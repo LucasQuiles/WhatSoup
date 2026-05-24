@@ -1,5 +1,9 @@
 # mwlab Transcription and Pinecone Setup
 
+This runbook is mwlab-specific. The plist and bridge names below describe that
+host's intended deployment shape and are not evidence that the bridge is
+installed on maclab, nucles, or another WhatSoup instance.
+
 ## Pinecone key in the dedicated keychain
 
 Store or update the Pinecone key in the mwlab dedicated keychain:
@@ -126,7 +130,8 @@ The 2026-04-17 incident where `fact_export_queue` was absent from live bot.db be
 
 ### Related gates
 
-- G2 is the launchd bootstrap of `com.mwlab.mw-mind-whatsapp-bridge` (see separate bridge section if present).
+- G2 is the mwlab-only launchd bootstrap of
+  `com.mwlab.mw-mind-whatsapp-bridge` if that bridge is deployed.
 - G1 is a prerequisite for the `backfill-enrichment --strict` workflow documented below.
 
 ## `backfill-enrichment --strict` (P3.6-H2) operator guide

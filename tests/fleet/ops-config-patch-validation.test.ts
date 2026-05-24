@@ -300,6 +300,62 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
   });
 });
 
+describe('handleConfigUpdate PATCH Pinecone project guard validation', () => {
+  let tmpDir: string;
+  let originalEnv: NodeJS.ProcessEnv;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-patch-pinecone-'));
+    originalEnv = { ...process.env };
+    process.env.XDG_CONFIG_HOME = tmpDir;
+    fs.mkdirSync(path.join(tmpDir, 'whatsoup', 'instances'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    process.env = originalEnv;
+  });
+
+  function writeChatConfig(name = 'test-line'): string {
+    const dir = path.join(tmpDir, 'whatsoup', 'instances', name);
+    fs.mkdirSync(dir, { recursive: true });
+    const cfg = path.join(dir, 'config.json');
+    fs.writeFileSync(cfg, JSON.stringify({
+      name,
+      type: 'chat',
+      accessMode: 'self_only',
+      adminPhones: ['18459780919'],
+      healthPort: 9095,
+    }));
+    return cfg;
+  }
+
+  it('rejects non-q Pinecone config without a project guard and leaves the file untouched', async () => {
+    const cfg = writeChatConfig();
+    const before = fs.readFileSync(cfg, 'utf-8');
+    const inst = fakeInstance(cfg);
+    const res = mockRes();
+
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({
+        memory: {
+          pinecone: {
+            apiKeyEnv: 'PINECONE_MINI3_KEY',
+            index: 'whatsapp-bot',
+          },
+        },
+      })),
+      res, makeDeps(inst), { name: 'test-line' },
+    );
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body).error).toContain(
+      'non-q instances with Pinecone config must set memory.pinecone.projectId or memory.pinecone.expectedHostSuffix',
+    );
+    expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
+  });
+});
+
 describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
   let tmpDir: string;
   let originalEnv: NodeJS.ProcessEnv;

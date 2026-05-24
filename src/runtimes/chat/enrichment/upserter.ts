@@ -1,3 +1,7 @@
+// Legacy direct-upsert helper. Runtime enrichment now queues facts through
+// fact_export_queue; no source/runtime caller currently imports upsertFacts.
+// Keep until the owner decides whether to remove, archive, or intentionally
+// rewire it with project-guard tests.
 import { createChildLogger } from '../../../logger.ts';
 import type { PineconeMemory } from '../providers/pinecone.ts';
 import type { LLMProvider } from '../providers/types.ts';

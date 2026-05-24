@@ -158,11 +158,10 @@ export class EnrichmentPoller {
           continue;
         }
 
-        // Enqueue validated facts for the standalone mw-mind Pinecone
-        // exporter. Source messages are marked
-        // processed after successful queueing, NOT after Pinecone write —
-        // the exporter is responsible for the remote upsert and for
-        // calling markFactsExported once Pinecone confirms.
+        // Enqueue validated facts for an external Pinecone exporter. Source
+        // messages are marked processed after successful queueing, NOT after
+        // Pinecone write. A deployment-provided bridge, if configured, owns the
+        // remote upsert and calls markFactsExported after Pinecone confirms.
         //
         // Queue accounting-gated promotion: we only mark the segment's
         // messages as processed if the queue accepted every fact without
@@ -239,8 +238,8 @@ export class EnrichmentPoller {
 
     // Write to enrichment_runs table. `facts_upserted` is retained as the
     // column name for wire-compatibility with existing metrics readers; the
-    // value now represents facts successfully queued for standalone export
-    // (the mw-mind Python pipeline performs the actual Pinecone upsert).
+    // value now represents facts successfully queued for external export. It
+    // is not proof that a Pinecone upsert has happened.
     try {
       this.db.raw.prepare(`
         INSERT INTO enrichment_runs (started_at, completed_at, messages_processed, facts_extracted, facts_upserted)

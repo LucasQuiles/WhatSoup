@@ -61,7 +61,11 @@ local vector embedding or scheduled Pinecone export.
 | `com.whatsoup.<passive-instance>.plist` | Passive capture/runtime instance | instance health port |
 | `com.whatsoup.whatsoup-fleet.plist` | Fleet server, health polling, proxy routing, discovery | `FLEET_PORT` |
 | `com.whatsoup.<embed-service>.plist` | Optional local embed service for vector profiles | service-owned |
-| `com.whatsoup.<bridge>.plist` | Optional scheduled bridge that drains `fact_export_queue` | none |
+| `com.whatsoup.<bridge>.plist` | Optional scheduled bridge that drains `fact_export_queue` when explicitly deployed | none |
+
+The bridge row is a deployment pattern, not evidence that a bridge is installed.
+Verify the concrete plist, wrapper, logs, and target Pinecone project before
+claiming queued facts are exported.
 
 Example wrapper chain:
 

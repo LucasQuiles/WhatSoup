@@ -45,6 +45,7 @@ describe('getPineconeReadiness', () => {
     vi.clearAllMocks();
     delete process.env.PINECONE_API_KEY;
     vi.mocked(Pinecone).mockReset();
+    delete (configModule.config as any).botName;
     delete (configModule.config as any).memory.pinecone.projectId;
     delete (configModule.config as any).memory.pinecone.expectedHostSuffix;
   });
@@ -91,6 +92,17 @@ describe('getPineconeReadiness', () => {
       state: 'project_mismatch',
       index: 'mw-mind',
     });
+  });
+
+  it('returns project_mismatch for non-q instances with Pinecone enabled and no project guard', async () => {
+    process.env.PINECONE_API_KEY = 'pcsk-test';
+    (configModule.config as any).botName = 'mini3';
+
+    await expect(getPineconeReadiness('mw-mind')).resolves.toEqual({
+      state: 'project_mismatch',
+      index: 'mw-mind',
+    });
+    expect(Pinecone).not.toHaveBeenCalled();
   });
 
   it('returns index_missing when auth works but the configured index is absent', async () => {

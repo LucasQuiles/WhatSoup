@@ -66,6 +66,98 @@ function err(field: string, message: string, status = 400): ValidationError {
   return { field, message, status };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function nonBlankString(value: unknown): boolean {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function hasAnyOwn(raw: Record<string, unknown>, fields: readonly string[]): boolean {
+  return fields.some(field => Object.prototype.hasOwnProperty.call(raw, field));
+}
+
+function pineconeBlock(raw: Record<string, unknown>): Record<string, unknown> {
+  const memory = isRecord(raw['memory']) ? raw['memory'] : undefined;
+  const pinecone = memory && isRecord(memory['pinecone']) ? memory['pinecone'] : undefined;
+  return pinecone ?? {};
+}
+
+function hasExplicitPineconeConfig(raw: Record<string, unknown>): boolean {
+  const pinecone = pineconeBlock(raw);
+  return (
+    hasAnyOwn(raw, [
+      'pineconeApiKeyEnv',
+      'pineconeIndex',
+      'pineconeAllowedIndexes',
+      'pineconeSearchMode',
+      'pineconeRerank',
+      'pineconeRerankModel',
+      'pineconeTopK',
+      'pineconeRerankTopN',
+      'pineconeContextTopK',
+      'pineconeSenderTopK',
+      'pineconeSelfFactTopK',
+      'pineconeNamespaces',
+      'pineconeNamespace',
+      'pineconeFactsNamespace',
+      'pineconeChunksNamespace',
+      'pineconeSummariesNamespace',
+      'pineconeLegacyNamespace',
+      'pineconeContactsNamespace',
+      'pineconeLocalDocsNamespace',
+      'pineconeOneDriveNamespace',
+      'pineconeKnowledgeSearch',
+      'pineconeKnowledgeProfiles',
+      'pineconeEmbedUrl',
+      'recencyHalfLifeDays',
+      'maxAgeDays',
+    ]) ||
+    hasAnyOwn(pinecone, [
+      'apiKeyEnv',
+      'index',
+      'allowedIndexes',
+      'namespaces',
+      'searchMode',
+      'rerank',
+      'rerankModel',
+      'topK',
+      'rerankTopN',
+      'contextTopK',
+      'senderTopK',
+      'selfFactTopK',
+      'recencyHalfLifeDays',
+      'maxAgeDays',
+      'knowledgeSearch',
+      'knowledgeProfiles',
+      'embedUrl',
+    ])
+  );
+}
+
+function validatePineconeProjectGuard(
+  raw: Record<string, unknown>,
+  ctx: ValidatorContext,
+): ValidationError | null {
+  const name = String(raw['name'] ?? ctx.name).trim().toLowerCase();
+  if (!name || name === 'q') return null;
+  if (!hasExplicitPineconeConfig(raw)) return null;
+
+  const pinecone = pineconeBlock(raw);
+  const hasGuard =
+    nonBlankString(pinecone['projectId']) ||
+    nonBlankString(pinecone['expectedHostSuffix']) ||
+    nonBlankString(raw['pineconeProjectId']) ||
+    nonBlankString(raw['pineconeExpectedHostSuffix']);
+
+  if (hasGuard) return null;
+  return err(
+    'memory.pinecone.projectId',
+    'non-q instances with Pinecone config must set memory.pinecone.projectId or memory.pinecone.expectedHostSuffix',
+  );
+}
+
 /**
  * Validate an entire instance config. Returns the first ValidationError, or null.
  *
@@ -203,6 +295,9 @@ export function validateInstanceConfig(
   // --- numeric bounds ---
   const numBoundsErr = validateNumericBounds(raw);
   if (numBoundsErr) return numBoundsErr;
+
+  const pineconeGuardErr = validatePineconeProjectGuard(raw, ctx);
+  if (pineconeGuardErr) return pineconeGuardErr;
 
   // Auth-only mode (loader bootstrap-auth path) stops here.
   if (ctx.authOnly) return null;

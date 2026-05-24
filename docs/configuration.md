@@ -328,6 +328,11 @@ Use `memory` for new installs and migrations. The runtime still accepts the old 
 | `memory.pinecone.knowledgeSearch.allowGlobalAgentSessions` | boolean | `false` | Allows `knowledge_search` in non-`sandboxPerChat` agent sessions. Default is fail-closed because global sessions can span callers. |
 | `memory.pinecone.knowledgeProfiles` | object | built-in profiles | Per-index retrieval profile overrides. Configure namespace allowlists, rerank settings, vector/text/entity mode, and `embedUrl`. |
 
+For non-`q` instances, any explicit Pinecone config must include
+`memory.pinecone.projectId` or `memory.pinecone.expectedHostSuffix` in the
+instance config. The validator rejects config-only Pinecone setup without one of
+those guards so same-name indexes cannot silently route to the wrong project.
+
 #### Legacy Migration
 
 Dry-run all local instance configs:
@@ -698,6 +703,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 24 | `messages.updated_at` column + backfill + touch triggers on insert and content-changing updates |
 | 25 | `lid_mappings_history` retained audit table + indexes — first-seen rows and LID → phone flips are recorded by the unified `writeLidMapping` seam (#251 LID conflict remediation) (`MIGRATION_25`) |
 | 26 | Rebuilds pre-existing `outbound_sends` tables so the caller CHECK constraint allows Reply Guarantee Protocol fallback audit rows (`rgp`) |
+| 27 | Message query performance indexes on timestamp/from-me, timestamp/content-type, and token counters when token columns exist (`runMigration27`) |
 
 ---
 

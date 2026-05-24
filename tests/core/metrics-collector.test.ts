@@ -112,6 +112,19 @@ describe('metrics collector', () => {
     expect(versions?.version).toBe(15)
   })
 
+  it('creates timestamp-window indexes used by metrics backfill', () => {
+    const rows = db.raw.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_messages_timestamp_%' ORDER BY name",
+    ).all() as Array<{ name: string }>
+
+    expect(rows.map((row) => row.name)).toEqual([
+      'idx_messages_timestamp_content_type',
+      'idx_messages_timestamp_from_me',
+      'idx_messages_timestamp_input_tokens',
+      'idx_messages_timestamp_output_tokens',
+    ])
+  })
+
   it('collects current-hour inbound, outbound, and media counts with upserts', () => {
     const now = new Date('2026-04-05T15:42:00.000Z')
     const bucket = '2026-04-05T15:00:00.000Z'

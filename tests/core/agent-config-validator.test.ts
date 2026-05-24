@@ -153,6 +153,64 @@ describe('enum validation', () => {
   });
 });
 
+describe('Pinecone project guard validation', () => {
+  it('rejects explicit Pinecone config on non-q instances without a project guard', () => {
+    const raw = baseChat({
+      memory: { pinecone: { apiKeyEnv: 'PINECONE_MINI3_KEY', index: 'whatsapp-bot' } },
+    });
+
+    const result = validateInstanceConfig(raw, ctx('create'));
+
+    expect(result?.field).toBe('memory.pinecone.projectId');
+    expect(result?.message).toContain('non-q instances with Pinecone config');
+  });
+
+  it('accepts explicit Pinecone config on q without a project guard', () => {
+    const raw = baseChat({
+      name: 'q',
+      memory: { pinecone: { apiKeyEnv: 'PINECONE_API_KEY', index: 'whatsapp-bot' } },
+    });
+
+    expect(validateInstanceConfig(raw, ctx('create', { name: 'q' }))).toBeNull();
+  });
+
+  it('accepts canonical and legacy Pinecone project guards on non-q instances', () => {
+    const canonical = baseChat({
+      memory: {
+        pinecone: {
+          apiKeyEnv: 'PINECONE_MINI3_KEY',
+          index: 'whatsapp-bot',
+          expectedHostSuffix: '-zz9hg2d.svc.aped-4627-b74a.pinecone.io',
+        },
+      },
+    });
+    const legacy = baseChat({
+      pineconeApiKeyEnv: 'PINECONE_MINI8_KEY',
+      pineconeIndex: 'whatsapp-bot',
+      pineconeProjectId: 'kdqp9y0',
+    });
+
+    expect(validateInstanceConfig(canonical, ctx('create'))).toBeNull();
+    expect(validateInstanceConfig(legacy, ctx('create'))).toBeNull();
+  });
+
+  it('rejects less common Pinecone aliases on non-q instances without a project guard', () => {
+    const legacyNamespaceAlias = baseChat({
+      pineconeLocalDocsNamespace: 'local-docs',
+    });
+    const canonicalTuning = baseChat({
+      memory: { pinecone: { topK: 8 } },
+    });
+
+    expect(validateInstanceConfig(legacyNamespaceAlias, ctx('create'))?.field).toBe(
+      'memory.pinecone.projectId',
+    );
+    expect(validateInstanceConfig(canonicalTuning, ctx('create'))?.field).toBe(
+      'memory.pinecone.projectId',
+    );
+  });
+});
+
 describe('healthPort validation', () => {
   it('rejects non-integer healthPort', () => {
     const raw = baseAgent({ healthPort: 8080.5 });

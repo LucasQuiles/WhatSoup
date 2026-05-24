@@ -272,12 +272,12 @@ if (instanceType === 'agent') {
   const anthropic = createAnthropicProvider();
   const openai = createOpenAIProvider();
   const pinecone = new PineconeMemory();
-  // Enrichment is now drain-via-queue: the poller enqueues validated facts
-  // into `fact_export_queue` (introduced by the exporter rollout), and the
-  // Python mw-mind pipeline drains that queue and upserts them to standalone MWLab
-  // `mw-mind`. Any instance with a configured pineconeIndex participates
-  // (historical `whatsapp-bot` callers still enqueue against their own
-  // index name; routing to the right index is the pipeline's concern).
+  // Enrichment is queue-backed: the poller enqueues validated facts into
+  // `fact_export_queue`. A deployment may provide an external bridge that
+  // drains pending rows and writes them to Pinecone; this process only proves
+  // queue admission, not remote export. Any instance with a configured
+  // pineconeIndex participates, and the bridge owns target index/project
+  // routing plus export acknowledgement.
   const enableEnrichment =
     typeof config.pineconeIndex === 'string' && config.pineconeIndex.length > 0;
   if (

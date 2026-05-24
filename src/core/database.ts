@@ -33,6 +33,8 @@ CREATE INDEX idx_messages_conversation_ts ON messages(conversation_key, timestam
 CREATE INDEX idx_messages_chat_jid ON messages(chat_jid);
 CREATE INDEX idx_messages_sender ON messages(sender_jid, timestamp);
 CREATE INDEX idx_messages_enrichment ON messages(enrichment_processed_at) WHERE enrichment_processed_at IS NULL;
+CREATE INDEX idx_messages_timestamp_from_me ON messages(timestamp, is_from_me);
+CREATE INDEX idx_messages_timestamp_content_type ON messages(timestamp, content_type);
 
 CREATE VIRTUAL TABLE messages_fts USING fts5(content, content=messages, content_rowid=pk);
 
@@ -702,6 +704,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [24, runMigration24],
   [25, runMigration25],
   [26, runMigration26],
+  [27, runMigration27],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -714,6 +717,26 @@ function runMigration26(db: DatabaseSync): void {
     .get() as { sql: string } | undefined;
   if (!table || table.sql.includes("'rgp'")) return;
   db.exec(MIGRATION_26_OUTBOUND_SENDS);
+}
+
+function runMigration27(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_messages_timestamp_from_me ON messages(timestamp, is_from_me);
+    CREATE INDEX IF NOT EXISTS idx_messages_timestamp_content_type ON messages(timestamp, content_type);
+  `);
+  const cols = db.prepare("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+  const names = new Set(cols.map(c => c.name));
+  if (names.has('input_tokens')) {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_messages_timestamp_input_tokens ON messages(timestamp, input_tokens)');
+  }
+  if (names.has('output_tokens')) {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_messages_timestamp_output_tokens ON messages(timestamp, output_tokens)');
+  }
 }
 
 function runMigration20(db: DatabaseSync): void {

@@ -323,6 +323,18 @@ describe('PineconeMemory', () => {
       ]);
       expect(mockSearchRecords.mock.calls).toEqual([[expectedCall], [expectedCall]]);
     });
+
+    it('skips search for non-q instances without a project guard', async () => {
+      (configModule.config as any).botName = 'mini3';
+      try {
+        const results = await memory.search('query', {}, 5);
+
+        expect(results).toEqual([]);
+        expect(mockSearchRecords).not.toHaveBeenCalled();
+      } finally {
+        delete (configModule.config as any).botName;
+      }
+    });
   });
 
   // ── upsert ────────────────────────────────────────────────────────────────
@@ -350,6 +362,18 @@ describe('PineconeMemory', () => {
           ],
         },
       ]]);
+    });
+
+    it('blocks upsert for non-q instances without a project guard', async () => {
+      (configModule.config as any).botName = 'mini3';
+      try {
+        await expect(memory.upsert([makeMemoryRecord()])).rejects.toMatchObject({
+          code: 'PINECONE_UNAVAILABLE',
+        });
+        expect(mockUpsertRecords).not.toHaveBeenCalled();
+      } finally {
+        delete (configModule.config as any).botName;
+      }
     });
 
     it('maps record id to _id field', async () => {

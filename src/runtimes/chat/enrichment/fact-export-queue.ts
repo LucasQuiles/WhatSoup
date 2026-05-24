@@ -237,9 +237,9 @@ export function enqueueFacts(
 
 /**
  * Read up to `limit` rows in `pending` status, oldest-first. This is a
- * read-only operation — it does NOT mutate row state. The caller
- * (the mw-mind Python pipeline) is responsible for calling
- * `markFactsExported` after Pinecone confirms the upsert.
+ * read-only operation — it does NOT mutate row state. A deployment-provided
+ * bridge is responsible for calling `markFactsExported` after Pinecone
+ * confirms the upsert.
  *
  * T1 hardening: corrupted payload_json rows are surfaced at log.error
  * (not silently hidden) and omitted from the returned array so the

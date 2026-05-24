@@ -110,6 +110,11 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
     return { state: 'disabled', index: targetIndex };
   }
 
+  const guard = configuredPineconeProjectGuard();
+  if (missingRequiredProjectGuardError(guard)) {
+    return { state: 'project_mismatch', index: targetIndex };
+  }
+
   try {
     const client = new Pinecone({ apiKey });
     const result = await client.listIndexes();
@@ -119,7 +124,7 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
     const found = indexes.find((index) => index.name === targetIndex);
 
     if (found) {
-      if (!matchesProjectGuard(found.host, configuredPineconeProjectGuard())) {
+      if (!matchesProjectGuard(found.host, guard)) {
         return { state: 'project_mismatch', index: targetIndex };
       }
       return { state: 'ready', index: targetIndex };
@@ -147,6 +152,18 @@ function configuredPineconeProjectGuard(): { projectId?: string; expectedHostSuf
   };
 }
 
+function pineconeProjectGuardRequired(): boolean {
+  const botName = (config as { botName?: unknown }).botName;
+  if (typeof botName !== 'string' || botName.trim() === '') return false;
+  return botName.trim().toLowerCase() !== 'q';
+}
+
+function missingRequiredProjectGuardError(guard: { projectId?: string; expectedHostSuffix?: string }): string | null {
+  if (!pineconeProjectGuardRequired()) return null;
+  if (guard.projectId || guard.expectedHostSuffix) return null;
+  return 'Pinecone project guard is required for non-q instances';
+}
+
 function matchesProjectGuard(
   host: string | undefined,
   guard: { projectId?: string; expectedHostSuffix?: string },
@@ -160,6 +177,8 @@ function matchesProjectGuard(
 
 async function configuredProjectGuardError(client: Pinecone, targetIndex: string): Promise<string | null> {
   const guard = configuredPineconeProjectGuard();
+  const missingGuardError = missingRequiredProjectGuardError(guard);
+  if (missingGuardError) return missingGuardError;
   if (!guard.projectId && !guard.expectedHostSuffix) return null;
   const result = await client.listIndexes();
   const indexes = Array.isArray((result as { indexes?: Array<{ name?: string; host?: string }> }).indexes)

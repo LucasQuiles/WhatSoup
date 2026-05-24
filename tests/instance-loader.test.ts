@@ -162,6 +162,7 @@ describe('loadInstance — optional fields preserved', () => {
         pinecone: {
           apiKeyEnv: 'PINECONE_TEST_KEY',
           index: 'mw-mind',
+          projectId: 'o6fsxb8',
         },
       },
       pineconeIndex: 'whatsapp-bot',

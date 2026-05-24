@@ -33,9 +33,13 @@ affects interactive SSH sessions.
 
 ## Services (launchd, user scope)
 
-Four `com.whatsoup.*` plists and two `com.mwlab.mw-mind-*` plists are
-loaded at login. Each `KeepAlive -> Crashed` so a clean exit will not
-restart automatically; use `launchctl kickstart -k` to bounce.
+This runbook is host-specific to an mwlab deployment. It describes the expected
+plist shape for that host; it is not evidence that the same bridge is installed
+on maclab, nucles, or any other WhatSoup instance.
+
+Four `com.whatsoup.*` plists and two `com.mwlab.mw-mind-*` plists are loaded at
+login when this deployment is installed. Each `KeepAlive -> Crashed` so a clean
+exit will not restart automatically; use `launchctl kickstart -k` to bounce.
 
 | Plist | Purpose | Listening port |
 | --- | --- | --- |
@@ -113,7 +117,7 @@ Reference docs:
 | Per-instance SQLite DB | `~/.local/share/whatsoup/instances/<name>/bot.db` |
 | Fleet token file | `~/.config/whatsoup/fleet-tokens.json` (`active`) |
 | Fleet logs | `~/.local/share/whatsoup/fleet-{stdout,stderr}.log` |
-| mw-mind bridge logs | `~/.local/share/mw-mind/whatsapp-bridge-{stdout,stderr}.log` |
+| mw-mind bridge logs, if deployed | `~/.local/share/mw-mind/whatsapp-bridge-{stdout,stderr}.log` |
 | mw-mind WhatSoup MCP proxy | `/Users/mw/LAB/WhatSoup/deploy/mcp/whatsoup-proxy.ts` |
 
 Do not create `bot.db` at the repo root or inside `~/.config/whatsoup/…`
