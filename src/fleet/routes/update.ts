@@ -7,11 +7,24 @@ import { createSSEWriter } from '../sse-helpers.ts';
 import { createChildLogger } from '../../logger.ts';
 import type { UpdateChecker } from '../update-checker.ts';
 import { createServiceManager } from '../platform.ts';
+import { cleanGitEnv } from '../../lib/git-env.ts';
 
 const execFileAsync = promisify(execFile);
 const log = createChildLogger('fleet:update');
 
 let updateInProgress = false;
+
+function childEnv(): NodeJS.ProcessEnv {
+  return cleanGitEnv();
+}
+
+function execGit(repoRoot: string, args: string[], timeout: number) {
+  return execFileAsync('git', args, {
+    cwd: repoRoot,
+    timeout,
+    env: childEnv(),
+  });
+}
 
 /**
  * Parse `git status --porcelain` output, filtering out untracked entries (`??`).
@@ -41,10 +54,7 @@ async function rollback(repoRoot: string, sha: string, writeSSE: (event: string,
     let stashRef: string | undefined;
 
     try {
-      const { stdout: porcelain } = await execFileAsync(
-        'git', ['status', '--porcelain'],
-        { cwd: repoRoot, timeout: 5_000 },
-      );
+      const { stdout: porcelain } = await execGit(repoRoot, ['status', '--porcelain'], 5_000);
       preservedFiles = parseTrackedChanges(porcelain);
     } catch (statusErr) {
       // git status itself failed — log but proceed with the reset; this preserves
@@ -60,10 +70,7 @@ async function rollback(repoRoot: string, sha: string, writeSSE: (event: string,
 
       let diffOut = '';
       try {
-        const { stdout } = await execFileAsync(
-          'git', ['diff', 'HEAD'],
-          { cwd: repoRoot, timeout: 10_000 },
-        );
+        const { stdout } = await execGit(repoRoot, ['diff', 'HEAD'], 10_000);
         diffOut = stdout;
       } catch (diffErr) {
         log.warn({ err: diffErr, sha }, 'rollback: git diff HEAD failed, skipping reset to avoid silent loss');
@@ -95,11 +102,7 @@ async function rollback(repoRoot: string, sha: string, writeSSE: (event: string,
       // 2b. Stash as a secondary recovery surface. Failure here is non-fatal — the
       // patch file is already on disk.
       try {
-        await execFileAsync(
-          'git',
-          ['stash', 'push', '--message', `whatsoup-update-rollback ${timestamp}`, '--', ...preservedFiles],
-          { cwd: repoRoot, timeout: 15_000 },
-        );
+        await execGit(repoRoot, ['stash', 'push', '--message', `whatsoup-update-rollback ${timestamp}`, '--', ...preservedFiles], 15_000);
         stashRef = 'stash@{0}';
       } catch (stashErr) {
         log.warn({ err: stashErr, sha }, 'rollback: git stash push failed, patch artifact still on disk');
@@ -107,7 +110,7 @@ async function rollback(repoRoot: string, sha: string, writeSSE: (event: string,
     }
 
     // 3. Destructive reset (unchanged behaviour).
-    await execFileAsync('git', ['reset', '--hard', sha], { cwd: repoRoot, timeout: 15_000 });
+    await execGit(repoRoot, ['reset', '--hard', sha], 15_000);
 
     // 4. Report.
     writeSSE('progress', {
@@ -163,12 +166,12 @@ export async function handleUpdate(
     // Save pre-pull SHA so we can diff the full range after pull (not just HEAD~1)
     let prePullSha: string | null = null;
     try {
-      prePullSha = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, timeout: 5_000 })).stdout.trim();
+      prePullSha = (await execGit(repoRoot, ['rev-parse', 'HEAD'], 5_000)).stdout.trim();
     } catch { /* proceed without — install steps will run unconditionally */ }
 
     // Pre-flight: reject if working tree is dirty (uncommitted changes would cause pull conflicts)
     try {
-      const { stdout: porcelain } = await execFileAsync('git', ['status', '--porcelain'], { cwd: repoRoot, timeout: 5_000 });
+      const { stdout: porcelain } = await execGit(repoRoot, ['status', '--porcelain'], 5_000);
       // Only block on tracked-file modifications (M, A, D, R, etc.) — untracked files (??) are
       // safe for git pull and should not prevent updates.
       const trackedChanges = porcelain.split('\n').filter(l => l.trim() && !l.startsWith('??'));
@@ -182,14 +185,12 @@ export async function handleUpdate(
     // Step 1: git pull
     writeSSE('progress', { step: 'pull', status: 'running' });
     try {
-      const { stdout } = await execFileAsync('git', ['pull', 'origin', 'main'], {
-        cwd: repoRoot, timeout: 60_000,
-      });
+      const { stdout } = await execGit(repoRoot, ['pull', 'origin', 'main'], 60_000);
       // Read the new SHA explicitly so the console can detect the update
       // without relying on checker.checkNow() completing in time
       let newSha: string | undefined;
       try {
-        newSha = (await execFileAsync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, timeout: 5_000 })).stdout.trim();
+        newSha = (await execGit(repoRoot, ['rev-parse', '--short', 'HEAD'], 5_000)).stdout.trim();
       } catch { /* non-critical — proceed without */ }
 
       const alreadyUpToDate = stdout.includes('Already up to date');
@@ -210,10 +211,7 @@ export async function handleUpdate(
     let changedFiles: string[] = [];
     if (prePullSha) {
       try {
-        const { stdout: diffOut } = await execFileAsync(
-          'git', ['diff', prePullSha, '--name-only'],
-          { cwd: repoRoot, timeout: 10_000 },
-        );
+        const { stdout: diffOut } = await execGit(repoRoot, ['diff', prePullSha, '--name-only'], 10_000);
         changedFiles = diffOut.split('\n').map(f => f.trim()).filter(Boolean);
       } catch { /* diff failed — changedFiles stays empty, install steps run unconditionally */ }
     }
@@ -223,7 +221,7 @@ export async function handleUpdate(
     const rootLockfileChanged = !prePullSha || changedFiles.includes('package-lock.json');
     if (rootLockfileChanged) {
       try {
-        await execFileAsync('npm', ['install'], { cwd: repoRoot, timeout: 120_000 });
+        await execFileAsync('npm', ['install'], { cwd: repoRoot, timeout: 120_000, env: childEnv() });
         writeSSE('progress', { step: 'install', status: 'done' });
       } catch (err: any) {
         writeSSE('error', { step: 'install', message: err.stderr?.trim() || err.message });
@@ -241,7 +239,7 @@ export async function handleUpdate(
     if (consoleLockfileChanged) {
       try {
         await execFileAsync('npm', ['install'], {
-          cwd: `${repoRoot}/console`, timeout: 120_000,
+          cwd: `${repoRoot}/console`, timeout: 120_000, env: childEnv(),
         });
         writeSSE('progress', { step: 'console-install', status: 'done' });
       } catch (err: any) {
@@ -260,7 +258,7 @@ export async function handleUpdate(
       writeSSE('progress', { step: 'console-build', status: 'running' });
       try {
         await execFileAsync('npx', ['vite', 'build'], {
-          cwd: `${repoRoot}/console`, timeout: 120_000,
+          cwd: `${repoRoot}/console`, timeout: 120_000, env: childEnv(),
         });
         writeSSE('progress', { step: 'console-build', status: 'done' });
       } catch (err: any) {

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createChildLogger } from '../logger.ts';
+import { cleanGitEnv } from '../lib/git-env.ts';
 
 const execFileAsync = promisify(execFile);
 const log = createChildLogger('update-checker');
@@ -77,6 +78,7 @@ export class UpdateChecker {
     const { stdout } = await execFileAsync('git', args, {
       cwd: this.repoRoot,
       timeout: 30_000,
+      env: cleanGitEnv(),
     });
     return stdout.trim();
   }

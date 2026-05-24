@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { normalizeRepoPath } from './lib/guard-core.ts';
+import { cleanGitEnv, normalizeRepoPath } from './lib/guard-core.ts';
 
 export type WorkIndexStatus =
   | 'active'
@@ -204,14 +204,6 @@ function topicInfo(relativePath: string): { topicRaw: string; topic: string } {
 
   const stem = path.basename(relativePath, '.md');
   return { topicRaw: stem, topic: topicFromSuperpowersStem(stem) };
-}
-
-function cleanGitEnv() {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('GIT_')) delete env[key];
-  }
-  return env;
 }
 
 function git(cwd: string, args: string[]): string {

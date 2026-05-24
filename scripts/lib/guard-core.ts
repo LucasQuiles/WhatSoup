@@ -1,5 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { cleanGitEnv } from '../../src/lib/git-env.ts';
+
+export { cleanGitEnv } from '../../src/lib/git-env.ts';
 
 const textExtensions = new Set([
   '.cjs',
@@ -23,7 +26,7 @@ export function normalizeRepoPath(filePath: string): string {
 }
 
 export function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() });
 }
 
 export function gitList(args: string[], cwd: string): string[] {
@@ -42,6 +45,7 @@ export function readStagedAddedLines(cwd: string, filePath: string): string {
     return execFileSync('git', ['diff', '--cached', '--unified=0', '--', filePath], {
       cwd,
       encoding: 'utf8',
+      env: cleanGitEnv(),
       maxBuffer: 20 * 1024 * 1024,
     });
   } catch {

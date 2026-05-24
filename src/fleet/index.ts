@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createChildLogger } from '../logger.ts';
 import { jsonResponse, parseRoute, parseQueryString, readBody, extractBearer } from '../lib/http.ts';
+import { cleanGitEnv } from '../lib/git-env.ts';
 import { FleetDiscovery } from './discovery.ts';
 import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
@@ -680,7 +681,7 @@ export function createFleetServer(deps: FleetDeps) {
   // from the checker which stays fresh after each git pull.
   let startupSha = 'unknown';
   try {
-    startupSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot }).toString().trim();
+    startupSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, env: cleanGitEnv() }).toString().trim();
   } catch { /* git not available */ }
   const getVersion = () => {
     const s = updateChecker.getState().sha;

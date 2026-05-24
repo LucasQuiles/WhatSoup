@@ -5,7 +5,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { escapeRegExp } from '../src/lib/regex-utils.ts';
-import { normalizeRepoPath } from './lib/guard-core.ts';
+import { cleanGitEnv, normalizeRepoPath } from './lib/guard-core.ts';
 
 interface ParsedArgs {
   help: boolean;
@@ -79,7 +79,7 @@ const privatePineconeProjectIds = [
 ].map((parts) => parts.join(''));
 
 function gitList(args: string[], cwd: string): string[] {
-  const output = execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  const output = execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() }).trim();
   return output ? output.split(/\r?\n/).map(normalizeRepoPath).filter(Boolean) : [];
 }
 

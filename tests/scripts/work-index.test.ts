@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
+import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
   buildWorkIndex,
   compareWorkIndexCoverage,
@@ -15,14 +16,6 @@ import {
 
 const WORK_INDEX_TEST_TIMEOUT_MS = 30_000;
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-
-function cleanGitEnv() {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('GIT_')) delete env[key];
-  }
-  return env;
-}
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() }).trim();

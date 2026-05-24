@@ -4,10 +4,15 @@ import { tmpdir } from 'node:os';
 import { join as joinPath } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { anonymizeText } from '../../scripts/anonymize-private-literals.ts';
 
 const join = (parts: string[]) => parts.join('');
 const tempDirs: string[] = [];
+
+function git(cwd: string, args: string[]): void {
+  execFileSync('git', args, { cwd, stdio: 'ignore', env: cleanGitEnv() });
+}
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
@@ -111,23 +116,33 @@ describe('anonymize-private-literals', () => {
   it('supports report-only and write modes for directory arguments', () => {
     const tmp = mkdtempSync(joinPath(tmpdir(), 'whatsoup-anonymizer-'));
     tempDirs.push(tmp);
-    execFileSync('git', ['init'], { cwd: tmp, stdio: 'ignore' });
+    git(tmp, ['init']);
     mkdirSync(joinPath(tmp, 'nested'));
     const rawPhone = join(['1845', '978', '0919']);
     writeFileSync(joinPath(tmp, 'nested', 'fixture.ts'), `const phone = "${rawPhone}";\n`);
-    execFileSync('git', ['add', 'nested/fixture.ts'], { cwd: tmp, stdio: 'ignore' });
+    git(tmp, ['add', 'nested/fixture.ts']);
 
     const script = joinPath(process.cwd(), 'scripts/anonymize-private-literals.ts');
+    const hookEnv = {
+      ...cleanGitEnv(),
+      GIT_DIR: execFileSync('git', ['rev-parse', '--git-dir'], {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+        env: cleanGitEnv(),
+      }).trim(),
+      GIT_WORK_TREE: process.cwd(),
+    };
     const report = spawnSync('node', ['--experimental-strip-types', script, '--json', 'nested'], {
       cwd: tmp,
       encoding: 'utf8',
+      env: hookEnv,
     });
 
     expect(report.status).toBe(1);
     expect(JSON.parse(report.stdout)).toMatchObject({ ok: false, write: false, files: 1 });
     expect(readFileSync(joinPath(tmp, 'nested', 'fixture.ts'), 'utf8')).toContain(rawPhone);
 
-    execFileSync('node', ['--experimental-strip-types', script, '--write', 'nested'], { cwd: tmp });
+    execFileSync('node', ['--experimental-strip-types', script, '--write', 'nested'], { cwd: tmp, env: hookEnv });
     expect(readFileSync(joinPath(tmp, 'nested', 'fixture.ts'), 'utf8')).toContain('15555550001');
   });
 });

@@ -2,11 +2,16 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanGitEnv } from '../../../src/lib/git-env.ts';
 import { handleUpdate } from '../../../src/fleet/routes/update.ts';
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() }).trim();
+}
+
+function runGit(cwd: string, args: string[]): void {
+  execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() });
 }
 
 function makeReqRes() {
@@ -43,6 +48,7 @@ describe('handleUpdate rollback with real git', () => {
   const originalPath = process.env.PATH;
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     process.env.PATH = originalPath;
     if (patchPath) {
       unlinkSync(patchPath);
@@ -61,9 +67,9 @@ describe('handleUpdate rollback with real git', () => {
     const repo = join(tmpRoot, 'repo');
     const fakeBin = join(tmpRoot, 'bin');
 
-    execFileSync('git', ['init', '--bare', remote], { encoding: 'utf8' });
+    runGit(tmpRoot, ['init', '--bare', remote]);
     git(remote, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
-    execFileSync('git', ['init', seed], { encoding: 'utf8' });
+    runGit(tmpRoot, ['init', seed]);
     git(seed, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
     git(seed, ['config', 'user.email', 'whatsoup-test.invalid']);
     git(seed, ['config', 'user.name', 'WhatSoup Test']);
@@ -73,7 +79,7 @@ describe('handleUpdate rollback with real git', () => {
     git(seed, ['remote', 'add', 'origin', remote]);
     git(seed, ['push', '-u', 'origin', 'main']);
 
-    execFileSync('git', ['clone', remote, repo], { encoding: 'utf8' });
+    runGit(tmpRoot, ['clone', remote, repo]);
     git(repo, ['switch', 'main']);
     const prePullSha = git(repo, ['rev-parse', 'HEAD']);
     writeFileSync(join(repo, 'operator-note.txt'), 'do not move\n');
@@ -91,6 +97,13 @@ describe('handleUpdate rollback with real git', () => {
     );
     chmodSync(npmPath, 0o700);
     process.env.PATH = `${fakeBin}:${originalPath}`;
+    vi.stubEnv('PATH', process.env.PATH);
+    vi.stubEnv('GIT_DIR', execFileSync('git', ['rev-parse', '--git-dir'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+    }).trim());
+    vi.stubEnv('GIT_WORK_TREE', process.cwd());
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, { checkNow: async () => undefined, getState: () => ({}) } as any, repo);

@@ -5,11 +5,16 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import { runPublicationGuard } from '../../scripts/publication-guard.ts';
 
 const internalDocPath = 'docs/sdlc/closed/example/state.md';
 
 const repos: string[] = [];
+
+function git(repo: string, args: string[]): void {
+  execFileSync('git', args, { cwd: repo, stdio: 'ignore', env: cleanGitEnv() });
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -41,8 +46,8 @@ function makeRepo(docText: string, classification: 'PUBLIC' | 'PRIVATE-ARCHIVE')
 | \`${internalDocPath}\` | ${classification} | Fixture row. |
 `);
 
-  execFileSync('git', ['init'], { cwd: repo, stdio: 'ignore' });
-  execFileSync('git', ['add', 'docs/publication-audit.md', internalDocPath], { cwd: repo, stdio: 'ignore' });
+  git(repo, ['init']);
+  git(repo, ['add', 'docs/publication-audit.md', internalDocPath]);
   return repo;
 }
 
@@ -76,7 +81,7 @@ describe('publication guard staged mode', () => {
     const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
     const newInternalDoc = 'docs/sdlc/closed/example/new-state.md';
     writeFileSync(join(repo, newInternalDoc), 'Internal planning note.\n');
-    execFileSync('git', ['add', newInternalDoc], { cwd: repo, stdio: 'ignore' });
+    git(repo, ['add', newInternalDoc]);
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     expect(runPublicationGuard(['--staged'], repo)).toBe(1);
@@ -87,7 +92,7 @@ describe('publication guard staged mode', () => {
     const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
     const publicDoc = 'docs/readme.md';
     writeFileSync(join(repo, publicDoc), 'See `docs/missing-reference.md` for details.\n');
-    execFileSync('git', ['add', publicDoc], { cwd: repo, stdio: 'ignore' });
+    git(repo, ['add', publicDoc]);
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     expect(runPublicationGuard(['--staged'], repo)).toBe(1);
@@ -99,7 +104,7 @@ describe('publication guard staged mode', () => {
     const publicDoc = 'docs/public-note.md';
     const token = ['ghp_', 'abcdefghijklmnop'].join('');
     writeFileSync(join(repo, publicDoc), `token: ${token}\n`);
-    execFileSync('git', ['add', publicDoc], { cwd: repo, stdio: 'ignore' });
+    git(repo, ['add', publicDoc]);
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     expect(runPublicationGuard(['--staged'], repo)).toBe(1);
@@ -110,8 +115,21 @@ describe('publication guard staged mode', () => {
     const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
     const publicDoc = 'docs/public-note.md';
     writeFileSync(join(repo, publicDoc), 'fixture: 81536414179000@lid\n');
-    execFileSync('git', ['add', publicDoc], { cwd: repo, stdio: 'ignore' });
+    git(repo, ['add', publicDoc]);
 
     expect(runPublicationGuard(['--staged'], repo)).toBe(0);
+  });
+
+  it('ignores inherited hook Git environment when checking synthetic repos', () => {
+    const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
+    const gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+    }).trim();
+    vi.stubEnv('GIT_DIR', gitDir);
+    vi.stubEnv('GIT_WORK_TREE', process.cwd());
+
+    expect(runPublicationGuard(['--release'], repo)).toBe(0);
   });
 });
