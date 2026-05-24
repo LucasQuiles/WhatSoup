@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { errorMessage } from '../lib/error-utils.ts';
 import type { AlertPayload, DeliveryResult, Sink } from './types.ts';
 
 export interface LocalSinkOptions {
@@ -53,14 +54,15 @@ export class LocalNotifySink implements Sink {
       await this.options.notifier('whatsoup-guard', payload.body);
       return { ok: true, channel: this.name };
     } catch (error) {
+      const message = errorMessage(error);
       this.writeFallback(payload, {
         fallback: 'notifier_failed',
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
       });
       return {
         ok: false,
         channel: this.name,
-        error: `${error instanceof Error ? error.message : String(error)}; wrote fallback log`,
+        error: `${message}; wrote fallback log`,
       };
     }
   }
