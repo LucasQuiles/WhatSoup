@@ -26,17 +26,17 @@ type SortKey = "mode" | "name" | "chats" | "groups" | "unread" | "sent" | "recv"
 type SortDir = "asc" | "desc";
 
 const COLUMNS: { label: string; widthClass?: string; center: boolean; sortKey: SortKey }[] = [
-  { label: "Mode", widthClass: "w-[90px]", center: false, sortKey: "mode" },
+  { label: "Mode", widthClass: "w-[var(--log-col-time)]", center: false, sortKey: "mode" },
   { label: "Line", center: false, sortKey: "name" },
-  { label: "Chats", widthClass: "w-[60px]", center: true, sortKey: "chats" },
-  { label: "Groups", widthClass: "w-[64px]", center: true, sortKey: "groups" },
-  { label: "Unread", widthClass: "w-[64px]", center: true, sortKey: "unread" },
-  { label: "Sent", widthClass: "w-[68px]", center: true, sortKey: "sent" },
-  { label: "Recv", widthClass: "w-[68px]", center: true, sortKey: "recv" },
-  { label: "Tokens", widthClass: "w-[80px]", center: true, sortKey: "tokens" },
-  { label: "Sessions", widthClass: "w-[72px]", center: true, sortKey: "sessions" },
+  { label: "Chats", widthClass: "w-[var(--col-chats)]", center: true, sortKey: "chats" },
+  { label: "Groups", widthClass: "w-[var(--avatar-lg)]", center: true, sortKey: "groups" },
+  { label: "Unread", widthClass: "w-[var(--avatar-lg)]", center: true, sortKey: "unread" },
+  { label: "Sent", widthClass: "w-[var(--feed-col-time)]", center: true, sortKey: "sent" },
+  { label: "Recv", widthClass: "w-[var(--feed-col-time)]", center: true, sortKey: "recv" },
+  { label: "Tokens", widthClass: "w-[var(--feed-inst-max)]", center: true, sortKey: "tokens" },
+  { label: "Sessions", widthClass: "w-[var(--col-sessions)]", center: true, sortKey: "sessions" },
   { label: "Tags", center: false, sortKey: null },
-  { label: "Active", widthClass: "w-[80px]", center: true, sortKey: "active" },
+  { label: "Active", widthClass: "w-[var(--feed-inst-max)]", center: true, sortKey: "active" },
 ];
 
 const modeFilterOptions: (Mode | "all")[] = ["all", "passive", "chat", "agent"];
@@ -295,6 +295,7 @@ const SoupKitchen: FC = () => {
             </div>
 
             <button
+              type="button"
               className="c-btn c-btn-add flex-shrink-0 ml-[var(--sp-3)]"
               onClick={() => setShowAddWizard(true)}
             >

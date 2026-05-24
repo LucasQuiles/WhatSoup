@@ -58,8 +58,8 @@ export function ModeSwitchDialog({
       onConfirm={handleConfirm}
       onCancel={onClose}
     >
-      <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
-        <p className="text-t3" style={{ fontSize: 'var(--font-size-sm)', marginBottom: 'var(--sp-2)' }}>
+      <div className="flex flex-col gap-[var(--sp-3)]">
+        <p className="text-t3 text-[var(--font-size-sm)] mb-[var(--sp-2)]">
           Select the operating mode for this instance. The instance will restart after switching.
         </p>
         {MODE_OPTIONS.map(opt => {
@@ -69,45 +69,35 @@ export function ModeSwitchDialog({
           return (
             <button
               key={opt.value}
+              type="button"
               onClick={() => !switching && setSelected(opt.value)}
-              className="flex items-start gap-3 text-left cursor-pointer c-hover"
+              className={`flex items-start gap-3 text-left cursor-pointer c-hover py-[var(--sp-3)] px-[var(--sp-4)] rounded-md ${switching ? 'opacity-60' : ''}`}
               style={{
-                padding: 'var(--sp-3) var(--sp-4)',
-                borderRadius: 'var(--radius-md)',
                 borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: isSelected ? `var(--m-${mk}-soft)` : 'var(--b1)',
                 background: isSelected ? `var(--m-${mk}-wash)` : 'var(--color-d1)',
-                opacity: switching ? 0.6 : 1,
               }}
             >
               {/* Radio indicator */}
               <span
-                className="flex-shrink-0 rounded-full"
+                className="flex-shrink-0 rounded-full w-[var(--feed-col-icon)] h-[var(--feed-col-icon)] mt-[var(--bw-accent)]"
                 style={{
-                  width: 'var(--feed-col-icon)',
-                  height: 'var(--feed-col-icon)',
-                  marginTop: 'var(--bw-accent)',
                   borderWidth: 'var(--bw-accent)', borderStyle: 'solid', borderColor: isSelected ? `var(--color-m-${mk})` : 'var(--b3)',
                   background: isSelected ? `var(--color-m-${mk})` : 'transparent',
                   boxShadow: isSelected ? `inset 0 0 0 3px var(--color-d2)` : 'none',
                 }}
               />
               <div>
-                <div className="font-sans font-medium" style={{ fontSize: 'var(--font-size-body)', color: isSelected ? `var(--color-m-${mk})` : 'var(--color-t2)' }}>
+                <div className="font-sans font-medium text-[var(--font-size-body)]" style={{ color: isSelected ? `var(--color-m-${mk})` : 'var(--color-t2)' }}>
                   {opt.label}
                   {isCurrent && (
                     <span
-                      className="font-mono"
-                      style={{
-                        marginLeft: 'var(--sp-2)',
-                        fontSize: 'var(--font-size-xs)',
-                        color: 'var(--color-t4)',
-                      }}
+                      className="font-mono ml-[var(--sp-2)] text-[var(--font-size-xs)] text-t4"
                     >
                       current
                     </span>
                   )}
                 </div>
-                <div className="text-t4" style={{ fontSize: 'var(--font-size-sm)' }}>
+                <div className="text-t4 text-[var(--font-size-sm)]">
                   {opt.description}
                 </div>
               </div>
@@ -116,14 +106,7 @@ export function ModeSwitchDialog({
         })}
         {changed && (
           <div
-            className="flex items-center gap-2"
-            style={{
-              padding: 'var(--sp-2) var(--sp-3)',
-              borderRadius: 'var(--radius-sm)',
-              background: 'var(--s-warn-wash)',
-              fontSize: 'var(--font-size-sm)',
-              color: 'var(--color-s-warn)',
-            }}
+            className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] rounded-sm bg-[var(--s-warn-wash)] text-[var(--font-size-sm)] text-s-warn"
           >
             <AlertTriangle size={13} strokeWidth={1.75} />
             <span>This will restart the instance. Active sessions will be interrupted.</span>

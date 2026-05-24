@@ -95,23 +95,22 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
   if (status === 'connected') {
     return (
       <div
-        className="flex flex-col items-center text-center"
-        style={{ gap: 'var(--sp-4)', padding: 'var(--sp-6) 0' }}
+        className="flex flex-col items-center text-center gap-[var(--sp-4)] py-[var(--sp-6)] px-0"
       >
         <CheckCircle2
           size={48}
           strokeWidth={1.5}
-          style={{ color: 'var(--color-s-ok)' }}
+          className="text-s-ok"
         />
-        <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-          <span className="c-heading" style={{ fontSize: 'var(--font-size-lg)' }}>
+        <div className="flex flex-col gap-[var(--sp-1)]">
+          <span className="c-heading text-[var(--font-size-lg)]">
             Line is live!
           </span>
-          <span className="c-body" style={{ color: 'var(--color-t3)' }}>
+          <span className="c-body text-t3">
             <strong>{lineName}</strong> is now connected and running.
           </span>
         </div>
-        <button className="c-btn c-btn-primary" onClick={onComplete}>
+        <button type="button" className="c-btn c-btn-primary" onClick={onComplete}>
           View Line
         </button>
       </div>
@@ -122,23 +121,22 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
     const isTimeout = errorMsg.toLowerCase().includes('timed out')
     return (
       <div
-        className="flex flex-col items-center text-center"
-        style={{ gap: 'var(--sp-4)', padding: 'var(--sp-6) 0' }}
+        className="flex flex-col items-center text-center gap-[var(--sp-4)] py-[var(--sp-6)] px-0"
       >
         <XCircle
           size={48}
           strokeWidth={1.5}
-          style={{ color: 'var(--color-s-crit)' }}
+          className="text-s-crit"
         />
-        <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
-          <span className="c-heading" style={{ fontSize: 'var(--font-size-lg)' }}>
+        <div className="flex flex-col gap-[var(--sp-1)]">
+          <span className="c-heading text-[var(--font-size-lg)]">
             {isTimeout ? 'Session timed out' : 'Authentication failed'}
           </span>
-          <span className="c-body" style={{ color: 'var(--color-t3)' }}>
+          <span className="c-body text-t3">
             {errorMsg || 'An unexpected error occurred. Check that the fleet server is running.'}
           </span>
         </div>
-        <button className="c-btn c-btn-primary" onClick={handleRetry}>
+        <button type="button" className="c-btn c-btn-primary" onClick={handleRetry}>
           Try Again
         </button>
       </div>
@@ -149,53 +147,50 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
   const qrExpiring = qrAge > 45 // QR codes expire after ~60s, warn at 45
   return (
     <div
-      className="flex flex-col items-center text-center"
-      style={{ gap: 'var(--sp-4)', padding: 'var(--sp-4) 0' }}
+      className="flex flex-col items-center text-center gap-[var(--sp-4)] py-[var(--sp-4)] px-0"
     >
       {qrValue ? (
         <QrDisplay value={qrValue} size={256} />
       ) : (
         <div
-          className="flex items-center justify-center"
-          style={{ width: 'var(--qr-size)', height: 'var(--qr-size)' }}
+          className="flex items-center justify-center w-[var(--qr-size)] h-[var(--qr-size)]"
         >
           <Loader2
             size={32}
-            className="animate-spin"
-            style={{ color: 'var(--color-t4)' }}
+            className="animate-spin text-t4"
           />
         </div>
       )}
 
-      <div className="flex flex-col" style={{ gap: 'var(--sp-1)' }}>
+      <div className="flex flex-col gap-[var(--sp-1)]">
         <span className="c-heading">Scan with WhatsApp</span>
-        <span className="c-body" style={{ color: 'var(--color-t3)' }}>
+        <span className="c-body text-t3">
           Open WhatsApp &rarr; Settings &rarr; Linked Devices &rarr; Link a Device
         </span>
       </div>
 
       <div
-        className="flex items-center"
-        style={{ gap: 'var(--sp-2)', color: qrExpiring ? 'var(--color-s-warn)' : 'var(--color-t4)' }}
+        className="flex items-center gap-[var(--sp-2)]"
+        style={{ color: qrExpiring ? 'var(--color-s-warn)' : 'var(--color-t4)' }}
       >
         {qrValue ? (
           qrExpiring ? (
             <>
               <Clock size={14} />
-              <span className="c-body" style={{ fontSize: 'var(--font-size-sm)' }}>
+              <span className="c-body text-[var(--font-size-sm)]">
                 QR code expiring soon — a new one will appear automatically
               </span>
             </>
           ) : (
             <>
               <Loader2 size={14} className="animate-spin" />
-              <span className="c-body" style={{ fontSize: 'var(--font-size-sm)' }}>
+              <span className="c-body text-[var(--font-size-sm)]">
                 Waiting for scan...
               </span>
             </>
           )
         ) : (
-          <span className="c-body" style={{ fontSize: 'var(--font-size-sm)' }}>
+          <span className="c-body text-[var(--font-size-sm)]">
             Generating QR code...
           </span>
         )}

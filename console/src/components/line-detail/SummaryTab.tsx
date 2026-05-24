@@ -90,17 +90,12 @@ export function SummaryTab({
   const config = line.mode !== 'passive' ? buildConfigEntries(rawConfig) : null
 
   return (
-    <div className="flex flex-col" style={{ gap: 'var(--sp-3)' }}>
+    <div className="flex flex-col gap-[var(--sp-3)]">
       {/* Row 1: KPI cards — 6-wide single row */}
       <div
+        className="grid gap-[var(--sp-2)] bg-d1 rounded-lg border border-[var(--b1)] p-[var(--sp-2)]"
         style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
-          gap: 'var(--sp-2)',
-          background: 'var(--color-d1)',
-          borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b1)',
-          borderRadius: 'var(--radius-lg)',
-          padding: 'var(--sp-2)',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(var(--avatar-sm), 1fr))',
         }}
       >
         {cards.map((card, i) => (
@@ -109,15 +104,12 @@ export function SummaryTab({
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3, delay: i * 0.04, ease: [0.22, 1, 0.36, 1] }}
-            className="c-card"
-            style={{
-              padding: 'var(--sp-3) var(--sp-4)',
-            }}
+            className="c-card py-[var(--sp-3)] px-[var(--sp-4)]"
           >
-            <div className="c-col-header text-t4" style={{ marginBottom: 'var(--sp-1)' }}>
+            <div className="c-col-header text-t4 mb-[var(--sp-1)]">
               {card.label}
             </div>
-            <div className={`font-mono font-semibold ${card.color}`} style={{ fontSize: 'var(--font-size-lg)', letterSpacing: 'var(--tracking-tight)' }}>
+            <div className={`font-mono font-semibold ${card.color} text-[var(--font-size-lg)] tracking-[var(--tracking-tight)]`}>
               {card.value}
             </div>
           </motion.div>
@@ -129,17 +121,14 @@ export function SummaryTab({
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
-        className="c-card flex items-center justify-between"
-        style={{
-          padding: 'var(--sp-4) var(--sp-5)',
-        }}
+        className="c-card flex items-center justify-between py-[var(--sp-4)] px-[var(--sp-5)]"
       >
-        <div className="c-col-header text-t4 flex-shrink-0" style={{ marginRight: 'var(--sp-5)' }}>
+        <div className="c-col-header text-t4 flex-shrink-0 mr-[var(--sp-5)]">
           Pipeline
         </div>
-        <div className="flex items-center flex-1 justify-center flex-wrap" style={{ gap: 'var(--sp-2)' }}>
+        <div className="flex items-center flex-1 justify-center flex-wrap gap-[var(--sp-2)]">
           {pipelineNodes.map((node, i) => (
-            <span key={node.label} className="flex items-center" style={{ gap: 'var(--sp-2)' }}>
+            <span key={node.label} className="flex items-center gap-[var(--sp-2)]">
               {i > 0 && <PipelineArrow />}
               <PipelineNode label={node.label} color={modeColor} active={node.active} />
             </span>
@@ -148,7 +137,7 @@ export function SummaryTab({
       </motion.div>
 
       {/* Row 3: Config + Actions side-by-side */}
-      <div className="flex" style={{ gap: 'var(--sp-3)' }}>
+      <div className="flex gap-[var(--sp-3)]">
         {/* Configuration panel */}
         <motion.div
           initial={{ opacity: 0, y: 8 }}
@@ -160,20 +149,20 @@ export function SummaryTab({
             <span className="c-col-header text-t4">{line.mode} Configuration</span>
             {config && (
               <button
+                type="button"
                 onClick={onEditConfig}
-                className="c-btn c-btn-ghost"
-                style={{ padding: 'var(--sp-0h) var(--sp-2)', fontSize: 'var(--font-size-xs)' }}
+                className="c-btn c-btn-ghost py-[var(--sp-0h)] px-[var(--sp-2)] text-[var(--font-size-xs)]"
               >
                 Edit
               </button>
             )}
           </div>
           {config ? (
-            <div style={{ padding: 'var(--sp-3) var(--sp-4)' }}>
+            <div className="py-[var(--sp-3)] px-[var(--sp-4)]">
               {line.mode === 'agent' && (
-                <div className="flex items-center justify-between" style={{ padding: 'var(--sp-1h) 0', ...(config.length > 0 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) }}>
+                <div className={`flex items-center justify-between py-[var(--sp-1h)] ${config.length > 0 ? 'border-b border-[var(--b1)]' : ''}`}>
                   <span className="c-label">provider</span>
-                  <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: 'var(--color-m-agt)' }}>
+                  <span className="font-mono text-[var(--font-size-data)] text-m-agt">
                     {getProvider(
                       ((rawConfig.agentOptions as Record<string, unknown> | undefined)?.provider as string) ?? DEFAULT_PROVIDER_ID
                     )?.displayName ?? DEFAULT_PROVIDER_ID}
@@ -181,14 +170,14 @@ export function SummaryTab({
                 </div>
               )}
               {config.map((entry, i) => (
-                <div key={entry.key} className="flex items-center justify-between" style={{ padding: 'var(--sp-1h) 0', ...(i < config.length - 1 ? { borderBottom: 'var(--bw) solid var(--b1)' } : {}) }}>
+                <div key={entry.key} className={`flex items-center justify-between py-[var(--sp-1h)] ${i < config.length - 1 ? 'border-b border-[var(--b1)]' : ''}`}>
                   <span className="c-label">{entry.key}</span>
-                  <span className="font-mono" style={{ fontSize: 'var(--font-size-data)', color: TYPE_COLOR[entry.type] }}>{entry.value}</span>
+                  <span className="font-mono text-[var(--font-size-data)]" style={{ color: TYPE_COLOR[entry.type] }}>{entry.value}</span>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="text-t4" style={{ padding: 'var(--sp-5)', fontSize: 'var(--font-size-sm)' }}>
+            <div className="text-t4 py-[var(--sp-5)] text-[var(--font-size-sm)]">
               Passive mode — no configuration required.
             </div>
           )}
@@ -199,44 +188,40 @@ export function SummaryTab({
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          className="c-card overflow-hidden"
-          style={{
-            width: 'var(--panel-actions)',
-            flexShrink: 0,
-          }}
+          className="c-card overflow-hidden flex-shrink-0 w-[var(--panel-actions)]"
         >
           <div className="c-toolbar bg-d3 c-border-b">
             <span className="c-col-header text-t4">Actions</span>
           </div>
-          <div className="flex flex-col" style={{ padding: 'var(--sp-3) var(--sp-4)', gap: 'var(--sp-2)' }}>
+          <div className="flex flex-col py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-2)]">
             <button
+              type="button"
               onClick={() => setConfirmAction('restart')}
-              className="c-btn w-full justify-center"
-              style={{ fontSize: 'var(--font-size-label)' }}
+              className="c-btn w-full justify-center text-[var(--font-size-label)]"
             >
               <RotateCw size={13} strokeWidth={1.75} /> Restart Instance
             </button>
             {line.mode !== 'passive' && (
               <button
+                type="button"
                 onClick={onEditConfig}
-                className="c-btn w-full justify-center"
-                style={{ fontSize: 'var(--font-size-label)' }}
+                className="c-btn w-full justify-center text-[var(--font-size-label)]"
               >
                 <SlidersHorizontal size={13} strokeWidth={1.75} /> Edit Configuration
               </button>
             )}
             <button
+              type="button"
               onClick={onChangeMode}
-              className="c-btn w-full justify-center"
-              style={{ fontSize: 'var(--font-size-label)' }}
+              className="c-btn w-full justify-center text-[var(--font-size-label)]"
             >
               <GitBranch size={13} strokeWidth={1.75} /> Change Mode
             </button>
-            <div style={{ borderTop: 'var(--bw) solid var(--b1)', paddingTop: 'var(--sp-2)', marginTop: 'var(--sp-1)' }}>
+            <div className="border-t border-[var(--b1)] pt-[var(--sp-2)] mt-[var(--sp-1)]">
               <button
+                type="button"
                 onClick={() => setConfirmAction('stop')}
-                className="c-btn c-btn-danger w-full justify-center"
-                style={{ fontSize: 'var(--font-size-label)' }}
+                className="c-btn c-btn-danger w-full justify-center text-[var(--font-size-label)]"
               >
                 <Power size={13} strokeWidth={1.75} /> Stop Instance
               </button>
@@ -262,7 +247,7 @@ export function SummaryTab({
         onCancel={() => setConfirmAction(null)}
       >
         <p>Restarting will briefly disconnect <strong>{line.name}</strong> from WhatsApp.</p>
-        <ul style={{ marginTop: 'var(--sp-2)', paddingLeft: 'var(--sp-5)' }}>
+        <ul className="mt-[var(--sp-2)] pl-[var(--sp-5)]">
           <li>Active chat sessions will be interrupted</li>
           <li>Agent sessions will be terminated and must restart</li>
           <li>Messages received during restart will be queued</li>
@@ -286,7 +271,7 @@ export function SummaryTab({
         onCancel={() => setConfirmAction(null)}
       >
         <p>Stopping will disconnect <strong>{line.name}</strong> from WhatsApp.</p>
-        <ul style={{ marginTop: 'var(--sp-2)', paddingLeft: 'var(--sp-5)' }}>
+        <ul className="mt-[var(--sp-2)] pl-[var(--sp-5)]">
           <li>All active chat and agent sessions will be terminated</li>
           <li>The instance will not reconnect until manually started</li>
           <li>Messages received while stopped will not be delivered</li>

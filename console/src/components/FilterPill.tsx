@@ -18,31 +18,21 @@ const FilterPill: FC<FilterPillProps> = ({
     <button
       type="button"
       onClick={onClick}
-      className={`font-mono cursor-pointer c-hover inline-flex items-center ${
+      className={`font-mono cursor-pointer c-hover inline-flex items-center text-[var(--font-size-sm)] tracking-[var(--tracking-pill)] py-[var(--sp-1)] px-[var(--sp-2h)] rounded-sm gap-[var(--sp-1h)] ${
         isActive ? `${activeColor} bg-d4` : 'text-t4 hover:text-t2 hover:bg-d3'
       }`}
       style={{
-        fontSize: 'var(--font-size-sm)',
-        letterSpacing: 'var(--tracking-pill)',
-        padding: 'var(--sp-1) var(--sp-2h)',
-        borderRadius: 'var(--radius-sm)',
         border: isActive
           ? (activeBorder ?? 'var(--bw) solid var(--b4)')
           : 'var(--bw) solid var(--b1)',
-        gap: 'var(--sp-1h)',
         ...style,
       }}
     >
       {label}
       {count !== undefined && count > 0 && (
         <span
-          className={`font-semibold leading-snug`}
+          className={`font-semibold leading-snug text-[var(--font-size-label)] min-w-[var(--sp-4)] text-center py-0 px-[var(--sp-1)] rounded-xs`}
           style={{
-            fontSize: 'var(--font-size-label)',
-            minWidth: 'var(--sp-4)',
-            textAlign: 'center',
-            padding: '0 var(--sp-1)',
-            borderRadius: 'var(--radius-xs)',
             backgroundColor: isActive ? 'var(--b3)' : 'var(--b2)',
             color: isActive ? 'var(--color-t1)' : 'var(--color-t4)',
           }}

@@ -148,6 +148,9 @@
   --feed-indent: 76px;       /* feed content indent: time + gap */
   --feed-inst-max: 80px;     /* feed instance tag max width */
   --feed-preview-max: 120px; /* feed preview max-height before scroll */
+  --col-chats: 60px;         /* soup kitchen chats column width */
+  --col-sessions: 72px;      /* soup kitchen sessions column width */
+  --chart-min-h: 220px;      /* metrics chart minimum height */
   --feed-actions-reserve: 96px; /* keep hover actions off the main text */
   /* ═══ Wizard tokens ═══ */
   --stepper-line-w: 32px;    /* wizard stepper connector width */

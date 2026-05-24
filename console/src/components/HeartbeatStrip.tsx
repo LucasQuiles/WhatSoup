@@ -6,10 +6,10 @@ interface HeartbeatStripProps {
   beats: Beat[];
 }
 
-const beatConfig: Record<Beat, { colorClass: string; height: string; opacity: number }> = {
-  up:   { colorClass: "bg-s-ok",   height: "14px", opacity: 0.55 },
-  down: { colorClass: "bg-s-crit", height: "20px", opacity: 0.85 },
-  slow: { colorClass: "bg-s-warn", height: "10px", opacity: 0.6 },
+const beatConfig: Record<Beat, { colorClass: string; height: string; opacity: string }> = {
+  up:   { colorClass: "bg-s-ok",   height: "var(--sep-h)", opacity: "var(--opacity-disabled)" },
+  down: { colorClass: "bg-s-crit", height: "var(--badge-unread)", opacity: "var(--opacity-muted)" },
+  slow: { colorClass: "bg-s-warn", height: "var(--dot-header)", opacity: "var(--opacity-muted)" },
 };
 
 const STRIP_LENGTH = 20;
@@ -22,7 +22,7 @@ const HeartbeatStrip: FC<HeartbeatStripProps> = ({ beats }) => {
 
   return (
     <div
-      className="flex gap-[1px] h-5 items-end"
+      className="flex gap-[var(--bw)] h-5 items-end"
       role="img"
       aria-label={`Health: ${beats.filter(b => b === 'up').length} of ${beats.length} heartbeats healthy`}
     >

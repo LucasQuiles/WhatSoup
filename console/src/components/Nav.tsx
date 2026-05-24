@@ -27,19 +27,12 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
     <nav
       role="navigation"
       aria-label="Main navigation"
-      className="bg-d1 flex items-center justify-between flex-shrink-0"
-      style={{
-        height: "var(--nav-h)",
-        padding: "0 var(--sp-5)",
-        borderBottom: "var(--bw) solid var(--b1)",
-        gap: "var(--sp-6)",
-      }}
+      className="bg-d1 flex items-center justify-between flex-shrink-0 h-[var(--nav-h)] py-0 px-[var(--sp-5)] gap-[var(--sp-6)] c-border-b"
     >
       {/* Left cluster: logo + nav items */}
-      <div className="flex items-center" style={{ gap: "var(--sp-6)" }}>
+      <div className="flex items-center gap-[var(--sp-6)]">
         <span
-          className="font-sans font-black select-none"
-          style={{ fontSize: "var(--font-size-xl)", letterSpacing: "var(--tracking-tighter)" }}
+          className="font-sans font-black select-none text-[var(--font-size-xl)] tracking-[var(--tracking-tighter)]"
         >
           <span className="text-t2">What</span>
           <span className="text-s-ok">Soup</span>
@@ -49,13 +42,12 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           to="/"
           end
           className={({ isActive }) =>
-            `flex items-center gap-1.5 font-sans font-medium c-nav-link relative ${
+            `flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] text-[var(--font-size-data)] rounded-sm ${
               isActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
-          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", borderRadius: "var(--radius-sm)" }}
         >
           {({ isActive }) => (
             <>
@@ -63,14 +55,11 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               <span>Soup Kitchen</span>
               {isActive && (
                 <span
-                  className="absolute"
+                  className="absolute bg-[var(--color-s-ok)] rounded-sm h-[var(--bw-accent)]"
                   style={{
                     bottom: "-1px",
                     left: "var(--sp-3)",
                     right: "var(--sp-3)",
-                    height: "var(--bw-accent)",
-                    background: "var(--color-s-ok)",
-                    borderRadius: "var(--radius-sm)",
                   }}
                 />
               )}
@@ -81,13 +70,12 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         <NavLink
           to="/inbox"
           className={({ isActive }) =>
-            `flex items-center gap-1.5 font-sans font-medium c-nav-link relative ${
+            `flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] text-[var(--font-size-data)] rounded-sm ${
               isActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
-          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", borderRadius: "var(--radius-sm)" }}
         >
           {({ isActive }) => (
             <>
@@ -95,31 +83,18 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               <span>Inbox</span>
               {unreadCount > 0 && (
                 <span
-                  className="font-mono font-semibold"
-                  style={{
-                    fontSize: "var(--font-size-xs)",
-                    background: "var(--color-s-warn)",
-                    color: "var(--color-d0)",
-                    padding: "1px var(--sp-1)",
-                    borderRadius: 'var(--radius-md)',
-                    minWidth: "var(--sp-4)",
-                    textAlign: "center",
-                    marginLeft: "var(--sp-0h)",
-                  }}
+                  className="font-mono font-semibold text-[var(--font-size-xs)] bg-[var(--color-s-warn)] text-d0 py-[var(--sp-0h)] px-[var(--sp-1)] rounded-md min-w-[var(--sp-4)] text-center ml-[var(--sp-0h)]"
                 >
                   {unreadCount > 99 ? "99+" : unreadCount}
                 </span>
               )}
               {isActive && (
                 <span
-                  className="absolute"
+                  className="absolute bg-[var(--color-s-ok)] rounded-sm h-[var(--bw-accent)]"
                   style={{
                     bottom: "-1px",
                     left: "var(--sp-3)",
                     right: "var(--sp-3)",
-                    height: "var(--bw-accent)",
-                    background: "var(--color-s-ok)",
-                    borderRadius: "var(--radius-sm)",
                   }}
                 />
               )}
@@ -130,13 +105,12 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         <NavLink
           to="/ops"
           className={({ isActive }) =>
-            `flex items-center gap-1.5 font-sans font-medium c-nav-link relative ${
+            `flex items-center gap-1.5 font-sans font-medium c-nav-link relative py-[var(--sp-1h)] px-[var(--sp-3)] text-[var(--font-size-data)] rounded-sm ${
               isActive
                 ? "text-t1 bg-d4"
                 : "text-t4 hover:text-t2"
             }`
           }
-          style={{ padding: "var(--sp-1h) var(--sp-3)", fontSize: "var(--font-size-data)", borderRadius: "var(--radius-sm)" }}
         >
           {({ isActive }) => (
             <>
@@ -144,14 +118,11 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               <span>Ops</span>
               {isActive && (
                 <span
-                  className="absolute"
+                  className="absolute bg-[var(--color-s-ok)] rounded-sm h-[var(--bw-accent)]"
                   style={{
                     bottom: "-1px",
                     left: "var(--sp-3)",
                     right: "var(--sp-3)",
-                    height: "var(--bw-accent)",
-                    background: "var(--color-s-ok)",
-                    borderRadius: "var(--radius-sm)",
                   }}
                 />
               )}
@@ -161,7 +132,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
       </div>
 
       {/* Right cluster: system status */}
-      <div className="flex items-center gap-2 font-mono" style={{ fontSize: "var(--font-size-xs)" }}>
+      <div className="flex items-center gap-2 font-mono text-[var(--font-size-xs)]">
         {connected ? (
           <span className="flex items-center gap-1 text-s-ok" title="Realtime connected">
             <Wifi size={12} strokeWidth={1.75} />
@@ -190,14 +161,9 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         {version && version !== 'unknown' && (
           updateAvailable && remoteSha ? (
             <button
+              type="button"
               onClick={onUpdateClick}
-              className="flex items-center gap-1 c-hover cursor-pointer"
-              style={{
-                color: 'var(--color-m-cht)',
-                padding: '2px var(--sp-1h)',
-                borderRadius: 'var(--radius-sm)',
-                background: 'var(--m-cht-soft)',
-              }}
+              className="flex items-center gap-1 c-hover cursor-pointer text-m-cht py-[var(--bw-accent)] px-[var(--sp-1h)] rounded-sm bg-[var(--m-cht-soft)]"
               title={`Update available: ${version} → ${remoteSha}`}
               aria-label={`Update available: ${version} to ${remoteSha}`}
             >

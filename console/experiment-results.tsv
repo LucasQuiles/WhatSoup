@@ -1,7 +1,24 @@
-commit	metric	status	description
-2247fa4	10 items	keep	baseline — 10 hardcoded/unwired items remaining
-3c141e8	7 items	keep	wire real config to SummaryTab+ModeTab, remove CHAT_CONFIG/AGENT_CONFIG
-e9e093f	5 items	keep	wire send message in Inbox + History tabs
-26891fd	2 items	keep	wire Ops restart buttons, remove hardcoded sparklines
-5f428a9	1 item	keep	real messagesToday from daily DB count
-062c4d3	0 mock items	keep	pipeline nodes data-driven, all mock data eliminated
+commit	metric	config_ok	status	description
+1f14198	129	1	keep	baseline
+5b661c6	133	1	keep	grid template hardcoded px rule (+4 violations)
+f044528	147	1	keep	whiteSpace + textTransform rules (+14)
+adafc8a	162	1	keep	flex numeric + animation rules (+15)
+aac14c7	178	1	keep	cursor + minWidth:0 rules (+16)
+6b67ce1	182	1	keep	overflowY/X + pointerEvents rules (+4)
+5a5e1c6	231	1	keep	simple background color rule (+49)
+51cc81a	288	1	keep	text/status/mode color rules (+57)
+8376215	311	1	keep	borderColor rule (+23)
+d0fed11	378	1	keep	borderRadius token rule (+67)
+2145278	633	1	keep	fontSize token rule (+255)
+81f022f	785	1	keep	gap token rule (+152)
+104c373	903	1	keep	padding token rules (+118)
+8f2d39a	986	1	keep	margin token rules (+83)
+7a53114	1063	1	keep	sizing token rules (+77)
+b15e674	1078	1	keep	letterSpacing token rule (+15)
+c4fa1c4	1116	1	keep	border edge shorthand global (+38)
+ab0798f	1133	1	keep	compound padding with zero (+17)
+400dd80	1155	1	keep	general background token rule (+22)
+n/a	n/a	n/a	discard	Tailwind gap-N → gap-[var(--sp-N)]: defaults align with DS, 77 violations but ambiguous value (skip)
+aec4f97	1163	1	keep	boxShadow token rule (+8)
+1a41344	1174	1	keep	Tailwind arbitrary px rule (+11)
+d944fe5	1161	1	keep	complex fixes: z-index, async guards, hardcoded px, a11y (-13 violations)

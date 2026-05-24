@@ -16,19 +16,16 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
 
   return (
     <div
-      className="flex items-center gap-3 flex-shrink-0"
+      className="flex items-center gap-3 flex-shrink-0 py-[var(--sp-2)] px-[var(--sp-4)] rounded-md text-[var(--font-size-data)]"
       style={{
-        padding: "var(--sp-2) var(--sp-4)",
         backgroundColor: "var(--s-crit-wash)",
         borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--s-crit-border)",
-        borderRadius: 'var(--radius-md)',
-        fontSize: "var(--font-size-data)",
       }}
     >
       {/* Count badge */}
       <span
-        className="inline-flex items-center gap-1.5 text-s-crit font-mono font-medium px-2.5 py-0.5 rounded"
-        style={{ fontSize: 'var(--font-size-sm)', backgroundColor: "var(--s-crit-soft)" }}
+        className="inline-flex items-center gap-1.5 text-s-crit font-mono font-medium px-2.5 py-0.5 rounded text-[var(--font-size-sm)]"
+        style={{ backgroundColor: "var(--s-crit-soft)" }}
       >
         <AlertTriangle size={12} strokeWidth={2} />
         {alerts.length} alert{alerts.length !== 1 && "s"}
@@ -44,8 +41,8 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
             className="inline-flex items-center gap-1 text-s-crit font-mono
                        c-hover
                        rounded cursor-pointer whitespace-nowrap
-                       hover:bg-[var(--s-crit-soft)]"
-            style={{ fontSize: 'var(--font-size-sm)', padding: "var(--sp-1) var(--sp-3)", backgroundColor: "var(--s-crit-wash)" }}
+                       hover:bg-[var(--s-crit-soft)] text-[var(--font-size-sm)] py-[var(--sp-1)] px-[var(--sp-3)]"
+            style={{ backgroundColor: "var(--s-crit-wash)" }}
           >
             <span className="text-t4">{alert.line}</span>
             <span className="mx-1 text-t5">—</span>
