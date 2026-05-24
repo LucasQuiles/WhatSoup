@@ -5,6 +5,7 @@ import { BaselineIntegrityError, type BaselineStore } from '../store/baseline.ts
 import type { EventInput, EventStore } from '../store/events.ts';
 import type { MuteStore } from '../store/mutes.ts';
 import { ProbeDocSchema, type ProbeDoc } from '../types.ts';
+import { errorMessage } from '../lib/error-utils.ts';
 import { matchMute } from './mute-match.ts';
 
 export interface RunOneProbeArgs {
@@ -139,7 +140,7 @@ function applyMute(
 
 function probeErrorPayload(error: unknown): Record<string, unknown> {
   return {
-    error: error instanceof Error ? error.message : String(error),
+    error: errorMessage(error),
     error_name: error instanceof Error ? error.name : 'unknown',
   };
 }

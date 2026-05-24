@@ -1,3 +1,4 @@
+import { errorMessage } from '../lib/error-utils.ts';
 import type { AlertPayload, DeliveryResult, Sink } from './types.ts';
 
 export interface ChainResult {
@@ -28,7 +29,7 @@ async function safeDeliver(sink: Sink, payload: AlertPayload): Promise<DeliveryR
     return {
       ok: false,
       channel: sink.name,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     };
   }
 }
