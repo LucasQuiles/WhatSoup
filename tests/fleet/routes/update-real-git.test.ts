@@ -62,10 +62,11 @@ describe('handleUpdate rollback with real git', () => {
     const fakeBin = join(tmpRoot, 'bin');
 
     execFileSync('git', ['init', '--bare', remote], { encoding: 'utf8' });
+    git(remote, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
     execFileSync('git', ['init', seed], { encoding: 'utf8' });
+    git(seed, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
     git(seed, ['config', 'user.email', 'whatsoup-test.invalid']);
     git(seed, ['config', 'user.name', 'WhatSoup Test']);
-    git(seed, ['switch', '-c', 'main']);
     writeFileSync(join(seed, 'package-lock.json'), 'base lock\n');
     git(seed, ['add', 'package-lock.json']);
     git(seed, ['commit', '-m', 'base']);
