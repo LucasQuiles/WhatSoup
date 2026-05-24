@@ -171,6 +171,12 @@ export interface TransportEvents {
     voterJid: string;
     selectedOptions: string[];
   }) => void;
+  /** Poll vote decryption failed after all bounded JID candidates were exhausted. */
+  pollVoteFailed: (data: {
+    pollMessageId: string;
+    chatJid: string;
+    reason: string;
+  }) => void;
 }
 
 // Typed event emitter augmentation
@@ -1294,6 +1300,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     // All candidates exhausted
     this.log.error({ pollMessageId: creationKey.id, candidateCount: candidates.length }, 'poll vote decryption failed with all JID candidates');
+    this.emit('pollVoteFailed', {
+      pollMessageId: creationKey.id,
+      chatJid: stored.chatJid,
+      reason: 'decrypt_failed',
+    });
   }
 
   /**
@@ -1310,7 +1321,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (existing) {
       // Vote changed within grace window — replace buffered result, reset timer
       clearTimeout(existing.timer);
-      this.log.info({ pollMessageId, newOptions: data.selectedOptions, prevOptions: existing.pendingEmit.selectedOptions }, 'poll vote changed within grace window');
+      this.log.info({
+        pollMessageId,
+        newOptionCount: data.selectedOptions.length,
+        prevOptionCount: existing.pendingEmit.selectedOptions.length,
+      }, 'poll vote changed within grace window');
     }
 
     const timer = setTimeout(() => {
@@ -1325,7 +1340,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.log.info({
         pollMessageId: data.pollMessageId,
         chatJid: data.chatJid,
-        selectedOptions: data.selectedOptions,
+        selectedOptionCount: data.selectedOptions.length,
         jidType: data.jidType,
       }, 'poll vote decrypted and emitted');
     }, ConnectionManager.POLL_VOTE_GRACE_MS);

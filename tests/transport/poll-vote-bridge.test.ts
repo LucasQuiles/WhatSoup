@@ -15,6 +15,18 @@ vi.mock('@whiskeysockets/baileys/lib/Utils/process-message.js', () => ({
   decryptPollVote: mockDecryptPollVote,
 }));
 
+const { mockConnectionLogger } = vi.hoisted(() => ({
+  mockConnectionLogger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    fatal: vi.fn(),
+    child: vi.fn(),
+  },
+}));
+mockConnectionLogger.child.mockReturnValue(mockConnectionLogger);
+
 vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['1111']),
@@ -35,21 +47,7 @@ vi.mock('../../src/config.ts', () => ({
 }));
 
 vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    fatal: vi.fn(),
-    child: () => ({
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      debug: vi.fn(),
-      fatal: vi.fn(),
-      level: 'error',
-    }),
-  }),
+  createChildLogger: () => mockConnectionLogger,
 }));
 
 import { createHash } from 'node:crypto';
@@ -289,13 +287,15 @@ describe('poll vote bridge', () => {
       expect(mockDecryptPollVote.mock.calls[1][1].voterJid).toBe(VOTER_PHONE);
     });
 
-    it('does not emit when all candidates fail', async () => {
+    it('emits pollVoteFailed when all decrypt candidates fail', async () => {
       mockDecryptPollVote.mockImplementation(() => {
         throw new Error('Unsupported state or unable to authenticate data');
       });
 
       const handler = vi.fn();
+      const failed = vi.fn();
       cm.on('pollVoteReceived', handler);
+      cm.on('pollVoteFailed', failed);
 
       const voteMsg = makePollVoteMessage({
         pollMsgId: POLL_MSG_ID,
@@ -304,10 +304,15 @@ describe('poll vote bridge', () => {
       });
 
       emit({ 'messages.upsert': { messages: [voteMsg], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(2));
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(handler).not.toHaveBeenCalled();
-      expect(mockDecryptPollVote).toHaveBeenCalledTimes(2);
+      expect(failed).toHaveBeenCalledWith({
+        pollMessageId: POLL_MSG_ID,
+        chatJid: VOTER_LID,
+        reason: 'decrypt_failed',
+      });
     });
 
     it('ignores votes for untracked polls', () => {
@@ -348,6 +353,46 @@ describe('poll vote bridge', () => {
           selectedOptions: ['Node.js', 'Go'],
         }),
       );
+    });
+
+    it('redacts selected poll labels from transport logs', async () => {
+      mockDecryptPollVote
+        .mockReturnValueOnce({ selectedOptions: [optionHash('Node.js')] })
+        .mockReturnValueOnce({ selectedOptions: [optionHash('Go')] });
+
+      const handler = vi.fn();
+      cm.on('pollVoteReceived', handler);
+
+      const vote1 = makePollVoteMessage({
+        pollMsgId: POLL_MSG_ID,
+        voterLid: VOTER_LID,
+        voterPhone: VOTER_PHONE,
+      });
+      emit({ 'messages.upsert': { messages: [vote1], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(1));
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      const vote2 = makePollVoteMessage({
+        pollMsgId: POLL_MSG_ID,
+        voterLid: VOTER_LID,
+        voterPhone: VOTER_PHONE,
+      });
+      emit({ 'messages.upsert': { messages: [vote2], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(2));
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(handler).toHaveBeenCalledWith(expect.objectContaining({ selectedOptions: ['Go'] }));
+
+      const changedLog = mockConnectionLogger.info.mock.calls.find(([, message]) => message === 'poll vote changed within grace window')?.[0] as Record<string, unknown> | undefined;
+      const emittedLog = mockConnectionLogger.info.mock.calls.find(([, message]) => message === 'poll vote decrypted and emitted')?.[0] as Record<string, unknown> | undefined;
+
+      expect(changedLog).toMatchObject({ pollMessageId: POLL_MSG_ID, newOptionCount: 1, prevOptionCount: 1 });
+      expect(changedLog).not.toHaveProperty('newOptions');
+      expect(changedLog).not.toHaveProperty('prevOptions');
+      expect(emittedLog).toMatchObject({ pollMessageId: POLL_MSG_ID, selectedOptionCount: 1, jidType: 'LID' });
+      expect(emittedLog).not.toHaveProperty('selectedOptions');
+      expect(JSON.stringify([changedLog, emittedLog])).not.toContain('Node.js');
+      expect(JSON.stringify([changedLog, emittedLog])).not.toContain('Go');
     });
 
     it('replaces buffered vote when user changes answer within grace window', async () => {

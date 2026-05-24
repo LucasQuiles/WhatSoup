@@ -320,6 +320,51 @@ export interface AgentRuntimeOptions {
 const POLL_QUESTION_MAX_CHARS = 900;
 const POLL_OPTION_MAX_CHARS = 95;  // leave margin under WhatsApp's ~100 char limit
 const POLL_DETAIL_DESCRIPTION_MIN_CHARS = 72;
+const ASKUSER_POLL_SOFT_EXPIRY_MS = 5 * 60 * 1000;
+const ASKUSER_POLL_HARD_EXPIRY_MS = 10 * 60 * 1000;
+const ASKUSER_OTHER_OPTION_LABEL = 'Other — propose a different option';
+
+type AskUserOption = { label: string; description: string };
+type AskUserQuestion = {
+  question: string;
+  header: string;
+  options: AskUserOption[];
+  multiSelect: boolean;
+};
+
+type PendingPollQuestion = {
+  questions: AskUserQuestion[];
+  toolId: string;
+  chatJid: string;
+  chatJidAliases: Set<string>;
+  mode: 'poll' | 'textFallback';
+  pollMessageIdToQuestionIndex: Map<string, number>;
+  currentQuestionIndex: number;
+  answersCollected: Record<number, string>;
+  createdAt: number;
+  softExpiryTimer?: ReturnType<typeof setTimeout>;
+  hardExpiryTimer?: ReturnType<typeof setTimeout>;
+};
+
+type EscapeHatchLabelPattern = { phrase: string; allowWhitespaceSuffix: boolean };
+
+const ESCAPE_HATCH_LABEL_PATTERNS: EscapeHatchLabelPattern[] = [
+  { phrase: 'other', allowWhitespaceSuffix: false },
+  { phrase: 'none of the above', allowWhitespaceSuffix: true },
+  { phrase: 'something else', allowWhitespaceSuffix: true },
+  { phrase: 'propose alternative', allowWhitespaceSuffix: true },
+  { phrase: 'cancel', allowWhitespaceSuffix: false },
+  { phrase: 'abort', allowWhitespaceSuffix: false },
+  { phrase: 'defer', allowWhitespaceSuffix: false },
+  { phrase: 'need more context', allowWhitespaceSuffix: true },
+];
+
+const OTHER_LABEL_PATTERNS: EscapeHatchLabelPattern[] = [
+  { phrase: 'other', allowWhitespaceSuffix: false },
+  { phrase: 'none of the above', allowWhitespaceSuffix: true },
+  { phrase: 'something else', allowWhitespaceSuffix: true },
+  { phrase: 'propose alternative', allowWhitespaceSuffix: true },
+];
 
 /**
  * Format an AskUserQuestion question for WhatsApp poll rendering.
@@ -335,7 +380,7 @@ const POLL_DETAIL_DESCRIPTION_MIN_CHARS = 72;
  */
 export function formatPollQuestion(q: {
   question: string;
-  options: Array<{ label: string; description: string }>;
+  options: AskUserOption[];
 }): {
   pollName: string;
   pollValues: string[];
@@ -423,11 +468,148 @@ export function formatPollQuestion(q: {
   };
 }
 
+function pendingPollMatchesChatJid(pending: PendingPollQuestion, chatJid: string): boolean {
+  return pending.chatJid === chatJid || pending.chatJidAliases.has(chatJid);
+}
+
+function normalizeDecisionLabel(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\u2010-\u2015]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function labelMatchesIntentPattern(value: string, pattern: EscapeHatchLabelPattern): boolean {
+  const normalized = normalizeDecisionLabel(value);
+  if (normalized === pattern.phrase) return true;
+  if (!normalized.startsWith(pattern.phrase)) return false;
+
+  const suffix = normalized.slice(pattern.phrase.length);
+  const suffixTrimmed = suffix.trimStart();
+  if (!suffixTrimmed) return true;
+
+  // Accept labels like "Other - propose" or "Need more context: logs" while
+  // avoiding false positives such as "Other databases" or "Cancel subscription".
+  if ('-:/(['.includes(suffixTrimmed[0])) return true;
+  return pattern.allowWhitespaceSuffix && /^\s+/.test(suffix);
+}
+
+function labelMatchesAny(value: string, patterns: EscapeHatchLabelPattern[]): boolean {
+  return patterns.some((pattern) => labelMatchesIntentPattern(value, pattern));
+}
+
+function hasEscapeHatchOption(options: AskUserOption[]): boolean {
+  return options.some((option) => labelMatchesAny(option.label, ESCAPE_HATCH_LABEL_PATTERNS));
+}
+
+function isOtherOptionLabel(value: string): boolean {
+  return labelMatchesAny(value, OTHER_LABEL_PATTERNS);
+}
+
+function normalizeAskUserQuestions(questions: AskUserQuestion[]): AskUserQuestion[] {
+  return questions.map((question) => {
+    const options = question.options.map((option) => ({
+      label: option.label,
+      description: option.description ?? '',
+    }));
+
+    if (options.length >= 12 || hasEscapeHatchOption(options)) {
+      return { ...question, options };
+    }
+
+    return {
+      ...question,
+      options: [
+        ...options,
+        {
+          label: ASKUSER_OTHER_OPTION_LABEL,
+          description: '',
+        },
+      ],
+    };
+  });
+}
+
+function formatOptionLine(
+  option: AskUserOption,
+  index: number,
+  { includeDescription = true }: { includeDescription?: boolean } = {},
+): string {
+  const description = includeDescription ? option.description.trim() : '';
+  return description.length > 0
+    ? `${index + 1}. *${option.label}* — ${description}`
+    : `${index + 1}. *${option.label}*`;
+}
+
+function formatTextFallbackQuestion(
+  q: AskUserQuestion,
+  intro?: string,
+  { includeDescriptions = true }: { includeDescriptions?: boolean } = {},
+): string {
+  const optionLines = q.options.map((option, index) => {
+    return formatOptionLine(option, index, { includeDescription: includeDescriptions });
+  });
+  const lines = [
+    ...(intro ? [intro, ''] : []),
+    q.question,
+    '',
+    ...(includeDescriptions ? [] : ['_Full option details were sent above._', '']),
+    ...optionLines,
+    '',
+    '_Reply with option number or text._',
+  ];
+  return lines.join('\n');
+}
+
+function formatOtherDirective(q: AskUserQuestion, selectedOptions: string[]): string {
+  const originalOptions = q.options
+    .filter((option) => !isOtherOptionLabel(option.label))
+    .map((option, index) => formatOptionLine(option, index));
+
+  return [
+    '[User selected Other — none of the proposed options fit]',
+    `Question requiring follow-up: ${q.question}`,
+    selectedOptions.length > 0 ? `Selected option(s): ${selectedOptions.join(', ')}` : null,
+    'Original options:',
+    ...(originalOptions.length > 0 ? originalOptions : ['(none recorded)']),
+    'Directive:',
+    'Ask the user what they have in mind. Explore their reasoning with 1-2 follow-up questions, then either propose a revised option or re-present the decision with the new option added.',
+  ].filter((line): line is string => line !== null).join('\n');
+}
+
+function resolveTypedPollAnswer(text: string, q: AskUserQuestion): string {
+  const normalized = normalizedPollReplyText(text);
+  let selectedOption: AskUserOption | undefined;
+
+  if (/^\d+$/.test(normalized)) {
+    const index = Number(normalized) - 1;
+    selectedOption = q.options[index];
+  } else if (/^[a-z]$/.test(normalized)) {
+    const index = normalized.charCodeAt(0) - 'a'.charCodeAt(0);
+    selectedOption = q.options[index];
+  } else {
+    selectedOption = q.options.find((option) => {
+      return normalizedPollReplyText(option.label) === normalized
+        || normalizedPollReplyText(option.description) === normalized;
+    });
+  }
+
+  if (!selectedOption) return `${text} (free-text response)`;
+  if (isOtherOptionLabel(selectedOption.label)) return formatOtherDirective(q, [selectedOption.label]);
+  return selectedOption.label;
+}
+
+function answerForPollSelection(q: AskUserQuestion, selectedOptions: string[]): string {
+  if (selectedOptions.some(isOtherOptionLabel)) return formatOtherDirective(q, selectedOptions);
+  return selectedOptions.join(', ');
+}
+
 function normalizedPollReplyText(text: string): string {
   return text.trim().toLowerCase().replace(/[.!?]+$/g, '').replace(/\s+/g, ' ');
 }
 
-function textMatchesPollOption(text: string, options: Array<{ label: string; description: string }>): boolean {
+function textMatchesPollOption(text: string, options: AskUserOption[]): boolean {
   const normalized = normalizedPollReplyText(text);
   if (!normalized) return false;
 
@@ -463,7 +645,7 @@ const LOW_SIGNAL_POLL_STATUS_REPLIES = new Set([
 
 function isLowSignalPollStatusReply(
   text: string,
-  options: Array<{ label: string; description: string }>,
+  options: AskUserOption[],
 ): boolean {
   if (textMatchesPollOption(text, options)) return false;
   return LOW_SIGNAL_POLL_STATUS_REPLIES.has(normalizedPollReplyText(text));
@@ -809,21 +991,7 @@ export class AgentRuntime implements Runtime {
   // ---------------------------------------------------------------------------
   // AskUserQuestion → Poll bridge state
   // ---------------------------------------------------------------------------
-  private pendingPollQuestions = new Map<string, {
-    questions: Array<{
-      question: string;
-      header: string;
-      options: Array<{ label: string; description: string }>;
-      multiSelect: boolean;
-    }>;
-    toolId: string;
-    chatJid: string;
-    mode: 'poll' | 'textFallback';
-    pollMessageIdToQuestionIndex: Map<string, number>;
-    currentQuestionIndex: number;
-    answersCollected: Record<number, string>;  // question index -> selectedLabel(s)
-    createdAt: number;
-  }>();
+  private pendingPollQuestions = new Map<string, PendingPollQuestion>();
   /** Tool IDs for which the auto-resolved is_error tool_result should be suppressed. */
   private suppressedAskUserToolIds = new Set<string>();
 
@@ -1247,7 +1415,7 @@ export class AgentRuntime implements Runtime {
     this.finishAutoCompact(mapKey);
     this.clearSilentCompact(mapKey);
     // Clean up pending poll question state
-    this.pendingPollQuestions.delete(mapKey);
+    this.deletePendingPollQuestions(mapKey);
     // Cancel any pending image coalesce buffer
     this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');
     // Clean up operation tracker for this chat
@@ -1452,6 +1620,9 @@ export class AgentRuntime implements Runtime {
       connection.on('pollVoteReceived', (data) => {
         this.handlePollVoteReceived(data);
       });
+      connection.on('pollVoteFailed', (data) => {
+        this.handlePollVoteFailed(data);
+      });
     }
   }
 
@@ -1599,6 +1770,17 @@ export class AgentRuntime implements Runtime {
           if (this.resumeFailedHandling.has(lidKey)) {
             this.resumeFailedHandling.delete(lidKey);
             this.resumeFailedHandling.add(canonical);
+          }
+          const pendingPoll = this.pendingPollQuestions.get(lidKey);
+          if (pendingPoll) {
+            this.pendingPollQuestions.delete(lidKey);
+            this.clearPendingPollTimers(pendingPoll);
+            pendingPoll.chatJidAliases.add(lidKey);
+            pendingPoll.chatJidAliases.add(newJid);
+            pendingPoll.chatJidAliases.add(canonical);
+            pendingPoll.chatJid = canonical;
+            this.pendingPollQuestions.set(canonical, pendingPoll);
+            this.startPendingPollExpiry(canonical, pendingPoll);
           }
           const imageBuffer = this.imageCoalesceBuffers.get(lidKey);
           if (imageBuffer) {
@@ -2680,35 +2862,38 @@ export class AgentRuntime implements Runtime {
     actorJid?: string,
   ): Promise<void> {
     // AskUserQuestion → Poll bridge: if a poll question is pending for this
-    // chat and the user sends a text reply, treat it as a free-text "Other"
-    // answer and inject it back to the session.
+    // chat and the user sends a text reply, resolve it as an option number,
+    // label, description match, or free-text answer and inject it back.
     const pendingPoll = this.pendingPollQuestions.get(mapKey);
     if (pendingPoll) {
-      while (
-        pendingPoll.currentQuestionIndex < pendingPoll.questions.length
-        && pendingPoll.answersCollected[pendingPoll.currentQuestionIndex] !== undefined
-      ) {
-        pendingPoll.currentQuestionIndex++;
-      }
+      this.advancePendingPollIndex(pendingPoll);
 
       const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
       if (currentQ) {
         if (pendingPoll.mode === 'poll' && isLowSignalPollStatusReply(text, currentQ.options)) {
-          this.sendDirect(
-            pendingPoll.chatJid,
-            'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
-          );
+          const queue = this.getQueueForChat(pendingPoll.chatJid, mapKey);
+          if (queue) {
+            queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
+            try {
+              await queue.flush();
+            } catch (err) {
+              log.error({ err, chatJid: pendingPoll.chatJid }, 'failed to flush pending poll status clarification');
+            }
+          } else {
+            this.sendDirect(
+              pendingPoll.chatJid,
+              'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
+            );
+          }
+          this.completeConsumedPerChatInbound(mapKey, 'poll_status_reply');
           return;
         }
 
-        pendingPoll.answersCollected[pendingPoll.currentQuestionIndex] = `${text} (free-text response)`;
+        const answeredQuestionIndex = pendingPoll.currentQuestionIndex;
+        pendingPoll.answersCollected[answeredQuestionIndex] = resolveTypedPollAnswer(text, currentQ);
+        this.removePollIdsForQuestion(pendingPoll, answeredQuestionIndex);
         pendingPoll.currentQuestionIndex++;
-        while (
-          pendingPoll.currentQuestionIndex < pendingPoll.questions.length
-          && pendingPoll.answersCollected[pendingPoll.currentQuestionIndex] !== undefined
-        ) {
-          pendingPoll.currentQuestionIndex++;
-        }
+        this.advancePendingPollIndex(pendingPoll);
 
         if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
           this.injectPollAnswers(mapKey, pendingPoll);
@@ -2718,6 +2903,7 @@ export class AgentRuntime implements Runtime {
             answered: Object.keys(pendingPoll.answersCollected).length,
             total: pendingPoll.questions.length,
           }, 'free-text answer collected — waiting for more');
+          this.completeConsumedPerChatInbound(mapKey, 'poll_partial_answer_collected');
         }
         return; // consume the message — don't send as a new turn
       }
@@ -2793,47 +2979,183 @@ export class AgentRuntime implements Runtime {
   // AskUserQuestion → WhatsApp Poll bridge
   // ---------------------------------------------------------------------------
 
+  private clearPendingPollTimers(pending: PendingPollQuestion): void {
+    if (pending.softExpiryTimer) {
+      clearTimeout(pending.softExpiryTimer);
+      pending.softExpiryTimer = undefined;
+    }
+    if (pending.hardExpiryTimer) {
+      clearTimeout(pending.hardExpiryTimer);
+      pending.hardExpiryTimer = undefined;
+    }
+  }
+
+  private deletePendingPollQuestions(mapKey: string): void {
+    const pending = this.pendingPollQuestions.get(mapKey);
+    if (pending) this.clearPendingPollTimers(pending);
+    this.pendingPollQuestions.delete(mapKey);
+  }
+
+  private completeConsumedPerChatInbound(mapKey: string, terminalReason: string): void {
+    const seqQueue = this.perChatInboundSeqQueue.get(mapKey);
+    const inboundSeq = seqQueue?.shift();
+    if (seqQueue && seqQueue.length === 0) {
+      this.perChatInboundSeqQueue.delete(mapKey);
+    }
+    this.chatQueues.get(mapKey)?.setInboundSeq(seqQueue?.[0]);
+
+    if (inboundSeq === undefined) return;
+    this.durability?.completeInbound(inboundSeq, terminalReason);
+    this.replyGuarantee?.disarm(inboundSeq);
+  }
+
+  private startPendingPollExpiry(mapKey: string, pending: PendingPollQuestion): void {
+    if (pending.mode === 'poll' && !pending.softExpiryTimer) {
+      pending.softExpiryTimer = setTimeout(() => this.handlePendingPollSoftExpiry(mapKey, pending), ASKUSER_POLL_SOFT_EXPIRY_MS);
+      pending.softExpiryTimer.unref?.();
+    }
+    if (!pending.hardExpiryTimer) {
+      pending.hardExpiryTimer = setTimeout(() => this.handlePendingPollHardExpiry(mapKey, pending), ASKUSER_POLL_HARD_EXPIRY_MS);
+      pending.hardExpiryTimer.unref?.();
+    }
+  }
+
+  private isPendingPollActive(pending: PendingPollQuestion): boolean {
+    for (const active of this.pendingPollQuestions.values()) {
+      if (active === pending) return true;
+    }
+    return false;
+  }
+
+  private shouldContinuePendingPollSend(mapKey: string, pending: PendingPollQuestion): boolean {
+    if (this.isPendingPollActive(pending)) return true;
+    this.clearPendingPollTimers(pending);
+    log.debug({ mapKey, chatJid: pending.chatJid, toolId: pending.toolId }, 'AskUserQuestion poll send abandoned after pending poll was replaced');
+    return false;
+  }
+
+  private removePollIdsForQuestion(pending: PendingPollQuestion, questionIndex: number): void {
+    for (const [pollMessageId, index] of pending.pollMessageIdToQuestionIndex) {
+      if (index === questionIndex) pending.pollMessageIdToQuestionIndex.delete(pollMessageId);
+    }
+  }
+
+  private advancePendingPollIndex(pending: PendingPollQuestion): void {
+    while (
+      pending.currentQuestionIndex < pending.questions.length
+      && pending.answersCollected[pending.currentQuestionIndex] !== undefined
+    ) {
+      pending.currentQuestionIndex++;
+    }
+  }
+
+  private unansweredPollQuestions(pending: PendingPollQuestion): Array<{ index: number; question: AskUserQuestion }> {
+    return pending.questions
+      .map((question, index) => ({ index, question }))
+      .filter(({ index }) => pending.answersCollected[index] === undefined);
+  }
+
+  private sendUnansweredPollTextFallback(
+    pending: PendingPollQuestion,
+    intro: string,
+  ): void {
+    const unanswered = this.unansweredPollQuestions(pending);
+    unanswered.forEach(({ question }, fallbackIndex) => {
+      this.sendDirect(
+        pending.chatJid,
+        formatTextFallbackQuestion(question, fallbackIndex === 0 ? intro : 'Remaining decision question:'),
+      );
+    });
+  }
+
+  private handlePendingPollSoftExpiry(mapKey: string, expectedPending: PendingPollQuestion): void {
+    const pending = this.pendingPollQuestions.get(mapKey);
+    if (!pending || pending !== expectedPending || pending.mode !== 'poll') return;
+
+    const unanswered = this.unansweredPollQuestions(pending);
+    if (unanswered.length === 0) return;
+
+    pending.mode = 'textFallback';
+    pending.pollMessageIdToQuestionIndex.clear();
+    pending.softExpiryTimer = undefined;
+    this.advancePendingPollIndex(pending);
+    this.sendUnansweredPollTextFallback(
+      pending,
+      'I did not receive the poll vote. Please reply with option number or text for the remaining decision question(s):',
+    );
+    log.warn({ mapKey, chatJid: pending.chatJid, unanswered: unanswered.length }, 'AskUserQuestion poll soft-expired to text fallback');
+  }
+
+  private handlePendingPollHardExpiry(mapKey: string, expectedPending: PendingPollQuestion): void {
+    const pending = this.pendingPollQuestions.get(mapKey);
+    if (!pending || pending !== expectedPending) return;
+
+    if (this.unansweredPollQuestions(pending).length > 0) {
+      this.sendDirect(pending.chatJid, 'This decision has expired — please re-trigger when ready.');
+    }
+    log.warn({ mapKey, chatJid: pending.chatJid }, 'AskUserQuestion poll hard-expired and was cleared');
+    this.deletePendingPollQuestions(mapKey);
+  }
+
   /**
    * Intercept an AskUserQuestion tool_use: send WhatsApp polls for each
    * question, store pending state, and register the toolId for tool_result
    * suppression.
    */
   private async handleAskUserQuestionAsPoll(
-    questions: Array<{
-      question: string;
-      header: string;
-      options: Array<{ label: string; description: string }>;
-      multiSelect: boolean;
-    }>,
+    questions: AskUserQuestion[],
     toolId: string,
     mapKey: string,
     queue: IOutboundQueue,
   ): Promise<void> {
     const chatJid = queue.targetChatJid;
+    if (isGroupJid(chatJid)) {
+      log.info({ chatJid, toolId }, 'AskUserQuestion poll bridge disabled in group chat before suppression registration');
+      return;
+    }
+
+    const normalizedQuestions = normalizeAskUserQuestions(questions);
+    questions.forEach((question, index) => {
+      const sourceOptions = question.options.map((option) => ({
+        label: option.label,
+        description: option.description ?? '',
+      }));
+      if (
+        sourceOptions.length >= 12
+        && !hasEscapeHatchOption(sourceOptions)
+        && normalizedQuestions[index]?.options.length === sourceOptions.length
+      ) {
+        log.warn({ chatJid, toolId, question: question.question.slice(0, 80), optionCount: sourceOptions.length }, 'AskUserQuestion options at WhatsApp cap — default Other option not appended');
+      }
+    });
+
     const connection = this.messenger as import('../../transport/connection.ts').ConnectionManager;
 
     // Register ALL synchronous state BEFORE any async work — tool_result and
     // result events may arrive while we're awaiting poll send.
+    this.deletePendingPollQuestions(mapKey);
     this.suppressedAskUserToolIds.add(toolId);
-    const pending = {
-      questions,
+    const pending: PendingPollQuestion = {
+      questions: normalizedQuestions,
       toolId,
       chatJid,
-      mode: 'poll' as 'poll' | 'textFallback',
+      chatJidAliases: new Set([chatJid]),
+      mode: 'poll',
       pollMessageIdToQuestionIndex: new Map<string, number>(),
       currentQuestionIndex: 0,
-      answersCollected: {} as Record<number, string>,
+      answersCollected: {},
       createdAt: Date.now(),
     };
     this.pendingPollQuestions.set(mapKey, pending);
 
     const pollMessageIds: string[] = [];
     let allHaveSecret = true;
-    const formattedQuestions = questions.map((q, index) => ({
+    const formattedQuestions = normalizedQuestions.map((q, index) => ({
       index,
       question: q,
       formatted: formatPollQuestion(q),
     }));
+    const detailFlushedQuestionIndexes = new Set<number>();
 
     for (const { index, question: q, formatted } of formattedQuestions) {
       const selectableCount = q.multiSelect ? q.options.length : 1;
@@ -2844,13 +3166,16 @@ export class AgentRuntime implements Runtime {
         // context first instead of scrolling back after the tap target appears.
         try {
           await queue.flush();
+          detailFlushedQuestionIndexes.add(index);
         } catch (err) {
           log.warn({ err, chatJid }, 'failed to flush poll details before poll send');
         }
+        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
       }
 
       try {
         const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
+        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
         if (result.waMessageId) {
           pollMessageIds.push(result.waMessageId);
           pending.pollMessageIdToQuestionIndex.set(result.waMessageId, index);
@@ -2859,10 +3184,13 @@ export class AgentRuntime implements Runtime {
           allHaveSecret = false;
         }
       } catch (err) {
+        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
         log.error({ err, chatJid, question: q.question.slice(0, 80) }, 'failed to send poll for AskUserQuestion');
         allHaveSecret = false;
       }
     }
+
+    if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
 
     if (pollMessageIds.length === 0 || !allHaveSecret) {
       pending.mode = 'textFallback';
@@ -2870,13 +3198,15 @@ export class AgentRuntime implements Runtime {
       // Fall back: send as text with numbered options.
       // Text fallback already includes full descriptions — no follow-up needed.
       log.warn({ chatJid, toolId }, 'poll send failed or missing secret — falling back to text question');
-      for (const { question: q } of formattedQuestions) {
-        const optionLines = q.options.map((o, i) => `${i + 1}. *${o.label}* — ${o.description}`).join('\n');
-        queue.enqueueText(`${q.question}\n\n${optionLines}\n\n_Reply with option number or text._`);
+      for (const { index, question: q } of formattedQuestions) {
+        queue.enqueueText(formatTextFallbackQuestion(q, undefined, {
+          includeDescriptions: !detailFlushedQuestionIndexes.has(index),
+        }));
       }
-
     }
-    log.info({ chatJid, mapKey, toolId, questionCount: questions.length, pollCount: pollMessageIds.length }, 'AskUserQuestion intercepted → polls sent');
+
+    this.startPendingPollExpiry(mapKey, pending);
+    log.info({ chatJid, mapKey, toolId, questionCount: normalizedQuestions.length, pollCount: pollMessageIds.length }, 'AskUserQuestion intercepted → polls sent');
   }
 
   /**
@@ -2893,7 +3223,7 @@ export class AgentRuntime implements Runtime {
     let matchedMapKey: string | null = null;
     let matchedQuestionIndex: number | undefined;
     for (const [mapKey, pending] of this.pendingPollQuestions) {
-      if (pending.chatJid !== data.chatJid || pending.mode !== 'poll') continue;
+      if (!pendingPollMatchesChatJid(pending, data.chatJid) || pending.mode !== 'poll') continue;
       const index = pending.pollMessageIdToQuestionIndex.get(data.pollMessageId);
       if (index !== undefined) {
         matchedMapKey = mapKey;
@@ -2922,14 +3252,9 @@ export class AgentRuntime implements Runtime {
 
     // Record the answer against the poll message that produced it; users can
     // vote on multiple AskUser polls in any order.
-    pending.answersCollected[matchedQuestionIndex] = data.selectedOptions.join(', ');
-    pending.pollMessageIdToQuestionIndex.delete(data.pollMessageId);
-    while (
-      pending.currentQuestionIndex < pending.questions.length
-      && pending.answersCollected[pending.currentQuestionIndex] !== undefined
-    ) {
-      pending.currentQuestionIndex++;
-    }
+    pending.answersCollected[matchedQuestionIndex] = answerForPollSelection(currentQ, data.selectedOptions);
+    this.removePollIdsForQuestion(pending, matchedQuestionIndex);
+    this.advancePendingPollIndex(pending);
 
     const answered = Object.keys(pending.answersCollected).length;
     if (answered >= pending.questions.length) {
@@ -2937,6 +3262,42 @@ export class AgentRuntime implements Runtime {
     } else {
       log.info({ mapKey: matchedMapKey, answered, total: pending.questions.length }, 'poll vote collected — waiting for more');
     }
+  }
+
+  private handlePollVoteFailed(data: {
+    pollMessageId: string;
+    chatJid: string;
+    reason: string;
+  }): void {
+    let matchedMapKey: string | null = null;
+    for (const [mapKey, pending] of this.pendingPollQuestions) {
+      if (!pendingPollMatchesChatJid(pending, data.chatJid) || pending.mode !== 'poll') continue;
+      if (pending.pollMessageIdToQuestionIndex.has(data.pollMessageId)) {
+        matchedMapKey = mapKey;
+        break;
+      }
+    }
+
+    if (matchedMapKey === null) {
+      log.debug({ chatJid: data.chatJid, pollMessageId: data.pollMessageId, reason: data.reason }, 'poll vote failure received but no matching pending poll');
+      return;
+    }
+
+    const pending = this.pendingPollQuestions.get(matchedMapKey);
+    if (!pending || pending.mode !== 'poll') return;
+
+    pending.mode = 'textFallback';
+    pending.pollMessageIdToQuestionIndex.clear();
+    if (pending.softExpiryTimer) {
+      clearTimeout(pending.softExpiryTimer);
+      pending.softExpiryTimer = undefined;
+    }
+    this.advancePendingPollIndex(pending);
+    this.sendUnansweredPollTextFallback(
+      pending,
+      "I couldn't read your poll vote. Please type your choice for the remaining decision question(s):",
+    );
+    log.warn({ mapKey: matchedMapKey, chatJid: pending.chatJid, pollMessageId: data.pollMessageId, reason: data.reason }, 'poll vote failure switched AskUserQuestion to text fallback');
   }
 
   /**
@@ -2947,25 +3308,26 @@ export class AgentRuntime implements Runtime {
    */
   private injectPollAnswers(
     mapKey: string,
-    pending: {
-      questions: Array<{ question: string }>;
-      answersCollected: Record<number, string>;
-      chatJid: string;
-    },
+    pending: PendingPollQuestion,
   ): void {
-    // Format the answer as structured context for Claude
+    // Format the answer as structured context for Claude.
     const lines = ['[User answered poll]'];
     pending.questions.forEach((q, index) => {
       const a = pending.answersCollected[index] ?? '(no answer)';
       lines.push(`Q: ${q.question}`);
-      lines.push(`A: ${a}`);
+      if (a.includes('\n')) {
+        lines.push('A:');
+        lines.push(a);
+      } else {
+        lines.push(`A: ${a}`);
+      }
       lines.push('');
     });
     const answerText = lines.join('\n').trim();
 
     // Clear pending state BEFORE sending the turn — sendTurnPerChat checks
-    // pendingPollQuestions and would re-intercept as another "Other" answer.
-    this.pendingPollQuestions.delete(mapKey);
+    // pendingPollQuestions and would re-intercept as another answer.
+    this.deletePendingPollQuestions(mapKey);
 
     // Route through sendTurnPerChat for proper lifecycle handling.
     // Poll bridge is per_chat only — shared mode guard in handleEvent prevents
@@ -3026,16 +3388,21 @@ export class AgentRuntime implements Runtime {
         }
         if (this.isSilentCompact(mapKey)) break;
 
-        // AskUserQuestion → WhatsApp poll bridge (per_chat mode only).
+        // AskUserQuestion → WhatsApp poll bridge (per_chat DM mode only).
         // Shared mode is excluded — see handleEvent tool_use case for rationale.
+        // Groups fall through to provider-native text because AskUser is a
+        // single-answer turn-unblock protocol, not a multi-voter group poll.
         if (event.toolName === 'AskUserQuestion' && mapKey !== undefined) {
           const questions = (event.toolInput as any)?.questions;
-          if (Array.isArray(questions) && questions.length > 0) {
+          if (Array.isArray(questions) && questions.length > 0 && !isGroupJid(queue.targetChatJid)) {
             // Suppression state (suppressedAskUserToolIds) is registered synchronously
             // inside handleAskUserQuestionAsPoll before any async work, so tool_result
             // suppression is guaranteed even though we fire-and-forget the async poll send.
             void this.handleAskUserQuestionAsPoll(questions, event.toolId, mapKey, queue);
             break; // skip normal tool_use handling — poll sent instead
+          }
+          if (isGroupJid(queue.targetChatJid)) {
+            log.info({ chatJid: queue.targetChatJid, toolName: event.toolName }, 'AskUserQuestion poll bridge disabled in group chat — falling through to normal handling');
           }
         }
 
@@ -3582,6 +3949,9 @@ export class AgentRuntime implements Runtime {
     }
     this.silentCompactScopes.clear();
     this.postTurnGate.clear();
+    for (const mapKey of Array.from(this.pendingPollQuestions.keys())) {
+      this.deletePendingPollQuestions(mapKey);
+    }
     for (const waiter of this.autoCompactWaiters.values()) {
       clearTimeout(waiter.timer);
       waiter.resolve();

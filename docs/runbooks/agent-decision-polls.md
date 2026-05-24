@@ -8,12 +8,13 @@ There are two poll paths with different semantics:
 
 1. `AskUserQuestion` for blocking decisions.
    - Use when the agent cannot safely continue without a user decision.
-   - WhatSoup intercepts the tool use in per-chat agent sessions, renders each question as a WhatsApp poll, and injects the selected answer back into the waiting turn.
+   - WhatSoup intercepts the tool use only in per-chat DM agent sessions, renders each question as a WhatsApp poll, and injects the selected answer back into the next agent turn.
+   - Group chats and shared/global agent sessions fall through to the provider's native behavior by default.
    - Use `multiSelect: true` when the user may choose more than one option.
    - Keep option labels short. Put paragraph-scale context in option descriptions so WhatSoup can send details before the poll.
 
 2. `send_poll` for non-blocking coordination.
-   - Use when the poll is a survey, lightweight preference check, or coordination aid that does not need to unblock the current agent turn.
+   - Use when the poll is a survey, lightweight preference check, brainstorming aid, or coordination signal that does not need to unblock the current agent turn.
    - Set `selectableCount` above `1` for multi-select polls.
    - Do not expect `send_poll` votes to be injected as a tool result. It sends the poll only.
 
@@ -25,6 +26,23 @@ Agents should follow this decision tree:
 2. If the decision is advisory or non-blocking, use `send_poll`.
 3. If the provider does not expose `AskUserQuestion`, use `send_poll` and clearly state that the user should vote in the poll, then continue only after observing the follow-up message or poll result through normal message context.
 4. Never ask the user to type `I voted`. The runtime waits for the native poll vote; exact option label or option number is only a fallback when WhatsApp vote delivery fails.
+5. Put the recommended option first when there is a safe default.
+6. Include `Need more context`, `Defer`, `Cancel`, or an equivalent escape hatch when the decision is non-urgent, risky, irreversible, or under-specified.
+7. Prefix high-risk irreversible options with `[Risk]` in the label or description so the tradeoff is visible in WhatsApp.
+
+## Default Other Option
+
+For `AskUserQuestion` in per-chat DMs, WhatSoup appends `Other — propose a different option` when all of these are true:
+
+- The effective option list has fewer than 12 options.
+- No existing escape hatch label is present.
+- The interaction is a DM per-chat session, not a group or shared/global session.
+
+When the user selects the default Other option, the runtime injects a structured follow-up directive instead of treating it as approval. The agent must interview the user, explore their reasoning with 1-2 follow-up questions, then either propose a revised option or re-present the decision with the new option added.
+
+Agents should normally provide at most 11 AskUser options if they want the runtime to append Other. If an option list already has 12 options, the runtime does not exceed WhatsApp's cap and logs that Other was not appended.
+
+Agents should not add their own generic `Other` option unless they need custom wording. Use explicit escape hatches such as `Need more context` when the correct next step is more information rather than a new option.
 
 ## Formatting Rules
 
@@ -32,12 +50,30 @@ Agents should follow this decision tree:
 - Options: 2-12 unique, non-empty labels.
 - Long option explanations: send as normal message context or `AskUserQuestion` descriptions, not as poll option labels.
 - Multi-select: use `multiSelect: true` for `AskUserQuestion`; use `selectableCount > 1` for `send_poll`.
+- Paragraph brainstorming options: use concise labels plus descriptions. The runtime sends full descriptions as companion text when poll option text would be too dense. If native poll send then fails immediately, the fallback avoids repeating details that were already flushed and points the user back to the detail message.
+
+## Recovery Behavior
+
+- Soft expiry: if no native poll vote is received after 5 minutes, the runtime switches the pending AskUser decision to text fallback and sends numbered options for all unanswered questions.
+- Hard expiry: after 10 minutes, the runtime clears the pending decision and asks the user to re-trigger when ready.
+- Decrypt failure: if WhatsApp delivers a poll vote that cannot be decrypted after all bounded JID candidates fail, transport emits `pollVoteFailed`; runtime sends a one-time numbered text fallback and accepts an option number, label, or free-text answer.
+- Low-signal replies such as `I voted` do not resolve a pending poll while the native poll path is still active. The user should tap the poll or type the exact option label/number.
+
+## Trigger Matrix
+
+| Scope | `AskUserQuestion` poll bridge | Default Other | `send_poll` | Group voting |
+| --- | --- | --- | --- | --- |
+| Per-chat DM | Blocking, correlated, answer injected | Auto-appended when under cap and no escape hatch | Available, non-blocking | Not applicable |
+| Per-chat group | Falls through to provider-native text | Not applied | Available, non-blocking | Future explicit config only |
+| Shared/global session | Falls through to provider-native behavior | Not applied | Available, non-blocking | Not applicable |
+
+Future group voting is a separate feature. It needs explicit voter policy such as admin-only, designated voter, quorum, close time, most-votes-wins, and tie handling. Do not treat current group `send_poll` as a blocking approval gate. Do not add hidden group text-answer collection to `AskUserQuestion`; consuming the next arbitrary group reply can unblock the agent with the wrong actor's answer.
 
 ## Portability Layers
 
 - Session prompt: `SessionManager.buildSystemPrompt()` injects decision-polling guidance into every agent provider session.
 - MCP schema: `send_poll` advertises descriptions in `tools/list` so provider-native tool planners can see the usage contract.
-- Runtime bridge: `AgentRuntime` intercepts `AskUserQuestion` in per-chat sessions and sends tracked WhatsApp polls.
+- Runtime bridge: `AgentRuntime` intercepts `AskUserQuestion` in per-chat DM sessions and sends tracked WhatsApp polls.
 - Sandbox diagnostics: provisioned workspaces install `deploy/hooks/poll-interaction-lint.mjs` as a fail-open `PostToolUse` hook that records poll-friction findings to `~/.claude/session-env/<session-id>/poll-interaction-lint.jsonl`.
 - Project instructions: this runbook and `CLAUDE.md` provide portable guidance to agents that read project files rather than session prelude text.
 
@@ -49,6 +85,7 @@ For release claims, also run the relevant targeted tests and `npm run guard:test
 
 ## Known Limits
 
-- `AskUserQuestion` poll correlation is per-chat only. Shared/global agent sessions fall through to their provider's native behavior.
+- `AskUserQuestion` poll correlation is per-chat DM only. Shared/global agent sessions and groups fall through to their provider's native behavior.
 - `send_poll` is not a blocking request/response protocol.
 - Implicit prose-to-poll conversion is intentionally not part of this contract. It is too prone to false positives unless a future spec defines exact trigger syntax and verification gates.
+- WhatsApp poll option text has tight practical limits. For paragraph-scale brainstorming, rely on companion text and concise labels rather than trying to pack full paragraphs into poll values.
