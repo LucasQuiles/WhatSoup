@@ -1,3 +1,4 @@
+import { errorMessage } from '../../lib/error-utils.ts';
 import type { AlertPayload, DeliveryResult, Sink } from '../types.ts';
 
 export interface NtfySinkOptions {
@@ -59,10 +60,6 @@ function missingConfiguredSecret(label: string, value: string | undefined): stri
     return `missing ${label}`;
   }
   return undefined;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function redact(value: string, secrets: Array<string | undefined>): string {

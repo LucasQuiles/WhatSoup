@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isRecord } from '../src/lib/type-guards.ts';
 
 interface ParsedArgs {
   root: string;
@@ -46,10 +47,6 @@ function defaultRoot(): string {
 
 function defaultSettingsPath(): string {
   return path.join(os.homedir(), '.claude', 'settings.json');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function readJsonRecord(filePath: string): Record<string, unknown> {

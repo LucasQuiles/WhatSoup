@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { safeErrorMessage } from '../lib/error-utils.ts';
 import { openDatabase, type StoreLogger } from '../store/connection.ts';
 import { EventStore } from '../store/events.ts';
 import { MuteStore } from '../store/mutes.ts';
@@ -195,8 +196,4 @@ function databaseOptions(deps: MuteCommandDeps): { now?: () => Date; logger?: St
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.logger ? { logger: deps.logger } : {}),
   };
-}
-
-function safeErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'operation failed';
 }

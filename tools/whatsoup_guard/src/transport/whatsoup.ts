@@ -1,3 +1,4 @@
+import { errorMessage } from '../lib/error-utils.ts';
 import type { AlertPayload, DeliveryResult, Sink } from './types.ts';
 
 export interface WhatSoupSinkOptions {
@@ -109,10 +110,6 @@ type AttemptResult =
 
 function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function formatAttempts(attempts: number): string {

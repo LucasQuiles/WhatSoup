@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { safeErrorMessage } from '../lib/error-utils.ts';
 import { loadPolicy } from '../policy/loader.ts';
 import { openDatabase, type StoreLogger } from '../store/connection.ts';
 import { EventStore } from '../store/events.ts';
@@ -128,8 +129,4 @@ function parseThresholdHours(value: string | undefined): OptionResult<number | u
 
 function currentDate(deps: WatchdogCommandDeps): () => Date {
   return deps.now ?? (() => new Date());
-}
-
-function safeErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'operation failed';
 }

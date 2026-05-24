@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { readBody, jsonResponse, requireInstance } from '../../lib/http.ts';
+import { escapeRegExp } from '../../lib/regex-utils.ts';
 import { isRecord } from '../../lib/type-guards.ts';
 import { createSSEWriter } from '../sse-helpers.ts';
 import { normalizePhoneE164 } from '../../lib/phone.ts';
@@ -383,10 +384,6 @@ async function handleServiceAction(
 
 function serviceErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function serviceErrorExitCode(err: unknown): number | string | undefined {

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { normalizeRepoPath } from './lib/guard-core.ts';
 
 export type DocDriftKind = 'tool-count' | 'module-count' | 'migration-history';
 
@@ -53,10 +54,6 @@ const migrationRequiredFragments = new Map<number, string[]>([
   [1, ['`messages`', '`contacts`', '`access_list`', '`agent_sessions`', '`rate_limits`', '`enrichment_runs`']],
   [2, ['`inbound_events`', '`outbound_ops`', '`tool_calls`', '`session_checkpoints`', '`recovery_runs`']],
 ]);
-
-function normalizeRepoPath(filePath: string): string {
-  return filePath.split(path.sep).join('/').replace(/^\.\//, '');
-}
 
 function lineForOffset(text: string, offset: number): number {
   let line = 1;

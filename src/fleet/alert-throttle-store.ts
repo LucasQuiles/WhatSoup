@@ -1,15 +1,12 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { isRecord } from '../lib/type-guards.ts';
 
 const CONFIG_DIR = join(homedir(), '.config', 'whatsoup');
 const ALERT_THROTTLE_FILE = join(CONFIG_DIR, 'fleet-alert-throttle.json');
 
 export const ALERT_THROTTLE_INTERVAL_MS = 15 * 60 * 1000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isFreshTimestamp(value: unknown, nowMs: number): value is string {
   if (typeof value !== 'string') return false;
