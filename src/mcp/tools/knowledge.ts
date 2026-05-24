@@ -10,6 +10,7 @@ import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
 import { config } from '../../config.ts';
 import type { KnowledgeProfileConfig } from '../../config.ts';
 import { toolError, type ToolDeclaration } from '../types.ts';
+import { pineconeProjectGuardError, type PineconeProjectGuard } from '../../lib/pinecone-project-guard.ts';
 
 const log = createChildLogger('knowledge-tools');
 
@@ -94,33 +95,15 @@ function resolveNamespacesToSearch(
   return { namespacesToSearch: [profile.namespace] };
 }
 
-function matchesProjectGuard(
-  host: string | undefined,
-  guard: { projectId?: string; expectedHostSuffix?: string },
-): boolean {
-  if (!guard.projectId && !guard.expectedHostSuffix) return true;
-  if (!host) return false;
-  if (guard.expectedHostSuffix && !host.endsWith(guard.expectedHostSuffix)) return false;
-  if (guard.projectId && !host.includes(`-${guard.projectId}.`)) return false;
-  return true;
-}
-
 async function validatePineconeProject(
   pc: Pinecone,
   indexName: string,
-  guard: { projectId?: string; expectedHostSuffix?: string },
+  guard: PineconeProjectGuard,
 ): Promise<string | null> {
-  if (!guard.projectId && !guard.expectedHostSuffix) return null;
-  const result = await pc.listIndexes();
-  const indexes = Array.isArray((result as { indexes?: Array<{ name?: string; host?: string }> }).indexes)
-    ? (result as { indexes: Array<{ name?: string; host?: string }> }).indexes
-    : [];
-  const found = indexes.find((index) => index.name === indexName);
-  if (!found) return `Index "${indexName}" was not found for the configured Pinecone key.`;
-  if (!matchesProjectGuard(found.host, guard)) {
-    return `Index "${indexName}" is in the wrong Pinecone project for this instance.`;
-  }
-  return null;
+  return pineconeProjectGuardError(pc, indexName, guard, {
+    missingIndex: (targetIndex) => `Index "${targetIndex}" was not found for the configured Pinecone key.`,
+    projectMismatch: (targetIndex) => `Index "${targetIndex}" is in the wrong Pinecone project for this instance.`,
+  });
 }
 
 function parseHits(

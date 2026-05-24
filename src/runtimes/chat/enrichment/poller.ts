@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import type { Database } from '../../../core/database.ts';
@@ -7,41 +6,8 @@ import type { LLMProvider } from '../providers/types.ts';
 import type { PineconeMemory } from '../providers/pinecone.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import { extractFacts } from './extractor.ts';
-import { validateFacts, type ValidatedFact } from './validator.ts';
-import { enqueueFacts, type ExportableFact } from './fact-export-queue.ts';
-
-function shortHash(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 12);
-}
-
-/**
- * Map a validated fact to an ExportableFact row.
- *
- * `factId` mirrors the ID shape the upserter used for Pinecone
- * (`{chatJid}:{senderSegment}:{hash(text)}`) so the queue stays idempotent
- * across retries and matches the downstream mw-mind Pinecone record IDs.
- */
-function toExportable(fact: ValidatedFact): ExportableFact {
-  const senderSegment = fact.senderJid || 'group';
-  const factId = `${fact.chatJid}:${senderSegment}:${shortHash(fact.text)}`;
-  return {
-    factId,
-    chatJid: fact.chatJid,
-    senderJid: fact.senderJid || null,
-    text: fact.text,
-    memoryType: fact.memoryType,
-    confidence: fact.adjustedConfidence,
-    senderName: fact.senderName,
-    supersedesText: fact.supersedesText,
-    sourceMessagePks: fact.sourceMessagePks,
-    promotionReason: fact.validationReason ?? '',
-    claim: fact.claim ?? '',
-    evidence: fact.evidence ?? '',
-    warrant: fact.warrant ?? '',
-    confidenceQualifier: fact.confidenceQualifier ?? '',
-    contradicts: '',
-  };
-}
+import { validateFacts } from './validator.ts';
+import { enqueueFacts, toExportable } from './fact-export-queue.ts';
 
 const log = createChildLogger('enrichment');
 

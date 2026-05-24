@@ -49,9 +49,13 @@ vi.mock('../../../../src/runtimes/chat/enrichment/validator.ts', () => ({
   validateFacts: vi.fn(),
 }));
 
-vi.mock('../../../../src/runtimes/chat/enrichment/fact-export-queue.ts', () => ({
-  enqueueFacts: vi.fn(),
-}));
+vi.mock('../../../../src/runtimes/chat/enrichment/fact-export-queue.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../src/runtimes/chat/enrichment/fact-export-queue.ts')>();
+  return {
+    ...actual,
+    enqueueFacts: vi.fn(),
+  };
+});
 
 import { EnrichmentPoller } from '../../../../src/runtimes/chat/enrichment/poller.ts';
 import type { LLMProvider } from '../../../../src/runtimes/chat/providers/types.ts';
@@ -167,7 +171,7 @@ describe('EnrichmentPoller', () => {
 
   // ── Positive ────────────────────────────────────────────────────────────
 
-  it('normal cycle: fetch → extract → validate → upsert → markProcessed', async () => {
+  it('normal cycle: fetch → extract → validate → enqueue → markProcessed', async () => {
     const msg1 = makeStoredMsg({ pk: 1, chatJid: 'chat1@g.us' });
     const msg2 = makeStoredMsg({ pk: 2, chatJid: 'chat1@g.us', messageId: 'msg-2' });
     vi.mocked(getUnprocessedMessages).mockReturnValue([msg1, msg2]);

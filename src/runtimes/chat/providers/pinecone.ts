@@ -7,6 +7,13 @@ import { truncateForRerank } from '../../../lib/text-utils.ts';
 import { emitAlert, clearAlertSource } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 import { sleep } from '../../../core/retry.ts';
+import {
+  findPineconeIndex,
+  hasPineconeProjectGuard,
+  matchesPineconeProjectGuard,
+  pineconeProjectGuardError,
+  type PineconeProjectGuard,
+} from '../../../lib/pinecone-project-guard.ts';
 
 const logger = createChildLogger('pinecone-provider');
 
@@ -117,14 +124,10 @@ export async function getPineconeReadiness(indexName: string = config.pineconeIn
 
   try {
     const client = new Pinecone({ apiKey });
-    const result = await client.listIndexes();
-    const indexes = Array.isArray((result as { indexes?: Array<{ name?: string; host?: string }> }).indexes)
-      ? (result as { indexes: Array<{ name?: string; host?: string }> }).indexes
-      : [];
-    const found = indexes.find((index) => index.name === targetIndex);
+    const found = findPineconeIndex(await client.listIndexes(), targetIndex);
 
     if (found) {
-      if (!matchesProjectGuard(found.host, guard)) {
+      if (!matchesPineconeProjectGuard(found.host, guard)) {
         return { state: 'project_mismatch', index: targetIndex };
       }
       return { state: 'ready', index: targetIndex };
@@ -144,7 +147,7 @@ function configuredPineconeApiKeyEnv(): string {
   return typeof apiKeyEnv === 'string' && apiKeyEnv.trim() !== '' ? apiKeyEnv : 'PINECONE_API_KEY';
 }
 
-function configuredPineconeProjectGuard(): { projectId?: string; expectedHostSuffix?: string } {
+function configuredPineconeProjectGuard(): PineconeProjectGuard {
   const memory = (config as { memory?: { pinecone?: { projectId?: string; expectedHostSuffix?: string } } }).memory;
   return {
     projectId: memory?.pinecone?.projectId,
@@ -158,38 +161,20 @@ function pineconeProjectGuardRequired(): boolean {
   return botName.trim().toLowerCase() !== 'q';
 }
 
-function missingRequiredProjectGuardError(guard: { projectId?: string; expectedHostSuffix?: string }): string | null {
+function missingRequiredProjectGuardError(guard: PineconeProjectGuard): string | null {
   if (!pineconeProjectGuardRequired()) return null;
-  if (guard.projectId || guard.expectedHostSuffix) return null;
+  if (hasPineconeProjectGuard(guard)) return null;
   return 'Pinecone project guard is required for non-q instances';
-}
-
-function matchesProjectGuard(
-  host: string | undefined,
-  guard: { projectId?: string; expectedHostSuffix?: string },
-): boolean {
-  if (!guard.projectId && !guard.expectedHostSuffix) return true;
-  if (!host) return false;
-  if (guard.expectedHostSuffix && !host.endsWith(guard.expectedHostSuffix)) return false;
-  if (guard.projectId && !host.includes(`-${guard.projectId}.`)) return false;
-  return true;
 }
 
 async function configuredProjectGuardError(client: Pinecone, targetIndex: string): Promise<string | null> {
   const guard = configuredPineconeProjectGuard();
   const missingGuardError = missingRequiredProjectGuardError(guard);
   if (missingGuardError) return missingGuardError;
-  if (!guard.projectId && !guard.expectedHostSuffix) return null;
-  const result = await client.listIndexes();
-  const indexes = Array.isArray((result as { indexes?: Array<{ name?: string; host?: string }> }).indexes)
-    ? (result as { indexes: Array<{ name?: string; host?: string }> }).indexes
-    : [];
-  const found = indexes.find((index) => index.name === targetIndex);
-  if (!found) return `Pinecone index "${targetIndex}" is missing for the configured key`;
-  if (!matchesProjectGuard(found.host, guard)) {
-    return `Pinecone index "${targetIndex}" is not in the configured project`;
-  }
-  return null;
+  return pineconeProjectGuardError(client, targetIndex, guard, {
+    missingIndex: (indexName) => `Pinecone index "${indexName}" is missing for the configured key`,
+    projectMismatch: (indexName) => `Pinecone index "${indexName}" is not in the configured project`,
+  });
 }
 
 export interface MemoryRecord {
