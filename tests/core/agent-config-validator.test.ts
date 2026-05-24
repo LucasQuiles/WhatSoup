@@ -154,7 +154,7 @@ describe('enum validation', () => {
 });
 
 describe('Pinecone project guard validation', () => {
-  it('rejects explicit Pinecone config on non-q instances without a project guard', () => {
+  it('rejects explicit Pinecone config on non-q create without a project guard', () => {
     const raw = baseChat({
       memory: { pinecone: { apiKeyEnv: 'PINECONE_MINI3_KEY', index: 'whatsapp-bot' } },
     });
@@ -163,6 +163,26 @@ describe('Pinecone project guard validation', () => {
 
     expect(result?.field).toBe('memory.pinecone.projectId');
     expect(result?.message).toContain('non-q instances with Pinecone config');
+  });
+
+  it('rejects explicit Pinecone config on non-q patch without a project guard', () => {
+    const raw = baseChat({
+      memory: { pinecone: { apiKeyEnv: 'PINECONE_MINI3_KEY', index: 'whatsapp-bot' } },
+    });
+
+    const result = validateInstanceConfig(raw, ctx('patch', { originalType: 'chat' }));
+
+    expect(result?.field).toBe('memory.pinecone.projectId');
+    expect(result?.message).toContain('non-q instances with Pinecone config');
+  });
+
+  it('does not reject existing non-q load or discovery configs without a project guard', () => {
+    const raw = baseChat({
+      memory: { pinecone: { apiKeyEnv: 'PINECONE_MINI3_KEY', index: 'whatsapp-bot' } },
+    });
+
+    expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+    expect(validateInstanceConfig(raw, ctx('discovery'))).toBeNull();
   });
 
   it('accepts explicit Pinecone config on q without a project guard', () => {

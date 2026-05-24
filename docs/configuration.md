@@ -330,8 +330,10 @@ Use `memory` for new installs and migrations. The runtime still accepts the old 
 
 For non-`q` instances, any explicit Pinecone config must include
 `memory.pinecone.projectId` or `memory.pinecone.expectedHostSuffix` in the
-instance config. The validator rejects config-only Pinecone setup without one of
-those guards so same-name indexes cannot silently route to the wrong project.
+instance config. Create/PATCH validation rejects new config-only Pinecone setup
+without one of those guards so same-name indexes cannot silently route to the
+wrong project. Existing load/discovery configs are not hard-failed for this
+guard; runtime Pinecone calls still fail closed when the guard is missing.
 
 #### Legacy Migration
 

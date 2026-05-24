@@ -140,6 +140,8 @@ function validatePineconeProjectGuard(
   raw: Record<string, unknown>,
   ctx: ValidatorContext,
 ): ValidationError | null {
+  if (ctx.mode !== 'create' && ctx.mode !== 'patch') return null;
+
   const name = String(raw['name'] ?? ctx.name).trim().toLowerCase();
   if (!name || name === 'q') return null;
   if (!hasExplicitPineconeConfig(raw)) return null;
