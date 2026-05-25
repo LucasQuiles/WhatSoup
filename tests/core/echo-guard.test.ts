@@ -66,4 +66,44 @@ describe('echo-guard', () => {
     __resetForTests();
     expect(canSendToGroup(jid, DEFAULT_CFG)).toBe(true);
   });
+
+  // --- Session-aware tests ---
+
+  it('allows rapid sends from the same sender token (intra-session)', () => {
+    const jid = '111111100000000001@g.us';
+    const token = 'session-A';
+    recordGroupOutbound(jid, token);
+    // Same token — should be exempt from cooldown
+    expect(canSendToGroup(jid, DEFAULT_CFG, token)).toBe(true);
+  });
+
+  it('blocks rapid sends from a different sender token (cross-session)', () => {
+    const jid = '111111100000000001@g.us';
+    recordGroupOutbound(jid, 'session-A');
+    // Different token — cooldown applies
+    expect(canSendToGroup(jid, DEFAULT_CFG, 'session-B')).toBe(false);
+  });
+
+  it('blocks rapid sends when new sender has no token (cross-session)', () => {
+    const jid = '111111100000000001@g.us';
+    recordGroupOutbound(jid, 'session-A');
+    // No token — cooldown applies
+    expect(canSendToGroup(jid, DEFAULT_CFG)).toBe(false);
+  });
+
+  it('blocks rapid sends when original sender had no token', () => {
+    const jid = '111111100000000001@g.us';
+    recordGroupOutbound(jid); // no token
+    // Even with a token, different source — cooldown applies
+    expect(canSendToGroup(jid, DEFAULT_CFG, 'session-B')).toBe(false);
+  });
+
+  it('allows cross-session send after cooldown expires', async () => {
+    vi.useFakeTimers();
+    const jid = '111111100000000001@g.us';
+    const cfg: EchoGuardConfig = { enabled: true, groupCooldownMs: 10 };
+    recordGroupOutbound(jid, 'session-A');
+    await vi.advanceTimersByTimeAsync(15);
+    expect(canSendToGroup(jid, cfg, 'session-B')).toBe(true);
+  });
 });
