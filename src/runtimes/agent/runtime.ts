@@ -45,6 +45,7 @@ import { toConversationKey, isGroupConversationKey } from '../../core/conversati
 import { createChatResolver } from '../../core/chats-resolver.ts';
 import { createOutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
@@ -1110,6 +1111,8 @@ export class AgentRuntime implements Runtime {
   private pendingPollQuestions = new Map<string, PendingPollQuestion>();
   /** Tool IDs for which the auto-resolved is_error tool_result should be suppressed. */
   private suppressedAskUserToolIds = new Set<string>();
+  private groupMetadataCache = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
+  private static readonly GROUP_METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
 
   // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
   // single global key for single/shared mode. Counts survive session map deletions
@@ -3235,6 +3238,31 @@ export class AgentRuntime implements Runtime {
     this.deletePendingPollQuestions(mapKey);
   }
 
+  private async fetchGroupAdminJids(chatJid: string): Promise<Set<string> | null> {
+    if (!isGroupJid(chatJid)) return null;
+    const cached = this.groupMetadataCache.get(chatJid);
+    if (cached && Date.now() - cached.fetchedAt < AgentRuntime.GROUP_METADATA_CACHE_TTL_MS) {
+      return cached.adminJids;
+    }
+    try {
+      const connection = this.messenger as ConnectionManager;
+      const sock = connection.getSocket();
+      if (!sock) return null;
+      const metadata = await sock.groupMetadata(chatJid);
+      const adminJids = new Set<string>();
+      for (const p of metadata.participants) {
+        if (p.admin === 'admin' || p.admin === 'superadmin') {
+          adminJids.add(jidNormalizedUser(p.id));
+        }
+      }
+      this.groupMetadataCache.set(chatJid, { adminJids, fetchedAt: Date.now() });
+      return adminJids;
+    } catch (err) {
+      log.warn({ err, chatJid }, 'failed to fetch group metadata — degrading to first-vote-wins');
+      return null;
+    }
+  }
+
   /**
    * Intercept an AskUserQuestion tool_use: send WhatsApp polls for each
    * question, store pending state, and register the toolId for tool_result
@@ -3247,10 +3275,6 @@ export class AgentRuntime implements Runtime {
     queue: IOutboundQueue,
   ): Promise<void> {
     const chatJid = queue.targetChatJid;
-    if (isGroupJid(chatJid)) {
-      log.info({ chatJid, toolId }, 'AskUserQuestion poll bridge disabled in group chat before suppression registration');
-      return;
-    }
 
     const normalizedQuestions = normalizeAskUserQuestions(questions);
     questions.forEach((question, index) => {
@@ -3269,6 +3293,20 @@ export class AgentRuntime implements Runtime {
 
     const connection = this.messenger as import('../../transport/connection.ts').ConnectionManager;
 
+    const instanceConfig = (config as any).pollResolution;
+    const isGroup = isGroupJid(chatJid);
+    let resolvedStrategy: ResolutionStrategy = isGroup
+      ? (instanceConfig?.defaultStrategy ?? 'first-vote-wins')
+      : 'first-vote-wins';
+    let adminJids: Set<string> | null = null;
+    if (isGroup && (resolvedStrategy === 'admin-only' || resolvedStrategy === 'admin-wins')) {
+      adminJids = await this.fetchGroupAdminJids(chatJid);
+      if (adminJids === null) {
+        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — degrading to first-vote-wins');
+        resolvedStrategy = 'first-vote-wins';
+      }
+    }
+
     // Register ALL synchronous state BEFORE any async work — tool_result and
     // result events may arrive while we're awaiting poll send.
     this.deletePendingPollQuestions(mapKey);
@@ -3283,6 +3321,13 @@ export class AgentRuntime implements Runtime {
       currentQuestionIndex: 0,
       answersCollected: {},
       createdAt: Date.now(),
+      resolution: resolvedStrategy,
+      timeoutMs: instanceConfig?.defaultTimeoutMs ?? 300_000,
+      votesByQuestion: new Map(),
+      adminJids,
+      sentPollMessageIds: [],
+      source: 'askuser' as const,
+      resolvedAt: undefined,
     };
     this.pendingPollQuestions.set(mapKey, pending);
 
@@ -3526,21 +3571,16 @@ export class AgentRuntime implements Runtime {
         }
         if (this.isSilentCompact(mapKey)) break;
 
-        // AskUserQuestion → WhatsApp poll bridge (per_chat DM mode only).
+        // AskUserQuestion → WhatsApp poll bridge (per_chat mode).
         // Shared mode is excluded — see handleEvent tool_use case for rationale.
-        // Groups fall through to provider-native text because AskUser is a
-        // single-answer turn-unblock protocol, not a multi-voter group poll.
         if (event.toolName === 'AskUserQuestion' && mapKey !== undefined) {
           const questions = (event.toolInput as any)?.questions;
-          if (Array.isArray(questions) && questions.length > 0 && !isGroupJid(queue.targetChatJid)) {
+          if (Array.isArray(questions) && questions.length > 0) {
             // Suppression state (suppressedAskUserToolIds) is registered synchronously
             // inside handleAskUserQuestionAsPoll before any async work, so tool_result
             // suppression is guaranteed even though we fire-and-forget the async poll send.
             void this.handleAskUserQuestionAsPoll(questions, event.toolId, mapKey, queue);
             break; // skip normal tool_use handling — poll sent instead
-          }
-          if (isGroupJid(queue.targetChatJid)) {
-            log.info({ chatJid: queue.targetChatJid, toolName: event.toolName }, 'AskUserQuestion poll bridge disabled in group chat — falling through to normal handling');
           }
         }
 

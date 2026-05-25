@@ -6016,7 +6016,7 @@ describe('AgentRuntime', () => {
       expect(injected).toContain('Directive:');
     });
 
-    it('falls through in group chats without registering AskUser poll suppression', () => {
+    it('sends polls in group chats and registers AskUser poll suppression', async () => {
       const { messenger, pollSends } = makePollMessenger({ waMessageId: 'POLL_GROUP', hasSecret: true });
       const db = makeDb();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -6060,27 +6060,12 @@ describe('AgentRuntime', () => {
         'group-map-key',
       );
 
-      expect(pollSends).toHaveLength(0);
-      expect(groupQueue.enqueueToolUpdate).toHaveBeenCalledTimes(1);
+      // Yield to let the async poll send fire
+      await new Promise((r) => setTimeout(r, 0));
 
-      handleEventWithContext(
-        {
-          type: 'tool_result',
-          toolId: 'tool-group-1',
-          isError: true,
-          content: 'Answer questions?',
-        },
-        groupQueue,
-        mockSession,
-        undefined,
-        undefined,
-        'group-map-key',
-        'group-map-key',
-      );
-
-      expect((groupQueue.enqueueToolUpdate as ReturnType<typeof vi.fn>).mock.calls.some(
-        ([update]) => (update as { category?: string }).category === 'error',
-      )).toBe(true);
+      expect(pollSends).toHaveLength(1);
+      // enqueueToolUpdate should NOT have been called — poll bridge short-circuits normal handling
+      expect(groupQueue.enqueueToolUpdate).toHaveBeenCalledTimes(0);
     });
 
     it('soft-expiry switches all unanswered poll questions to text fallback', async () => {
