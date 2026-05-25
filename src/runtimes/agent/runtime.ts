@@ -123,6 +123,11 @@ const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
 const AUTO_COMPACT_TIMEOUT_MS = 2 * 60 * 1000;
 const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 15 * 60 * 1000;
+// Default auto-compact threshold: trigger /compact after 150k input tokens since last compact.
+// Claude's context window is 200k tokens; compacting at 150k prevents "prompt too long" errors
+// while leaving headroom for tool results and system prompts. Override per-instance via
+// agentOptions.autoCompactInputTokens in config.json.
+const DEFAULT_AUTO_COMPACT_INPUT_TOKENS = 150_000;
 
 class AgentCommandRuntimeError extends Error {
   readonly code: string;
@@ -834,6 +839,8 @@ function humanizeError(_toolName: string, text: string): string | null {
  * Returns `true` when the text looks like a provider usage-limit notice.
  */
 export function isUsageLimitMessage(text: string): boolean {
+  if (isPromptTooLongMessage(text)) return false; // distinct error path
+
   const lower = text.toLowerCase();
   if (
     lower.includes('out of extra usage') ||
@@ -853,6 +860,27 @@ export function isUsageLimitMessage(text: string): boolean {
     lower.includes('usage cap') ||
     lower.includes('plan limit') ||
     lower.includes('quota exceeded')
+  );
+}
+
+/**
+ * Detect context-window overflow errors from the Claude provider.
+ *
+ * When the accumulated conversation exceeds the model's context window, Claude
+ * returns an error like "Prompt is too long". The session is unsalvageable —
+ * sending /compact will also fail because the prompt is already too large.
+ * The correct recovery is to kill the session so the next user message spawns
+ * a fresh one with recent chat context injected.
+ */
+export function isPromptTooLongMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('prompt is too long') ||
+    lower.includes('prompt too long') ||
+    lower.includes('maximum context length') ||
+    lower.includes('context_length_exceeded') ||
+    lower.includes('max_tokens_exceeded') ||
+    (lower.includes('token') && lower.includes('limit') && lower.includes('exceed'))
   );
 }
 
@@ -1605,7 +1633,7 @@ export class AgentRuntime implements Runtime {
       Number.isFinite(options.autoCompactInputTokens) &&
       options.autoCompactInputTokens > 0
         ? Math.floor(options.autoCompactInputTokens)
-        : undefined;
+        : DEFAULT_AUTO_COMPACT_INPUT_TOKENS;
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
@@ -3510,6 +3538,18 @@ export class AgentRuntime implements Runtime {
             session?.shutdown();
             break;
           }
+          // Context overflow — session is unsalvageable, kill and let next message respawn
+          if (isPromptTooLongMessage(event.text)) {
+            log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
+            queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq,
+              conversationKey,
+              mapKey,
+            });
+            session?.shutdown();
+            break;
+          }
           if (!wasSilentCompact) {
             queue.enqueueResultText(event.text);
             // Accumulate result text for voice reply (SP4)
@@ -5043,6 +5083,18 @@ export class AgentRuntime implements Runtime {
           // Suppress usage-limit messages — log and kill session instead of forwarding
           if (isUsageLimitMessage(event.text)) {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq: this.currentInboundSeq,
+              conversationKey: toConversationKey(queue.targetChatJid),
+              clearCurrentInboundSeq: true,
+            });
+            this.session?.shutdown();
+            break;
+          }
+          // Context overflow — session is unsalvageable, kill and let next message respawn
+          if (isPromptTooLongMessage(event.text)) {
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
+            queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),

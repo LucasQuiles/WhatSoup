@@ -4546,6 +4546,7 @@ describe('AgentRuntime', () => {
       clearTurnWatchdog: vi.fn(),
       shutdown: vi.fn(),
       getDbRowId: vi.fn(() => 41),
+      getStatus: vi.fn(() => ({ active: true })),
     };
     (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
     (runtime as unknown as { durability: { completeTurn: typeof completeTurn } }).durability = {
