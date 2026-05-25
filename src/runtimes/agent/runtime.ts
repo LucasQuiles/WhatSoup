@@ -1166,10 +1166,14 @@ export class AgentRuntime implements Runtime {
       threshold: this.autoCompactInputTokens,
     }, 'auto compact triggered');
 
+    this.markPendingSystemResult(scopeKey);
     void session.sendTurn('/compact').catch((err) => {
       log.warn({ err, scopeKey, rowId }, 'auto compact send failed');
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
+      // Unmark — no result event will arrive for a failed send
+      const pending = this.perChatPendingSystemResults.get(scopeKey) ?? 0;
+      if (pending > 0) this.perChatPendingSystemResults.set(scopeKey, pending - 1);
     });
   }
 
@@ -1316,6 +1320,9 @@ export class AgentRuntime implements Runtime {
   // Tracks inbound seq per chat key (per_chat mode — chats are concurrent)
   // FIFO queue: push on dispatch, shift on result to prevent race when turns overlap.
   private perChatInboundSeqQueue: Map<string, number[]> = new Map();
+  // Counts pending system-turn results (context injection, continuation) that should
+  // not consume from perChatInboundSeqQueue when their result event arrives.
+  private perChatPendingSystemResults: Map<string, number> = new Map();
 
   // Startup notification deferred until after WA connects
   private pendingStartupMessage: { chatJid: string; text: string } | null = null;
@@ -1404,6 +1411,7 @@ export class AgentRuntime implements Runtime {
   private cleanupPerChatState(mapKey: string): void {
     this.perChatCrashCount.delete(mapKey);
     this.perChatInboundSeqQueue.delete(mapKey);
+    this.perChatPendingSystemResults.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
@@ -2024,8 +2032,10 @@ export class AgentRuntime implements Runtime {
             // Without this, the agent resumes with stale context — it has no
             // awareness of messages sent during the downtime window.
             if (checkpointUpdatedAt) {
-              await this.injectMissedMessages(session, chatJid, checkpointUpdatedAt);
+              const injected = await this.injectMissedMessages(session, chatJid, checkpointUpdatedAt);
+              if (injected) this.markPendingSystemResult(initialMapKey);
             }
+            this.markPendingSystemResult(initialMapKey);
             await session.sendTurn('[System: session resumed after service restart — continue where you left off]');
             log.info({ chatJid }, 'sent continuation turn after proactive resume');
           } catch (err) {
@@ -2809,6 +2819,7 @@ export class AgentRuntime implements Runtime {
                   `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
               )
               .join('\n');
+            this.markPendingSystemResult(mapKey);
             await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
           }
         } catch (err) {
@@ -2967,10 +2978,16 @@ export class AgentRuntime implements Runtime {
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0]; // peek — don't shift yet
     if (event.type === 'result') {
-      // Consume the seq for this completed turn
-      seqQueue.shift();
-      // Turn completed successfully — clear pending replay text
-      this.pendingTurnText.delete(mapKey);
+      const pendingSystem = this.perChatPendingSystemResults.get(mapKey) ?? 0;
+      if (pendingSystem > 0) {
+        // This result belongs to a system turn (context injection, continuation) — don't consume user seq
+        this.perChatPendingSystemResults.set(mapKey, pendingSystem - 1);
+      } else {
+        // Consume the seq for this completed user turn
+        seqQueue.shift();
+        // Turn completed successfully — clear pending replay text
+        this.pendingTurnText.delete(mapKey);
+      }
     }
     this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey, toolScopeKey);
   }
@@ -2994,6 +3011,11 @@ export class AgentRuntime implements Runtime {
     const pending = this.pendingPollQuestions.get(mapKey);
     if (pending) this.clearPendingPollTimers(pending);
     this.pendingPollQuestions.delete(mapKey);
+  }
+
+  private markPendingSystemResult(mapKey: string | undefined): void {
+    if (mapKey === undefined) return;
+    this.perChatPendingSystemResults.set(mapKey, (this.perChatPendingSystemResults.get(mapKey) ?? 0) + 1);
   }
 
   private completeConsumedPerChatInbound(mapKey: string, terminalReason: string): void {
@@ -4072,6 +4094,7 @@ export class AgentRuntime implements Runtime {
     this.perChatCrashCount.clear();
     this.activeToolNames.clear();
     this.perChatInboundSeqQueue.clear();
+    this.perChatPendingSystemResults.clear();
     this.currentTurnInboundContentType = null;
     this.currentTurnAssistantText = '';
     this.currentTurnAssistantItemText.clear();
@@ -4611,8 +4634,10 @@ export class AgentRuntime implements Runtime {
             try {
               // Inject messages that arrived during the crash window
               if (chatJid) {
-                await this.injectMissedMessages(session, chatJid, crashedAtSec);
+                const injected = await this.injectMissedMessages(session, chatJid, crashedAtSec);
+                if (injected) this.markPendingSystemResult(mapKey);
               }
+              this.markPendingSystemResult(mapKey);
               await session.sendTurn('[System: session resumed after crash ��� continue where you left off]');
               log.info({ mapKey }, 'sent continuation turn after auto-respawn');
             } catch (err) {
@@ -4825,6 +4850,7 @@ export class AgentRuntime implements Runtime {
                     `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
                 )
                 .join('\n');
+              this.markPendingSystemResult(mapKey);
               await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
             }
           } catch (err) {
