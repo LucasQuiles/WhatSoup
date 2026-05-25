@@ -770,6 +770,13 @@ export const config = {
     toolThresholds: mergeToolThresholds(instance?.operationTracker?.toolThresholds),
   } satisfies OperationTrackerConfig,
 
+  // Poll resolution: configurable group poll behavior
+  pollResolution: {
+    defaultStrategy: (instance?.pollResolution?.defaultStrategy as string | undefined) ?? 'first-vote-wins',
+    defaultTimeoutMs: (instance?.pollResolution?.defaultTimeoutMs as number | undefined) ?? 300_000,
+    maxTimeoutMs: (instance?.pollResolution?.maxTimeoutMs as number | undefined) ?? 600_000,
+  },
+
   // Health
   healthPort: (instance?.healthPort as number | undefined) ?? intEnv('HEALTH_PORT', 9090),
 
