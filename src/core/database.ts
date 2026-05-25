@@ -843,6 +843,7 @@ export class Database {
     }
 
     this.runPendingMigrations();
+    this.verifyRequiredTables();
     log.info('Database opened and schema initialised');
   }
 
@@ -877,6 +878,36 @@ export class Database {
           // best effort
         }
         throw new WhatSoupError(`Migration ${version} failed`, 'DATABASE_ERROR', err);
+      }
+    }
+  }
+
+
+  /**
+   * Guard against phantom migrations — a migration recorded as applied but
+   * whose DDL is missing (e.g. table was dropped externally). Re-runs the
+   * idempotent DDL for critical tables that use CREATE TABLE IF NOT EXISTS.
+   */
+  private verifyRequiredTables(): void {
+    const requiredIdempotentDDL: Array<{ table: string; ddl: string }> = [
+      {
+        table: 'chat_aliases',
+        ddl: `CREATE TABLE IF NOT EXISTS chat_aliases (
+  alias TEXT NOT NULL PRIMARY KEY,
+  chat_jid TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+      },
+    ];
+
+    for (const { table, ddl } of requiredIdempotentDDL) {
+      const exists = this.db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get(table) as { name: string } | undefined;
+      if (!exists) {
+        log.warn({ table }, 'Required table missing despite migration recorded — recreating');
+        this.db.exec(ddl);
       }
     }
   }
