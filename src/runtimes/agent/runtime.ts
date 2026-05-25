@@ -3151,12 +3151,21 @@ export class AgentRuntime implements Runtime {
   }
 
   private startPendingPollExpiry(mapKey: string, pending: PendingPollQuestion): void {
+    const softMs = pending.timeoutMs;
+    const hardMs = pending.timeoutMs * 2;
+
     if (pending.mode === 'poll' && !pending.softExpiryTimer) {
-      pending.softExpiryTimer = setTimeout(() => this.handlePendingPollSoftExpiry(mapKey, pending), ASKUSER_POLL_SOFT_EXPIRY_MS);
+      pending.softExpiryTimer = setTimeout(() => {
+        pending.softExpiryTimer = undefined;
+        this.handlePendingPollSoftExpiry(mapKey, pending);
+      }, softMs);
       pending.softExpiryTimer.unref?.();
     }
     if (!pending.hardExpiryTimer) {
-      pending.hardExpiryTimer = setTimeout(() => this.handlePendingPollHardExpiry(mapKey, pending), ASKUSER_POLL_HARD_EXPIRY_MS);
+      pending.hardExpiryTimer = setTimeout(() => {
+        pending.hardExpiryTimer = undefined;
+        this.handlePendingPollHardExpiry(mapKey, pending);
+      }, hardMs);
       pending.hardExpiryTimer.unref?.();
     }
   }
@@ -3212,6 +3221,29 @@ export class AgentRuntime implements Runtime {
   private handlePendingPollSoftExpiry(mapKey: string, expectedPending: PendingPollQuestion): void {
     const pending = this.pendingPollQuestions.get(mapKey);
     if (!pending || pending !== expectedPending || pending.mode !== 'poll') return;
+
+    // send_poll awaiters should settle/reject without sending AskUser fallback text
+    if (pending.source === 'send_poll') {
+      if (pending.resolution === 'majority-after-timeout') {
+        // Tally and settle with majority result
+        for (const [qIndex, votes] of pending.votesByQuestion) {
+          if (pending.answersCollected[qIndex] === undefined) {
+            const winner = evaluateResolutionOnTimeout(votes);
+            pending.answersCollected[qIndex] = winner ?? '[No votes received — decision expired]';
+          }
+        }
+        for (let i = 0; i < pending.questions.length; i++) {
+          if (pending.answersCollected[i] === undefined) {
+            pending.answersCollected[i] = '[No votes received — decision expired]';
+          }
+        }
+        const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
+        this.settlePoll(mapKey, pending, 'timeout', answer);
+      } else {
+        this.settlePoll(mapKey, pending, 'expiry', '[Poll timed out — no qualifying vote received]');
+      }
+      return;
+    }
 
     const unanswered = this.unansweredPollQuestions(pending);
     if (unanswered.length === 0) return;
@@ -3340,40 +3372,52 @@ export class AgentRuntime implements Runtime {
     }));
     const detailFlushedQuestionIndexes = new Set<number>();
 
-    for (const { index, question: q, formatted } of formattedQuestions) {
-      const selectableCount = q.multiSelect ? q.options.length : 1;
+    const sendPollLoop = async (): Promise<void> => {
+      for (const { index, question: q, formatted } of formattedQuestions) {
+        const selectableCount = q.multiSelect ? q.options.length : 1;
 
-      if (formatted.followUpText) {
-        queue.enqueueText(formatted.followUpText);
-        // Long option details should arrive before the poll so the user can read
-        // context first instead of scrolling back after the tap target appears.
+        if (formatted.followUpText) {
+          queue.enqueueText(formatted.followUpText);
+          // Long option details should arrive before the poll so the user can read
+          // context first instead of scrolling back after the tap target appears.
+          try {
+            await queue.flush();
+            detailFlushedQuestionIndexes.add(index);
+          } catch (err) {
+            log.warn({ err, chatJid }, 'failed to flush poll details before poll send');
+          }
+          if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+        }
+
         try {
-          await queue.flush();
-          detailFlushedQuestionIndexes.add(index);
+          const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
+          if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+          if (result.waMessageId) {
+            pollMessageIds.push(result.waMessageId);
+            pending.pollMessageIdToQuestionIndex.set(result.waMessageId, index);
+          }
+          if (!result.hasSecret) {
+            allHaveSecret = false;
+          }
         } catch (err) {
-          log.warn({ err, chatJid }, 'failed to flush poll details before poll send');
-        }
-        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
-      }
-
-      try {
-        const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
-        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
-        if (result.waMessageId) {
-          pollMessageIds.push(result.waMessageId);
-          pending.pollMessageIdToQuestionIndex.set(result.waMessageId, index);
-        }
-        if (!result.hasSecret) {
+          if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+          log.error({ err, chatJid, question: q.question.slice(0, 80) }, 'failed to send poll for AskUserQuestion');
           allHaveSecret = false;
         }
-      } catch (err) {
-        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
-        log.error({ err, chatJid, question: q.question.slice(0, 80) }, 'failed to send poll for AskUserQuestion');
-        allHaveSecret = false;
       }
+    };
+
+    const pollQueue = this.getQueueForChat(chatJid, mapKey);
+    if (pollQueue) {
+      await pollQueue.enqueuePoll(sendPollLoop);
+      pollQueue.setPollPending(true);
+    } else {
+      await sendPollLoop();
     }
 
     if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+
+    pending.sentPollMessageIds = [...pollMessageIds];
 
     if (pollMessageIds.length === 0 || !allHaveSecret) {
       pending.mode = 'textFallback';
