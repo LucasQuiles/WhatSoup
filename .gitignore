@@ -76,3 +76,8 @@ coverage/
 
 # Editor/manual backup files
 *.bak
+
+# Temporary build/debug artifacts
+output.txt
+bead-output.md
+codex-exec-deep-dive.md
