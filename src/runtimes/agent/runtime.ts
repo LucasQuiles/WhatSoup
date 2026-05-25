@@ -337,6 +337,24 @@ type AskUserQuestion = {
   multiSelect: boolean;
 };
 
+export type ResolutionStrategy =
+  | 'first-vote-wins'
+  | 'admin-only'
+  | 'admin-wins'
+  | 'majority-after-timeout';
+
+export interface PollVote {
+  voterJid: string;
+  selectedOptions: string[];
+  isAdmin: boolean;
+  timestamp: number;
+}
+
+export interface ResolutionResult {
+  status: 'resolved' | 'pending' | 'ignored';
+  answer?: string;
+}
+
 type PendingPollQuestion = {
   questions: AskUserQuestion[];
   toolId: string;
@@ -349,7 +367,77 @@ type PendingPollQuestion = {
   createdAt: number;
   softExpiryTimer?: ReturnType<typeof setTimeout>;
   hardExpiryTimer?: ReturnType<typeof setTimeout>;
+  // Group poll extensions
+  resolution: ResolutionStrategy;
+  timeoutMs: number;
+  votesByQuestion: Map<number, Map<string, PollVote>>;
+  adminJids: Set<string> | null;
+  awaitResolve?: (answer: string) => void;
+  awaitReject?: (err: Error) => void;
+  awaitAbortController?: AbortController;
+  resolvedAt?: number;
+  source: 'askuser' | 'send_poll';
+  sentPollMessageIds: string[];
 };
+
+// ---------------------------------------------------------------------------
+// Group poll resolution engine (module-level exports for testability)
+// ---------------------------------------------------------------------------
+
+export function evaluateResolution(
+  strategy: ResolutionStrategy,
+  votes: Map<string, PollVote>,
+  adminJids: Set<string> | null,
+): ResolutionResult {
+  if (votes.size === 0) return { status: 'pending' };
+  switch (strategy) {
+    case 'first-vote-wins': {
+      const firstVote = votes.values().next().value!;
+      return { status: 'resolved', answer: firstVote.selectedOptions.join(', ') };
+    }
+    case 'admin-only': {
+      for (const vote of votes.values()) {
+        if (vote.isAdmin) return { status: 'resolved', answer: vote.selectedOptions.join(', ') };
+      }
+      return { status: 'pending' };
+    }
+    case 'admin-wins': {
+      for (const vote of votes.values()) {
+        if (vote.isAdmin) return { status: 'resolved', answer: vote.selectedOptions.join(', ') };
+      }
+      return { status: 'pending' };
+    }
+    case 'majority-after-timeout':
+      return { status: 'pending' };
+  }
+}
+
+export function evaluateResolutionOnTimeout(votes: Map<string, PollVote>): string | null {
+  if (votes.size === 0) return null;
+  const tally = new Map<string, { count: number; earliestTimestamp: number }>();
+  for (const vote of votes.values()) {
+    const option = vote.selectedOptions[0];
+    if (!option) continue;
+    const existing = tally.get(option);
+    if (existing) {
+      existing.count++;
+      existing.earliestTimestamp = Math.min(existing.earliestTimestamp, vote.timestamp);
+    } else {
+      tally.set(option, { count: 1, earliestTimestamp: vote.timestamp });
+    }
+  }
+  let winner: string | null = null;
+  let bestCount = 0;
+  let bestTimestamp = Infinity;
+  for (const [option, data] of tally) {
+    if (data.count > bestCount || (data.count === bestCount && data.earliestTimestamp < bestTimestamp)) {
+      winner = option;
+      bestCount = data.count;
+      bestTimestamp = data.earliestTimestamp;
+    }
+  }
+  return winner;
+}
 
 type EscapeHatchLabelPattern = { phrase: string; allowWhitespaceSuffix: boolean };
 
