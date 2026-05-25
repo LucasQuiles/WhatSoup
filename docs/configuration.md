@@ -706,7 +706,6 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 25 | `lid_mappings_history` retained audit table + indexes — first-seen rows and LID → phone flips are recorded by the unified `writeLidMapping` seam (#251 LID conflict remediation) (`MIGRATION_25`) |
 | 26 | Rebuilds pre-existing `outbound_sends` tables so the caller CHECK constraint allows Reply Guarantee Protocol fallback audit rows (`rgp`) |
 | 27 | Message query performance indexes on timestamp/from-me, timestamp/content-type, and token counters when token columns exist (`runMigration27`) |
-| 28 | `pending_polls` table — durable AskUserQuestion → WhatsApp poll state so pending polls survive restarts (`MIGRATION_28_PENDING_POLLS`) |
 
 ---
 
