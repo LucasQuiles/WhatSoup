@@ -203,10 +203,17 @@ export class OutboundQueue implements IOutboundQueue {
   private friendlyProgressSent = new Set<string>();
   public lastActivity = Date.now();
 
+  /**
+   * Opaque token identifying this queue instance for echo-guard exemption.
+   * Sends from the same token are not subject to the cross-session cooldown.
+   */
+  private readonly senderToken: string;
+
   constructor(messenger: Messenger, chatJid: string) {
     this.messenger = messenger;
     this.chatJid = chatJid;
     this.cachedConversationKey = toConversationKey(chatJid);
+    this.senderToken = crypto.randomUUID();
   }
 
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
@@ -656,13 +663,14 @@ export class OutboundQueue implements IOutboundQueue {
       const wait = MIN_SEND_GAP_MS - elapsed;
       await new Promise<void>((resolve) => setTimeout(resolve, wait));
     }
-    // AE4: Echo guard — suppress group messages during cooldown
-    if (!canSendToGroup(this.chatJid, config.echoGuard)) {
+    // AE4: Echo guard — suppress cross-session group echo loops.
+    // Passes senderToken so intra-session rapid sends (tool status + text) are exempt.
+    if (!canSendToGroup(this.chatJid, config.echoGuard, this.senderToken)) {
       return; // silently drop
     }
     await this.sendWithRetry(text);
     this.lastSentAt = Date.now();
-    recordGroupOutbound(this.chatJid);
+    recordGroupOutbound(this.chatJid, this.senderToken);
   }
 
   private async sendWithRetry(text: string): Promise<void> {
