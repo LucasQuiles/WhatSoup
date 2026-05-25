@@ -6067,7 +6067,7 @@ describe('AgentRuntime', () => {
       );
 
       // Yield to let the async poll send fire
-      await new Promise((r) => setTimeout(r, 0));
+      await Promise.resolve();
 
       expect(pollSends).toHaveLength(1);
       // enqueueToolUpdate should NOT have been called — poll bridge short-circuits normal handling
