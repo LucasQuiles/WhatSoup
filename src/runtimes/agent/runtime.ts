@@ -2996,47 +2996,62 @@ export class AgentRuntime implements Runtime {
     // label, description match, or free-text answer and inject it back.
     const pendingPoll = this.pendingPollQuestions.get(mapKey);
     if (pendingPoll) {
-      this.advancePendingPollIndex(pendingPoll);
+      // In groups, determine whether this sender's text should be intercepted
+      let bypassPollIntercept = false;
+      if (isGroupJid(pendingPoll.chatJid) && actorJid) {
+        const canonicalActor = jidNormalizedUser(actorJid);
+        bypassPollIntercept =
+          // admin-only: non-admin text is not a poll answer
+          (pendingPoll.resolution === 'admin-only' && !pendingPoll.adminJids?.has(canonicalActor)) ||
+          // majority-after-timeout: text input never counts — only poll widget votes
+          (pendingPoll.resolution ?? 'first-vote-wins') === 'majority-after-timeout';
+      }
 
-      const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
-      if (currentQ) {
-        if (pendingPoll.mode === 'poll' && isLowSignalPollStatusReply(text, currentQ.options)) {
-          const queue = this.getQueueForChat(pendingPoll.chatJid, mapKey);
-          if (queue) {
-            queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
-            try {
-              await queue.flush();
-            } catch (err) {
-              log.error({ err, chatJid: pendingPoll.chatJid }, 'failed to flush pending poll status clarification');
-            }
-          } else {
-            this.sendDirect(
-              pendingPoll.chatJid,
-              'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
-            );
-          }
-          this.completeConsumedPerChatInbound(mapKey, 'poll_status_reply');
-          return;
-        }
-
-        const answeredQuestionIndex = pendingPoll.currentQuestionIndex;
-        pendingPoll.answersCollected[answeredQuestionIndex] = resolveTypedPollAnswer(text, currentQ);
-        this.removePollIdsForQuestion(pendingPoll, answeredQuestionIndex);
-        pendingPoll.currentQuestionIndex++;
+      if (!bypassPollIntercept) {
         this.advancePendingPollIndex(pendingPoll);
 
-        if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
-          this.injectPollAnswers(mapKey, pendingPoll);
-        } else {
-          log.info({
-            mapKey,
-            answered: Object.keys(pendingPoll.answersCollected).length,
-            total: pendingPoll.questions.length,
-          }, 'free-text answer collected — waiting for more');
-          this.completeConsumedPerChatInbound(mapKey, 'poll_partial_answer_collected');
+        const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
+        if (currentQ) {
+          if (pendingPoll.mode === 'poll' && isLowSignalPollStatusReply(text, currentQ.options)) {
+            const queue = this.getQueueForChat(pendingPoll.chatJid, mapKey);
+            if (queue) {
+              queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
+              try {
+                await queue.flush();
+              } catch (err) {
+                log.error({ err, chatJid: pendingPoll.chatJid }, 'failed to flush pending poll status clarification');
+              }
+            } else {
+              this.sendDirect(
+                pendingPoll.chatJid,
+                'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
+              );
+            }
+            this.completeConsumedPerChatInbound(mapKey, 'poll_status_reply');
+            return;
+          }
+
+          const answeredQuestionIndex = pendingPoll.currentQuestionIndex;
+          pendingPoll.answersCollected[answeredQuestionIndex] = resolveTypedPollAnswer(text, currentQ);
+          this.removePollIdsForQuestion(pendingPoll, answeredQuestionIndex);
+          pendingPoll.currentQuestionIndex++;
+          this.advancePendingPollIndex(pendingPoll);
+
+          if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
+            this.injectPollAnswers(mapKey, pendingPoll);
+          } else {
+            log.info({
+              mapKey,
+              answered: Object.keys(pendingPoll.answersCollected).length,
+              total: pendingPoll.questions.length,
+            }, 'free-text answer collected — waiting for more');
+            this.completeConsumedPerChatInbound(mapKey, 'poll_partial_answer_collected');
+          }
+          return; // consume the message — don't send as a new turn
         }
-        return; // consume the message — don't send as a new turn
       }
+      // When bypassPollIntercept is true, execution falls through to the
+      // normal sendTurnToSession path below
     }
 
     // Clear post-turn gate — legitimate new user turn begins
@@ -3128,7 +3143,19 @@ export class AgentRuntime implements Runtime {
 
   private deletePendingPollQuestions(mapKey: string): void {
     const pending = this.pendingPollQuestions.get(mapKey);
-    if (pending) this.clearPendingPollTimers(pending);
+    if (!pending) return;
+    this.clearPendingPollTimers(pending);
+    // Clean up suppression for askuser source
+    if (pending.source === 'askuser' || pending.source === undefined) {
+      this.suppressedAskUserToolIds.delete(pending.toolId);
+    }
+    // Reject ONLY if awaiters haven't already been settled by settlePoll()
+    // (settlePoll nulls callbacks after settlement, so this is safe)
+    if (pending.awaitReject) {
+      pending.awaitReject(new Error('Poll abandoned'));
+      pending.awaitResolve = undefined;
+      pending.awaitReject = undefined;
+    }
     this.pendingPollQuestions.delete(mapKey);
   }
 
