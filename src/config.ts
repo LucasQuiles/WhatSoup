@@ -808,10 +808,13 @@ export const config = {
   ),
 
   // Echo guard — per-group outbound cooldown to prevent cascade floods.
+  // Session-aware: intra-session rapid sends are exempt, only cross-session
+  // sends respect the cooldown. 1s default catches sub-second echo loops
+  // without blocking crash recovery or /new session first responses.
   // In-memory, resets on restart. DMs are never affected.
   echoGuard: {
     enabled: ((instance?.echoGuard as Record<string, unknown> | undefined)?.enabled as boolean | undefined) !== false,
-    groupCooldownMs: ((instance?.echoGuard as Record<string, unknown> | undefined)?.groupCooldownMs as number | undefined) ?? 60_000,
+    groupCooldownMs: ((instance?.echoGuard as Record<string, unknown> | undefined)?.groupCooldownMs as number | undefined) ?? 1_000,
   },
 
   // Paused chats — messages are stored but never dispatched to runtime.
