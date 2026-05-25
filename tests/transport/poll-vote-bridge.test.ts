@@ -443,4 +443,107 @@ describe('poll vote bridge', () => {
       );
     });
   });
+
+  describe('multi-voter grace window', () => {
+    const POLL_MSG_ID = 'POLL_MULTI_VOTER_001';
+    const VOTER_A_LID = '3333@lid';
+    const VOTER_A_PHONE = '2222@s.whatsapp.net';
+    const VOTER_B_LID = '5555@lid';
+    const VOTER_B_PHONE = '6666@s.whatsapp.net';
+    const BOT_LID = '4444@lid';
+
+    beforeEach(async () => {
+      const secret = new Uint8Array(32).fill(77);
+      mockSock.sendMessage.mockResolvedValue({
+        key: { id: POLL_MSG_ID, remoteJid: VOTER_A_LID, fromMe: true },
+        message: {
+          messageContextInfo: { messageSecret: secret },
+          pollCreationMessageV3: {
+            name: 'Favorite language?',
+            options: [{ optionName: 'Rust' }, { optionName: 'Go' }, { optionName: 'TypeScript' }],
+          },
+        },
+      });
+      await cm.sendPollMessage(VOTER_A_LID, 'Favorite language?', ['Rust', 'Go', 'TypeScript'], 1);
+    });
+
+    it('emits independent events for two voters on the same poll without clobbering', async () => {
+      // Voter A picks Rust, voter B picks Go — each gets their own grace key
+      mockDecryptPollVote.mockImplementation((_vote: any, ctx: any) => {
+        if (ctx.voterJid === VOTER_A_LID && ctx.pollCreatorJid === BOT_LID) {
+          return { selectedOptions: [optionHash('Rust')] };
+        }
+        if (ctx.voterJid === VOTER_B_LID && ctx.pollCreatorJid === BOT_LID) {
+          return { selectedOptions: [optionHash('Go')] };
+        }
+        throw new Error('Unsupported state or unable to authenticate data');
+      });
+
+      const handler = vi.fn();
+      cm.on('pollVoteReceived', handler);
+
+      // Voter A votes
+      const voteA = makePollVoteMessage({
+        pollMsgId: POLL_MSG_ID,
+        voterLid: VOTER_A_LID,
+        voterPhone: VOTER_A_PHONE,
+      });
+      emit({ 'messages.upsert': { messages: [voteA], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(1));
+
+      // Voter B votes 2s later (still within grace window of A)
+      await vi.advanceTimersByTimeAsync(2_000);
+      const voteB = {
+        key: {
+          remoteJid: VOTER_B_LID,
+          remoteJidAlt: VOTER_B_PHONE,
+          fromMe: false,
+          id: 'VOTE_MSG_B_123',
+          addressingMode: 'lid',
+        },
+        message: {
+          pollUpdateMessage: {
+            pollCreationMessageKey: {
+              remoteJid: VOTER_B_LID,
+              fromMe: true,
+              id: POLL_MSG_ID,
+            },
+            vote: {
+              encPayload: new Uint8Array(50),
+              encIv: new Uint8Array(12),
+            },
+          },
+        },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+      };
+      emit({ 'messages.upsert': { messages: [voteB], type: 'notify' } });
+      await vi.waitFor(() => expect(mockDecryptPollVote).toHaveBeenCalledTimes(2));
+
+      // Neither emitted yet — both in their own grace windows
+      expect(handler).not.toHaveBeenCalled();
+
+      // Advance 5s — both timers should fire
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(handler).toHaveBeenCalledTimes(2);
+
+      const calls = handler.mock.calls.map((c) => c[0]);
+      const voteAResult = calls.find((c) => c.voterJid === VOTER_A_LID);
+      const voteBResult = calls.find((c) => c.voterJid === VOTER_B_LID);
+
+      expect(voteAResult).toBeDefined();
+      expect(voteAResult).toMatchObject({
+        pollMessageId: POLL_MSG_ID,
+        voterJid: VOTER_A_LID,
+        selectedOptions: ['Rust'],
+      });
+
+      expect(voteBResult).toBeDefined();
+      expect(voteBResult).toMatchObject({
+        pollMessageId: POLL_MSG_ID,
+        voterJid: VOTER_B_LID,
+        selectedOptions: ['Go'],
+      });
+    });
+  });
 });
