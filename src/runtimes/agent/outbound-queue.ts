@@ -136,6 +136,9 @@ export interface IOutboundQueue {
   setTextAggregateDelayMs(ms: number): void;
   /** Start the composing indicator immediately without adding any content to the queue. */
   indicateTyping(): void;
+  enqueuePoll(sendFn: () => Promise<void>): Promise<void>;
+  hasPendingPoll?(): boolean;
+  setPollPending(pending: boolean): void;
   flush(): Promise<void>;
   shutdown(): Promise<void>;
   abortTurn(): void;
@@ -202,6 +205,7 @@ export class OutboundQueue implements IOutboundQueue {
   /** In friendly mode: progress event tool IDs already reported (dedup — only first per tool). */
   private friendlyProgressSent = new Set<string>();
   public lastActivity = Date.now();
+  private pollPending = false;
 
   /**
    * Opaque token identifying this queue instance for echo-guard exemption.
@@ -436,6 +440,10 @@ export class OutboundQueue implements IOutboundQueue {
       }
 
       case 'operation_progress': {
+        if (this.pollPending) {
+          this.startTyping();
+          return;
+        }
         if (this.toolUpdateMode === 'minimal') {
           this.startTyping();
           return;
@@ -457,6 +465,10 @@ export class OutboundQueue implements IOutboundQueue {
       }
 
       case 'operation_slow': {
+        if (this.pollPending) {
+          this.startTyping();
+          return;
+        }
         if (this.toolUpdateMode === 'minimal') {
           this.enqueue('_Still working..._');
         } else if (this.toolUpdateMode === 'friendly') {
@@ -469,6 +481,10 @@ export class OutboundQueue implements IOutboundQueue {
       }
 
       case 'operation_stalled': {
+        if (this.pollPending) {
+          this.startTyping();
+          return;
+        }
         const elapsed = formatElapsed(event.elapsedMs);
         if (this.toolUpdateMode === 'minimal') {
           this.enqueue(`_Still working (${elapsed})..._`);
@@ -485,6 +501,25 @@ export class OutboundQueue implements IOutboundQueue {
   /** Start the composing indicator immediately without queuing any content. */
   indicateTyping(): void {
     this.startTyping();
+  }
+
+  /**
+   * Flush all buffered text, then execute the poll send function.
+   * Ensures any in-progress text messages are delivered before the poll arrives.
+   */
+  async enqueuePoll(sendFn: () => Promise<void>): Promise<void> {
+    this.flushStreamBuffer();
+    this.flushToolBuffer();
+    await this.chain;
+    await sendFn();
+  }
+
+  hasPendingPoll(): boolean {
+    return this.pollPending;
+  }
+
+  setPollPending(pending: boolean): void {
+    this.pollPending = pending;
   }
 
   /** Flush all pending messages (tool buffer + send queue) immediately. */
