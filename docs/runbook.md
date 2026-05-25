@@ -1059,6 +1059,55 @@ Key log patterns to monitor:
 
 ---
 
+## AskUserQuestion Poll Bridge
+
+When an agent subprocess calls `AskUserQuestion` in per-chat DM mode, the runtime intercepts it and renders the options as a WhatsApp poll. Poll state is held in memory with a 2-hour nudge timer. The runtime includes persistence scaffolding (`persistPendingPoll`, `rehydratePendingPolls`) but the `pending_polls` migration has not yet landed — persistence calls fail silently and polls do not survive restarts.
+
+### Pending poll state
+
+### Vote reconciliation
+
+If a user reports they voted but the agent didn't respond:
+
+1. Check transport logs for decrypt failures: `grep "poll vote decryption failed" <log>`
+2. If `pollVoteFailed` fired, the runtime should have sent a text fallback — check for `"poll vote failure switched AskUserQuestion to text fallback"` in logs
+3. If the service restarted between poll send and vote, the in-memory pending state was lost — the user should re-trigger the question
+
+**Future:** When migration 28 (`pending_polls` table) lands, pending polls will persist across restarts and the rehydration path will be operational.
+
+### Nudge timer
+
+Pending polls send a gentle reminder ("Still waiting on your answer") every 2 hours. There is no hard expiry — polls persist until answered or the session is cleaned up. The nudge timer is `unref`'d and does not block shutdown.
+
+### Group chats
+
+AskUserQuestion poll injection is disabled in group chats. The runtime falls through to normal provider handling (agent asks as text). This is by design — AskUserQuestion is a single-answer turn-unblock protocol incompatible with multi-voter group semantics.
+
+---
+
+## Prompt-Too-Long Recovery
+
+When the accumulated conversation exceeds the model's context window, the agent receives a "prompt is too long" error. The runtime detects this via `isPromptTooLongMessage()` and kills the session — sending `/compact` would also fail because the prompt is already too large. The user sees: `_Context limit reached — starting fresh session. Send your message again._`
+
+### Auto-compact prevention
+
+The default `autoCompactInputTokens` threshold is 150,000 tokens. This triggers a proactive `/compact` well before the 200k context limit is reached. Override per-instance via `agentOptions.autoCompactInputTokens` in config.
+
+### Diagnosis
+
+```bash
+# Check if prompt-too-long fired
+grep "prompt too long" /var/log/whatsoup/<instance>.log
+
+# Check auto-compact activity
+grep "auto compact triggered" /var/log/whatsoup/<instance>.log
+
+# Verify current threshold
+grep "autoCompactInputTokens" instances/<name>/instance.json
+```
+
+---
+
 ## Repair Reference
 
 ### Log locations

@@ -54,8 +54,8 @@ Agents should not add their own generic `Other` option unless they need custom w
 
 ## Recovery Behavior
 
-- Soft expiry: if no native poll vote is received after 5 minutes, the runtime switches the pending AskUser decision to text fallback and sends numbered options for all unanswered questions.
-- Hard expiry: after 10 minutes, the runtime clears the pending decision and asks the user to re-trigger when ready.
+- In-memory persistence: pending poll state lives in the runtime's `pendingPollQuestions` map. The runtime includes `persistPendingPoll` and `rehydratePendingPolls` scaffolding for database persistence, but the `pending_polls` migration has not yet landed — persistence calls fail silently and polls do not currently survive restarts.
+- Nudge timer: every 2 hours without a response, the runtime sends a gentle reminder ("Still waiting on your answer"). No hard expiry — polls persist until answered or the session is cleaned up.
 - Decrypt failure: if WhatsApp delivers a poll vote that cannot be decrypted after all bounded JID candidates fail, transport emits `pollVoteFailed`; runtime sends a one-time numbered text fallback and accepts an option number, label, or free-text answer.
 - Low-signal replies such as `I voted` do not resolve a pending poll while the native poll path is still active. The user should tap the poll or type the exact option label/number.
 
