@@ -3218,6 +3218,64 @@ export class AgentRuntime implements Runtime {
     });
   }
 
+  private settlePoll(
+    mapKey: string,
+    pending: PendingPollQuestion,
+    reason: 'vote' | 'timeout' | 'abort' | 'expiry',
+    answer: string,
+  ): void {
+    // Re-read and verify object identity — idempotent guard
+    const current = this.pendingPollQuestions.get(mapKey);
+    if (current !== pending || pending.resolvedAt !== undefined) {
+      log.debug({ mapKey, reason }, 'settlePoll called but poll already settled or removed');
+      return;
+    }
+    pending.resolvedAt = Date.now();
+
+    // Clear timers
+    if (pending.softExpiryTimer) { clearTimeout(pending.softExpiryTimer); pending.softExpiryTimer = undefined; }
+    if (pending.hardExpiryTimer) { clearTimeout(pending.hardExpiryTimer); pending.hardExpiryTimer = undefined; }
+
+    // Clear transport poll tracking using preserved sent IDs
+    const connection = this.messenger as ConnectionManager;
+    if (typeof connection.clearPollTracking === 'function' && pending.sentPollMessageIds) {
+      for (const pollMsgId of pending.sentPollMessageIds) {
+        connection.clearPollTracking(pollMsgId);
+      }
+    }
+
+    // Resolve/reject BEFORE removing from map
+    if (pending.source === 'send_poll') {
+      if (reason === 'abort' || reason === 'expiry') {
+        if (pending.awaitReject) {
+          pending.awaitReject(new Error(`Poll ${reason}: ${answer}`));
+        }
+      } else if (pending.awaitResolve) {
+        pending.awaitResolve(answer);
+      }
+      pending.awaitResolve = undefined;
+      pending.awaitReject = undefined;
+    }
+
+    if (pending.awaitAbortController) {
+      pending.awaitAbortController = undefined;
+    }
+
+    // Remove from pending map (safe — awaiters already settled)
+    this.deletePendingPollQuestions(mapKey);
+
+    // AskUser: inject answer into session (treat undefined source as 'askuser' for legacy compat)
+    if (pending.source === 'askuser' || pending.source === undefined) {
+      this.injectPollAnswers(mapKey, pending);
+    }
+
+    // Mark queue as no longer poll-pending
+    const queue = this.getQueueForChat(pending.chatJid, mapKey);
+    queue?.setPollPending(false);
+
+    log.info({ mapKey, reason, source: pending.source }, 'poll settled');
+  }
+
   private handlePendingPollSoftExpiry(mapKey: string, expectedPending: PendingPollQuestion): void {
     const pending = this.pendingPollQuestions.get(mapKey);
     if (!pending || pending !== expectedPending || pending.mode !== 'poll') return;
@@ -3242,6 +3300,24 @@ export class AgentRuntime implements Runtime {
       } else {
         this.settlePoll(mapKey, pending, 'expiry', '[Poll timed out — no qualifying vote received]');
       }
+      return;
+    }
+
+    // For AskUser majority-after-timeout, resolve with tally
+    if (pending.resolution === 'majority-after-timeout') {
+      for (const [qIndex, votes] of pending.votesByQuestion) {
+        if (pending.answersCollected[qIndex] === undefined) {
+          const winner = evaluateResolutionOnTimeout(votes);
+          pending.answersCollected[qIndex] = winner ?? '[No votes received — decision expired]';
+        }
+      }
+      for (let i = 0; i < pending.questions.length; i++) {
+        if (pending.answersCollected[i] === undefined) {
+          pending.answersCollected[i] = '[No votes received — decision expired]';
+        }
+      }
+      const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
+      this.settlePoll(mapKey, pending, 'timeout', answer);
       return;
     }
 
@@ -3477,15 +3553,43 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
-    // Record the answer against the poll message that produced it; users can
-    // vote on multiple AskUser polls in any order.
-    pending.answersCollected[matchedQuestionIndex] = answerForPollSelection(currentQ, data.selectedOptions);
-    this.removePollIdsForQuestion(pending, matchedQuestionIndex);
-    this.advancePendingPollIndex(pending);
+    // Determine admin status for this voter
+    const isAdmin = pending.adminJids?.has(jidNormalizedUser(data.voterJid)) ?? false;
 
+    const vote: PollVote = {
+      voterJid: data.voterJid,
+      selectedOptions: data.selectedOptions,
+      isAdmin,
+      timestamp: Date.now(),
+    };
+
+    // Store vote per question (votesByQuestion may be absent on legacy state)
+    if (!pending.votesByQuestion) pending.votesByQuestion = new Map();
+    let questionVotes = pending.votesByQuestion.get(matchedQuestionIndex);
+    if (!questionVotes) {
+      questionVotes = new Map();
+      pending.votesByQuestion.set(matchedQuestionIndex, questionVotes);
+    }
+    const canonicalVoter = jidNormalizedUser(data.voterJid);
+    questionVotes.set(canonicalVoter, vote);
+
+    // Evaluate resolution for this question (resolution may be absent on legacy state)
+    const resolutionResult = evaluateResolution(pending.resolution ?? 'first-vote-wins', questionVotes, pending.adminJids);
+    if (resolutionResult.status === 'resolved' && resolutionResult.answer !== undefined) {
+      if (pending.answersCollected[matchedQuestionIndex] === undefined) {
+        // Use answerForPollSelection to apply question-aware formatting (e.g. "Other" directive)
+        const winningVote = questionVotes.get(canonicalVoter) ?? vote;
+        pending.answersCollected[matchedQuestionIndex] = answerForPollSelection(currentQ, winningVote.selectedOptions);
+        this.removePollIdsForQuestion(pending, matchedQuestionIndex);
+        this.advancePendingPollIndex(pending);
+      }
+    }
+
+    // Check if all questions resolved
     const answered = Object.keys(pending.answersCollected).length;
     if (answered >= pending.questions.length) {
-      this.injectPollAnswers(matchedMapKey, pending);
+      const fullAnswer = pending.questions.map((_, i) => pending.answersCollected[i] ?? '(no answer)').join('\n');
+      this.settlePoll(matchedMapKey, pending, 'vote', fullAnswer);
     } else {
       log.info({ mapKey: matchedMapKey, answered, total: pending.questions.length }, 'poll vote collected — waiting for more');
     }
