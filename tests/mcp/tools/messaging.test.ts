@@ -92,6 +92,10 @@ function makeConnection(calls: string[]) {
       calls.push(JSON.stringify({ jid, content }));
       return { waMessageId: null };
     },
+    sendPollMessage: async (jid: string, name: string, values: string[], selectableCount: number) => {
+      calls.push(JSON.stringify({ jid, content: { poll: { name, values, selectableCount } } }));
+      return { waMessageId: `poll-${Date.now()}`, hasSecret: true };
+    },
     sendMedia: async (jid: string, media: unknown) => {
       calls.push(JSON.stringify({ sendMedia: { jid, media } }));
       return { waMessageId: null };
