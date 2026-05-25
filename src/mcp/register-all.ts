@@ -46,6 +46,7 @@ const log = createChildLogger('register-all');
 
 export interface RegisterAllToolsOptions {
   enableKnowledgeSearch?: boolean;
+  pollRegistrar?: import('./tools/messaging.ts').PollRegistrar;
 }
 
 /**
@@ -134,7 +135,10 @@ export function registerAllTools(
   // Pattern 1 — options-object: take ToolRegistry + deps directly. These bypass
   // the callback `register` helper; registry throws inside the module body
   // propagate to runModule's catch directly.
-  runModule('messaging', true, () => messagingTools.registerMessagingTools(registry, { connection, db: db.raw, profiles: profileRegistry, auditWriter: outboundSendsWriter }));
+  runModule('messaging', true, () => messagingTools.registerMessagingTools(registry, {
+    connection, db: db.raw, profiles: profileRegistry, auditWriter: outboundSendsWriter,
+    pollRegistrar: options.pollRegistrar,
+  }));
   runModule('media', true, () => mediaTools.registerMediaTools(registry, { connection, db }));
   runModule('voice', true, () => voiceTools.registerVoiceTools(registry, { connection, db }));
   runModule('retention', true, () => retentionTools.registerRetentionTools(registry, { db }));

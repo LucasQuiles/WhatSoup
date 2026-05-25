@@ -1759,6 +1759,10 @@ export class AgentRuntime implements Runtime {
     }).memory?.pinecone?.knowledgeSearch?.allowGlobalAgentSessions === true;
     registerAllTools(this.registry, this.messenger as ConnectionManager, this.db, {
       enableKnowledgeSearch: this.sandboxPerChat || allowGlobalKnowledgeSearch,
+      pollRegistrar: {
+        register: (pollId, chatJid, options, resolution, timeoutMs, abortSignal) =>
+          this.registerSendPollAwaiter(pollId, chatJid, options, resolution, timeoutMs, abortSignal),
+      },
     });
   }
 
@@ -3396,6 +3400,81 @@ export class AgentRuntime implements Runtime {
       log.warn({ err, chatJid }, 'failed to fetch group metadata — degrading to first-vote-wins');
       return null;
     }
+  }
+
+  /**
+   * Register a send_poll tool call as a pending poll awaiter.
+   * Bridges the MCP tool layer to the runtime's poll resolution engine
+   * so that `awaitResult: true` polls block until a vote resolves them.
+   */
+  private registerSendPollAwaiter(
+    pollId: string,
+    chatJid: string,
+    options: string[],
+    resolution: ResolutionStrategy,
+    timeoutMs: number,
+    abortSignal?: AbortSignal,
+  ): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const mapKey = `send_poll:${pollId}`;
+      const pending: PendingPollQuestion = {
+        questions: [{ question: 'send_poll', header: 'Poll', options: options.map(o => ({ label: o, description: '' })), multiSelect: false }],
+        toolId: `send_poll:${pollId}`,
+        chatJid,
+        chatJidAliases: new Set([chatJid]),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([[pollId, 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt: Date.now(),
+        resolution,
+        timeoutMs,
+        votesByQuestion: new Map(),
+        adminJids: null,
+        awaitResolve: resolve,
+        awaitReject: reject,
+        source: 'send_poll',
+        sentPollMessageIds: [pollId],
+      };
+      this.pendingPollQuestions.set(mapKey, pending);
+      this.startPendingPollExpiry(mapKey, pending);
+
+      // Wire AbortSignal for MCP client disconnect
+      if (abortSignal) {
+        const onAbort = () => {
+          this.settlePoll(mapKey, pending, 'abort', 'MCP client disconnected');
+        };
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+        // Wrap resolve/reject to clean up abort listener on normal settlement
+        const origResolve = pending.awaitResolve;
+        const origReject = pending.awaitReject;
+        if (origResolve) {
+          pending.awaitResolve = (answer: string) => {
+            abortSignal.removeEventListener('abort', onAbort);
+            origResolve(answer);
+          };
+        }
+        if (origReject) {
+          pending.awaitReject = (err: Error) => {
+            abortSignal.removeEventListener('abort', onAbort);
+            origReject(err);
+          };
+        }
+      }
+
+      // Fetch admin JIDs if strategy requires it
+      if ((resolution === 'admin-only' || resolution === 'admin-wins') && isGroupJid(chatJid)) {
+        void this.fetchGroupAdminJids(chatJid).then(admins => {
+          if (this.pendingPollQuestions.get(mapKey) === pending) {
+            pending.adminJids = admins;
+            if (admins === null) {
+              log.warn({ mapKey, resolution }, 'admin metadata unavailable — degrading to first-vote-wins');
+              pending.resolution = 'first-vote-wins';
+            }
+          }
+        });
+      }
+    });
   }
 
   /**

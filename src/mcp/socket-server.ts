@@ -68,7 +68,8 @@ export class WhatSoupSocketServer {
     this.server = createServer((socket: Socket) => {
       const clientId = ++clientCounter;
       // SP11: Clone base session for this connection
-      const connSession: SessionContext = { ...this.baseSession };
+      const abortController = new AbortController();
+      const connSession: SessionContext = { ...this.baseSession, abortSignal: abortController.signal };
       this.connectionSessions.set(clientId, connSession);
       this.activeSockets.set(clientId, socket);
 
@@ -76,6 +77,7 @@ export class WhatSoupSocketServer {
       let buf = '';
 
       socket.on('close', () => {
+        abortController.abort(); // Signal all pending tool calls for this client
         this.connectionSessions.delete(clientId);
         this.activeSockets.delete(clientId);
         log.info({ clientId, connections: this.connectionSessions.size }, 'client disconnected');

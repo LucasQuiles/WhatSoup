@@ -37,6 +37,8 @@ export interface SessionContext {
   actorJid?: string;
   /** Filesystem boundary for file-access tools. Set to workspacePath for sandboxed sessions. */
   allowedRoot?: string;
+  /** Abort signal tied to the MCP client connection. Fires when the client disconnects. */
+  abortSignal?: AbortSignal;
 }
 
 export interface ToolDeclaration {

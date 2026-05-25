@@ -24,6 +24,7 @@ import { UnknownProfileError, type ProfileRegistry } from '../../core/profiles.t
 import type { OutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { formatMentions } from '../../core/mentions.ts';
 import type { MessageRow } from '../../core/messages.ts';
+import type { ResolutionStrategy } from '../../runtimes/agent/runtime.ts';
 
 // ---------------------------------------------------------------------------
 // Error sanitization — prevent raw API/protocol errors from leaking to agents
@@ -59,11 +60,23 @@ function errorResult(error: string) {
 // Deps interface
 // ---------------------------------------------------------------------------
 
+export interface PollRegistrar {
+  register(
+    pollId: string,
+    chatJid: string,
+    options: string[],
+    resolution: ResolutionStrategy,
+    timeoutMs: number,
+    abortSignal?: AbortSignal,
+  ): Promise<string>;
+}
+
 export interface MessagingDeps {
   connection: ConnectionManager;
   db: DatabaseSync;
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;
+  pollRegistrar?: PollRegistrar;
 }
 
 const POLL_QUESTION_MAX_CHARS = 900;
@@ -505,6 +518,10 @@ export function registerMessagingTools(
         z.string().describe('Short poll option label. Keep under the WhatsApp option limit; send paragraph details before the poll.'),
       ).describe('Poll options. Must contain 2-12 unique, non-empty labels.'),
       selectableCount: z.number().optional().describe('Whole number of options the voter may select. Defaults to 1; use values above 1 for multi-select polls and never exceed options.length.'),
+      resolution: z.enum(['first-vote-wins', 'admin-only', 'admin-wins', 'majority-after-timeout']).optional()
+        .describe('Resolution strategy. Defaults to first-vote-wins.'),
+      timeoutMs: z.number().optional().describe('Timeout in ms. Default 300000, max 600000.'),
+      awaitResult: z.boolean().optional().describe('If true, block until poll resolves. Default false.'),
     }),
     handler: async (params, _session: SessionContext) => {
       const chatJid = params['chatJid'] as string;
@@ -558,19 +575,33 @@ export function registerMessagingTools(
         return errorResult('selectableCount cannot exceed the number of poll options');
       }
 
+      const resolvedResolution = (params['resolution'] as ResolutionStrategy | undefined) ?? 'first-vote-wins';
+      const resolvedTimeoutMs = Math.min(
+        (params['timeoutMs'] as number | undefined) ?? 300_000,
+        600_000,
+      );
+      const awaitResult = (params['awaitResult'] as boolean | undefined) ?? false;
+
       try {
-        await connection.sendRaw(chatJid, {
-          poll: {
-            name: question,
-            values: options,
-            selectableCount: resolvedSelectableCount,
-          },
-        });
+        const result = await connection.sendPollMessage(chatJid, question, options, resolvedSelectableCount);
+
+        if (awaitResult && result.waMessageId && result.hasSecret && deps.pollRegistrar) {
+          const abortSignal = _session.abortSignal;
+          try {
+            const answer = await deps.pollRegistrar.register(
+              result.waMessageId, chatJid, options,
+              resolvedResolution, resolvedTimeoutMs, abortSignal,
+            );
+            return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount, answer };
+          } catch (err) {
+            return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount, error: 'Poll timed out or was cancelled', awaitFailed: true };
+          }
+        }
+
+        return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount };
       } catch (err) {
         return errorResult(sanitizeError(err));
       }
-
-      return { sent: true, question, options, selectableCount: resolvedSelectableCount };
     },
   });
 
