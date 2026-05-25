@@ -598,6 +598,11 @@ export function registerMessagingTools(
           }
         }
 
+        if (awaitResult && !(result.waMessageId && result.hasSecret && deps.pollRegistrar)) {
+          return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount,
+                   awaitFailed: true, error: 'Poll sent but vote tracking unavailable — cannot await result' };
+        }
+
         return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount };
       } catch (err) {
         return errorResult(sanitizeError(err));

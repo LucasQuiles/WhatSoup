@@ -375,7 +375,6 @@ type PendingPollQuestion = {
   adminJids: Set<string> | null;
   awaitResolve?: (answer: string) => void;
   awaitReject?: (err: Error) => void;
-  awaitAbortController?: AbortController;
   resolvedAt?: number;
   source: 'askuser' | 'send_poll';
   sentPollMessageIds: string[];
@@ -403,6 +402,8 @@ export function evaluateResolution(
       return { status: 'pending' };
     }
     case 'admin-wins': {
+      // On vote arrival: admin vote resolves immediately; no admin vote yet → pending.
+      // On timeout: falls back to majority of recorded non-admin votes (see handlePendingPollSoftExpiry).
       for (const vote of votes.values()) {
         if (vote.isAdmin) return { status: 'resolved', answer: vote.selectedOptions.join(', ') };
       }
@@ -3005,8 +3006,9 @@ export class AgentRuntime implements Runtime {
       if (isGroupJid(pendingPoll.chatJid) && actorJid) {
         const canonicalActor = jidNormalizedUser(actorJid);
         bypassPollIntercept =
-          // admin-only: non-admin text is not a poll answer
-          (pendingPoll.resolution === 'admin-only' && !pendingPoll.adminJids?.has(canonicalActor)) ||
+          // admin-only / admin-wins: non-admin text is not a poll answer
+          ((pendingPoll.resolution === 'admin-only' || pendingPoll.resolution === 'admin-wins')
+            && !pendingPoll.adminJids?.has(canonicalActor)) ||
           // majority-after-timeout: text input never counts — only poll widget votes
           (pendingPoll.resolution ?? 'first-vote-wins') === 'majority-after-timeout';
       }
@@ -3288,10 +3290,6 @@ export class AgentRuntime implements Runtime {
       pending.awaitReject = undefined;
     }
 
-    if (pending.awaitAbortController) {
-      pending.awaitAbortController = undefined;
-    }
-
     // Remove from pending map (safe — awaiters already settled)
     this.deletePendingPollQuestions(mapKey);
 
@@ -3328,9 +3326,28 @@ export class AgentRuntime implements Runtime {
         }
         const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
         this.settlePoll(mapKey, pending, 'timeout', answer);
-      } else {
-        this.settlePoll(mapKey, pending, 'expiry', '[Poll timed out — no qualifying vote received]');
+        return;
       }
+
+      // admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
+      if (pending.resolution === 'admin-wins') {
+        for (const [qIndex, votes] of pending.votesByQuestion) {
+          if (pending.answersCollected[qIndex] === undefined) {
+            const winner = evaluateResolutionOnTimeout(votes);
+            pending.answersCollected[qIndex] = winner ?? '[No admin responded — decision expired]';
+          }
+        }
+        for (let i = 0; i < pending.questions.length; i++) {
+          if (pending.answersCollected[i] === undefined) {
+            pending.answersCollected[i] = '[No admin responded — decision expired]';
+          }
+        }
+        const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
+        this.settlePoll(mapKey, pending, 'timeout', answer);
+        return;
+      }
+
+      this.settlePoll(mapKey, pending, 'expiry', '[Poll timed out — no qualifying vote received]');
       return;
     }
 
@@ -3345,6 +3362,24 @@ export class AgentRuntime implements Runtime {
       for (let i = 0; i < pending.questions.length; i++) {
         if (pending.answersCollected[i] === undefined) {
           pending.answersCollected[i] = '[No votes received — decision expired]';
+        }
+      }
+      const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
+      this.settlePoll(mapKey, pending, 'timeout', answer);
+      return;
+    }
+
+    // AskUser admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
+    if (pending.resolution === 'admin-wins') {
+      for (const [qIndex, votes] of pending.votesByQuestion) {
+        if (pending.answersCollected[qIndex] === undefined) {
+          const winner = evaluateResolutionOnTimeout(votes);
+          pending.answersCollected[qIndex] = winner ?? '[No admin responded — decision expired]';
+        }
+      }
+      for (let i = 0; i < pending.questions.length; i++) {
+        if (pending.answersCollected[i] === undefined) {
+          pending.answersCollected[i] = '[No admin responded — decision expired]';
         }
       }
       const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
@@ -3417,6 +3452,13 @@ export class AgentRuntime implements Runtime {
   ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const mapKey = `send_poll:${pollId}`;
+
+      // DMs always use first-vote-wins — admin strategies require group metadata
+      if (!isGroupJid(chatJid) && (resolution === 'admin-only' || resolution === 'admin-wins')) {
+        log.warn({ pollId, chatJid, resolution }, 'admin poll strategy used in DM — degrading to first-vote-wins');
+        resolution = 'first-vote-wins';
+      }
+
       const pending: PendingPollQuestion = {
         questions: [{ question: 'send_poll', header: 'Poll', options: options.map(o => ({ label: o, description: '' })), multiSelect: false }],
         toolId: `send_poll:${pollId}`,
@@ -3507,7 +3549,7 @@ export class AgentRuntime implements Runtime {
 
     const connection = this.messenger as import('../../transport/connection.ts').ConnectionManager;
 
-    const instanceConfig = (config as any).pollResolution;
+    const instanceConfig = config.pollResolution;
     const isGroup = isGroupJid(chatJid);
     let resolvedStrategy: ResolutionStrategy = isGroup
       ? (instanceConfig?.defaultStrategy ?? 'first-vote-wins')
@@ -3722,6 +3764,11 @@ export class AgentRuntime implements Runtime {
 
     const pending = this.pendingPollQuestions.get(matchedMapKey);
     if (!pending || pending.mode !== 'poll') return;
+
+    if (pending.source === 'send_poll') {
+      this.settlePoll(matchedMapKey, pending, 'expiry', '[Poll vote decryption failed]');
+      return;
+    }
 
     pending.mode = 'textFallback';
     pending.pollMessageIdToQuestionIndex.clear();

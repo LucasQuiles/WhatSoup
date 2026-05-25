@@ -774,7 +774,6 @@ export const config = {
   pollResolution: {
     defaultStrategy: (instance?.pollResolution?.defaultStrategy as string | undefined) ?? 'first-vote-wins',
     defaultTimeoutMs: (instance?.pollResolution?.defaultTimeoutMs as number | undefined) ?? 300_000,
-    maxTimeoutMs: (instance?.pollResolution?.maxTimeoutMs as number | undefined) ?? 600_000,
   },
 
   // Health
