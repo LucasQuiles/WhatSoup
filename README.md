@@ -305,6 +305,8 @@ Access modes: `self_only` (just you), `allowlist` (approved contacts), `open_dm`
 
 **Realtime event poller** — Snapshot-diff engine running every 2 seconds. Tracks per-instance markers (latest message PK, access list changes, log file mtime) and emits WebSocket invalidation events only when something changes. Log file tracking uses a cached-path optimization — steady-state polls do a single `statSync` instead of scanning the log directory.
 
+**AskUserQuestion poll bridge** — When an agent subprocess calls `AskUserQuestion`, the runtime intercepts it and renders the options as a WhatsApp poll instead of blocking on terminal input. Poll votes are decrypted via Baileys' Signal protocol and injected back into the session. Supports LID-addressed messages, vote-change grace windows, persistent pending state across restarts, and a default "Other" escape hatch. Per-chat DM mode only; groups fall through to text. See `docs/runbooks/agent-decision-polls.md`.
+
 **linkedStatus** — Each instance in the fleet API includes `linkedStatus: 'linked' | 'unlinked'` based on whether Baileys auth credentials exist. Unlinked instances show a "Re-link" button instead of "Restart" since they need QR authentication before they can run.
 
 ## Health & Monitoring

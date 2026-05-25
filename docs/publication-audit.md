@@ -2,21 +2,18 @@
 
 `docs/publication-audit.md` is the tracked source of truth for documentation that must be reviewed before public publication. The publication guard validates that every tracked internal documentation path has exactly one row here.
 
-**Total classification rows:** 192
+**Total classification rows:** 189
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 192 |
+| PRIVATE-ARCHIVE | 189 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 192 |
+| Total | 189 |
 
 | Path | Classification | Rationale |
 |---|---|---|
-| `HANDOFF-DEDUP-CONSOLIDATION.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `HANDOFF-MULTI-PROVIDER-FRONTEND.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `HANDOFF-PROVIDER-UI-PHASE2.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/current-program.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/research/2026-04-05-sp1-media-access-minimal-investigation.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/research/gemini-cli-stream-json-investigation-2026-04-04.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
