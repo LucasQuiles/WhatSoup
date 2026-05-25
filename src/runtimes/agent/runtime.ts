@@ -3552,7 +3552,7 @@ export class AgentRuntime implements Runtime {
     const instanceConfig = config.pollResolution;
     const isGroup = isGroupJid(chatJid);
     let resolvedStrategy: ResolutionStrategy = isGroup
-      ? (instanceConfig?.defaultStrategy ?? 'first-vote-wins')
+      ? ((instanceConfig?.defaultStrategy as ResolutionStrategy | undefined) ?? 'first-vote-wins')
       : 'first-vote-wins';
     let adminJids: Set<string> | null = null;
     if (isGroup && (resolvedStrategy === 'admin-only' || resolvedStrategy === 'admin-wins')) {
