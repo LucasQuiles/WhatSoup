@@ -520,7 +520,7 @@ export function registerMessagingTools(
       selectableCount: z.number().optional().describe('Whole number of options the voter may select. Defaults to 1; use values above 1 for multi-select polls and never exceed options.length.'),
       resolution: z.enum(['first-vote-wins', 'admin-only', 'admin-wins', 'majority-after-timeout']).optional()
         .describe('Resolution strategy. Defaults to first-vote-wins.'),
-      timeoutMs: z.number().optional().describe('Timeout in ms. Default 300000, max 600000.'),
+      timeoutMs: z.number().optional().describe('Timeout in ms. Default 3600000 (1 hour), max 86400000 (24 hours).'),
       awaitResult: z.boolean().optional().describe('If true, block until poll resolves. Default false.'),
     }),
     handler: async (params, _session: SessionContext) => {
@@ -577,8 +577,8 @@ export function registerMessagingTools(
 
       const resolvedResolution = (params['resolution'] as ResolutionStrategy | undefined) ?? 'first-vote-wins';
       const resolvedTimeoutMs = Math.min(
-        (params['timeoutMs'] as number | undefined) ?? 300_000,
-        600_000,
+        (params['timeoutMs'] as number | undefined) ?? 3_600_000,
+        86_400_000,
       );
       const awaitResult = (params['awaitResult'] as boolean | undefined) ?? false;
 

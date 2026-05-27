@@ -3578,7 +3578,7 @@ export class AgentRuntime implements Runtime {
       answersCollected: {},
       createdAt: Date.now(),
       resolution: resolvedStrategy,
-      timeoutMs: instanceConfig?.defaultTimeoutMs ?? 300_000,
+      timeoutMs: instanceConfig?.defaultTimeoutMs ?? 3_600_000,
       votesByQuestion: new Map(),
       adminJids,
       sentPollMessageIds: [],

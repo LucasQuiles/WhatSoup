@@ -773,7 +773,7 @@ export const config = {
   // Poll resolution: configurable group poll behavior
   pollResolution: {
     defaultStrategy: (instance?.pollResolution?.defaultStrategy as string | undefined) ?? 'first-vote-wins',
-    defaultTimeoutMs: (instance?.pollResolution?.defaultTimeoutMs as number | undefined) ?? 300_000,
+    defaultTimeoutMs: (instance?.pollResolution?.defaultTimeoutMs as number | undefined) ?? 3_600_000,
   },
 
   // Health
