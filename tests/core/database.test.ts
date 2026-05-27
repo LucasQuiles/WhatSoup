@@ -913,3 +913,87 @@ describe('migration 25 — lid_mappings_history', () => {
     expect(row.c).toBe(0);
   });
 });
+
+describe('migration 28 — pending_polls', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('records migration version 28 in schema_migrations', () => {
+    const row = db.raw
+      .prepare('SELECT version FROM schema_migrations WHERE version = 28')
+      .get() as { version: number } | undefined;
+    expect(row?.version).toBe(28);
+  });
+
+  it('creates pending_polls table with the expected schema', () => {
+    const cols = db.raw
+      .prepare("PRAGMA table_info('pending_polls')")
+      .all() as Array<{ name: string; type: string; notnull: number; pk: number }>;
+    const byName = Object.fromEntries(cols.map((c) => [c.name, c]));
+
+    // PRIMARY KEY columns in SQLite report notnull=0 even though NULL would be rejected by the PK constraint.
+    expect(byName.map_key).toMatchObject({ type: 'TEXT', pk: 1 });
+    expect(byName.chat_jid).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(byName.tool_id).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(byName.source).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(byName.resolution).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(byName.payload).toMatchObject({ type: 'TEXT', notnull: 1 });
+    expect(byName.created_at).toMatchObject({ type: 'INTEGER', notnull: 1 });
+    expect(byName.closes_at).toMatchObject({ type: 'INTEGER', notnull: 0 });
+    expect(byName.hard_closes_at).toMatchObject({ type: 'INTEGER', notnull: 0 });
+  });
+
+  it('creates indexes on chat_jid and closes_at', () => {
+    const indexes = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='pending_polls'")
+      .all() as Array<{ name: string }>;
+    const names = indexes.map((i) => i.name);
+    expect(names).toContain('idx_pending_polls_chat_jid');
+    expect(names).toContain('idx_pending_polls_closes_at');
+  });
+
+  it('upserts on conflicting map_key (round-trip persistence)', () => {
+    const insert = db.raw.prepare(`
+      INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(map_key) DO UPDATE SET payload = excluded.payload, closes_at = excluded.closes_at
+    `);
+    insert.run('key-1', 'chat-1@s.whatsapp.net', 'tool-1', 'askuser', 'first-vote-wins', '{"v":1}', 1_000, 2_000, 3_000);
+    insert.run('key-1', 'chat-1@s.whatsapp.net', 'tool-1', 'askuser', 'first-vote-wins', '{"v":2}', 1_000, 2_500, 3_000);
+
+    const row = db.raw.prepare('SELECT payload, closes_at FROM pending_polls WHERE map_key = ?').get('key-1') as
+      | { payload: string; closes_at: number }
+      | undefined;
+    expect(row?.payload).toBe('{"v":2}');
+    expect(row?.closes_at).toBe(2_500);
+  });
+
+  it('table is empty after migration (no backfill)', () => {
+    const row = db.raw
+      .prepare('SELECT COUNT(*) AS c FROM pending_polls')
+      .get() as { c: number };
+    expect(row.c).toBe(0);
+  });
+
+  it('migration is idempotent (re-running CREATE IF NOT EXISTS is a no-op)', () => {
+    // Already applied on open; re-running the migration explicitly should not throw or
+    // change any state.
+    expect(() => {
+      db.raw.exec(`
+        CREATE TABLE IF NOT EXISTS pending_polls (
+          map_key TEXT PRIMARY KEY, chat_jid TEXT NOT NULL, tool_id TEXT NOT NULL,
+          source TEXT NOT NULL, resolution TEXT NOT NULL, payload TEXT NOT NULL,
+          created_at INTEGER NOT NULL, closes_at INTEGER, hard_closes_at INTEGER
+        );
+      `);
+    }).not.toThrow();
+  });
+});
