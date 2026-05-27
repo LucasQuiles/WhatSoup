@@ -497,12 +497,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     const cutoff = Date.now() - ConnectionManager.PENDING_POLL_TTL_MS;
     for (const [id, poll] of this.pendingPolls) {
       if (poll.createdAt < cutoff) {
-        this.pendingPolls.delete(id);
-        const grace = this.voteGraceTimers.get(id);
-        if (grace) {
-          clearTimeout(grace.timer);
-          this.voteGraceTimers.delete(id);
-        }
+        this.clearPollTracking(id);
       }
     }
   }
@@ -1317,7 +1312,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     pollMessageId: string,
     data: { pollMessageId: string; chatJid: string; voterJid: string; selectedOptions: string[]; jidType: string },
   ): void {
-    const existing = this.voteGraceTimers.get(pollMessageId);
+    const graceKey = `${pollMessageId}:${data.voterJid}`;
+    const existing = this.voteGraceTimers.get(graceKey);
     if (existing) {
       // Vote changed within grace window — replace buffered result, reset timer
       clearTimeout(existing.timer);
@@ -1329,8 +1325,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
 
     const timer = setTimeout(() => {
-      this.voteGraceTimers.delete(pollMessageId);
-      this.pendingPolls.delete(pollMessageId);
+      this.voteGraceTimers.delete(graceKey);
       this.emit('pollVoteReceived', {
         pollMessageId: data.pollMessageId,
         chatJid: data.chatJid,
@@ -1345,7 +1340,20 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }, 'poll vote decrypted and emitted');
     }, ConnectionManager.POLL_VOTE_GRACE_MS);
 
-    this.voteGraceTimers.set(pollMessageId, { timer, pendingEmit: data });
+    this.voteGraceTimers.set(graceKey, { timer, pendingEmit: data });
+  }
+
+  /** Atomically clears all grace timers and pendingPolls state for a given poll. */
+  public clearPollTracking(pollMessageId: string): void {
+    this.pendingPolls.delete(pollMessageId);
+    const prefix = `${pollMessageId}:`;
+    for (const [key, entry] of this.voteGraceTimers) {
+      if (key.startsWith(prefix)) {
+        clearTimeout(entry.timer);
+        this.voteGraceTimers.delete(key);
+      }
+    }
+    this.log.info({ pollMessageId }, 'poll tracking cleared');
   }
 
   // -------------------------------------------------------------------------

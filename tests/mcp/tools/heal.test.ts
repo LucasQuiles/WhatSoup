@@ -52,6 +52,8 @@ const { mockSession, mockQueue, capturedOnEventRef } = vi.hoisted(() => {
     targetChatJid: 'test@s.whatsapp.net',
     getLastOpId: vi.fn(() => undefined),
     setDurability: vi.fn(),
+    enqueuePoll: vi.fn(async (sendFn: () => Promise<void>) => sendFn()),
+    setPollPending: vi.fn(),
   };
 
   return { mockSession, mockQueue, capturedOnEventRef };

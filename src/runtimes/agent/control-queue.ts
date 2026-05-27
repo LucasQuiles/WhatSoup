@@ -63,6 +63,16 @@ export class ControlQueue implements IOutboundQueue {
     // intentional no-op
   }
 
+  /** Pass-through — control sessions execute polls immediately without ordering constraints. */
+  async enqueuePoll(sendFn: () => Promise<void>): Promise<void> {
+    await sendFn();
+  }
+
+  /** No-op — control sessions have no poll-pending state. */
+  setPollPending(_pending: boolean): void {
+    // intentional no-op
+  }
+
   /** No-op — nothing to flush; all output is kept in the local log buffer. */
   async flush(): Promise<void> {
     // intentional no-op

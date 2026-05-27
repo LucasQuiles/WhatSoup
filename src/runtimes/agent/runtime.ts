@@ -45,6 +45,7 @@ import { toConversationKey, isGroupConversationKey } from '../../core/conversati
 import { createChatResolver } from '../../core/chats-resolver.ts';
 import { createOutboundSendsWriter } from '../../core/outbound-sends.ts';
 import { toPersonalJid, isGroupJid } from '../../core/jid-constants.ts';
+import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { config } from '../../config.ts';
@@ -337,6 +338,24 @@ type AskUserQuestion = {
   multiSelect: boolean;
 };
 
+export type ResolutionStrategy =
+  | 'first-vote-wins'
+  | 'admin-only'
+  | 'admin-wins'
+  | 'majority-after-timeout';
+
+export interface PollVote {
+  voterJid: string;
+  selectedOptions: string[];
+  isAdmin: boolean;
+  timestamp: number;
+}
+
+export interface ResolutionResult {
+  status: 'resolved' | 'pending' | 'ignored';
+  answer?: string;
+}
+
 type PendingPollQuestion = {
   questions: AskUserQuestion[];
   toolId: string;
@@ -349,7 +368,78 @@ type PendingPollQuestion = {
   createdAt: number;
   softExpiryTimer?: ReturnType<typeof setTimeout>;
   hardExpiryTimer?: ReturnType<typeof setTimeout>;
+  // Group poll extensions
+  resolution: ResolutionStrategy;
+  timeoutMs: number;
+  votesByQuestion: Map<number, Map<string, PollVote>>;
+  adminJids: Set<string> | null;
+  awaitResolve?: (answer: string) => void;
+  awaitReject?: (err: Error) => void;
+  resolvedAt?: number;
+  source: 'askuser' | 'send_poll';
+  sentPollMessageIds: string[];
 };
+
+// ---------------------------------------------------------------------------
+// Group poll resolution engine (module-level exports for testability)
+// ---------------------------------------------------------------------------
+
+export function evaluateResolution(
+  strategy: ResolutionStrategy,
+  votes: Map<string, PollVote>,
+  adminJids: Set<string> | null,
+): ResolutionResult {
+  if (votes.size === 0) return { status: 'pending' };
+  switch (strategy) {
+    case 'first-vote-wins': {
+      const firstVote = votes.values().next().value!;
+      return { status: 'resolved', answer: firstVote.selectedOptions.join(', ') };
+    }
+    case 'admin-only': {
+      for (const vote of votes.values()) {
+        if (vote.isAdmin) return { status: 'resolved', answer: vote.selectedOptions.join(', ') };
+      }
+      return { status: 'pending' };
+    }
+    case 'admin-wins': {
+      // On vote arrival: admin vote resolves immediately; no admin vote yet → pending.
+      // On timeout: falls back to majority of recorded non-admin votes (see handlePendingPollSoftExpiry).
+      for (const vote of votes.values()) {
+        if (vote.isAdmin) return { status: 'resolved', answer: vote.selectedOptions.join(', ') };
+      }
+      return { status: 'pending' };
+    }
+    case 'majority-after-timeout':
+      return { status: 'pending' };
+  }
+}
+
+export function evaluateResolutionOnTimeout(votes: Map<string, PollVote>): string | null {
+  if (votes.size === 0) return null;
+  const tally = new Map<string, { count: number; earliestTimestamp: number }>();
+  for (const vote of votes.values()) {
+    const option = vote.selectedOptions[0];
+    if (!option) continue;
+    const existing = tally.get(option);
+    if (existing) {
+      existing.count++;
+      existing.earliestTimestamp = Math.min(existing.earliestTimestamp, vote.timestamp);
+    } else {
+      tally.set(option, { count: 1, earliestTimestamp: vote.timestamp });
+    }
+  }
+  let winner: string | null = null;
+  let bestCount = 0;
+  let bestTimestamp = Infinity;
+  for (const [option, data] of tally) {
+    if (data.count > bestCount || (data.count === bestCount && data.earliestTimestamp < bestTimestamp)) {
+      winner = option;
+      bestCount = data.count;
+      bestTimestamp = data.earliestTimestamp;
+    }
+  }
+  return winner;
+}
 
 type EscapeHatchLabelPattern = { phrase: string; allowWhitespaceSuffix: boolean };
 
@@ -1022,6 +1112,8 @@ export class AgentRuntime implements Runtime {
   private pendingPollQuestions = new Map<string, PendingPollQuestion>();
   /** Tool IDs for which the auto-resolved is_error tool_result should be suppressed. */
   private suppressedAskUserToolIds = new Set<string>();
+  private groupMetadataCache = new Map<string, { adminJids: Set<string>; fetchedAt: number }>();
+  private static readonly GROUP_METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
 
   // Crash tracking — keyed by per-chat mapKey for per_chat runtimes and by a
   // single global key for single/shared mode. Counts survive session map deletions
@@ -1668,6 +1760,10 @@ export class AgentRuntime implements Runtime {
     }).memory?.pinecone?.knowledgeSearch?.allowGlobalAgentSessions === true;
     registerAllTools(this.registry, this.messenger as ConnectionManager, this.db, {
       enableKnowledgeSearch: this.sandboxPerChat || allowGlobalKnowledgeSearch,
+      pollRegistrar: {
+        register: (pollId, chatJid, options, resolution, timeoutMs, abortSignal) =>
+          this.registerSendPollAwaiter(pollId, chatJid, options, resolution, timeoutMs, abortSignal),
+      },
     });
   }
 
@@ -2905,47 +3001,63 @@ export class AgentRuntime implements Runtime {
     // label, description match, or free-text answer and inject it back.
     const pendingPoll = this.pendingPollQuestions.get(mapKey);
     if (pendingPoll) {
-      this.advancePendingPollIndex(pendingPoll);
+      // In groups, determine whether this sender's text should be intercepted
+      let bypassPollIntercept = false;
+      if (isGroupJid(pendingPoll.chatJid) && actorJid) {
+        const canonicalActor = jidNormalizedUser(actorJid);
+        bypassPollIntercept =
+          // admin-only / admin-wins: non-admin text is not a poll answer
+          ((pendingPoll.resolution === 'admin-only' || pendingPoll.resolution === 'admin-wins')
+            && !pendingPoll.adminJids?.has(canonicalActor)) ||
+          // majority-after-timeout: text input never counts — only poll widget votes
+          (pendingPoll.resolution ?? 'first-vote-wins') === 'majority-after-timeout';
+      }
 
-      const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
-      if (currentQ) {
-        if (pendingPoll.mode === 'poll' && isLowSignalPollStatusReply(text, currentQ.options)) {
-          const queue = this.getQueueForChat(pendingPoll.chatJid, mapKey);
-          if (queue) {
-            queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
-            try {
-              await queue.flush();
-            } catch (err) {
-              log.error({ err, chatJid: pendingPoll.chatJid }, 'failed to flush pending poll status clarification');
-            }
-          } else {
-            this.sendDirect(
-              pendingPoll.chatJid,
-              'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
-            );
-          }
-          this.completeConsumedPerChatInbound(mapKey, 'poll_status_reply');
-          return;
-        }
-
-        const answeredQuestionIndex = pendingPoll.currentQuestionIndex;
-        pendingPoll.answersCollected[answeredQuestionIndex] = resolveTypedPollAnswer(text, currentQ);
-        this.removePollIdsForQuestion(pendingPoll, answeredQuestionIndex);
-        pendingPoll.currentQuestionIndex++;
+      if (!bypassPollIntercept) {
         this.advancePendingPollIndex(pendingPoll);
 
-        if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
-          this.injectPollAnswers(mapKey, pendingPoll);
-        } else {
-          log.info({
-            mapKey,
-            answered: Object.keys(pendingPoll.answersCollected).length,
-            total: pendingPoll.questions.length,
-          }, 'free-text answer collected — waiting for more');
-          this.completeConsumedPerChatInbound(mapKey, 'poll_partial_answer_collected');
+        const currentQ = pendingPoll.questions[pendingPoll.currentQuestionIndex];
+        if (currentQ) {
+          if (pendingPoll.mode === 'poll' && isLowSignalPollStatusReply(text, currentQ.options)) {
+            const queue = this.getQueueForChat(pendingPoll.chatJid, mapKey);
+            if (queue) {
+              queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
+              try {
+                await queue.flush();
+              } catch (err) {
+                log.error({ err, chatJid: pendingPoll.chatJid }, 'failed to flush pending poll status clarification');
+              }
+            } else {
+              this.sendDirect(
+                pendingPoll.chatJid,
+                'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
+              );
+            }
+            this.completeConsumedPerChatInbound(mapKey, 'poll_status_reply');
+            return;
+          }
+
+          const answeredQuestionIndex = pendingPoll.currentQuestionIndex;
+          pendingPoll.answersCollected[answeredQuestionIndex] = resolveTypedPollAnswer(text, currentQ);
+          this.removePollIdsForQuestion(pendingPoll, answeredQuestionIndex);
+          pendingPoll.currentQuestionIndex++;
+          this.advancePendingPollIndex(pendingPoll);
+
+          if (Object.keys(pendingPoll.answersCollected).length >= pendingPoll.questions.length) {
+            this.injectPollAnswers(mapKey, pendingPoll);
+          } else {
+            log.info({
+              mapKey,
+              answered: Object.keys(pendingPoll.answersCollected).length,
+              total: pendingPoll.questions.length,
+            }, 'free-text answer collected — waiting for more');
+            this.completeConsumedPerChatInbound(mapKey, 'poll_partial_answer_collected');
+          }
+          return; // consume the message — don't send as a new turn
         }
-        return; // consume the message — don't send as a new turn
       }
+      // When bypassPollIntercept is true, execution falls through to the
+      // normal sendTurnToSession path below
     }
 
     // Clear post-turn gate — legitimate new user turn begins
@@ -3037,7 +3149,19 @@ export class AgentRuntime implements Runtime {
 
   private deletePendingPollQuestions(mapKey: string): void {
     const pending = this.pendingPollQuestions.get(mapKey);
-    if (pending) this.clearPendingPollTimers(pending);
+    if (!pending) return;
+    this.clearPendingPollTimers(pending);
+    // Clean up suppression for askuser source
+    if (pending.source === 'askuser' || pending.source === undefined) {
+      this.suppressedAskUserToolIds.delete(pending.toolId);
+    }
+    // Reject ONLY if awaiters haven't already been settled by settlePoll()
+    // (settlePoll nulls callbacks after settlement, so this is safe)
+    if (pending.awaitReject) {
+      pending.awaitReject(new Error('Poll abandoned'));
+      pending.awaitResolve = undefined;
+      pending.awaitReject = undefined;
+    }
     this.pendingPollQuestions.delete(mapKey);
   }
 
@@ -3060,12 +3184,21 @@ export class AgentRuntime implements Runtime {
   }
 
   private startPendingPollExpiry(mapKey: string, pending: PendingPollQuestion): void {
+    const softMs = pending.timeoutMs;
+    const hardMs = pending.timeoutMs * 2;
+
     if (pending.mode === 'poll' && !pending.softExpiryTimer) {
-      pending.softExpiryTimer = setTimeout(() => this.handlePendingPollSoftExpiry(mapKey, pending), ASKUSER_POLL_SOFT_EXPIRY_MS);
+      pending.softExpiryTimer = setTimeout(() => {
+        pending.softExpiryTimer = undefined;
+        this.handlePendingPollSoftExpiry(mapKey, pending);
+      }, softMs);
       pending.softExpiryTimer.unref?.();
     }
     if (!pending.hardExpiryTimer) {
-      pending.hardExpiryTimer = setTimeout(() => this.handlePendingPollHardExpiry(mapKey, pending), ASKUSER_POLL_HARD_EXPIRY_MS);
+      pending.hardExpiryTimer = setTimeout(() => {
+        pending.hardExpiryTimer = undefined;
+        this.handlePendingPollHardExpiry(mapKey, pending);
+      }, hardMs);
       pending.hardExpiryTimer.unref?.();
     }
   }
@@ -3118,9 +3251,141 @@ export class AgentRuntime implements Runtime {
     });
   }
 
+  private settlePoll(
+    mapKey: string,
+    pending: PendingPollQuestion,
+    reason: 'vote' | 'timeout' | 'abort' | 'expiry',
+    answer: string,
+  ): void {
+    // Re-read and verify object identity — idempotent guard
+    const current = this.pendingPollQuestions.get(mapKey);
+    if (current !== pending || pending.resolvedAt !== undefined) {
+      log.debug({ mapKey, reason }, 'settlePoll called but poll already settled or removed');
+      return;
+    }
+    pending.resolvedAt = Date.now();
+
+    // Clear timers
+    if (pending.softExpiryTimer) { clearTimeout(pending.softExpiryTimer); pending.softExpiryTimer = undefined; }
+    if (pending.hardExpiryTimer) { clearTimeout(pending.hardExpiryTimer); pending.hardExpiryTimer = undefined; }
+
+    // Clear transport poll tracking using preserved sent IDs
+    const connection = this.messenger as ConnectionManager;
+    if (typeof connection.clearPollTracking === 'function' && pending.sentPollMessageIds) {
+      for (const pollMsgId of pending.sentPollMessageIds) {
+        connection.clearPollTracking(pollMsgId);
+      }
+    }
+
+    // Resolve/reject BEFORE removing from map
+    if (pending.source === 'send_poll') {
+      if (reason === 'abort' || reason === 'expiry') {
+        if (pending.awaitReject) {
+          pending.awaitReject(new Error(`Poll ${reason}: ${answer}`));
+        }
+      } else if (pending.awaitResolve) {
+        pending.awaitResolve(answer);
+      }
+      pending.awaitResolve = undefined;
+      pending.awaitReject = undefined;
+    }
+
+    // Remove from pending map (safe — awaiters already settled)
+    this.deletePendingPollQuestions(mapKey);
+
+    // AskUser: inject answer into session (treat undefined source as 'askuser' for legacy compat)
+    if (pending.source === 'askuser' || pending.source === undefined) {
+      this.injectPollAnswers(mapKey, pending);
+    }
+
+    // Mark queue as no longer poll-pending
+    const queue = this.getQueueForChat(pending.chatJid, mapKey);
+    queue?.setPollPending(false);
+
+    log.info({ mapKey, reason, source: pending.source }, 'poll settled');
+  }
+
   private handlePendingPollSoftExpiry(mapKey: string, expectedPending: PendingPollQuestion): void {
     const pending = this.pendingPollQuestions.get(mapKey);
     if (!pending || pending !== expectedPending || pending.mode !== 'poll') return;
+
+    // send_poll awaiters should settle/reject without sending AskUser fallback text
+    if (pending.source === 'send_poll') {
+      if (pending.resolution === 'majority-after-timeout') {
+        // Tally and settle with majority result
+        for (const [qIndex, votes] of pending.votesByQuestion) {
+          if (pending.answersCollected[qIndex] === undefined) {
+            const winner = evaluateResolutionOnTimeout(votes);
+            pending.answersCollected[qIndex] = winner ?? '[No votes received — decision expired]';
+          }
+        }
+        for (let i = 0; i < pending.questions.length; i++) {
+          if (pending.answersCollected[i] === undefined) {
+            pending.answersCollected[i] = '[No votes received — decision expired]';
+          }
+        }
+        const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
+        this.settlePoll(mapKey, pending, 'timeout', answer);
+        return;
+      }
+
+      // admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
+      if (pending.resolution === 'admin-wins') {
+        for (const [qIndex, votes] of pending.votesByQuestion) {
+          if (pending.answersCollected[qIndex] === undefined) {
+            const winner = evaluateResolutionOnTimeout(votes);
+            pending.answersCollected[qIndex] = winner ?? '[No admin responded — decision expired]';
+          }
+        }
+        for (let i = 0; i < pending.questions.length; i++) {
+          if (pending.answersCollected[i] === undefined) {
+            pending.answersCollected[i] = '[No admin responded — decision expired]';
+          }
+        }
+        const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
+        this.settlePoll(mapKey, pending, 'timeout', answer);
+        return;
+      }
+
+      this.settlePoll(mapKey, pending, 'expiry', '[Poll timed out — no qualifying vote received]');
+      return;
+    }
+
+    // For AskUser majority-after-timeout, resolve with tally
+    if (pending.resolution === 'majority-after-timeout') {
+      for (const [qIndex, votes] of pending.votesByQuestion) {
+        if (pending.answersCollected[qIndex] === undefined) {
+          const winner = evaluateResolutionOnTimeout(votes);
+          pending.answersCollected[qIndex] = winner ?? '[No votes received — decision expired]';
+        }
+      }
+      for (let i = 0; i < pending.questions.length; i++) {
+        if (pending.answersCollected[i] === undefined) {
+          pending.answersCollected[i] = '[No votes received — decision expired]';
+        }
+      }
+      const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
+      this.settlePoll(mapKey, pending, 'timeout', answer);
+      return;
+    }
+
+    // AskUser admin-wins timeout fallback: if no admin voted, use majority of recorded non-admin votes
+    if (pending.resolution === 'admin-wins') {
+      for (const [qIndex, votes] of pending.votesByQuestion) {
+        if (pending.answersCollected[qIndex] === undefined) {
+          const winner = evaluateResolutionOnTimeout(votes);
+          pending.answersCollected[qIndex] = winner ?? '[No admin responded — decision expired]';
+        }
+      }
+      for (let i = 0; i < pending.questions.length; i++) {
+        if (pending.answersCollected[i] === undefined) {
+          pending.answersCollected[i] = '[No admin responded — decision expired]';
+        }
+      }
+      const answer = pending.questions.map((_, i) => pending.answersCollected[i]).join('\n');
+      this.settlePoll(mapKey, pending, 'timeout', answer);
+      return;
+    }
 
     const unanswered = this.unansweredPollQuestions(pending);
     if (unanswered.length === 0) return;
@@ -3147,6 +3412,113 @@ export class AgentRuntime implements Runtime {
     this.deletePendingPollQuestions(mapKey);
   }
 
+  private async fetchGroupAdminJids(chatJid: string): Promise<Set<string> | null> {
+    if (!isGroupJid(chatJid)) return null;
+    const cached = this.groupMetadataCache.get(chatJid);
+    if (cached && Date.now() - cached.fetchedAt < AgentRuntime.GROUP_METADATA_CACHE_TTL_MS) {
+      return cached.adminJids;
+    }
+    try {
+      const connection = this.messenger as ConnectionManager;
+      const sock = connection.getSocket();
+      if (!sock) return null;
+      const metadata = await sock.groupMetadata(chatJid);
+      const adminJids = new Set<string>();
+      for (const p of metadata.participants) {
+        if (p.admin === 'admin' || p.admin === 'superadmin') {
+          adminJids.add(jidNormalizedUser(p.id));
+        }
+      }
+      this.groupMetadataCache.set(chatJid, { adminJids, fetchedAt: Date.now() });
+      return adminJids;
+    } catch (err) {
+      log.warn({ err, chatJid }, 'failed to fetch group metadata — degrading to first-vote-wins');
+      return null;
+    }
+  }
+
+  /**
+   * Register a send_poll tool call as a pending poll awaiter.
+   * Bridges the MCP tool layer to the runtime's poll resolution engine
+   * so that `awaitResult: true` polls block until a vote resolves them.
+   */
+  private registerSendPollAwaiter(
+    pollId: string,
+    chatJid: string,
+    options: string[],
+    resolution: ResolutionStrategy,
+    timeoutMs: number,
+    abortSignal?: AbortSignal,
+  ): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const mapKey = `send_poll:${pollId}`;
+
+      // DMs always use first-vote-wins — admin strategies require group metadata
+      if (!isGroupJid(chatJid) && (resolution === 'admin-only' || resolution === 'admin-wins')) {
+        log.warn({ pollId, chatJid, resolution }, 'admin poll strategy used in DM — degrading to first-vote-wins');
+        resolution = 'first-vote-wins';
+      }
+
+      const pending: PendingPollQuestion = {
+        questions: [{ question: 'send_poll', header: 'Poll', options: options.map(o => ({ label: o, description: '' })), multiSelect: false }],
+        toolId: `send_poll:${pollId}`,
+        chatJid,
+        chatJidAliases: new Set([chatJid]),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([[pollId, 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt: Date.now(),
+        resolution,
+        timeoutMs,
+        votesByQuestion: new Map(),
+        adminJids: null,
+        awaitResolve: resolve,
+        awaitReject: reject,
+        source: 'send_poll',
+        sentPollMessageIds: [pollId],
+      };
+      this.pendingPollQuestions.set(mapKey, pending);
+      this.startPendingPollExpiry(mapKey, pending);
+
+      // Wire AbortSignal for MCP client disconnect
+      if (abortSignal) {
+        const onAbort = () => {
+          this.settlePoll(mapKey, pending, 'abort', 'MCP client disconnected');
+        };
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+        // Wrap resolve/reject to clean up abort listener on normal settlement
+        const origResolve = pending.awaitResolve;
+        const origReject = pending.awaitReject;
+        if (origResolve) {
+          pending.awaitResolve = (answer: string) => {
+            abortSignal.removeEventListener('abort', onAbort);
+            origResolve(answer);
+          };
+        }
+        if (origReject) {
+          pending.awaitReject = (err: Error) => {
+            abortSignal.removeEventListener('abort', onAbort);
+            origReject(err);
+          };
+        }
+      }
+
+      // Fetch admin JIDs if strategy requires it
+      if ((resolution === 'admin-only' || resolution === 'admin-wins') && isGroupJid(chatJid)) {
+        void this.fetchGroupAdminJids(chatJid).then(admins => {
+          if (this.pendingPollQuestions.get(mapKey) === pending) {
+            pending.adminJids = admins;
+            if (admins === null) {
+              log.warn({ mapKey, resolution }, 'admin metadata unavailable — degrading to first-vote-wins');
+              pending.resolution = 'first-vote-wins';
+            }
+          }
+        });
+      }
+    });
+  }
+
   /**
    * Intercept an AskUserQuestion tool_use: send WhatsApp polls for each
    * question, store pending state, and register the toolId for tool_result
@@ -3159,10 +3531,6 @@ export class AgentRuntime implements Runtime {
     queue: IOutboundQueue,
   ): Promise<void> {
     const chatJid = queue.targetChatJid;
-    if (isGroupJid(chatJid)) {
-      log.info({ chatJid, toolId }, 'AskUserQuestion poll bridge disabled in group chat before suppression registration');
-      return;
-    }
 
     const normalizedQuestions = normalizeAskUserQuestions(questions);
     questions.forEach((question, index) => {
@@ -3181,6 +3549,20 @@ export class AgentRuntime implements Runtime {
 
     const connection = this.messenger as import('../../transport/connection.ts').ConnectionManager;
 
+    const instanceConfig = config.pollResolution;
+    const isGroup = isGroupJid(chatJid);
+    let resolvedStrategy: ResolutionStrategy = isGroup
+      ? ((instanceConfig?.defaultStrategy as ResolutionStrategy | undefined) ?? 'first-vote-wins')
+      : 'first-vote-wins';
+    let adminJids: Set<string> | null = null;
+    if (isGroup && (resolvedStrategy === 'admin-only' || resolvedStrategy === 'admin-wins')) {
+      adminJids = await this.fetchGroupAdminJids(chatJid);
+      if (adminJids === null) {
+        log.warn({ chatJid, resolvedStrategy }, 'admin metadata unavailable — degrading to first-vote-wins');
+        resolvedStrategy = 'first-vote-wins';
+      }
+    }
+
     // Register ALL synchronous state BEFORE any async work — tool_result and
     // result events may arrive while we're awaiting poll send.
     this.deletePendingPollQuestions(mapKey);
@@ -3195,6 +3577,13 @@ export class AgentRuntime implements Runtime {
       currentQuestionIndex: 0,
       answersCollected: {},
       createdAt: Date.now(),
+      resolution: resolvedStrategy,
+      timeoutMs: instanceConfig?.defaultTimeoutMs ?? 3_600_000,
+      votesByQuestion: new Map(),
+      adminJids,
+      sentPollMessageIds: [],
+      source: 'askuser' as const,
+      resolvedAt: undefined,
     };
     this.pendingPollQuestions.set(mapKey, pending);
 
@@ -3207,40 +3596,52 @@ export class AgentRuntime implements Runtime {
     }));
     const detailFlushedQuestionIndexes = new Set<number>();
 
-    for (const { index, question: q, formatted } of formattedQuestions) {
-      const selectableCount = q.multiSelect ? q.options.length : 1;
+    const sendPollLoop = async (): Promise<void> => {
+      for (const { index, question: q, formatted } of formattedQuestions) {
+        const selectableCount = q.multiSelect ? q.options.length : 1;
 
-      if (formatted.followUpText) {
-        queue.enqueueText(formatted.followUpText);
-        // Long option details should arrive before the poll so the user can read
-        // context first instead of scrolling back after the tap target appears.
+        if (formatted.followUpText) {
+          queue.enqueueText(formatted.followUpText);
+          // Long option details should arrive before the poll so the user can read
+          // context first instead of scrolling back after the tap target appears.
+          try {
+            await queue.flush();
+            detailFlushedQuestionIndexes.add(index);
+          } catch (err) {
+            log.warn({ err, chatJid }, 'failed to flush poll details before poll send');
+          }
+          if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+        }
+
         try {
-          await queue.flush();
-          detailFlushedQuestionIndexes.add(index);
+          const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
+          if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+          if (result.waMessageId) {
+            pollMessageIds.push(result.waMessageId);
+            pending.pollMessageIdToQuestionIndex.set(result.waMessageId, index);
+          }
+          if (!result.hasSecret) {
+            allHaveSecret = false;
+          }
         } catch (err) {
-          log.warn({ err, chatJid }, 'failed to flush poll details before poll send');
-        }
-        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
-      }
-
-      try {
-        const result = await connection.sendPollMessage(chatJid, formatted.pollName, formatted.pollValues, selectableCount);
-        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
-        if (result.waMessageId) {
-          pollMessageIds.push(result.waMessageId);
-          pending.pollMessageIdToQuestionIndex.set(result.waMessageId, index);
-        }
-        if (!result.hasSecret) {
+          if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+          log.error({ err, chatJid, question: q.question.slice(0, 80) }, 'failed to send poll for AskUserQuestion');
           allHaveSecret = false;
         }
-      } catch (err) {
-        if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
-        log.error({ err, chatJid, question: q.question.slice(0, 80) }, 'failed to send poll for AskUserQuestion');
-        allHaveSecret = false;
       }
+    };
+
+    const pollQueue = this.getQueueForChat(chatJid, mapKey);
+    if (pollQueue) {
+      await pollQueue.enqueuePoll(sendPollLoop);
+      pollQueue.setPollPending(true);
+    } else {
+      await sendPollLoop();
     }
 
     if (!this.shouldContinuePendingPollSend(mapKey, pending)) return;
+
+    pending.sentPollMessageIds = [...pollMessageIds];
 
     if (pollMessageIds.length === 0 || !allHaveSecret) {
       pending.mode = 'textFallback';
@@ -3300,15 +3701,43 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
-    // Record the answer against the poll message that produced it; users can
-    // vote on multiple AskUser polls in any order.
-    pending.answersCollected[matchedQuestionIndex] = answerForPollSelection(currentQ, data.selectedOptions);
-    this.removePollIdsForQuestion(pending, matchedQuestionIndex);
-    this.advancePendingPollIndex(pending);
+    // Determine admin status for this voter
+    const isAdmin = pending.adminJids?.has(jidNormalizedUser(data.voterJid)) ?? false;
 
+    const vote: PollVote = {
+      voterJid: data.voterJid,
+      selectedOptions: data.selectedOptions,
+      isAdmin,
+      timestamp: Date.now(),
+    };
+
+    // Store vote per question (votesByQuestion may be absent on legacy state)
+    if (!pending.votesByQuestion) pending.votesByQuestion = new Map();
+    let questionVotes = pending.votesByQuestion.get(matchedQuestionIndex);
+    if (!questionVotes) {
+      questionVotes = new Map();
+      pending.votesByQuestion.set(matchedQuestionIndex, questionVotes);
+    }
+    const canonicalVoter = jidNormalizedUser(data.voterJid);
+    questionVotes.set(canonicalVoter, vote);
+
+    // Evaluate resolution for this question (resolution may be absent on legacy state)
+    const resolutionResult = evaluateResolution(pending.resolution ?? 'first-vote-wins', questionVotes, pending.adminJids);
+    if (resolutionResult.status === 'resolved' && resolutionResult.answer !== undefined) {
+      if (pending.answersCollected[matchedQuestionIndex] === undefined) {
+        // Use answerForPollSelection to apply question-aware formatting (e.g. "Other" directive)
+        const winningVote = questionVotes.get(canonicalVoter) ?? vote;
+        pending.answersCollected[matchedQuestionIndex] = answerForPollSelection(currentQ, winningVote.selectedOptions);
+        this.removePollIdsForQuestion(pending, matchedQuestionIndex);
+        this.advancePendingPollIndex(pending);
+      }
+    }
+
+    // Check if all questions resolved
     const answered = Object.keys(pending.answersCollected).length;
     if (answered >= pending.questions.length) {
-      this.injectPollAnswers(matchedMapKey, pending);
+      const fullAnswer = pending.questions.map((_, i) => pending.answersCollected[i] ?? '(no answer)').join('\n');
+      this.settlePoll(matchedMapKey, pending, 'vote', fullAnswer);
     } else {
       log.info({ mapKey: matchedMapKey, answered, total: pending.questions.length }, 'poll vote collected — waiting for more');
     }
@@ -3335,6 +3764,11 @@ export class AgentRuntime implements Runtime {
 
     const pending = this.pendingPollQuestions.get(matchedMapKey);
     if (!pending || pending.mode !== 'poll') return;
+
+    if (pending.source === 'send_poll') {
+      this.settlePoll(matchedMapKey, pending, 'expiry', '[Poll vote decryption failed]');
+      return;
+    }
 
     pending.mode = 'textFallback';
     pending.pollMessageIdToQuestionIndex.clear();
@@ -3438,21 +3872,16 @@ export class AgentRuntime implements Runtime {
         }
         if (this.isSilentCompact(mapKey)) break;
 
-        // AskUserQuestion → WhatsApp poll bridge (per_chat DM mode only).
+        // AskUserQuestion → WhatsApp poll bridge (per_chat mode).
         // Shared mode is excluded — see handleEvent tool_use case for rationale.
-        // Groups fall through to provider-native text because AskUser is a
-        // single-answer turn-unblock protocol, not a multi-voter group poll.
         if (event.toolName === 'AskUserQuestion' && mapKey !== undefined) {
           const questions = (event.toolInput as any)?.questions;
-          if (Array.isArray(questions) && questions.length > 0 && !isGroupJid(queue.targetChatJid)) {
+          if (Array.isArray(questions) && questions.length > 0) {
             // Suppression state (suppressedAskUserToolIds) is registered synchronously
             // inside handleAskUserQuestionAsPoll before any async work, so tool_result
             // suppression is guaranteed even though we fire-and-forget the async poll send.
             void this.handleAskUserQuestionAsPoll(questions, event.toolId, mapKey, queue);
             break; // skip normal tool_use handling — poll sent instead
-          }
-          if (isGroupJid(queue.targetChatJid)) {
-            log.info({ chatJid: queue.targetChatJid, toolName: event.toolName }, 'AskUserQuestion poll bridge disabled in group chat — falling through to normal handling');
           }
         }
 

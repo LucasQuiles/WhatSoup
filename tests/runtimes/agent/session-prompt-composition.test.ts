@@ -9,7 +9,7 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 
 const CHAT_JID = 'test@s.whatsapp.net';
-const BASE_TRANSPORT_PROMPT_BYTES = 800;
+const BASE_TRANSPORT_PROMPT_BYTES = 970;
 
 const tempRoots: string[] = [];
 
@@ -127,7 +127,9 @@ describe('SessionManager system prompt composition', () => {
     expect(prompt).toContain('Use multiSelect: true when the user may choose more than one option');
     expect(prompt).toContain('For non-blocking surveys or lightweight coordination, use send_poll');
     expect(prompt).toContain('Do not ask the user to type "I voted"');
-    expect(prompt).toContain('In group chats, use send_poll. AskUserQuestion auto-polling is DM-only until group voter policy exists.');
+    expect(prompt).toContain('AskUserQuestion works in both DMs and groups. In groups, first vote resolves by default.');
+    expect(prompt).toContain('send_poll supports resolution strategies: first-vote-wins (default), admin-only, admin-wins, majority-after-timeout.');
+    expect(prompt).toContain('send_poll supports awaitResult: true to block and wait for the poll result.');
   });
 
   it('keeps the no-extra-instructions prompt within the recorded byte budget', () => {
