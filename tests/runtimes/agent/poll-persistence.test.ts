@@ -127,6 +127,11 @@ describe('serializePendingPoll / deserializePendingPoll', () => {
     const serialized = serializePendingPoll(original);
     const restored = deserializePendingPoll(JSON.parse(JSON.stringify(serialized)));
     expect(restored.adminJids).toBeNull();
+    // Surrounding fields must still round-trip cleanly — null adminJids must
+    // not corrupt any other state.
+    expect(restored.chatJid).toBe(original.chatJid);
+    expect(restored.resolution).toBe(original.resolution);
+    expect(restored.questions).toEqual(original.questions);
   });
 
   it('drops non-serializable fields (timers, awaiters) on round-trip', () => {
@@ -149,6 +154,13 @@ describe('serializePendingPoll / deserializePendingPoll', () => {
     expect(restored.hardExpiryTimer).toBeUndefined();
     expect(restored.awaitResolve).toBeUndefined();
     expect(restored.awaitReject).toBeUndefined();
+    // Persisted fields must still round-trip cleanly — dropping non-serializable
+    // handles must not corrupt the rest of the payload.
+    expect(restored.chatJid).toBe(original.chatJid);
+    expect(restored.toolId).toBe(original.toolId);
+    expect(Array.from(restored.pollMessageIdToQuestionIndex.entries())).toEqual(
+      Array.from(original.pollMessageIdToQuestionIndex.entries()),
+    );
   });
 
   it('handles empty ballot (no votes yet)', () => {
