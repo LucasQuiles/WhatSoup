@@ -6118,7 +6118,9 @@ describe('AgentRuntime', () => {
         await vi.waitFor(() => expect(pollSends.length).toBe(2));
         sentMessages.length = 0;
 
-        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        // Soft expiry fires at pending.timeoutMs (config.pollResolution.defaultTimeoutMs, currently 1h).
+        // Fake timer; wall-clock cost is constant regardless of advance amount.
+        await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 100);
 
         expect(sentMessages.filter((message) => message.text.includes('option number or text'))).toHaveLength(2);
         expect(sentMessages.some((message) => message.text.includes('First question?'))).toBe(true);
@@ -6304,7 +6306,9 @@ describe('AgentRuntime', () => {
         sentMessages.length = 0;
         mockSession.sendTurn.mockClear();
 
-        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+        // Hard expiry fires at pending.timeoutMs * 2 (currently 1h * 2 = 2h).
+        // Fake timer; wall-clock cost is constant regardless of advance amount.
+        await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000 + 100);
         expect(sentMessages.some((message) => message.text.includes('This decision has expired'))).toBe(true);
 
         await sendAndDrain(runtime, makeMsg({
