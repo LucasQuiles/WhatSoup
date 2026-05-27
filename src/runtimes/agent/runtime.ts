@@ -326,8 +326,6 @@ export interface AgentRuntimeOptions {
 const POLL_QUESTION_MAX_CHARS = 900;
 const POLL_OPTION_MAX_CHARS = 95;  // leave margin under WhatsApp's ~100 char limit
 const POLL_DETAIL_DESCRIPTION_MIN_CHARS = 72;
-const ASKUSER_POLL_SOFT_EXPIRY_MS = 5 * 60 * 1000;
-const ASKUSER_POLL_HARD_EXPIRY_MS = 10 * 60 * 1000;
 const ASKUSER_OTHER_OPTION_LABEL = 'Other — propose a different option';
 
 type AskUserOption = { label: string; description: string };
