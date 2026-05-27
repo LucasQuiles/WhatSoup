@@ -462,6 +462,26 @@ CREATE INDEX IF NOT EXISTS idx_lid_mappings_history_changed_at
   ON lid_mappings_history(changed_at);
 `;
 
+const MIGRATION_28_PENDING_POLLS = `
+CREATE TABLE IF NOT EXISTS pending_polls (
+  map_key         TEXT PRIMARY KEY,
+  chat_jid        TEXT NOT NULL,
+  tool_id         TEXT NOT NULL,
+  source          TEXT NOT NULL,
+  resolution      TEXT NOT NULL,
+  payload         TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  closes_at       INTEGER,
+  hard_closes_at  INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_polls_chat_jid
+  ON pending_polls(chat_jid);
+
+CREATE INDEX IF NOT EXISTS idx_pending_polls_closes_at
+  ON pending_polls(closes_at);
+`;
+
 const MIGRATION_26_OUTBOUND_SENDS = `
 CREATE TABLE outbound_sends_v26 (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -705,6 +725,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [25, runMigration25],
   [26, runMigration26],
   [27, runMigration27],
+  [28, runMigration28],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -717,6 +738,10 @@ function runMigration26(db: DatabaseSync): void {
     .get() as { sql: string } | undefined;
   if (!table || table.sql.includes("'rgp'")) return;
   db.exec(MIGRATION_26_OUTBOUND_SENDS);
+}
+
+function runMigration28(db: DatabaseSync): void {
+  db.exec(MIGRATION_28_PENDING_POLLS);
 }
 
 function runMigration27(db: DatabaseSync): void {

@@ -54,7 +54,7 @@ Agents should not add their own generic `Other` option unless they need custom w
 
 ## Recovery Behavior
 
-- In-memory persistence: pending poll state lives in the runtime's `pendingPollQuestions` map. The runtime includes `persistPendingPoll` and `rehydratePendingPolls` scaffolding for database persistence, but the `pending_polls` migration has not yet landed — persistence calls fail silently and polls do not currently survive restarts.
+- Restart durability: pending poll state lives in the runtime's `pendingPollQuestions` map AND is mirrored to the `pending_polls` SQLite table (migration 28). `persistPendingPoll` upserts on every meaningful state change (register, ballot append, mode flip, answer collected); `removePendingPoll` deletes on settle / hard-expiry / cancellation. On `AgentRuntime.start()`, `rehydratePendingPolls` restores live polls with re-armed timers using the remaining time, and silently drops rows where `hard_closes_at <= now` after sending a single "decision expired during downtime" notice to the originating chat. Persistence errors are logged and swallowed — the in-memory state remains authoritative, so a misconfigured DB degrades to in-process-only behavior rather than crashing the runtime.
 - Nudge timer: every 2 hours without a response, the runtime sends a gentle reminder ("Still waiting on your answer"). No hard expiry — polls persist until answered or the session is cleaned up.
 - Decrypt failure: if WhatsApp delivers a poll vote that cannot be decrypted after all bounded JID candidates fail, transport emits `pollVoteFailed`; runtime sends a one-time numbered text fallback and accepts an option number, label, or free-text answer.
 - Low-signal replies such as `I voted` do not resolve a pending poll while the native poll path is still active. The user should tap the poll or type the exact option label/number.
@@ -64,10 +64,17 @@ Agents should not add their own generic `Other` option unless they need custom w
 | Scope | `AskUserQuestion` poll bridge | Default Other | `send_poll` | Group voting |
 | --- | --- | --- | --- | --- |
 | Per-chat DM | Blocking, correlated, answer injected | Auto-appended when under cap and no escape hatch | Available, non-blocking | Not applicable |
-| Per-chat group | Falls through to provider-native text | Not applied | Available, non-blocking | Future explicit config only |
+| Per-chat group | Blocking, correlated via voter policy, answer injected (default `first-vote-wins`) | Auto-appended when under cap and no escape hatch | Available; `awaitResult: true` blocks; `resolution` selects strategy | 4 strategies shipped: `first-vote-wins`, `admin-only`, `admin-wins`, `majority-after-timeout` |
 | Shared/global session | Falls through to provider-native behavior | Not applied | Available, non-blocking | Not applicable |
 
-Future group voting is a separate feature. It needs explicit voter policy such as admin-only, designated voter, quorum, close time, most-votes-wins, and tie handling. Do not treat current group `send_poll` as a blocking approval gate. Do not add hidden group text-answer collection to `AskUserQuestion`; consuming the next arbitrary group reply can unblock the agent with the wrong actor's answer.
+Group polls support the four resolution strategies via `send_poll`'s `resolution` parameter, or via the instance-level `agentOptions.pollDefaults.defaultStrategy` config for `AskUserQuestion`. Each strategy:
+
+- **`first-vote-wins`** (default): first valid ballot resolves. Same semantics as DMs.
+- **`admin-only`**: only group admins (per Baileys `groupMetadata.participants`) count; non-admin votes are silently ignored.
+- **`admin-wins`**: any vote is recorded, but an admin vote resolves immediately; if no admin votes by `timeoutMs`, the recorded majority resolves on timeout.
+- **`majority-after-timeout`**: all votes are collected; resolution occurs only when `timeoutMs` elapses, then the highest-count option wins (with first-recorded tie-break).
+
+`timeoutMs` is bounded to `[1_000, 86_400_000]` (1 s – 24 h) at both the MCP schema layer (`z.number().int().min(1000).max(86_400_000)`) and the runtime handler (defense in depth). Values outside the range are rejected by validation. The `AskUserQuestion` path also clamps `instanceConfig.defaultTimeoutMs` to the same bounds. Soft expiry fires at `pending.timeoutMs`; hard expiry at `pending.timeoutMs * 2`. DM polls in admin-related strategies degrade silently to `first-vote-wins` (DMs have no admin concept).
 
 ## Portability Layers
 

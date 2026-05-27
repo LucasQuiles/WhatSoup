@@ -354,7 +354,80 @@ export interface ResolutionResult {
   answer?: string;
 }
 
-type PendingPollQuestion = {
+/**
+ * Serialized form of PendingPollQuestion for SQLite persistence.
+ * Drops timers (re-armed on rehydrate) and promise handles (cannot be restored
+ * after restart — the original awaiter is gone). All other state is preserved.
+ */
+export interface SerializedPendingPoll {
+  questions: AskUserQuestion[];
+  toolId: string;
+  chatJid: string;
+  chatJidAliases: string[];
+  mode: 'poll' | 'textFallback';
+  pollMessageIdToQuestionIndex: Array<[string, number]>;
+  currentQuestionIndex: number;
+  answersCollected: Record<number, string>;
+  createdAt: number;
+  resolution: ResolutionStrategy;
+  timeoutMs: number;
+  votesByQuestion: Array<[number, Array<[string, PollVote]>]>;
+  adminJids: string[] | null;
+  resolvedAt?: number;
+  source: 'askuser' | 'send_poll';
+  sentPollMessageIds: string[];
+}
+
+export function serializePendingPoll(pending: PendingPollQuestion): SerializedPendingPoll {
+  return {
+    questions: pending.questions,
+    toolId: pending.toolId,
+    chatJid: pending.chatJid,
+    chatJidAliases: Array.from(pending.chatJidAliases),
+    mode: pending.mode,
+    pollMessageIdToQuestionIndex: Array.from(pending.pollMessageIdToQuestionIndex.entries()),
+    currentQuestionIndex: pending.currentQuestionIndex,
+    answersCollected: pending.answersCollected,
+    createdAt: pending.createdAt,
+    resolution: pending.resolution,
+    timeoutMs: pending.timeoutMs,
+    votesByQuestion: Array.from(pending.votesByQuestion.entries())
+      .map(([qIdx, voters]) => [qIdx, Array.from(voters.entries())] as [number, Array<[string, PollVote]>]),
+    adminJids: pending.adminJids ? Array.from(pending.adminJids) : null,
+    resolvedAt: pending.resolvedAt,
+    source: pending.source,
+    sentPollMessageIds: pending.sentPollMessageIds,
+  };
+}
+
+export function deserializePendingPoll(s: SerializedPendingPoll): PendingPollQuestion {
+  return {
+    questions: s.questions,
+    toolId: s.toolId,
+    chatJid: s.chatJid,
+    chatJidAliases: new Set(s.chatJidAliases),
+    mode: s.mode,
+    pollMessageIdToQuestionIndex: new Map(s.pollMessageIdToQuestionIndex),
+    currentQuestionIndex: s.currentQuestionIndex,
+    answersCollected: s.answersCollected,
+    createdAt: s.createdAt,
+    softExpiryTimer: undefined,
+    hardExpiryTimer: undefined,
+    resolution: s.resolution,
+    timeoutMs: s.timeoutMs,
+    votesByQuestion: new Map(
+      s.votesByQuestion.map(([qIdx, voters]) => [qIdx, new Map(voters)] as [number, Map<string, PollVote>]),
+    ),
+    adminJids: s.adminJids ? new Set(s.adminJids) : null,
+    awaitResolve: undefined,
+    awaitReject: undefined,
+    resolvedAt: s.resolvedAt,
+    source: s.source,
+    sentPollMessageIds: s.sentPollMessageIds,
+  };
+}
+
+export type PendingPollQuestion = {
   questions: AskUserQuestion[];
   toolId: string;
   chatJid: string;
@@ -1904,12 +1977,14 @@ export class AgentRuntime implements Runtime {
           const pendingPoll = this.pendingPollQuestions.get(lidKey);
           if (pendingPoll) {
             this.pendingPollQuestions.delete(lidKey);
+            this.removePendingPoll(lidKey);
             this.clearPendingPollTimers(pendingPoll);
             pendingPoll.chatJidAliases.add(lidKey);
             pendingPoll.chatJidAliases.add(newJid);
             pendingPoll.chatJidAliases.add(canonical);
             pendingPoll.chatJid = canonical;
             this.pendingPollQuestions.set(canonical, pendingPoll);
+            this.persistPendingPoll(canonical, pendingPoll);
             this.startPendingPollExpiry(canonical, pendingPoll);
           }
           const imageBuffer = this.imageCoalesceBuffers.get(lidKey);
@@ -2410,6 +2485,11 @@ export class AgentRuntime implements Runtime {
     this.startHealthStatsTimer();
     this.startWorkspaceSweepTimer();
     this.startQueueSweepTimer();
+
+    // Restore any pending polls from the previous process so votes-in-flight
+    // and active AskUserQuestion polls survive a restart. Errors logged inside;
+    // never throws.
+    await this.rehydratePendingPolls();
 
     log.info({
       instanceName: this.instanceName,
@@ -3161,6 +3241,7 @@ export class AgentRuntime implements Runtime {
       pending.awaitReject = undefined;
     }
     this.pendingPollQuestions.delete(mapKey);
+    this.removePendingPoll(mapKey);
   }
 
   private markPendingSystemResult(mapKey: string | undefined): void {
@@ -3179,6 +3260,130 @@ export class AgentRuntime implements Runtime {
     if (inboundSeq === undefined) return;
     this.durability?.completeInbound(inboundSeq, terminalReason);
     this.replyGuarantee?.disarm(inboundSeq);
+  }
+
+  /**
+   * Persist a pending poll's current state to the pending_polls table so it
+   * survives process restarts. Errors are logged and swallowed — the in-memory
+   * state remains authoritative; persistence is best-effort durability.
+   *
+   * Should be called as a checkpoint after any meaningful state change:
+   * register, ballot append, mode flip, answer collected.
+   */
+  private persistPendingPoll(mapKey: string, pending: PendingPollQuestion): void {
+    try {
+      const serialized = serializePendingPoll(pending);
+      const payload = JSON.stringify(serialized);
+      const closesAt = pending.createdAt + pending.timeoutMs;
+      const hardClosesAt = pending.createdAt + pending.timeoutMs * 2;
+      this.db.raw
+        .prepare(
+          `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(map_key) DO UPDATE SET
+             chat_jid = excluded.chat_jid,
+             tool_id = excluded.tool_id,
+             source = excluded.source,
+             resolution = excluded.resolution,
+             payload = excluded.payload,
+             closes_at = excluded.closes_at,
+             hard_closes_at = excluded.hard_closes_at`,
+        )
+        .run(
+          mapKey,
+          pending.chatJid,
+          pending.toolId,
+          pending.source,
+          pending.resolution,
+          payload,
+          pending.createdAt,
+          closesAt,
+          hardClosesAt,
+        );
+    } catch (err) {
+      log.error({ err, mapKey }, 'persistPendingPoll failed; in-memory state remains authoritative');
+    }
+  }
+
+  /**
+   * Delete a pending poll row from the persistence table. Called when the
+   * in-memory entry is removed (settle, hard-expiry, cancellation).
+   */
+  private removePendingPoll(mapKey: string): void {
+    try {
+      this.db.raw.prepare('DELETE FROM pending_polls WHERE map_key = ?').run(mapKey);
+    } catch (err) {
+      log.error({ err, mapKey }, 'removePendingPoll failed');
+    }
+  }
+
+  /**
+   * Restore pending polls from the persistence table on runtime start. Live
+   * polls (hard_closes_at > now) are rehydrated into `pendingPollQuestions`
+   * with re-armed timers using the remaining time. Expired polls
+   * (hard_closes_at <= now) have a brief "decision expired during downtime"
+   * message sent to the originating chat (best-effort via outbound queue) and
+   * are deleted from the table.
+   *
+   * Persistence errors are logged and swallowed; rehydration always succeeds
+   * structurally even if some rows are unreadable.
+   */
+  private async rehydratePendingPolls(): Promise<void> {
+    let rows: Array<{
+      map_key: string;
+      chat_jid: string;
+      payload: string;
+      hard_closes_at: number | null;
+    }> = [];
+    try {
+      rows = this.db.raw
+        .prepare('SELECT map_key, chat_jid, payload, hard_closes_at FROM pending_polls')
+        .all() as Array<{ map_key: string; chat_jid: string; payload: string; hard_closes_at: number | null }>;
+    } catch (err) {
+      log.error({ err }, 'rehydratePendingPolls: SELECT failed; skipping');
+      return;
+    }
+    if (rows.length === 0) return;
+
+    const now = Date.now();
+    let restored = 0;
+    let expired = 0;
+    for (const row of rows) {
+      try {
+        if (row.hard_closes_at !== null && row.hard_closes_at <= now) {
+          this.removePendingPoll(row.map_key);
+          this.notifyPollExpiredDuringDowntime(row.chat_jid);
+          expired += 1;
+          continue;
+        }
+        const serialized = JSON.parse(row.payload) as SerializedPendingPoll;
+        const pending = deserializePendingPoll(serialized);
+        this.pendingPollQuestions.set(row.map_key, pending);
+        this.startPendingPollExpiry(row.map_key, pending);
+        restored += 1;
+      } catch (err) {
+        log.error({ err, mapKey: row.map_key }, 'rehydratePendingPolls: row deserialize failed; skipping');
+      }
+    }
+    if (restored > 0 || expired > 0) {
+      log.info({ restored, expired }, 'rehydratePendingPolls: completed');
+    }
+  }
+
+  /**
+   * Best-effort notification that a pending poll expired during process
+   * downtime. The recipient sees a single line; the poll itself is dropped.
+   * Failure to send (messenger not ready, JID unresolvable) is logged.
+   */
+  private notifyPollExpiredDuringDowntime(chatJid: string): void {
+    const message = 'A poll I was waiting on expired before I picked it back up — ask me again if you still need that decision.';
+    try {
+      void this.messenger.sendMessage(chatJid, message).catch((err) =>
+        log.warn({ err, chatJid }, 'notifyPollExpiredDuringDowntime: send failed (non-fatal)'),
+      );
+    } catch (err) {
+      log.warn({ err, chatJid }, 'notifyPollExpiredDuringDowntime: dispatch failed (non-fatal)');
+    }
   }
 
   private startPendingPollExpiry(mapKey: string, pending: PendingPollQuestion): void {
@@ -3392,6 +3597,7 @@ export class AgentRuntime implements Runtime {
     pending.pollMessageIdToQuestionIndex.clear();
     pending.softExpiryTimer = undefined;
     this.advancePendingPollIndex(pending);
+    this.persistPendingPoll(mapKey, pending);
     this.sendUnansweredPollTextFallback(
       pending,
       'I did not receive the poll vote. Please reply with option number or text for the remaining decision question(s):',
@@ -3477,6 +3683,7 @@ export class AgentRuntime implements Runtime {
         sentPollMessageIds: [pollId],
       };
       this.pendingPollQuestions.set(mapKey, pending);
+      this.persistPendingPoll(mapKey, pending);
       this.startPendingPollExpiry(mapKey, pending);
 
       // Wire AbortSignal for MCP client disconnect
@@ -3576,7 +3783,10 @@ export class AgentRuntime implements Runtime {
       answersCollected: {},
       createdAt: Date.now(),
       resolution: resolvedStrategy,
-      timeoutMs: instanceConfig?.defaultTimeoutMs ?? 3_600_000,
+      timeoutMs: Math.min(
+        Math.max(instanceConfig?.defaultTimeoutMs ?? 3_600_000, 1_000),
+        86_400_000,
+      ),
       votesByQuestion: new Map(),
       adminJids,
       sentPollMessageIds: [],
@@ -3584,6 +3794,7 @@ export class AgentRuntime implements Runtime {
       resolvedAt: undefined,
     };
     this.pendingPollQuestions.set(mapKey, pending);
+    this.persistPendingPoll(mapKey, pending);
 
     const pollMessageIds: string[] = [];
     let allHaveSecret = true;
@@ -3730,6 +3941,10 @@ export class AgentRuntime implements Runtime {
         this.advancePendingPollIndex(pending);
       }
     }
+
+    // Persist ballot/answer mutations so a restart during a multi-vote poll
+    // doesn't lose the in-progress tally.
+    this.persistPendingPoll(matchedMapKey, pending);
 
     // Check if all questions resolved
     const answered = Object.keys(pending.answersCollected).length;
