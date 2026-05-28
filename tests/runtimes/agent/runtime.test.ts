@@ -913,45 +913,6 @@ describe('AgentRuntime', () => {
     }
   });
 
-  it('auto-compact timeout decrements the pending-system count and absorbs a late /compact result without double-decrementing', async () => {
-    vi.useFakeTimers();
-    try {
-      const db = makeDb();
-      const { messenger } = makeMessenger();
-      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
-      const state = runtime as unknown as {
-        perChatPendingSystemResults: Map<string, number>;
-        abandonedSystemResults: Set<string>;
-      };
-      mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'session-1', startedAt: '2026-05-18T00:00:00.000Z', messageCount: 1, lastMessageAt: null });
-      mockSession.getDbRowId.mockReturnValue(42);
-      mockGetSessionTokenSnapshot.mockReturnValue({ totalInputTokens: 250, totalOutputTokens: 5, lastCompactInputTokens: 100, lastCompactOutputTokens: 0 });
-
-      await runtime.start();
-      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
-      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
-      await Promise.resolve();
-
-      // /compact dispatched → exactly one pending system result registered.
-      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
-      expect(state.perChatPendingSystemResults.get('__global__') ?? 0).toBe(1);
-
-      // Timeout fires: decrement to 0 and record the abandonment.
-      await vi.advanceTimersByTimeAsync(4 * 60 * 1000 + 100);
-      expect(state.perChatPendingSystemResults.get('__global__') ?? 0).toBe(0);
-      expect(state.abandonedSystemResults.has('__global__')).toBe(true);
-
-      // The /compact result arrives late: absorbed as a system result without
-      // driving the counter negative, and the abandonment marker is cleared.
-      capturedOnEventRef.current?.({ type: 'result', text: null });
-      await Promise.resolve();
-      expect(state.perChatPendingSystemResults.get('__global__') ?? 0).toBe(0);
-      expect(state.abandonedSystemResults.has('__global__')).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -5737,7 +5698,6 @@ describe('AgentRuntime', () => {
       // No separate follow-up description message
     });
 
-
     it('does not duplicate long option details in immediate text fallback after poll send fails', async () => {
       const { messenger } = makePollMessenger({ waMessageId: 'POLL_FAIL_LONG_DETAILS', hasSecret: false });
       const db = makeDb();
@@ -6168,7 +6128,6 @@ describe('AgentRuntime', () => {
       });
       expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('waiting for the poll vote itself'));
     });
-
 
     it('injects an Other poll vote as a structured interview directive', async () => {
       const { messenger, pollSends, eventHandlers } = makePollMessenger({ waMessageId: 'POLL_OTHER_DIRECTIVE', hasSecret: true });
