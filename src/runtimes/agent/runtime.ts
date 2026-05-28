@@ -3198,10 +3198,12 @@ export class AgentRuntime implements Runtime {
     const conversationKey = toConversationKey(queue.targetChatJid);
     const seqQueue = this.perChatInboundSeqQueue.get(mapKey) ?? [];
     const inboundSeq = seqQueue[0]; // peek — don't shift yet
+    let isSystemResult = false;
     if (event.type === 'result') {
       const pendingSystem = this.perChatPendingSystemResults.get(mapKey) ?? 0;
       if (pendingSystem > 0) {
         // This result belongs to a system turn (context injection, continuation) — don't consume user seq
+        isSystemResult = true;
         this.perChatPendingSystemResults.set(mapKey, pendingSystem - 1);
       } else {
         // Consume the seq for this completed user turn
@@ -3210,7 +3212,7 @@ export class AgentRuntime implements Runtime {
         this.pendingTurnText.delete(mapKey);
       }
     }
-    this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey, toolScopeKey);
+    this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey, toolScopeKey, isSystemResult);
   }
 
   // ---------------------------------------------------------------------------
@@ -4057,7 +4059,7 @@ export class AgentRuntime implements Runtime {
    * references rather than shared instance fields. Used by handleEventPerChat
    * so concurrent per_chat events do not overwrite each other's context.
    */
-  private handleEventWithContext(event: AgentEvent, queue: IOutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number, mapKey?: string, toolScopeKey: string = mapKey ?? GLOBAL_TOOL_SCOPE_KEY): void {
+  private handleEventWithContext(event: AgentEvent, queue: IOutboundQueue, session: SessionManager | null, conversationKey?: string, inboundSeq?: number, mapKey?: string, toolScopeKey: string = mapKey ?? GLOBAL_TOOL_SCOPE_KEY, isSystemResult: boolean = false): void {
     const tracker = this.getTracker(mapKey);
     switch (event.type) {
       case 'init':
@@ -4179,7 +4181,13 @@ export class AgentRuntime implements Runtime {
             // Do NOT gate — the turn is logically still open (waiting for poll vote).
             // Allow the poll vote handler to send the next turn.
             this.postTurnGate.delete(mapKey);
-          } else {
+          } else if (!isSystemResult) {
+            // Only genuine user-turn completions arm the gate. System-turn results
+            // (context injection on respawn, resume continuation, auto-compact
+            // /compact) are followed by — or resume — a real user turn whose
+            // assistant_text/tool_use must NOT be suppressed as phantom. Arming
+            // the gate on those silently dropped real replies (incl. send_message
+            // / send_poll), so leave the gate state unchanged for system results.
             this.postTurnGate.add(mapKey);
           }
         }

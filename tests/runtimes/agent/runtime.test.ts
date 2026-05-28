@@ -2450,6 +2450,55 @@ describe('AgentRuntime', () => {
     }).not.toThrow();
   });
 
+  it('per_chat: system-turn result does not arm the post-turn gate (real reply still delivered)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as {
+      perChatPendingSystemResults: Map<string, number>;
+      postTurnGate: Set<string>;
+    };
+    const chatJid = '15550001111@s.whatsapp.net';
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello', inboundSeq: 1 }));
+    expect(capturedOnEventRef.current).toBeTypeOf('function');
+
+    // A system turn is in flight (context injection on respawn, resume
+    // continuation, or auto-compact /compact). Its result must NOT arm the
+    // post-turn gate, otherwise the real user turn that follows is suppressed.
+    state.perChatPendingSystemResults.set(chatJid, 1);
+    capturedOnEventRef.current!({ type: 'result', text: null });
+
+    expect(state.postTurnGate.has(chatJid)).toBe(false);
+
+    // The real user turn's output that follows must be delivered, not gated.
+    mockQueue.enqueueStreamingText.mockClear();
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Real reply' });
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Real reply');
+  });
+
+  it('per_chat: real user-turn result still arms the post-turn gate (phantom suppressed)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as { postTurnGate: Set<string> };
+    const chatJid = '15550002222@s.whatsapp.net';
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello', inboundSeq: 1 }));
+    expect(capturedOnEventRef.current).toBeTypeOf('function');
+
+    // No system result pending — this is a genuine user-turn completion.
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    expect(state.postTurnGate.has(chatJid)).toBe(true);
+
+    // SDK phantom output after a real turn is still suppressed.
+    mockQueue.enqueueStreamingText.mockClear();
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'phantom' });
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+  });
+
   it('shared-session: assistant_text after result is suppressed (post-turn gate)', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
