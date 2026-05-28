@@ -6615,9 +6615,7 @@ describe('AgentRuntime', () => {
       await vi.waitFor(() => {
         expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('Yes'));
       });
-      const sendTurnArgs = mockSession.sendTurn.mock.calls.map(call => call[0] as string);
-      expect(sendTurnArgs.some(arg => typeof arg === 'string' && arg.includes('Yes'))).toBe(true);
-      expect(sendTurnArgs.some(arg => typeof arg === 'string' && arg.includes('No'))).toBe(false);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith(expect.stringContaining('No'));
       expect(state.pendingPollQuestions.has(groupJid)).toBe(false);
     });
 
