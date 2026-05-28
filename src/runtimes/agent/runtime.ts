@@ -4284,7 +4284,13 @@ export class AgentRuntime implements Runtime {
                   },
                 }
               : {}),
-            ...(inboundSeq !== undefined
+            // Only a genuine user-turn result terminates the user's inbound seq
+            // and disarms its reply guarantee. A system-turn result (context
+            // injection on respawn, resume continuation, /compact) carries the
+            // *peeked* user seq but must NOT mark it response_sent or disarm —
+            // otherwise a crash before the real turn replies drops the reply
+            // with no replay (a150f7e8 stopped the seq-queue shift but not this).
+            ...(inboundSeq !== undefined && !isSystemResult
               ? {
                   inbound: {
                     seq: inboundSeq,
@@ -4294,7 +4300,7 @@ export class AgentRuntime implements Runtime {
               : {}),
             ...(lastOpId !== undefined ? { lastOpId } : {}),
           });
-          this.replyGuarantee?.disarm(inboundSeq);
+          if (!isSystemResult) this.replyGuarantee?.disarm(inboundSeq);
           if (lastOpId !== undefined) {
             queue.clearLastOpId();
           }
@@ -5871,7 +5877,11 @@ export class AgentRuntime implements Runtime {
                   },
                 }
               : {}),
-            ...(this.currentInboundSeq !== undefined
+            // System-turn results must not terminate the user's inbound seq or
+            // disarm its guarantee (see the per_chat handler). Not reachable in
+            // single mode today (system results arrive with currentInboundSeq
+            // cleared), but guarded for parity and future safety.
+            ...(this.currentInboundSeq !== undefined && !isSystemResult
               ? {
                   inbound: {
                     seq: this.currentInboundSeq,
@@ -5881,8 +5891,8 @@ export class AgentRuntime implements Runtime {
               : {}),
             ...(lastOpId !== undefined ? { lastOpId } : {}),
           });
-          this.replyGuarantee?.disarm(this.currentInboundSeq);
-          if (this.currentInboundSeq !== undefined) {
+          if (!isSystemResult) this.replyGuarantee?.disarm(this.currentInboundSeq);
+          if (this.currentInboundSeq !== undefined && !isSystemResult) {
             this.currentInboundSeq = undefined;
           }
           if (lastOpId !== undefined) {
