@@ -4759,6 +4759,62 @@ describe('AgentRuntime', () => {
     expect(queue.clearLastOpId).toHaveBeenCalledOnce();
   });
 
+  it('per_chat system-turn result does not terminate the user inbound seq or disarm its reply guarantee', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const completeTurn = vi.fn();
+    const disarm = vi.fn();
+    const session = {
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => 41),
+      getStatus: vi.fn(() => ({ active: true })),
+    };
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+    (runtime as unknown as { durability: { completeTurn: typeof completeTurn } }).durability = { completeTurn };
+    (runtime as unknown as { replyGuarantee: { disarm: typeof disarm } }).replyGuarantee = { disarm };
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: {
+            clearTurnWatchdog: ReturnType<typeof vi.fn>;
+            shutdown: ReturnType<typeof vi.fn>;
+            getDbRowId: ReturnType<typeof vi.fn>;
+          } | null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+          isSystemResult?: boolean,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    // isSystemResult = true (e.g. context injection on respawn) carries the
+    // peeked user seq (17) but must NOT mark it response_sent or disarm its
+    // reply guarantee — otherwise a crash before the real turn replies drops it.
+    handleEventWithContext(
+      { type: 'result', text: null, inputTokens: 3, outputTokens: 5 },
+      queue,
+      session,
+      'conv-111',
+      17,
+      '111',
+      '111#session',
+      true,
+    );
+
+    const arg = completeTurn.mock.calls[0][0] as { inbound?: unknown; sessionTokens?: unknown };
+    expect(arg.inbound).toBeUndefined();
+    expect(disarm).not.toHaveBeenCalled();
+    // Token/checkpoint accounting still runs for the system turn.
+    expect(arg.sessionTokens).toEqual({ dbRowId: 41, inputTokens: 3, outputTokens: 5 });
+  });
+
   it('shared result batches turn completion writes through durability.completeTurn', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
