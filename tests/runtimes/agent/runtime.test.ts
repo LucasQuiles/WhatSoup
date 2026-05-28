@@ -6489,4 +6489,214 @@ describe('AgentRuntime', () => {
       expect(errorCalls).toHaveLength(0);
     });
   });
+
+  // ── AdminE2E: admin-only voter policy ─────────────────────────────────────
+  // End-to-end verification of admin-only resolution across both poll sources:
+  //   - askuser: handlePollVoteReceived → settlePoll → injectPollAnswers → sendTurn
+  //   - send_poll: handlePollVoteReceived → settlePoll → awaitResolve resolves the
+  //     promise returned by registerSendPollAwaiter
+  // Plus a non-resolution case proving non-admin votes are RECORDED but do not
+  // settle, distinguishing real admin gating from incidental no-op behavior.
+
+  describe('admin-only voter policy E2E', () => {
+    type AdminPollPending = {
+      questions: Array<{ question: string; header: string; options: Array<{ label: string; description: string }>; multiSelect: boolean }>;
+      toolId: string;
+      chatJid: string;
+      chatJidAliases: Set<string>;
+      mode: 'poll' | 'textFallback';
+      pollMessageIdToQuestionIndex: Map<string, number>;
+      currentQuestionIndex: number;
+      answersCollected: Record<number, string>;
+      createdAt: number;
+      resolution?: string;
+      timeoutMs?: number;
+      adminJids?: Set<string> | null;
+      votesByQuestion?: Map<number, Map<string, { voterJid: string; selectedOptions: string[]; isAdmin: boolean; timestamp: number }>>;
+      awaitResolve?: (answer: string) => void;
+      awaitReject?: (err: Error) => void;
+      source?: 'askuser' | 'send_poll';
+      sentPollMessageIds?: string[];
+    };
+
+    type AdminRuntimeState = {
+      pendingPollQuestions: Map<string, AdminPollPending>;
+      chatSessions: Map<string, typeof mockSession>;
+      chatQueues: Map<string, IOutboundQueue>;
+      handlePollVoteReceived: (data: {
+        pollMessageId: string;
+        chatJid: string;
+        voterJid: string;
+        selectedOptions: string[];
+      }) => void;
+    };
+
+    const groupJid = 'test-group@g.us';
+    const adminJid = '15550001111@s.whatsapp.net';
+    const nonAdminA = '15550002222@s.whatsapp.net';
+    const nonAdminB = '15550003333@s.whatsapp.net';
+
+    function seedAdminOnlyPending(
+      state: AdminRuntimeState,
+      mapKey: string,
+      source: 'askuser' | 'send_poll',
+      pollMessageId: string,
+      awaitResolve?: (answer: string) => void,
+    ): AdminPollPending {
+      const pending: AdminPollPending = {
+        questions: [{
+          question: 'Approve deploy?',
+          header: 'Deploy',
+          options: [
+            { label: 'Yes', description: 'ship it' },
+            { label: 'No', description: 'hold' },
+          ],
+          multiSelect: false,
+        }],
+        toolId: source === 'send_poll' ? `send_poll:${pollMessageId}` : 'tool-admin-vote',
+        chatJid: groupJid,
+        chatJidAliases: new Set([groupJid]),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([[pollMessageId, 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt: Date.now(),
+        resolution: 'admin-only',
+        timeoutMs: 60_000,
+        adminJids: new Set([adminJid]),
+        votesByQuestion: new Map(),
+        source,
+        sentPollMessageIds: [pollMessageId],
+      };
+      if (source === 'send_poll' && awaitResolve) {
+        pending.awaitResolve = awaitResolve;
+      }
+      state.pendingPollQuestions.set(mapKey, pending);
+      return pending;
+    }
+
+    it('E2Ea — askuser source: non-admin votes are recorded but do not resolve; admin vote settles via sendTurn with the admin selection', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as AdminRuntimeState;
+      await runtime.start();
+
+      state.chatSessions.set(groupJid, mockSession);
+      state.chatQueues.set(groupJid, mockQueue);
+      const pollMessageId = 'POLL_ADMIN_ASKUSER';
+      const pending = seedAdminOnlyPending(state, groupJid, 'askuser', pollMessageId);
+
+      mockSession.sendTurn.mockClear();
+
+      // Non-admin vote — recorded but does not resolve
+      state.handlePollVoteReceived({
+        pollMessageId,
+        chatJid: groupJid,
+        voterJid: nonAdminA,
+        selectedOptions: ['No'],
+      });
+
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      expect(pending.answersCollected[0]).toBeUndefined();
+      expect(pending.votesByQuestion?.get(0)?.size).toBe(1);
+      const nonAdminVote = pending.votesByQuestion?.get(0)?.get(nonAdminA);
+      expect(nonAdminVote?.isAdmin).toBe(false);
+      expect(nonAdminVote?.selectedOptions).toEqual(['No']);
+
+      // Admin vote — resolves with admin's selection
+      state.handlePollVoteReceived({
+        pollMessageId,
+        chatJid: groupJid,
+        voterJid: adminJid,
+        selectedOptions: ['Yes'],
+      });
+
+      await vi.waitFor(() => {
+        expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('Yes'));
+      });
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith(expect.stringContaining('No'));
+      expect(state.pendingPollQuestions.has(groupJid)).toBe(false);
+    });
+
+    it('E2Eb — send_poll source: admin vote resolves the awaitResolve promise with the admin selection', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as AdminRuntimeState;
+      await runtime.start();
+
+      const pollMessageId = 'POLL_ADMIN_SENDPOLL';
+      const mapKey = `send_poll:${pollMessageId}`;
+      let resolved: string | null = null;
+      const awaitResolve = (answer: string): void => { resolved = answer; };
+      const pending = seedAdminOnlyPending(state, mapKey, 'send_poll', pollMessageId, awaitResolve);
+
+      mockSession.sendTurn.mockClear();
+
+      // Non-admin vote — recorded but does not resolve
+      state.handlePollVoteReceived({
+        pollMessageId,
+        chatJid: groupJid,
+        voterJid: nonAdminA,
+        selectedOptions: ['No'],
+      });
+      expect(resolved).toBeNull();
+      expect(pending.answersCollected[0]).toBeUndefined();
+      expect(pending.votesByQuestion?.get(0)?.size).toBe(1);
+
+      // Admin vote — resolves the promise with admin selection
+      state.handlePollVoteReceived({
+        pollMessageId,
+        chatJid: groupJid,
+        voterJid: adminJid,
+        selectedOptions: ['Yes'],
+      });
+
+      await vi.waitFor(() => {
+        expect(resolved).toBe('Yes');
+      });
+      expect(state.pendingPollQuestions.has(mapKey)).toBe(false);
+      // send_poll source does NOT use sendTurn — assert it stays untouched
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+
+    it('E2Ec — multiple non-admin votes are recorded with isAdmin:false but the poll stays open until an admin vote or timeout', async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const state = runtime as unknown as AdminRuntimeState;
+      await runtime.start();
+
+      state.chatSessions.set(groupJid, mockSession);
+      state.chatQueues.set(groupJid, mockQueue);
+      const pollMessageId = 'POLL_ADMIN_NONACCUM';
+      const pending = seedAdminOnlyPending(state, groupJid, 'askuser', pollMessageId);
+
+      mockSession.sendTurn.mockClear();
+
+      for (const [voter, selection] of [[nonAdminA, 'Yes'], [nonAdminB, 'No']] as const) {
+        state.handlePollVoteReceived({
+          pollMessageId,
+          chatJid: groupJid,
+          voterJid: voter,
+          selectedOptions: [selection],
+        });
+      }
+
+      // All non-admin votes recorded
+      expect(pending.votesByQuestion?.get(0)?.size).toBe(2);
+      const recordedVoteA = pending.votesByQuestion?.get(0)?.get(nonAdminA);
+      const recordedVoteB = pending.votesByQuestion?.get(0)?.get(nonAdminB);
+      expect(recordedVoteA?.isAdmin).toBe(false);
+      expect(recordedVoteB?.isAdmin).toBe(false);
+      expect(recordedVoteA?.selectedOptions).toEqual(['Yes']);
+      expect(recordedVoteB?.selectedOptions).toEqual(['No']);
+
+      // Poll NOT resolved: no answer collected, pending still present, sendTurn not called
+      expect(pending.answersCollected[0]).toBeUndefined();
+      expect(state.pendingPollQuestions.has(groupJid)).toBe(true);
+      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+  });
 });

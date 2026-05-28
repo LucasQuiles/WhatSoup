@@ -590,6 +590,9 @@ export function registerMessagingTools(
 
         if (awaitResult && result.waMessageId && result.hasSecret && deps.pollRegistrar) {
           const abortSignal = _session.abortSignal;
+          if (abortSignal?.aborted) {
+            return { sent: true, pollId: result.waMessageId, question, options, selectableCount: resolvedSelectableCount, error: 'Poll cancelled before await began', awaitFailed: true };
+          }
           try {
             const answer = await deps.pollRegistrar.register(
               result.waMessageId, chatJid, options,
