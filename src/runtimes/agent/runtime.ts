@@ -4593,10 +4593,16 @@ export class AgentRuntime implements Runtime {
       }
 
       if (silent) this.beginSilentCompact(mapKey);
+      // A manual /compact is a system turn: its result must not consume a user
+      // inbound seq or arm the post-turn gate. Mirror the auto-compact path.
+      this.markPendingSystemResult(mapKey);
       try {
         await session.sendTurn('/compact');
       } catch (err) {
         if (silent) this.clearSilentCompact(mapKey);
+        // No result will arrive for a failed send — unmark.
+        const pending = this.perChatPendingSystemResults.get(mapKey) ?? 0;
+        if (pending > 0) this.perChatPendingSystemResults.set(mapKey, pending - 1);
         throw err;
       }
 
@@ -4628,11 +4634,18 @@ export class AgentRuntime implements Runtime {
 
     if (silent) this.beginSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
     this.currentTurnChatJid = targetChatJid;
+    // A manual /compact is a system turn: its result must not arm the post-turn
+    // gate. Mirror the auto-compact path (single/shared discriminate on this in
+    // handleEvent's result case).
+    this.markPendingSystemResult(GLOBAL_TOOL_SCOPE_KEY);
     try {
       await session.sendTurn('/compact');
     } catch (err) {
       if (silent) this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       this.currentTurnChatJid = null;
+      // No result will arrive for a failed send — unmark.
+      const pending = this.perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) ?? 0;
+      if (pending > 0) this.perChatPendingSystemResults.set(GLOBAL_TOOL_SCOPE_KEY, pending - 1);
       throw err;
     }
 
@@ -5751,10 +5764,25 @@ export class AgentRuntime implements Runtime {
         tracker?.onTurnComplete();
         this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
 
+        // System-turn results (auto-compact /compact, manual /compact) must not
+        // arm the post-turn gate — otherwise the next real turn's output is
+        // suppressed as phantom (the per_chat bug, same class, single mode).
+        // Mirror handleEventPerChat: the GLOBAL pending-system counter is
+        // incremented by maybeStartAutoCompact / handleAgentCommand. Shared mode
+        // never increments GLOBAL (auto-compact early-returns), so this is a
+        // no-op there.
+        const pendingSystem = this.perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) ?? 0;
+        const isSystemResult = pendingSystem > 0;
+        if (isSystemResult) {
+          this.perChatPendingSystemResults.set(GLOBAL_TOOL_SCOPE_KEY, pendingSystem - 1);
+        }
+
         // AskUserQuestion poll bridge is per_chat only — no pending-poll
         // suppression in shared mode. Normal result lifecycle applies.
         // Activate post-turn gate — suppress any SDK-injected events until next user turn
-        this.postTurnGate.add(GLOBAL_TOOL_SCOPE_KEY);
+        if (!isSystemResult) {
+          this.postTurnGate.add(GLOBAL_TOOL_SCOPE_KEY);
+        }
 
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {

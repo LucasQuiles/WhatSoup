@@ -2012,6 +2012,35 @@ describe('AgentRuntime', () => {
     expect(mockSession.sendTurn).not.toHaveBeenCalled();
   });
 
+  it('per_chat manual /compact marks a system result so its turn does not arm the gate', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const groupJid = '120363555555555000@g.us';
+    mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() });
+
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as {
+      perChatPendingSystemResults: Map<string, number>;
+      postTurnGate: Set<string>;
+    };
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ chatJid: groupJid, isGroup: true, content: 'hello' }));
+    mockSession.sendTurn.mockClear();
+
+    // Non-silent so isSilentCompact does not independently suppress the follow-up.
+    await runtime.handleAgentCommand({ command: 'compact', chatJid: groupJid, silent: false });
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+    // The manual /compact registered a pending system result for this chat.
+    expect(state.perChatPendingSystemResults.get(groupJid)).toBe(1);
+
+    // Its result must not arm the gate, and a real reply after it is delivered.
+    capturedOnEventRef.current!({ type: 'result', text: null });
+    expect(state.postTurnGate.has(groupJid)).toBe(false);
+    mockQueue.enqueueStreamingText.mockClear();
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'After compact' });
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('After compact');
+  });
+
   it('single handleAgentCommand silently sends /compact without compact output or fallback', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -2507,6 +2536,31 @@ describe('AgentRuntime', () => {
     mockQueue.enqueueStreamingText.mockClear();
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'phantom' });
     expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
+  });
+
+  it('single-mode: system-turn result does not arm the post-turn gate (real reply delivered)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    const state = runtime as unknown as {
+      perChatPendingSystemResults: Map<string, number>;
+      postTurnGate: Set<string>;
+    };
+
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    // A system turn is in flight (single-mode auto-compact /compact is keyed by
+    // the global scope). Its result must NOT arm the post-turn gate.
+    state.perChatPendingSystemResults.set('__global__', 1);
+    capturedOnEventRef.current!({ type: 'result', text: null });
+
+    expect(state.postTurnGate.has('__global__')).toBe(false);
+
+    // Real output that follows the system turn must be delivered, not gated.
+    mockQueue.enqueueStreamingText.mockClear();
+    capturedOnEventRef.current!({ type: 'assistant_text', text: 'Real reply' });
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Real reply');
   });
 
   it('shared-session: assistant_text after result is suppressed (post-turn gate)', () => {
