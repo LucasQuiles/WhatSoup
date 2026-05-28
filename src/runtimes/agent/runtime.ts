@@ -1354,6 +1354,13 @@ export class AgentRuntime implements Runtime {
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
       this.autoCompactCooldownUntil.set(scopeKey, Date.now() + AUTO_COMPACT_TIMEOUT_BACKOFF_MS);
+      // The /compact result may still arrive late. Decrement now so a stranded
+      // +1 cannot misclassify a future user turn, and record the abandonment so
+      // the late (FIFO-first) result is absorbed without double-decrementing.
+      if ((this.perChatPendingSystemResults.get(scopeKey) ?? 0) > 0) {
+        this.unmarkPendingSystemResult(scopeKey);
+        this.abandonedSystemResults.add(scopeKey);
+      }
     }, AUTO_COMPACT_TIMEOUT_MS);
     timer.unref?.();
 
@@ -1370,14 +1377,17 @@ export class AgentRuntime implements Runtime {
       threshold: this.autoCompactInputTokens,
     }, 'auto compact triggered');
 
+    // Starting a fresh compact — discard any stale abandonment marker so its
+    // late result (if it somehow still arrives) cannot be absorbed against this
+    // new attempt. The cooldown already prevents this within the backoff window.
+    this.abandonedSystemResults.delete(scopeKey);
     this.markPendingSystemResult(scopeKey);
     void session.sendTurn('/compact').catch((err) => {
       log.warn({ err, scopeKey, rowId }, 'auto compact send failed');
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
-      // Unmark — no result event will arrive for a failed send
-      const pending = this.perChatPendingSystemResults.get(scopeKey) ?? 0;
-      if (pending > 0) this.perChatPendingSystemResults.set(scopeKey, pending - 1);
+      // No result event will arrive for a failed send.
+      this.unmarkPendingSystemResult(scopeKey);
     });
   }
 
@@ -1528,6 +1538,14 @@ export class AgentRuntime implements Runtime {
   // not consume from perChatInboundSeqQueue when their result event arrives.
   private perChatPendingSystemResults: Map<string, number> = new Map();
 
+  // Scopes whose auto-compact /compact timed out. The pending-system count is
+  // decremented at timeout (so a stranded +1 cannot misclassify a future user
+  // turn), and the scope is recorded here so the /compact result — if it still
+  // arrives late (FIFO: it precedes any subsequent turn's result on the same
+  // subprocess) — is absorbed as a system result without double-decrementing.
+  // Cleared on absorption, on a fresh compact, on respawn, and on cleanup.
+  private abandonedSystemResults: Set<string> = new Set();
+
   // Startup notification deferred until after WA connects
   private pendingStartupMessage: { chatJid: string; text: string } | null = null;
 
@@ -1616,6 +1634,7 @@ export class AgentRuntime implements Runtime {
     this.perChatCrashCount.delete(mapKey);
     this.perChatInboundSeqQueue.delete(mapKey);
     this.perChatPendingSystemResults.delete(mapKey);
+    this.abandonedSystemResults.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
@@ -2250,6 +2269,8 @@ export class AgentRuntime implements Runtime {
             log.info({ chatJid }, 'sent continuation turn after proactive resume');
           } catch (err) {
             log.warn({ err, chatJid }, 'failed to send continuation turn after resume');
+            // Continuation send failed — no result will arrive for its mark.
+            this.unmarkPendingSystemResult(initialMapKey);
           }
         }).catch((err) => {
           log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
@@ -3002,6 +3023,10 @@ export class AgentRuntime implements Runtime {
 
     const wasInactive = !session.getStatus().active;
     if (wasInactive) {
+      // Respawning — the prior subprocess is gone, so a previously-abandoned
+      // /compact result will never arrive. Drop its marker so it cannot absorb
+      // the fresh session's first (context-injection) result.
+      this.abandonedSystemResults.delete(mapKey ?? GLOBAL_TOOL_SCOPE_KEY);
       // Flush any buffered output from the dying session before shutting down.
       // Without this, text in the 2-second stream debounce buffer is lost when
       // the child process is killed, because the stream parser stops emitting events.
@@ -3039,6 +3064,8 @@ export class AgentRuntime implements Runtime {
           }
         } catch (err) {
           log.warn({ err, chatJid }, 'chat context injection failed — proceeding without context');
+          // Context-injection send failed — no result will arrive for its mark.
+          this.unmarkPendingSystemResult(mapKey);
         }
       }
     }
@@ -3210,16 +3237,24 @@ export class AgentRuntime implements Runtime {
     const inboundSeq = seqQueue[0]; // peek — don't shift yet
     let isSystemResult = false;
     if (event.type === 'result') {
-      const pendingSystem = this.perChatPendingSystemResults.get(mapKey) ?? 0;
-      if (pendingSystem > 0) {
-        // This result belongs to a system turn (context injection, continuation) — don't consume user seq
+      if (this.abandonedSystemResults.has(mapKey)) {
+        // Late result for an auto-compact we already timed out and decremented.
+        // Absorb it as a system result without decrementing again (FIFO: this is
+        // the first result after the timeout). Don't consume the user seq.
+        this.abandonedSystemResults.delete(mapKey);
         isSystemResult = true;
-        this.perChatPendingSystemResults.set(mapKey, pendingSystem - 1);
       } else {
-        // Consume the seq for this completed user turn
-        seqQueue.shift();
-        // Turn completed successfully — clear pending replay text
-        this.pendingTurnText.delete(mapKey);
+        const pendingSystem = this.perChatPendingSystemResults.get(mapKey) ?? 0;
+        if (pendingSystem > 0) {
+          // This result belongs to a system turn (context injection, continuation) — don't consume user seq
+          isSystemResult = true;
+          this.perChatPendingSystemResults.set(mapKey, pendingSystem - 1);
+        } else {
+          // Consume the seq for this completed user turn
+          seqQueue.shift();
+          // Turn completed successfully — clear pending replay text
+          this.pendingTurnText.delete(mapKey);
+        }
       }
     }
     this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey, toolScopeKey, isSystemResult);
@@ -3262,6 +3297,19 @@ export class AgentRuntime implements Runtime {
   private markPendingSystemResult(mapKey: string | undefined): void {
     if (mapKey === undefined) return;
     this.perChatPendingSystemResults.set(mapKey, (this.perChatPendingSystemResults.get(mapKey) ?? 0) + 1);
+  }
+
+  /**
+   * Reverse a markPendingSystemResult when the system turn's sendTurn fails and
+   * no result event will arrive. Without this, the stranded +1 would later
+   * misclassify a genuine user-turn result as a system turn (the same class of
+   * bug as the post-turn gate suppression). Guarded so the counter never goes
+   * negative.
+   */
+  private unmarkPendingSystemResult(mapKey: string | undefined): void {
+    if (mapKey === undefined) return;
+    const pending = this.perChatPendingSystemResults.get(mapKey) ?? 0;
+    if (pending > 0) this.perChatPendingSystemResults.set(mapKey, pending - 1);
   }
 
   private completeConsumedPerChatInbound(mapKey: string, terminalReason: string): void {
@@ -4600,9 +4648,8 @@ export class AgentRuntime implements Runtime {
         await session.sendTurn('/compact');
       } catch (err) {
         if (silent) this.clearSilentCompact(mapKey);
-        // No result will arrive for a failed send — unmark.
-        const pending = this.perChatPendingSystemResults.get(mapKey) ?? 0;
-        if (pending > 0) this.perChatPendingSystemResults.set(mapKey, pending - 1);
+        // No result will arrive for a failed send.
+        this.unmarkPendingSystemResult(mapKey);
         throw err;
       }
 
@@ -4643,9 +4690,8 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       if (silent) this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       this.currentTurnChatJid = null;
-      // No result will arrive for a failed send — unmark.
-      const pending = this.perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) ?? 0;
-      if (pending > 0) this.perChatPendingSystemResults.set(GLOBAL_TOOL_SCOPE_KEY, pending - 1);
+      // No result will arrive for a failed send.
+      this.unmarkPendingSystemResult(GLOBAL_TOOL_SCOPE_KEY);
       throw err;
     }
 
@@ -5373,6 +5419,8 @@ export class AgentRuntime implements Runtime {
               log.info({ mapKey }, 'sent continuation turn after auto-respawn');
             } catch (err) {
               log.warn({ err, mapKey }, 'failed to send continuation turn after auto-respawn');
+              // Continuation send failed — no result will arrive for its mark.
+              this.unmarkPendingSystemResult(mapKey);
             }
           }).catch((err) => {
             log.warn({ err, mapKey, sessionId }, 'auto-respawn resume failed — will retry on next message');
@@ -5586,6 +5634,8 @@ export class AgentRuntime implements Runtime {
             }
           } catch (err) {
             log.warn({ err, chatJid }, 'context recovery failed — starting blank session');
+            // Context-recovery send failed — no result will arrive for its mark.
+            this.unmarkPendingSystemResult(mapKey);
           }
 
           // Replay the pending turn that was lost during the failed resume
@@ -5771,10 +5821,18 @@ export class AgentRuntime implements Runtime {
         // incremented by maybeStartAutoCompact / handleAgentCommand. Shared mode
         // never increments GLOBAL (auto-compact early-returns), so this is a
         // no-op there.
-        const pendingSystem = this.perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) ?? 0;
-        const isSystemResult = pendingSystem > 0;
-        if (isSystemResult) {
-          this.perChatPendingSystemResults.set(GLOBAL_TOOL_SCOPE_KEY, pendingSystem - 1);
+        let isSystemResult: boolean;
+        if (this.abandonedSystemResults.has(GLOBAL_TOOL_SCOPE_KEY)) {
+          // Late result for an auto-compact we already timed out and decremented
+          // (FIFO-first); absorb without double-decrementing.
+          this.abandonedSystemResults.delete(GLOBAL_TOOL_SCOPE_KEY);
+          isSystemResult = true;
+        } else {
+          const pendingSystem = this.perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) ?? 0;
+          isSystemResult = pendingSystem > 0;
+          if (isSystemResult) {
+            this.perChatPendingSystemResults.set(GLOBAL_TOOL_SCOPE_KEY, pendingSystem - 1);
+          }
         }
 
         // AskUserQuestion poll bridge is per_chat only — no pending-poll
