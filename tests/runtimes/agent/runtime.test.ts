@@ -913,6 +913,45 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('auto-compact timeout decrements the pending-system count and absorbs a late /compact result without double-decrementing', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+      const state = runtime as unknown as {
+        perChatPendingSystemResults: Map<string, number>;
+        abandonedSystemResults: Set<string>;
+      };
+      mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'session-1', startedAt: '2026-05-18T00:00:00.000Z', messageCount: 1, lastMessageAt: null });
+      mockSession.getDbRowId.mockReturnValue(42);
+      mockGetSessionTokenSnapshot.mockReturnValue({ totalInputTokens: 250, totalOutputTokens: 5, lastCompactInputTokens: 100, lastCompactOutputTokens: 0 });
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 250, outputTokens: 5 });
+      await Promise.resolve();
+
+      // /compact dispatched → exactly one pending system result registered.
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+      expect(state.perChatPendingSystemResults.get('__global__') ?? 0).toBe(1);
+
+      // Timeout fires: decrement to 0 and record the abandonment.
+      await vi.advanceTimersByTimeAsync(4 * 60 * 1000 + 100);
+      expect(state.perChatPendingSystemResults.get('__global__') ?? 0).toBe(0);
+      expect(state.abandonedSystemResults.has('__global__')).toBe(true);
+
+      // The /compact result arrives late: absorbed as a system result without
+      // driving the counter negative, and the abandonment marker is cleared.
+      capturedOnEventRef.current?.({ type: 'result', text: null });
+      await Promise.resolve();
+      expect(state.perChatPendingSystemResults.get('__global__') ?? 0).toBe(0);
+      expect(state.abandonedSystemResults.has('__global__')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -2561,6 +2600,48 @@ describe('AgentRuntime', () => {
     mockQueue.enqueueStreamingText.mockClear();
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Real reply' });
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Real reply');
+  });
+
+  it('per_chat: a failed context-injection send does not leak a pending system result', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as { perChatPendingSystemResults: Map<string, number> };
+    const chatJid = '15550004444@s.whatsapp.net';
+
+    // Recent messages exist, so a fresh (inactive) session triggers context
+    // injection on the next turn.
+    vi.mocked(getRecentMessages).mockReturnValue([
+      {
+        pk: 1,
+        chatJid,
+        conversationKey: 'k',
+        senderJid: 'sender@s.whatsapp.net',
+        senderName: 'Alice',
+        messageId: 'm1',
+        content: 'earlier message',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1_700_000_000,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: new Date().toISOString(),
+        mediaPath: null,
+        contentText: null,
+      },
+    ]);
+    // Session is inactive so sendTurnToSession respawns and injects context;
+    // make that injection sendTurn fail. The injection mark must be reversed.
+    mockSession.getStatus.mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
+    mockSession.sendTurn.mockRejectedValueOnce(new Error('inject send failed'));
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello', inboundSeq: 1 }));
+
+    // No stranded +1 — otherwise the next real user-turn result would be
+    // misclassified as a system turn.
+    expect(state.perChatPendingSystemResults.get(chatJid) ?? 0).toBe(0);
   });
 
   it('shared-session: assistant_text after result is suppressed (post-turn gate)', () => {
