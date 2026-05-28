@@ -888,16 +888,26 @@ describe('AgentRuntime', () => {
 
       expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
 
-      // Advance past the 2-minute compact timeout - no compact_boundary event arrived.
-      await vi.advanceTimersByTimeAsync(2 * 60 * 1000 + 100);
+      // Advance past the 4-minute compact timeout - no compact_boundary event arrived.
+      await vi.advanceTimersByTimeAsync(4 * 60 * 1000 + 100);
 
       // A subsequent result event would normally trigger maybeStartAutoCompact again.
-      // With the cooldown in place, /compact must NOT be re-sent.
+      // While the post-timeout backoff is active, /compact must NOT be re-sent.
       mockSession.sendTurn.mockClear();
       capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 200, outputTokens: 10 });
       await Promise.resolve();
 
       expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+
+      // Once the (now shorter) 5-minute backoff elapses, auto-compact may retry —
+      // bounding how far a stuck session grows between attempts instead of
+      // degrading for a long window.
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 100);
+      mockSession.sendTurn.mockClear();
+      capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 200, outputTokens: 10 });
+      await Promise.resolve();
+
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
     } finally {
       vi.useRealTimers();
     }

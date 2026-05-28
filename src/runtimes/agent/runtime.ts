@@ -122,8 +122,18 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
-const AUTO_COMPACT_TIMEOUT_MS = 2 * 60 * 1000;
-const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 15 * 60 * 1000;
+// Time to wait for an auto-triggered /compact to complete before giving up.
+// A /compact must summarize the whole conversation, so on large contexts it can
+// legitimately take a few minutes; 2 min was too short and produced false
+// timeouts that fed an unbounded-growth spiral. Must stay < SILENT_COMPACT_TTL_MS
+// so the silent-compact flag does not expire mid-compaction.
+const AUTO_COMPACT_TIMEOUT_MS = 4 * 60 * 1000;
+// Cooldown after a timed-out /compact before another auto-compact may be tried.
+// Kept short so a session that times out retries soon (bounding how far it grows
+// between attempts) rather than degrading for a long window; still long enough to
+// prevent a per-turn retry storm. A session that genuinely cannot compact is
+// ultimately recovered by the prompt-too-long kill+respawn path.
+const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 5 * 60 * 1000;
 // Default auto-compact threshold: trigger /compact after 150k input tokens since last compact.
 // Claude's context window is 200k tokens; compacting at 150k prevents "prompt too long" errors
 // while leaving headroom for tool results and system prompts. Override per-instance via
