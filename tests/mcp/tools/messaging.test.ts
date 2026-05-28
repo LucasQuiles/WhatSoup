@@ -1,10 +1,10 @@
 // tests/mcp/tools/messaging.test.ts
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
-import { registerMessagingTools, type MessagingDeps } from '../../../src/mcp/tools/messaging.ts';
+import { registerMessagingTools, type MessagingDeps, type PollRegistrar } from '../../../src/mcp/tools/messaging.ts';
 import { createProfileRegistry } from '../../../src/core/profiles.ts';
 import { createOutboundSendsWriter } from '../../../src/core/outbound-sends.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
@@ -105,6 +105,57 @@ function makeConnection(calls: string[]) {
 
 function chatSession(conversationKey: string, deliveryJid: string): SessionContext {
   return { tier: 'chat-scoped', conversationKey, deliveryJid };
+}
+
+type FakeRegisterCall = {
+  pollId: string;
+  chatJid: string;
+  options: string[];
+  resolution: string;
+  timeoutMs: number;
+  abortSignal: AbortSignal | undefined;
+};
+
+type FakePollRegistrar = PollRegistrar & {
+  calls: FakeRegisterCall[];
+  resolveLast(answer: string): void;
+  rejectLast(err: Error): void;
+};
+
+function makeFakePollRegistrar(): FakePollRegistrar {
+  const calls: FakeRegisterCall[] = [];
+  let pendingResolve: ((answer: string) => void) | null = null;
+  let pendingReject: ((err: Error) => void) | null = null;
+  const registrar: FakePollRegistrar = {
+    calls,
+    resolveLast(answer: string): void {
+      if (!pendingResolve) throw new Error('no pending registrar call to resolve');
+      pendingResolve(answer);
+      pendingResolve = null;
+      pendingReject = null;
+    },
+    rejectLast(err: Error): void {
+      if (!pendingReject) throw new Error('no pending registrar call to reject');
+      pendingReject(err);
+      pendingResolve = null;
+      pendingReject = null;
+    },
+    async register(pollId, chatJid, options, resolution, timeoutMs, abortSignal) {
+      calls.push({ pollId, chatJid, options, resolution, timeoutMs, abortSignal });
+      return new Promise<string>((resolve, reject) => {
+        pendingResolve = resolve;
+        pendingReject = reject;
+        if (abortSignal) {
+          abortSignal.addEventListener('abort', () => reject(new Error('aborted')));
+        }
+      });
+    },
+  };
+  return registrar;
+}
+
+function depsWithRegistrar(base: MessagingDeps, registrar: FakePollRegistrar): MessagingDeps {
+  return Object.assign({}, base, { pollRegistrar: registrar });
 }
 
 // ---------------------------------------------------------------------------
@@ -876,6 +927,170 @@ describe('registerMessagingTools', () => {
       expect(JSON.parse(longOption.content[0].text).error).toMatch(/95 characters or fewer/);
 
       expect(calls).toHaveLength(0);
+    });
+
+    it('C6a — awaitResult:true awaits the registrar and returns the resolved answer with exact register args', async () => {
+      const localRegistry = new ToolRegistry();
+      const fakeRegistrar = makeFakePollRegistrar();
+      registerMessagingTools(localRegistry, depsWithRegistrar(deps, fakeRegistrar));
+
+      const session = chatSession('poll-await', 'poll-await@s.whatsapp.net');
+      const callPromise = localRegistry.call(
+        'send_poll',
+        {
+          question: 'Pick a colour',
+          options: ['Red', 'Blue', 'Green'],
+          resolution: 'first-vote-wins',
+          timeoutMs: 5000,
+          awaitResult: true,
+        },
+        session,
+      );
+
+      await vi.waitFor(() => {
+        expect(fakeRegistrar.calls).toHaveLength(1);
+      });
+      const registerCall = fakeRegistrar.calls[0];
+      expect(registerCall.pollId).toMatch(/^poll-/);
+      expect(registerCall.chatJid).toBe('poll-await@s.whatsapp.net');
+      expect(registerCall.options).toEqual(['Red', 'Blue', 'Green']);
+      expect(registerCall.resolution).toBe('first-vote-wins');
+      expect(registerCall.timeoutMs).toBe(5000);
+
+      fakeRegistrar.resolveLast('Red');
+      const result = await callPromise;
+      const body = JSON.parse(result.content[0].text);
+      expect(body.sent).toBe(true);
+      expect(body.pollId).toBe(registerCall.pollId);
+      expect(body.answer).toBe('Red');
+      expect(body.awaitFailed).toBeUndefined();
+      expect(body.error).toBeUndefined();
+      expect(body.options).toEqual(['Red', 'Blue', 'Green']);
+    });
+
+    it('C6b — awaitResult:true without a pollRegistrar dep returns awaitFailed with the tracking-unavailable error', async () => {
+      const session = chatSession('poll-no-reg', 'poll-no-reg@s.whatsapp.net');
+      const result = await registry.call(
+        'send_poll',
+        { question: 'Pick', options: ['A', 'B'], awaitResult: true },
+        session,
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.sent).toBe(true);
+      expect(body.pollId).toMatch(/^poll-/);
+      expect(body.awaitFailed).toBe(true);
+      expect(body.answer).toBeUndefined();
+      expect(body.options).toEqual(['A', 'B']);
+      expect(body.question).toBe('Pick');
+      expect(body.error).toBe('Poll sent but vote tracking unavailable — cannot await result');
+    });
+
+    it('C6c — timeoutMs is bounded by Zod inclusive and defaults to 3,600,000 when undefined', async () => {
+      const session = chatSession('poll-bounds', 'poll-bounds@s.whatsapp.net');
+
+      const tooLow = await registry.call('send_poll', { question: 'Pick', options: ['A', 'B'], timeoutMs: 999 }, session);
+      expect(tooLow.isError).toBe(true);
+      expect(tooLow.content[0].text).toMatch(/timeoutMs/i);
+
+      const tooHigh = await registry.call('send_poll', { question: 'Pick', options: ['A', 'B'], timeoutMs: 86_400_001 }, session);
+      expect(tooHigh.isError).toBe(true);
+      expect(tooHigh.content[0].text).toMatch(/timeoutMs/i);
+
+      const localRegistry = new ToolRegistry();
+      const fakeRegistrar = makeFakePollRegistrar();
+      registerMessagingTools(localRegistry, depsWithRegistrar(deps, fakeRegistrar));
+
+      const minPromise = localRegistry.call(
+        'send_poll',
+        { question: 'Pick', options: ['A', 'B'], awaitResult: true, timeoutMs: 1000 },
+        chatSession('poll-min', 'poll-min@s.whatsapp.net'),
+      );
+      await vi.waitFor(() => { expect(fakeRegistrar.calls).toHaveLength(1); });
+      expect(fakeRegistrar.calls[0].timeoutMs).toBe(1000);
+      fakeRegistrar.resolveLast('A');
+      await minPromise;
+
+      const maxPromise = localRegistry.call(
+        'send_poll',
+        { question: 'Pick', options: ['A', 'B'], awaitResult: true, timeoutMs: 86_400_000 },
+        chatSession('poll-max', 'poll-max@s.whatsapp.net'),
+      );
+      await vi.waitFor(() => { expect(fakeRegistrar.calls).toHaveLength(2); });
+      expect(fakeRegistrar.calls[1].timeoutMs).toBe(86_400_000);
+      fakeRegistrar.resolveLast('A');
+      await maxPromise;
+
+      const defaultPromise = localRegistry.call(
+        'send_poll',
+        { question: 'Pick', options: ['A', 'B'], awaitResult: true },
+        chatSession('poll-default', 'poll-default@s.whatsapp.net'),
+      );
+      await vi.waitFor(() => { expect(fakeRegistrar.calls).toHaveLength(3); });
+      expect(fakeRegistrar.calls[2].timeoutMs).toBe(3_600_000);
+      fakeRegistrar.resolveLast('A');
+      await defaultPromise;
+    });
+
+    it('C7a — AbortController firing during an in-flight registrar call resolves to awaitFailed with the cancelled error', async () => {
+      const localRegistry = new ToolRegistry();
+      const fakeRegistrar = makeFakePollRegistrar();
+      registerMessagingTools(localRegistry, depsWithRegistrar(deps, fakeRegistrar));
+
+      const controller = new AbortController();
+      const session: SessionContext = {
+        tier: 'chat-scoped',
+        conversationKey: 'poll-cancel',
+        deliveryJid: 'poll-cancel@s.whatsapp.net',
+        abortSignal: controller.signal,
+      };
+      const callPromise = localRegistry.call(
+        'send_poll',
+        { question: 'Pick', options: ['A', 'B'], awaitResult: true },
+        session,
+      );
+
+      await vi.waitFor(() => { expect(fakeRegistrar.calls).toHaveLength(1); });
+      expect(fakeRegistrar.calls[0].abortSignal).toBe(controller.signal);
+
+      controller.abort();
+      const result = await callPromise;
+      const body = JSON.parse(result.content[0].text);
+      expect(body.sent).toBe(true);
+      expect(body.pollId).toBe(fakeRegistrar.calls[0].pollId);
+      expect(body.awaitFailed).toBe(true);
+      expect(body.answer).toBeUndefined();
+      expect(body.options).toEqual(['A', 'B']);
+      expect(body.question).toBe('Pick');
+      expect(body.error).toBe('Poll timed out or was cancelled');
+    });
+
+    it('C7b — AbortSignal already aborted before the call short-circuits without engaging the registrar', async () => {
+      const localRegistry = new ToolRegistry();
+      const fakeRegistrar = makeFakePollRegistrar();
+      registerMessagingTools(localRegistry, depsWithRegistrar(deps, fakeRegistrar));
+
+      const controller = new AbortController();
+      controller.abort();
+      const session: SessionContext = {
+        tier: 'chat-scoped',
+        conversationKey: 'poll-pre-abort',
+        deliveryJid: 'poll-pre-abort@s.whatsapp.net',
+        abortSignal: controller.signal,
+      };
+      const result = await localRegistry.call(
+        'send_poll',
+        { question: 'Pick', options: ['A', 'B'], awaitResult: true },
+        session,
+      );
+
+      expect(fakeRegistrar.calls).toHaveLength(0);
+      const body = JSON.parse(result.content[0].text);
+      expect(body.sent).toBe(true);
+      expect(body.pollId).toMatch(/^poll-/);
+      expect(body.awaitFailed).toBe(true);
+      expect(body.answer).toBeUndefined();
+      expect(body.error).toBe('Poll cancelled before await began');
     });
   });
 
