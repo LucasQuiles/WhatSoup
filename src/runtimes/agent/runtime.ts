@@ -1196,6 +1196,9 @@ export class AgentRuntime implements Runtime {
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
 
+  /** Count of swallowed pending_polls persistence failures (persist/remove/rehydrate). Surfaced in health. */
+  private pollPersistenceErrors = 0;
+
   private recordCrash(mapKey: string): number {
     const count = (this.perChatCrashCount.get(mapKey) ?? 0) + 1;
     this.perChatCrashCount.set(mapKey, count);
@@ -3301,6 +3304,7 @@ export class AgentRuntime implements Runtime {
           hardClosesAt,
         );
     } catch (err) {
+      this.pollPersistenceErrors += 1;
       log.error({ err, mapKey }, 'persistPendingPoll failed; in-memory state remains authoritative');
     }
   }
@@ -3313,6 +3317,7 @@ export class AgentRuntime implements Runtime {
     try {
       this.db.raw.prepare('DELETE FROM pending_polls WHERE map_key = ?').run(mapKey);
     } catch (err) {
+      this.pollPersistenceErrors += 1;
       log.error({ err, mapKey }, 'removePendingPoll failed');
     }
   }
@@ -3348,11 +3353,15 @@ export class AgentRuntime implements Runtime {
     const now = Date.now();
     let restored = 0;
     let expired = 0;
+    // Accumulate expired-poll counts per chat so a long downtime that strands
+    // many polls in one chat produces a single consolidated notification rather
+    // than one message per stranded poll.
+    const expiredByChat = new Map<string, number>();
     for (const row of rows) {
       try {
         if (row.hard_closes_at !== null && row.hard_closes_at <= now) {
           this.removePendingPoll(row.map_key);
-          this.notifyPollExpiredDuringDowntime(row.chat_jid);
+          expiredByChat.set(row.chat_jid, (expiredByChat.get(row.chat_jid) ?? 0) + 1);
           expired += 1;
           continue;
         }
@@ -3362,21 +3371,28 @@ export class AgentRuntime implements Runtime {
         this.startPendingPollExpiry(row.map_key, pending);
         restored += 1;
       } catch (err) {
+        this.pollPersistenceErrors += 1;
         log.error({ err, mapKey: row.map_key }, 'rehydratePendingPolls: row deserialize failed; skipping');
       }
     }
+    for (const [chatJid, count] of expiredByChat) {
+      this.notifyPollExpiredDuringDowntime(chatJid, count);
+    }
     if (restored > 0 || expired > 0) {
-      log.info({ restored, expired }, 'rehydratePendingPolls: completed');
+      log.info({ restored, expired, chatsNotified: expiredByChat.size }, 'rehydratePendingPolls: completed');
     }
   }
 
   /**
-   * Best-effort notification that a pending poll expired during process
-   * downtime. The recipient sees a single line; the poll itself is dropped.
-   * Failure to send (messenger not ready, JID unresolvable) is logged.
+   * Best-effort notification that one or more pending polls expired during
+   * process downtime. The recipient sees a single consolidated line per chat;
+   * the polls themselves are dropped. Failure to send (messenger not ready,
+   * JID unresolvable) is logged.
    */
-  private notifyPollExpiredDuringDowntime(chatJid: string): void {
-    const message = 'A poll I was waiting on expired before I picked it back up — ask me again if you still need that decision.';
+  private notifyPollExpiredDuringDowntime(chatJid: string, count = 1): void {
+    const message = count > 1
+      ? `${count} polls I was waiting on expired before I picked them back up — ask me again if you still need those decisions.`
+      : 'A poll I was waiting on expired before I picked it back up — ask me again if you still need that decision.';
     try {
       void this.messenger.sendMessage(chatJid, message).catch((err) =>
         log.warn({ err, chatJid }, 'notifyPollExpiredDuringDowntime: send failed (non-fatal)'),
@@ -4361,6 +4377,7 @@ export class AgentRuntime implements Runtime {
           sessionCount: sessions.length,
           recentCrashes: recentCrashCount,
           lastCrashAt: this.lastCrashAt,
+          pollPersistenceErrors: this.pollPersistenceErrors,
         },
       };
     }
@@ -4375,6 +4392,7 @@ export class AgentRuntime implements Runtime {
         active: status?.active ?? false,
         pid: status?.pid ?? null,
         sessionId: status?.sessionId ?? null,
+        pollPersistenceErrors: this.pollPersistenceErrors,
       },
     };
   }

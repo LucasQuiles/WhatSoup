@@ -304,7 +304,8 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
-import { AgentRuntime, isUsageLimitMessage } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
 import { tmpdir } from 'node:os';
 
@@ -6697,6 +6698,137 @@ describe('AgentRuntime', () => {
       expect(pending.answersCollected[0]).toBeUndefined();
       expect(state.pendingPollQuestions.has(groupJid)).toBe(true);
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── P2 hardening: rehydrate consolidation + persistence error counter ─────
+
+  describe('poll persistence hardening', () => {
+    function makeRealDb(): RealDatabase {
+      const db = new RealDatabase(':memory:');
+      db.open();
+      return db;
+    }
+
+    function buildPayload(overrides: Partial<PendingPollQuestion>): string {
+      const pending: PendingPollQuestion = {
+        questions: [{
+          question: 'Pick',
+          header: 'H',
+          options: [{ label: 'A', description: '' }, { label: 'B', description: '' }],
+          multiSelect: false,
+        }],
+        toolId: 'tool-x',
+        chatJid: 'chat@g.us',
+        chatJidAliases: new Set(['chat@g.us']),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([['POLL_X', 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt: 1_700_000_000_000,
+        resolution: 'first-vote-wins',
+        timeoutMs: 3_600_000,
+        votesByQuestion: new Map(),
+        adminJids: null,
+        source: 'askuser',
+        sentPollMessageIds: ['POLL_X'],
+        ...overrides,
+      };
+      return JSON.stringify(serializePendingPoll(pending));
+    }
+
+    function insertRow(
+      db: RealDatabase,
+      mapKey: string,
+      chatJid: string,
+      hardClosesAt: number | null,
+      payload: string,
+    ): void {
+      db.raw.prepare(
+        `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(mapKey, chatJid, mapKey, 'askuser', 'first-vote-wins', payload, 1_700_000_000_000, hardClosesAt, hardClosesAt);
+    }
+
+    it('rehydrate consolidates expired-during-downtime notices to one message per chat', async () => {
+      const db = makeRealDb();
+      const { messenger, sentMessages } = makeMessenger();
+      const past = Date.now() - 10_000;
+      const future = Date.now() + 3_600_000;
+
+      // chatA: 3 stranded polls → one consolidated "3 polls" notice
+      insertRow(db, 'send_poll:a1', 'chatA@g.us', past, buildPayload({ chatJid: 'chatA@g.us' }));
+      insertRow(db, 'send_poll:a2', 'chatA@g.us', past, buildPayload({ chatJid: 'chatA@g.us' }));
+      insertRow(db, 'send_poll:a3', 'chatA@g.us', past, buildPayload({ chatJid: 'chatA@g.us' }));
+      // chatB: 1 stranded poll → one single-poll notice
+      insertRow(db, 'send_poll:b1', 'chatB@g.us', past, buildPayload({ chatJid: 'chatB@g.us' }));
+      // chatC: live poll → restored, no notice
+      insertRow(db, 'send_poll:c1', 'chatC@g.us', future, buildPayload({
+        chatJid: 'chatC@g.us',
+        pollMessageIdToQuestionIndex: new Map([['POLL_C', 0]]),
+        sentPollMessageIds: ['POLL_C'],
+      }));
+
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      await (runtime as unknown as { rehydratePendingPolls(): Promise<void> }).rehydratePendingPolls();
+
+      // Exactly 2 chats notified (chatA + chatB), not 4 messages
+      expect(sentMessages).toHaveLength(2);
+      const byChat = new Map(sentMessages.map((m) => [m.jid, m.text]));
+      expect(byChat.get('chatA@g.us')).toMatch(/3 polls/);
+      expect(byChat.get('chatB@g.us')).toMatch(/A poll I was waiting on/);
+      expect(byChat.has('chatC@g.us')).toBe(false);
+
+      // chatC live poll restored into the in-memory map; expired rows deleted from table
+      const state = runtime as unknown as { pendingPollQuestions: Map<string, unknown> };
+      expect(state.pendingPollQuestions.has('send_poll:c1')).toBe(true);
+      expect(state.pendingPollQuestions.has('send_poll:a1')).toBe(false);
+      const remaining = db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number };
+      expect(remaining.cnt).toBe(1);
+
+      db.close();
+    });
+
+    it('persistPendingPoll failure increments pollPersistenceErrors and surfaces it in the health snapshot', async () => {
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+
+      const snapBefore = runtime.getHealthSnapshot();
+      expect((snapBefore.details as { pollPersistenceErrors: number }).pollPersistenceErrors).toBe(0);
+
+      // Drop the table AFTER construction so the constructor's own prepares
+      // succeed but persist/remove INSERT/DELETE hit "no such table" and the
+      // catch blocks increment the counter.
+      db.raw.prepare('DROP TABLE pending_polls').run();
+
+      const pending: PendingPollQuestion = {
+        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
+        toolId: 'tool-y',
+        chatJid: 'chatErr@g.us',
+        chatJidAliases: new Set(['chatErr@g.us']),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([['POLL_Y', 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt: Date.now(),
+        resolution: 'first-vote-wins',
+        timeoutMs: 3_600_000,
+        votesByQuestion: new Map(),
+        adminJids: null,
+        source: 'send_poll',
+        sentPollMessageIds: ['POLL_Y'],
+      };
+
+      (runtime as unknown as { persistPendingPoll(k: string, p: PendingPollQuestion): void })
+        .persistPendingPoll('send_poll:y', pending);
+      (runtime as unknown as { removePendingPoll(k: string): void })
+        .removePendingPoll('send_poll:y');
+
+      const snapAfter = runtime.getHealthSnapshot();
+      expect((snapAfter.details as { pollPersistenceErrors: number }).pollPersistenceErrors).toBe(2);
+
+      db.close();
     });
   });
 });
