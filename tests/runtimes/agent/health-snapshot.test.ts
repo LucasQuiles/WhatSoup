@@ -261,6 +261,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         sessionCount: 0,
         recentCrashes: 0,
         lastCrashAt: null,
+        pollPersistenceErrors: 0,
       },
     });
   });
@@ -276,6 +277,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         sessionCount: 0,
         recentCrashes: 0,
         lastCrashAt: null,
+        pollPersistenceErrors: 0,
       },
     });
   });

@@ -167,6 +167,30 @@ describe('GET /health', () => {
     expect(typeof json.uptime_seconds).toBe('number');
   });
 
+  it('reports pending_polls_total reflecting live rows in the pending_polls table', async () => {
+    // Empty table → 0
+    const empty = await httpReq(port, '/health', 'GET');
+    expect(JSON.parse(empty.body).sqlite.pending_polls_total).toBe(0);
+
+    // Insert two live polls
+    const insert = db.raw.prepare(
+      `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const now = Date.now();
+    insert.run('send_poll:p1', 'chatA@g.us', 'send_poll:p1', 'send_poll', 'first-vote-wins', '{}', now, now + 60_000, now + 120_000);
+    insert.run('send_poll:p2', 'chatB@g.us', 'send_poll:p2', 'send_poll', 'admin-only', '{}', now, now + 60_000, now + 120_000);
+
+    const after = await httpReq(port, '/health', 'GET');
+    expect(after.status).toBe(200);
+    expect(JSON.parse(after.body).sqlite.pending_polls_total).toBe(2);
+
+    // Deleting one decrements the reported count
+    db.raw.prepare('DELETE FROM pending_polls WHERE map_key = ?').run('send_poll:p1');
+    const afterDelete = await httpReq(port, '/health', 'GET');
+    expect(JSON.parse(afterDelete.body).sqlite.pending_polls_total).toBe(1);
+  });
+
   it('returns 503 with unhealthy status when disconnected', async () => {
     db.close();
     const db2 = makeDb();

@@ -571,6 +571,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to read sqlite schema_version',
       );
 
+      const pendingPollsTotal = safeDbQuery(
+        () => {
+          const row = deps.db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number } | undefined;
+          return row?.cnt ?? 0;
+        },
+        0,
+        'failed to count pending polls',
+      );
+
       // Mode-specific runtime block for control-plane
       let runtimeBlock: Record<string, unknown> = {};
       if (deps.runtime) {
@@ -620,6 +629,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           schema_version: schemaVersion,
           messages_total: messagesTotal,
           unprocessed: enrichmentStats.unprocessed,
+          pending_polls_total: pendingPollsTotal,
         },
         access_control: {
           pending_count: pendingCount,
