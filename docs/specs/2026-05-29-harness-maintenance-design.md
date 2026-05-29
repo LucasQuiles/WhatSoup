@@ -24,7 +24,7 @@ Two concrete failures motivated this work:
 
 A naive fix — "run the updaters on a timer" — introduces a worse problem:
 **supply-chain exposure**. The Codex CLI installs from npm, and the host
-currently has no `~/.npmrc`, `minimum-release-age` unset, and `before=null`.
+currently has no `~/.npmrc`, `min-release-age` unset, and `before=null`.
 A blind `@latest` would install a release published seconds earlier, which is
 the dominant npm attack pattern (compromised-maintainer publish, yanked within
 hours). The maintenance system must therefore be safe by construction, not just
@@ -49,7 +49,9 @@ safely.
 ### Runtimes & load-bearing surface
 - **Node:** system `v20.20.2`; NVM `v20.20.0`, `v22.22.3`, `v24.13.0`
   (Codex's node, npm `11.8.0`), `v24.15.0` (WhatSoup's `.nvmrc` pin, npm
-  `11.12.1`). npm ≥ 11.5 supports `minimum-release-age`.
+  `11.12.1`). The host's npm `11.12.1` exposes `min-release-age`, while the
+  older npm `11.8.0` ignores it, so the maintenance script also enforces
+  publish age directly from registry metadata.
 - **Python:** system `3.12.3` (drives DreamMachine + many `~/.claude/scripts`
   and `~/bin` fleet jobs).
 - **Package managers:** npm only (no bun, no pnpm); corepack present.
@@ -123,7 +125,7 @@ A managed `~/.npmrc` is added to `deploy/` as `npmrc.hardened` and applied by
 
 ```ini
 registry=https://registry.npmjs.org/
-minimum-release-age=10080      ; 7 days, in minutes
+min-release-age=10080      ; 7 days, in minutes
 audit=true
 fund=false
 ```

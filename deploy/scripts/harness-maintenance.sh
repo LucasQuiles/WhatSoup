@@ -63,6 +63,8 @@ fi
 CODX_NODE_BIN_DIR="${WHATSOUP_CODEX_NODE_BIN_DIR:-$HOME/.nvm/versions/node/v24.13.0/bin}"
 ALERT_BIN="${WHATSOUP_ALERT_BIN:-$HOME/.local/bin/whatsapp-alert}"
 PROBE_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_TIMEOUT_SECS:-10}"
+REPO_NODE_BIN_DIR="$(dirname "$REPO_NODE_BIN")"
+export PATH="$HOME/.local/bin:$REPO_NODE_BIN_DIR:$PATH"
 
 log() {
   echo "[harness-maintenance] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" | tee -a "$RUN_LOG" >&2
@@ -207,12 +209,52 @@ apply_npmrc() {
     return 0
   fi
   if [ -f "$HOME/.npmrc" ] && ! cmp -s "$NPMRC_TEMPLATE" "$HOME/.npmrc"; then
-    local backup="$HOME/.npmrc.whatsoup-backup-$(date -u +%Y%m%dT%H%M%SZ)"
+    local backup
+    backup="$HOME/.npmrc.whatsoup-backup-$(date -u +%Y%m%dT%H%M%SZ)"
     cp "$HOME/.npmrc" "$backup"
     record_event "npmrc" "backup" "existing ~/.npmrc backed up" "$HOME/.npmrc" "$backup"
   fi
-  cp "$NPMRC_TEMPLATE" "$HOME/.npmrc"
-  record_event "npmrc" "applied" "hardened npm settings applied"
+  "$REPO_NODE_BIN" - "$NPMRC_TEMPLATE" "$HOME/.npmrc" <<'NODE'
+const fs = require('node:fs');
+const [templatePath, targetPath] = process.argv.slice(2);
+const templateLines = fs
+  .readFileSync(templatePath, 'utf8')
+  .split(/\r?\n/)
+  .filter((line) => {
+    const trimmed = line.trim();
+    return trimmed && !trimmed.startsWith('#') && !trimmed.startsWith(';');
+  });
+const desired = new Map();
+for (const line of templateLines) {
+  const index = line.indexOf('=');
+  if (index === -1) continue;
+  desired.set(line.slice(0, index).trim(), line);
+}
+
+const targetExists = fs.existsSync(targetPath);
+const lines = targetExists
+  ? fs.readFileSync(targetPath, 'utf8').split(/\r?\n/)
+  : [];
+if (lines.at(-1) === '') lines.pop();
+
+const seen = new Set();
+const merged = lines.map((line) => {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith(';')) return line;
+  const index = trimmed.indexOf('=');
+  if (index === -1) return line;
+  const key = trimmed.slice(0, index).trim();
+  const replacement = desired.get(key);
+  if (!replacement) return line;
+  seen.add(key);
+  return replacement;
+});
+for (const [key, line] of desired) {
+  if (!seen.has(key)) merged.push(line);
+}
+fs.writeFileSync(targetPath, `${merged.join('\n')}\n`);
+NODE
+  record_event "npmrc" "applied" "hardened npm settings merged"
 }
 
 guard_manifest() {
