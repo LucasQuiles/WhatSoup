@@ -1,0 +1,226 @@
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
+export const DEFAULT_COOLDOWN_MINUTES = 7 * 24 * 60;
+
+export interface NpmVersionAge {
+  version: string;
+  publishedAt: string;
+  ageMinutes: number;
+  cooldownMinutes: number;
+  eligible: boolean;
+}
+
+export interface FloatingReference {
+  path: string;
+  value: string;
+}
+
+export interface ManifestValidation {
+  schemaVersion: number;
+  cooldownMinutes: number;
+  tier1Harnesses: string[];
+  probes: string[];
+  floatingReferences: FloatingReference[];
+  warnings: string[];
+}
+
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function asRecord(value: unknown, label: string): JsonRecord {
+  if (!isRecord(value)) throw new Error(`${label} must be an object`);
+  return value;
+}
+
+function asArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return value;
+}
+
+function asString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function asNumber(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${label} must be a number`);
+  }
+  return value;
+}
+
+function walkForFloatingReferences(
+  value: unknown,
+  path: string,
+  findings: FloatingReference[],
+): void {
+  if (typeof value === 'string') {
+    if (/(^|[^a-z0-9_-])@latest\b/i.test(value) || /\blatest\b/i.test(value)) {
+      findings.push({ path, value });
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((child, index) =>
+      walkForFloatingReferences(child, `${path}[${index}]`, findings),
+    );
+    return;
+  }
+  if (isRecord(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      walkForFloatingReferences(child, path ? `${path}.${key}` : key, findings);
+    }
+  }
+}
+
+export function validateManifestPayload(payload: unknown): ManifestValidation {
+  const root = asRecord(payload, 'manifest');
+  const schemaVersion = asNumber(root.schema_version, 'schema_version');
+  if (schemaVersion !== 1) {
+    throw new Error(`schema_version must be 1, got ${schemaVersion}`);
+  }
+
+  const npm = asRecord(root.npm, 'npm');
+  const cooldownMinutes = asNumber(npm.cooldown_minutes, 'npm.cooldown_minutes');
+  if (cooldownMinutes < DEFAULT_COOLDOWN_MINUTES) {
+    throw new Error(
+      `npm.cooldown_minutes must be at least ${DEFAULT_COOLDOWN_MINUTES}`,
+    );
+  }
+
+  const tier1 = asArray(root.tier1, 'tier1');
+  const tier1Harnesses = tier1.map((entry, index) => {
+    const record = asRecord(entry, `tier1[${index}]`);
+    const name = asString(record.name, `tier1[${index}].name`);
+    asString(record.kind, `tier1[${index}].kind`);
+    asArray(record.smoke, `tier1[${index}].smoke`);
+    return name;
+  });
+  for (const required of ['claude', 'codex', 'opencode']) {
+    if (!tier1Harnesses.includes(required)) {
+      throw new Error(`tier1 must include ${required}`);
+    }
+  }
+
+  const tier2 = asRecord(root.tier2, 'tier2');
+  const probesPayload = asArray(tier2.probes, 'tier2.probes');
+  const probes = probesPayload.map((entry, index) => {
+    const record = asRecord(entry, `tier2.probes[${index}]`);
+    const name = asString(record.name, `tier2.probes[${index}].name`);
+    asString(record.mode, `tier2.probes[${index}].mode`);
+    return name;
+  });
+
+  const floatingReferences: FloatingReference[] = [];
+  walkForFloatingReferences(payload, '', floatingReferences);
+
+  const warnings: string[] = [];
+  if (floatingReferences.length > 0) {
+    warnings.push(
+      `${floatingReferences.length} floating latest reference(s) will be reported by maintenance checks`,
+    );
+  }
+
+  return {
+    schemaVersion,
+    cooldownMinutes,
+    tier1Harnesses,
+    probes,
+    floatingReferences,
+    warnings,
+  };
+}
+
+export function validateManifestText(text: string): ManifestValidation {
+  return validateManifestPayload(JSON.parse(text));
+}
+
+export function npmVersionAge(
+  versionTimes: Record<string, string>,
+  version: string,
+  now: Date = new Date(),
+  cooldownMinutes = DEFAULT_COOLDOWN_MINUTES,
+): NpmVersionAge {
+  const publishedAt = versionTimes[version];
+  if (!publishedAt) throw new Error(`no npm publish time for ${version}`);
+  const published = new Date(publishedAt);
+  if (Number.isNaN(published.getTime())) {
+    throw new Error(`invalid npm publish time for ${version}: ${publishedAt}`);
+  }
+  const ageMinutes = Math.floor((now.getTime() - published.getTime()) / 60000);
+  return {
+    version,
+    publishedAt,
+    ageMinutes,
+    cooldownMinutes,
+    eligible: ageMinutes >= cooldownMinutes,
+  };
+}
+
+function parseArgs(argv: string[]): Record<string, string | boolean> {
+  const parsed: Record<string, string | boolean> = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (!arg.startsWith('--')) throw new Error(`unexpected argument: ${arg}`);
+    const key = arg.slice(2);
+    if (key === 'json') {
+      parsed[key] = true;
+      continue;
+    }
+    const value = argv[i + 1];
+    if (!value || value.startsWith('--')) {
+      throw new Error(`missing value for --${key}`);
+    }
+    parsed[key] = value;
+    i += 1;
+  }
+  return parsed;
+}
+
+export function run(argv: string[] = process.argv.slice(2)): unknown {
+  const args = parseArgs(argv);
+  if (args['version-eligible']) {
+    const version = String(args['version-eligible']);
+    const timeJsonPath = asString(args['time-json'], '--time-json');
+    const cooldownMinutes = args['cooldown-minutes']
+      ? Number(args['cooldown-minutes'])
+      : DEFAULT_COOLDOWN_MINUTES;
+    const now = args.now ? new Date(String(args.now)) : new Date();
+    const result = npmVersionAge(
+      JSON.parse(readFileSync(timeJsonPath, 'utf8')) as Record<string, string>,
+      version,
+      now,
+      cooldownMinutes,
+    );
+    if (args.json) console.log(JSON.stringify(result, null, 2));
+    else console.log(`${version} eligible=${result.eligible}`);
+    if (!result.eligible) process.exitCode = 2;
+    return result;
+  }
+
+  const manifestPath = String(args.manifest ?? 'deploy/managed-components.json');
+  const result = validateManifestText(readFileSync(manifestPath, 'utf8'));
+  if (args.json) console.log(JSON.stringify(result, null, 2));
+  else {
+    console.log(
+      `harness-maintenance manifest ok: tier1=${result.tier1Harnesses.join(',')} probes=${result.probes.join(',')}`,
+    );
+    for (const warning of result.warnings) console.warn(warning);
+  }
+  return result;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    run();
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exitCode = 1;
+  }
+}

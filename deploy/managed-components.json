@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "npm": {
+    "cooldown_minutes": 10080,
+    "npmrc": "deploy/npmrc.hardened",
+    "safe_install_args": [
+      "--ignore-scripts",
+      "--global-style=false"
+    ]
+  },
+  "tier1": [
+    {
+      "name": "claude",
+      "kind": "native",
+      "update": [
+        "claude",
+        "install",
+        "latest"
+      ],
+      "rollback": [
+        "claude",
+        "install",
+        "{previous}"
+      ],
+      "smoke": [
+        "claude",
+        "--version"
+      ]
+    },
+    {
+      "name": "codex",
+      "kind": "npm-global",
+      "package": "@openai/codex",
+      "node_bin": "$HOME/.nvm/versions/node/v24.13.0/bin",
+      "update": [
+        "npm",
+        "install",
+        "-g",
+        "@openai/codex@{target}",
+        "--ignore-scripts"
+      ],
+      "rollback": [
+        "npm",
+        "install",
+        "-g",
+        "@openai/codex@{previous}",
+        "--ignore-scripts"
+      ],
+      "smoke": [
+        "codex",
+        "--version"
+      ]
+    },
+    {
+      "name": "opencode",
+      "kind": "native",
+      "update": [
+        "opencode",
+        "upgrade"
+      ],
+      "rollback": [
+        "opencode",
+        "upgrade",
+        "{previous}"
+      ],
+      "smoke": [
+        "opencode",
+        "--version"
+      ]
+    }
+  ],
+  "tier2": {
+    "probes": [
+      {
+        "name": "npm-global",
+        "mode": "detect-only",
+        "nodes": [
+          "24.13.0",
+          "24.15.0"
+        ]
+      },
+      {
+        "name": "claude-plugins",
+        "mode": "detect-only",
+        "paths": [
+          "$HOME/.claude/plugins"
+        ]
+      },
+      {
+        "name": "mcp-servers",
+        "mode": "detect-only",
+        "commands": [
+          "claude mcp list",
+          "npx @playwright/mcp@latest"
+        ]
+      },
+      {
+        "name": "local-bin",
+        "mode": "detect-only",
+        "binaries": [
+          "pinecone-mcp",
+          "google-workspace-mcp",
+          "playwright-mcp",
+          "render-mcp",
+          "sentry-mcp",
+          "whatsapp-mcp"
+        ]
+      },
+      {
+        "name": "apt",
+        "mode": "detect-only",
+        "packages": [
+          "gh",
+          "jq",
+          "ripgrep",
+          "sqlite3",
+          "git",
+          "ffmpeg",
+          "google-chrome-stable"
+        ]
+      },
+      {
+        "name": "runtime",
+        "mode": "detect-only",
+        "commands": [
+          "node --version",
+          "npm --version",
+          "python3 --version"
+        ]
+      },
+      {
+        "name": "systemd-units",
+        "mode": "detect-only",
+        "units": [
+          "whatsoup-fleet.service",
+          "whatsoup-reply-guarantee.timer",
+          "harness-maintenance.timer"
+        ]
+      }
+    ]
+  }
+}

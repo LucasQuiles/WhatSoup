@@ -1,0 +1,493 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+STATE_DIR="${WHATSOUP_HARNESS_MAINTENANCE_STATE_DIR:-$HOME/.cache/whatsoup/harness-maintenance}"
+MANIFEST="${WHATSOUP_HARNESS_MAINTENANCE_MANIFEST:-$REPO_ROOT/deploy/managed-components.json}"
+NPMRC_TEMPLATE="$REPO_ROOT/deploy/npmrc.hardened"
+EVENTS_FILE=""
+CHECK_ONLY=0
+JSON_OUT=0
+MODE="run"
+
+usage() {
+  cat <<'USAGE'
+Usage: harness-maintenance.sh [--check] [--json]
+
+  --check  Dry-run: validate, inventory, and report without mutating versions.
+  --json   Print final state JSON to stdout.
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check)
+      CHECK_ONLY=1
+      MODE="check"
+      shift
+      ;;
+    --json)
+      JSON_OUT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+mkdir -p "$STATE_DIR"
+RUN_LOG="$STATE_DIR/run.log"
+TMP_DIR="$(mktemp -d)"
+EVENTS_FILE="$TMP_DIR/events.ndjson"
+STATE_TMP="$TMP_DIR/state.json"
+STATE_FILE="$STATE_DIR/state.json"
+touch "$EVENTS_FILE"
+
+NVMRC_NODE_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc")"
+REPO_NODE_BIN="${WHATSOUP_NODE_BIN:-$HOME/.nvm/versions/node/v$NVMRC_NODE_VERSION/bin/node}"
+if [ ! -x "$REPO_NODE_BIN" ]; then
+  REPO_NODE_BIN="$(command -v node || true)"
+fi
+if [ -z "$REPO_NODE_BIN" ]; then
+  echo "Node is required to run harness maintenance guards" >&2
+  exit 1
+fi
+
+CODX_NODE_BIN_DIR="${WHATSOUP_CODEX_NODE_BIN_DIR:-$HOME/.nvm/versions/node/v24.13.0/bin}"
+ALERT_BIN="${WHATSOUP_ALERT_BIN:-$HOME/.local/bin/whatsapp-alert}"
+PROBE_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_TIMEOUT_SECS:-10}"
+
+log() {
+  echo "[harness-maintenance] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" | tee -a "$RUN_LOG" >&2
+}
+
+json_escape_event() {
+  "$REPO_NODE_BIN" - "$EVENTS_FILE" "$1" "$2" "$3" "${4:-}" "${5:-}" "${6:-}" <<'NODE'
+const fs = require('node:fs');
+const [eventsPath, component, status, message, before, after, target] = process.argv.slice(2);
+fs.appendFileSync(eventsPath, `${JSON.stringify({
+  at: new Date().toISOString(),
+  component,
+  status,
+  message,
+  before: before || undefined,
+  after: after || undefined,
+  target: target || undefined,
+})}\n`);
+NODE
+}
+
+record_event() {
+  json_escape_event "$@"
+  log "$1 [$2] $3"
+}
+
+write_state() {
+  local status="$1"
+  "$REPO_NODE_BIN" - "$EVENTS_FILE" "$STATE_TMP" "$status" "$MODE" <<'NODE'
+const fs = require('node:fs');
+const [eventsPath, outPath, status, mode] = process.argv.slice(2);
+const lines = fs.readFileSync(eventsPath, 'utf8').split(/\n/).filter(Boolean);
+const events = lines.map((line) => JSON.parse(line));
+const state = {
+  schema_version: 1,
+  run_at: new Date().toISOString(),
+  mode,
+  status,
+  event_count: events.length,
+  events,
+};
+fs.writeFileSync(outPath, `${JSON.stringify(state, null, 2)}\n`);
+NODE
+  mv "$STATE_TMP" "$STATE_FILE"
+  if [ "$JSON_OUT" -eq 1 ]; then
+    cat "$STATE_FILE"
+  fi
+}
+
+send_alert() {
+  local severity="$1"
+  local summary="$2"
+  local evidence="$3"
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    return 0
+  fi
+  if [ -x "$ALERT_BIN" ]; then
+    "$ALERT_BIN" \
+      --instance q \
+      --source harness-maintenance \
+      --severity "$severity" \
+      --summary "$summary" \
+      --evidence "$evidence" >/dev/null 2>&1 || true
+  fi
+}
+
+on_error() {
+  local rc=$?
+  trap - ERR
+  record_event "harness-maintenance" "failed" "unexpected failure rc=$rc"
+  write_state "failed" || true
+  send_alert "warn" "Harness maintenance failed" "Unexpected failure rc=$rc. See $RUN_LOG"
+  rm -rf "$TMP_DIR"
+  exit "$rc"
+}
+trap on_error ERR
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+parse_version() {
+  grep -Eo '[0-9]+(\.[0-9]+){1,2}([-+._a-zA-Z0-9]*)?' | head -n 1
+}
+
+command_version() {
+  local cmd="$1"
+  shift
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    return 1
+  fi
+  "$cmd" "$@" 2>/dev/null | parse_version
+}
+
+claude_current() {
+  command_version claude --version || true
+}
+
+codex_bin() {
+  if [ -x "$CODX_NODE_BIN_DIR/codex" ]; then
+    echo "$CODX_NODE_BIN_DIR/codex"
+  else
+    command -v codex || true
+  fi
+}
+
+npm_bin() {
+  if [ -x "$CODX_NODE_BIN_DIR/npm" ]; then
+    echo "$CODX_NODE_BIN_DIR/npm"
+  else
+    command -v npm || true
+  fi
+}
+
+codex_current() {
+  local bin
+  bin="$(codex_bin)"
+  if [ -z "$bin" ]; then
+    return 0
+  fi
+  CODEX_NO_DEFAULTS=1 "$bin" --version 2>/dev/null | parse_version
+}
+
+opencode_current() {
+  command_version opencode --version || true
+}
+
+smoke_claude() {
+  command -v claude >/dev/null 2>&1 && claude --version >/dev/null 2>&1
+}
+
+smoke_codex() {
+  local bin
+  bin="$(codex_bin)"
+  [ -n "$bin" ] && CODEX_NO_DEFAULTS=1 "$bin" --version >/dev/null 2>&1
+}
+
+smoke_opencode() {
+  command -v opencode >/dev/null 2>&1 && opencode --version >/dev/null 2>&1
+}
+
+apply_npmrc() {
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    record_event "npmrc" "checked" "hardened npmrc would be applied from deploy/npmrc.hardened"
+    return 0
+  fi
+  if [ -f "$HOME/.npmrc" ] && ! cmp -s "$NPMRC_TEMPLATE" "$HOME/.npmrc"; then
+    local backup="$HOME/.npmrc.whatsoup-backup-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$HOME/.npmrc" "$backup"
+    record_event "npmrc" "backup" "existing ~/.npmrc backed up" "$HOME/.npmrc" "$backup"
+  fi
+  cp "$NPMRC_TEMPLATE" "$HOME/.npmrc"
+  record_event "npmrc" "applied" "hardened npm settings applied"
+}
+
+guard_manifest() {
+  "$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/harness-maintenance-guard.ts" \
+    --manifest "$MANIFEST" >/dev/null
+  record_event "manifest" "ok" "managed components manifest validated"
+}
+
+npm_latest_version() {
+  local pkg="$1"
+  local npm
+  npm="$(npm_bin)"
+  if [ -z "$npm" ]; then
+    return 1
+  fi
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" view "$pkg" version 2>/dev/null | tail -n 1
+}
+
+ensure_npm_version_eligible() {
+  local pkg="$1"
+  local version="$2"
+  local npm
+  npm="$(npm_bin)"
+  if [ -z "$npm" ]; then
+    record_event "$pkg" "failed" "npm not found for cooldown check"
+    return 1
+  fi
+  local time_json="$TMP_DIR/npm-time.json"
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" view "$pkg" time --json > "$time_json"
+  set +e
+  local out
+  out="$("$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/harness-maintenance-guard.ts" \
+    --version-eligible "$version" \
+    --time-json "$time_json" \
+    --json 2>&1)"
+  local rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$rc" -eq 2 ]; then
+    record_event "$pkg" "held" "target version is younger than the cooldown" "" "" "$version"
+    send_alert "warn" "Harness update held by npm cooldown" "$pkg@$version is younger than the configured cooldown. $out"
+    return 2
+  fi
+  record_event "$pkg" "failed" "npm cooldown check failed: $out"
+  return "$rc"
+}
+
+audit_npm_global() {
+  local npm
+  npm="$(npm_bin)"
+  if [ -z "$npm" ]; then
+    return 1
+  fi
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" audit signatures --global >/dev/null 2>&1
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" audit --global --audit-level=high >/dev/null 2>&1
+}
+
+update_claude() {
+  local before latest after
+  before="$(claude_current)"
+  latest="$(npm_latest_version @anthropic-ai/claude-code || true)"
+  if [ -z "$before" ]; then
+    record_event "claude" "missing" "claude binary not found"
+    return 0
+  fi
+  if [ -z "$latest" ]; then
+    record_event "claude" "unknown" "latest version lookup failed" "$before"
+    return 0
+  fi
+  if [ "$before" = "$latest" ]; then
+    record_event "claude" "current" "already at latest" "$before" "$before" "$latest"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    record_event "claude" "drift" "update available" "$before" "$before" "$latest"
+    return 0
+  fi
+  claude install latest
+  if ! smoke_claude; then
+    claude install "$before" || true
+    record_event "claude" "rollback" "smoke failed after update; rollback attempted" "$before" "" "$latest"
+    send_alert "critical" "Claude harness rollback" "Update to $latest failed smoke check; rollback to $before attempted."
+    return 1
+  fi
+  after="$(claude_current)"
+  record_event "claude" "updated" "updated and smoke checked" "$before" "$after" "$latest"
+  send_alert "info" "Claude harness updated" "Claude CLI $before -> $after"
+}
+
+update_codex() {
+  local before latest npm after
+  before="$(codex_current)"
+  latest="$(npm_latest_version @openai/codex || true)"
+  npm="$(npm_bin)"
+  if [ -z "$before" ]; then
+    record_event "codex" "missing" "codex binary not found"
+    return 0
+  fi
+  if [ -z "$latest" ] || [ -z "$npm" ]; then
+    record_event "codex" "unknown" "latest version lookup failed" "$before"
+    return 0
+  fi
+  if [ "$before" = "$latest" ]; then
+    record_event "codex" "current" "already at latest" "$before" "$before" "$latest"
+    return 0
+  fi
+  if ! ensure_npm_version_eligible @openai/codex "$latest"; then
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    record_event "codex" "drift" "cooldown-eligible update available" "$before" "$before" "$latest"
+    return 0
+  fi
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" install -g "@openai/codex@$latest" --ignore-scripts
+  if ! audit_npm_global || ! smoke_codex; then
+    PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" install -g "@openai/codex@$before" --ignore-scripts || true
+    record_event "codex" "rollback" "audit or smoke failed after update; rollback attempted" "$before" "" "$latest"
+    send_alert "critical" "Codex harness rollback" "Update to $latest failed audit/smoke; rollback to $before attempted."
+    return 1
+  fi
+  after="$(codex_current)"
+  record_event "codex" "updated" "updated, audited, and smoke checked" "$before" "$after" "$latest"
+  send_alert "info" "Codex harness updated" "Codex CLI $before -> $after"
+}
+
+update_opencode() {
+  local before after
+  before="$(opencode_current)"
+  if [ -z "$before" ]; then
+    record_event "opencode" "missing" "opencode binary not found"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    record_event "opencode" "checked" "opencode present; upgrade skipped in check mode" "$before"
+    return 0
+  fi
+  opencode upgrade
+  if ! smoke_opencode; then
+    opencode upgrade "$before" || true
+    record_event "opencode" "rollback" "smoke failed after upgrade; rollback attempted" "$before"
+    send_alert "critical" "OpenCode harness rollback" "Upgrade failed smoke check; rollback to $before attempted."
+    return 1
+  fi
+  after="$(opencode_current)"
+  if [ "$before" = "$after" ]; then
+    record_event "opencode" "current" "upgrade completed with no version change" "$before" "$after"
+  else
+    record_event "opencode" "updated" "upgraded and smoke checked" "$before" "$after"
+    send_alert "info" "OpenCode harness updated" "OpenCode $before -> $after"
+  fi
+}
+
+probe_command() {
+  local name="$1"
+  shift
+  set +e
+  local out
+  if command -v timeout >/dev/null 2>&1; then
+    out="$(timeout "$PROBE_TIMEOUT_SECS" "$@" 2>&1 | head -n 20)"
+  else
+    out="$("$@" 2>&1 | head -n 20)"
+  fi
+  local rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    record_event "$name" "ok" "$out"
+  elif [ "$rc" -eq 124 ]; then
+    record_event "$name" "timeout" "probe exceeded ${PROBE_TIMEOUT_SECS}s"
+    send_alert "warn" "Harness maintenance probe timed out" "$name exceeded ${PROBE_TIMEOUT_SECS}s"
+  else
+    record_event "$name" "failed" "$out"
+    send_alert "warn" "Harness maintenance probe failed" "$name failed: $out"
+  fi
+}
+
+probe_local_bin() {
+  local bin="$1"
+  local path
+  path="$(command -v "$bin" || true)"
+  if [ -z "$path" ]; then
+    record_event "local-bin:$bin" "missing" "$bin not found on PATH"
+    return 0
+  fi
+  case "$bin" in
+    google-workspace-mcp|pinecone-mcp|whatsapp-mcp)
+      record_event "local-bin:$bin" "present" "$path present; stdio MCP version probe skipped"
+      return 0
+      ;;
+  esac
+  set +e
+  local out
+  if command -v timeout >/dev/null 2>&1; then
+    out="$(timeout "$PROBE_TIMEOUT_SECS" "$path" --version 2>&1 | head -n 5)"
+  else
+    out="$("$path" --version 2>&1 | head -n 5)"
+  fi
+  local rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    record_event "local-bin:$bin" "ok" "$out"
+  elif [ "$rc" -eq 124 ]; then
+    record_event "local-bin:$bin" "present" "$path present; no bounded --version response"
+  else
+    record_event "local-bin:$bin" "present" "$path present; --version unavailable"
+  fi
+}
+
+probe_tier2() {
+  if command -v claude >/dev/null 2>&1; then
+    probe_command "mcp-servers" claude mcp list
+  else
+    record_event "mcp-servers" "skipped" "claude binary unavailable"
+  fi
+
+  for bin in pinecone-mcp google-workspace-mcp playwright-mcp render-mcp sentry-mcp whatsapp-mcp; do
+    probe_local_bin "$bin"
+  done
+
+  for version in 24.13.0 24.15.0; do
+    local npm="$HOME/.nvm/versions/node/v$version/bin/npm"
+    if [ -x "$npm" ]; then
+      probe_command "npm-global:$version" env PATH="$HOME/.nvm/versions/node/v$version/bin:$PATH" "$npm" ls -g --depth=0
+    else
+      record_event "npm-global:$version" "missing" "npm not found for node $version"
+    fi
+  done
+
+  probe_command "runtime:node" node --version
+  probe_command "runtime:npm" npm --version
+  probe_command "runtime:python3" python3 --version
+
+  if command -v apt >/dev/null 2>&1; then
+    set +e
+    local apt_out
+    apt_out="$(apt list --upgradable 2>/dev/null | grep -E '^(gh|jq|ripgrep|sqlite3|git|ffmpeg|google-chrome-stable)/' || true)"
+    set -e
+    if [ -n "$apt_out" ]; then
+      record_event "apt" "drift" "$apt_out"
+    else
+      record_event "apt" "ok" "no curated apt package upgrades detected"
+    fi
+  else
+    record_event "apt" "skipped" "apt unavailable"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    for unit in whatsoup-fleet.service whatsoup-reply-guarantee.timer harness-maintenance.timer; do
+      set +e
+      local unit_state
+      unit_state="$(systemctl --user is-active "$unit" 2>&1)"
+      local rc=$?
+      set -e
+      if [ "$rc" -eq 0 ]; then
+        record_event "systemd:$unit" "ok" "$unit active"
+      else
+        record_event "systemd:$unit" "not-active" "$unit state: $unit_state"
+      fi
+    done
+  else
+    record_event "systemd" "skipped" "systemctl unavailable"
+  fi
+}
+
+main() {
+  log "starting mode=$MODE repo=$REPO_ROOT"
+  guard_manifest
+  apply_npmrc
+  update_claude
+  update_codex
+  update_opencode
+  probe_tier2
+  write_state "ok"
+  log "complete state=$STATE_FILE"
+}
+
+main
