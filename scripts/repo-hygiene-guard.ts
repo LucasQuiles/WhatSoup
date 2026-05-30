@@ -6,7 +6,7 @@ import { git, normalizeRepoPath } from './lib/guard-core.ts';
 
 export { normalizeRepoPath } from './lib/guard-core.ts';
 
-export type GuardMode = 'staged' | 'commit-msg' | 'release-hygiene';
+export type GuardMode = 'staged' | 'commit-msg' | 'release-hygiene' | 'commit-authors';
 
 export interface ParsedArgs {
   mode: GuardMode;
@@ -25,6 +25,13 @@ export interface GuardIssue {
   message: string;
   filePath?: string;
   line?: number;
+}
+
+export interface CommitAuthor {
+  sha: string;
+  name: string;
+  email: string;
+  subject: string;
 }
 
 interface GuardPattern {
@@ -70,6 +77,19 @@ const operationalProtocolIdentifiers = new Set([
 ]);
 
 const trackedSensitiveAllowlist = new Set(['.env.example', '.claude/settings.json']);
+
+const disallowedCommitAuthorPatterns: GuardPattern[] = [
+  {
+    code: 'placeholder-commit-author',
+    message: 'Commit author uses a placeholder identity; amend before publishing.',
+    regex: /\b(?:whatsoup-test|test|example)\.invalid\b/i,
+  },
+  {
+    code: 'placeholder-commit-author',
+    message: 'Commit author uses a placeholder identity; amend before publishing.',
+    regex: /\bWhatSoup Test\b/i,
+  },
+];
 
 function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
   if (allowedEnvVarNameToken.test(token)) return true;
@@ -190,6 +210,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.mode = 'staged';
     } else if (arg === '--release-hygiene') {
       args.mode = 'release-hygiene';
+    } else if (arg === '--commit-authors') {
+      args.mode = 'commit-authors';
     } else if (arg === '--commit-msg') {
       args.mode = 'commit-msg';
       const next = argv[i + 1];
@@ -433,6 +455,78 @@ export function scanTrackedFiles(cwd: string): GuardIssue[] {
   return scanContentLines(lines);
 }
 
+export function parseCommitAuthorLog(log: string): CommitAuthor[] {
+  return log
+    .split('\x1e')
+    .map((record) => record.trim())
+    .filter(Boolean)
+    .map((record) => {
+      const [sha, name, email, subject] = record.split('\x00');
+      return {
+        sha: sha ?? '',
+        name: name ?? '',
+        email: email ?? '',
+        subject: subject ?? '',
+      };
+    })
+    .filter((commit) => commit.sha !== '');
+}
+
+export function scanCommitAuthors(commits: CommitAuthor[]): GuardIssue[] {
+  const issues: GuardIssue[] = [];
+
+  for (const commit of commits) {
+    const author = `${commit.name} ${commit.email}`;
+    for (const pattern of disallowedCommitAuthorPatterns) {
+      if (pattern.regex.test(author)) {
+        issues.push({
+          code: pattern.code,
+          message: `${pattern.message} (${commit.subject || 'no subject'})`,
+          filePath: `commit:${commit.sha.slice(0, 12)}`,
+        });
+        break;
+      }
+    }
+  }
+
+  return issues;
+}
+
+function gitRefExists(cwd: string, ref: string): boolean {
+  try {
+    git(['rev-parse', '--verify', '--quiet', ref], cwd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function commitAuthorBaseRef(cwd: string): string | null {
+  const githubBaseRef = process.env.GITHUB_BASE_REF?.trim();
+  if (githubBaseRef && gitRefExists(cwd, `origin/${githubBaseRef}`)) {
+    return `origin/${githubBaseRef}`;
+  }
+
+  try {
+    const branch = git(['branch', '--show-current'], cwd).trim();
+    const upstream = branch
+      ? git(['for-each-ref', '--format=%(upstream:short)', `refs/heads/${branch}`], cwd).trim()
+      : '';
+    if (upstream && gitRefExists(cwd, upstream)) return upstream;
+  } catch {
+    // Fall through to origin/main for detached or not-yet-published branches.
+  }
+
+  return gitRefExists(cwd, 'origin/main') ? 'origin/main' : null;
+}
+
+function readCommitAuthors(cwd: string): CommitAuthor[] {
+  const baseRef = commitAuthorBaseRef(cwd);
+  const rangeArgs = baseRef ? [`${baseRef}..HEAD`] : ['-1', 'HEAD'];
+  const log = git(['log', '--format=%H%x00%an%x00%ae%x00%s%x1e', ...rangeArgs], cwd);
+  return parseCommitAuthorLog(log);
+}
+
 function printIssues(issues: GuardIssue[]): void {
   for (const issue of issues) {
     const location = issue.filePath
@@ -445,11 +539,13 @@ function printIssues(issues: GuardIssue[]): void {
 function printHelp(): void {
   console.log(`Usage: npm run guard:repo -- [--staged]
        npm run guard:repo -- --release-hygiene
+       npm run guard:repo -- --commit-authors
        npm run guard:repo:commit-msg -- <message-file>
 
 Modes:
   --staged              Scan staged added lines. This is the default.
   --release-hygiene     Scan tracked release-hygiene files.
+  --commit-authors      Scan commits in the branch/PR range for placeholder authors.
   --commit-msg <file>   Scan a commit message file.
   --help                Show this help.
 
@@ -467,6 +563,8 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
     ? scanCommitMessage(readFileSync(args.messageFile ?? '', 'utf8'))
     : args.mode === 'release-hygiene'
       ? scanTrackedFiles(cwd)
+      : args.mode === 'commit-authors'
+        ? scanCommitAuthors(readCommitAuthors(cwd))
       : [
           ...scanStagedSensitiveArtifacts(cwd),
           ...scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd))),
