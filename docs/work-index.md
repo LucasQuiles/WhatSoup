@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 177
+**Total entries:** 178
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | bead=113, doc=14, handoff=4, plan=13, review=1, spec=13, state=19 |
-| Status | active=2, closed=7, completed=114, deferred=8, pending=38, unknown=8 |
-| Status source | bead-manifest=3, body-marker=101, directory=7, fallback=3, phase-log=7, state-md-status=56 |
+| Kind | bead=113, doc=14, handoff=4, plan=14, review=1, spec=13, state=19 |
+| Status | active=2, closed=7, completed=115, deferred=8, pending=38, unknown=8 |
+| Status source | bead-manifest=3, body-marker=102, directory=7, fallback=3, phase-log=7, state-md-status=56 |
 
 ## Inconsistencies
 
@@ -317,7 +317,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 
-### docs/superpowers/plans  _(13 entries)_
+### docs/superpowers/plans  _(14 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -334,6 +334,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-04-07-fleet-charts.md` | plan | deferred | body-marker | fleet-charts | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | completed | body-marker | operation-tracker | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-04-25-pr-0a-transport-contract-foundation.md` | plan | completed | body-marker | pr-0a-transport-contract-foundation | 2026-05-12 |  |
+| `docs/superpowers/plans/2026-05-29-harness-maintenance.md` | plan | completed | body-marker | harness-maintenance | 2026-05-29 |  |
 
 ### docs/superpowers/reviews  _(1 entries)_
 
@@ -362,4 +363,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-05-12T20:27:36Z from commit `e6aa9fe0e1d718fb7e02ea25d4db9cfe9f78f4fa`
+- Generated at 2026-05-30T00:17:07Z from commit `c04a66b3ad4bb533729f5af974d02cd523a00237`

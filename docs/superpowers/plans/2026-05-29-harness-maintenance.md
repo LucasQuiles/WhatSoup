@@ -1,6 +1,8 @@
 # Harness Maintenance Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Status:** completed - implemented on branch feat/harness-maintenance with local verification; not yet pushed or deployed.
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
 **Goal:** Add daily, supply-chain-aware harness maintenance for the runtime host.
 
@@ -18,10 +20,10 @@
 - Create: `deploy/managed-components.json`
 - Modify: `package.json`
 
-- [ ] Write manifest validation and npm cooldown helper tests covering 7-day eligibility, held fresh releases, invalid manifests, and floating `@latest` detection.
-- [ ] Implement pure functions in `scripts/harness-maintenance-guard.ts`.
-- [ ] Add `guard:harness-maintenance` to `package.json`.
-- [ ] Run `npm test -- tests/scripts/harness-maintenance-guard.test.ts --pool=forks`.
+- [x] Write manifest validation and npm cooldown helper tests covering 7-day eligibility, held fresh releases, invalid manifests, and floating `@latest` detection.
+- [x] Implement pure functions in `scripts/harness-maintenance-guard.ts`.
+- [x] Add `guard:harness-maintenance` to `package.json`.
+- [x] Run `npm test -- tests/scripts/harness-maintenance-guard.test.ts --pool=forks`.
 
 ### Task 2: Deploy Runner And Units
 
@@ -32,23 +34,23 @@
 - Create: `deploy/harness-maintenance.timer`
 - Modify: `deploy/setup.sh`
 
-- [ ] Implement `--check` dry-run mode and default mutating mode.
-- [ ] Apply `deploy/npmrc.hardened` without overwriting an existing different `~/.npmrc` without a timestamped backup.
-- [ ] Probe Tier 2 surfaces as detect-only findings.
-- [ ] Update Tier 1 harnesses only when not in `--check`, using exact versions and smoke checks.
-- [ ] Wire scripts and units into `deploy/setup.sh`.
-- [ ] Run `bash -n deploy/scripts/harness-maintenance.sh deploy/setup.sh`.
+- [x] Implement `--check` dry-run mode and default mutating mode.
+- [x] Apply `deploy/npmrc.hardened` without overwriting an existing different `~/.npmrc` without a timestamped backup.
+- [x] Probe Tier 2 surfaces as detect-only findings.
+- [x] Update Tier 1 harnesses only when not in `--check`, using exact versions and smoke checks.
+- [x] Wire scripts and units into `deploy/setup.sh`.
+- [x] Run `bash -n deploy/scripts/harness-maintenance.sh deploy/setup.sh`.
 
 ### Task 3: Verification And Commit
 
 **Files:**
 - All changed files.
 
-- [ ] Run `npm run guard:harness-maintenance`.
-- [ ] Run `deploy/scripts/harness-maintenance.sh --check --json`.
-- [ ] Run focused tests.
-- [ ] Run repo hygiene staged guard.
-- [ ] Commit locally on `feat/harness-maintenance` without pushing.
+- [x] Run `npm run guard:harness-maintenance`.
+- [x] Run `deploy/scripts/harness-maintenance.sh --check --json`.
+- [x] Run focused tests.
+- [x] Run repo hygiene staged guard.
+- [x] Commit locally on `feat/harness-maintenance` without pushing.
 
 ### Self-Review
 
