@@ -230,6 +230,101 @@ guard_manifest() {
   record_event "manifest" "ok" "managed components manifest validated"
 }
 
+manifest_npm_cooldown_minutes() {
+  "$REPO_NODE_BIN" - "$MANIFEST" <<'NODE'
+const fs = require('node:fs');
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+console.log(String(manifest.npm.cooldown_minutes));
+NODE
+}
+
+manifest_npmrc_min_release_age_days() {
+  "$REPO_NODE_BIN" - "$MANIFEST" <<'NODE'
+const fs = require('node:fs');
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+console.log(String(manifest.npm.npmrc_min_release_age_days));
+NODE
+}
+
+manifest_codex_npm_min_version() {
+  "$REPO_NODE_BIN" - "$MANIFEST" <<'NODE'
+const fs = require('node:fs');
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+console.log(String(manifest.npm.codex_node.npm_min_version));
+NODE
+}
+
+check_codex_npm_cooldown() {
+  local npm
+  npm="$(npm_bin)"
+  if [ -z "$npm" ]; then
+    record_event "codex-npm-cooldown" "missing" "npm not found for Codex node"
+    send_alert "warn" "Codex npm cooldown check missing npm" "The Codex node npm binary was not found."
+    return 0
+  fi
+
+  local expected_days min_version stderr_file npm_version smoke_dir smoke_rc
+  expected_days="$(manifest_npmrc_min_release_age_days)"
+  min_version="$(manifest_codex_npm_min_version)"
+  stderr_file="$(mktemp "$TMP_DIR/codex-npm-cooldown.stderr.XXXXXX")"
+  smoke_dir="$(mktemp -d "$TMP_DIR/codex-npm-smoke.XXXXXX")"
+
+  set +e
+  npm_version="$(PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" --version 2>"$stderr_file" | tail -n 1)"
+  local version_rc=$?
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" config get min-release-age >/dev/null 2>>"$stderr_file"
+  local config_rc=$?
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" install is-number@7.0.0 \
+    --dry-run \
+    --ignore-scripts \
+    --package-lock=false \
+    --no-save \
+    --prefix "$smoke_dir" >/dev/null 2>>"$stderr_file"
+  smoke_rc=$?
+  set -e
+
+  if [ "$version_rc" -ne 0 ] || [ -z "$npm_version" ]; then
+    local err
+    err="$(head -n "$PROBE_OUTPUT_LINES" "$stderr_file")"
+    record_event "codex-npm-cooldown" "failed" "npm --version failed: $err"
+    send_alert "warn" "Codex npm cooldown check failed" "npm --version failed for Codex node. $err"
+    return 0
+  fi
+  if [ "$config_rc" -ne 0 ]; then
+    local err
+    err="$(head -n "$PROBE_OUTPUT_LINES" "$stderr_file")"
+    record_event "codex-npm-cooldown" "failed" "npm config get min-release-age failed: $err"
+    send_alert "warn" "Codex npm cooldown check failed" "npm config get min-release-age failed for Codex node. $err"
+    return 0
+  fi
+
+  set +e
+  local out
+  out="$("$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/harness-maintenance-guard.ts" \
+    --npm-cooldown-config \
+    --npm-version "$npm_version" \
+    --min-version "$min_version" \
+    --expected-days "$expected_days" \
+    --npmrc-file "$HOME/.npmrc" \
+    --stderr-file "$stderr_file" \
+    --install-exit-code "$smoke_rc" 2>&1)"
+  local rc=$?
+  set -e
+
+  if [ "$rc" -eq 0 ]; then
+    record_event "codex-npm-cooldown" "ok" "npm $npm_version accepts min-release-age=${expected_days}d"
+    return 0
+  fi
+  if [ "$rc" -eq 2 ]; then
+    record_event "codex-npm-cooldown" "degraded" "npm $npm_version: $out"
+    send_alert "warn" "Codex npm cooldown defense dormant" "Codex node npm does not fully honor min-release-age. $out"
+    return 0
+  fi
+
+  record_event "codex-npm-cooldown" "failed" "cooldown recognition guard failed: $out"
+  send_alert "warn" "Codex npm cooldown check failed" "Cooldown recognition guard failed. $out"
+}
+
 npm_latest_version() {
   local pkg="$1"
   local npm
@@ -518,6 +613,7 @@ main() {
   log "starting mode=$MODE repo=$REPO_ROOT"
   guard_manifest
   apply_npmrc
+  check_codex_npm_cooldown
   update_claude
   update_codex
   update_opencode
