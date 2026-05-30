@@ -13,7 +13,7 @@ echo "=============="
 echo ""
 
 # ── Step 1: Check requirements ──────────────────────────────────────
-echo "[1/6] Checking requirements..."
+echo "[1/7] Checking requirements..."
 errors=0
 
 # Node.js
@@ -75,12 +75,12 @@ echo ""
 # ── Step 2: Install dependencies ────────────────────────────────────
 # Matches .github/workflows/quality.yml install step exactly so local
 # setup, CI, and Docker all reproduce the pinned lockfile tree.
-echo "[2/6] Installing dependencies..."
+echo "[2/7] Installing dependencies..."
 (cd "$REPO_ROOT" && npm ci)
 echo "  ✓ Root dependencies installed"
 
 # ── Step 3: Install wrapper scripts ─────────────────────────────────
-echo "[3/6] Installing wrapper scripts to $BIN_DIR..."
+echo "[3/7] Installing wrapper scripts to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
 ln -sf "$REPO_ROOT/deploy/whatsoup" "$BIN_DIR/whatsoup"
 chmod +x "$REPO_ROOT/deploy/whatsoup"
@@ -91,6 +91,9 @@ echo "  ✓ whatsoup-fleet → $REPO_ROOT/deploy/whatsoup-fleet"
 ln -sf "$REPO_ROOT/deploy/scripts/ensure-node-installed.sh" "$BIN_DIR/whatsoup-ensure-node"
 chmod +x "$REPO_ROOT/deploy/scripts/ensure-node-installed.sh"
 echo "  ✓ whatsoup-ensure-node → $REPO_ROOT/deploy/scripts/ensure-node-installed.sh"
+ln -sf "$REPO_ROOT/deploy/scripts/harness-maintenance.sh" "$BIN_DIR/whatsoup-harness-maintenance"
+chmod +x "$REPO_ROOT/deploy/scripts/harness-maintenance.sh"
+echo "  ✓ whatsoup-harness-maintenance → $REPO_ROOT/deploy/scripts/harness-maintenance.sh"
 
 # Ensure ~/.local/bin is on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
@@ -99,18 +102,32 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
 fi
 
 # ── Step 4: Install systemd unit ────────────────────────────────────
-echo "[4/6] Installing systemd user unit..."
+echo "[4/7] Installing systemd user units..."
 mkdir -p "$SYSTEMD_DIR"
 cp "$REPO_ROOT/deploy/whatsoup@.service" "$SYSTEMD_DIR/whatsoup@.service"
 cp "$REPO_ROOT/deploy/whatsoup-fleet.service" "$SYSTEMD_DIR/whatsoup-fleet.service"
+cp "$REPO_ROOT/deploy/harness-maintenance.service" "$SYSTEMD_DIR/harness-maintenance.service"
+cp "$REPO_ROOT/deploy/harness-maintenance.timer" "$SYSTEMD_DIR/harness-maintenance.timer"
 systemctl --user daemon-reload 2>/dev/null || true
 echo "  ✓ whatsoup@.service installed"
 echo "  ✓ whatsoup-fleet.service installed"
+echo "  ✓ harness-maintenance.{service,timer} installed"
 
-# ── Step 5: Build console ───────────────────────────────────────────
+# ── Step 5: Install hardened npm defaults ───────────────────────────
+echo "[5/7] Installing hardened npm defaults..."
+if [ -f "$HOME/.npmrc" ] && ! cmp -s "$REPO_ROOT/deploy/npmrc.hardened" "$HOME/.npmrc"; then
+  npmrc_backup="$HOME/.npmrc.whatsoup-backup-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp "$HOME/.npmrc" "$npmrc_backup"
+  echo "  ✓ Existing ~/.npmrc backed up to $npmrc_backup"
+fi
+node --experimental-strip-types "$REPO_ROOT/scripts/npmrc-merge.ts" \
+  "$REPO_ROOT/deploy/npmrc.hardened" "$HOME/.npmrc"
+echo "  ✓ ~/.npmrc hardened with 7-day npm release cooldown while preserving local settings"
+
+# ── Step 6: Build console ───────────────────────────────────────────
 # Matches .github/workflows/quality.yml console-install + console-build
 # exactly. stderr is left visible so peer-dep / build failures surface.
-echo "[5/6] Building fleet console..."
+echo "[6/7] Building fleet console..."
 if [ -f "$REPO_ROOT/console/package.json" ]; then
   (cd "$REPO_ROOT/console" && npm ci && npm run build)
   echo "  ✓ Console built to dist/"
@@ -118,8 +135,8 @@ else
   echo "  ⚠ Console not found — skipping build"
 fi
 
-# ── Step 6: Check API keys ──────────────────────────────────────────
-echo "[6/6] Checking API keys..."
+# ── Step 7: Check API keys ──────────────────────────────────────────
+echo "[7/7] Checking API keys..."
 if command -v secret-tool &>/dev/null; then
   check_key() {
     local service="$1"
@@ -156,4 +173,8 @@ echo ""
 echo "  To run the fleet server as a persistent background service:"
 echo "     systemctl --user enable --now whatsoup-fleet"
 echo "     systemctl --user status whatsoup-fleet"
+echo ""
+echo "  To run harness maintenance daily:"
+echo "     systemctl --user enable --now harness-maintenance.timer"
+echo "     whatsoup-harness-maintenance --check"
 echo ""

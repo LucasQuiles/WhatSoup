@@ -31,6 +31,7 @@
     "guard:repo:release-hygiene": "npm run guard:repo -- --release-hygiene",
     "guard:repo:commit-msg": "npm run guard:repo -- --commit-msg",
     "guard:repo:staged": "npm run guard:repo -- --staged",
+    "guard:harness-maintenance": "node --experimental-strip-types scripts/harness-maintenance-guard.ts",
     "guard:node-pin-consistency": "node --experimental-strip-types scripts/check-node-pin-consistency.ts",
     "guard:claude-settings": "node --experimental-strip-types scripts/claude-settings-guard.ts --check",
     "guard:agent-decision-polls": "node --experimental-strip-types scripts/agent-decision-polls-guard.ts",

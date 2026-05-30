@@ -260,6 +260,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-repo-release-hygiene` | `npm run guard:repo:release-hygiene` | `package.json` | stable | active | Repo hygiene guard over the release-hygiene file set |
 | `cli:npm.guard-repo-staged` | `npm run guard:repo:staged` | `package.json` | stable | active | Repo hygiene guard over the staged diff |
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
+| `cli:npm.guard-harness-maintenance` | `npm run guard:harness-maintenance` | `package.json` | internal | active | Validate harness-maintenance manifest and npm cooldown gates |
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
 | `cli:npm.guard-agent-decision-polls` | `npm run guard:agent-decision-polls` | `package.json` | stable | active | Verify AskUser poll protocol wiring across prompts, MCP schema, sandbox diagnostics, docs, and release gates |
