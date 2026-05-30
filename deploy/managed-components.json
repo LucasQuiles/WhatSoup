@@ -6,7 +6,11 @@
     "safe_install_args": [
       "--ignore-scripts",
       "--global-style=false"
-    ]
+    ],
+    "codex_node": {
+      "node_bin": "$HOME/.nvm/versions/node/v24.13.0/bin",
+      "npm_min_version": "11.12.0"
+    }
   },
   "tier1": [
     {

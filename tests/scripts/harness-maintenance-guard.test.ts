@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DEFAULT_COOLDOWN_MINUTES,
+  npmCooldownConfigCheck,
   npmVersionAge,
   run,
   validateManifestPayload,
@@ -16,6 +17,10 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
     npm: {
       cooldown_minutes: DEFAULT_COOLDOWN_MINUTES,
       npmrc: 'deploy/npmrc.hardened',
+      codex_node: {
+        node_bin: '$HOME/.nvm/versions/node/v24.13.0/bin',
+        npm_min_version: '11.12.0',
+      },
     },
     tier1: [
       {
@@ -58,6 +63,7 @@ describe('harness maintenance guard', () => {
     const result = validateManifestPayload(manifest());
     expect(result.schemaVersion).toBe(1);
     expect(result.cooldownMinutes).toBe(DEFAULT_COOLDOWN_MINUTES);
+    expect(result.codexNodeNpmMinVersion).toBe('11.12.0');
     expect(result.tier1Harnesses).toEqual(['claude', 'codex', 'opencode']);
     expect(result.probes).toEqual(['mcp-servers']);
   });
@@ -112,6 +118,47 @@ describe('harness maintenance guard', () => {
     );
     expect(result.eligible).toBe(false);
     expect(result.ageMinutes).toBe(24 * 60);
+  });
+
+  it('marks codex npm cooldown config as ok when npm recognizes min-release-age', () => {
+    const result = npmCooldownConfigCheck({
+      npmVersion: '11.12.1',
+      minVersion: '11.12.0',
+      expectedValue: '10080',
+      stdout: '10080\n',
+      stderr: '',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reasons).toEqual([]);
+  });
+
+  it('marks codex npm cooldown config as degraded when npm warns the key is unknown', () => {
+    const result = npmCooldownConfigCheck({
+      npmVersion: '11.8.0',
+      minVersion: '11.12.0',
+      expectedValue: '10080',
+      stdout: '10080\n',
+      stderr:
+        'npm warn Unknown user config "min-release-age". This will stop working in the next major version of npm.\n',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain('npm 11.8.0 is below required 11.12.0');
+    expect(result.reasons).toContain('npm does not recognize min-release-age');
+  });
+
+  it('marks codex npm cooldown config as degraded when min-release-age is missing', () => {
+    const result = npmCooldownConfigCheck({
+      npmVersion: '11.12.1',
+      minVersion: '11.12.0',
+      expectedValue: '10080',
+      stdout: 'null\n',
+      stderr: '',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toEqual(['min-release-age is null, expected 10080']);
   });
 
   it('run() returns exit code 2 for held npm versions', () => {

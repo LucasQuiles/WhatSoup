@@ -16,9 +16,20 @@ export interface FloatingReference {
   value: string;
 }
 
+export interface NpmCooldownConfigCheck {
+  npmVersion: string;
+  minVersion: string;
+  expectedValue: string;
+  actualValue: string;
+  stderr: string;
+  ok: boolean;
+  reasons: string[];
+}
+
 export interface ManifestValidation {
   schemaVersion: number;
   cooldownMinutes: number;
+  codexNodeNpmMinVersion: string;
   tier1Harnesses: string[];
   probes: string[];
   floatingReferences: FloatingReference[];
@@ -53,6 +64,17 @@ function asNumber(value: unknown, label: string): number {
     throw new Error(`${label} must be a number`);
   }
   return value;
+}
+
+function compareVersion(left: string, right: string): number {
+  const leftParts = left.split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = right.split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0);
+  const max = Math.max(leftParts.length, rightParts.length);
+  for (let i = 0; i < max; i += 1) {
+    const delta = (leftParts[i] ?? 0) - (rightParts[i] ?? 0);
+    if (delta !== 0) return delta > 0 ? 1 : -1;
+  }
+  return 0;
 }
 
 function walkForFloatingReferences(
@@ -93,6 +115,12 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
       `npm.cooldown_minutes must be at least ${DEFAULT_COOLDOWN_MINUTES}`,
     );
   }
+  const codexNode = asRecord(npm.codex_node, 'npm.codex_node');
+  asString(codexNode.node_bin, 'npm.codex_node.node_bin');
+  const codexNodeNpmMinVersion = asString(
+    codexNode.npm_min_version,
+    'npm.codex_node.npm_min_version',
+  );
 
   const tier1 = asArray(root.tier1, 'tier1');
   const tier1Harnesses = tier1.map((entry, index) => {
@@ -130,6 +158,7 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
   return {
     schemaVersion,
     cooldownMinutes,
+    codexNodeNpmMinVersion,
     tier1Harnesses,
     probes,
     floatingReferences,
@@ -139,6 +168,41 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
 
 export function validateManifestText(text: string): ManifestValidation {
   return validateManifestPayload(JSON.parse(text));
+}
+
+export function npmCooldownConfigCheck({
+  npmVersion,
+  minVersion,
+  expectedValue,
+  stdout,
+  stderr,
+}: {
+  npmVersion: string;
+  minVersion: string;
+  expectedValue: string;
+  stdout: string;
+  stderr: string;
+}): NpmCooldownConfigCheck {
+  const actualValue = stdout.trim();
+  const reasons: string[] = [];
+  if (compareVersion(npmVersion, minVersion) < 0) {
+    reasons.push(`npm ${npmVersion} is below required ${minVersion}`);
+  }
+  if (/Unknown user config ["']min-release-age["']/i.test(stderr)) {
+    reasons.push('npm does not recognize min-release-age');
+  }
+  if (actualValue !== expectedValue) {
+    reasons.push(`min-release-age is ${actualValue || '(empty)'}, expected ${expectedValue}`);
+  }
+  return {
+    npmVersion,
+    minVersion,
+    expectedValue,
+    actualValue,
+    stderr,
+    ok: reasons.length === 0,
+    reasons,
+  };
 }
 
 export function npmVersionAge(
@@ -169,7 +233,7 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'json') {
+    if (key === 'json' || key === 'npm-cooldown-config') {
       parsed[key] = true;
       continue;
     }
@@ -185,6 +249,27 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
 
 export function run(argv: string[] = process.argv.slice(2)): unknown {
   const args = parseArgs(argv);
+  if (args['npm-cooldown-config']) {
+    const npmVersion = asString(args['npm-version'], '--npm-version');
+    const minVersion = asString(args['min-version'], '--min-version');
+    const expectedValue = asString(args['expected-value'], '--expected-value');
+    const stdoutPath = asString(args['stdout-file'], '--stdout-file');
+    const stderrPath = asString(args['stderr-file'], '--stderr-file');
+    const result = npmCooldownConfigCheck({
+      npmVersion,
+      minVersion,
+      expectedValue,
+      stdout: readFileSync(stdoutPath, 'utf8'),
+      stderr: readFileSync(stderrPath, 'utf8'),
+    });
+    if (args.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(result.ok ? 'codex npm cooldown config ok' : result.reasons.join('; '));
+    }
+    if (!result.ok) process.exitCode = 2;
+    return result;
+  }
+
   if (args['version-eligible']) {
     const version = String(args['version-eligible']);
     const timeJsonPath = asString(args['time-json'], '--time-json');
