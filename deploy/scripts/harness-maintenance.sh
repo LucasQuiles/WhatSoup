@@ -545,7 +545,7 @@ probe_tier2() {
     record_event "mcp-servers" "skipped" "claude binary unavailable"
   fi
 
-  for bin in pinecone-mcp google-workspace-mcp playwright-mcp render-mcp sentry-mcp whatsapp-mcp; do
+  for bin in pinecone-mcp google-workspace-mcp playwright-mcp sentry-mcp whatsapp-mcp; do
     probe_local_bin "$bin"
   done
 

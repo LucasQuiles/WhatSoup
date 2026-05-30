@@ -72,13 +72,19 @@ should be normalized opportunistically if those project scopes are in use. **No
 WhatSoup code change was needed** — cutover.sh already prescribes the correct
 form; the deployed files had simply drifted from it.
 
-### Fix 2 — Playwright MCP pin (Claude-global)
+### Fix 2 — Playwright MCP wrapper pin (Claude-global — DONE 2026-05-30)
 
-Add a **user-scoped** pinned `playwright` MCP (`@playwright/mcp@0.0.75`) that
-shadows the plugin's floating entry, so it survives plugin reinstalls. This is
-Claude-global hygiene, tracked under `~/.claude` / machine-config, **not** a
-WhatSoup repo change. Revisit the pinned version on a deliberate cadence (the
-probe continues to report when a newer version exists, but does not auto-adopt).
+**Correction to the original "shadow the plugin" plan:** there are two heavily
+used Playwright MCP registrations, and they do not shadow each other because they
+use distinct tool namespaces. The plugin registration still runs
+`npx @playwright/mcp@latest`; the user-scoped headed wrapper
+(`~/.local/bin/playwright-mcp`) is the controllable registration used for GUI/X
+sessions. Pin that wrapper to the vetted cached `@playwright/mcp@0.0.75` binary
+instead of letting it choose the "best cached" version. This is Claude-global
+hygiene, **not** a WhatSoup repo code change.
+
+**Applied 2026-05-30, verified `playwright … ✓ Connected` and
+`local-bin:playwright-mcp [ok] Version 0.0.75`.**
 
 ### Fix 3 — render MCP endpoint re-point (Claude-global — DONE 2026-05-30)
 
@@ -114,9 +120,9 @@ Document, not automate (both need root/interactive):
    `tsx` form, so no repo code change was needed — the deployed files had drifted
    from it. (If the drift recurs, harden cutover/setup to write the registration
    reproducibly.)
-2. **Playwright pin** (Claude-global, no WhatSoup PR): add the pinned user-scoped
-   MCP override; verify it shadows the plugin entry; record the pinned version in
-   the machine-config notes.
+2. **Playwright pin** (Claude-global — DONE): pin the headed
+   `~/.local/bin/playwright-mcp` wrapper to the cached `@playwright/mcp@0.0.75`
+   binary; verify `claude mcp list` and the harness local-bin probe.
 3. **render** (Claude-global — DONE): re-point the registration URL `/sse` → `/mcp`
    in `~/.mcp.json` (Render migrated the endpoint); keep type + token; verify
    `claude mcp list` → `render … ✓ Connected`.
@@ -127,8 +133,9 @@ Document, not automate (both need root/interactive):
 ## Testing / verification
 
 - After Fix 1: `claude mcp list` shows `whatsoup … ✓ Connected`. **(Done 2026-05-30.)**
-- After Fix 2: the playwright entry resolves to the pinned version; probe reports
-  it as pinned, not floating.
+- After Fix 2: `claude mcp list` shows `playwright … ✓ Connected` and the
+  harness probe reports `local-bin:playwright-mcp [ok] Version 0.0.75`.
+  **(Done 2026-05-30.)**
 - After Fix 3: `claude mcp list` shows `render … ✓ Connected` (URL re-pointed to
   `/mcp`). **(Done 2026-05-30.)**
 - Runbook items: verified manually when executed (chrome version bump; Drive
@@ -139,7 +146,8 @@ Document, not automate (both need root/interactive):
 **Correction (2026-05-30):** Fix 1 turned out to be **host config**, not a
 WhatSoup repo change — the registration lives in host `.mcp.json` files and the
 repo's `cutover.sh` already prescribes the correct `tsx` form. So *none* of Fixes
-1–4 are WhatSoup repo code changes; the only repo artifact is this spec doc itself
-(a record/runbook). Fixes 2–4 are Claude-global / host ops, documented here
+1–4 are WhatSoup product-code changes. The repo artifacts are the spec/runbook and
+the harness-maintenance probe manifest/script that avoid stale false positives.
+Fixes 2–4 are Claude-global / host ops, documented here
 because the harness-maintenance probe is the thing that surfaces them daily. None
 are auto-remediated — the probe reports; a human applies.

@@ -106,7 +106,6 @@
           "pinecone-mcp",
           "google-workspace-mcp",
           "playwright-mcp",
-          "render-mcp",
           "sentry-mcp",
           "whatsapp-mcp"
         ]
