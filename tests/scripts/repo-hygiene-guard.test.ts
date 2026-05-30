@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   isTrackedSensitiveArtifact,
   parseArgs,
+  parseCommitAuthorLog,
   parseUnifiedDiffAddedLines,
   scanAddedLines,
   scanCommitMessage,
+  scanCommitAuthors,
   scanContentLines,
 } from '../../scripts/repo-hygiene-guard.ts';
 
@@ -120,6 +122,48 @@ describe('repo hygiene guard', () => {
     expect(issues.map((issue) => issue.code)).toEqual([
       'private-instance-label',
       'private-instance-label',
+    ]);
+  });
+
+  it('flags placeholder commit authors', () => {
+    const issues = scanCommitAuthors([
+      {
+        sha: 'abc123def4567890',
+        name: 'WhatSoup Test',
+        email: 'whatsoup-test.invalid',
+        subject: 'docs: reconcile bead statuses',
+      },
+      {
+        sha: 'def456abc1237890',
+        name: 'Lucas Quiles',
+        email: '180208450+LucasQuiles@users.noreply.github.com',
+        subject: 'fix: normal commit',
+      },
+    ]);
+
+    expect(issues.map((issue) => issue.code)).toEqual(['placeholder-commit-author']);
+    expect(issues[0].filePath).toBe('commit:abc123def456');
+  });
+
+  it('parses git author logs for commit-author scanning', () => {
+    const commits = parseCommitAuthorLog(
+      'abc123\x00WhatSoup Test\x00whatsoup-test.invalid\x00docs: one\x1e\n'
+      + 'def456\x00Lucas Quiles\x00180208450+LucasQuiles@users.noreply.github.com\x00fix: two\x1e\n',
+    );
+
+    expect(commits).toEqual([
+      {
+        sha: 'abc123',
+        name: 'WhatSoup Test',
+        email: 'whatsoup-test.invalid',
+        subject: 'docs: one',
+      },
+      {
+        sha: 'def456',
+        name: 'Lucas Quiles',
+        email: '180208450+LucasQuiles@users.noreply.github.com',
+        subject: 'fix: two',
+      },
     ]);
   });
 

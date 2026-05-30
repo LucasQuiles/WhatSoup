@@ -2,15 +2,15 @@
 
 `docs/publication-audit.md` is the tracked source of truth for documentation that must be reviewed before public publication. The publication guard validates that every tracked internal documentation path has exactly one row here.
 
-**Total classification rows:** 191
+**Total classification rows:** 194
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 191 |
+| PRIVATE-ARCHIVE | 194 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 191 |
+| Total | 194 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -169,6 +169,9 @@
 | `docs/specs/2026-05-10-compatibility-deprecation-policy-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-10-public-release-readiness-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-29-harness-maintenance-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/specs/2026-05-30-codex-npm-cooldown-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/specs/2026-05-30-mcp-ops-hygiene-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/specs/2026-05-30-systemd-unit-reconciliation-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-kickoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |

@@ -122,6 +122,21 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
   });
 
+  it('verify chains invoke the commit-author guard', () => {
+    for (const scriptName of ['verify:push:branch', 'verify:release']) {
+      const chain = packageJson.scripts[scriptName];
+      expect(chain, `${scriptName} script must exist`).toBeDefined();
+      expect(chain).toMatch(/\bnpm run guard:repo:commit-authors\b/);
+    }
+  });
+
+  it('verify:push:branch invokes full test typecheck, not source-only typecheck', () => {
+    const chain = packageJson.scripts['verify:push:branch'];
+    expect(chain, 'verify:push:branch script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run typecheck:all\b/);
+    expect(chain).not.toMatch(/\bnpm run typecheck(?:\s|&&|$)/);
+  });
+
   it('verify:release invokes the standalone whatsoup guard package checks', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
@@ -164,5 +179,9 @@ describe('quality workflow composition', () => {
     expect(qualityWorkflow).toContain('TEST_INTEGRITY_DEPLOY_KEY');
     expect(qualityWorkflow).toContain('LucasQuiles/test-integrity.git');
     expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
+  });
+
+  it('runs the commit-author guard in CI quality workflow', () => {
+    expect(qualityWorkflow).toContain('npm run guard:repo:commit-authors');
   });
 });

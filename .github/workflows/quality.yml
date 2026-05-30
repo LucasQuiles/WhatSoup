@@ -48,6 +48,13 @@ jobs:
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
 
+      - name: Repo hygiene commit-author guard
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+          fi
+          npm run guard:repo:commit-authors
+
       - name: Install test-integrity plugin
         env:
           TEST_INTEGRITY_DEPLOY_KEY: ${{ secrets.TEST_INTEGRITY_DEPLOY_KEY }}
