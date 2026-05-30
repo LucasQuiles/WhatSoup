@@ -4,10 +4,22 @@ Manual host-level maintenance steps surfaced by the harness-maintenance daily
 probe. These need root or interactive auth, so they are **documented, not
 automated** — the probe reports the drift; an operator applies the fix.
 
-Run the probe's dry-run check any time to see current findings:
+Run the probe's dry-run check any time to see current findings on Linux/systemd
+hosts where `deploy/setup.sh` installed the wrapper:
 
 ```
 ~/.local/bin/whatsoup-harness-maintenance --check
+```
+
+On macOS launchd hosts, `deploy/setup.sh` is not the installer. Run the script
+from the checkout, or install the same operator command as a symlink:
+
+```
+cd ~/LAB/WhatSoup
+deploy/scripts/harness-maintenance.sh --check
+
+mkdir -p ~/.local/bin
+ln -sf ~/LAB/WhatSoup/deploy/scripts/harness-maintenance.sh ~/.local/bin/whatsoup-harness-maintenance
 ```
 
 ## Google Chrome (apt) upgrade
