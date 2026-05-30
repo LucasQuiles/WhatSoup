@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, w
 import { join } from 'node:path';
 
 const DRAIN_SCRIPT = join(process.cwd(), 'deploy/hooks/drain-stuck-replies.mjs');
+const WRAPPER_PATH = join(process.cwd(), 'deploy/scripts/reply-guarantee-drain.sh');
 const PLIST_PATH = join(process.cwd(), 'deploy/com.whatsoup.reply-guarantee.plist');
 const SERVICE_PATH = join(process.cwd(), 'deploy/whatsoup-reply-guarantee.service');
 
@@ -196,14 +197,16 @@ describe('reply guarantee daemon deployment artifacts', () => {
   it('ships macOS launchd and Linux systemd schedulers without host-specific paths', () => {
     const plist = readFileSync(PLIST_PATH, 'utf8');
     const service = readFileSync(SERVICE_PATH, 'utf8');
+    const wrapper = readFileSync(WRAPPER_PATH, 'utf8');
 
     expect(plist).toContain('com.whatsoup.reply-guarantee');
     expect(plist).toContain('<key>StartInterval</key>');
     expect(plist).toContain('<integer>60</integer>');
     expect(plist).toContain('drain-stuck-replies.mjs');
     expect(service).toContain('Description=WhatSoup Reply Guarantee queue drain');
-    expect(service).toContain('ExecStart=');
-    expect(service).toContain('WHATSOUP_REPO_ROOT');
-    expect(`${plist}\n${service}`).not.toMatch(/\/Users\/[^<\s]+|mwlab|anabot|nucles/i);
+    expect(service).toContain('ExecStart=%h/.local/bin/whatsoup-reply-guarantee-drain');
+    expect(service).not.toContain('WHATSOUP_REPO_ROOT');
+    expect(wrapper).toContain('drain-stuck-replies.mjs');
+    expect(`${plist}\n${service}\n${wrapper}`).not.toMatch(/\/Users\/[^<\s]+|mwlab|anabot|nucles/i);
   });
 });

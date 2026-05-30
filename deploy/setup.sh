@@ -8,6 +8,18 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 
+if [ "${1:-}" = "--check" ]; then
+  exec "$REPO_ROOT/scripts/check-unit-drift.sh"
+fi
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  cat <<'USAGE'
+Usage: deploy/setup.sh [--check]
+
+  --check  Compare checked-in systemd units with installed user units.
+USAGE
+  exit 0
+fi
+
 echo "WhatSoup Setup"
 echo "=============="
 echo ""
@@ -94,6 +106,9 @@ echo "  ✓ whatsoup-ensure-node → $REPO_ROOT/deploy/scripts/ensure-node-insta
 ln -sf "$REPO_ROOT/deploy/scripts/harness-maintenance.sh" "$BIN_DIR/whatsoup-harness-maintenance"
 chmod +x "$REPO_ROOT/deploy/scripts/harness-maintenance.sh"
 echo "  ✓ whatsoup-harness-maintenance → $REPO_ROOT/deploy/scripts/harness-maintenance.sh"
+ln -sf "$REPO_ROOT/deploy/scripts/reply-guarantee-drain.sh" "$BIN_DIR/whatsoup-reply-guarantee-drain"
+chmod +x "$REPO_ROOT/deploy/scripts/reply-guarantee-drain.sh"
+echo "  ✓ whatsoup-reply-guarantee-drain → $REPO_ROOT/deploy/scripts/reply-guarantee-drain.sh"
 
 # Ensure ~/.local/bin is on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
@@ -106,12 +121,22 @@ echo "[4/7] Installing systemd user units..."
 mkdir -p "$SYSTEMD_DIR"
 cp "$REPO_ROOT/deploy/whatsoup@.service" "$SYSTEMD_DIR/whatsoup@.service"
 cp "$REPO_ROOT/deploy/whatsoup-fleet.service" "$SYSTEMD_DIR/whatsoup-fleet.service"
+cp "$REPO_ROOT/deploy/whatsoup-heal-notify@.service" "$SYSTEMD_DIR/whatsoup-heal-notify@.service"
+cp "$REPO_ROOT/deploy/whatsoup-reply-guarantee.service" "$SYSTEMD_DIR/whatsoup-reply-guarantee.service"
+cp "$REPO_ROOT/deploy/whatsoup-reply-guarantee.timer" "$SYSTEMD_DIR/whatsoup-reply-guarantee.timer"
 cp "$REPO_ROOT/deploy/harness-maintenance.service" "$SYSTEMD_DIR/harness-maintenance.service"
 cp "$REPO_ROOT/deploy/harness-maintenance.timer" "$SYSTEMD_DIR/harness-maintenance.timer"
 systemctl --user daemon-reload 2>/dev/null || true
 echo "  ✓ whatsoup@.service installed"
 echo "  ✓ whatsoup-fleet.service installed"
+echo "  ✓ whatsoup-heal-notify@.service installed"
+echo "  ✓ whatsoup-reply-guarantee.{service,timer} installed"
 echo "  ✓ harness-maintenance.{service,timer} installed"
+mkdir -p "$HOME/.config/whatsoup"
+if [ ! -f "$HOME/.config/whatsoup/fleet.env" ]; then
+  cp "$REPO_ROOT/deploy/fleet.env.example" "$HOME/.config/whatsoup/fleet.env.example"
+  echo "  - Optional fleet bind template installed to ~/.config/whatsoup/fleet.env.example"
+fi
 
 # ── Step 5: Install hardened npm defaults ───────────────────────────
 echo "[5/7] Installing hardened npm defaults..."
@@ -177,4 +202,7 @@ echo ""
 echo "  To run harness maintenance daily:"
 echo "     systemctl --user enable --now harness-maintenance.timer"
 echo "     whatsoup-harness-maintenance --check"
+echo ""
+echo "  To run reply-guarantee drain every minute:"
+echo "     systemctl --user enable --now whatsoup-reply-guarantee.timer"
 echo ""

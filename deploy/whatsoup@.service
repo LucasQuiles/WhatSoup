@@ -8,6 +8,7 @@ StartLimitBurst=10
 OnFailure=whatsoup-heal-notify@%i.service
 
 [Service]
+EnvironmentFile=-%h/.config/whatsoup/secrets.env
 Type=simple
 # Pre-install the .nvmrc-pinned Node via nvm if available. No-op on hosts
 # without nvm. The wrapper's version gate (deploy/whatsoup, PR #663) is the
@@ -40,6 +41,10 @@ TimeoutStopSec=15
 # Load instance-specific tokens (health API auth). The - prefix means
 # systemd won't fail if the file is missing (token simply won't be set).
 EnvironmentFile=-%h/.config/whatsoup/instances/%i/tokens.env
+# Memory limits — each instance runs ~1.5GB normally.
+# MemoryHigh triggers kernel reclaim pressure; MemoryMax is the hard OOM cap.
+MemoryHigh=4G
+MemoryMax=6G
 
 [Install]
 WantedBy=graphical-session.target

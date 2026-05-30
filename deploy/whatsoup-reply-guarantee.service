@@ -4,4 +4,4 @@ Documentation=https://github.com/LucasQuiles/WhatSoup
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env bash -lc 'cd "${WHATSOUP_REPO_ROOT:?Set WHATSOUP_REPO_ROOT to the WhatSoup checkout}" && exec node deploy/hooks/drain-stuck-replies.mjs --once'
+ExecStart=%h/.local/bin/whatsoup-reply-guarantee-drain

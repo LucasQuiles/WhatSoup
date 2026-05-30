@@ -27,5 +27,5 @@ const server = createFleetServer({
 });
 
 server.start(port);
-console.log(`Fleet server listening on http://127.0.0.1:${port}`);
+console.log(`Fleet server listening on http://${process.env.FLEET_BIND_ADDRESS ?? '127.0.0.1'}:${port}`);
 console.log('Press Ctrl+C to stop');
