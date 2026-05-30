@@ -34,8 +34,15 @@ different places.
   `~/.claude/plugins/marketplaces/claude-plugins-official/external_plugins/playwright/.mcp.json`.
   Latest dist-tag = `0.0.75`. This is a claude-plugins-official plugin, not a
   WhatSoup file; editing it directly is overwritten on plugin update.
-- **render:** HTTP server `https://mcp.render.com/sse` failing; local helper
-  `~/.local/bin/render-mcp` absent.
+- **render:** HTTP MCP server `https://mcp.render.com/sse` failing. Root cause is
+  **not** disuse — Render **migrated the MCP endpoint `/sse` → `/mcp`** (SSE →
+  streamable HTTP); the old `/sse` path now returns 404, the new `/mcp` returns 200
+  with a valid MCP handshake. The render MCP is in fact **actively used** (many
+  `mcp__render__*` tool calls across recent sessions: `create_web_service`,
+  `list_deploys`, `get_service`, `get_metrics`, `list_logs`,
+  `update_environment_variables`, …). The bearer token is unchanged and still valid
+  (the failure was 404 endpoint-not-found, not 401). The `~/.local/bin/render-mcp`
+  local helper is absent but irrelevant — this server is HTTP, not a local stdio helper.
 - **chrome:** installed `147.0.7727.101-1`, candidate `148.0.7778.215-1`.
 
 ## Design
@@ -73,12 +80,24 @@ Claude-global hygiene, tracked under `~/.claude` / machine-config, **not** a
 WhatSoup repo change. Revisit the pinned version on a deliberate cadence (the
 probe continues to report when a newer version exists, but does not auto-adopt).
 
-### Fix 3 — render MCP resolution (Claude-global)
+### Fix 3 — render MCP endpoint re-point (Claude-global — DONE 2026-05-30)
 
-Decide per actual use: if `render` is unused, **remove** the failing HTTP server
-and the dangling local-helper reference from the Claude MCP config (stops the
-daily failure noise). If used, re-provision the helper and re-auth. Default:
-remove, since the local helper is absent and the HTTP endpoint is failing.
+**Correction to the original "remove if unused" default:** render is *actively
+used*, so the fix is a **re-point, not a removal**. Render retired the `/sse`
+endpoint and moved to streamable HTTP at `/mcp`. Update the registration's URL in
+`~/.mcp.json`, keep `type: http` and the existing (valid) bearer token:
+```
+"url": "https://mcp.render.com/sse"  →  "https://mcp.render.com/mcp"
+```
+**Applied 2026-05-30, verified `render … ✓ Connected`.**
+
+*Verify-before-acting lesson:* the spec's blanket "remove if unused" default would
+have deleted a heavily-used integration. Always confirm actual usage **and** the
+failure mode (here: an endpoint migration, not disuse) before remediating.
+
+*Token hygiene (separate, optional):* the bearer key sat in a cleartext dotfile; if
+treating it as exposed, rotate it in the Render dashboard and update the `~/.mcp.json`
+`Authorization` header. Not required for function — the key still works.
 
 ### Fix 4 — host ops runbook
 
@@ -98,9 +117,9 @@ Document, not automate (both need root/interactive):
 2. **Playwright pin** (Claude-global, no WhatSoup PR): add the pinned user-scoped
    MCP override; verify it shadows the plugin entry; record the pinned version in
    the machine-config notes.
-3. **render** (Claude-global): confirm non-use, then remove the server + helper
-   reference from the MCP config; verify it no longer appears as failing in
-   `claude mcp list`.
+3. **render** (Claude-global — DONE): re-point the registration URL `/sse` → `/mcp`
+   in `~/.mcp.json` (Render migrated the endpoint); keep type + token; verify
+   `claude mcp list` → `render … ✓ Connected`.
 4. **runbook** (docs): add `docs/runbooks/host-maintenance.md` (or extend an
    existing ops doc) with the chrome-apt and Drive-reauth procedures and link it
    from the harness-maintenance probe findings.
@@ -110,7 +129,8 @@ Document, not automate (both need root/interactive):
 - After Fix 1: `claude mcp list` shows `whatsoup … ✓ Connected`. **(Done 2026-05-30.)**
 - After Fix 2: the playwright entry resolves to the pinned version; probe reports
   it as pinned, not floating.
-- After Fix 3: no `render` failure line in `claude mcp list` / the probe.
+- After Fix 3: `claude mcp list` shows `render … ✓ Connected` (URL re-pointed to
+  `/mcp`). **(Done 2026-05-30.)**
 - Runbook items: verified manually when executed (chrome version bump; Drive
   reconnect).
 
