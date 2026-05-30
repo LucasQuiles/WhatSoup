@@ -261,6 +261,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-repo-staged` | `npm run guard:repo:staged` | `package.json` | stable | active | Repo hygiene guard over the staged diff |
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
 | `cli:npm.guard-harness-maintenance` | `npm run guard:harness-maintenance` | `package.json` | internal | active | Validate harness-maintenance manifest and npm cooldown gates |
+| `cli:npm.guard-unit-drift` | `npm run guard:unit-drift` | `package.json` | internal | active | Compare checked-in systemd user units with installed units |
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
 | `cli:npm.guard-agent-decision-polls` | `npm run guard:agent-decision-polls` | `package.json` | stable | active | Verify AskUser poll protocol wiring across prompts, MCP schema, sandbox diagnostics, docs, and release gates |
@@ -305,9 +306,12 @@ are breaking.
 | `deploy:wrapper.whatsoup` | `whatsoup` launcher script | [`deploy/whatsoup`](../deploy/whatsoup) | stable | active | Takes `<instance-name>` argument; loads keychain secrets, exports env, execs `src/bootstrap.ts` for that instance |
 | `deploy:wrapper.whatsoup-fleet` | `whatsoup-fleet` launcher | [`deploy/whatsoup-fleet`](../deploy/whatsoup-fleet) | stable | active | Fleet-only entrypoint |
 | `deploy:wrapper.whatsoup-auth` | `whatsoup-auth` launcher | [`deploy/whatsoup-auth`](../deploy/whatsoup-auth) | stable | active | Auth-flow entrypoint |
+| `deploy:wrapper.whatsoup-reply-guarantee-drain` | `whatsoup-reply-guarantee-drain` launcher | [`deploy/scripts/reply-guarantee-drain.sh`](../deploy/scripts/reply-guarantee-drain.sh) | stable | active | Repo-relative systemd entrypoint for draining queued stuck replies |
 | `deploy:systemd.instance` | `whatsoup@.service` template | [`deploy/whatsoup@.service`](../deploy/whatsoup@.service) | stable | active | systemd template; per-instance unit |
 | `deploy:systemd.fleet` | `whatsoup-fleet.service` | [`deploy/whatsoup-fleet.service`](../deploy/whatsoup-fleet.service) | stable | active | systemd fleet service |
 | `deploy:systemd.heal-notify` | `whatsoup-heal-notify@.service` | [`deploy/whatsoup-heal-notify@.service`](../deploy/whatsoup-heal-notify@.service) | stable | active | systemd heal-notification template |
+| `deploy:systemd.reply-guarantee` | `whatsoup-reply-guarantee.{service,timer}` | [`deploy/whatsoup-reply-guarantee.service`](../deploy/whatsoup-reply-guarantee.service), [`deploy/whatsoup-reply-guarantee.timer`](../deploy/whatsoup-reply-guarantee.timer) | stable | active | systemd timer for draining queued stuck replies |
+| `deploy:systemd.harness-maintenance` | `harness-maintenance.{service,timer}` | [`deploy/harness-maintenance.service`](../deploy/harness-maintenance.service), [`deploy/harness-maintenance.timer`](../deploy/harness-maintenance.timer) | stable | active | systemd timer for harness and dependency maintenance |
 | `deploy:setup.sh` | `setup.sh` | [`deploy/setup.sh`](../deploy/setup.sh) | stable | active | Operator setup script |
 | `deploy:generate-health-tokens` | `generate-health-tokens.sh` | [`deploy/generate-health-tokens.sh`](../deploy/generate-health-tokens.sh) | stable | active | Generates per-instance health tokens |
 | `deploy:tokens.env-template` | `whatsoup-tokens.env.example` | [`deploy/whatsoup-tokens.env.example`](../deploy/whatsoup-tokens.env.example) | stable | active | Template for `tokens.env` populated at deploy time |

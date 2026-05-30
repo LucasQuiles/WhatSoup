@@ -18,9 +18,10 @@ Type=simple
 # by which point a sibling instance has typically completed the install.
 ExecStartPre=%h/.local/bin/whatsoup-ensure-node
 ExecStart=%h/.local/bin/whatsoup-fleet 9099
-Restart=on-failure
+Restart=always
 RestartSec=5
 Environment=NODE_OPTIONS=--experimental-strip-types
+EnvironmentFile=-%h/.config/whatsoup/fleet.env
 
 [Install]
 WantedBy=default.target

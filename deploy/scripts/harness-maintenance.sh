@@ -497,6 +497,21 @@ probe_tier2() {
   else
     record_event "systemd" "skipped" "systemctl unavailable"
   fi
+
+  if [ -x "$REPO_ROOT/scripts/check-unit-drift.sh" ]; then
+    set +e
+    local drift_out
+    drift_out="$("$REPO_ROOT/scripts/check-unit-drift.sh" 2>&1)"
+    local drift_rc=$?
+    set -e
+    if [ "$drift_rc" -eq 0 ]; then
+      record_event "systemd-content" "ok" "$drift_out"
+    else
+      record_event "systemd-content" "drift" "$drift_out"
+    fi
+  else
+    record_event "systemd-content" "skipped" "check-unit-drift.sh unavailable"
+  fi
 }
 
 main() {
