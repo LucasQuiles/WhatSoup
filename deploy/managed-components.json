@@ -2,6 +2,7 @@
   "schema_version": 1,
   "npm": {
     "cooldown_minutes": 10080,
+    "npmrc_min_release_age_days": 7,
     "npmrc": "deploy/npmrc.hardened",
     "safe_install_args": [
       "--ignore-scripts",

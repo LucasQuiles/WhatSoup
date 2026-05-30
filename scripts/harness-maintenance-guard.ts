@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const DEFAULT_COOLDOWN_MINUTES = 7 * 24 * 60;
+export const DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS = 7;
 
 export interface NpmVersionAge {
   version: string;
@@ -19,8 +20,9 @@ export interface FloatingReference {
 export interface NpmCooldownConfigCheck {
   npmVersion: string;
   minVersion: string;
-  expectedValue: string;
-  actualValue: string;
+  expectedDays: string;
+  npmrcValue: string | null;
+  installExitCode: number;
   stderr: string;
   ok: boolean;
   reasons: string[];
@@ -29,6 +31,7 @@ export interface NpmCooldownConfigCheck {
 export interface ManifestValidation {
   schemaVersion: number;
   cooldownMinutes: number;
+  npmrcMinReleaseAgeDays: number;
   codexNodeNpmMinVersion: string;
   tier1Harnesses: string[];
   probes: string[];
@@ -64,6 +67,16 @@ function asNumber(value: unknown, label: string): number {
     throw new Error(`${label} must be a number`);
   }
   return value;
+}
+
+function parseNpmrcMinReleaseAge(text: string): string | null {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#') || trimmed.startsWith(';')) continue;
+    const match = trimmed.match(/^min-release-age\s*=\s*(.+?)\s*$/);
+    if (match) return match[1] ?? null;
+  }
+  return null;
 }
 
 function compareVersion(left: string, right: string): number {
@@ -115,6 +128,15 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
       `npm.cooldown_minutes must be at least ${DEFAULT_COOLDOWN_MINUTES}`,
     );
   }
+  const npmrcMinReleaseAgeDays = asNumber(
+    npm.npmrc_min_release_age_days,
+    'npm.npmrc_min_release_age_days',
+  );
+  if (npmrcMinReleaseAgeDays < DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS) {
+    throw new Error(
+      `npm.npmrc_min_release_age_days must be at least ${DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS}`,
+    );
+  }
   const codexNode = asRecord(npm.codex_node, 'npm.codex_node');
   asString(codexNode.node_bin, 'npm.codex_node.node_bin');
   const codexNodeNpmMinVersion = asString(
@@ -158,6 +180,7 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
   return {
     schemaVersion,
     cooldownMinutes,
+    npmrcMinReleaseAgeDays,
     codexNodeNpmMinVersion,
     tier1Harnesses,
     probes,
@@ -173,17 +196,19 @@ export function validateManifestText(text: string): ManifestValidation {
 export function npmCooldownConfigCheck({
   npmVersion,
   minVersion,
-  expectedValue,
-  stdout,
+  expectedDays,
+  npmrcText,
+  installExitCode,
   stderr,
 }: {
   npmVersion: string;
   minVersion: string;
-  expectedValue: string;
-  stdout: string;
+  expectedDays: string;
+  npmrcText: string;
+  installExitCode: number;
   stderr: string;
 }): NpmCooldownConfigCheck {
-  const actualValue = stdout.trim();
+  const npmrcValue = parseNpmrcMinReleaseAge(npmrcText);
   const reasons: string[] = [];
   if (compareVersion(npmVersion, minVersion) < 0) {
     reasons.push(`npm ${npmVersion} is below required ${minVersion}`);
@@ -191,14 +216,18 @@ export function npmCooldownConfigCheck({
   if (/Unknown user config ["']min-release-age["']/i.test(stderr)) {
     reasons.push('npm does not recognize min-release-age');
   }
-  if (actualValue !== expectedValue) {
-    reasons.push(`min-release-age is ${actualValue || '(empty)'}, expected ${expectedValue}`);
+  if (npmrcValue !== expectedDays) {
+    reasons.push(`npmrc min-release-age is ${npmrcValue ?? '(missing)'}, expected ${expectedDays}`);
+  }
+  if (installExitCode !== 0) {
+    reasons.push('npm dry-run install failed with min-release-age enabled');
   }
   return {
     npmVersion,
     minVersion,
-    expectedValue,
-    actualValue,
+    expectedDays,
+    npmrcValue,
+    installExitCode,
     stderr,
     ok: reasons.length === 0,
     reasons,
@@ -252,14 +281,19 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
   if (args['npm-cooldown-config']) {
     const npmVersion = asString(args['npm-version'], '--npm-version');
     const minVersion = asString(args['min-version'], '--min-version');
-    const expectedValue = asString(args['expected-value'], '--expected-value');
-    const stdoutPath = asString(args['stdout-file'], '--stdout-file');
+    const expectedDays = asString(args['expected-days'], '--expected-days');
+    const npmrcPath = asString(args['npmrc-file'], '--npmrc-file');
     const stderrPath = asString(args['stderr-file'], '--stderr-file');
+    const installExitCode = Number(args['install-exit-code']);
+    if (!Number.isInteger(installExitCode) || installExitCode < 0) {
+      throw new Error('--install-exit-code must be a non-negative integer');
+    }
     const result = npmCooldownConfigCheck({
       npmVersion,
       minVersion,
-      expectedValue,
-      stdout: readFileSync(stdoutPath, 'utf8'),
+      expectedDays,
+      npmrcText: readFileSync(npmrcPath, 'utf8'),
+      installExitCode,
       stderr: readFileSync(stderrPath, 'utf8'),
     });
     if (args.json) console.log(JSON.stringify(result, null, 2));

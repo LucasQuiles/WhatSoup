@@ -1,4 +1,4 @@
 registry=https://registry.npmjs.org/
-min-release-age=10080
+min-release-age=7
 audit=true
 fund=false

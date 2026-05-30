@@ -238,6 +238,14 @@ console.log(String(manifest.npm.cooldown_minutes));
 NODE
 }
 
+manifest_npmrc_min_release_age_days() {
+  "$REPO_NODE_BIN" - "$MANIFEST" <<'NODE'
+const fs = require('node:fs');
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+console.log(String(manifest.npm.npmrc_min_release_age_days));
+NODE
+}
+
 manifest_codex_npm_min_version() {
   "$REPO_NODE_BIN" - "$MANIFEST" <<'NODE'
 const fs = require('node:fs');
@@ -255,17 +263,24 @@ check_codex_npm_cooldown() {
     return 0
   fi
 
-  local expected min_version stdout_file stderr_file npm_version
-  expected="$(manifest_npm_cooldown_minutes)"
+  local expected_days min_version stderr_file npm_version smoke_dir smoke_rc
+  expected_days="$(manifest_npmrc_min_release_age_days)"
   min_version="$(manifest_codex_npm_min_version)"
-  stdout_file="$(mktemp "$TMP_DIR/codex-npm-cooldown.stdout.XXXXXX")"
   stderr_file="$(mktemp "$TMP_DIR/codex-npm-cooldown.stderr.XXXXXX")"
+  smoke_dir="$(mktemp -d "$TMP_DIR/codex-npm-smoke.XXXXXX")"
 
   set +e
   npm_version="$(PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" --version 2>"$stderr_file" | tail -n 1)"
   local version_rc=$?
-  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" config get min-release-age >"$stdout_file" 2>>"$stderr_file"
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" config get min-release-age >/dev/null 2>>"$stderr_file"
   local config_rc=$?
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" install is-number@7.0.0 \
+    --dry-run \
+    --ignore-scripts \
+    --package-lock=false \
+    --no-save \
+    --prefix "$smoke_dir" >/dev/null 2>>"$stderr_file"
+  smoke_rc=$?
   set -e
 
   if [ "$version_rc" -ne 0 ] || [ -z "$npm_version" ]; then
@@ -289,14 +304,15 @@ check_codex_npm_cooldown() {
     --npm-cooldown-config \
     --npm-version "$npm_version" \
     --min-version "$min_version" \
-    --expected-value "$expected" \
-    --stdout-file "$stdout_file" \
-    --stderr-file "$stderr_file" 2>&1)"
+    --expected-days "$expected_days" \
+    --npmrc-file "$HOME/.npmrc" \
+    --stderr-file "$stderr_file" \
+    --install-exit-code "$smoke_rc" 2>&1)"
   local rc=$?
   set -e
 
   if [ "$rc" -eq 0 ]; then
-    record_event "codex-npm-cooldown" "ok" "npm $npm_version recognizes min-release-age=$expected"
+    record_event "codex-npm-cooldown" "ok" "npm $npm_version accepts min-release-age=${expected_days}d"
     return 0
   fi
   if [ "$rc" -eq 2 ]; then
