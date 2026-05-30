@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+if resolved_path="$(readlink -f "$SCRIPT_PATH" 2>/dev/null)"; then
+  SCRIPT_PATH="$resolved_path"
+fi
+REPO_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/../.." && pwd)"
 STATE_DIR="${WHATSOUP_HARNESS_MAINTENANCE_STATE_DIR:-$HOME/.cache/whatsoup/harness-maintenance}"
 MANIFEST="${WHATSOUP_HARNESS_MAINTENANCE_MANIFEST:-$REPO_ROOT/deploy/managed-components.json}"
 NPMRC_TEMPLATE="$REPO_ROOT/deploy/npmrc.hardened"
@@ -63,6 +67,7 @@ fi
 CODX_NODE_BIN_DIR="${WHATSOUP_CODEX_NODE_BIN_DIR:-$HOME/.nvm/versions/node/v24.13.0/bin}"
 ALERT_BIN="${WHATSOUP_ALERT_BIN:-$HOME/.local/bin/whatsapp-alert}"
 PROBE_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_TIMEOUT_SECS:-10}"
+PROBE_OUTPUT_LINES="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_OUTPUT_LINES:-200}"
 REPO_NODE_BIN_DIR="$(dirname "$REPO_NODE_BIN")"
 export PATH="$HOME/.local/bin:$REPO_NODE_BIN_DIR:$PATH"
 
@@ -214,46 +219,8 @@ apply_npmrc() {
     cp "$HOME/.npmrc" "$backup"
     record_event "npmrc" "backup" "existing ~/.npmrc backed up" "$HOME/.npmrc" "$backup"
   fi
-  "$REPO_NODE_BIN" - "$NPMRC_TEMPLATE" "$HOME/.npmrc" <<'NODE'
-const fs = require('node:fs');
-const [templatePath, targetPath] = process.argv.slice(2);
-const templateLines = fs
-  .readFileSync(templatePath, 'utf8')
-  .split(/\r?\n/)
-  .filter((line) => {
-    const trimmed = line.trim();
-    return trimmed && !trimmed.startsWith('#') && !trimmed.startsWith(';');
-  });
-const desired = new Map();
-for (const line of templateLines) {
-  const index = line.indexOf('=');
-  if (index === -1) continue;
-  desired.set(line.slice(0, index).trim(), line);
-}
-
-const targetExists = fs.existsSync(targetPath);
-const lines = targetExists
-  ? fs.readFileSync(targetPath, 'utf8').split(/\r?\n/)
-  : [];
-if (lines.at(-1) === '') lines.pop();
-
-const seen = new Set();
-const merged = lines.map((line) => {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith(';')) return line;
-  const index = trimmed.indexOf('=');
-  if (index === -1) return line;
-  const key = trimmed.slice(0, index).trim();
-  const replacement = desired.get(key);
-  if (!replacement) return line;
-  seen.add(key);
-  return replacement;
-});
-for (const [key, line] of desired) {
-  if (!seen.has(key)) merged.push(line);
-}
-fs.writeFileSync(targetPath, `${merged.join('\n')}\n`);
-NODE
+  "$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/npmrc-merge.ts" \
+    "$NPMRC_TEMPLATE" "$HOME/.npmrc"
   record_event "npmrc" "applied" "hardened npm settings merged"
 }
 
@@ -301,6 +268,7 @@ ensure_npm_version_eligible() {
     return 2
   fi
   record_event "$pkg" "failed" "npm cooldown check failed: $out"
+  send_alert "warn" "Npm cooldown check failed" "The maintenance job could not verify publish age for $pkg@$version. $out"
   return "$rc"
 }
 
@@ -320,10 +288,12 @@ update_claude() {
   latest="$(npm_latest_version @anthropic-ai/claude-code || true)"
   if [ -z "$before" ]; then
     record_event "claude" "missing" "claude binary not found"
+    send_alert "warn" "Claude harness missing" "The maintenance job could not find the claude binary on PATH."
     return 0
   fi
   if [ -z "$latest" ]; then
     record_event "claude" "unknown" "latest version lookup failed" "$before"
+    send_alert "warn" "Claude latest lookup failed" "The maintenance job could not determine the latest Claude CLI version."
     return 0
   fi
   if [ "$before" = "$latest" ]; then
@@ -353,10 +323,12 @@ update_codex() {
   npm="$(npm_bin)"
   if [ -z "$before" ]; then
     record_event "codex" "missing" "codex binary not found"
+    send_alert "warn" "Codex harness missing" "The maintenance job could not find the codex binary."
     return 0
   fi
   if [ -z "$latest" ] || [ -z "$npm" ]; then
     record_event "codex" "unknown" "latest version lookup failed" "$before"
+    send_alert "warn" "Codex latest lookup failed" "The maintenance job could not determine the latest Codex CLI version."
     return 0
   fi
   if [ "$before" = "$latest" ]; then
@@ -387,6 +359,7 @@ update_opencode() {
   before="$(opencode_current)"
   if [ -z "$before" ]; then
     record_event "opencode" "missing" "opencode binary not found"
+    send_alert "warn" "OpenCode harness missing" "The maintenance job could not find the opencode binary on PATH."
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -413,13 +386,15 @@ probe_command() {
   local name="$1"
   shift
   set +e
-  local out
+  local out out_file
+  out_file="$(mktemp "$TMP_DIR/probe.XXXXXX")"
   if command -v timeout >/dev/null 2>&1; then
-    out="$(timeout "$PROBE_TIMEOUT_SECS" "$@" 2>&1 | head -n 20)"
+    timeout "$PROBE_TIMEOUT_SECS" "$@" >"$out_file" 2>&1
   else
-    out="$("$@" 2>&1 | head -n 20)"
+    "$@" >"$out_file" 2>&1
   fi
   local rc=$?
+  out="$(head -n "$PROBE_OUTPUT_LINES" "$out_file")"
   set -e
   if [ "$rc" -eq 0 ]; then
     record_event "$name" "ok" "$out"
@@ -447,13 +422,15 @@ probe_local_bin() {
       ;;
   esac
   set +e
-  local out
+  local out out_file
+  out_file="$(mktemp "$TMP_DIR/local-bin.XXXXXX")"
   if command -v timeout >/dev/null 2>&1; then
-    out="$(timeout "$PROBE_TIMEOUT_SECS" "$path" --version 2>&1 | head -n 5)"
+    timeout "$PROBE_TIMEOUT_SECS" "$path" --version >"$out_file" 2>&1
   else
-    out="$("$path" --version 2>&1 | head -n 5)"
+    "$path" --version >"$out_file" 2>&1
   fi
   local rc=$?
+  out="$(head -n 5 "$out_file")"
   set -e
   if [ "$rc" -eq 0 ]; then
     record_event "local-bin:$bin" "ok" "$out"
@@ -466,8 +443,10 @@ probe_local_bin() {
 
 probe_tier2() {
   if command -v claude >/dev/null 2>&1; then
+    probe_command "claude-plugins" claude plugin list
     probe_command "mcp-servers" claude mcp list
   else
+    record_event "claude-plugins" "skipped" "claude binary unavailable"
     record_event "mcp-servers" "skipped" "claude binary unavailable"
   fi
 

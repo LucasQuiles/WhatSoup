@@ -120,8 +120,9 @@ if [ -f "$HOME/.npmrc" ] && ! cmp -s "$REPO_ROOT/deploy/npmrc.hardened" "$HOME/.
   cp "$HOME/.npmrc" "$npmrc_backup"
   echo "  ✓ Existing ~/.npmrc backed up to $npmrc_backup"
 fi
-cp "$REPO_ROOT/deploy/npmrc.hardened" "$HOME/.npmrc"
-echo "  ✓ ~/.npmrc hardened with 7-day npm release cooldown"
+node --experimental-strip-types "$REPO_ROOT/scripts/npmrc-merge.ts" \
+  "$REPO_ROOT/deploy/npmrc.hardened" "$HOME/.npmrc"
+echo "  ✓ ~/.npmrc hardened with 7-day npm release cooldown while preserving local settings"
 
 # ── Step 6: Build console ───────────────────────────────────────────
 # Matches .github/workflows/quality.yml console-install + console-build

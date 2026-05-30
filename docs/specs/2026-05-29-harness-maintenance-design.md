@@ -131,7 +131,9 @@ fund=false
 ```
 
 The script enforces the same 7-day cooldown independently (it does not trust
-the global config to be present), and for any npm install:
+the global config to be present). Applying the template must merge managed keys
+into any existing `~/.npmrc` so auth tokens and unrelated local settings are
+preserved. For any npm install:
 
 1. Resolve the exact target version from the registry.
 2. Reject it if `time[version]` is younger than 7 days → hold + alert
