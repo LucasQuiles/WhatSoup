@@ -1093,6 +1093,10 @@ When the accumulated conversation exceeds the model's context window, the agent 
 
 The default `autoCompactInputTokens` threshold is 150,000 tokens. This triggers a proactive `/compact` well before the 200k context limit is reached. Override per-instance via `agentOptions.autoCompactInputTokens` in config.
 
+After a successful auto-compact, the runtime applies a 5-minute success cooldown. If the same scope becomes eligible again inside that rapid re-arm window, the runtime treats the compact as operationally ineffective and escalates the cooldown: 15 minutes, then 30 minutes, then 60 minutes capped. This bounds the slow-response spiral where a high-volume chat repeatedly spends turns compacting instead of replying.
+
+The next real user turn after a successful compact is measured separately. If that turn's own input exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
+
 ### Diagnosis
 
 ```bash
@@ -1102,9 +1106,17 @@ grep "prompt too long" /var/log/whatsoup/<instance>.log
 # Check auto-compact activity
 grep "auto compact triggered" /var/log/whatsoup/<instance>.log
 
+# Check bounded-spiral detections
+grep -E "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" /var/log/whatsoup/<instance>.log
+
+# Check health counters
+curl -s http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
+
 # Verify current threshold
 grep "autoCompactInputTokens" instances/<name>/instance.json
 ```
+
+Canary a compact change on one host first. During the canary window, the pass condition is that `auto compact triggered` entries for a hot scope occur no more often than the active cooldown tier and normal replies continue between compacts. A fail signal is repeated rapid re-arm logs with `autoCompactConsecutiveRapidRearmsMax` climbing while message latency remains elevated.
 
 ---
 

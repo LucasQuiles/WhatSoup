@@ -262,6 +262,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         recentCrashes: 0,
         lastCrashAt: null,
         pollPersistenceErrors: 0,
+        autoCompactIneffective: 0,
+        autoCompactConsecutiveRapidRearmsMax: 0,
+        autoCompactNextTurnOverThreshold: 0,
       },
     });
   });
@@ -278,6 +281,9 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         recentCrashes: 0,
         lastCrashAt: null,
         pollPersistenceErrors: 0,
+        autoCompactIneffective: 0,
+        autoCompactConsecutiveRapidRearmsMax: 0,
+        autoCompactNextTurnOverThreshold: 0,
       },
     });
   });
@@ -290,5 +296,33 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
   it('snapshot has a valid status string', () => {
     const snapshot = runtime.getHealthSnapshot();
     expect(['healthy', 'degraded', 'unhealthy']).toContain(snapshot.status);
+  });
+});
+
+describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
+  it('includes auto-compact counters in the non-per-chat branch', () => {
+    mockSession.getStatus.mockReturnValue({
+      active: false,
+      pid: null,
+      sessionId: null,
+      startedAt: null,
+      messageCount: 0,
+      lastMessageAt: null,
+    });
+
+    const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'test');
+
+    expect(runtime.getHealthSnapshot()).toStrictEqual({
+      status: 'healthy',
+      details: {
+        active: false,
+        pid: null,
+        sessionId: null,
+        pollPersistenceErrors: 0,
+        autoCompactIneffective: 0,
+        autoCompactConsecutiveRapidRearmsMax: 0,
+        autoCompactNextTurnOverThreshold: 0,
+      },
+    });
   });
 });

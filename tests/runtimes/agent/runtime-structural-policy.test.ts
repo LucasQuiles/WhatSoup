@@ -22,7 +22,7 @@ describe('AgentRuntime structural policy', () => {
     const crashMatch = source.match(/private cleanupPerChatCrashTurnState\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
 
     expect(mapKeyCleanupMatches.length).toBeGreaterThanOrEqual(2);
-    expect(workspaceCleanupMatches).toHaveLength(2);
+    expect(workspaceCleanupMatches.length).toBeGreaterThanOrEqual(3);
     expect(source).toContain('this.cleanupPerChatState(lidKey);');
     expect(crashMatch).toBeTruthy();
 
@@ -52,6 +52,10 @@ describe('AgentRuntime structural policy', () => {
       'this.postTurnGate.delete(mapKey);',
       'this.compactBoundaryScopes.delete(mapKey);',
       'this.autoCompactCooldownUntil.delete(mapKey);',
+      'this.autoCompactLastSuccessAt.delete(mapKey);',
+      'this.autoCompactRapidRearmRecordedForSuccessAt.delete(mapKey);',
+      'this.autoCompactConsecutiveRapidRearms.delete(mapKey);',
+      'this.autoCompactMeasureNextTurn.delete(mapKey);',
       'this.operationTrackers.delete(mapKey);',
       'this.deletePendingPollQuestions(mapKey);',
     ];
