@@ -14,6 +14,10 @@ const timerTemplates = [
   'deploy/bot-errors-health-check.timer',
   'deploy/bot-errors-heartbeat-watchdog.timer',
 ];
+const launchdInstallers = [
+  'deploy/scripts/install-bot-errors-health-launchd.sh',
+  'deploy/scripts/install-bot-errors-launchd.sh',
+];
 const unitTemplates = [...serviceTemplates, ...timerTemplates];
 const PRIVATE_SOCKET_SEGMENT = ['instances', 'personal', 'whatsoup.sock'].join('/');
 
@@ -32,5 +36,15 @@ describe('BOT ERRORS service templates', () => {
       expect(text).not.toMatch(/\/home\/[A-Za-z0-9._-]+\//);
       expect(text).not.toContain(PRIVATE_SOCKET_SEGMENT);
     }
+  });
+
+  it('fails loud before installing launchd plists when referenced scripts are missing', () => {
+    for (const file of launchdInstallers) {
+      const text = readFileSync(file, 'utf8');
+      expect(text).toContain('missing required BOT ERRORS script');
+      expect(text).toContain('bot-errors-health-check.py');
+      expect(text).toContain('bot-errors-runner.py');
+    }
+    expect(readFileSync('deploy/scripts/install-bot-errors-launchd.sh', 'utf8')).toContain('bot-errors-dispatcher.py');
   });
 });
