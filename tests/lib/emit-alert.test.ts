@@ -37,6 +37,7 @@ const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart
 const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----END ', 'PRIVATE KEY-----'].join('');
 const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
 const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
+const PHONE_SAMPLE = '+1 (555) 123-4567';
 let outboxDir = '';
 
 function spawnedChild() {
@@ -104,6 +105,7 @@ describe('emitAlert', () => {
       JWT_SAMPLE,
       PRIVATE_KEY_SAMPLE,
       URL_USERINFO_SAMPLE,
+      PHONE_SAMPLE,
     ].join('\n');
 
     emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', secretEvidence);
@@ -116,6 +118,7 @@ describe('emitAlert', () => {
     expect(event.evidence).toContain('[REDACTED JWT]');
     expect(event.evidence).toContain('[REDACTED PEM PRIVATE KEY]');
     expect(event.evidence).toContain(REDACTED_URL_USERINFO);
+    expect(event.evidence).toContain('[REDACTED PHONE]');
     expect(event.evidence).not.toContain('plain-secret');
     expect(event.evidence).not.toContain('abc.def');
     expect(event.evidence).not.toContain(AWS_KEY_SAMPLE);
@@ -124,6 +127,7 @@ describe('emitAlert', () => {
     expect(event.evidence).not.toContain('-----BEGIN');
     expect(event.evidence).not.toContain('-----END');
     expect(event.evidence).not.toContain(URL_USERINFO_SAMPLE);
+    expect(event.evidence).not.toContain(PHONE_SAMPLE);
   });
 
   it('never exposes a truncated temp file as a live event', () => {

@@ -14,6 +14,7 @@ const REDACTED_URL_USERINFO = `https://[REDACTED] at ${'example'}.com/path`;
 const AT_SIGN = '@';
 const TEST_SERVICE_NAME = `whatsoup${AT_SIGN}18454174651.service`;
 const TEST_CHAT_JID = `q${AT_SIGN}s.whatsapp.net`;
+const PHONE_SAMPLE = '+1 (555) 123-4567';
 
 function writeEvent(root: string, severity = 'critical', overrides: Record<string, unknown> = {}) {
   const outbox = join(root, 'outbox');
@@ -103,6 +104,7 @@ describe('bot-errors-dispatcher', () => {
         JWT_SAMPLE,
         PRIVATE_KEY_SAMPLE,
         URL_USERINFO_SAMPLE,
+        PHONE_SAMPLE,
       ].join('\n'),
       diagnostics: {
         logHints: [`journalctl --user -u ${TEST_SERVICE_NAME} --since '30 minutes ago'`],
@@ -127,6 +129,7 @@ describe('bot-errors-dispatcher', () => {
     expect(rendered).toContain('[REDACTED JWT]');
     expect(rendered).toContain('[REDACTED PEM PRIVATE KEY]');
     expect(rendered).toContain(REDACTED_URL_USERINFO);
+    expect(rendered).toContain('[REDACTED PHONE]');
     expect(rendered).not.toContain(TEST_SERVICE_NAME.replace(/\.service$/, ''));
     expect(rendered).not.toContain(TEST_CHAT_JID);
     expect(rendered).not.toContain(AWS_KEY_SAMPLE);
@@ -134,6 +137,7 @@ describe('bot-errors-dispatcher', () => {
     expect(rendered).not.toContain('eyJhbGci');
     expect(rendered).not.toContain('-----BEGIN');
     expect(rendered).not.toContain(URL_USERINFO_SAMPLE);
+    expect(rendered).not.toContain(PHONE_SAMPLE);
   });
 
   it('ignores partial temp files in the outbox without delivery or quarantine', () => {

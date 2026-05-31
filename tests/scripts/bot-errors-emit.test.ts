@@ -11,6 +11,7 @@ const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart
 const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----END ', 'PRIVATE KEY-----'].join('');
 const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
 const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
+const PHONE_SAMPLE = '+1 (555) 123-4567';
 
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
@@ -41,6 +42,7 @@ describe('bot-errors-emit', () => {
       JWT_SAMPLE,
       PRIVATE_KEY_SAMPLE,
       URL_USERINFO_SAMPLE,
+      PHONE_SAMPLE,
       '',
     ].join('\n'));
 
@@ -88,6 +90,7 @@ describe('bot-errors-emit', () => {
     expect(event.evidence).toContain('[REDACTED JWT]');
     expect(event.evidence).toContain('[REDACTED PEM PRIVATE KEY]');
     expect(event.evidence).toContain(REDACTED_URL_USERINFO);
+    expect(event.evidence).toContain('[REDACTED PHONE]');
     expect(event.evidence).not.toContain('plain-secret');
     expect(event.evidence).not.toContain('abc.def');
     expect(event.evidence).not.toContain(AWS_KEY_SAMPLE);
@@ -95,6 +98,7 @@ describe('bot-errors-emit', () => {
     expect(event.evidence).not.toContain('eyJhbGci');
     expect(event.evidence).not.toContain('-----BEGIN');
     expect(event.evidence).not.toContain(URL_USERINFO_SAMPLE);
+    expect(event.evidence).not.toContain(PHONE_SAMPLE);
     expect(event.diagnostics.logHints).toContain(join('/tmp', 'bot-errors', 'unit-node-offload', 'logs', 'unit-node-offload-sync.log'));
     expect(event.diagnostics.target).toBe('unit-node');
   });
