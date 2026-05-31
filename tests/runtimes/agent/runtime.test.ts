@@ -405,6 +405,47 @@ async function sendAndDrainShared(runtime: AgentRuntime, msg: IncomingMessage): 
   await (runtime as unknown as { turnQueue: { idle: () => Promise<void> } }).turnQueue.idle();
 }
 
+function mockActiveAgentSession(rowId = 42): void {
+  mockSession.getStatus.mockReturnValue({
+    active: true,
+    pid: 123,
+    sessionId: 'session-1',
+    startedAt: '2026-05-30T00:00:00.000Z',
+    messageCount: 1,
+    lastMessageAt: null,
+  });
+  mockSession.getDbRowId.mockReturnValue(rowId);
+}
+
+function mockTokenSnapshot(totalInputTokens: number, lastCompactInputTokens: number): void {
+  mockGetSessionTokenSnapshot.mockReturnValue({
+    totalInputTokens,
+    totalOutputTokens: 0,
+    lastCompactInputTokens,
+    lastCompactOutputTokens: 0,
+  });
+}
+
+async function emitAgentResult(inputTokens: number, text: string | null = null): Promise<void> {
+  capturedOnEventRef.current?.({ type: 'result', text, inputTokens, outputTokens: 0 });
+  await Promise.resolve();
+}
+
+async function emitAgentResultWithoutTokens(text: string | null = null): Promise<void> {
+  capturedOnEventRef.current?.({ type: 'result', text });
+  await Promise.resolve();
+}
+
+async function emitTokenUsage(inputTokens: number): Promise<void> {
+  capturedOnEventRef.current?.({ type: 'token_usage', inputTokens, outputTokens: 0 });
+  await Promise.resolve();
+}
+
+async function emitSuccessfulCompactResult(inputTokens = 0): Promise<void> {
+  capturedOnEventRef.current?.({ type: 'compact_boundary' });
+  await emitAgentResult(inputTokens);
+}
+
 function makeQueueMock(targetChatJid: string): IOutboundQueue {
   return {
     enqueueText: vi.fn(),
@@ -454,6 +495,11 @@ type PerChatCleanupRuntimeState = {
     hardExpiryTimer?: ReturnType<typeof setTimeout>;
   }>;
   resumeFailedHandling: Set<string>;
+  autoCompactCooldownUntil: Map<string, number>;
+  autoCompactLastSuccessAt: Map<string, number>;
+  autoCompactRapidRearmRecordedForSuccessAt: Map<string, number>;
+  autoCompactConsecutiveRapidRearms: Map<string, number>;
+  autoCompactMeasureNextTurn: Set<string>;
   imageCoalesceBuffers: Map<string, {
     texts: string[];
     timer: ReturnType<typeof setTimeout>;
@@ -703,6 +749,10 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current?.({ type: 'result', text: null, inputTokens: 10, outputTokens: 1 });
 
     expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+
+    mockSession.sendTurn.mockClear();
+    await emitAgentResult(200);
+    expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
   });
 
   it('initialises baseline silently for existing sessions already over threshold (no compact storm on rollout)', async () => {
@@ -750,6 +800,12 @@ describe('AgentRuntime', () => {
 
     expect(mockMarkSessionCompacted).toHaveBeenCalledWith(db, 42);
     expect(mockMarkSessionCompacted).toHaveBeenCalledTimes(1);
+    const state = runtime as unknown as {
+      autoCompactCooldownUntil: Map<string, number>;
+      autoCompactMeasureNextTurn: Set<string>;
+    };
+    expect(state.autoCompactCooldownUntil.has(scopeKey)).toBe(true);
+    expect(state.autoCompactMeasureNextTurn.has(scopeKey)).toBe(true);
   });
 
   it('does not persist baseline on crash cleanup when no compact_boundary was observed', () => {
@@ -777,6 +833,32 @@ describe('AgentRuntime', () => {
     }).persistBaselineIfBoundaryObserved(scopeKey, null);
 
     expect(mockMarkSessionCompacted).not.toHaveBeenCalled();
+  });
+
+  it('cleans up auto-compact rapid-rearm state with per-chat session state', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat', autoCompactInputTokens: 100 });
+    const mapKey = 'chat-a@s.whatsapp.net';
+    const state = runtime as unknown as {
+      autoCompactLastSuccessAt: Map<string, number>;
+      autoCompactRapidRearmRecordedForSuccessAt: Map<string, number>;
+      autoCompactConsecutiveRapidRearms: Map<string, number>;
+      autoCompactMeasureNextTurn: Set<string>;
+      cleanupPerChatState: (k: string) => void;
+    };
+
+    state.autoCompactLastSuccessAt.set(mapKey, 100);
+    state.autoCompactRapidRearmRecordedForSuccessAt.set(mapKey, 100);
+    state.autoCompactConsecutiveRapidRearms.set(mapKey, 2);
+    state.autoCompactMeasureNextTurn.add(mapKey);
+
+    state.cleanupPerChatState(mapKey);
+
+    expect(state.autoCompactLastSuccessAt.has(mapKey)).toBe(false);
+    expect(state.autoCompactRapidRearmRecordedForSuccessAt.has(mapKey)).toBe(false);
+    expect(state.autoCompactConsecutiveRapidRearms.has(mapKey)).toBe(false);
+    expect(state.autoCompactMeasureNextTurn.has(mapKey)).toBe(false);
   });
 
   it('initialises baseline at the exact threshold boundary (>= not >)', async () => {
@@ -913,6 +995,301 @@ describe('AgentRuntime', () => {
     }
   });
 
+  it('does not re-arm auto-compact immediately after a successful compact in single mode', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+      mockActiveAgentSession();
+      mockTokenSnapshot(250, 100);
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      await emitAgentResult(150);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+      await emitSuccessfulCompactResult();
+
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(600, 250);
+      await emitAgentResult(350);
+
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not re-arm auto-compact immediately after a successful compact in per-chat mode', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', {
+        sessionScope: 'per_chat',
+        autoCompactInputTokens: 100,
+      });
+      mockActiveAgentSession();
+      mockTokenSnapshot(250, 100);
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ chatJid: 'chat-a@s.whatsapp.net', senderJid: 'chat-a@s.whatsapp.net', content: 'hello' }));
+      await emitAgentResult(150);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+      await emitSuccessfulCompactResult();
+
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(600, 250);
+      await emitAgentResult(350);
+
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('escalates auto-compact cooldown tiers on consecutive rapid re-arms', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+      mockActiveAgentSession();
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+
+      const triggerCompact = async (totalInputTokens: number, lastCompactInputTokens: number) => {
+        mockSession.sendTurn.mockClear();
+        mockTokenSnapshot(totalInputTokens, lastCompactInputTokens);
+        await emitAgentResult(totalInputTokens - lastCompactInputTokens);
+        expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+        await emitSuccessfulCompactResult();
+      };
+
+      const triggerRapidRearm = async (totalInputTokens: number, lastCompactInputTokens: number) => {
+        mockSession.sendTurn.mockClear();
+        mockTokenSnapshot(totalInputTokens, lastCompactInputTokens);
+        await emitAgentResult(totalInputTokens - lastCompactInputTokens);
+        expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+      };
+
+      await triggerCompact(250, 100);
+      await triggerRapidRearm(600, 250);
+      expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(1);
+      expect(runtime.getHealthSnapshot().details.autoCompactConsecutiveRapidRearmsMax).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(650, 250);
+      await emitAgentResult(400);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+
+      await vi.advanceTimersByTimeAsync(9 * 60 * 1000 + 100);
+      await triggerCompact(700, 250);
+      await triggerRapidRearm(1_100, 700);
+      expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(2);
+      expect(runtime.getHealthSnapshot().details.autoCompactConsecutiveRapidRearmsMax).toBe(2);
+
+      await vi.advanceTimersByTimeAsync(16 * 60 * 1000);
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(1_200, 700);
+      await emitAgentResult(500);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+
+      await vi.advanceTimersByTimeAsync(14 * 60 * 1000 + 100);
+      await triggerCompact(1_300, 700);
+      await triggerRapidRearm(1_700, 1_300);
+      expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(3);
+      expect(runtime.getHealthSnapshot().details.autoCompactConsecutiveRapidRearmsMax).toBe(3);
+
+      await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(1_800, 1_300);
+      await emitAgentResult(500);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resets rapid-rearm escalation after a recovered compact cycle', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+      mockActiveAgentSession();
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+
+      mockTokenSnapshot(250, 100);
+      await emitAgentResult(150);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+      await emitSuccessfulCompactResult();
+
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(600, 250);
+      await emitAgentResult(350);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+      expect(runtime.getHealthSnapshot().details.autoCompactConsecutiveRapidRearmsMax).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(15 * 60 * 1000 + 100);
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(700, 250);
+      await emitAgentResult(450);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+      await emitSuccessfulCompactResult();
+
+      await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(900, 700);
+      await emitAgentResult(200);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+      await emitSuccessfulCompactResult();
+
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(1_200, 900);
+      await emitAgentResult(300);
+      expect(mockSession.sendTurn).not.toHaveBeenCalledWith('/compact');
+
+      await vi.advanceTimersByTimeAsync(16 * 60 * 1000);
+      mockSession.sendTurn.mockClear();
+      mockTokenSnapshot(1_300, 900);
+      await emitAgentResult(400);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts only the first real high-input turn after a successful compact', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+      mockActiveAgentSession();
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      mockTokenSnapshot(250, 100);
+      await emitAgentResult(150);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+      await emitSuccessfulCompactResult(250);
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
+
+      await sendAndDrain(runtime, makeMsg({ content: 'large follow-up' }));
+      await emitAgentResult(250, 'ok');
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
+      expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(1);
+
+      await emitAgentResult(250, 'still ok');
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses token_usage events for next-turn measurement when result has no token counts', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+      mockActiveAgentSession();
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      mockTokenSnapshot(250, 100);
+      await emitAgentResult(150);
+      expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
+
+      await emitSuccessfulCompactResult();
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
+
+      await sendAndDrain(runtime, makeMsg({ content: 'large codex follow-up' }));
+      await emitTokenUsage(250);
+      await emitAgentResultWithoutTokens('ok');
+
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
+      expect(runtime.getHealthSnapshot().details.autoCompactIneffective).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not count single-session system-turn token_usage as the first post-compact user turn', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+      const state = runtime as unknown as {
+        perChatPendingSystemResults: Map<string, number>;
+        autoCompactMeasureNextTurn: Set<string>;
+      };
+      const globalKey = '__global__';
+      mockActiveAgentSession();
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ content: 'hello' }));
+      mockTokenSnapshot(250, 100);
+      await emitAgentResult(150);
+      await emitSuccessfulCompactResult();
+
+      state.perChatPendingSystemResults.set(globalKey, 1);
+      await emitTokenUsage(250);
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
+      expect(state.autoCompactMeasureNextTurn.has(globalKey)).toBe(true);
+
+      state.perChatPendingSystemResults.delete(globalKey);
+      await emitTokenUsage(250);
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not count per-chat system-turn token_usage as the first post-compact user turn', async () => {
+    vi.useFakeTimers();
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', {
+        sessionScope: 'per_chat',
+        autoCompactInputTokens: 100,
+      });
+      const chatJid = 'chat-a@s.whatsapp.net';
+      const state = runtime as unknown as {
+        perChatPendingSystemResults: Map<string, number>;
+        autoCompactMeasureNextTurn: Set<string>;
+      };
+      mockActiveAgentSession();
+
+      await runtime.start();
+      await sendAndDrain(runtime, makeMsg({ chatJid, senderJid: chatJid, content: 'hello' }));
+      mockTokenSnapshot(250, 100);
+      await emitAgentResult(150);
+      await emitSuccessfulCompactResult();
+
+      state.perChatPendingSystemResults.set(chatJid, 1);
+      await emitTokenUsage(250);
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
+      expect(state.autoCompactMeasureNextTurn.has(chatJid)).toBe(true);
+
+      state.perChatPendingSystemResults.delete(chatJid);
+      await emitTokenUsage(250);
+      expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -1019,6 +1396,75 @@ describe('AgentRuntime', () => {
     await sendAndDrain(runtime, makeMsg({ content: '/new' }));
 
     expect(mockQueue.abortTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it('/new clears single-session auto-compact state before replacing the session', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    const state = runtime as unknown as {
+      autoCompactCooldownUntil: Map<string, number>;
+      autoCompactLastSuccessAt: Map<string, number>;
+      autoCompactRapidRearmRecordedForSuccessAt: Map<string, number>;
+      autoCompactConsecutiveRapidRearms: Map<string, number>;
+      autoCompactMeasureNextTurn: Set<string>;
+    };
+    const globalKey = '__global__';
+
+    await runtime.start();
+    state.autoCompactCooldownUntil.set(globalKey, 1_700_000_900_000);
+    state.autoCompactLastSuccessAt.set(globalKey, 1_700_000_000_000);
+    state.autoCompactRapidRearmRecordedForSuccessAt.set(globalKey, 1_700_000_000_000);
+    state.autoCompactConsecutiveRapidRearms.set(globalKey, 2);
+    state.autoCompactMeasureNextTurn.add(globalKey);
+
+    await sendAndDrain(runtime, makeMsg({ content: '/new' }));
+
+    expect(state.autoCompactCooldownUntil.has(globalKey)).toBe(false);
+    expect(state.autoCompactLastSuccessAt.has(globalKey)).toBe(false);
+    expect(state.autoCompactRapidRearmRecordedForSuccessAt.has(globalKey)).toBe(false);
+    expect(state.autoCompactConsecutiveRapidRearms.has(globalKey)).toBe(false);
+    expect(state.autoCompactMeasureNextTurn.has(globalKey)).toBe(false);
+  });
+
+  it('/kill-session clears single-session auto-compact state', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
+    const state = runtime as unknown as {
+      autoCompactCooldownUntil: Map<string, number>;
+      autoCompactLastSuccessAt: Map<string, number>;
+      autoCompactRapidRearmRecordedForSuccessAt: Map<string, number>;
+      autoCompactConsecutiveRapidRearms: Map<string, number>;
+      autoCompactMeasureNextTurn: Set<string>;
+    };
+    const globalKey = '__global__';
+
+    mockSession.getStatus.mockReturnValue({
+      active: true,
+      pid: 123,
+      sessionId: 'ses_kill',
+      startedAt: new Date().toISOString(),
+      messageCount: 1,
+      lastMessageAt: null,
+    });
+    await runtime.start();
+    state.autoCompactCooldownUntil.set(globalKey, 1_700_000_900_000);
+    state.autoCompactLastSuccessAt.set(globalKey, 1_700_000_000_000);
+    state.autoCompactRapidRearmRecordedForSuccessAt.set(globalKey, 1_700_000_000_000);
+    state.autoCompactConsecutiveRapidRearms.set(globalKey, 2);
+    state.autoCompactMeasureNextTurn.add(globalKey);
+
+    await sendAndDrain(runtime, makeMsg({
+      content: '/kill-session 1',
+      senderJid: '15550100001@s.whatsapp.net',
+    }));
+
+    expect(state.autoCompactCooldownUntil.has(globalKey)).toBe(false);
+    expect(state.autoCompactLastSuccessAt.has(globalKey)).toBe(false);
+    expect(state.autoCompactRapidRearmRecordedForSuccessAt.has(globalKey)).toBe(false);
+    expect(state.autoCompactConsecutiveRapidRearms.has(globalKey)).toBe(false);
+    expect(state.autoCompactMeasureNextTurn.has(globalKey)).toBe(false);
   });
 
   it('per_chat crash callbacks consume inbound seq, preserve replay text, clear dirty turn state, and notify the user', async () => {
@@ -1414,6 +1860,11 @@ describe('AgentRuntime', () => {
       state.pendingTurnText.set(lidKey, 'pending');
       state.perChatCrashCount.set(lidKey, 2);
       state.resumeFailedHandling.add(lidKey);
+      state.autoCompactCooldownUntil.set(lidKey, 1_700_000_900_000);
+      state.autoCompactLastSuccessAt.set(lidKey, 1_700_000_000_000);
+      state.autoCompactRapidRearmRecordedForSuccessAt.set(lidKey, 1_700_000_000_000);
+      state.autoCompactConsecutiveRapidRearms.set(lidKey, 2);
+      state.autoCompactMeasureNextTurn.add(lidKey);
       state.imageCoalesceBuffers.set(lidKey, {
         texts: ['image-a', 'image-b'],
         timer: imageTimer,
@@ -1454,6 +1905,11 @@ describe('AgentRuntime', () => {
       expect(state.pendingTurnText.get(canonicalJid)).toBe('pending');
       expect(state.perChatCrashCount.get(canonicalJid)).toBe(2);
       expect(state.resumeFailedHandling.has(canonicalJid)).toBe(true);
+      expect(state.autoCompactCooldownUntil.get(canonicalJid)).toBe(1_700_000_900_000);
+      expect(state.autoCompactLastSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
+      expect(state.autoCompactRapidRearmRecordedForSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
+      expect(state.autoCompactConsecutiveRapidRearms.get(canonicalJid)).toBe(2);
+      expect(state.autoCompactMeasureNextTurn.has(canonicalJid)).toBe(true);
       expect(state.imageCoalesceBuffers.get(canonicalJid)).toMatchObject({
         texts: ['image-a', 'image-b'],
         inboundSeqs: [6, 7],
@@ -1478,6 +1934,11 @@ describe('AgentRuntime', () => {
       expect(state.pendingTurnText.has(lidKey)).toBe(false);
       expect(state.pendingPollQuestions.has(lidKey)).toBe(false);
       expect(state.resumeFailedHandling.has(lidKey)).toBe(false);
+      expect(state.autoCompactCooldownUntil.has(lidKey)).toBe(false);
+      expect(state.autoCompactLastSuccessAt.has(lidKey)).toBe(false);
+      expect(state.autoCompactRapidRearmRecordedForSuccessAt.has(lidKey)).toBe(false);
+      expect(state.autoCompactConsecutiveRapidRearms.has(lidKey)).toBe(false);
+      expect(state.autoCompactMeasureNextTurn.has(lidKey)).toBe(false);
       expect(state.imageCoalesceBuffers.has(lidKey)).toBe(false);
     } finally {
       vi.useRealTimers();

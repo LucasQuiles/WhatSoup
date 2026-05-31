@@ -134,6 +134,18 @@ const AUTO_COMPACT_TIMEOUT_MS = 4 * 60 * 1000;
 // prevent a per-turn retry storm. A session that genuinely cannot compact is
 // ultimately recovered by the prompt-too-long kill+respawn path.
 const AUTO_COMPACT_TIMEOUT_BACKOFF_MS = 5 * 60 * 1000;
+// Baseline cooldown after a successful auto-compact before another may start.
+// Keeps success and timeout paths from re-arming /compact on every turn.
+const AUTO_COMPACT_SUCCESS_COOLDOWN_MS = 5 * 60 * 1000;
+// A scope eligible again inside this window after a successful compact is a
+// rapid re-arm: the compact completed but was operationally ineffective.
+const AUTO_COMPACT_RAPID_REARM_WINDOW_MS = 5 * 60 * 1000;
+const AUTO_COMPACT_BACKOFF_TIERS_MS = [
+  AUTO_COMPACT_SUCCESS_COOLDOWN_MS,
+  15 * 60 * 1000,
+  30 * 60 * 1000,
+  60 * 60 * 1000,
+] as const;
 // Default auto-compact threshold: trigger /compact after 150k input tokens since last compact.
 // Claude's context window is 200k tokens; compacting at 150k prevents "prompt too long" errors
 // while leaving headroom for tool results and system prompts. Override per-instance via
@@ -1170,6 +1182,13 @@ export class AgentRuntime implements Runtime {
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
+  private autoCompactLastSuccessAt = new Map<string, number>();
+  private autoCompactRapidRearmRecordedForSuccessAt = new Map<string, number>();
+  private autoCompactConsecutiveRapidRearms = new Map<string, number>();
+  private autoCompactMeasureNextTurn = new Set<string>();
+  private autoCompactIneffective = 0;
+  private autoCompactConsecutiveRapidRearmsMax = 0;
+  private autoCompactNextTurnOverThreshold = 0;
   private autoCompactWaiters = new Map<string, {
     promise: Promise<void>;
     resolve: () => void;
@@ -1298,6 +1317,61 @@ export class AgentRuntime implements Runtime {
     return hadBoundary;
   }
 
+  private recordAutoCompactSuccess(scopeKey: string): void {
+    const now = Date.now();
+    this.autoCompactLastSuccessAt.set(scopeKey, now);
+    this.autoCompactRapidRearmRecordedForSuccessAt.delete(scopeKey);
+    this.autoCompactMeasureNextTurn.add(scopeKey);
+    this.autoCompactCooldownUntil.set(scopeKey, now + AUTO_COMPACT_SUCCESS_COOLDOWN_MS);
+  }
+
+  private recordAutoCompactRapidRearm(scopeKey: string, lastSuccessAt: number, now: number): void {
+    if (this.autoCompactRapidRearmRecordedForSuccessAt.get(scopeKey) === lastSuccessAt) return;
+    const next = (this.autoCompactConsecutiveRapidRearms.get(scopeKey) ?? 0) + 1;
+    this.autoCompactRapidRearmRecordedForSuccessAt.set(scopeKey, lastSuccessAt);
+    this.autoCompactConsecutiveRapidRearms.set(scopeKey, next);
+    this.autoCompactIneffective += 1;
+    if (next > this.autoCompactConsecutiveRapidRearmsMax) {
+      this.autoCompactConsecutiveRapidRearmsMax = next;
+    }
+    const tier = Math.min(next, AUTO_COMPACT_BACKOFF_TIERS_MS.length - 1);
+    this.autoCompactCooldownUntil.set(scopeKey, now + AUTO_COMPACT_BACKOFF_TIERS_MS[tier]);
+    log.warn(
+      {
+        scopeKey,
+        consecutiveRapidRearms: next,
+        cooldownMs: AUTO_COMPACT_BACKOFF_TIERS_MS[tier],
+        rapidRearmWindowMs: AUTO_COMPACT_RAPID_REARM_WINDOW_MS,
+      },
+      'auto compact rapid re-arm detected',
+    );
+  }
+
+  private recordAutoCompactNextTurnIfNeeded(
+    scopeKey: string,
+    inputTokens: number | undefined,
+    consumeWhenNotOverThreshold = true,
+  ): void {
+    if (this.autoCompactInputTokens === undefined) return;
+    if (!this.autoCompactMeasureNextTurn.has(scopeKey)) return;
+    if (inputTokens === undefined || inputTokens <= this.autoCompactInputTokens) {
+      if (consumeWhenNotOverThreshold) this.autoCompactMeasureNextTurn.delete(scopeKey);
+      return;
+    }
+
+    this.autoCompactMeasureNextTurn.delete(scopeKey);
+    this.autoCompactNextTurnOverThreshold += 1;
+    const lastSuccessAt = this.autoCompactLastSuccessAt.get(scopeKey);
+    const now = Date.now();
+    if (lastSuccessAt !== undefined && now - lastSuccessAt < AUTO_COMPACT_RAPID_REARM_WINDOW_MS) {
+      this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
+    }
+    log.warn(
+      { scopeKey, inputTokens: inputTokens ?? 0, threshold: this.autoCompactInputTokens },
+      'auto compact next turn input exceeded threshold',
+    );
+  }
+
   private maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): void {
     if (this.autoCompactInputTokens === undefined || session === null) return;
     if (this.sessionScope === 'shared') return;
@@ -1339,9 +1413,25 @@ export class AgentRuntime implements Runtime {
 
     if (this.autoCompactWaiters.has(scopeKey) || this.isSilentCompact(scopeKey)) return;
 
+    const now = Date.now();
+    const lastSuccessAt = this.autoCompactLastSuccessAt.get(scopeKey);
+    if (lastSuccessAt !== undefined) {
+      const withinRapidRearmWindow = now - lastSuccessAt < AUTO_COMPACT_RAPID_REARM_WINDOW_MS;
+      const alreadyRecordedForSuccess =
+        this.autoCompactRapidRearmRecordedForSuccessAt.get(scopeKey) === lastSuccessAt;
+      if (withinRapidRearmWindow && !alreadyRecordedForSuccess) {
+        this.recordAutoCompactRapidRearm(scopeKey, lastSuccessAt, now);
+        return;
+      }
+      if (!withinRapidRearmWindow && !alreadyRecordedForSuccess) {
+        this.autoCompactConsecutiveRapidRearms.delete(scopeKey);
+        this.autoCompactLastSuccessAt.delete(scopeKey);
+      }
+    }
+
     const cooldownUntil = this.autoCompactCooldownUntil.get(scopeKey);
     if (cooldownUntil !== undefined) {
-      if (Date.now() < cooldownUntil) return;
+      if (now < cooldownUntil) return;
       this.autoCompactCooldownUntil.delete(scopeKey);
     }
 
@@ -1628,6 +1718,10 @@ export class AgentRuntime implements Runtime {
     this.postTurnGate.delete(mapKey);
     this.compactBoundaryScopes.delete(mapKey);
     this.autoCompactCooldownUntil.delete(mapKey);
+    this.autoCompactLastSuccessAt.delete(mapKey);
+    this.autoCompactRapidRearmRecordedForSuccessAt.delete(mapKey);
+    this.autoCompactConsecutiveRapidRearms.delete(mapKey);
+    this.autoCompactMeasureNextTurn.delete(mapKey);
     this.finishAutoCompact(mapKey);
     this.clearSilentCompact(mapKey);
     // Clean up pending poll question state
@@ -1640,6 +1734,17 @@ export class AgentRuntime implements Runtime {
       tracker.shutdown();
       this.operationTrackers.delete(mapKey);
     }
+  }
+
+  private cleanupGlobalAutoCompactState(): void {
+    this.compactBoundaryScopes.delete(GLOBAL_TOOL_SCOPE_KEY);
+    this.autoCompactCooldownUntil.delete(GLOBAL_TOOL_SCOPE_KEY);
+    this.autoCompactLastSuccessAt.delete(GLOBAL_TOOL_SCOPE_KEY);
+    this.autoCompactRapidRearmRecordedForSuccessAt.delete(GLOBAL_TOOL_SCOPE_KEY);
+    this.autoCompactConsecutiveRapidRearms.delete(GLOBAL_TOOL_SCOPE_KEY);
+    this.autoCompactMeasureNextTurn.delete(GLOBAL_TOOL_SCOPE_KEY);
+    this.finishAutoCompact(GLOBAL_TOOL_SCOPE_KEY);
+    this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
   }
 
   // ---------------------------------------------------------------------------
@@ -1990,6 +2095,30 @@ export class AgentRuntime implements Runtime {
           if (this.resumeFailedHandling.has(lidKey)) {
             this.resumeFailedHandling.delete(lidKey);
             this.resumeFailedHandling.add(canonical);
+          }
+          const autoCompactCooldownUntil = this.autoCompactCooldownUntil.get(lidKey);
+          if (autoCompactCooldownUntil !== undefined) {
+            this.autoCompactCooldownUntil.delete(lidKey);
+            this.autoCompactCooldownUntil.set(canonical, autoCompactCooldownUntil);
+          }
+          const lastAutoCompactSuccessAt = this.autoCompactLastSuccessAt.get(lidKey);
+          if (lastAutoCompactSuccessAt !== undefined) {
+            this.autoCompactLastSuccessAt.delete(lidKey);
+            this.autoCompactLastSuccessAt.set(canonical, lastAutoCompactSuccessAt);
+          }
+          const rapidRearmRecordedAt = this.autoCompactRapidRearmRecordedForSuccessAt.get(lidKey);
+          if (rapidRearmRecordedAt !== undefined) {
+            this.autoCompactRapidRearmRecordedForSuccessAt.delete(lidKey);
+            this.autoCompactRapidRearmRecordedForSuccessAt.set(canonical, rapidRearmRecordedAt);
+          }
+          const consecutiveRapidRearms = this.autoCompactConsecutiveRapidRearms.get(lidKey);
+          if (consecutiveRapidRearms !== undefined) {
+            this.autoCompactConsecutiveRapidRearms.delete(lidKey);
+            this.autoCompactConsecutiveRapidRearms.set(canonical, consecutiveRapidRearms);
+          }
+          if (this.autoCompactMeasureNextTurn.has(lidKey)) {
+            this.autoCompactMeasureNextTurn.delete(lidKey);
+            this.autoCompactMeasureNextTurn.add(canonical);
           }
           const pendingPoll = this.pendingPollQuestions.get(lidKey);
           if (pendingPoll) {
@@ -2700,11 +2829,15 @@ export class AgentRuntime implements Runtime {
           // Abort the old queue — clears timers and typing heartbeat before discarding.
           // Use getQueueForChat (map-based) instead of getActiveQueue (shared-field-based).
           this.getQueueForChat(chatJid, perChatMapKey)?.abortTurn();
+          if (this.sessionScope !== 'per_chat') {
+            this.cleanupGlobalAutoCompactState();
+          }
           // Create a fresh queue before spawning so stale output from the old session
           // can never leak into the new session's delivery channel.
           if (this.sandboxPerChat && this.sessionScope === 'per_chat') {
             // sandboxPerChat: replace session+queue keyed by workspaceKey; workspace resources survive
             const { workspaceKey } = chatJidToWorkspace(this.cwd ?? homedir(), chatJid);
+            this.cleanupPerChatState(workspaceKey);
             this.chatSessions.delete(workspaceKey);
             const q1 = this.createOutboundQueue(chatJid, '/new sandbox per-chat replacement');
             this.chatQueues.set(workspaceKey, q1);
@@ -2713,6 +2846,7 @@ export class AgentRuntime implements Runtime {
             this.outboundQueues.set(chatJid, q2);
           } else if (this.sessionScope === 'per_chat') {
             // non-sandboxPerChat per_chat: keyed by canonical chat key
+            this.cleanupPerChatState(perChatMapKey!);
             this.chatSessions.delete(perChatMapKey!);
             const q3 = this.createOutboundQueue(chatJid, '/new per-chat replacement');
             this.chatQueues.set(perChatMapKey!, q3);
@@ -2860,6 +2994,7 @@ export class AgentRuntime implements Runtime {
             this.getActiveQueue()?.abortTurn();
             this.operationTracker?.shutdown();
             this.operationTracker = null;
+            this.cleanupGlobalAutoCompactState();
             await this.session.shutdown(false);
             this.session = null;
             this.queue = null;
@@ -4320,8 +4455,12 @@ export class AgentRuntime implements Runtime {
         // another full threshold's worth of tokens. The waiter still
         // unblocks in either case so the next user turn is not stuck behind
         // a failed compact.
+        if (!wasSilentCompact && !hadCompactBoundary && !isSystemResult && mapKey !== undefined) {
+          this.recordAutoCompactNextTurnIfNeeded(mapKey, event.inputTokens);
+        }
         if (hadCompactBoundary && rowId !== null) {
           markSessionCompacted(this.db, rowId);
+          this.recordAutoCompactSuccess(compactScopeKey);
         }
         if (wasSilentCompact || hadCompactBoundary) {
           this.finishAutoCompact(compactScopeKey);
@@ -4360,6 +4499,14 @@ export class AgentRuntime implements Runtime {
         // Record token usage without triggering turn completion.
         // Codex emits thread/tokenUsage/updated mid-turn; the actual turn
         // completion comes from turn/completed → type:'result'.
+        if (
+          mapKey !== undefined &&
+          !this.isSilentCompact(mapKey) &&
+          !isSystemResult &&
+          (this.perChatPendingSystemResults.get(mapKey) ?? 0) === 0
+        ) {
+          this.recordAutoCompactNextTurnIfNeeded(mapKey, event.inputTokens, false);
+        }
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = session?.getDbRowId() ?? null;
           if (rowId !== null) {
@@ -4423,6 +4570,9 @@ export class AgentRuntime implements Runtime {
           recentCrashes: recentCrashCount,
           lastCrashAt: this.lastCrashAt,
           pollPersistenceErrors: this.pollPersistenceErrors,
+          autoCompactIneffective: this.autoCompactIneffective,
+          autoCompactConsecutiveRapidRearmsMax: this.autoCompactConsecutiveRapidRearmsMax,
+          autoCompactNextTurnOverThreshold: this.autoCompactNextTurnOverThreshold,
         },
       };
     }
@@ -4438,6 +4588,9 @@ export class AgentRuntime implements Runtime {
         pid: status?.pid ?? null,
         sessionId: status?.sessionId ?? null,
         pollPersistenceErrors: this.pollPersistenceErrors,
+        autoCompactIneffective: this.autoCompactIneffective,
+        autoCompactConsecutiveRapidRearmsMax: this.autoCompactConsecutiveRapidRearmsMax,
+        autoCompactNextTurnOverThreshold: this.autoCompactNextTurnOverThreshold,
       },
     };
   }
@@ -4736,6 +4889,11 @@ export class AgentRuntime implements Runtime {
     }
     this.autoCompactWaiters.clear();
     this.compactBoundaryScopes.clear();
+    this.autoCompactCooldownUntil.clear();
+    this.autoCompactLastSuccessAt.clear();
+    this.autoCompactRapidRearmRecordedForSuccessAt.clear();
+    this.autoCompactConsecutiveRapidRearms.clear();
+    this.autoCompactMeasureNextTurn.clear();
     this.replyGuarantee?.shutdown();
     this.replyGuarantee = null;
 
@@ -5464,6 +5622,7 @@ export class AgentRuntime implements Runtime {
     if (rowId === null) return;
     if (!this.compactBoundaryScopes.has(scopeKey)) return;
     markSessionCompacted(this.db, rowId);
+    this.recordAutoCompactSuccess(scopeKey);
     log.info({ scopeKey, rowId }, 'auto compact baseline persisted on crash cleanup (compact_boundary observed pre-crash)');
   }
 
@@ -5912,8 +6071,12 @@ export class AgentRuntime implements Runtime {
         // succeeded — advancing on it silently disables auto-compact for
         // another threshold's worth of tokens. See the per_chat handler for
         // the parallel gate.
+        if (!wasSilentCompact && !hadCompactBoundary && !isSystemResult) {
+          this.recordAutoCompactNextTurnIfNeeded(GLOBAL_TOOL_SCOPE_KEY, event.inputTokens);
+        }
         if (hadCompactBoundary && rowId !== null) {
           markSessionCompacted(this.db, rowId);
+          this.recordAutoCompactSuccess(GLOBAL_TOOL_SCOPE_KEY);
         }
         if (wasSilentCompact || hadCompactBoundary) {
           this.finishAutoCompact(GLOBAL_TOOL_SCOPE_KEY);
@@ -5948,6 +6111,12 @@ export class AgentRuntime implements Runtime {
 
       case 'token_usage':
         // Record token usage without triggering turn completion (non-per-chat path).
+        if (
+          !this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY) &&
+          (this.perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) ?? 0) === 0
+        ) {
+          this.recordAutoCompactNextTurnIfNeeded(GLOBAL_TOOL_SCOPE_KEY, event.inputTokens, false);
+        }
         if (event.inputTokens !== undefined || event.outputTokens !== undefined) {
           const rowId = this.session?.getDbRowId() ?? null;
           if (rowId !== null) {
