@@ -38,8 +38,8 @@ scoped markdown files currently on disk.
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
-| `docs/sdlc/active/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | agent-layer-hardening | state-md-status |
-| `docs/sdlc/active/agent-layer-hardening-20260405/state.md` | state | agent-layer-hardening | state-md-status |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | agent-layer-hardening | state-md-status |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | agent-layer-hardening | state-md-status |
 
 ### Unknown-status — triage needed (8)
 
@@ -66,16 +66,6 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-04-07-fleet-charts.md` |
 
 ## Full listing by canonical parent
-
-### docs/sdlc/active/agent-layer-hardening-20260405  _(5 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/active/agent-layer-hardening-20260405/beads/SEC1-path-traversal.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-04-05 |  |
-| `docs/sdlc/active/agent-layer-hardening-20260405/beads/SEC2-fts-injection.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-04-05 |  |
-| `docs/sdlc/active/agent-layer-hardening-20260405/beads/SEC3-ssrf-dns.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-04-05 |  |
-| `docs/sdlc/active/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | active | state-md-status | agent-layer-hardening | 2026-04-05 |  |
-| `docs/sdlc/active/agent-layer-hardening-20260405/state.md` | state | active | state-md-status | agent-layer-hardening | 2026-04-23 |  |
 
 ### docs/sdlc/closed/add-line-wizard-20260401  _(2 entries)_
 
@@ -202,6 +192,16 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/closed/whatsapp-mcp-features/sp9-broadcast-proof.md` | doc | deferred | body-marker | whatsapp-mcp-features | 2026-04-05 |  |
 | `docs/sdlc/closed/whatsapp-mcp-features/state.md` | state | completed | phase-log | whatsapp-mcp-features | 2026-04-23 |  |
 | `docs/sdlc/closed/whatsapp-mcp-features/worktree-process-fix.md` | doc | completed | phase-log | whatsapp-mcp-features | 2026-04-05 |  |
+
+### docs/sdlc/completed/agent-layer-hardening-20260405  _(5 entries)_
+
+| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
+|------|------|--------|--------|-------|----------|------------|
+| `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC1-path-traversal.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC2-fts-injection.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC3-ssrf-dns.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | active | state-md-status | agent-layer-hardening | 2026-05-31 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | active | state-md-status | agent-layer-hardening | 2026-05-31 |  |
 
 ### docs/sdlc/completed/audit-remediation-20260330  _(1 entries)_
 
@@ -363,4 +363,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-05-30T00:17:07Z from commit `c04a66b3ad4bb533729f5af974d02cd523a00237`
+- Generated at 2026-05-31T06:14:04Z from commit `3f680e5fbe0f0c970d48511f1231e0fd306a460e`
