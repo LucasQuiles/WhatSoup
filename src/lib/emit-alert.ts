@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createChildLogger } from '../logger.ts';
-import { writeBotErrorsEvent } from './bot-errors-outbox.ts';
+import { writeBotErrorsEvent, type BotErrorsSeverity } from './bot-errors-outbox.ts';
 
 const log = createChildLogger('emit-alert');
 import { homedir } from 'node:os';
@@ -67,9 +67,10 @@ export function emitAlert(
   source: string,
   summary: string,
   evidence: string,
+  severity: BotErrorsSeverity = 'critical',
 ): void {
   try {
-    writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity: 'critical' });
+    writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity });
     return;
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);

@@ -2,6 +2,7 @@ import { createChildLogger } from '../logger.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottle, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
+import type { BotErrorsSeverity } from '../lib/bot-errors-outbox.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
@@ -27,6 +28,11 @@ export interface InstanceStatus {
   error: string | null;
   lastAlertAt: string | null;
   silencedUntil: string | null;
+  /**
+   * True once this instance has produced any HTTP response or parsed health body.
+   * Never-reachable instances are stale config or deployment gaps, not confirmed outages.
+   */
+  everReachable: boolean;
 }
 
 export type StatusChangeCallback = (instance: string, newStatus: InstanceStatus['status'], oldStatus: InstanceStatus['status']) => void;
@@ -251,6 +257,7 @@ export class HealthPoller {
             error: null,
             lastAlertAt: this.lastAlertAtFor(name, existing),
             silencedUntil: existing?.silencedUntil ?? null,
+            everReachable: true,
           });
         } catch (err) {
           this.updateFailure(name, (err as Error).message);
@@ -280,13 +287,13 @@ export class HealthPoller {
             if (parsed) {
               const classification = classifyHealthSnapshot(parsed);
               if (!isNonOnlineClassification(classification)) {
-                this.updateFailure(name, `HTTP ${res.status}`);
+                this.updateFailure(name, `HTTP ${res.status}`, true);
                 return;
               }
               this.updateFromHealthSnapshot(name, parsed, classification);
               return;
             }
-            this.updateFailure(name, `HTTP ${res.status}`);
+            this.updateFailure(name, `HTTP ${res.status}`, true);
             return;
           }
 
@@ -315,6 +322,7 @@ export class HealthPoller {
           error: null,
           lastAlertAt: this.lastAlertAtFor(name, existing),
           silencedUntil: existing?.silencedUntil ?? null,
+          everReachable: true,
         });
         if (prevStatus !== 'online') {
           this.emitStatusChange(name, 'online', prevStatus);
@@ -343,12 +351,13 @@ export class HealthPoller {
     }
   }
 
-  private updateFailure(name: string, error: string): void {
+  private updateFailure(name: string, error: string, reachableNow = false): void {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
     const newStatus: InstanceStatus['status'] = failures >= 3 ? 'unreachable' : 'degraded';
     const confidence: StatusConfidence = newStatus === 'unreachable' ? 'confirmed' : 'inferred';
+    const everReachable = (existing?.everReachable ?? false) || reachableNow;
 
     log.warn({ name, failures, error }, 'instance health poll failed');
     this.statuses.set(name, {
@@ -363,6 +372,7 @@ export class HealthPoller {
       error,
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
+      everReachable,
     });
 
     // Notify listeners on any status transition
@@ -370,12 +380,20 @@ export class HealthPoller {
       this.emitStatusChange(name, newStatus, prevStatus);
     }
 
-    // Emit alert on transition into unreachable (exactly when failures crosses 2→3)
+    // Emit alert on transition into unreachable (exactly when failures crosses 2→3).
     if (newStatus === 'unreachable' && prevStatus !== 'unreachable') {
-      this.maybeEmitAlert(name, 'instance_unreachable',
-        `whatsoup@${name} unreachable (${failures} consecutive poll failures)`,
-        `Last error: ${error}`,
-      );
+      if (everReachable) {
+        this.maybeEmitAlert(name, 'instance_unreachable',
+          `whatsoup@${name} unreachable (${failures} consecutive poll failures)`,
+          `Last error: ${error}`,
+        );
+      } else {
+        this.maybeEmitAlert(name, 'instance_never_reachable',
+          `whatsoup@${name} configured but never came online (${failures} consecutive poll failures)`,
+          `Last error: ${error}. No server has ever answered on its health port — verify the deploy or remove the stale config for this instance.`,
+          'warning',
+        );
+      }
     }
   }
 
@@ -402,6 +420,7 @@ export class HealthPoller {
       error: null,
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
+      everReachable: true,
     });
 
     if (newStatus !== prevStatus) {
@@ -436,7 +455,7 @@ export class HealthPoller {
     );
   }
 
-  private maybeEmitAlert(name: string, source: string, summary: string, evidence: string): void {
+  private maybeEmitAlert(name: string, source: string, summary: string, evidence: string, severity: BotErrorsSeverity = 'critical'): void {
     if (isInstanceSilenced(name)) {
       log.info({ name, source }, 'alert suppressed — instance is silenced');
       return;
@@ -464,6 +483,6 @@ export class HealthPoller {
       }
     }
 
-    emitAlert(name, source, summary, evidence);
+    emitAlert(name, source, summary, evidence, severity);
   }
 }
