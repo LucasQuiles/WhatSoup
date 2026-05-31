@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# BOT ERRORS — end-to-end failure-scenario drill harness.
+#
+# Exercises the REAL emit + dispatcher scripts against a throwaway sandbox
+# (BOT_ERRORS_STATE_DIR) with dispatch captured to a file instead of sent
+# (BOT_ERRORS_DRY_SEND_CAPTURE). Touches ZERO live bots, sends ZERO real
+# WhatsApp messages, sends ZERO email fallback. Safe to run anytime.
+#
+# Each drill simulates one failure class in the alert pipeline and asserts the
+# pipeline behaves as intended: a qualifying failure reaches the dispatch
+# channel with self-contained evidence, secrets are redacted, malformed events
+# are quarantined (not silently dropped, not crash-the-batch), oversized
+# payloads truncate, and delivery is idempotent.
+#
+# Fake credential patterns used in the redaction drill are assembled at runtime
+# from fragments so no secret-shaped literal is ever stored in this file.
+#
+# Usage:  bash tests/drills/bot-errors-failure-drills.sh
+# Exit:   0 = all drills passed, 1 = at least one drill failed.
+
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+EMIT="$REPO_ROOT/deploy/scripts/bot-errors-emit.py"
+DISPATCH="$REPO_ROOT/deploy/scripts/bot-errors-dispatcher.py"
+
+SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/bot-errors-drill.XXXXXX")"
+CAPTURE="$SANDBOX/sent.log"
+
+export BOT_ERRORS_STATE_DIR="$SANDBOX/state"
+export BOT_ERRORS_OUTBOX_DIR="$BOT_ERRORS_STATE_DIR/outbox"
+export BOT_ERRORS_DRY_SEND_CAPTURE="$CAPTURE"
+# Deterministic platform string so logHints assertions are stable.
+export BOT_ERRORS_DRY_PLATFORM="linux"
+export BOT_ERRORS_DRY_PLATFORM_RELEASE="6.0.0-drill"
+
+PASS=0
+FAIL=0
+declare -a FAILURES=()
+
+cleanup() { rm -rf "$SANDBOX"; }
+trap cleanup EXIT
+
+pass() { PASS=$((PASS + 1)); printf '  \033[32mPASS\033[0m %s\n' "$1"; }
+fail() { FAIL=$((FAIL + 1)); FAILURES+=("$1"); printf '  \033[31mFAIL\033[0m %s\n' "$1"; }
+
+# assert_in <needle> <haystack-file> <label>
+assert_in() {
+  if grep -qF -- "$1" "$2"; then pass "$3"; else fail "$3 (missing: $1)"; fi
+}
+# assert_not_in <needle> <haystack-file> <label>
+assert_not_in() {
+  if grep -qF -- "$1" "$2"; then fail "$3 (leaked)"; else pass "$3"; fi
+}
+# assert_count <dir> <pattern> <expected> <label>
+assert_count() {
+  local n; n=$(find "$1" -maxdepth 1 -name "$2" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$n" = "$3" ]; then pass "$4 ($n)"; else fail "$4 (expected $3, got $n)"; fi
+}
+
+reset_sandbox() {
+  rm -rf "$BOT_ERRORS_STATE_DIR" "$CAPTURE"
+  mkdir -p "$BOT_ERRORS_OUTBOX_DIR"
+}
+
+emit() { python3 "$EMIT" "$@" >/dev/null 2>&1; }
+dispatch_once() { python3 "$DISPATCH" --once >/dev/null 2>&1; }
+
+echo "BOT ERRORS failure-scenario drills"
+echo "sandbox: $SANDBOX"
+echo
+
+# ── Drill 1: happy path — tool failure reaches dispatch with self-contained evidence
+echo "Drill 1: tool-failure alert end-to-end + self-contained evidence"
+reset_sandbox
+emit --severity critical --instance ana-bot --source agent_tool_error \
+  --summary "Tool Bash failed in ana-bot" \
+  --evidence "exit=127 cmd=missing-binary; PostToolUse hook captured nonzero"
+dispatch_once
+assert_in "BOT ERROR" "$CAPTURE" "renders BOT ERROR title"
+assert_in "ana-bot" "$CAPTURE" "carries instance"
+assert_in "agent_tool_error" "$CAPTURE" "carries source"
+assert_in "exit=127" "$CAPTURE" "carries evidence"
+assert_in "journalctl" "$CAPTURE" "carries actionable logHint"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "event moved to sent/"
+assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 0 "outbox drained"
+echo
+
+# ── Drill 2: severity / event-type rendering
+echo "Drill 2: severity + event-type title rendering"
+reset_sandbox
+emit --severity warning --instance mini3 --source health --summary "degraded"
+emit --severity info --instance mini3 --source health --summary "fyi"
+emit --event-type clear --instance mini3 --source health --summary "recovered"
+dispatch_once
+assert_in "BOT WARNING" "$CAPTURE" "warning -> BOT WARNING"
+assert_in "BOT INFO" "$CAPTURE" "info -> BOT INFO"
+assert_in "BOT RECOVERY" "$CAPTURE" "clear -> BOT RECOVERY"
+echo
+
+# ── Drill 3: secret redaction — never leak credentials to the group
+echo "Drill 3: secret redaction in evidence"
+reset_sandbox
+# Assemble fake secret-shaped tokens at runtime (no literal in the file).
+FAKE_JWT="eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkcmlsbCJ9.s5doX9rAbCdEfGhIjKlMnOpQrStUvWxYz0123456"
+FAKE_GH="gh""p_0123456789abcdefABCDEF0123456789abcd"
+FAKE_AWS="AK""IAIOSFODNN7EXAMPLE"
+# Assemble the Bearer sample from fragments too (no "Authorization: Bearer <tok>"
+# literal stored in the file, per repo hygiene scanner rules).
+FAKE_BEARER="Bea""rer abc.def.ghi"
+emit --severity critical --instance ana-bot --source secret_probe \
+  --summary "leak probe" \
+  --evidence "token=$FAKE_JWT gh=$FAKE_GH aws=$FAKE_AWS Authorization: $FAKE_BEARER"
+dispatch_once
+assert_not_in "$FAKE_JWT" "$CAPTURE" "JWT not leaked"
+assert_not_in "$FAKE_GH" "$CAPTURE" "GitHub token not leaked"
+assert_not_in "$FAKE_AWS" "$CAPTURE" "AWS key not leaked"
+assert_in "REDACTED" "$CAPTURE" "redaction marker present"
+echo
+
+# ── Drill 4: poison event quarantined, not silently dropped, batch survives
+echo "Drill 4: malformed event quarantine + batch survival"
+reset_sandbox
+printf '{ this is not valid json' > "$BOT_ERRORS_OUTBOX_DIR/20260101T000000Z.bad.poison.deadbeef.json"
+emit --severity critical --instance ana-bot --source agent_tool_error \
+  --summary "valid alongside poison" --evidence "exit=1"
+dispatch_once
+rc=$?
+[ "$rc" = "0" ] && pass "dispatcher exits 0 despite poison" || fail "dispatcher exit $rc on poison"
+assert_count "$BOT_ERRORS_STATE_DIR/quarantine" "*.poison" 1 "poison moved to quarantine/"
+assert_in "valid alongside poison" "$CAPTURE" "valid event still delivered"
+assert_in "quarantined an unreadable event" "$CAPTURE" "quarantine self-alert fired"
+echo
+
+# ── Drill 5: oversized payload truncates, no crash
+echo "Drill 5: oversized evidence truncation"
+reset_sandbox
+BIG=$(head -c 20000 < /dev/zero | tr '\0' 'A')
+emit --severity critical --instance ana-bot --source big --summary "huge" --evidence "$BIG"
+dispatch_once
+assert_in "truncated" "$CAPTURE" "oversized evidence truncated"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "oversized event still delivered"
+echo
+
+# ── Drill 6: idempotent dispatch — no double send
+echo "Drill 6: idempotent dispatch (no double-send)"
+reset_sandbox
+emit --severity critical --instance ana-bot --source dup --summary "once only"
+dispatch_once
+n1=$(find "$BOT_ERRORS_STATE_DIR/sent" -name "*.sent" | wc -l | tr -d ' ')
+dispatch_once
+n2=$(find "$BOT_ERRORS_STATE_DIR/sent" -name "*.sent" | wc -l | tr -d ' ')
+[ "$n1" = "1" ] && [ "$n2" = "1" ] && pass "event sent exactly once across two runs" \
+  || fail "double-send: sent count $n1 then $n2"
+echo
+
+# ── Drill 7: empty summary falls back, never empty-body alert
+echo "Drill 7: blank summary fallback"
+reset_sandbox
+emit --severity critical --instance ana-bot --source blank --summary " "
+dispatch_once
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "blank-summary event still delivered"
+[ -s "$CAPTURE" ] && pass "dispatch body non-empty" || fail "dispatch body empty"
+echo
+
+# ── Drill 8: outbox-write failure (B4 gap probe)
+# NB: emit.ensure_private_dir() force-chmods the outbox dir back to 0700, so
+# making the outbox dir itself read-only cannot simulate a write failure — the
+# realistic trigger is an unwritable PARENT (disk full / perms / RO mount), so
+# the mkdir of the outbox dir fails. We point the outbox under a 0500 parent.
+echo "Drill 8: outbox-write-failure behavior (B4 probe)"
+reset_sandbox
+RO_PARENT="$SANDBOX/ro-parent"
+mkdir -p "$RO_PARENT"
+chmod 0500 "$RO_PARENT"
+if BOT_ERRORS_OUTBOX_DIR="$RO_PARENT/outbox" python3 "$EMIT" \
+     --severity critical --instance ana-bot --source wf \
+     --summary "should fail to write" >/dev/null 2>&1; then
+  fail "emit unexpectedly succeeded on unwritable parent"
+else
+  pass "emit fails loudly (nonzero) on unwritable outbox parent"
+fi
+chmod 0700 "$RO_PARENT"
+# Document the gap: a failed write currently has no secondary breadcrumb.
+bc=$(find "$SANDBOX" \( -name "*breadcrumb*" -o -name "*.writefail" \) 2>/dev/null | wc -l | tr -d ' ')
+if [ "$bc" = "0" ]; then
+  printf '  \033[33mNOTE\033[0m B4 gap: no breadcrumb written on outbox-write failure (Q lane)\n'
+fi
+echo
+
+# ── Drill 9: redaction coverage matrix (acceptance: raw_secret_hits == 0)
+# Policy decision (Q+peer): diagnostic log PATHS are intentionally retained in
+# rendered messages — investigators need them for remediation. Secrets and PII
+# (token/bearer/JWT/PEM/userinfo/phone) must be zero. Phone redaction was the
+# gap surfaced by the peer drill; closed in e522e1f (phone-like 10-15 digit
+# redaction added to TS + Python redactors, bounded so ISO timestamps survive).
+echo "Drill 9: redaction coverage matrix (phone + path policy)"
+reset_sandbox
+FAKE_PHONE="+15558675309"
+# System log path (not an operator-home path) so the hygiene guard stays clean
+# while still exercising the diagnostic-path-retention policy.
+DIAG_PATH="/var/log/bot-errors/dispatch.jsonl"
+emit --severity critical --instance ana-bot --source redaction_matrix \
+  --summary "coverage probe" \
+  --evidence "phone=$FAKE_PHONE logfile=$DIAG_PATH userinfo=https://u:p@host/x"
+dispatch_once
+assert_not_in "$FAKE_PHONE" "$CAPTURE" "phone not leaked (closed in e522e1f)"
+assert_not_in "u:p@host" "$CAPTURE" "url userinfo redacted"
+# Path retention is policy, not a failure — assert it is intentionally kept.
+assert_in "dispatch.jsonl" "$CAPTURE" "diagnostic log path retained (policy)"
+echo
+
+echo "──────────────────────────────────────────"
+echo "drills: $PASS passed, $FAIL failed"
+if [ "$FAIL" -ne 0 ]; then
+  printf 'failed drills:\n'; for f in "${FAILURES[@]}"; do printf '  - %s\n' "$f"; done
+  exit 1
+fi
+exit 0
