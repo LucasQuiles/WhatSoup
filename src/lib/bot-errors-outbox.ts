@@ -34,16 +34,24 @@ const GITHUB_TOKEN = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
 const PEM_PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
 const URL_USERINFO = /\b(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
+const PHONE_LIKE = /(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])/g;
+
+function redactPhoneLike(value: string): string {
+  return value.replace(PHONE_LIKE, (match, prefix: string, candidate: string) => {
+    const digits = candidate.replace(/\D/g, '');
+    return digits.length >= 10 && digits.length <= 15 ? `${prefix}[REDACTED PHONE]` : match;
+  });
+}
 
 function redactText(value: string): string {
-  return value
+  return redactPhoneLike(value
     .replace(PEM_PRIVATE_KEY, '[REDACTED PEM PRIVATE KEY]')
     .replace(URL_USERINFO, '$1[REDACTED]@')
     .replace(AWS_ACCESS_KEY_ID, '[REDACTED AWS ACCESS KEY]')
     .replace(GITHUB_TOKEN, '[REDACTED GITHUB TOKEN]')
     .replace(JWT_VALUE, '[REDACTED JWT]')
     .replace(SECRETISH_ASSIGNMENT, (_match, key: string, sep: string, quote: string) => `${key}${sep}${quote}[REDACTED]`)
-    .replace(BEARER_VALUE, 'Bearer [REDACTED]');
+    .replace(BEARER_VALUE, 'Bearer [REDACTED]'));
 }
 
 function safeSegment(value: string): string {

@@ -10,6 +10,7 @@ const GITHUB_TOKEN_SAMPLE = ['ghp', 'abcdefghijklmnopqrstuvwxyz1234567890'].join
 const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart1234567890'].join('.');
 const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
 const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
+const PHONE_SAMPLE = '+1 (555) 123-4567';
 
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
@@ -33,6 +34,7 @@ describe('bot-errors-runner', () => {
       GITHUB_TOKEN_SAMPLE,
       JWT_SAMPLE,
       URL_USERINFO_SAMPLE,
+      PHONE_SAMPLE,
     ].join(' ');
 
     const result = spawnSync('python3', [
@@ -69,10 +71,12 @@ describe('bot-errors-runner', () => {
     expect(event?.evidence).toContain('[REDACTED GITHUB TOKEN]');
     expect(event?.evidence).toContain('[REDACTED JWT]');
     expect(event?.evidence).toContain(REDACTED_URL_USERINFO);
+    expect(event?.evidence).toContain('[REDACTED PHONE]');
     expect(event?.evidence).not.toContain(AWS_KEY_SAMPLE);
     expect(event?.evidence).not.toContain(GITHUB_TOKEN_SAMPLE);
     expect(event?.evidence).not.toContain('eyJhbGci');
     expect(event?.evidence).not.toContain(URL_USERINFO_SAMPLE);
+    expect(event?.evidence).not.toContain(PHONE_SAMPLE);
     expect(event?.diagnostics.queue).toContain(tmpRoot);
   });
 
