@@ -310,6 +310,99 @@ describe('bot-errors-health-check', () => {
     expect(event.evidence).toContain('health agent: on_demand_ok down http://127.0.0.1:9/health');
   });
 
+  it('treats intentional blocked instances as info when the service is not active', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'ar-bot');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify({ type: 'agent', enabled: false }));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_SERVICE_STATUS: 'inactive',
+        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: '',
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'bot-host-blocked',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          instances: [{
+            name: 'ar-bot',
+            expected: 'blocked',
+            service: 'com.whatsoup.ar-bot',
+            reason: 'pending Lucas approval',
+          }],
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('info');
+    expect(event.evidence).toContain('config ar-bot: expected=blocked exists=True service_status=inactive');
+    expect(event.evidence).toContain('plugins ar-bot: skipped expected=blocked');
+    expect(event.evidence).not.toContain('WARN config ar-bot');
+  });
+
+  it('warns when an intentional blocked instance is unexpectedly active', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'ar-bot');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify({ type: 'agent', enabled: false }));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_SERVICE_STATUS: 'active',
+        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: 'ar-bot',
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'bot-host-blocked',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          instances: [{
+            name: 'ar-bot',
+            expected: 'blocked',
+            service: 'com.whatsoup.ar-bot',
+            reason: 'pending Lucas approval',
+          }],
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('warning');
+    expect(event.evidence).toContain('WARN config ar-bot: expected=blocked exists=True service_status=active');
+    expect(event.evidence).toContain('actual=active');
+  });
+
   it('raises critical daily health severity when disk free space is below threshold', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
 
