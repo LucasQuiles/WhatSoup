@@ -1,12 +1,23 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { homedir, hostname, platform, release } from 'node:os';
 import { join } from 'node:path';
 import { sessionStateDir } from './lib/rgp-state.mjs';
 
 const MAX_ERROR_LOG_BYTES = 64 * 1024;
 const MAX_ERROR_LOG_LINES = 200;
 const MAX_EXCERPT_CHARS = 800;
+const MAX_EVIDENCE_CHARS = 4000;
 const MAX_INPUT_SUMMARY_CHARS = 300;
+const SECRETISH_ASSIGNMENT =
+  /\b(api[_-]?key|token|secret|password|authorization|cookie|credential)\b(\s*[:=]\s*)(["']?)[^\s"',}]+/gi;
+const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
+const AWS_ACCESS_KEY_ID = /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g;
+const GITHUB_TOKEN = /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g;
+const JWT_VALUE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
+const PEM_PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
+const URL_USERINFO = /\b(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
 
 function readStdin() {
   return new Promise((resolve) => {
@@ -23,6 +34,13 @@ function readStdin() {
 
 function sanitize(value) {
   return String(value)
+    .replace(PEM_PRIVATE_KEY, '[REDACTED PEM PRIVATE KEY]')
+    .replace(URL_USERINFO, '$1[REDACTED]@')
+    .replace(AWS_ACCESS_KEY_ID, '[REDACTED AWS ACCESS KEY]')
+    .replace(GITHUB_TOKEN, '[REDACTED GITHUB TOKEN]')
+    .replace(JWT_VALUE, '[REDACTED JWT]')
+    .replace(SECRETISH_ASSIGNMENT, (_match, key, sep, quote) => `${key}${sep}${quote}[REDACTED]`)
+    .replace(BEARER_VALUE, 'Bearer [REDACTED]')
     .replace(/(?:\/Users|\/private\/tmp|\/tmp)\/[^\s"'`]+/g, '<redacted-path>')
     .replace(/\b\+?\d[\d\s().-]{7,}\d\b/g, '<redacted-phone>');
 }
@@ -54,6 +72,161 @@ function isErrorResult(response) {
   if (response.error != null) return true;
   const text = contentText(response);
   return /(sandbox_deny|exit code [1-9]|enoent|eacces|permission denied|error:|⚠️ error)/i.test(text);
+}
+
+function stateDir() {
+  return process.env.BOT_ERRORS_STATE_DIR || join(homedir(), '.local', 'state', 'bot-errors');
+}
+
+function outboxDir() {
+  return process.env.BOT_ERRORS_OUTBOX_DIR || join(stateDir(), 'outbox');
+}
+
+function safeSegment(value) {
+  const cleaned = String(value).trim().replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '');
+  return (cleaned || 'unknown').slice(0, 80);
+}
+
+function ensurePrivateDir(path) {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(path, 0o700);
+  } catch {
+    // Best-effort hardening only; hook telemetry must not block the caller path.
+  }
+}
+
+function writeEventFile(event) {
+  const outbox = outboxDir();
+  ensurePrivateDir(outbox);
+  const created = event.createdAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const fileName = `${created}.${safeSegment(event.instance)}.${safeSegment(event.source)}.${event.id}.json`;
+  const finalPath = join(outbox, fileName);
+  const tmpPath = join(outbox, `.${fileName}.${process.pid}.tmp`);
+  try {
+    writeFileSync(tmpPath, `${JSON.stringify(event, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    renameSync(tmpPath, finalPath);
+    try {
+      chmodSync(finalPath, 0o600);
+    } catch {
+      // Best effort.
+    }
+    return finalPath;
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Best effort.
+    }
+    throw err;
+  }
+}
+
+function diagnosticEnvKeys() {
+  return Object.keys(process.env)
+    .filter((key) => /^(BOT_ERRORS_|WHATSOUP_|CLAUDE_|XDG_|NODE_ENV$|LOG_DIR$)/.test(key))
+    .filter((key) => !/(TOKEN|SECRET|KEY|PASSWORD|COOKIE|CREDENTIAL)/i.test(key))
+    .sort();
+}
+
+function valueAt(record, names) {
+  for (const name of names) {
+    if (typeof record?.[name] === 'string' && record[name].trim()) return record[name].trim();
+  }
+  return '';
+}
+
+function sourceFor(toolName, hookEvent) {
+  const base = hookEvent === 'PostToolUseFailure' ? 'hook-tool-call-failed' : 'hook-tool-result-error';
+  return `${base}:${safeSegment(toolName)}`;
+}
+
+function buildEvidence(payload, entry, sessionLogPath) {
+  const lines = [
+    `hook_event=${payload.hook_event_name || 'PostToolUse'}`,
+    `session_id=${entry.sessionId}`,
+    `tool_name=${entry.toolName}`,
+    `tool_use_id=${valueAt(payload, ['tool_use_id', 'toolUseId']) || 'unknown'}`,
+    `cwd=${valueAt(payload, ['cwd']) || process.cwd()}`,
+    `transcript_path=${valueAt(payload, ['transcript_path', 'transcriptPath']) || 'unknown'}`,
+    `agent_id=${valueAt(payload, ['agent_id', 'agentId']) || 'main'}`,
+    `agent_type=${valueAt(payload, ['agent_type', 'agentType']) || 'unknown'}`,
+    `duration_ms=${payload.duration_ms ?? payload.durationMs ?? 'unknown'}`,
+    `whatsoup_instance=${process.env.WHATSOUP_INSTANCE || 'unknown'}`,
+    `whatsoup_chat_jid=${process.env.WHATSOUP_CHAT_JID || payload.tool_input?.chatJid || payload.toolInput?.chatJid || 'unknown'}`,
+    `input_summary=${entry.inputSummary || 'none'}`,
+    `session_error_log=${sessionLogPath}`,
+    'error_excerpt:',
+    entry.excerpt || 'unknown',
+  ];
+  return truncate(lines.join('\n'), MAX_EVIDENCE_CHARS);
+}
+
+function botErrorLogHints(instance, payload, sessionLogPath) {
+  const hints = [
+    sessionLogPath,
+    valueAt(payload, ['transcript_path', 'transcriptPath']),
+    join(stateDir(), 'logs'),
+  ].filter(Boolean);
+  if (platform() === 'darwin') {
+    hints.push(`launchctl print gui/$(id -u)/${instance}`);
+    hints.push(`log show --last 30m --predicate 'eventMessage CONTAINS "${instance.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"'`);
+  } else {
+    hints.push(`journalctl --user -u whatsoup@${instance}.service --since '30 minutes ago'`);
+    hints.push("journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'");
+  }
+  return [...new Set(hints)].slice(0, 8);
+}
+
+function writeBotErrorsAlert(payload, entry, sessionLogPath) {
+  if (process.env.BOT_ERRORS_TOOL_FAILURE_ALERTS === '0') return null;
+  const hookEvent = payload.hook_event_name || 'PostToolUse';
+  if (hookEvent !== 'PostToolUseFailure' && process.env.BOT_ERRORS_POST_TOOL_USE_ALERTS !== '1') return null;
+  const instance = process.env.WHATSOUP_INSTANCE || valueAt(payload, ['instance']) || 'agent-tool';
+  const source = sourceFor(entry.toolName, hookEvent);
+  const event = {
+    schemaVersion: 1,
+    id: `tool-${safeSegment(entry.sessionId)}-${safeSegment(entry.toolName)}-${Date.now()}-${randomUUID().slice(0, 8)}`,
+    eventType: 'alert',
+    severity: 'error',
+    createdAt: new Date().toISOString(),
+    machine: hostname(),
+    platform: `${platform()} ${release()}`,
+    instance,
+    source,
+    summary: sanitize(`Agent tool failure: ${entry.toolName}`),
+    evidence: sanitize(buildEvidence(payload, entry, sessionLogPath)),
+    process: {
+      pid: process.pid,
+      ppid: process.ppid,
+      cwd: process.cwd(),
+      argv: process.argv.map(sanitize),
+      execPath: process.execPath,
+      node: process.version,
+    },
+    runtime: {
+      envKeys: diagnosticEnvKeys(),
+      hookEvent: payload.hook_event_name || 'PostToolUse',
+      permissionMode: payload.permission_mode || null,
+      effort: payload.effort || null,
+    },
+    diagnostics: {
+      logHints: botErrorLogHints(instance, payload, sessionLogPath),
+      queue: outboxDir(),
+      sessionId: entry.sessionId,
+      toolName: entry.toolName,
+      toolUseId: valueAt(payload, ['tool_use_id', 'toolUseId']) || '',
+      agentId: valueAt(payload, ['agent_id', 'agentId']),
+      agentType: valueAt(payload, ['agent_type', 'agentType']),
+    },
+    delivery: {
+      attempts: 0,
+      status: 'queued',
+      nextAttemptAtEpoch: 0,
+      lastError: null,
+    },
+  };
+  return writeEventFile(event);
 }
 
 function summarizeInput(input) {
@@ -97,9 +270,11 @@ async function main() {
   try {
     const raw = await readStdin();
     const payload = JSON.parse(raw || '{}');
-    if (payload.hook_event_name && payload.hook_event_name !== 'PostToolUse') return;
+    if (payload.hook_event_name && !['PostToolUse', 'PostToolUseFailure'].includes(payload.hook_event_name)) return;
 
-    const response = payload.tool_response ?? payload.toolResponse ?? payload.result;
+    const response = payload.hook_event_name === 'PostToolUseFailure'
+      ? { is_error: true, content: payload.error ?? payload.message ?? payload.tool_error }
+      : payload.tool_response ?? payload.toolResponse ?? payload.result;
     if (!isErrorResult(response)) return;
 
     const sessionId = typeof payload.session_id === 'string' && payload.session_id.trim()
@@ -117,6 +292,15 @@ async function main() {
 
     appendJsonLine(path, entry);
     trimErrorLog(path);
+    try {
+      writeBotErrorsAlert(payload, entry, path);
+    } catch (err) {
+      appendJsonLine(path, {
+        event: 'bot-errors-alert-failed',
+        createdAt: new Date().toISOString(),
+        message: sanitize(err instanceof Error ? err.message : String(err)),
+      });
+    }
   } catch {
     // PostToolUse diagnostics are best-effort and must degrade softly.
   }

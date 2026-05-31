@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const STOP_HOOK = join(process.cwd(), 'deploy/hooks/stop-ensure-reply.mjs');
 const POST_TOOL_HOOK = join(process.cwd(), 'deploy/hooks/post-tool-use-log.mjs');
+const AWS_KEY_SAMPLE = ['AKIA', 'IOSFODNN7EXAMPLE'].join('');
+const GITHUB_TOKEN_SAMPLE = ['ghp', 'abcdefghijklmnopqrstuvwxyz1234567890'].join('_');
+const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart1234567890'].join('.');
+const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----END ', 'PRIVATE KEY-----'].join('');
+const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
+const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
 
 const tmpDirs: string[] = [];
 
@@ -42,6 +48,10 @@ function errorsPath(home: string, sessionId: string): string {
   return join(home, '.claude', 'session-env', sessionId, 'errors.jsonl');
 }
 
+function botErrorsOutbox(home: string): string {
+  return join(home, '.local', 'state', 'bot-errors', 'outbox');
+}
+
 function markerPath(home: string, sessionId: string): string {
   return join(home, '.claude', 'session-env', sessionId, 'whatsapp-fallback-queued');
 }
@@ -52,6 +62,14 @@ function readJsonl(path: string): unknown[] {
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line));
+}
+
+function readBotErrors(home: string): unknown[] {
+  const outbox = botErrorsOutbox(home);
+  if (!existsSync(outbox)) return [];
+  return readdirSync(outbox)
+    .filter((name) => name.endsWith('.json') && !name.startsWith('.'))
+    .map((name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')));
 }
 
 afterEach(() => {
@@ -74,7 +92,7 @@ describe('PostToolUse RGP error logger', () => {
         is_error: true,
         content: 'sandbox_deny: /private/tmp/whatsoup/private +1 (415) 555-1212 failed',
       },
-    }, { HOME: home });
+    }, { HOME: home, WHATSOUP_INSTANCE: 'ana-bot' });
 
     expect(result.status).toBe(0);
     const entries = readJsonl(errorsPath(home, 'session-a'));
@@ -93,6 +111,7 @@ describe('PostToolUse RGP error logger', () => {
     expect(excerpt).toContain('<redacted-phone>');
     expect(excerpt).not.toContain('/private/tmp');
     expect(excerpt).not.toContain('415');
+    expect(readBotErrors(home)).toHaveLength(0);
   });
 
   it('does not log successful tool responses and truncates oversized error logs', () => {
@@ -131,6 +150,55 @@ describe('PostToolUse RGP error logger', () => {
       sessionId: 'session-b',
       toolName: 'Read',
     });
+    expect(readBotErrors(home)).toHaveLength(0);
+  });
+
+  it('queues BOT ERRORS alerts from PostToolUseFailure payloads', () => {
+    const home = makeHome();
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-fail',
+      hook_event_name: 'PostToolUseFailure',
+      transcript_path: '/tmp/transcript.jsonl',
+      cwd: '/tmp/workspace',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      tool_input: { command: 'python3 -c "raise SystemExit(2)"' },
+      error: [
+        'Command timed out after 120000ms token=plain-secret',
+        AWS_KEY_SAMPLE,
+        GITHUB_TOKEN_SAMPLE,
+        JWT_SAMPLE,
+        PRIVATE_KEY_SAMPLE,
+        URL_USERINFO_SAMPLE,
+      ].join('\n'),
+      duration_ms: 120000,
+    }, { HOME: home, WHATSOUP_INSTANCE: 'ana-bot', WHATSOUP_CHAT_JID: 'chat@g.us' });
+
+    expect(result.status).toBe(0);
+    const botErrors = readBotErrors(home);
+    expect(botErrors).toHaveLength(1);
+    expect(botErrors[0]).toMatchObject({
+      eventType: 'alert',
+      severity: 'error',
+      instance: 'ana-bot',
+      source: 'hook-tool-call-failed:Bash',
+      summary: 'Agent tool failure: Bash',
+    });
+    expect(JSON.stringify(botErrors[0])).toContain('duration_ms=120000');
+    expect(JSON.stringify(botErrors[0])).toContain('tool_use_id=tool-123');
+    expect(JSON.stringify(botErrors[0])).toContain('token=[REDACTED]');
+    expect(JSON.stringify(botErrors[0])).toContain('[REDACTED AWS ACCESS KEY]');
+    expect(JSON.stringify(botErrors[0])).toContain('[REDACTED GITHUB TOKEN]');
+    expect(JSON.stringify(botErrors[0])).toContain('[REDACTED JWT]');
+    expect(JSON.stringify(botErrors[0])).toContain('[REDACTED PEM PRIVATE KEY]');
+    expect(JSON.stringify(botErrors[0])).toContain(REDACTED_URL_USERINFO);
+    expect(JSON.stringify(botErrors[0])).not.toContain('plain-secret');
+    expect(JSON.stringify(botErrors[0])).not.toContain(AWS_KEY_SAMPLE);
+    expect(JSON.stringify(botErrors[0])).not.toContain(GITHUB_TOKEN_SAMPLE);
+    expect(JSON.stringify(botErrors[0])).not.toContain('eyJhbGci');
+    expect(JSON.stringify(botErrors[0])).not.toContain('-----BEGIN');
+    expect(JSON.stringify(botErrors[0])).not.toContain(URL_USERINFO_SAMPLE);
   });
 });
 

@@ -1,0 +1,155 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+
+let tmpRoot = '';
+const AWS_KEY_SAMPLE = ['AKIA', 'IOSFODNN7EXAMPLE'].join('');
+const GITHUB_TOKEN_SAMPLE = ['ghp', 'abcdefghijklmnopqrstuvwxyz1234567890'].join('_');
+const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart1234567890'].join('.');
+const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----END ', 'PRIVATE KEY-----'].join('');
+const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
+const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
+
+afterEach(() => {
+  if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
+  tmpRoot = '';
+});
+
+function outboxEvent() {
+  const outbox = join(tmpRoot, 'outbox');
+  const files = readdirSync(outbox);
+  expect(files).toHaveLength(1);
+  return {
+    name: files[0]!,
+    path: join(outbox, files[0]!),
+    event: JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as Record<string, any>,
+  };
+}
+
+describe('bot-errors-emit', () => {
+  it('writes a private durable BOT ERRORS event from shell-friendly arguments', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
+    const evidencePath = join(tmpRoot, 'evidence.log');
+    writeFileSync(evidencePath, [
+      'line one',
+      'api_key=plain-secret',
+      'Authorization: Bearer abc.def',
+      AWS_KEY_SAMPLE,
+      GITHUB_TOKEN_SAMPLE,
+      JWT_SAMPLE,
+      PRIVATE_KEY_SAMPLE,
+      URL_USERINFO_SAMPLE,
+      '',
+    ].join('\n'));
+
+    const output = execFileSync('python3', [
+      'deploy/scripts/bot-errors-emit.py',
+      '--instance',
+      'fleet-offload-sync',
+      '--source',
+      'unit-node-rsync',
+      '--summary',
+      'unit-node sync failed token=inline-secret',
+      '--evidence',
+      'rsync exited 12',
+      '--evidence-file',
+      evidencePath,
+      '--log-hint',
+      join('/tmp', 'bot-errors', 'unit-node-offload', 'logs', 'unit-node-offload-sync.log'),
+      '--diagnostic',
+      'target=unit-node',
+      '--print-path',
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
+      encoding: 'utf8',
+    }).trim();
+
+    const { name, path, event } = outboxEvent();
+    expect(output).toBe(path);
+    expect(name.startsWith('.')).toBe(false);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(event).toMatchObject({
+      schemaVersion: 1,
+      eventType: 'alert',
+      severity: 'critical',
+      instance: 'fleet-offload-sync',
+      source: 'unit-node-rsync',
+      delivery: { attempts: 0, status: 'queued' },
+    });
+    expect(event.summary).toBe('unit-node sync failed token=[REDACTED]');
+    expect(event.evidence).toContain('rsync exited 12');
+    expect(event.evidence).toContain('api_key=[REDACTED]');
+    expect(event.evidence).toContain('Authorization: Bearer [REDACTED]');
+    expect(event.evidence).toContain('[REDACTED AWS ACCESS KEY]');
+    expect(event.evidence).toContain('[REDACTED GITHUB TOKEN]');
+    expect(event.evidence).toContain('[REDACTED JWT]');
+    expect(event.evidence).toContain('[REDACTED PEM PRIVATE KEY]');
+    expect(event.evidence).toContain(REDACTED_URL_USERINFO);
+    expect(event.evidence).not.toContain('plain-secret');
+    expect(event.evidence).not.toContain('abc.def');
+    expect(event.evidence).not.toContain(AWS_KEY_SAMPLE);
+    expect(event.evidence).not.toContain(GITHUB_TOKEN_SAMPLE);
+    expect(event.evidence).not.toContain('eyJhbGci');
+    expect(event.evidence).not.toContain('-----BEGIN');
+    expect(event.evidence).not.toContain(URL_USERINFO_SAMPLE);
+    expect(event.diagnostics.logHints).toContain(join('/tmp', 'bot-errors', 'unit-node-offload', 'logs', 'unit-node-offload-sync.log'));
+    expect(event.diagnostics.target).toBe('unit-node');
+  });
+
+  it('uses hidden tmp files and leaves only final json visible', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
+
+    execFileSync('python3', [
+      'deploy/scripts/bot-errors-emit.py',
+      '--instance',
+      'unit-lab-offload-sync',
+      '--source',
+      'preflight',
+      '--summary',
+      'unit-lab preflight failed',
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/\.json$/);
+    expect(basename(files[0]!)).not.toMatch(/\\.tmp$/);
+  });
+
+  it('uses WSL-local diagnostics instead of per-service journalctl hints', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
+
+    execFileSync('python3', [
+      'deploy/scripts/bot-errors-emit.py',
+      '--instance',
+      'brick-wsl',
+      '--source',
+      'relay-canary',
+      '--summary',
+      'brick WSL relay canary',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SYS_PLATFORM: 'linux',
+        BOT_ERRORS_DRY_PLATFORM_SYSTEM: 'Linux',
+        BOT_ERRORS_DRY_PLATFORM_RELEASE: '6.6.87.2-microsoft-standard-WSL2',
+      },
+    });
+
+    const { event } = outboxEvent();
+    expect(event.platform).toBe('Linux 6.6.87.2-microsoft-standard-WSL2');
+    expect(event.diagnostics.logHints).toContain(`ps -eo pid,etime,cmd | grep -F brick-wsl`);
+    expect(event.diagnostics.logHints).toContain(join(tmpRoot, '.claude/observability/runtime'));
+    expect(event.diagnostics.logHints).toContain(join(tmpRoot, 'outbox'));
+    expect(event.diagnostics.logHints.some((hint: string) => hint.includes('journalctl'))).toBe(false);
+  });
+});

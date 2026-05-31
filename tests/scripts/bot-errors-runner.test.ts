@@ -5,6 +5,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 let tmpRoot = '';
+const AWS_KEY_SAMPLE = ['AKIA', 'IOSFODNN7EXAMPLE'].join('');
+const GITHUB_TOKEN_SAMPLE = ['ghp', 'abcdefghijklmnopqrstuvwxyz1234567890'].join('_');
+const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart1234567890'].join('.');
+const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
+const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
 
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
@@ -22,6 +27,13 @@ describe('bot-errors-runner', () => {
   it('emits a durable alert with command context when a process exits nonzero', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
     mkdirSync(join(tmpRoot, 'outbox'), { recursive: true });
+    const stderrLine = [
+      'token=secret',
+      AWS_KEY_SAMPLE,
+      GITHUB_TOKEN_SAMPLE,
+      JWT_SAMPLE,
+      URL_USERINFO_SAMPLE,
+    ].join(' ');
 
     const result = spawnSync('python3', [
       'deploy/scripts/bot-errors-runner.py',
@@ -32,7 +44,7 @@ describe('bot-errors-runner', () => {
       '--',
       'python3',
       '-c',
-      'import sys; print("hello"); print("token=secret", file=sys.stderr); sys.exit(7)',
+      `import sys; print("hello"); print(${JSON.stringify(stderrLine)}, file=sys.stderr); sys.exit(7)`,
     ], {
       cwd: process.cwd(),
       env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
@@ -53,6 +65,14 @@ describe('bot-errors-runner', () => {
     expect(event?.evidence).toContain('exit_code=7');
     expect(event?.evidence).toContain('jid=123@g.us');
     expect(event?.evidence).toContain('token=[REDACTED]');
+    expect(event?.evidence).toContain('[REDACTED AWS ACCESS KEY]');
+    expect(event?.evidence).toContain('[REDACTED GITHUB TOKEN]');
+    expect(event?.evidence).toContain('[REDACTED JWT]');
+    expect(event?.evidence).toContain(REDACTED_URL_USERINFO);
+    expect(event?.evidence).not.toContain(AWS_KEY_SAMPLE);
+    expect(event?.evidence).not.toContain(GITHUB_TOKEN_SAMPLE);
+    expect(event?.evidence).not.toContain('eyJhbGci');
+    expect(event?.evidence).not.toContain(URL_USERINFO_SAMPLE);
     expect(event?.diagnostics.queue).toContain(tmpRoot);
   });
 
