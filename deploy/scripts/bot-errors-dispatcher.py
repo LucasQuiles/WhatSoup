@@ -9,7 +9,9 @@ retry metadata, poison quarantine, and state reporting.
 from __future__ import annotations
 
 import argparse
+import calendar
 import fcntl
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -66,7 +68,7 @@ AWAITING_PHYSICAL_RENOTIFY_SECONDS = positive_env_int(
     "BOT_ERRORS_AWAITING_PHYSICAL_RENOTIFY_SECONDS",
     24 * 60 * 60,
 )
-INTERNAL_FORCE_NOTIFY_SOURCES = {"heartbeat-watchdog"}
+INTERNAL_FORCE_NOTIFY_SOURCES = {"heartbeat-watchdog", "storm-collapse"}
 DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES = {
     "whatsapp_device_bond_lost",
     "whatsapp_auth_bond_local_failure",
@@ -226,6 +228,9 @@ def record_test_leak_daily_marker(
     return True
 
 
+COMMA_TOKEN_LIST = re.compile(r"\b[A-Za-z0-9_.:-]+(?:\s*,\s*[A-Za-z0-9_.:-]+)+\b")
+
+
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -241,6 +246,8 @@ def state_paths() -> dict[str, Path]:
         "outbox": Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox")),
         "processing": root / "processing",
         "sent": root / "sent",
+        "storm_collapsed": root / "storm-collapsed",
+        "storm_manifests": root / "storm-manifests",
         "suppressed": root / "suppressed",
         "quarantine": root / "quarantine",
         "testleak": root / "testleak",
@@ -287,6 +294,8 @@ def setup_dirs() -> dict[str, Path]:
         "outbox",
         "processing",
         "sent",
+        "storm_collapsed",
+        "storm_manifests",
         "suppressed",
         "quarantine",
         "testleak",
@@ -355,6 +364,13 @@ def append_private_jsonl(path: Path, record: dict[str, Any]) -> None:
     except OSError:
         pass
     fsync_parent(path)
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
 
 
 def append_dispatch_log(paths: dict[str, Path], payload: dict[str, Any]) -> None:
@@ -978,6 +994,7 @@ def format_event(event: dict[str, Any]) -> str:
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     failure = critical_asset_failure(event)
     asset = critical_asset_asset(event)
+    storm = event.get("storm") if isinstance(event.get("storm"), dict) else {}
     log_hints = diagnostics.get("logHints") if isinstance(diagnostics.get("logHints"), list) else []
     writefail_recovery = (
         diagnostics.get("writefailRecovery")
@@ -1022,6 +1039,15 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("platform", event.get("platform")),
         event_line("pid", process_info.get("pid")),
         event_line("cwd", process_info.get("cwd")),
+        event_line("affected_hosts", storm.get("affectedHosts")),
+        event_line(
+            "affected_host_list",
+            ", ".join(str(host) for host in storm.get("hosts", []))
+            if isinstance(storm.get("hosts"), list)
+            else None,
+            1800,
+        ),
+        event_line("storm_manifest", storm.get("manifest"), 900),
     ]
     for idx, hint in enumerate(log_hints[:5], start=1):
         lines.append(event_line(f"log_{idx}", hint, 900))
@@ -1538,6 +1564,410 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
     return sent, failed, last_error
 
 
+def storm_threshold() -> int:
+    return max(0, env_int("BOT_ERRORS_STORM_THRESHOLD", 3))
+
+
+def storm_window_seconds() -> int:
+    return max(1, env_int("BOT_ERRORS_STORM_WINDOW_SECONDS", 120))
+
+
+def created_epoch(event: dict[str, Any]) -> int:
+    created = str(event.get("createdAt") or "").strip()
+    if created:
+        if "." in created and created.endswith("Z"):
+            created = created.split(".", 1)[0] + "Z"
+        try:
+            return int(calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ")))
+        except ValueError:
+            pass
+    return int(time.time())
+
+
+def iso_from_epoch(epoch: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def event_host(event: dict[str, Any]) -> str:
+    for key in ("machine", "machineName", "host", "hostname", "instance"):
+        value = str(event.get(key) or "").strip()
+        if value:
+            return value
+    return "unknown"
+
+
+def sorted_unique_hosts(events: list[dict[str, Any]]) -> list[str]:
+    hosts = {event_host(event) for event in events}
+    return sorted(hosts, key=lambda value: value.lower())
+
+
+def normalize_token_lists(text: str) -> str:
+    def sort_match(match: re.Match[str]) -> str:
+        items = [item.strip() for item in match.group(0).split(",") if item.strip()]
+        return ",".join(sorted(items, key=lambda value: value.lower()))
+
+    return COMMA_TOKEN_LIST.sub(sort_match, text)
+
+
+def normalized_summary(event: dict[str, Any]) -> str:
+    text = redact(event.get("summary") or "unspecified bot error").lower()
+    host_tokens = set()
+    for key in ("machine", "machineName", "host", "hostname", "instance"):
+        raw = str(event.get(key) or "").strip().lower()
+        if not raw:
+            continue
+        host_tokens.add(raw)
+        host_tokens.add(raw.split(".", 1)[0])
+    for token in sorted(host_tokens, key=len, reverse=True):
+        if token:
+            text = re.sub(rf"\b{re.escape(token)}\b", "{host}", text)
+    text = re.sub(r"\b(?:maclab|mwlab|mini\d{1,2})\b", "{host}", text)
+    text = normalize_token_lists(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def storm_fingerprint(event: dict[str, Any]) -> str:
+    parts = [
+        str(event.get("source") or "unknown").strip().lower(),
+        str(event.get("severity") or "critical").strip().lower(),
+        normalized_summary(event),
+    ]
+    return "\n".join(parts)
+
+
+def storm_fingerprint_hash(fingerprint: str) -> str:
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+
+
+def find_event_path_by_id(event_id: str, paths: dict[str, Path], keys: tuple[str, ...]) -> Path | None:
+    if not event_id:
+        return None
+    for key in keys:
+        directory = paths[key]
+        if not directory.exists():
+            continue
+        for path in directory.glob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if read_json(path).get("id") == event_id:
+                    return path
+            except Exception:
+                continue
+    return None
+
+
+def is_storm_candidate(event: dict[str, Any]) -> bool:
+    if isinstance(event.get("storm"), dict):
+        return False
+    event_type = str(event.get("eventType") or "alert")
+    severity = str(event.get("severity") or "").lower()
+    return event_type == "alert" and severity in {"critical", "warning"}
+
+
+def manifest_entry(path: Path, event: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    log_hints = diagnostics.get("logHints") if isinstance(diagnostics.get("logHints"), list) else []
+    return {
+        "eventId": event.get("id"),
+        "machine": event_host(event),
+        "instance": event.get("instance"),
+        "source": event.get("source"),
+        "severity": event.get("severity"),
+        "createdAt": event.get("createdAt"),
+        "summary": truncate(redact(event.get("summary")), 700),
+        "evidence": truncate(redact(event.get("evidence")), 1800),
+        "outboxPath": str(path),
+        "logHints": [truncate(redact(hint), 900) for hint in log_hints[:10]],
+    }
+
+
+def mark_collapsed(event: dict[str, Any], digest_id: str, manifest_path: Path) -> dict[str, Any]:
+    delivery = event.setdefault("delivery", {})
+    if isinstance(delivery, dict):
+        delivery["status"] = "storm-collapsed"
+        delivery["collapsedAt"] = now_iso()
+        delivery["collapsedInto"] = digest_id
+        delivery["lastError"] = None
+    diagnostics = event.setdefault("diagnostics", {})
+    if isinstance(diagnostics, dict):
+        diagnostics["stormCollapse"] = {
+            "digestId": digest_id,
+            "manifest": str(manifest_path),
+            "collapsedAt": now_iso(),
+        }
+    return event
+
+
+def storm_digest_event(
+    paths: dict[str, Path],
+    fingerprint: str,
+    fingerprint_hash: str,
+    bucket_start: int,
+    bucket_end: int,
+    events: list[dict[str, Any]],
+    manifest_path: Path,
+) -> dict[str, Any]:
+    first = events[0]
+    hosts = sorted_unique_hosts(events)
+    severity = str(first.get("severity") or "critical").lower()
+    source = str(first.get("source") or "unknown")
+    summary = normalized_summary(first) or "same fingerprint alert storm"
+    digest_id = f"storm-{fingerprint_hash}-{bucket_start}"
+    evidence_lines = [
+        f"affected_hosts:{len(hosts)}",
+        f"hosts:{', '.join(hosts)}",
+        f"fingerprint:{fingerprint_hash}",
+        f"source:{source}",
+        f"severity:{severity}",
+        f"window_start_epoch:{bucket_start}",
+        f"window_end_epoch:{bucket_end}",
+        f"collapsed_events:{len(events)}",
+        f"manifest:{manifest_path}",
+        f"fingerprint_basis:{fingerprint.replace(chr(10), ' | ')}",
+    ]
+    return {
+        "schemaVersion": 1,
+        "eventType": "alert",
+        "severity": severity,
+        "id": digest_id,
+        "createdAt": now_iso(),
+        "machine": "fleet",
+        "platform": "mixed",
+        "instance": "storm-collapse",
+        "source": "storm-collapse",
+        "summary": f"BOT ERRORS storm collapse: {len(hosts)} hosts - {summary}",
+        "evidence": "\n".join(evidence_lines),
+        "diagnostics": {
+            "logHints": [str(manifest_path)],
+            "queue": str(paths["outbox"]),
+            "forceNotify": True,
+            "forceNotifyLevel": f"storm-{fingerprint_hash}-{bucket_start}",
+        },
+        "storm": {
+            "fingerprint": fingerprint_hash,
+            "source": source,
+            "affectedHosts": len(hosts),
+            "hosts": hosts,
+            "windowStartEpoch": bucket_start,
+            "windowEndEpoch": bucket_end,
+            "manifest": str(manifest_path),
+            "collapsedEvents": len(events),
+        },
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def storm_digest_outbox_path(paths: dict[str, Path], digest_id: str, source: str, window_start: int) -> Path:
+    created = iso_from_epoch(window_start).replace("-", "").replace(":", "")
+    instance = safe_segment("storm-collapse")
+    source_segment = safe_segment(source or "unknown")
+    event_id = safe_segment(digest_id)
+    return paths["outbox"] / f"{created}.{instance}.{source_segment}.{event_id}.json"
+
+
+def merge_manifest_entries(existing: list[Any], additions: list[dict[str, Any]]) -> list[Any]:
+    seen: set[tuple[str, str]] = set()
+    merged: list[Any] = []
+    for entry in existing:
+        if isinstance(entry, dict):
+            key = (str(entry.get("eventId") or ""), str(entry.get("outboxPath") or ""))
+            seen.add(key)
+        merged.append(entry)
+    for entry in additions:
+        key = (str(entry.get("eventId") or ""), str(entry.get("outboxPath") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(entry)
+    return merged
+
+
+def existing_storm_window(
+    paths: dict[str, Path],
+    fingerprint_hash: str,
+    start_epoch: int,
+) -> tuple[dict[str, Any], Path] | None:
+    for path in sorted(paths["storm_manifests"].glob(f"*.{fingerprint_hash}.json")):
+        try:
+            manifest = read_json(path)
+            if manifest.get("fingerprint") != fingerprint_hash:
+                continue
+            window_start = int(manifest.get("windowStartEpoch") or 0)
+            window_end = int(manifest.get("windowEndEpoch") or 0)
+        except Exception:
+            continue
+        if window_start <= start_epoch < window_end:
+            return manifest, path
+    return None
+
+
+def collapse_storm_group(
+    paths: dict[str, Path],
+    key: tuple[str, int],
+    records: list[tuple[Path, dict[str, Any]]],
+) -> int:
+    fingerprint, requested_start = key
+    window = storm_window_seconds()
+    fingerprint_hash = storm_fingerprint_hash(fingerprint)
+    existing = existing_storm_window(paths, fingerprint_hash, requested_start)
+    if existing:
+        existing_manifest, manifest_path = existing
+        bucket_start = int(existing_manifest.get("windowStartEpoch") or requested_start)
+        bucket_end = int(existing_manifest.get("windowEndEpoch") or (bucket_start + window))
+        manifest = existing_manifest
+    else:
+        bucket_start = requested_start
+        bucket_end = bucket_start + window
+        manifest_path = paths["storm_manifests"] / f"{bucket_start}.{fingerprint_hash}.json"
+        manifest = {}
+    digest_id = f"storm-{fingerprint_hash}-{bucket_start}"
+    events = [event for _, event in records]
+    additions = [manifest_entry(path, event) for path, event in records]
+    if not manifest and manifest_path.exists():
+        try:
+            manifest = read_json(manifest_path)
+        except Exception:
+            manifest = {}
+    existing_entries = manifest.get("entries") if isinstance(manifest.get("entries"), list) else []
+    existing_collapsed = (
+        manifest.get("entriesCollapsed")
+        if isinstance(manifest.get("entriesCollapsed"), list)
+        else []
+    )
+    existing_hosts = manifest.get("hosts") if isinstance(manifest.get("hosts"), list) else []
+    merged_hosts = sorted(
+        {str(host) for host in existing_hosts if str(host)} | set(sorted_unique_hosts(events)),
+        key=lambda value: value.lower(),
+    )
+    manifest = {
+        "schemaVersion": 1,
+        "kind": "bot_errors_storm_collapse",
+        "createdAt": manifest.get("createdAt") or now_iso(),
+        "updatedAt": now_iso(),
+        "digestId": digest_id,
+        "fingerprint": fingerprint_hash,
+        "windowStartEpoch": bucket_start,
+        "windowEndEpoch": bucket_end,
+        "affectedHosts": len(merged_hosts),
+        "hosts": merged_hosts,
+        "entries": merge_manifest_entries(existing_entries, additions),
+    }
+    atomic_write_json(manifest_path, manifest)
+
+    known_digest_path = find_event_path_by_id(
+        digest_id,
+        paths,
+        ("outbox", "processing", "sent", "suppressed", "quarantine"),
+    )
+    digest = storm_digest_event(
+        paths, fingerprint, fingerprint_hash, bucket_start, bucket_end, events, manifest_path
+    )
+    digest_path = known_digest_path or storm_digest_outbox_path(paths, digest_id, str(digest.get("source")), bucket_start)
+    if known_digest_path is None:
+        atomic_write_json(digest_path, digest)
+        append_dispatch_log(paths, {
+            "type": "storm_digest_queued",
+            "digestId": digest.get("id"),
+            "digestPath": str(digest_path),
+            "fingerprint": fingerprint_hash,
+            "affectedHosts": len(sorted_unique_hosts(events)),
+            "collapsedEvents": len(events),
+            "manifest": str(manifest_path),
+        })
+    else:
+        append_dispatch_log(paths, {
+            "type": "storm_digest_reused",
+            "digestId": digest_id,
+            "digestPath": str(digest_path),
+            "fingerprint": fingerprint_hash,
+            "manifest": str(manifest_path),
+        })
+    manifest["digestOutboxPath"] = str(digest_path)
+
+    collapsed = 0
+    collapsed_entries: list[dict[str, Any]] = []
+    for path, event in records:
+        if not path.exists():
+            append_dispatch_log(paths, {
+                "type": "storm_collapse_missing_source",
+                "digestId": digest.get("id"),
+                "sourcePath": str(path),
+            })
+            continue
+        event = mark_collapsed(event, str(digest.get("id")), manifest_path)
+        atomic_write_json(path, event)
+        target = paths["storm_collapsed"] / (
+            f"{path.name}.{safe_segment(str(digest.get('id')))}.{int(time.time())}.collapsed"
+        )
+        os.replace(path, target)
+        collapsed += 1
+        collapsed_entries.append({
+            "eventId": event.get("id"),
+            "sourcePath": str(path),
+            "collapsedPath": str(target),
+        })
+        append_dispatch_log(paths, {
+            "type": "storm_collapsed",
+            "eventId": event.get("id"),
+            "digestId": digest.get("id"),
+            "fingerprint": fingerprint_hash,
+            "sourcePath": str(path),
+            "collapsedPath": str(target),
+            "manifest": str(manifest_path),
+        })
+
+    manifest["entriesCollapsed"] = merge_manifest_entries(existing_collapsed, collapsed_entries)
+    atomic_write_json(manifest_path, manifest)
+    return collapsed
+
+
+def collapse_ready_storms(paths: dict[str, Path]) -> int:
+    threshold = storm_threshold()
+    if threshold < 2:
+        return 0
+    window = storm_window_seconds()
+    groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
+    for path in sorted(paths["outbox"].glob("*.json")):
+        if not ready(path, paths["quarantine"]):
+            continue
+        try:
+            event = read_json(path)
+        except Exception:
+            continue
+        if not is_storm_candidate(event):
+            continue
+        fingerprint = storm_fingerprint(event)
+        groups.setdefault(fingerprint, []).append((path, event, created_epoch(event)))
+
+    collapsed = 0
+    for fingerprint, records in groups.items():
+        remaining = sorted(records, key=lambda record: (record[2], str(record[0])))
+        while remaining:
+            collapsed_window = False
+            for index, (_, _, start_epoch) in enumerate(remaining):
+                cluster = [
+                    (path, event, epoch)
+                    for path, event, epoch in remaining[index:]
+                    if start_epoch <= epoch < start_epoch + window
+                ]
+                events = [event for _, event, _ in cluster]
+                if len(sorted_unique_hosts(events)) < threshold:
+                    continue
+                collapsed += collapse_storm_group(
+                    paths,
+                    (fingerprint, start_epoch),
+                    [(path, event) for path, event, _ in cluster],
+                )
+                clustered_paths = {path for path, _, _ in cluster}
+                remaining = [record for record in remaining if record[0] not in clustered_paths]
+                collapsed_window = True
+                break
+            if not collapsed_window:
+                break
+    return collapsed
+
+
 def ready(path: Path, quarantine_dir: Path) -> bool:
     try:
         event = read_json(path)
@@ -1639,7 +2069,7 @@ def remember_known_event(index: dict[str, dict[str, Any]], event: dict[str, Any]
 
 def build_known_event_index(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = {}
-    for key in ("outbox", "processing", "sent", "suppressed", "quarantine"):
+    for key in ("outbox", "processing", "sent", "storm_collapsed", "suppressed", "quarantine"):
         directory = paths[key]
         if not directory.exists():
             continue
@@ -1821,6 +2251,8 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     counts = {
         "outbox": len(list(paths["outbox"].glob("*.json"))),
         "processing": len(list(paths["processing"].glob("*"))),
+        "stormCollapsed": len(list(paths["storm_collapsed"].glob("*"))),
+        "stormManifests": len(list(paths["storm_manifests"].glob("*"))),
         "suppressed": len(list(paths["suppressed"].glob("*"))),
         "quarantine": len(list(paths["quarantine"].glob("*"))),
         "writefail": sum(len(list(path.glob("*.writefail"))) for path in writefail_dirs() if path.exists()),
@@ -1944,6 +2376,7 @@ def run_once(max_events: int) -> dict[str, Any]:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         writefail_recovered = recover_writefail_breadcrumbs(paths)
         reclaimed = reclaim_processing(paths)
+        storm_collapsed = collapse_ready_storms(paths)
         processed = 0
         sent = 0
         suppressed = 0
@@ -2006,6 +2439,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             testLeakDropped=test_leak_dropped,
             reclaimed=reclaimed,
             writefailRecovered=writefail_recovered,
+            stormCollapsed=storm_collapsed,
             lastError=last_error,
         )
         return {
@@ -2018,6 +2452,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             "testLeakDropped": test_leak_dropped,
             "reclaimed": reclaimed,
             "writefailRecovered": writefail_recovered,
+            "stormCollapsed": storm_collapsed,
             "lastError": last_error,
         }
 
