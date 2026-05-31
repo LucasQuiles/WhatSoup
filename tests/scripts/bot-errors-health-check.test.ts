@@ -1,0 +1,434 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+
+let tmpRoot = '';
+
+afterEach(() => {
+  if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
+  tmpRoot = '';
+});
+
+describe('bot-errors-health-check', () => {
+  it('reports missing personal socket configuration instead of treating cwd as a socket', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'missing-routing',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalTools: true,
+          expectPersonalSocket: true,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+        }),
+        BOT_ERRORS_SOCKET_PATH: '',
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('critical');
+    expect(event.evidence).toContain('FAIL personal_socket: <unset> exists=False');
+    expect(event.evidence).toContain('tools personal: FAIL BOT_ERRORS_SOCKET_PATH is not configured');
+  });
+
+  it('raises severity when an expected tool is missing', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_TOOL_NAMES: 'send_message',
+        BOT_ERRORS_REQUIRED_TOOLS: 'send_message,missing_tool',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'tool-test',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      severity: string;
+      summary: string;
+      evidence: string;
+    };
+    expect(event.severity).not.toBe('info');
+    expect(event.summary).toContain('missing required tools missing_tool');
+    expect(event.evidence).toContain('FAIL tools personal');
+    expect(event.evidence).toContain('required_missing=missing_tool');
+  });
+
+  it('raises critical daily health severity when inherited agent plugins are not explicitly covered', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'agent');
+    const claudeDir = join(tmpRoot, '.claude');
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+      enabledPlugins: {
+        'superpowers@superpowers-marketplace': true,
+        'sdlc-os@sdlc-os-dev': false,
+      },
+    }));
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+      type: 'agent',
+      agentOptions: {
+        enabledPlugins: {
+          'superpowers@superpowers-marketplace': true,
+        },
+      },
+    }));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'agent-host',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+          expectPluginInventory: true,
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('critical');
+    expect(event.evidence).toContain('FAIL plugin_coverage agent');
+    expect(event.evidence).toContain('inherited_disabled=sdlc-os@sdlc-os-dev');
+  });
+
+  it('treats omitted enabledPlugins as intentional global inheritance', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'agent');
+    const claudeDir = join(tmpRoot, '.claude');
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
+      enabledPlugins: {
+        'superpowers@superpowers-marketplace': true,
+        'sdlc-os@sdlc-os-dev': true,
+      },
+    }));
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+      type: 'agent',
+      agentOptions: { sessionScope: 'per_chat' },
+    }));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'agent-host',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+          expectPluginInventory: true,
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('info');
+    expect(event.evidence).toContain('plugin_coverage agent: inherits global user_scope_keys=2');
+    expect(event.evidence).not.toContain('FAIL plugin_coverage agent');
+  });
+
+  it('uses macOS log paths for Darwin-origin daily health diagnostics', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_PLATFORM: 'darwin',
+        BOT_ERRORS_DRY_SERVICE_STATUS: 'active',
+        BOT_ERRORS_DRY_TOOL_NAMES: 'send_message,list_chats,search_messages,get_chat,get_group_metadata',
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      diagnostics: { logHints: string[] };
+      platform: string;
+    };
+    expect(event.platform).toBe('darwin');
+    expect(event.diagnostics.logHints).toContain(join(tmpRoot, 'logs/health.out.log'));
+    expect(event.diagnostics.logHints).toContain(join(tmpRoot, 'logs/dispatcher.out.log'));
+    expect(event.diagnostics.logHints.some((hint) => hint.includes('journalctl'))).toBe(false);
+  });
+
+  it('uses local log paths for WSL-origin daily health diagnostics', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_PLATFORM: 'linux',
+        BOT_ERRORS_DRY_PLATFORM_RELEASE: '6.6.87.2-microsoft-standard-WSL2',
+        BOT_ERRORS_DRY_SERVICE_STATUS: 'active',
+        BOT_ERRORS_DRY_TOOL_NAMES: 'send_message,list_chats,search_messages,get_chat,get_group_metadata',
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      diagnostics: { logHints: string[] };
+      platform: string;
+    };
+    expect(event.platform).toBe('linux');
+    expect(event.diagnostics.logHints).toContain(join(tmpRoot, 'logs/health.out.log'));
+    expect(event.diagnostics.logHints).toContain(join(tmpRoot, 'logs/dispatcher.out.log'));
+    expect(event.diagnostics.logHints.some((hint) => hint.includes('journalctl'))).toBe(false);
+  });
+
+  it('does not critical an on-demand MACLAB-style agent when profile says it may be stopped', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'agent');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+      type: 'agent',
+      enabled: true,
+      healthPort: 9,
+    }));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: '',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'relay-only',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          allowUnprofiledInstances: true,
+          instances: [{ name: 'agent', expected: 'on_demand', healthPort: 9 }],
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).not.toBe('critical');
+    expect(event.evidence).toContain('profile: role=relay-only');
+    expect(event.evidence).toContain('personal_socket: skipped by health profile');
+    expect(event.evidence).toContain('tools personal: skipped by health profile');
+    expect(event.evidence).toContain('health agent: on_demand_ok down http://127.0.0.1:9/health');
+  });
+
+  it('raises critical daily health severity when disk free space is below threshold', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(128 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'no-bot',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('critical');
+    expect(event.evidence).toContain('FAIL disk');
+    expect(event.evidence).toContain('free_bytes=134217728');
+  });
+
+  it('raises critical daily health severity when clock offset exceeds threshold', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_CLOCK_OFFSET_MS: '600000',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'no-bot',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('critical');
+    expect(event.evidence).toContain('FAIL clock: status=synced offset_ms=600000.0');
+  });
+
+  it('graces a stale dispatcher heartbeat when service uptime is inside restart grace', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const state = join(tmpRoot, 'dispatcher-state.json');
+    const socket = join(tmpRoot, 'whatsoup.sock');
+    writeFileSync(state, JSON.stringify({ time: new Date().toISOString() }));
+    writeFileSync(socket, '');
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(state, old, old);
+
+    const output = execFileSync('python3', [
+      'deploy/scripts/bot-errors-health-check.py',
+      '--deadman',
+      '--max-state-age',
+      '30',
+      '--restart-grace',
+      '30',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_SOCKET_PATH: socket,
+        BOT_ERRORS_DRY_SERVICE_STATUS: 'active',
+        BOT_ERRORS_DRY_SERVICE_UPTIME_SECONDS: '2',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(output).toContain('deadman grace ok');
+    expect(output).toContain('service_uptime_seconds=2');
+  });
+
+  it('graces a transitional service state using systemd state-change age', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const state = join(tmpRoot, 'dispatcher-state.json');
+    const socket = join(tmpRoot, 'whatsoup.sock');
+    writeFileSync(state, JSON.stringify({ time: new Date().toISOString() }));
+    writeFileSync(socket, '');
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(state, old, old);
+
+    const output = execFileSync('python3', [
+      'deploy/scripts/bot-errors-health-check.py',
+      '--deadman',
+      '--max-state-age',
+      '30',
+      '--restart-grace',
+      '30',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_SOCKET_PATH: socket,
+        BOT_ERRORS_DRY_SERVICE_STATUS: 'activating',
+        BOT_ERRORS_DRY_SERVICE_STATE_CHANGE_AGE_SECONDS: '2',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(output).toContain('deadman grace ok');
+    expect(output).toContain('service_state_change_age_seconds=2');
+  });
+});
