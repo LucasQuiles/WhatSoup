@@ -82,6 +82,138 @@ print(target)
 """
 
 
+REMOTE_WRITEFAIL_CLAIM_SCRIPT = r"""
+import json, os, re, sys, time
+from pathlib import Path
+
+root = Path(sys.argv[1]).expanduser()
+limit = int(sys.argv[2])
+lease_seconds = int(sys.argv[3])
+
+def unique(paths):
+    result = []
+    seen = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+def safe(value):
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value).strip("_")
+    return (cleaned or "unknown")[:80]
+
+def private_dir(candidates):
+    for path in candidates:
+        try:
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                path.chmod(0o700)
+            except OSError:
+                pass
+            return path
+        except OSError:
+            continue
+    raise RuntimeError("no writable writefail processing dir")
+
+override = os.environ.get("BOT_ERRORS_WRITEFAIL_DIR")
+sources = []
+if override:
+    sources.append(Path(override).expanduser())
+sources.append(root / "writefail")
+tmpdir = Path(os.environ.get("TMPDIR", "/tmp")).expanduser()
+sources.append(tmpdir / "bot-errors-writefail")
+sources.append(Path("/tmp") / "bot-errors-writefail")
+sources.append(Path.home() / ".bot-errors-writefail")
+sources = unique(sources)
+
+processing = private_dir([
+    root / "relay-writefail-processing",
+    Path.home() / ".bot-errors-writefail-relay-processing",
+    Path("/tmp") / f"bot-errors-writefail-relay-processing-{os.getuid()}",
+])
+
+now = time.time()
+count = 0
+for claim in sorted(processing.glob("*.relay-writefail")):
+    try:
+        if now - claim.stat().st_mtime <= lease_seconds:
+            continue
+        payload = claim.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        continue
+    print(json.dumps({
+        "kind": "writefail",
+        "name": claim.name,
+        "claim": str(claim),
+        "sourceDir": str(processing),
+        "payload": payload,
+    }, sort_keys=True))
+    count += 1
+    if count >= limit:
+        raise SystemExit(0)
+
+for source in sources:
+    if count >= limit:
+        break
+    if not source.exists():
+        continue
+    for path in sorted(source.glob("*.writefail")):
+        if count >= limit:
+            break
+        claim = processing / f"{safe(source.name)}.{safe(path.name)}.{os.getpid()}.relay-writefail"
+        try:
+            os.replace(path, claim)
+            payload = claim.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        print(json.dumps({
+            "kind": "writefail",
+            "name": path.name,
+            "claim": str(claim),
+            "sourceDir": str(source),
+            "payload": payload,
+        }, sort_keys=True))
+        count += 1
+"""
+
+
+REMOTE_WRITEFAIL_ACK_SCRIPT = r"""
+import os, re, sys, time
+from pathlib import Path
+
+claim = Path(sys.argv[1])
+root = Path(sys.argv[2]).expanduser()
+action = sys.argv[3]
+
+def safe(value):
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value).strip("_")
+    return (cleaned or "unknown")[:80]
+
+if action == "ack":
+    try:
+        target_dir = root / "writefail-relayed"
+        target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = target_dir / f"{safe(claim.name)}.{int(time.time())}.relayed"
+        os.replace(claim, target)
+        print(target)
+    except OSError:
+        claim.unlink(missing_ok=True)
+        print("deleted")
+else:
+    target_dir = root / "writefail"
+    target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    base = claim.name.split(".writefail.", 1)[0] + ".writefail" if ".writefail." in claim.name else claim.name
+    target = target_dir / safe(base)
+    if target.exists():
+        target = target_dir / f"{int(time.time())}.{safe(base)}"
+    os.replace(claim, target)
+    print(target)
+"""
+
+
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -402,6 +534,21 @@ def remote_ack(host: str, claim: str, remote_root: str, action: str, timeout: in
     return proc.stdout.strip()
 
 
+def remote_writefail_ack(host: str, claim: str, remote_root: str, action: str, timeout: int) -> str:
+    proc = subprocess.run(
+        remote_python_command(host, [claim, remote_root, action]),
+        input=REMOTE_WRITEFAIL_ACK_SCRIPT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh writefail ack {host} failed rc={proc.returncode}: {proc.stderr.strip()[:500]}")
+    return proc.stdout.strip()
+
+
 def local_outbox_path(event: dict[str, Any], remote_host: str) -> Path:
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", state_root() / "outbox"))
     ensure_private_dir(outbox)
@@ -417,15 +564,120 @@ def local_outbox_path(event: dict[str, Any], remote_host: str) -> Path:
     return outbox / filename
 
 
+def local_record_event_id(path: Path) -> str | None:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    if isinstance(loaded.get("id"), str):
+        return loaded["id"]
+    event = loaded.get("event")
+    if isinstance(event, dict) and isinstance(event.get("id"), str):
+        return event["id"]
+    return None
+
+
 def local_event_exists(event_id: str) -> bool:
     if not event_id:
         return False
     root = state_root()
-    pattern = f"*{safe_segment(event_id)}*"
-    for child in ("outbox", "processing", "sent"):
-        if any((root / child).glob(pattern)):
-            return True
+    for child in ("outbox", "processing", "sent", "suppressed", "writefail", "writefail-recovered"):
+        directory = root / child
+        if not directory.exists():
+            continue
+        for path in directory.glob("*"):
+            if path.is_file() and local_record_event_id(path) == event_id:
+                return True
     return False
+
+
+def safe_child_path(directory: Path, name: str) -> Path:
+    ensure_private_dir(directory)
+    target = directory / safe_segment(name)
+    if target.resolve().parent != directory.resolve():
+        raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
+    if target.exists():
+        stem = safe_segment(name)
+        target = directory / f"{int(time.time())}.{os.getpid()}.{stem}"
+    return target
+
+
+def local_writefail_path(remote_host: str, event_id: str) -> Path:
+    stamp = now_iso().replace("-", "").replace(":", "")
+    name = f"{stamp}.harvest-{safe_segment(remote_host)}.{safe_segment(event_id)}.writefail"
+    return safe_child_path(state_root() / "writefail", name)
+
+
+def local_writefail_quarantine_path(remote_host: str, record: dict[str, Any]) -> Path:
+    stamp = now_iso().replace("-", "").replace(":", "")
+    name = f"{stamp}.harvest-{safe_segment(remote_host)}.{safe_segment(str(record.get('name') or 'poison'))}.poison"
+    return safe_child_path(state_root() / "writefail-harvest-quarantine", name)
+
+
+def write_harvest_quarantine(remote_host: str, remote_root: str, record: dict[str, Any], reason: str) -> Path:
+    path = local_writefail_quarantine_path(remote_host, record)
+    payload = {
+        "schemaVersion": 1,
+        "kind": "writefail_harvest_poison",
+        "remoteHost": remote_host,
+        "remoteRoot": remote_root,
+        "remoteClaim": record.get("claim"),
+        "remoteName": record.get("name"),
+        "sourceDir": record.get("sourceDir"),
+        "reason": reason,
+        "payload": str(record.get("payload") or "")[:20000],
+        "quarantinedAt": now_iso(),
+    }
+    atomic_write_json(path, payload)
+    return path
+
+
+def relay_writefail(remote_host: str, remote_root: str, record: dict[str, Any]) -> tuple[Path, str]:
+    try:
+        crumb = json.loads(record["payload"])
+    except Exception as exc:
+        path = write_harvest_quarantine(remote_host, remote_root, record, f"invalid JSON: {exc}")
+        append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": str(exc)})
+        return path, "poison"
+    if not isinstance(crumb, dict):
+        path = write_harvest_quarantine(remote_host, remote_root, record, "breadcrumb root is not an object")
+        append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": "root"})
+        return path, "poison"
+    event = crumb.get("event")
+    if crumb.get("kind") != "outbox_write_failure" or not isinstance(event, dict) or not isinstance(event.get("id"), str):
+        path = write_harvest_quarantine(remote_host, remote_root, record, "missing outbox_write_failure event.id")
+        append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": "schema"})
+        return path, "poison"
+    event_id = str(event["id"])
+    if local_event_exists(event_id):
+        append_log({
+            "type": "writefail_duplicate_already_local",
+            "remote": remote_host,
+            "eventId": event_id,
+            "remoteClaim": record.get("claim"),
+        })
+        return state_root() / "writefail-recovered" / f"existing-{safe_segment(event_id)}", "duplicate"
+    crumb["harvest"] = {
+        "fromHost": remote_host,
+        "fromRoot": remote_root,
+        "fromDir": record.get("sourceDir"),
+        "remoteClaim": record.get("claim"),
+        "remoteName": record.get("name"),
+        "collectorHost": socket.gethostname(),
+        "harvestedAt": now_iso(),
+    }
+    path = local_writefail_path(remote_host, event_id)
+    atomic_write_json(path, crumb)
+    append_log({
+        "type": "writefail_harvested",
+        "remote": remote_host,
+        "eventId": event_id,
+        "remoteClaim": record.get("claim"),
+        "localPath": str(path),
+    })
+    return path, "harvested"
 
 
 def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> Path:
@@ -464,9 +716,13 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
     prune_state_to_configured_remotes(state, remotes)
     remote_state = state.setdefault("remotes", {})
     processed = 0
+    writefail_harvested = 0
+    writefail_duplicates = 0
+    writefail_poison = 0
     failed = 0
     for remote in remotes:
         host, remote_root = parse_remote(remote)
+        outbox_claim_failed = False
         try:
             records = ssh_json_lines(host, REMOTE_CLAIM_SCRIPT, [remote_root, str(max_events), str(lease_seconds)], timeout)
             remote_state.setdefault(remote, {})["lastSuccessAt"] = int(time.time())
@@ -489,6 +745,7 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
         except Exception as exc:  # noqa: BLE001 - collector must keep other remotes alive.
             failed += 1
             error = str(exc)
+            outbox_claim_failed = True
             remote_state.setdefault(remote, {})["lastError"] = error
             append_log({"type": "remote_claim_failed", "remote": remote, "error": error})
             enqueue_meta_alert(
@@ -499,7 +756,35 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                 state,
                 alert_cooldown,
             )
-            continue
+            records = []
+        try:
+            writefail_records = ssh_json_lines(
+                host,
+                REMOTE_WRITEFAIL_CLAIM_SCRIPT,
+                [remote_root, str(max_events), str(lease_seconds)],
+                timeout,
+            )
+            enqueue_meta_recovery(
+                remote,
+                "remote-writefail-harvest-failed",
+                f"BOT ERRORS collector remote writefail harvest recovered: {remote}",
+                f"remote={remote}\nremote_root={remote_root}\nharvest_status=success",
+                state,
+            )
+        except Exception as exc:  # noqa: BLE001 - outbox relay must not be blocked by B6 harvest.
+            failed += 1
+            writefail_records = []
+            error = str(exc)
+            append_log({"type": "remote_writefail_claim_failed", "remote": remote, "error": error})
+            if not outbox_claim_failed:
+                enqueue_meta_alert(
+                    remote,
+                    "remote-writefail-harvest-failed",
+                    f"BOT ERRORS collector cannot claim remote writefail crumbs: {remote}",
+                    f"remote={remote}\nremote_root={remote_root}\nerror={error}\ncollector_log={state_root() / 'logs/collector.jsonl'}",
+                    state,
+                    alert_cooldown,
+                )
         for record in records:
             try:
                 local_path = relay_event(host, remote_root, record)
@@ -519,6 +804,68 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                 except Exception as ack_exc:  # noqa: BLE001
                     append_log({"type": "remote_requeue_failed", "remote": remote, "claim": record.get("claim"), "error": str(ack_exc)})
                 append_log({"type": "relay_failed", "remote": remote, "claim": record.get("claim"), "error": str(exc)})
+        for record in writefail_records:
+            try:
+                local_path, status = relay_writefail(host, remote_root, record)
+                if status == "poison":
+                    writefail_poison += 1
+                    remote_writefail_ack(host, str(record["claim"]), remote_root, "ack", timeout)
+                    append_log({
+                        "type": "writefail_harvest_poison_acked",
+                        "remote": remote,
+                        "remoteClaim": record["claim"],
+                        "localPath": str(local_path),
+                    })
+                elif status == "duplicate":
+                    writefail_duplicates += 1
+                    try:
+                        ack_path = remote_writefail_ack(host, str(record["claim"]), remote_root, "ack", timeout)
+                        append_log({
+                            "type": "writefail_harvest_duplicate_acked",
+                            "remote": remote,
+                            "remoteClaim": record["claim"],
+                            "remoteAckPath": ack_path,
+                            "localPath": str(local_path),
+                        })
+                    except Exception as ack_exc:  # noqa: BLE001 - duplicate is already safe locally.
+                        append_log({
+                            "type": "writefail_harvest_duplicate_ack_failed",
+                            "remote": remote,
+                            "remoteClaim": record.get("claim"),
+                            "error": str(ack_exc),
+                        })
+                else:
+                    writefail_harvested += 1
+                    try:
+                        ack_path = remote_writefail_ack(host, str(record["claim"]), remote_root, "ack", timeout)
+                        append_log({
+                            "type": "writefail_harvest_acked",
+                            "remote": remote,
+                            "remoteClaim": record["claim"],
+                            "remoteAckPath": ack_path,
+                            "localPath": str(local_path),
+                        })
+                    except Exception as ack_exc:  # noqa: BLE001 - exact-id dedup makes retry safe.
+                        append_log({
+                            "type": "writefail_harvest_ack_failed",
+                            "remote": remote,
+                            "remoteClaim": record.get("claim"),
+                            "localPath": str(local_path),
+                            "error": str(ack_exc),
+                        })
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                append_log({"type": "writefail_harvest_failed", "remote": remote, "claim": record.get("claim"), "error": str(exc)})
+                enqueue_meta_alert(
+                    remote,
+                    "remote-writefail-harvest-failed",
+                    f"BOT ERRORS collector cannot harvest remote writefail: {remote}",
+                    f"remote={remote}\nremote_root={remote_root}\nerror={exc}\ncollector_log={state_root() / 'logs/collector.jsonl'}",
+                    state,
+                    alert_cooldown,
+                )
+        if outbox_claim_failed:
+            continue
         last_success = int(remote_state.get(remote, {}).get("lastSuccessAt") or 0)
         age = int(time.time()) - last_success if last_success else remote_sla + 1
         if age > remote_sla:
@@ -531,7 +878,13 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                 alert_cooldown,
             )
     save_state(state)
-    return {"processed": processed, "failed": failed}
+    return {
+        "processed": processed,
+        "writefailHarvested": writefail_harvested,
+        "writefailDuplicates": writefail_duplicates,
+        "writefailPoison": writefail_poison,
+        "failed": failed,
+    }
 
 
 def run_daemon(remotes: list[str], max_events: int, interval: int, timeout: int, lease_seconds: int, remote_sla: int, alert_cooldown: int) -> None:

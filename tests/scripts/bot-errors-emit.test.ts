@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -207,5 +207,49 @@ describe('bot-errors-emit', () => {
     expect(crumb.event).toMatchObject({ instance: 'ana-bot', severity: 'critical' });
     expect(crumb.event.evidence).toContain('[REDACTED PHONE]');
     expect(crumb.event.evidence).not.toContain('867-5309');
+  });
+
+  it('prefers the collector-visible home writefail fallback before TMPDIR', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
+    const roParent = join(tmpRoot, 'ro-parent');
+    const home = join(tmpRoot, 'home');
+    const writerTmp = join(tmpRoot, 'launchd-tmp');
+    mkdirSync(roParent, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    mkdirSync(writerTmp, { recursive: true });
+    chmodSync(roParent, 0o500);
+
+    let exitCode = 0;
+    try {
+      execFileSync('python3', [
+        'deploy/scripts/bot-errors-emit.py',
+        '--instance',
+        'ana-bot',
+        '--source',
+        'writefail-probe',
+        '--summary',
+        'should choose home fallback',
+      ], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          TMPDIR: writerTmp,
+          BOT_ERRORS_STATE_DIR: join(roParent, 'state'),
+          BOT_ERRORS_OUTBOX_DIR: join(roParent, 'outbox'),
+        },
+        encoding: 'utf8',
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+    } catch (err: any) {
+      exitCode = err.status ?? 1;
+    } finally {
+      chmodSync(roParent, 0o700);
+    }
+
+    expect(exitCode).not.toBe(0);
+    expect(readdirSync(join(home, '.bot-errors-writefail')).filter((f) => f.endsWith('.writefail'))).toHaveLength(1);
+    const tmpFallback = join(writerTmp, 'bot-errors-writefail');
+    expect(existsSync(tmpFallback) ? readdirSync(tmpFallback).filter((f) => f.endsWith('.writefail')) : []).toHaveLength(0);
   });
 });

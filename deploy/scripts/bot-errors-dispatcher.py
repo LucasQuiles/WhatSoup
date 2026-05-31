@@ -282,6 +282,11 @@ def format_event(event: dict[str, Any]) -> str:
         if isinstance(diagnostics.get("writefailRecovery"), dict)
         else None
     )
+    writefail_harvest = (
+        writefail_recovery.get("harvest")
+        if isinstance(writefail_recovery, dict) and isinstance(writefail_recovery.get("harvest"), dict)
+        else None
+    )
 
     lines = [
         f"{title} - {summary}",
@@ -294,6 +299,8 @@ def format_event(event: dict[str, Any]) -> str:
         event_line(
             "writefail_recovered",
             (
+                f"origin={event.get('machine') or event.get('machineName') or 'unknown'} "
+                f"harvested_from={writefail_harvest.get('fromHost') if writefail_harvest else 'local'} "
                 f"recorded={writefail_recovery.get('recordedAt')} "
                 f"failed_target={writefail_recovery.get('failedTarget')} "
                 f"breadcrumb={writefail_recovery.get('breadcrumb')}"
@@ -536,6 +543,7 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
                 diagnostics["writefailRecovery"] = {
                     "breadcrumb": str(path),
                     "failedTarget": crumb.get("failedTarget"),
+                    "harvest": crumb.get("harvest") if isinstance(crumb.get("harvest"), dict) else None,
                     "reason": crumb.get("reason"),
                     "recordedAt": crumb.get("recordedAt"),
                     "recoveredAt": now_iso(),

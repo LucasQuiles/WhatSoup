@@ -59,8 +59,8 @@ def writefail_dirs() -> list[Path]:
     if override:
         candidates.append(Path(override))
     candidates.append(state_root() / "writefail")
-    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
     candidates.append(Path.home() / ".bot-errors-writefail")
+    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
     # De-dup while preserving order.
     seen: set[str] = set()
     ordered: list[Path] = []
