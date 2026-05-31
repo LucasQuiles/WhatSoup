@@ -23,6 +23,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EMIT="$REPO_ROOT/deploy/scripts/bot-errors-emit.py"
 DISPATCH="$REPO_ROOT/deploy/scripts/bot-errors-dispatcher.py"
+HEARTBEAT="$REPO_ROOT/deploy/scripts/bot-errors-heartbeat-watchdog.py"
 
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/bot-errors-drill.XXXXXX")"
 CAPTURE="$SANDBOX/sent.log"
@@ -56,6 +57,9 @@ assert_not_in() {
 assert_count() {
   local n; n=$(find "$1" -maxdepth 1 -name "$2" 2>/dev/null | wc -l | tr -d ' ')
   if [ "$n" = "$3" ]; then pass "$4 ($n)"; else fail "$4 (expected $3, got $n)"; fi
+}
+assert_missing() {
+  if [ ! -e "$1" ]; then pass "$2"; else fail "$2 (exists: $1)"; fi
 }
 
 reset_sandbox() {
@@ -222,6 +226,27 @@ assert_not_in "$FAKE_PHONE" "$CAPTURE" "phone not leaked (closed in e522e1f)"
 assert_not_in "u:p@host" "$CAPTURE" "url userinfo redacted"
 # Path retention is policy, not a failure — assert it is intentionally kept.
 assert_in "dispatch.jsonl" "$CAPTURE" "diagnostic log path retained (policy)"
+echo
+
+# ── Drill 10: quiet daily-health success is still observable by watchdog
+echo "Drill 10: daily-health info suppression + stale watchdog pairing"
+reset_sandbox
+emit --severity info --instance bot-errors-health --source daily-health \
+  --summary "BOT ERRORS daily health passed" --evidence "machine=mini1 status=ok"
+dispatch_once
+assert_missing "$CAPTURE" "daily-health info does not send to BOT ERRORS"
+assert_count "$BOT_ERRORS_STATE_DIR/suppressed" "*.suppressed" 1 "daily-health info retained as suppressed disposition"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 0 "daily-health info not marked sent"
+HEARTBEAT_OK="$SANDBOX/heartbeat-ok.json"
+BOT_ERRORS_WATCHDOG_CHECKS=daily_health python3 "$HEARTBEAT" --once \
+  --max-daily-health-age 999999 > "$HEARTBEAT_OK" 2>&1
+assert_in '"problems": []' "$HEARTBEAT_OK" "suppressed daily-health satisfies heartbeat freshness"
+rm -rf "$BOT_ERRORS_STATE_DIR/suppressed"
+HEARTBEAT_STALE="$SANDBOX/heartbeat-stale.json"
+BOT_ERRORS_WATCHDOG_CHECKS=daily_health python3 "$HEARTBEAT" --once \
+  --max-daily-health-age 1 > "$HEARTBEAT_STALE" 2>&1
+assert_in 'daily_health' "$HEARTBEAT_STALE" "missing daily-health produces stale watchdog problem"
+assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 1 "stale watchdog queues a critical alert"
 echo
 
 echo "──────────────────────────────────────────"

@@ -61,6 +61,7 @@ def state_paths() -> dict[str, Path]:
         "outbox": Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox")),
         "processing": root / "processing",
         "sent": root / "sent",
+        "suppressed": root / "suppressed",
         "quarantine": root / "quarantine",
         "locks": root / "locks",
         "logs": root / "logs",
@@ -78,7 +79,7 @@ def ensure_private_dir(path: Path) -> None:
 
 def setup_dirs() -> dict[str, Path]:
     paths = state_paths()
-    for key in ("root", "outbox", "processing", "sent", "quarantine", "locks", "logs"):
+    for key in ("root", "outbox", "processing", "sent", "suppressed", "quarantine", "locks", "logs"):
         ensure_private_dir(paths[key])
     return paths
 
@@ -330,6 +331,26 @@ def mark_sent(event: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
+def mark_suppressed(event: dict[str, Any], reason: str) -> dict[str, Any]:
+    delivery = event.setdefault("delivery", {})
+    if isinstance(delivery, dict):
+        delivery["status"] = "suppressed"
+        delivery["suppressedAt"] = now_iso()
+        delivery["suppressedReason"] = reason
+        delivery["lastError"] = None
+    return event
+
+
+def should_suppress_send(event: dict[str, Any]) -> str | None:
+    if os.environ.get("BOT_ERRORS_SEND_DAILY_HEALTH_INFO", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return None
+    source = str(event.get("source") or "")
+    severity = str(event.get("severity") or "").lower()
+    if source == "daily-health" and severity == "info":
+        return "daily-health info events are retained for heartbeat freshness but not posted to BOT ERRORS"
+    return None
+
+
 def ready(path: Path, quarantine_dir: Path) -> bool:
     try:
         event = read_json(path)
@@ -416,6 +437,7 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     counts = {
         "outbox": len(list(paths["outbox"].glob("*.json"))),
         "processing": len(list(paths["processing"].glob("*"))),
+        "suppressed": len(list(paths["suppressed"].glob("*"))),
         "quarantine": len(list(paths["quarantine"].glob("*"))),
     }
     state = {
@@ -441,6 +463,24 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         diagnostics["dispatchLog"] = str(paths["logs"] / "dispatch.jsonl")
     event = mark_attempt(event)
     atomic_write_json(claimed, event)
+    suppress_reason = should_suppress_send(event)
+    if suppress_reason:
+        event = mark_suppressed(event, suppress_reason)
+        atomic_write_json(claimed, event)
+        suppressed_name = f"{path.name}.{int(time.time())}.suppressed"
+        suppressed_path = paths["suppressed"] / suppressed_name
+        os.replace(claimed, suppressed_path)
+        append_dispatch_log(paths, {
+            "type": "suppressed",
+            "eventId": event.get("id"),
+            "path": str(suppressed_path),
+            "reason": suppress_reason,
+            "source": event.get("source"),
+            "severity": event.get("severity"),
+            "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
+        })
+        return True, "suppressed"
+
     text = format_event(event)
     try:
         send_whatsapp(text)
@@ -481,6 +521,7 @@ def run_once(max_events: int) -> dict[str, Any]:
         reclaimed = reclaim_processing(paths)
         processed = 0
         sent = 0
+        suppressed = 0
         failed = 0
         last_error = None
         for path in sorted(paths["outbox"].glob("*.json")):
@@ -491,12 +532,31 @@ def run_once(max_events: int) -> dict[str, Any]:
             processed += 1
             ok, detail = process_one(path, paths)
             if ok:
-                sent += 1
+                if detail == "suppressed":
+                    suppressed += 1
+                else:
+                    sent += 1
             else:
                 failed += 1
                 last_error = detail
-        record_state(paths, lastRunAt=now_iso(), processed=processed, sent=sent, failed=failed, reclaimed=reclaimed, lastError=last_error)
-        return {"processed": processed, "sent": sent, "failed": failed, "reclaimed": reclaimed, "lastError": last_error}
+        record_state(
+            paths,
+            lastRunAt=now_iso(),
+            processed=processed,
+            sent=sent,
+            suppressed=suppressed,
+            failed=failed,
+            reclaimed=reclaimed,
+            lastError=last_error,
+        )
+        return {
+            "processed": processed,
+            "sent": sent,
+            "suppressed": suppressed,
+            "failed": failed,
+            "reclaimed": reclaimed,
+            "lastError": last_error,
+        }
 
 
 def run_daemon(interval: int, max_events: int) -> None:

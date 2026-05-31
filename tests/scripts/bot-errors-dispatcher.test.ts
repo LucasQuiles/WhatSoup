@@ -91,6 +91,67 @@ describe('bot-errors-dispatcher', () => {
     expect(rendered).not.toContain('requested_action: Q investigate');
   });
 
+  it('suppresses daily-health info sends with a distinct auditable disposition', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    const sent = join(tmpRoot, 'sent');
+    const suppressed = join(tmpRoot, 'suppressed');
+    writeEvent(tmpRoot, 'info', {
+      id: 'daily-health-ok',
+      source: 'daily-health',
+      instance: 'bot-errors-health',
+      summary: 'BOT ERRORS daily health passed',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 0, suppressed: 1, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "suppressed"');
+    expect(readdirSync(sent)).toHaveLength(0);
+    const suppressedFiles = readdirSync(suppressed);
+    expect(suppressedFiles).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(suppressed, suppressedFiles[0]!), 'utf8')) as {
+      delivery: { attempts: number; status: string; suppressedReason: string };
+    };
+    expect(event.delivery.attempts).toBeGreaterThanOrEqual(1);
+    expect(event.delivery.status).toBe('suppressed');
+    expect(event.delivery.suppressedReason).toContain('daily-health info events');
+  });
+
+  it('still sends daily-health warnings', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    writeEvent(tmpRoot, 'warning', {
+      id: 'daily-health-warning',
+      source: 'daily-health',
+      instance: 'bot-errors-health',
+      summary: 'BOT ERRORS daily health found issues',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, suppressed: 0, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8')).toContain('BOT WARNING - BOT ERRORS daily health found issues');
+  });
+
   it('renders at-sign-bearing diagnostics mention-safely', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');

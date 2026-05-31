@@ -626,7 +626,18 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
                 continue
             if expectation == "blocked":
                 exists = cfg.exists()
-                lines.append(f"WARN config {name}: expected=blocked exists={exists} reason={reason or 'operator approval required'}")
+                service = item.get("service")
+                service_name = str(service) if service else ""
+                status = service_is_active(service_name) if service_name else "not_configured"
+                line = (
+                    f"config {name}: expected=blocked exists={exists} "
+                    f"service_status={status} reason={reason or 'operator approval required'}"
+                )
+                if service_name:
+                    line += f" service={service_name}"
+                if status == "active":
+                    line = f"WARN {line} actual=active"
+                lines.append(line)
                 continue
             if not cfg.exists():
                 lines.append(f"FAIL config {name}: missing {cfg} expected={expectation}")

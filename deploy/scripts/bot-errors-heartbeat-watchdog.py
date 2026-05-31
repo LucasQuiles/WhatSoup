@@ -227,7 +227,7 @@ def daily_health_event_host(path: Path, data: dict[str, Any] | None) -> str | No
 def daily_health_events() -> list[tuple[Path, int, dict[str, Any] | None]]:
     root = state_root()
     events: list[tuple[Path, int, dict[str, Any] | None]] = []
-    for dirname in ("outbox", "processing", "sent", "relayed"):
+    for dirname in ("outbox", "processing", "sent", "suppressed", "relayed"):
         directory = root / dirname
         if not directory.exists():
             continue
