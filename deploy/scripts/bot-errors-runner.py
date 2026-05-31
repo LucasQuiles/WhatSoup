@@ -25,6 +25,11 @@ SECRETISH_ASSIGNMENT = re.compile(
 )
 AUTHORIZATION_BEARER = re.compile(r"\bAuthorization:\s*Bearer\s+[^\s\"',}]+", re.I)
 BEARER_VALUE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+")
+AWS_ACCESS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
+GITHUB_TOKEN = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
+JWT_VALUE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
+PEM_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S)
+URL_USERINFO = re.compile(r"\b(https?://)[^\s/@:]+:[^\s/@]+@", re.I)
 
 
 def now_iso() -> str:
@@ -49,6 +54,11 @@ def ensure_private_dir(path: Path) -> None:
 
 def redact(value: Any) -> str:
     text = "" if value is None else str(value)
+    text = PEM_PRIVATE_KEY.sub("[REDACTED PEM PRIVATE KEY]", text)
+    text = URL_USERINFO.sub(r"\1[REDACTED]@", text)
+    text = AWS_ACCESS_KEY_ID.sub("[REDACTED AWS ACCESS KEY]", text)
+    text = GITHUB_TOKEN.sub("[REDACTED GITHUB TOKEN]", text)
+    text = JWT_VALUE.sub("[REDACTED JWT]", text)
     text = AUTHORIZATION_BEARER.sub("Authorization: Bearer [REDACTED]", text)
     text = SECRETISH_ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}[REDACTED]", text)
     return BEARER_VALUE.sub("Bearer [REDACTED]", text)

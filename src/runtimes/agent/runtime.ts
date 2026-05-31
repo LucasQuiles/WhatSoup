@@ -122,6 +122,9 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
+const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
+const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
+const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
 // Time to wait for an auto-triggered /compact to complete before giving up.
 // A /compact must summarize the whole conversation, so on large contexts it can
 // legitimately take a few minutes; 2 min was too short and produced false
@@ -1105,6 +1108,23 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
   return { category, detail };
 }
 
+function safeAlertSegment(value: string): string {
+  const cleaned = value.trim().replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '');
+  return cleaned.length > 0 ? cleaned.slice(0, 80) : 'unknown';
+}
+
+function alertEvidenceValue(value: string | null | undefined): string {
+  const text = value == null || value.trim() === '' ? 'unknown' : value.trim();
+  return text.replace(/@/g, ' at ');
+}
+
+function alertExcerpt(value: string): string {
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  return cleaned.length > TOOL_FAILURE_ALERT_EXCERPT_CHARS
+    ? `${cleaned.slice(0, TOOL_FAILURE_ALERT_EXCERPT_CHARS - 1)}…`
+    : cleaned;
+}
+
 export class AgentRuntime implements Runtime {
   private static readonly WORKSPACE_IDLE_MS = 30 * 60 * 1000;
   private static readonly WORKSPACE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -1205,6 +1225,7 @@ export class AgentRuntime implements Runtime {
   /** Maps toolScopeKey → (toolId → toolName) so tool_result errors stay isolated per session scope. */
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
+  private recentToolFailureAlerts = new Map<string, number>();
 
   /** Count of swallowed pending_polls persistence failures (persist/remove/rehydrate). Surfaced in health. */
   private pollPersistenceErrors = 0;
@@ -1262,6 +1283,77 @@ export class AgentRuntime implements Runtime {
 
   private clearToolNames(toolScopeKey: string): void {
     this.activeToolNames.delete(toolScopeKey);
+  }
+
+  private maybeEmitToolFailureAlert(args: {
+    chatJid: string | null | undefined;
+    toolId: string;
+    toolName: string;
+    content: string;
+    classification: ToolUpdate;
+    toolScopeKey: string;
+    mapKey?: string;
+  }): void {
+    if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
+
+    const now = Date.now();
+    for (const [key, recordedAt] of this.recentToolFailureAlerts) {
+      if (now - recordedAt > TOOL_FAILURE_ALERT_DEDUP_MS) {
+        this.recentToolFailureAlerts.delete(key);
+      }
+    }
+
+    const provider = this.agentProvider || 'unknown-provider';
+    const source = `runtime-tool-error:${safeAlertSegment(provider)}:${safeAlertSegment(args.toolName)}`;
+    const fingerprint = [
+      this.instanceName,
+      provider,
+      args.toolName,
+      args.classification.category,
+      args.content.replace(/\s+/g, ' ').trim().slice(0, 500),
+    ].join('\n');
+
+    if (this.recentToolFailureAlerts.has(fingerprint)) return;
+    this.recentToolFailureAlerts.set(fingerprint, now);
+    while (this.recentToolFailureAlerts.size > MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS) {
+      const oldest = this.recentToolFailureAlerts.keys().next().value;
+      if (oldest === undefined) break;
+      this.recentToolFailureAlerts.delete(oldest);
+    }
+
+    const evidence = [
+      'runtime_source=src/runtimes/agent/runtime.ts:tool_result',
+      `instance=${alertEvidenceValue(this.instanceName)}`,
+      `provider=${alertEvidenceValue(provider)}`,
+      `session_scope=${this.sessionScope}`,
+      `chat_jid=${alertEvidenceValue(args.chatJid ?? null)}`,
+      `tool_scope_key=${alertEvidenceValue(args.toolScopeKey)}`,
+      `map_key=${alertEvidenceValue(args.mapKey ?? null)}`,
+      `tool_id=${alertEvidenceValue(args.toolId)}`,
+      `tool_name=${alertEvidenceValue(args.toolName)}`,
+      `classification=${args.classification.category}`,
+      `detail=${alertEvidenceValue(args.classification.detail)}`,
+      `cwd=${alertEvidenceValue(this.cwd ?? process.cwd())}`,
+      'error_excerpt:',
+      alertExcerpt(args.content) || 'unknown',
+    ].join('\n');
+
+    try {
+      emitAlert(
+        this.instanceName,
+        source,
+        `Agent tool failure: ${args.toolName}`,
+        evidence,
+      );
+    } catch (err) {
+      log.warn({
+        instance: this.instanceName,
+        provider,
+        toolId: args.toolId,
+        toolName: args.toolName,
+        err: err instanceof Error ? err.message : String(err),
+      }, 'failed to emit BOT ERRORS tool failure alert');
+    }
   }
 
   private beginSilentCompact(scopeKey: string): void {
@@ -2048,8 +2140,12 @@ export class AgentRuntime implements Runtime {
           new URL('.', import.meta.url).pathname,
           '../../../deploy/hooks/poll-interaction-lint.mjs',
         );
-        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath, pollLintHookPath);
-        log.info({ cwd, hookPath, pollLintHookPath }, 'wrote sandbox-policy.json and settings.json');
+        const postToolUseLogHookPath = resolve(
+          new URL('.', import.meta.url).pathname,
+          '../../../deploy/hooks/post-tool-use-log.sh',
+        );
+        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath, pollLintHookPath, postToolUseLogHookPath);
+        log.info({ cwd, hookPath, pollLintHookPath, postToolUseLogHookPath }, 'wrote sandbox-policy.json and settings.json');
       } catch (err) {
         log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
         throw err;
@@ -4190,7 +4286,17 @@ export class AgentRuntime implements Runtime {
           const toolName = toolNames?.get(event.toolId) ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
-          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
+          const classification = classifyToolError(toolName, event.content);
+          queue.enqueueToolUpdate(classification);
+          this.maybeEmitToolFailureAlert({
+            chatJid: queue.targetChatJid,
+            toolId: event.toolId,
+            toolName,
+            content: event.content,
+            classification,
+            toolScopeKey,
+            mapKey,
+          });
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {
@@ -5088,6 +5194,7 @@ export class AgentRuntime implements Runtime {
         // Provision workspace (deterministic rewrite of control files)
         const hookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
         const pollLintHookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/poll-interaction-lint.mjs');
+        const postToolUseLogHookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/post-tool-use-log.sh');
         const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
         const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
         const chatScopedToolNames = this.registry.getChatScopedToolNames();
@@ -5097,6 +5204,7 @@ export class AgentRuntime implements Runtime {
           sandbox: this.sandbox!,
           hookPath,
           pollLintHookPath,
+          postToolUseLogHookPath,
           mcpServerPath,
           sendMediaServerPath,
           chatScopedToolNames,
@@ -5778,7 +5886,16 @@ export class AgentRuntime implements Runtime {
             toolName,
             error: errorPreview,
           }, 'tool error reported by agent');
-          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
+          const classification = classifyToolError(toolName, event.content);
+          queue.enqueueToolUpdate(classification);
+          this.maybeEmitToolFailureAlert({
+            chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
+            toolId: event.toolId,
+            toolName,
+            content: event.content,
+            classification,
+            toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
+          });
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {

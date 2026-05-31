@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""Write a BOT ERRORS event to the local durable outbox."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shlex
+import socket
+import sys
+import time
+import uuid
+from typing import Any
+
+
+SEVERITIES = ("critical", "error", "warning", "info")
+EVENT_TYPES = ("alert", "clear")
+MAX_EVIDENCE_CHARS = 12000
+SECRETISH_ASSIGNMENT = re.compile(
+    r"\b(api[_-]?key|token|secret|password|cookie|credential)\b(\s*[:=]\s*)([\"']?)[^\s\"',}]+",
+    re.I,
+)
+AUTHORIZATION_BEARER = re.compile(r"\bAuthorization:\s*Bearer\s+[^\s\"',}]+", re.I)
+BEARER_VALUE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+")
+AWS_ACCESS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
+GITHUB_TOKEN = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
+JWT_VALUE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
+PEM_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S)
+URL_USERINFO = re.compile(r"\b(https?://)[^\s/@:]+:[^\s/@]+@", re.I)
+
+
+def now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def state_root() -> Path:
+    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
+
+
+def outbox_dir() -> Path:
+    return Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", state_root() / "outbox"))
+
+
+def host_sys_platform() -> str:
+    return os.environ.get("BOT_ERRORS_DRY_SYS_PLATFORM", sys.platform)
+
+
+def host_system() -> str:
+    return os.environ.get("BOT_ERRORS_DRY_PLATFORM_SYSTEM", platform.system())
+
+
+def host_release() -> str:
+    return os.environ.get("BOT_ERRORS_DRY_PLATFORM_RELEASE", platform.release())
+
+
+def is_wsl() -> bool:
+    release = host_release().lower()
+    return host_sys_platform() == "linux" and (
+        "microsoft" in release
+        or "wsl" in release
+        or bool(os.environ.get("WSL_DISTRO_NAME"))
+    )
+
+
+def ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+
+
+def redact(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = PEM_PRIVATE_KEY.sub("[REDACTED PEM PRIVATE KEY]", text)
+    text = URL_USERINFO.sub(r"\1[REDACTED]@", text)
+    text = AWS_ACCESS_KEY_ID.sub("[REDACTED AWS ACCESS KEY]", text)
+    text = GITHUB_TOKEN.sub("[REDACTED GITHUB TOKEN]", text)
+    text = JWT_VALUE.sub("[REDACTED JWT]", text)
+    text = AUTHORIZATION_BEARER.sub("Authorization: Bearer [REDACTED]", text)
+    text = SECRETISH_ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}[REDACTED]", text)
+    return BEARER_VALUE.sub("Bearer [REDACTED]", text)
+
+
+def truncate(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 32] + f"\n[truncated {len(value) - limit + 32} chars]"
+
+
+def safe_segment(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    return (cleaned or "unknown")[:80]
+
+
+def env_keys() -> list[str]:
+    patterns = (
+        re.compile(r"^LOG_DIR$"),
+        re.compile(r"^NODE_ENV$"),
+        re.compile(r"^WHATSOUP_"),
+        re.compile(r"^BOT_ERRORS_"),
+        re.compile(r"^XDG_"),
+        re.compile(r"^SYSTEMD_"),
+        re.compile(r"^INVOCATION_ID$"),
+    )
+    return sorted(
+        key for key in os.environ
+        if any(pattern.search(key) for pattern in patterns)
+        and not re.search(r"TOKEN|SECRET|KEY|PASSWORD|COOKIE|CREDENTIAL", key, re.I)
+    )
+
+
+def log_hints(instance: str, explicit: list[str]) -> list[str]:
+    hints = [hint for hint in explicit if hint]
+    log_dir = os.environ.get("LOG_DIR")
+    if log_dir:
+        hints.append(str(Path(log_dir) / "whatsoup.log"))
+    if instance:
+        if host_sys_platform() == "darwin":
+            hints.append(f"launchctl print gui/$(id -u)/{instance}")
+            hints.append(f"log show --last 30m --predicate 'process == \"{instance}\"'")
+        elif is_wsl():
+            hints.append(f"ps -eo pid,etime,cmd | grep -F {shlex.quote(instance)}")
+            hints.append(str(Path.home() / ".claude/observability/runtime"))
+            hints.append(str(Path.home() / ".claude/observability/sessions"))
+        else:
+            hints.append(f"journalctl --user -u {instance}.service --since '30 minutes ago'")
+            hints.append(f"journalctl --user -u whatsoup@{instance}.service --since '30 minutes ago'")
+    if host_sys_platform() == "darwin":
+        hints.append(str(state_root() / "logs/dispatcher.out.log"))
+        hints.append(str(state_root() / "logs/collector.jsonl"))
+    elif is_wsl():
+        hints.append(str(state_root() / "outbox"))
+        hints.append(str(state_root() / "relayed"))
+    else:
+        hints.append("journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'")
+    return list(dict.fromkeys(hints))[:8]
+
+
+def read_evidence(args: argparse.Namespace) -> str:
+    parts = [args.evidence or ""]
+    for path in args.evidence_file or []:
+        try:
+            parts.append(Path(path).read_text(encoding="utf-8", errors="replace"))
+        except Exception as exc:  # noqa: BLE001 - diagnostics must survive bad evidence paths.
+            parts.append(f"[failed to read evidence file {path}: {exc}]")
+    return truncate(redact("\n".join(part for part in parts if part)), MAX_EVIDENCE_CHARS)
+
+
+def parse_diagnostics(values: list[str] | None) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values or []:
+        key, sep, val = value.partition("=")
+        if not sep:
+            parsed[safe_segment(key)] = ""
+        else:
+            parsed[safe_segment(key)] = redact(val)
+    return parsed
+
+
+def build_event(args: argparse.Namespace) -> dict[str, Any]:
+    event_type = args.event_type
+    severity = args.severity or ("info" if event_type == "clear" else "critical")
+    instance = args.instance.strip() or "unknown"
+    source = args.source.strip() or "unknown"
+    created = now_iso()
+    event_id = args.event_id or str(uuid.uuid4())
+    return {
+        "schemaVersion": 1,
+        "id": event_id,
+        "eventType": event_type,
+        "severity": severity,
+        "createdAt": created,
+        "machine": socket.gethostname(),
+        "platform": f"{host_system()} {host_release()}",
+        "instance": instance,
+        "source": source,
+        "summary": truncate(redact(args.summary.strip() or f"{event_type} event from {source}"), 500),
+        "evidence": read_evidence(args),
+        "process": {
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "cwd": os.getcwd(),
+            "argv": [redact(part) for part in sys.argv],
+            "execPath": sys.executable,
+            "python": platform.python_version(),
+        },
+        "runtime": {
+            "envKeys": env_keys(),
+            "invocationId": os.environ.get("INVOCATION_ID"),
+            "systemdExecPid": os.environ.get("SYSTEMD_EXEC_PID"),
+        },
+        "diagnostics": {
+            "logHints": log_hints(instance, args.log_hint or []),
+            "queue": str(outbox_dir()),
+            **parse_diagnostics(args.diagnostic),
+        },
+        "delivery": {
+            "attempts": 0,
+            "status": "queued",
+            "nextAttemptAtEpoch": 0,
+            "lastError": None,
+        },
+    }
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        try:
+            dir_fd = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def write_event(event: dict[str, Any]) -> Path:
+    outbox = outbox_dir()
+    ensure_private_dir(outbox)
+    created = str(event["createdAt"]).replace("-", "").replace(":", "")
+    file_name = f"{created}.{safe_segment(str(event['instance']))}.{safe_segment(str(event['source']))}.{event['id']}.json"
+    final = outbox / file_name
+    atomic_write_json(final, event)
+    return final
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Enqueue a BOT ERRORS event")
+    parser.add_argument("--event-type", choices=EVENT_TYPES, default="alert")
+    parser.add_argument("--event-id")
+    parser.add_argument("--severity", choices=SEVERITIES)
+    parser.add_argument("--instance", required=True)
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--summary", required=True)
+    parser.add_argument("--evidence", default="")
+    parser.add_argument("--evidence-file", action="append")
+    parser.add_argument("--log-hint", action="append")
+    parser.add_argument("--diagnostic", action="append", help="Extra diagnostic key=value; may be repeated")
+    parser.add_argument("--print-path", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    path = write_event(build_event(args))
+    if args.print_path:
+        print(path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
