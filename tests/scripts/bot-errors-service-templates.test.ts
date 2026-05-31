@@ -2,11 +2,19 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const serviceTemplates = [
+  'deploy/bot-errors-collector.service',
   'deploy/bot-errors-dispatcher.service',
   'deploy/bot-errors-health-check.service',
+  'deploy/bot-errors-heartbeat-watchdog.service',
   'deploy/bot-errors-deadman.service',
   'deploy/bot-errors-q-loop.service',
 ];
+const timerTemplates = [
+  'deploy/bot-errors-deadman.timer',
+  'deploy/bot-errors-health-check.timer',
+  'deploy/bot-errors-heartbeat-watchdog.timer',
+];
+const unitTemplates = [...serviceTemplates, ...timerTemplates];
 const PRIVATE_SOCKET_SEGMENT = ['instances', 'personal', 'whatsoup.sock'].join('/');
 
 describe('BOT ERRORS service templates', () => {
@@ -18,7 +26,7 @@ describe('BOT ERRORS service templates', () => {
   });
 
   it('keep deploy-specific identifiers out of tracked unit files', () => {
-    for (const file of serviceTemplates) {
+    for (const file of unitTemplates) {
       const text = readFileSync(file, 'utf8');
       expect(text).not.toContain('120363');
       expect(text).not.toMatch(/\/home\/[A-Za-z0-9._-]+\//);
