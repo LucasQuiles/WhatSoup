@@ -322,14 +322,26 @@ def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) ->
     stamp = now_iso().replace("-", "").replace(":", "")
     name = f"{stamp}.{safe_segment(str(instance))}.{safe_segment(str(event_id))}.writefail"
     for base in writefail_dirs():
+        tmp_path: Path | None = None
         try:
             base.mkdir(parents=True, exist_ok=True, mode=0o700)
             path = base / name
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd, "wb") as handle:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+            try:
+                dir_fd = os.open(base, os.O_DIRECTORY | os.O_RDONLY)
+            except OSError:
+                dir_fd = None
+            if dir_fd is not None:
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             try:
                 sys.stderr.write(f"[bot-errors] lost-alert breadcrumb written: {path}\n")
                 sys.stderr.flush()
@@ -337,6 +349,11 @@ def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) ->
                 pass
             return path
         except Exception:  # noqa: BLE001 - try the next fallback location.
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
             continue
 
     # Trace 2 failed everywhere — last resort: dump the event to stderr so it is at

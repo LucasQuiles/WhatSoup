@@ -63,6 +63,8 @@ def state_paths() -> dict[str, Path]:
         "sent": root / "sent",
         "suppressed": root / "suppressed",
         "quarantine": root / "quarantine",
+        "writefail_recovered": root / "writefail-recovered",
+        "writefail_quarantine": root / "writefail-quarantine",
         "locks": root / "locks",
         "logs": root / "logs",
         "state": root / "dispatcher-state.json",
@@ -79,7 +81,18 @@ def ensure_private_dir(path: Path) -> None:
 
 def setup_dirs() -> dict[str, Path]:
     paths = state_paths()
-    for key in ("root", "outbox", "processing", "sent", "suppressed", "quarantine", "locks", "logs"):
+    for key in (
+        "root",
+        "outbox",
+        "processing",
+        "sent",
+        "suppressed",
+        "quarantine",
+        "writefail_recovered",
+        "writefail_quarantine",
+        "locks",
+        "logs",
+    ):
         ensure_private_dir(paths[key])
     return paths
 
@@ -123,6 +136,11 @@ def truncate(value: Any, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 32] + f"\n[truncated {len(text) - limit + 32} chars]"
+
+
+def safe_segment(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    return (cleaned or "unknown")[:80]
 
 
 def redact(value: Any) -> str:
@@ -259,6 +277,11 @@ def format_event(event: dict[str, Any]) -> str:
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
     log_hints = diagnostics.get("logHints") if isinstance(diagnostics.get("logHints"), list) else []
+    writefail_recovery = (
+        diagnostics.get("writefailRecovery")
+        if isinstance(diagnostics.get("writefailRecovery"), dict)
+        else None
+    )
 
     lines = [
         f"{title} - {summary}",
@@ -268,6 +291,17 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("source", event.get("source")),
         event_line("event", event.get("id")),
         event_line("created", event.get("createdAt")),
+        event_line(
+            "writefail_recovered",
+            (
+                f"recorded={writefail_recovery.get('recordedAt')} "
+                f"failed_target={writefail_recovery.get('failedTarget')} "
+                f"breadcrumb={writefail_recovery.get('breadcrumb')}"
+            )
+            if writefail_recovery
+            else None,
+            900,
+        ),
         event_line("dispatcher_attempts", delivery.get("attempts")),
         event_line("platform", event.get("platform")),
         event_line("pid", process_info.get("pid")),
@@ -341,6 +375,10 @@ def mark_suppressed(event: dict[str, Any], reason: str) -> dict[str, Any]:
     return event
 
 
+def reset_delivery(event: dict[str, Any]) -> None:
+    event["delivery"] = {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None}
+
+
 def should_suppress_send(event: dict[str, Any]) -> str | None:
     if os.environ.get("BOT_ERRORS_SEND_DAILY_HEALTH_INFO", "").strip().lower() in {"1", "true", "yes", "on"}:
         return None
@@ -403,6 +441,150 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
     return dest
 
 
+def writefail_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    override = os.environ.get("BOT_ERRORS_WRITEFAIL_DIR")
+    if override:
+        candidates.append(Path(override))
+    candidates.append(state_root() / "writefail")
+    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
+    candidates.append(Path.home() / ".bot-errors-writefail")
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
+
+
+def event_already_known(event_id: str, paths: dict[str, Path]) -> bool:
+    if not event_id:
+        return False
+    for key in ("outbox", "processing", "sent", "suppressed", "quarantine"):
+        directory = paths[key]
+        if not directory.exists():
+            continue
+        for path in directory.glob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if read_json(path).get("id") == event_id:
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def outbox_path_for_event(event: dict[str, Any], paths: dict[str, Path]) -> Path:
+    created = str(event.get("createdAt") or now_iso()).replace("-", "").replace(":", "")
+    instance = safe_segment(str(event.get("instance") or "unknown"))
+    source = safe_segment(str(event.get("source") or "unknown"))
+    event_id = safe_segment(str(event.get("id") or f"recovered-{int(time.time())}-{os.getpid()}"))
+    path = paths["outbox"] / f"{created}.{instance}.{source}.{event_id}.json"
+    if path.exists():
+        path = paths["outbox"] / f"{created}.{instance}.{source}.{event_id}.{int(time.time())}.{os.getpid()}.json"
+    return path
+
+
+def move_writefail(path: Path, target_dir: Path, suffix: str) -> Path:
+    ensure_private_dir(target_dir)
+    target = target_dir / f"{path.name}.{int(time.time())}.{suffix}"
+    if target.exists():
+        target = target_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{suffix}"
+    shutil.move(str(path), str(target))
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+    return target
+
+
+def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> int:
+    recovered = 0
+    scanned = 0
+    for base in writefail_dirs():
+        if not base.exists():
+            continue
+        for path in sorted(base.glob("*.writefail")):
+            if scanned >= limit:
+                return recovered
+            scanned += 1
+            try:
+                crumb = read_json(path)
+                if crumb.get("kind") != "outbox_write_failure":
+                    raise ValueError("writefail breadcrumb kind is not outbox_write_failure")
+                event = crumb.get("event")
+                if not isinstance(event, dict):
+                    raise ValueError("writefail breadcrumb missing event object")
+                event_id = str(event.get("id") or "")
+                if event_already_known(event_id, paths):
+                    duplicate = move_writefail(path, paths["writefail_recovered"], "duplicate")
+                    append_dispatch_log(paths, {
+                        "type": "writefail_duplicate",
+                        "eventId": event_id,
+                        "breadcrumb": str(path),
+                        "path": str(duplicate),
+                    })
+                    continue
+                diagnostics = event.setdefault("diagnostics", {})
+                if not isinstance(diagnostics, dict):
+                    diagnostics = {}
+                    event["diagnostics"] = diagnostics
+                diagnostics["writefailRecovery"] = {
+                    "breadcrumb": str(path),
+                    "failedTarget": crumb.get("failedTarget"),
+                    "reason": crumb.get("reason"),
+                    "recordedAt": crumb.get("recordedAt"),
+                    "recoveredAt": now_iso(),
+                }
+                log_hints = diagnostics.get("logHints")
+                if isinstance(log_hints, list):
+                    log_hints.append(str(path))
+                else:
+                    diagnostics["logHints"] = [str(path)]
+                reset_delivery(event)
+                outbox_path = outbox_path_for_event(event, paths)
+                try:
+                    atomic_write_json(outbox_path, event)
+                except Exception as exc:  # noqa: BLE001 - keep breadcrumb for a later retry.
+                    append_dispatch_log(paths, {
+                        "type": "writefail_requeue_failed",
+                        "eventId": event_id,
+                        "breadcrumb": str(path),
+                        "outboxPath": str(outbox_path),
+                        "reason": str(exc),
+                    })
+                    return recovered
+                recovered_path = move_writefail(path, paths["writefail_recovered"], "recovered")
+                append_dispatch_log(paths, {
+                    "type": "writefail_recovered",
+                    "eventId": event_id,
+                    "breadcrumb": str(path),
+                    "path": str(recovered_path),
+                    "outboxPath": str(outbox_path),
+                })
+                recovered += 1
+            except Exception as exc:  # noqa: BLE001 - one bad breadcrumb must not block dispatch.
+                try:
+                    quarantined = move_writefail(path, paths["writefail_quarantine"], "poison")
+                    append_dispatch_log(paths, {
+                        "type": "writefail_quarantine",
+                        "breadcrumb": str(path),
+                        "path": str(quarantined),
+                        "reason": str(exc),
+                    })
+                except Exception:
+                    append_dispatch_log(paths, {
+                        "type": "writefail_recovery_failed",
+                        "breadcrumb": str(path),
+                        "reason": str(exc),
+                    })
+    return recovered
+
+
 def claim(path: Path, processing_dir: Path) -> Path:
     dest = processing_dir / f"{path.name}.{os.getpid()}.processing"
     os.replace(path, dest)
@@ -439,6 +621,9 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
         "processing": len(list(paths["processing"].glob("*"))),
         "suppressed": len(list(paths["suppressed"].glob("*"))),
         "quarantine": len(list(paths["quarantine"].glob("*"))),
+        "writefail": sum(len(list(path.glob("*.writefail"))) for path in writefail_dirs() if path.exists()),
+        "writefailRecovered": len(list(paths["writefail_recovered"].glob("*"))),
+        "writefailQuarantine": len(list(paths["writefail_quarantine"].glob("*"))),
     }
     state = {
         "updatedAt": now_iso(),
@@ -518,6 +703,7 @@ def run_once(max_events: int) -> dict[str, Any]:
     lock_path = paths["locks"] / "dispatcher.lock"
     with lock_path.open("w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        writefail_recovered = recover_writefail_breadcrumbs(paths)
         reclaimed = reclaim_processing(paths)
         processed = 0
         sent = 0
@@ -547,6 +733,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             suppressed=suppressed,
             failed=failed,
             reclaimed=reclaimed,
+            writefailRecovered=writefail_recovered,
             lastError=last_error,
         )
         return {
@@ -555,6 +742,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             "suppressed": suppressed,
             "failed": failed,
             "reclaimed": reclaimed,
+            "writefailRecovered": writefail_recovered,
             "lastError": last_error,
         }
 
