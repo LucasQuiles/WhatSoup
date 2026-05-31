@@ -163,28 +163,42 @@ assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "blank-summary event still 
 [ -s "$CAPTURE" ] && pass "dispatch body non-empty" || fail "dispatch body empty"
 echo
 
-# ── Drill 8: outbox-write failure (B4 gap probe)
+# ── Drill 8: outbox-write failure leaves a loud, reconstructable breadcrumb (B4)
 # NB: emit.ensure_private_dir() force-chmods the outbox dir back to 0700, so
 # making the outbox dir itself read-only cannot simulate a write failure — the
 # realistic trigger is an unwritable PARENT (disk full / perms / RO mount), so
 # the mkdir of the outbox dir fails. We point the outbox under a 0500 parent.
-echo "Drill 8: outbox-write-failure behavior (B4 probe)"
+# B4 (closed): emit must exit nonzero AND drop a reconstructable breadcrumb in a
+# fallback dir so a write failure is never a silent lost alert.
+echo "Drill 8: outbox-write-failure breadcrumb (B4)"
 reset_sandbox
 RO_PARENT="$SANDBOX/ro-parent"
 mkdir -p "$RO_PARENT"
 chmod 0500 "$RO_PARENT"
-if BOT_ERRORS_OUTBOX_DIR="$RO_PARENT/outbox" python3 "$EMIT" \
+WF_DIR="$SANDBOX/writefail"
+WF_STDERR="$SANDBOX/wf-stderr.log"
+if BOT_ERRORS_OUTBOX_DIR="$RO_PARENT/outbox" BOT_ERRORS_WRITEFAIL_DIR="$WF_DIR" \
+     python3 "$EMIT" \
      --severity critical --instance ana-bot --source wf \
-     --summary "should fail to write" >/dev/null 2>&1; then
+     --summary "should fail to write" --evidence "phone=+15558675309" \
+     >/dev/null 2>"$WF_STDERR"; then
   fail "emit unexpectedly succeeded on unwritable parent"
 else
   pass "emit fails loudly (nonzero) on unwritable outbox parent"
 fi
 chmod 0700 "$RO_PARENT"
-# Document the gap: a failed write currently has no secondary breadcrumb.
-bc=$(find "$SANDBOX" \( -name "*breadcrumb*" -o -name "*.writefail" \) 2>/dev/null | wc -l | tr -d ' ')
-if [ "$bc" = "0" ]; then
-  printf '  \033[33mNOTE\033[0m B4 gap: no breadcrumb written on outbox-write failure (Q lane)\n'
+# Trace 1: loud stderr line names the failure.
+assert_in "outbox write FAILED" "$WF_STDERR" "B4 trace 1: stderr records write failure"
+# Trace 2: a reconstructable breadcrumb lands in the fallback dir.
+assert_count "$WF_DIR" "*.writefail" 1 "B4 trace 2: breadcrumb written to fallback dir"
+WF_FILE=$(find "$WF_DIR" -name "*.writefail" 2>/dev/null | head -1)
+if [ -n "$WF_FILE" ]; then
+  assert_in "outbox_write_failure" "$WF_FILE" "breadcrumb tags kind"
+  assert_in "ana-bot" "$WF_FILE" "breadcrumb carries instance for reconstruction"
+  assert_in '"severity": "critical"' "$WF_FILE" "breadcrumb carries original event"
+  assert_not_in "+15558675309" "$WF_FILE" "breadcrumb keeps redaction (no PII leak)"
+else
+  fail "breadcrumb file not found for content assertions"
 fi
 echo
 

@@ -46,6 +46,32 @@ def outbox_dir() -> Path:
     return Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", state_root() / "outbox"))
 
 
+def writefail_dirs() -> list[Path]:
+    """Fallback breadcrumb locations, most-durable-first, for recording a lost
+    alert when the primary outbox is unwritable (disk full / RO mount / perms).
+
+    Each candidate is deliberately on a different subtree from the outbox so the
+    same failure that defeated the outbox does not also defeat the breadcrumb.
+    The first writable one wins.
+    """
+    candidates: list[Path] = []
+    override = os.environ.get("BOT_ERRORS_WRITEFAIL_DIR")
+    if override:
+        candidates.append(Path(override))
+    candidates.append(state_root() / "writefail")
+    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
+    candidates.append(Path.home() / ".bot-errors-writefail")
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            ordered.append(path)
+    return ordered
+
+
 def host_sys_platform() -> str:
     return os.environ.get("BOT_ERRORS_DRY_SYS_PLATFORM", sys.platform)
 
@@ -255,6 +281,77 @@ def write_event(event: dict[str, Any]) -> Path:
     return final
 
 
+def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) -> Path | None:
+    """Best-effort lost-alert breadcrumb when the primary outbox write fails.
+
+    Leaves at least two traces so a disk-full / RO-mount / perms failure on the
+    outbox cannot make a qualifying alert vanish silently:
+      1. a loud stderr line (captured by journald / launchd for the emitting unit)
+      2. a durable breadcrumb file in the first writable fallback dir, carrying the
+         already-redacted event so the alert is fully reconstructable / replayable.
+
+    NEVER raises — a breadcrumb failure must not mask the original write failure.
+    Returns the breadcrumb path if one was written, else None.
+    """
+    reason = f"{type(exc).__name__}: {exc}"
+    event_id = event.get("id")
+    instance = event.get("instance")
+
+    # Trace 1 — loud stderr (always attempted, even if the file write later fails).
+    try:
+        sys.stderr.write(
+            f"[bot-errors] CRITICAL outbox write FAILED for {target}: {redact(reason)}; "
+            f"id={event_id} instance={instance} source={event.get('source')} "
+            f"severity={event.get('severity')} — recording breadcrumb\n"
+        )
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001 - stderr must never crash the breadcrumb path.
+        pass
+
+    # Trace 2 — durable breadcrumb file in the first writable fallback location.
+    breadcrumb = {
+        "schemaVersion": 1,
+        "kind": "outbox_write_failure",
+        "recordedAt": now_iso(),
+        "failedTarget": str(target),
+        "reason": redact(reason),
+        "emitPid": os.getpid(),
+        "event": event,
+    }
+    data = (json.dumps(breadcrumb, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    stamp = now_iso().replace("-", "").replace(":", "")
+    name = f"{stamp}.{safe_segment(str(instance))}.{safe_segment(str(event_id))}.writefail"
+    for base in writefail_dirs():
+        try:
+            base.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = base / name
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                sys.stderr.write(f"[bot-errors] lost-alert breadcrumb written: {path}\n")
+                sys.stderr.flush()
+            except Exception:  # noqa: BLE001
+                pass
+            return path
+        except Exception:  # noqa: BLE001 - try the next fallback location.
+            continue
+
+    # Trace 2 failed everywhere — last resort: dump the event to stderr so it is at
+    # least in the journal rather than entirely lost.
+    try:
+        sys.stderr.write(
+            "[bot-errors] breadcrumb write failed in ALL fallback dirs; "
+            f"lost-event payload follows:\n{json.dumps(event, sort_keys=True)}\n"
+        )
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Enqueue a BOT ERRORS event")
     parser.add_argument("--event-type", choices=EVENT_TYPES, default="alert")
@@ -273,7 +370,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    path = write_event(build_event(args))
+    event = build_event(args)
+    try:
+        path = write_event(event)
+    except Exception as exc:  # noqa: BLE001 - a lost alert must be recorded, then fail loud.
+        record_writefail(event, exc, outbox_dir())
+        return 1
     if args.print_path:
         print(path)
     return 0

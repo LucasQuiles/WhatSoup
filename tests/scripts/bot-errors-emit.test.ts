@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -155,5 +155,57 @@ describe('bot-errors-emit', () => {
     expect(event.diagnostics.logHints).toContain(join(tmpRoot, '.claude/observability/runtime'));
     expect(event.diagnostics.logHints).toContain(join(tmpRoot, 'outbox'));
     expect(event.diagnostics.logHints.some((hint: string) => hint.includes('journalctl'))).toBe(false);
+  });
+
+  it('records a reconstructable breadcrumb when the outbox is unwritable (B4)', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
+    const roParent = join(tmpRoot, 'ro-parent');
+    const writefail = join(tmpRoot, 'writefail');
+    mkdirSync(roParent, { recursive: true });
+    chmodSync(roParent, 0o500); // unwritable parent → mkdir of outbox fails
+
+    let exitCode = 0;
+    let stderr = '';
+    try {
+      execFileSync('python3', [
+        'deploy/scripts/bot-errors-emit.py',
+        '--instance',
+        'ana-bot',
+        '--source',
+        'writefail-probe',
+        '--summary',
+        'should fail to write',
+        '--evidence',
+        'phone=+1 (555) 867-5309',
+      ], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_OUTBOX_DIR: join(roParent, 'outbox'),
+          BOT_ERRORS_WRITEFAIL_DIR: writefail,
+        },
+        encoding: 'utf8',
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+    } catch (err: any) {
+      exitCode = err.status ?? 1;
+      stderr = String(err.stderr ?? '');
+    } finally {
+      chmodSync(roParent, 0o700);
+    }
+
+    // Loud-fail: nonzero exit + stderr trace 1.
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain('outbox write FAILED');
+
+    // Trace 2: a reconstructable, still-redacted breadcrumb in the fallback dir.
+    const crumbs = readdirSync(writefail).filter((f) => f.endsWith('.writefail'));
+    expect(crumbs).toHaveLength(1);
+    const crumb = JSON.parse(readFileSync(join(writefail, crumbs[0]!), 'utf8')) as Record<string, any>;
+    expect(crumb).toMatchObject({ kind: 'outbox_write_failure', schemaVersion: 1 });
+    expect(crumb.event).toMatchObject({ instance: 'ana-bot', severity: 'critical' });
+    expect(crumb.event.evidence).toContain('[REDACTED PHONE]');
+    expect(crumb.event.evidence).not.toContain('867-5309');
   });
 });
