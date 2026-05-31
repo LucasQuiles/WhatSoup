@@ -161,6 +161,85 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  // Never-reachable phantom config: warn, do NOT page a critical outage.
+  it('emits a non-paging warning for an instance that was never reachable', async () => {
+    mockFetch.mockRejectedValue(new Error('connect ECONNREFUSED'));
+
+    const instances = makeInstances(
+      ['stale-config', makeInstance({ name: 'stale-config', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(poller.getStatus('stale-config')!.status).toBe('unreachable');
+    expect(poller.getStatus('stale-config')!.everReachable).toBe(false);
+    expect(emitAlert).toHaveBeenCalledOnce();
+    expect(emitAlert).toHaveBeenCalledWith(
+      'stale-config',
+      'instance_never_reachable',
+      expect.stringContaining('never came online'),
+      expect.any(String),
+      'warning',
+    );
+
+    poller.stop();
+  });
+
+  // Real outage: instance was online, then went away → critical page.
+  it('emits a critical outage for an instance that was online then went unreachable', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ status: 'healthy' }) })
+      .mockRejectedValue(new Error('connect ECONNREFUSED'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.everReachable).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(poller.getStatus('remote-1')!.status).toBe('unreachable');
+    expect(emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_unreachable',
+      expect.stringContaining('unreachable'),
+      expect.any(String),
+      'critical',
+    );
+
+    poller.stop();
+  });
+
+  // A 503 from a live server proves reachability → later loss is a real outage.
+  it('treats a non-ok HTTP response as proof of reachability', async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 503, json: () => Promise.resolve({}) });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')!.everReachable).toBe(true);
+
+    poller.stop();
+  });
+
   // Test 4: successful poll resets consecutiveFailures to 0
   it('successful poll resets consecutiveFailures to 0', async () => {
     // First two polls fail, third succeeds
@@ -449,10 +528,12 @@ describe('HealthPoller', () => {
 
     expect(emitAlert).not.toHaveBeenCalled();
     expect(alertThrottleStore.recordAlertThrottle).not.toHaveBeenCalled();
+    // This remote never answered, so the suppressed alert is the never-reachable
+    // class (not a real outage) — suppression must still apply regardless of class.
     expect(logger.info).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'remote-1',
-        source: 'instance_unreachable',
+        source: 'instance_never_reachable',
       }),
       'alert suppressed — rate limit (15min)',
     );

@@ -77,6 +77,24 @@ describe('emitAlert', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it('defaults to critical but honors an explicit non-critical severity override', () => {
+    emitAlert(
+      'whatsoup-prod',
+      'instance_never_reachable',
+      'configured but never came online',
+      'connect ECONNREFUSED',
+      'warning',
+    );
+
+    expect(readOnlyEvent()).toMatchObject({
+      eventType: 'alert',
+      severity: 'warning',
+      instance: 'whatsoup-prod',
+      source: 'instance_never_reachable',
+    });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it('redacts obvious secret material before writing the event', () => {
     const secretEvidence = [
       'token=plain-secret',
