@@ -235,6 +235,11 @@ def safe_segment(value: str) -> str:
     return (cleaned or "unknown")[:80]
 
 
+def safe_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    return (cleaned or "unknown")[:180]
+
+
 def env_key_segment(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").upper()
 
@@ -595,7 +600,7 @@ def local_event_exists(event_id: str) -> bool:
 
 def safe_child_path(directory: Path, name: str) -> Path:
     ensure_private_dir(directory)
-    target = directory / safe_segment(name)
+    target = directory / safe_filename(name)
     if target.resolve().parent != directory.resolve():
         raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
     if target.exists():
