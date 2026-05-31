@@ -58,6 +58,33 @@ exit "$status"
   return script;
 }
 
+function writeHostSelectiveExecFakeSsh(root: string): string {
+  const script = join(root, 'fake-host-selective-ssh.sh');
+  writeFileSync(
+    script,
+    `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "mini5" ]; then
+    echo "simulated mini5 unreachable" >&2
+    exit 255
+  fi
+done
+while [ "$#" -gt 0 ] && [ "$1" != "python3" ]; do
+  shift
+done
+if [ "$1" != "python3" ]; then
+  echo "python3 command not found" >&2
+  exit 127
+fi
+shift
+exec python3 "$@"
+`,
+    { mode: 0o700 },
+  );
+  chmodSync(script, 0o700);
+  return script;
+}
+
 function outboxEvents() {
   const outbox = join(tmpRoot, 'outbox');
   return readdirSync(outbox)
@@ -149,12 +176,79 @@ function writeRemoteWritefail(dir: string, id = 'remote-writefail-test', overrid
   writeFileSync(join(dir, `${id}.writefail`), `${JSON.stringify(crumb, null, 2)}\n`, { mode: 0o600 });
 }
 
+function writeRemoteEvent(dir: string, id = 'remote-relay-test', overrides: Record<string, unknown> = {}) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const event = {
+    schemaVersion: 1,
+    id,
+    eventType: 'alert',
+    severity: 'critical',
+    createdAt: '2026-05-31T00:00:00Z',
+    machine: 'mini6-hostname',
+    platform: 'darwin',
+    instance: 'ana-bot',
+    source: 'remote-drill',
+    summary: 'reachable host event relayed',
+    evidence: 'host mini6 stayed reachable while mini5 was unreachable',
+    delivery: { attempts: 0, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    ...overrides,
+  };
+  writeFileSync(join(dir, `${id}.json`), `${JSON.stringify(event, null, 2)}\n`, { mode: 0o600 });
+}
+
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
 });
 
 describe('bot-errors-collector', () => {
+  it('isolates an unreachable remote while still relaying a reachable host', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const failedRemote = join(tmpRoot, 'remote-failed');
+    const healthyRemote = join(tmpRoot, 'remote-healthy');
+    mkdirSync(join(failedRemote, 'outbox'), { recursive: true, mode: 0o700 });
+    writeRemoteEvent(join(healthyRemote, 'outbox'), 'mini6-relay-while-mini5-dark');
+    const fakeSsh = writeHostSelectiveExecFakeSsh(tmpRoot);
+
+    const result = spawnSync(
+      'python3',
+      [
+        'deploy/scripts/bot-errors-collector.py',
+        '--remote',
+        `mini5:${failedRemote}`,
+        '--remote',
+        `mini6:${healthyRemote}`,
+        '--max-events',
+        '5',
+        '--timeout',
+        '5',
+        '--alert-cooldown',
+        '1',
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+        },
+        encoding: 'utf8',
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ processed: 1, remotesSucceeded: 1, isolatedFailures: 2 });
+    const events = outboxEvents();
+    expect(events).toHaveLength(2);
+    expect(events.some((event) => String(event.summary).includes('BOT ERRORS collector cannot claim remote outbox: mini5'))).toBe(true);
+    expect(events.some((event) => event.id === 'mini6-relay-while-mini5-dark')).toBe(true);
+    const relayed = events.find((event) => event.id === 'mini6-relay-while-mini5-dark') as {
+      diagnostics?: { relay?: { remoteHost?: string } };
+    };
+    expect(relayed.diagnostics?.relay?.remoteHost).toBe('mini6');
+    expect(readdirSync(join(healthyRemote, 'outbox')).filter((file) => file.endsWith('.json'))).toHaveLength(0);
+  });
+
   it('keeps one open remote-claim incident and emits recovery on the next success', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
@@ -240,7 +334,7 @@ describe('bot-errors-collector', () => {
   it('harvests remote writefail crumbs into the local writefail inbox with provenance', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const remoteRoot = join(tmpRoot, 'remote');
-    const longEventId = 'remote-critical-live-canary-2c837410-eb60-4099-a73b-e29476a38ea7';
+    const longEventId = `remote-critical-live-canary-${'x'.repeat(210)}`;
     writeRemoteWritefail(join(remoteRoot, 'writefail'), longEventId);
     const fakeSsh = writeExecFakeSsh(tmpRoot);
 

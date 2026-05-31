@@ -898,6 +898,8 @@ def daily() -> int:
         *clock_inventory(),
         *tool_lines,
     ]
+    if missing_required_tools:
+        lines.insert(0, f"FAIL required_tools: required_missing={','.join(missing_required_tools)}")
     failures = [
         line for line in lines
         if line.startswith("FAIL ") or " FAIL " in line or line.startswith("config ") and "invalid JSON" in line

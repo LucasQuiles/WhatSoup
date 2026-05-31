@@ -235,9 +235,16 @@ def safe_segment(value: str) -> str:
     return (cleaned or "unknown")[:80]
 
 
-def safe_filename(value: str) -> str:
+def safe_filename(value: str, max_length: int = 180) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
-    return (cleaned or "unknown")[:180]
+    cleaned = cleaned or "unknown"
+    if len(cleaned) <= max_length:
+        return cleaned
+    for suffix in (".writefail", ".poison", ".json"):
+        if cleaned.endswith(suffix) and len(suffix) < max_length:
+            stem = cleaned[: max_length - len(suffix)].rstrip("._-:")
+            return f"{stem or 'unknown'}{suffix}"
+    return cleaned[:max_length]
 
 
 def env_key_segment(value: str) -> str:
@@ -386,6 +393,7 @@ def enqueue_meta_alert(remote: str, source: str, summary: str, evidence: str, st
         "process": {"pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv},
         "diagnostics": {
             "queue": str(state_root() / "outbox"),
+            "logHints": [str(state_root() / "logs/collector.jsonl")],
             "collectorLog": str(state_root() / "logs/collector.jsonl"),
             "remote": remote,
         },
@@ -439,6 +447,7 @@ def enqueue_meta_recovery(remote: str, source: str, summary: str, evidence: str,
         "process": {"pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv},
         "diagnostics": {
             "queue": str(state_root() / "outbox"),
+            "logHints": [str(state_root() / "logs/collector.jsonl")],
             "collectorLog": str(state_root() / "logs/collector.jsonl"),
             "remote": remote,
         },
@@ -604,7 +613,7 @@ def safe_child_path(directory: Path, name: str) -> Path:
     if target.resolve().parent != directory.resolve():
         raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
     if target.exists():
-        stem = safe_segment(name)
+        stem = safe_filename(name, 140)
         target = directory / f"{int(time.time())}.{os.getpid()}.{stem}"
     return target
 
@@ -707,6 +716,12 @@ def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> P
     }
     diagnostics["relayLog"] = str(state_root() / "logs/collector.jsonl")
     diagnostics["remoteQueue"] = str(Path(remote_root) / "outbox")
+    diagnostics["queue"] = str(state_root() / "outbox")
+    log_hints = diagnostics.get("logHints")
+    if isinstance(log_hints, list):
+        log_hints.append(str(state_root() / "logs/collector.jsonl"))
+    else:
+        diagnostics["logHints"] = [str(state_root() / "logs/collector.jsonl")]
     event["delivery"] = {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None}
     path = local_outbox_path(event, remote_host)
     atomic_write_json(path, event)
@@ -724,12 +739,15 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
     writefail_harvested = 0
     writefail_duplicates = 0
     writefail_poison = 0
+    remotes_succeeded = 0
+    isolated_failures = 0
     failed = 0
     for remote in remotes:
         host, remote_root = parse_remote(remote)
         outbox_claim_failed = False
         try:
             records = ssh_json_lines(host, REMOTE_CLAIM_SCRIPT, [remote_root, str(max_events), str(lease_seconds)], timeout)
+            remotes_succeeded += 1
             remote_state.setdefault(remote, {})["lastSuccessAt"] = int(time.time())
             remote_state[remote]["lastSuccessIso"] = now_iso()
             remote_state[remote]["lastError"] = None
@@ -749,6 +767,7 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
             )
         except Exception as exc:  # noqa: BLE001 - collector must keep other remotes alive.
             failed += 1
+            isolated_failures += 1
             error = str(exc)
             outbox_claim_failed = True
             remote_state.setdefault(remote, {})["lastError"] = error
@@ -778,6 +797,8 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
             )
         except Exception as exc:  # noqa: BLE001 - outbox relay must not be blocked by B6 harvest.
             failed += 1
+            if outbox_claim_failed:
+                isolated_failures += 1
             writefail_records = []
             error = str(exc)
             append_log({"type": "remote_writefail_claim_failed", "remote": remote, "error": error})
@@ -888,6 +909,8 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
         "writefailHarvested": writefail_harvested,
         "writefailDuplicates": writefail_duplicates,
         "writefailPoison": writefail_poison,
+        "remotesSucceeded": remotes_succeeded,
+        "isolatedFailures": isolated_failures,
         "failed": failed,
     }
 
@@ -920,7 +943,7 @@ def main() -> int:
         return 0
     result = run_once(remotes, args.max_events, args.timeout, args.lease_seconds, args.remote_sla, args.alert_cooldown)
     print(json.dumps(result, sort_keys=True))
-    return 1 if result["failed"] else 0
+    return 1 if result["failed"] and (not result["remotesSucceeded"] or result["failed"] > result["isolatedFailures"]) else 0
 
 
 if __name__ == "__main__":

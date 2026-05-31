@@ -23,11 +23,14 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EMIT="$REPO_ROOT/deploy/scripts/bot-errors-emit.py"
 DISPATCH="$REPO_ROOT/deploy/scripts/bot-errors-dispatcher.py"
+HEALTH="$REPO_ROOT/deploy/scripts/bot-errors-health-check.py"
 HEARTBEAT="$REPO_ROOT/deploy/scripts/bot-errors-heartbeat-watchdog.py"
 COLLECTOR="$REPO_ROOT/deploy/scripts/bot-errors-collector.py"
 
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/bot-errors-drill.XXXXXX")"
 CAPTURE="$SANDBOX/sent.log"
+ALL_CAPTURE="$SANDBOX/all-sent.log"
+CAPTURE_BYTES=0
 
 export BOT_ERRORS_STATE_DIR="$SANDBOX/state"
 export BOT_ERRORS_OUTBOX_DIR="$BOT_ERRORS_STATE_DIR/outbox"
@@ -66,10 +69,23 @@ assert_missing() {
 reset_sandbox() {
   rm -rf "$BOT_ERRORS_STATE_DIR" "$CAPTURE"
   mkdir -p "$BOT_ERRORS_OUTBOX_DIR"
+  CAPTURE_BYTES=0
 }
 
 emit() { python3 "$EMIT" "$@" >/dev/null 2>&1; }
-dispatch_once() { python3 "$DISPATCH" --once >/dev/null 2>&1; }
+dispatch_once() {
+  python3 "$DISPATCH" --once >/dev/null 2>&1
+  local rc=$?
+  if [ -s "$CAPTURE" ]; then
+    local size
+    size=$(wc -c < "$CAPTURE" | tr -d ' ')
+    if [ "$size" -gt "$CAPTURE_BYTES" ]; then
+      tail -c +$((CAPTURE_BYTES + 1)) "$CAPTURE" >> "$ALL_CAPTURE"
+      CAPTURE_BYTES="$size"
+    fi
+  fi
+  return "$rc"
+}
 
 echo "BOT ERRORS failure-scenario drills"
 echo "sandbox: $SANDBOX"
@@ -355,6 +371,286 @@ assert_in "remote writefail drill critical" "$CAPTURE" "harvested remote critica
 assert_in "writefail_recovered: origin=mini5-hostname harvested_from=mini5" "$CAPTURE" "dispatch names remote writefail origin"
 assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "remote critical recovered exactly once"
 assert_count "$REMOTE_WF" "*.writefail" 0 "remote writefail source drained"
+echo
+
+# ── Drill 12: remote unreachable stays isolated from reachable hosts
+echo "Drill 12: collector remote-unreachable isolation"
+reset_sandbox
+D12_FAIL_REMOTE="$SANDBOX/d12-mini5"
+D12_OK_REMOTE="$SANDBOX/d12-mini6"
+mkdir -p "$D12_FAIL_REMOTE/outbox" "$D12_OK_REMOTE/outbox"
+python3 - "$D12_OK_REMOTE/outbox" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1]) / "mini6-reachable.json"
+target.write_text(json.dumps({
+    "schemaVersion": 1,
+    "id": "mini6-reachable-while-mini5-unreachable",
+    "eventType": "alert",
+    "severity": "critical",
+    "createdAt": "2026-05-31T00:00:00Z",
+    "machine": "mini6-hostname",
+    "platform": "darwin",
+    "instance": "ana-bot",
+    "source": "collector-drill",
+    "summary": "mini6 reachable event while mini5 unreachable",
+    "evidence": "collector must isolate per-host failure",
+    "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+}) + "\n")
+PY
+D12_SSH="$SANDBOX/d12-fake-ssh.sh"
+cat > "$D12_SSH" <<'SH'
+#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "mini5" ]; then
+    echo "simulated mini5 unreachable" >&2
+    exit 255
+  fi
+done
+while [ "$#" -gt 0 ] && [ "$1" != "python3" ]; do
+  shift
+done
+[ "$1" = "python3" ] || exit 127
+shift
+exec python3 "$@"
+SH
+chmod 0700 "$D12_SSH"
+if BOT_ERRORS_RELAY_SSH_COMMAND="$D12_SSH" python3 "$COLLECTOR" \
+     --remote "mini5:$D12_FAIL_REMOTE" --remote "mini6:$D12_OK_REMOTE" \
+     --max-events 5 --timeout 5 --alert-cooldown 1 > "$SANDBOX/collector-d12.json" 2>&1; then
+  pass "collector exits 0 when one remote is down but another is relayed"
+else
+  fail "collector exited nonzero despite per-host isolation"
+fi
+assert_in '"processed": 1' "$SANDBOX/collector-d12.json" "reachable host relayed one event"
+assert_in '"remotesSucceeded": 1' "$SANDBOX/collector-d12.json" "collector records one successful remote"
+assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 2 "unreachable meta + reachable event queued"
+dispatch_once
+assert_in "collector cannot claim remote outbox: mini5" "$CAPTURE" "unreachable host produces alert"
+assert_in "mini6 reachable event while mini5 unreachable" "$CAPTURE" "reachable host still reaches dispatch"
+assert_count "$D12_OK_REMOTE/outbox" "*.json" 0 "reachable remote drained"
+echo
+
+# ── Drill 13: WhatsApp socket unavailable leaves durable retry state
+echo "Drill 13: WhatsApp socket unavailable keeps alert durable"
+reset_sandbox
+emit --severity critical --instance ana-bot --source socket_down \
+  --summary "socket down alert must stay queued" --evidence "send channel unavailable"
+if BOT_ERRORS_DRY_SEND_CAPTURE="" BOT_ERRORS_JID="bot-errors-test-group" \
+     BOT_ERRORS_SOCKET_PATH="$SANDBOX/missing.sock" python3 "$DISPATCH" --once \
+     > "$SANDBOX/d13-fail.out" 2>&1; then
+  fail "dispatcher unexpectedly succeeded while socket missing"
+else
+  pass "dispatcher exits nonzero when send channel is missing"
+fi
+assert_missing "$CAPTURE" "socket-down failure does not fake a send"
+assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 1 "socket-down event remains in outbox"
+assert_in '"type": "send_failed"' "$BOT_ERRORS_STATE_DIR/logs/dispatch.jsonl" "dispatch log records send_failed"
+dispatch_once
+assert_missing "$CAPTURE" "retry backoff prevents immediate tight-loop resend"
+python3 - "$BOT_ERRORS_OUTBOX_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+for path in Path(sys.argv[1]).glob("*.json"):
+    event = json.loads(path.read_text())
+    event.setdefault("delivery", {})["nextAttemptAtEpoch"] = 0
+    path.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n")
+PY
+dispatch_once
+assert_in "socket down alert must stay queued" "$CAPTURE" "socket recovery sends queued event"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "socket recovery sends exactly once"
+echo
+
+# ── Drill 14: dispatcher crash mid-claim replay
+echo "Drill 14: dispatcher processing claim reclaimed after crash"
+reset_sandbox
+mkdir -p "$BOT_ERRORS_STATE_DIR/processing"
+python3 - "$BOT_ERRORS_STATE_DIR/processing" "$BOT_ERRORS_OUTBOX_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+processing = Path(sys.argv[1])
+outbox = Path(sys.argv[2])
+event = {
+    "schemaVersion": 1,
+    "id": "crash-mid-claim-drill",
+    "eventType": "alert",
+    "severity": "critical",
+    "createdAt": "2026-05-31T00:00:00Z",
+    "machine": "nucles",
+    "platform": "linux",
+    "instance": "bot-errors-dispatcher",
+    "source": "crash-mid-claim",
+    "summary": "processing claim survived dispatcher crash",
+    "evidence": "synthetic orphaned processing claim",
+    "process": {"pid": 1, "cwd": str(outbox.parent), "argv": ["dispatcher"]},
+    "diagnostics": {"logHints": [str(outbox.parent / "logs/dispatch.jsonl")], "queue": str(outbox)},
+    "delivery": {"attempts": 0, "status": "sending", "nextAttemptAtEpoch": 0, "lastError": None},
+}
+(processing / "20260531T000000Z.crash-mid-claim-drill.json.999.processing").write_text(json.dumps(event, indent=2) + "\n")
+PY
+dispatch_once
+assert_in "processing claim survived dispatcher crash" "$CAPTURE" "orphaned processing claim dispatched"
+assert_count "$BOT_ERRORS_STATE_DIR/processing" "*.processing" 0 "processing dir drained after reclaim"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "reclaimed event sent once"
+echo
+
+# ── Drill 15: local queue permission denied uses HOME fallback before TMPDIR
+echo "Drill 15: queue permission denied breadcrumb fallback order"
+reset_sandbox
+D15_RO="$SANDBOX/d15-ro"
+D15_HOME="$SANDBOX/d15-home"
+D15_TMP="$SANDBOX/d15-tmp"
+mkdir -p "$D15_RO" "$D15_HOME" "$D15_TMP"
+chmod 0500 "$D15_RO"
+D15_STDERR="$SANDBOX/d15-stderr.log"
+if HOME="$D15_HOME" TMPDIR="$D15_TMP" BOT_ERRORS_STATE_DIR="$D15_RO/state" \
+     BOT_ERRORS_OUTBOX_DIR="$D15_RO/state/outbox" python3 "$EMIT" \
+     --severity critical --instance ana-bot --source queue_perm_denied \
+     --summary "home fallback crumb should recover" --evidence "local queue denied" \
+     >/dev/null 2>"$D15_STDERR"; then
+  fail "emit unexpectedly succeeded with unwritable state root"
+else
+  pass "emit fails loudly when local queue cannot be created"
+fi
+chmod 0700 "$D15_RO"
+assert_in "outbox write FAILED" "$D15_STDERR" "permission denied writes stderr trace"
+assert_count "$D15_HOME/.bot-errors-writefail" "*.writefail" 1 "HOME fallback receives breadcrumb"
+assert_count "$D15_TMP/bot-errors-writefail" "*.writefail" 0 "TMPDIR fallback not used before HOME"
+BOT_ERRORS_WRITEFAIL_DIR="$D15_HOME/.bot-errors-writefail" dispatch_once
+assert_in "home fallback crumb should recover" "$CAPTURE" "HOME fallback breadcrumb recovered"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "permission-denied recovery sends once"
+echo
+
+# ── Drill 16: cold restart persistence across outbox, processing, writefail
+echo "Drill 16: cold restart replay from outbox + processing + writefail"
+reset_sandbox
+mkdir -p "$BOT_ERRORS_OUTBOX_DIR" "$BOT_ERRORS_STATE_DIR/processing" "$BOT_ERRORS_STATE_DIR/writefail"
+python3 - "$BOT_ERRORS_STATE_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+base = {
+    "schemaVersion": 1,
+    "eventType": "alert",
+    "severity": "critical",
+    "createdAt": "2026-05-31T00:00:00Z",
+    "machine": "nucles",
+    "platform": "linux",
+    "instance": "bot-errors-dispatcher",
+    "source": "cold-restart",
+    "process": {"pid": 1, "cwd": str(root), "argv": ["dispatcher"]},
+    "diagnostics": {"logHints": [str(root / "logs/dispatch.jsonl")], "queue": str(root / "outbox")},
+    "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+}
+events = [
+    ("outbox", "reboot-outbox", "cold restart outbox event"),
+    ("processing", "reboot-processing", "cold restart processing event"),
+    ("writefail", "reboot-writefail", "cold restart writefail event"),
+]
+for kind, event_id, summary in events:
+    event = {**base, "id": event_id, "summary": summary, "evidence": f"{kind} survived process death"}
+    if kind == "outbox":
+        (root / "outbox" / f"20260531T000000Z.{event_id}.json").write_text(json.dumps(event, indent=2) + "\n")
+    elif kind == "processing":
+        (root / "processing" / f"20260531T000000Z.{event_id}.json.999.processing").write_text(json.dumps(event, indent=2) + "\n")
+    else:
+        crumb = {
+            "schemaVersion": 1,
+            "kind": "outbox_write_failure",
+            "recordedAt": "2026-05-31T00:00:01Z",
+            "failedTarget": str(root / "outbox"),
+            "reason": "synthetic cold restart breadcrumb",
+            "emitPid": 1,
+            "event": event,
+        }
+        (root / "writefail" / f"{event_id}.writefail").write_text(json.dumps(crumb, indent=2) + "\n")
+PY
+dispatch_once
+assert_in "cold restart outbox event" "$CAPTURE" "outbox event survived cold restart"
+assert_in "cold restart processing event" "$CAPTURE" "processing claim survived cold restart"
+assert_in "cold restart writefail event" "$CAPTURE" "writefail crumb survived cold restart"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 3 "cold restart sends three events exactly once"
+assert_count "$BOT_ERRORS_STATE_DIR/processing" "*.processing" 0 "cold restart leaves no processing stranding"
+echo
+
+# ── Drill 17: missing required tool at startup becomes actionable alert
+echo "Drill 17: missing required tool/plugin health alert"
+reset_sandbox
+D17_HOME="$SANDBOX/d17-home"
+mkdir -p "$D17_HOME"
+HOME="$D17_HOME" BOT_ERRORS_STATE_DIR="$BOT_ERRORS_STATE_DIR" \
+  BOT_ERRORS_DRY_TOOL_NAMES="send_message" BOT_ERRORS_REQUIRED_TOOLS="send_message,missing_tool" \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"tool-test","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectConfigInventory":false,"expectPluginInventory":false}' \
+  python3 "$HEALTH" --daily >/dev/null 2>&1
+dispatch_once
+assert_in "missing required tools missing_tool" "$CAPTURE" "missing required tool appears in alert summary"
+assert_in "required_missing=missing_tool" "$CAPTURE" "missing required tool appears in evidence"
+echo
+
+# ── Drill 18: stale heartbeat detects hung supervisor and emits recovery clear
+echo "Drill 18: stale heartbeat alert and recovery"
+reset_sandbox
+D18_Q_STATE="$SANDBOX/d18-q-loop-state.json"
+printf '{"updated_at":100}\n' > "$D18_Q_STATE"
+BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop BOT_ERRORS_DRY_NOW=1000 \
+  python3 "$HEARTBEAT" --once --max-q-loop-age 60 > "$SANDBOX/d18-stale-1.json" 2>&1
+assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 1 "stale q-loop heartbeat queues one alert"
+BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop BOT_ERRORS_DRY_NOW=1001 \
+  python3 "$HEARTBEAT" --once --max-q-loop-age 60 > "$SANDBOX/d18-stale-2.json" 2>&1
+assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 1 "duplicate stale heartbeat suppressed while open"
+printf '{"updated_at":1002}\n' > "$D18_Q_STATE"
+BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop BOT_ERRORS_DRY_NOW=1002 \
+  python3 "$HEARTBEAT" --once --max-q-loop-age 60 > "$SANDBOX/d18-recovery.json" 2>&1
+assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 2 "heartbeat recovery queues clear event"
+dispatch_once
+assert_in "heartbeat watchdog stale: q_loop" "$CAPTURE" "stale heartbeat alert dispatched"
+assert_in "heartbeat watchdog recovered: q_loop" "$CAPTURE" "heartbeat recovery dispatched"
+echo
+
+# ── Drill 19: rendered alerts must be actionable from the message body alone
+echo "Drill 19: Q-actionability render audit"
+D19_AUDIT="$SANDBOX/d19-audit.txt"
+if python3 - "$ALL_CAPTURE" > "$D19_AUDIT" 2>&1 <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+messages = [part.strip() for part in path.read_text(encoding="utf-8").split("\n---\n") if part.strip()]
+required = ("severity", "machine", "instance", "source", "event", "created", "requested_action")
+failures = []
+for index, message in enumerate(messages, start=1):
+    missing = [label for label in required if f"> {label}:" not in message]
+    path_count = 0
+    for pattern in (r"> log_\d+:", r"> queue:", r"> dispatch_log:", r"breadcrumb="):
+        if re.search(pattern, message):
+            path_count += 1
+    if path_count < 2:
+        missing.append(">=2 evidence paths")
+    if "writefail" in message.lower() and "recovered" in message.lower() and "> writefail_recovered:" not in message:
+        missing.append("writefail recovery provenance")
+    if missing:
+        failures.append(f"message {index}: {', '.join(missing)}")
+if not messages:
+    failures.append("no rendered messages captured")
+if failures:
+    print("\n".join(failures))
+    raise SystemExit(1)
+print(f"audited {len(messages)} rendered messages")
+PY
+then
+  pass "all rendered alerts satisfy Q-actionability rubric"
+else
+  fail "Q-actionability audit failed: $(tr '\n' ';' < "$D19_AUDIT")"
+fi
 echo
 
 echo "──────────────────────────────────────────"
