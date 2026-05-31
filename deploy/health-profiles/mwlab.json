@@ -4,5 +4,6 @@
   "expectQLoop": false,
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
-  "expectConfigInventory": false
+  "expectConfigInventory": false,
+  "requiredCredentialFiles": ["fleet-token"]
 }

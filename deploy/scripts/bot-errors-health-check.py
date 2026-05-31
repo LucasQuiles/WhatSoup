@@ -44,6 +44,7 @@ DEFAULT_HEALTH_PROFILE = {
     "expectPersonalTools": True,
     "expectConfigInventory": True,
 }
+ROOT_CREDENTIAL_FILES = {"fleet-token", "fleet.env", "fleet-tokens.json", "secrets.env"}
 
 
 def kernel_release() -> str:
@@ -112,6 +113,27 @@ def profile_instances(profile: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, dict)]
+
+
+def profile_string_list(container: dict[str, Any], key: str) -> list[str]:
+    raw = container.get(key, [])
+    if not isinstance(raw, list):
+        return []
+    return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
+
+
+def profile_mode(value: Any, default: int | None = None) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        try:
+            return int(text, 8 if text.startswith("0") else 10)
+        except ValueError:
+            return default
+    return default
 
 
 def ensure_private_dir(path: Path) -> None:
@@ -604,6 +626,85 @@ def read_instance_config(cfg: Path) -> tuple[dict[str, Any] | None, str | None]:
         return None, str(exc)
 
 
+def file_readable(path: Path, mode: int) -> bool:
+    return os.access(path, os.R_OK) and bool(mode & 0o444)
+
+
+def required_file_path(base: Path, requirement: str) -> Path:
+    expanded = Path(os.path.expandvars(os.path.expanduser(requirement)))
+    if expanded.is_absolute():
+        return expanded
+    return base / expanded
+
+
+def credential_requirement_paths(root: Path, requirement: str) -> tuple[list[Path], str]:
+    if requirement in ROOT_CREDENTIAL_FILES:
+        path = root / requirement
+        return ([path] if path.exists() else []), str(path)
+    if "/" in requirement or requirement.startswith("~"):
+        path = required_file_path(root, requirement)
+        return ([path] if path.exists() else []), str(path)
+    if not root.exists():
+        return [], str(root / requirement)
+    matches = sorted(path for path in root.rglob(requirement) if path.is_file())
+    return matches, str(root / "**" / requirement)
+
+
+def required_credential_inventory(profile: dict[str, Any]) -> list[str]:
+    requirements = profile_string_list(profile, "requiredCredentialFiles")
+    if not requirements:
+        return ["required_credentials: none declared"]
+    root = Path.home() / ".config/whatsoup"
+    lines: list[str] = []
+    for requirement in requirements:
+        paths, expected = credential_requirement_paths(root, requirement)
+        if not paths:
+            lines.append(f"FAIL credential {requirement}: missing required {requirement} expected_path={expected}")
+            continue
+        for path in paths:
+            try:
+                st = path.stat()
+            except OSError as exc:
+                lines.append(f"FAIL credential {requirement}: stat_failed path={path} error={exc}")
+                continue
+            mode = stat.S_IMODE(st.st_mode)
+            age_days = int((time.time() - st.st_mtime) / 86400)
+            if not file_readable(path, mode):
+                lines.append(f"FAIL credential {requirement}: unreadable path={path} mode={mode:o} age_days={age_days}")
+            elif mode & 0o022:
+                lines.append(f"FAIL credential {requirement}: world_writable path={path} mode={mode:o} age_days={age_days}")
+            elif mode > 0o600:
+                lines.append(f"WARN credential {requirement}: mode>{0o600:o} path={path} mode={mode:o} age_days={age_days}")
+            else:
+                lines.append(f"OK credential {requirement}: path={path} mode={mode:o} age_days={age_days}")
+    return lines
+
+
+def required_credential_existing_paths(profile: dict[str, Any]) -> set[Path]:
+    root = Path.home() / ".config/whatsoup"
+    paths: set[Path] = set()
+    for requirement in profile_string_list(profile, "requiredCredentialFiles"):
+        matches, _ = credential_requirement_paths(root, requirement)
+        paths.update(path.resolve() for path in matches)
+    return paths
+
+
+def config_mode_line(name: str, requirement: str, path: Path, mode: int, strict_max: int | None) -> str | None:
+    if strict_max is not None and mode > strict_max:
+        return f"FAIL config {name}: mode>{strict_max:o} required {requirement} path={path} mode={mode:o}"
+    if mode & 0o004:
+        return f"WARN config {name}: world_readable required {requirement} path={path} mode={mode:o}"
+    return None
+
+
+def required_config_files(profile: dict[str, Any], item: dict[str, Any]) -> list[str]:
+    instance_reqs = profile_string_list(item, "requiredConfigFiles")
+    if instance_reqs:
+        return instance_reqs
+    profile_reqs = profile_string_list(profile, "requiredConfigFiles")
+    return profile_reqs if profile_reqs else ["config.json"]
+
+
 def config_inventory(profile: dict[str, Any]) -> list[str]:
     if not profile_bool(profile, "expectConfigInventory", True):
         return ["configs: skipped by health profile"]
@@ -639,8 +740,24 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
                     line = f"WARN {line} actual=active"
                 lines.append(line)
                 continue
+            strict_max = profile_mode(item.get("requiredConfigMaxMode"), profile_mode(profile.get("requiredConfigMaxMode")))
+            required_configs = required_config_files(profile, item)
+            for requirement in required_configs:
+                required_path = required_file_path(root / name, requirement)
+                if not required_path.exists():
+                    lines.append(f"FAIL config {name}: missing required {requirement} expected_path={required_path}")
+                    continue
+                required_mode = stat.S_IMODE(required_path.stat().st_mode)
+                mode_line = config_mode_line(name, requirement, required_path, required_mode, strict_max)
+                if mode_line:
+                    lines.append(mode_line)
+                if required_path != cfg and required_path.suffix == ".json":
+                    _, required_error = read_instance_config(required_path)
+                    if required_error:
+                        lines.append(f"config {name}: invalid JSON required {requirement}: {required_error}")
             if not cfg.exists():
-                lines.append(f"FAIL config {name}: missing {cfg} expected={expectation}")
+                if "config.json" not in required_configs:
+                    lines.append(f"FAIL config {name}: missing {cfg} expected={expectation}")
                 continue
             mode = stat.S_IMODE(cfg.stat().st_mode)
             data, error = read_instance_config(cfg)
@@ -672,6 +789,7 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
                 lines.append(f"{prefix}socket {name}: {socket_path} exists={exists}")
         return lines
     ports: dict[int, str] = {}
+    strict_max = profile_mode(profile.get("requiredConfigMaxMode"))
     for cfg in sorted(root.glob("*/config.json")):
         mode = stat.S_IMODE(cfg.stat().st_mode)
         data, error = read_instance_config(cfg)
@@ -684,6 +802,9 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
         port = data.get("healthPort")
         socket_path = data.get("socketPath")
         lines.append(f"config {name}: type={kind} enabled={enabled} mode={mode:o} healthPort={port}")
+        mode_line = config_mode_line(name, "config.json", cfg, mode, strict_max)
+        if mode_line:
+            lines.append(mode_line)
         if isinstance(port, int):
             if port in ports:
                 lines.append(f"duplicate healthPort {port}: {ports[port]} and {name}")
@@ -695,20 +816,23 @@ def config_inventory(profile: dict[str, Any]) -> list[str]:
     return lines
 
 
-def credential_metadata() -> list[str]:
+def credential_metadata(profile: dict[str, Any]) -> list[str]:
     root = Path.home() / ".config/whatsoup"
     lines: list[str] = []
     if not root.exists():
         return [f"credentials: missing {root}"]
+    required_paths = required_credential_existing_paths(profile)
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         if path.name not in {"tokens.env", "fleet-token", "fleet.env", "fleet-tokens.json", "secrets.env"}:
             continue
+        if path.resolve() in required_paths:
+            continue
         st = path.stat()
         mode = stat.S_IMODE(st.st_mode)
         age_days = int((time.time() - st.st_mtime) / 86400)
-        status = "OK" if mode <= 0o600 else "WARN"
+        status = "FAIL" if mode & 0o022 else "OK" if mode <= 0o600 else "WARN"
         lines.append(f"{status} credential_meta {path}: mode={mode:o} age_days={age_days}")
     return lines
 
@@ -893,7 +1017,8 @@ def daily() -> int:
         *queue_inventory(),
         *config_inventory(profile),
         *plugin_inventory(profile),
-        *credential_metadata(),
+        *required_credential_inventory(profile),
+        *credential_metadata(profile),
         *disk_inventory(),
         *clock_inventory(),
         *tool_lines,

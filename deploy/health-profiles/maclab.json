@@ -5,6 +5,7 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
+  "requiredCredentialFiles": ["fleet-token"],
   "instances": [
     {
       "name": "agent",

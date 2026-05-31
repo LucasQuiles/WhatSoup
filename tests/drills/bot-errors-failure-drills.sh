@@ -954,6 +954,137 @@ else
 fi
 echo
 
+# ── Drill 22: profile-declared required files + permission policy (B9)
+echo "Drill 22: profile-declared required files and permission policy"
+reset_sandbox
+D22_HOME="$SANDBOX/d22a-home"
+mkdir -p "$D22_HOME"
+HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+  BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
+  python3 "$HEALTH" --daily >/dev/null 2>&1
+dispatch_once
+assert_in "FAIL credential tokens.env: missing required tokens.env" "$CAPTURE" "D22a missing required credential fails"
+assert_not_in "D22_SECRET" "$CAPTURE" "D22a no credential body leaked"
+
+reset_sandbox
+D22_HOME="$SANDBOX/d22b-home"
+mkdir -p "$D22_HOME/.config/whatsoup"
+printf 'TOKEN=D22_SECRET_UNREADABLE\n' > "$D22_HOME/.config/whatsoup/tokens.env"
+chmod 000 "$D22_HOME/.config/whatsoup/tokens.env"
+HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+  BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
+  python3 "$HEALTH" --daily >/dev/null 2>&1
+chmod 600 "$D22_HOME/.config/whatsoup/tokens.env"
+dispatch_once
+assert_in "FAIL credential tokens.env: unreadable" "$CAPTURE" "D22b unreadable required credential fails"
+assert_not_in "D22_SECRET_UNREADABLE" "$CAPTURE" "D22b unreadable credential contents not leaked"
+
+reset_sandbox
+D22_HOME="$SANDBOX/d22c-warn-home"
+mkdir -p "$D22_HOME/.config/whatsoup"
+printf 'TOKEN=D22_SECRET_MODE_WARN\n' > "$D22_HOME/.config/whatsoup/tokens.env"
+chmod 0644 "$D22_HOME/.config/whatsoup/tokens.env"
+HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+  BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
+  python3 "$HEALTH" --daily >/dev/null 2>&1
+dispatch_once
+assert_in "BOT WARNING" "$CAPTURE" "D22c credential 0644 warns, not critical"
+assert_in "WARN credential tokens.env: mode>600" "$CAPTURE" "D22c credential 0644 warning line"
+assert_not_in "credential_meta" "$CAPTURE" "D22c required credential does not duplicate metadata line"
+assert_not_in "D22_SECRET_MODE_WARN" "$CAPTURE" "D22c warning credential contents not leaked"
+
+reset_sandbox
+D22_HOME="$SANDBOX/d22c-fail-home"
+mkdir -p "$D22_HOME/.config/whatsoup"
+printf 'TOKEN=D22_SECRET_MODE_FAIL\n' > "$D22_HOME/.config/whatsoup/tokens.env"
+chmod 0666 "$D22_HOME/.config/whatsoup/tokens.env"
+HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+  BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
+  python3 "$HEALTH" --daily >/dev/null 2>&1
+dispatch_once
+assert_in "FAIL credential tokens.env: world_writable" "$CAPTURE" "D22c credential world-writable fails"
+d22c_fail_count=$(grep -c "FAIL credential tokens.env" "$CAPTURE" 2>/dev/null | tr -d ' ')
+[ "$d22c_fail_count" = "1" ] && pass "D22c world-writable required credential fails once" \
+  || fail "D22c expected one required credential FAIL, got $d22c_fail_count"
+assert_not_in "credential_meta" "$CAPTURE" "D22c world-writable required credential does not duplicate metadata line"
+assert_not_in "D22_SECRET_MODE_FAIL" "$CAPTURE" "D22c failing credential contents not leaked"
+
+reset_sandbox
+D22_HOME="$SANDBOX/d22d-home"
+mkdir -p "$D22_HOME/.config/whatsoup/instances/ana-bot"
+HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+  BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"instances":[{"name":"ana-bot","expected":"always_on","service":"com.whatsoup.ana-bot"}]}' \
+  python3 "$HEALTH" --daily >/dev/null 2>&1
+dispatch_once
+assert_in "FAIL config ana-bot: missing required config.json" "$CAPTURE" "D22d missing required config fails"
+
+reset_sandbox
+D22_HOME="$SANDBOX/d22e-warn-home"
+mkdir -p "$D22_HOME/.config/whatsoup/instances/ana-bot"
+printf '{"type":"agent","secret":"D22_CONFIG_SECRET_WARN"}\n' > "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
+chmod 0644 "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
+HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+  BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"instances":[{"name":"ana-bot","expected":"always_on","service":"com.whatsoup.ana-bot"}]}' \
+  python3 "$HEALTH" --daily >/dev/null 2>&1
+dispatch_once
+assert_in "BOT WARNING" "$CAPTURE" "D22e config 0644 warns by default"
+assert_in "WARN config ana-bot: world_readable required config.json" "$CAPTURE" "D22e config 0644 warning line"
+assert_not_in "D22_CONFIG_SECRET_WARN" "$CAPTURE" "D22e warning config body not leaked"
+
+reset_sandbox
+D22_HOME="$SANDBOX/d22e-fail-home"
+mkdir -p "$D22_HOME/.config/whatsoup/instances/ana-bot"
+printf '{"type":"agent","secret":"D22_CONFIG_SECRET_FAIL"}\n' > "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
+chmod 0644 "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
+HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+  BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"requiredConfigMaxMode":"0600","instances":[{"name":"ana-bot","expected":"always_on","service":"com.whatsoup.ana-bot"}]}' \
+  python3 "$HEALTH" --daily >/dev/null 2>&1
+dispatch_once
+assert_in "FAIL config ana-bot: mode>600 required config.json" "$CAPTURE" "D22e strict config max mode fails"
+assert_not_in "D22_CONFIG_SECRET_FAIL" "$CAPTURE" "D22e strict config body not leaked"
+
+reset_sandbox
+D22_HOME="$SANDBOX/d22f-home"
+mkdir -p "$D22_HOME"
+HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+  BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
+  BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"no-bot","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"instances":[]}' \
+  python3 "$HEALTH" --daily >/dev/null 2>&1
+dispatch_once
+assert_missing "$CAPTURE" "D22f no-bot info event remains suppressed"
+assert_count "$BOT_ERRORS_STATE_DIR/suppressed" "*.suppressed" 1 "D22f no-bot produces suppressed info only"
+
+D22_AUDIT="$SANDBOX/d22-audit.txt"
+if grep -E "D22_SECRET|D22_CONFIG_SECRET|TOKEN=" "$ALL_CAPTURE" > "$D22_AUDIT" 2>&1; then
+  fail "D22g required-file diagnostics leaked contents: $(tr '\n' ';' < "$D22_AUDIT")"
+else
+  pass "D22g required-file diagnostics do not leak credential/config contents"
+fi
+echo
+
 echo "──────────────────────────────────────────"
 echo "drills: $PASS passed, $FAIL failed"
 if [ "$FAIL" -ne 0 ]; then
