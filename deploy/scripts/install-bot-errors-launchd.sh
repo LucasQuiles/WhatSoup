@@ -9,6 +9,9 @@ STATE_DIR=${BOT_ERRORS_STATE_DIR:-$HOME/.local/state/bot-errors}
 HEALTH_PROFILE=${BOT_ERRORS_HEALTH_PROFILE:-}
 LAUNCH_AGENTS=$HOME/Library/LaunchAgents
 UID_VALUE=$(id -u)
+DISPATCHER_SCRIPT="$REPO_ROOT/deploy/scripts/bot-errors-dispatcher.py"
+HEALTH_SCRIPT="$REPO_ROOT/deploy/scripts/bot-errors-health-check.py"
+RUNNER_SCRIPT="$REPO_ROOT/deploy/scripts/bot-errors-runner.py"
 
 if [[ -z "$HEALTH_PROFILE" ]]; then
   host_profile=$(hostname -s | tr '[:upper:]' '[:lower:]')
@@ -19,6 +22,13 @@ fi
 
 mkdir -p "$STATE_DIR/logs" "$LAUNCH_AGENTS"
 chmod 700 "$STATE_DIR" "$STATE_DIR/logs" 2>/dev/null || true
+
+for required in "$DISPATCHER_SCRIPT" "$HEALTH_SCRIPT" "$RUNNER_SCRIPT"; do
+  if [[ ! -f "$required" ]]; then
+    echo "missing required BOT ERRORS script: $required" >&2
+    exit 2
+  fi
+done
 
 write_plist(){
   local label="$1" path="$2" body="$3"
@@ -47,7 +57,7 @@ write_plist "$dispatcher_label" "$dispatcher_plist" "$(cat <<PLIST
   <key>ProgramArguments</key>
   <array>
     <string>$PYTHON</string>
-    <string>$REPO_ROOT/deploy/scripts/bot-errors-dispatcher.py</string>
+    <string>$DISPATCHER_SCRIPT</string>
     <string>--daemon</string>
     <string>--interval</string>
     <string>30</string>
@@ -77,7 +87,7 @@ write_plist "$deadman_label" "$deadman_plist" "$(cat <<PLIST
   <key>ProgramArguments</key>
   <array>
     <string>$PYTHON</string>
-    <string>$REPO_ROOT/deploy/scripts/bot-errors-health-check.py</string>
+    <string>$HEALTH_SCRIPT</string>
     <string>--deadman</string>
   </array>
   <key>EnvironmentVariables</key>
@@ -105,7 +115,7 @@ write_plist "$health_label" "$health_plist" "$(cat <<PLIST
   <key>ProgramArguments</key>
   <array>
     <string>$PYTHON</string>
-    <string>$REPO_ROOT/deploy/scripts/bot-errors-runner.py</string>
+    <string>$RUNNER_SCRIPT</string>
     <string>--instance</string>
     <string>bot-errors-health</string>
     <string>--source</string>
@@ -118,7 +128,7 @@ write_plist "$health_label" "$health_plist" "$(cat <<PLIST
     <string>launchd_label=$health_label</string>
     <string>--</string>
     <string>$PYTHON</string>
-    <string>$REPO_ROOT/deploy/scripts/bot-errors-health-check.py</string>
+    <string>$HEALTH_SCRIPT</string>
     <string>--daily</string>
   </array>
   <key>EnvironmentVariables</key>
