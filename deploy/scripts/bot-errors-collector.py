@@ -1909,25 +1909,10 @@ def run_once(
                     recovery_evidence,
                     state,
                 )
-                enqueue_meta_recovery(
-                    remote,
-                    "remote-drain-stale",
-                    f"BOT ERRORS collector remote drain recovered: {remote}",
-                    recovery_evidence,
-                    state,
-                )
             else:
                 defer_meta_recovery(
                     remote,
                     "remote-claim-failed",
-                    state,
-                    consecutive_successes,
-                    recovery_successes,
-                    recovery_evidence,
-                )
-                defer_meta_recovery(
-                    remote,
-                    "remote-drain-stale",
                     state,
                     consecutive_successes,
                     recovery_successes,
@@ -1964,6 +1949,18 @@ def run_once(
                     alert_cooldown,
                 )
         if not outbox_claim_failed and not outbox_relay_failed:
+            remote_record = remote_state.setdefault(remote, {})
+            remote_record["lastDrainAt"] = int(time.time())
+            remote_record["lastDrainIso"] = now_iso()
+            remote_record["lastDrainError"] = None
+            drain_recovery_evidence = f"remote={remote}\nremote_root={remote_root}\noutbox_drain_status=success"
+            enqueue_meta_recovery(
+                remote,
+                "remote-drain-stale",
+                f"BOT ERRORS collector remote drain recovered: {remote}",
+                drain_recovery_evidence,
+                state,
+            )
             enqueue_meta_recovery(
                 remote,
                 "remote-relay-failed",
@@ -2088,14 +2085,17 @@ def run_once(
                 )
         if outbox_claim_failed:
             continue
-        last_success = int(remote_state.get(remote, {}).get("lastSuccessAt") or 0)
-        age = int(time.time()) - last_success if last_success else remote_sla + 1
+        drain_record = remote_state.get(remote, {})
+        last_drain = int(drain_record.get("lastDrainAt") or drain_record.get("lastSuccessAt") or 0)
+        last_drain_iso = drain_record.get("lastDrainIso") or drain_record.get("lastSuccessIso")
+        last_drain_error = drain_record.get("lastDrainError") or drain_record.get("lastError")
+        age = int(time.time()) - last_drain if last_drain else remote_sla + 1
         if age > remote_sla:
             enqueue_meta_alert(
                 remote,
                 "remote-drain-stale",
                 f"BOT ERRORS collector has not drained remote within SLA: {remote}",
-                f"remote={remote}\nage_seconds={age}\nremote_sla_seconds={remote_sla}\nlast_success={remote_state.get(remote, {}).get('lastSuccessIso')}\nlast_error={remote_state.get(remote, {}).get('lastError')}\ncollector_log={state_root() / 'logs/collector.jsonl'}",
+                f"remote={remote}\nage_seconds={age}\nremote_sla_seconds={remote_sla}\nlast_drain={last_drain_iso}\nlast_error={last_drain_error}\ncollector_log={state_root() / 'logs/collector.jsonl'}",
                 state,
                 alert_cooldown,
             )

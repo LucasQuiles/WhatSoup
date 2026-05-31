@@ -24,6 +24,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EMIT="$REPO_ROOT/deploy/scripts/bot-errors-emit.py"
 DISPATCH="$REPO_ROOT/deploy/scripts/bot-errors-dispatcher.py"
 HEARTBEAT="$REPO_ROOT/deploy/scripts/bot-errors-heartbeat-watchdog.py"
+COLLECTOR="$REPO_ROOT/deploy/scripts/bot-errors-collector.py"
 
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/bot-errors-drill.XXXXXX")"
 CAPTURE="$SANDBOX/sent.log"
@@ -294,6 +295,67 @@ BOT_ERRORS_WATCHDOG_CHECKS=daily_health python3 "$HEARTBEAT" --once \
   --max-daily-health-age 1 > "$HEARTBEAT_STALE" 2>&1
 assert_in 'daily_health' "$HEARTBEAT_STALE" "missing daily-health produces stale watchdog problem"
 assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 1 "stale watchdog queues a critical alert"
+echo
+
+# ── Drill 11: remote writefail harvest reaches dispatcher recovery as CRITICAL
+echo "Drill 11: collector remote writefail harvest + critical recovery"
+reset_sandbox
+REMOTE_ROOT="$SANDBOX/remote-root"
+REMOTE_WF="$REMOTE_ROOT/writefail"
+mkdir -p "$REMOTE_WF"
+python3 - "$REMOTE_WF" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1]) / "remote-critical.writefail"
+event = {
+    "schemaVersion": 1,
+    "id": "remote-critical-drill",
+    "eventType": "alert",
+    "severity": "critical",
+    "createdAt": "2026-05-31T00:00:00Z",
+    "machine": "mini5-hostname",
+    "platform": "darwin",
+    "instance": "ana-bot",
+    "source": "wf",
+    "summary": "remote writefail drill critical",
+    "evidence": "remote outbox failed before collector harvest",
+    "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+}
+target.write_text(json.dumps({
+    "schemaVersion": 1,
+    "kind": "outbox_write_failure",
+    "recordedAt": "2026-05-31T00:00:01Z",
+    "failedTarget": "/remote/outbox",
+    "reason": "synthetic remote writefail",
+    "emitPid": 1,
+    "event": event,
+}) + "\n")
+PY
+FAKE_SSH="$SANDBOX/fake-ssh-exec.sh"
+cat > "$FAKE_SSH" <<'SH'
+#!/bin/sh
+while [ "$#" -gt 0 ] && [ "$1" != "python3" ]; do
+  shift
+done
+if [ "$1" != "python3" ]; then
+  echo "python3 command not found" >&2
+  exit 127
+fi
+shift
+exec python3 "$@"
+SH
+chmod 0700 "$FAKE_SSH"
+BOT_ERRORS_RELAY_SSH_COMMAND="$FAKE_SSH" python3 "$COLLECTOR" \
+  --remote "mini5:$REMOTE_ROOT" --max-events 5 --timeout 5 > "$SANDBOX/collector-b6.json" 2>&1
+assert_in '"writefailHarvested": 1' "$SANDBOX/collector-b6.json" "collector harvests one remote writefail"
+assert_count "$BOT_ERRORS_STATE_DIR/writefail" "*.writefail" 1 "remote crumb lands in nucles writefail inbox"
+dispatch_once
+assert_in "remote writefail drill critical" "$CAPTURE" "harvested remote critical reaches dispatch"
+assert_in "writefail_recovered: origin=mini5-hostname harvested_from=mini5" "$CAPTURE" "dispatch names remote writefail origin"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "remote critical recovered exactly once"
+assert_count "$REMOTE_WF" "*.writefail" 0 "remote writefail source drained"
 echo
 
 echo "──────────────────────────────────────────"
