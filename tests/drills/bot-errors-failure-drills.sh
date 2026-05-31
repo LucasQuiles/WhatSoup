@@ -653,6 +653,307 @@ else
 fi
 echo
 
+# ── Drill 20: same-fingerprint fleet storms collapse to a single digest (B8)
+echo "Drill 20: same-fingerprint storm collapse (D20a-D20e)"
+reset_sandbox
+python3 - "$BOT_ERRORS_OUTBOX_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+outbox = Path(sys.argv[1])
+hosts = ["MACLAB", "MWLAB"] + [f"mini{i}" for i in range(1, 12)]
+for i, host in enumerate(hosts):
+    tools = "send_message,missing_tool" if i % 2 == 0 else "missing_tool,send_message"
+    event = {
+        "schemaVersion": 1,
+        "id": f"d20a-{host}",
+        "eventType": "alert",
+        "severity": "critical",
+        "createdAt": "2026-05-31T00:00:00Z",
+        "machine": host,
+        "platform": "darwin",
+        "instance": "bot-errors-health",
+        "source": "daily-health",
+        "summary": f"{host} missing required tools {tools}",
+        "evidence": f"machine={host} profile={host}.json required_missing=missing_tool",
+        "process": {"pid": 1, "cwd": str(outbox.parent), "argv": ["health"]},
+        "diagnostics": {
+            "logHints": [f"/var/log/bot-errors/{host}.log", str(outbox.parent / "remote" / host / "health.json")],
+            "queue": str(outbox),
+        },
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    (outbox / f"20260531T000000Z.d20a.{host}.json").write_text(json.dumps(event, indent=2) + "\n")
+PY
+dispatch_once
+d20_count=$(grep -c "BOT ERRORS storm collapse" "$CAPTURE" 2>/dev/null | tr -d ' ')
+[ "$d20_count" = "1" ] && pass "D20a emits exactly one storm digest" \
+  || fail "D20a expected one storm digest, got $d20_count"
+assert_in "affected_hosts: 13" "$CAPTURE" "D20a/D20e digest carries affected host count"
+for host in MACLAB MWLAB mini1 mini2 mini3 mini4 mini5 mini6 mini7 mini8 mini9 mini10 mini11; do
+  assert_in "$host" "$CAPTURE" "D20a/D20e digest names $host"
+done
+assert_in "storm_manifest:" "$CAPTURE" "D20a/D20e digest names manifest path"
+assert_count "$BOT_ERRORS_STATE_DIR/storm-collapsed" "*.collapsed" 13 "D20a original storm events retained as collapsed evidence"
+assert_count "$BOT_ERRORS_STATE_DIR/storm-manifests" "*.json" 1 "D20a manifest written"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "D20a digest sent once"
+assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 0 "D20a outbox drained"
+
+reset_sandbox
+python3 - "$BOT_ERRORS_OUTBOX_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+outbox = Path(sys.argv[1])
+hosts = ["MACLAB", "MWLAB"] + [f"mini{i}" for i in range(1, 12)]
+for host in hosts:
+    event = {
+        "schemaVersion": 1,
+        "id": f"d20a-reuse-first-{host}",
+        "eventType": "alert",
+        "severity": "critical",
+        "createdAt": "2026-05-31T00:00:00Z",
+        "machine": host,
+        "platform": "darwin",
+        "instance": "bot-errors-health",
+        "source": "daily-health",
+        "summary": f"{host} missing required tools send_message",
+        "evidence": f"machine={host} required_missing=send_message",
+        "diagnostics": {"logHints": [f"/var/log/bot-errors/{host}.log"], "queue": str(outbox)},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    (outbox / f"20260531T000000Z.d20a.reuse.first.{host}.json").write_text(json.dumps(event, indent=2) + "\n")
+PY
+python3 "$DISPATCH" --once --max-events 0 >/dev/null 2>&1
+assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 1 "D20a crash-idempotency leaves one deterministic digest queued"
+python3 - "$BOT_ERRORS_OUTBOX_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+outbox = Path(sys.argv[1])
+for host in ("mini12", "mini13", "mini14"):
+    event = {
+        "schemaVersion": 1,
+        "id": f"d20a-reuse-late-{host}",
+        "eventType": "alert",
+        "severity": "critical",
+        "createdAt": "2026-05-31T00:00:01Z",
+        "machine": host,
+        "platform": "darwin",
+        "instance": "bot-errors-health",
+        "source": "daily-health",
+        "summary": f"{host} missing required tools send_message",
+        "evidence": f"machine={host} required_missing=send_message",
+        "diagnostics": {"logHints": [f"/var/log/bot-errors/{host}.log"], "queue": str(outbox)},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    (outbox / f"20260531T000001Z.d20a.reuse.late.{host}.json").write_text(json.dumps(event, indent=2) + "\n")
+PY
+dispatch_once
+d20_reuse_count=$(grep -c "BOT ERRORS storm collapse" "$CAPTURE" 2>/dev/null | tr -d ' ')
+[ "$d20_reuse_count" = "1" ] && pass "D20a crash-idempotency reuses existing digest without double-send" \
+  || fail "D20a crash-idempotency expected one digest send, got $d20_reuse_count"
+assert_in '"type": "storm_digest_reused"' "$BOT_ERRORS_STATE_DIR/logs/dispatch.jsonl" "D20a crash-idempotency logs digest reuse"
+assert_count "$BOT_ERRORS_STATE_DIR/storm-collapsed" "*.collapsed" 16 "D20a crash-idempotency retains original plus late collapsed evidence"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "D20a crash-idempotency sends one digest"
+
+reset_sandbox
+python3 - "$BOT_ERRORS_OUTBOX_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+outbox = Path(sys.argv[1])
+for host in ("mini1", "mini2", "mini3"):
+    event = {
+        "schemaVersion": 1,
+        "id": f"d20b-same-{host}",
+        "eventType": "alert",
+        "severity": "critical",
+        "createdAt": "2026-05-31T00:00:00Z",
+        "machine": host,
+        "platform": "darwin",
+        "instance": "bot-errors-health",
+        "source": "daily-health",
+        "summary": f"{host} missing required tools send_message",
+        "evidence": f"machine={host} required_missing=send_message",
+        "diagnostics": {"logHints": [f"/var/log/bot-errors/{host}.log"], "queue": str(outbox)},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    (outbox / f"20260531T000000Z.d20b.same.{host}.json").write_text(json.dumps(event, indent=2) + "\n")
+one_off = {
+    "schemaVersion": 1,
+    "id": "d20b-one-off",
+    "eventType": "alert",
+    "severity": "critical",
+    "createdAt": "2026-05-31T00:00:00Z",
+    "machine": "mini4",
+    "platform": "darwin",
+    "instance": "ana-bot",
+    "source": "tool-failure",
+    "summary": "mini4 tool call failed differently",
+    "evidence": "distinct fingerprint must not merge",
+    "diagnostics": {"logHints": ["/var/log/bot-errors/mini4.log"], "queue": str(outbox)},
+    "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+}
+(outbox / "20260531T000000Z.d20b.one-off.json").write_text(json.dumps(one_off, indent=2) + "\n")
+PY
+dispatch_once
+d20b_count=$(grep -c "BOT ERRORS storm collapse" "$CAPTURE" 2>/dev/null | tr -d ' ')
+[ "$d20b_count" = "1" ] && pass "D20b same fingerprint collapses once" \
+  || fail "D20b expected one digest, got $d20b_count"
+assert_in "mini4 tool call failed differently" "$CAPTURE" "D20b distinct fingerprint still sends independently"
+assert_count "$BOT_ERRORS_STATE_DIR/storm-collapsed" "*.collapsed" 3 "D20b only same-fingerprint events collapsed"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 2 "D20b emits digest plus one distinct alert"
+
+reset_sandbox
+python3 - "$BOT_ERRORS_OUTBOX_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+outbox = Path(sys.argv[1])
+for host, stamp in (("mini1", "2026-05-31T00:01:59Z"), ("mini2", "2026-05-31T00:02:00Z"), ("mini3", "2026-05-31T00:02:01Z")):
+    event = {
+        "schemaVersion": 1,
+        "id": f"d20c-boundary-{host}",
+        "eventType": "alert",
+        "severity": "critical",
+        "createdAt": stamp,
+        "machine": host,
+        "platform": "darwin",
+        "instance": "bot-errors-health",
+        "source": "daily-health",
+        "summary": f"{host} missing required tools send_message",
+        "evidence": f"machine={host} required_missing=send_message",
+        "diagnostics": {"logHints": [f"/var/log/bot-errors/{host}.log"], "queue": str(outbox)},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    safe = stamp.replace(":", "").replace("-", "")
+    (outbox / f"{safe}.d20c.boundary.{host}.json").write_text(json.dumps(event, indent=2) + "\n")
+PY
+dispatch_once
+d20_boundary_count=$(grep -c "BOT ERRORS storm collapse" "$CAPTURE" 2>/dev/null | tr -d ' ')
+[ "$d20_boundary_count" = "1" ] && pass "D20c boundary-straddling events collapse inside sliding window" \
+  || fail "D20c boundary straddle expected one digest, got $d20_boundary_count"
+assert_count "$BOT_ERRORS_STATE_DIR/storm-collapsed" "*.collapsed" 3 "D20c boundary straddle retains collapsed evidence"
+
+reset_sandbox
+python3 - "$BOT_ERRORS_OUTBOX_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+outbox = Path(sys.argv[1])
+for host, stamp in (("mini1", "2026-05-31T00:01:50Z"), ("mini2", "2026-05-31T00:02:31Z"), ("mini3", "2026-05-31T00:03:12Z")):
+    event = {
+        "schemaVersion": 1,
+        "id": f"d20f-trickle-{host}",
+        "eventType": "alert",
+        "severity": "critical",
+        "createdAt": stamp,
+        "machine": host,
+        "platform": "darwin",
+        "instance": "bot-errors-health",
+        "source": "daily-health",
+        "summary": f"{host} missing required tools send_message",
+        "evidence": f"machine={host} required_missing=send_message",
+        "diagnostics": {"logHints": [f"/var/log/bot-errors/{host}.log"], "queue": str(outbox)},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+    safe = stamp.replace(":", "").replace("-", "")
+    (outbox / f"{safe}.d20f.trickle.{host}.json").write_text(json.dumps(event, indent=2) + "\n")
+PY
+dispatch_once
+d20_trickle_count=$(grep -c "BOT ERRORS storm collapse" "$CAPTURE" 2>/dev/null | tr -d ' ')
+[ "$d20_trickle_count" = "1" ] && pass "D20f trickle across bucket boundary collapses inside rolling window" \
+  || fail "D20f trickle expected one digest, got $d20_trickle_count"
+assert_count "$BOT_ERRORS_STATE_DIR/storm-collapsed" "*.collapsed" 3 "D20f trickle retains collapsed evidence"
+
+reset_sandbox
+python3 - "$BOT_ERRORS_OUTBOX_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+outbox = Path(sys.argv[1])
+for stamp, hosts in (("2026-05-31T00:00:00Z", ("mini1", "mini2", "mini3")), ("2026-05-31T00:03:00Z", ("mini4", "mini5", "mini6"))):
+    for host in hosts:
+        event = {
+            "schemaVersion": 1,
+            "id": f"d20c-{stamp}-{host}",
+            "eventType": "alert",
+            "severity": "critical",
+            "createdAt": stamp,
+            "machine": host,
+            "platform": "darwin",
+            "instance": "bot-errors-health",
+            "source": "daily-health",
+            "summary": f"{host} missing required tools send_message",
+            "evidence": f"machine={host} required_missing=send_message",
+            "diagnostics": {"logHints": [f"/var/log/bot-errors/{host}.log"], "queue": str(outbox)},
+            "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+        }
+        safe = stamp.replace(":", "").replace("-", "")
+        (outbox / f"{safe}.d20c.{host}.json").write_text(json.dumps(event, indent=2) + "\n")
+PY
+BOT_ERRORS_STORM_WINDOW_SECONDS=120 dispatch_once
+d20c_count=$(grep -c "BOT ERRORS storm collapse" "$CAPTURE" 2>/dev/null | tr -d ' ')
+[ "$d20c_count" = "2" ] && pass "D20c emits separate digests across windows" \
+  || fail "D20c expected two digests, got $d20c_count"
+assert_count "$BOT_ERRORS_STATE_DIR/storm-collapsed" "*.collapsed" 6 "D20c collapsed both windows without permanent suppression"
+
+reset_sandbox
+for host in mini1 mini2 mini3; do
+  emit --severity info --instance bot-errors-health --source daily-health \
+    --summary "BOT ERRORS daily health passed" --evidence "machine=$host status=ok"
+done
+dispatch_once
+assert_missing "$CAPTURE" "D20d daily-health recovery/info noise remains suppressed"
+assert_count "$BOT_ERRORS_STATE_DIR/suppressed" "*.suppressed" 3 "D20d recovery/info events bounded as suppressed dispositions"
+D20_AUDIT="$SANDBOX/d20-audit.txt"
+if python3 - "$ALL_CAPTURE" > "$D20_AUDIT" 2>&1 <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+messages = [part.strip() for part in path.read_text(encoding="utf-8").split("\n---\n") if part.strip()]
+required = ("severity", "machine", "instance", "source", "event", "created", "requested_action")
+failures = []
+storm_messages = 0
+for index, message in enumerate(messages, start=1):
+    missing = [label for label in required if f"> {label}:" not in message]
+    path_count = 0
+    for pattern in (r"> log_\d+:", r"> queue:", r"> dispatch_log:", r"breadcrumb=", r"> storm_manifest:"):
+        if re.search(pattern, message):
+            path_count += 1
+    if path_count < 2:
+        missing.append(">=2 evidence paths")
+    if "BOT ERRORS storm collapse" in message:
+        storm_messages += 1
+        for needle in ("> affected_hosts:", "> affected_host_list:", "> storm_manifest:"):
+            if needle not in message:
+                missing.append(needle)
+    if missing:
+        failures.append(f"message {index}: {', '.join(missing)}")
+if storm_messages < 1:
+    failures.append("no storm digest messages captured")
+if failures:
+    print("\n".join(failures))
+    raise SystemExit(1)
+print(f"audited {len(messages)} rendered messages including {storm_messages} storm digest(s)")
+PY
+then
+  pass "D20e storm digests satisfy Q-actionability rubric"
+else
+  fail "D20e actionability audit failed: $(tr '\n' ';' < "$D20_AUDIT")"
+fi
+echo
+
 echo "──────────────────────────────────────────"
 echo "drills: $PASS passed, $FAIL failed"
 if [ "$FAIL" -ne 0 ]; then

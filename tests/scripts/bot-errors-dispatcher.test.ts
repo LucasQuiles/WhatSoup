@@ -38,6 +38,37 @@ function writeEvent(root: string, severity = 'critical', overrides: Record<strin
   writeFileSync(join(outbox, '20260531T000000Z.attempt-counter-test.json'), `${JSON.stringify(event, null, 2)}\n`, { mode: 0o600 });
 }
 
+function writeStormEvent(root: string, machine: string, overrides: Record<string, unknown> = {}) {
+  const outbox = join(root, 'outbox');
+  mkdirSync(outbox, { recursive: true, mode: 0o700 });
+  const safeMachine = machine.replace(/[^A-Za-z0-9_.:-]+/g, '_');
+  const event = {
+    schemaVersion: 1,
+    id: `storm-${safeMachine}`,
+    eventType: 'alert',
+    severity: 'critical',
+    createdAt: '2026-05-31T00:00:00Z',
+    machine,
+    platform: 'darwin',
+    instance: 'bot-errors-health',
+    source: 'daily-health',
+    summary: `${machine} missing required tools send_message,missing_tool`,
+    evidence: `machine=${machine} profile=${safeMachine}.json required_missing=missing_tool`,
+    process: { pid: 123, cwd: root, argv: ['health'] },
+    diagnostics: {
+      logHints: [`/var/log/bot-errors/${safeMachine}.log`, join(root, 'remote', safeMachine, 'health.json')],
+      queue: outbox,
+    },
+    delivery: { attempts: 0, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    ...overrides,
+  };
+  writeFileSync(
+    join(outbox, `20260531T000000Z.${safeMachine}.${event.id}.json`),
+    `${JSON.stringify(event, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+}
+
 function writeWritefail(root: string, eventOverrides: Record<string, unknown> = {}) {
   const writefail = join(root, 'writefail');
   mkdirSync(writefail, { recursive: true, mode: 0o700 });
@@ -291,6 +322,254 @@ describe('bot-errors-dispatcher', () => {
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, suppressed: 0, failed: 0 });
     expect(readFileSync(capturePath, 'utf8')).toContain('BOT WARNING - BOT ERRORS daily health found issues');
+  });
+
+  it('collapses same-fingerprint storms into one manifest-backed digest', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    const collapsed = join(tmpRoot, 'storm-collapsed');
+    const manifests = join(tmpRoot, 'storm-manifests');
+    const sent = join(tmpRoot, 'sent');
+    const hosts = ['MACLAB', 'MWLAB', ...Array.from({ length: 11 }, (_, index) => `mini${index + 1}`)];
+    hosts.forEach((host, index) => {
+      writeStormEvent(tmpRoot, host, {
+        id: `storm-${host}`,
+        summary: index % 2 === 0
+          ? `${host} missing required tools send_message,missing_tool`
+          : `${host} missing required tools missing_tool,send_message`,
+      });
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        BOT_ERRORS_STORM_THRESHOLD: '3',
+        BOT_ERRORS_STORM_WINDOW_SECONDS: '120',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 13, failed: 0 });
+    const rendered = readFileSync(capturePath, 'utf8');
+    expect(rendered.match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
+    expect(rendered).toContain('affected_hosts: 13');
+    expect(rendered).toContain('affected_host_list:');
+    hosts.forEach((host) => expect(rendered).toContain(host));
+    expect(rendered).toContain('storm_manifest:');
+    expect(rendered).toContain('requested_action: Q investigate');
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_digest_queued"');
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_collapsed"');
+    expect(readdirSync(collapsed)).toHaveLength(13);
+    expect(readdirSync(manifests)).toHaveLength(1);
+    expect(readdirSync(sent)).toHaveLength(1);
+    const manifest = JSON.parse(readFileSync(join(manifests, readdirSync(manifests)[0]!), 'utf8')) as {
+      affectedHosts: number;
+      entries: unknown[];
+      entriesCollapsed: unknown[];
+      hosts: string[];
+    };
+    expect(manifest.affectedHosts).toBe(13);
+    expect(manifest.entries).toHaveLength(13);
+    expect(manifest.entriesCollapsed).toHaveLength(13);
+    expect(manifest.hosts).toHaveLength(13);
+    hosts.forEach((host) => expect(manifest.hosts).toContain(host));
+  });
+
+  it('does not merge distinct storm fingerprints', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const collapsed = join(tmpRoot, 'storm-collapsed');
+    for (const host of ['mini1', 'mini2', 'mini3']) {
+      writeStormEvent(tmpRoot, host, { id: `same-${host}`, summary: `${host} missing required tools send_message` });
+    }
+    writeStormEvent(tmpRoot, 'mini4', {
+      id: 'one-off-mini4',
+      source: 'tool-failure',
+      summary: 'mini4 tool call failed differently',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 2, sent: 2, stormCollapsed: 3, failed: 0 });
+    const messages = readFileSync(capturePath, 'utf8').split('\n---\n').filter((part) => part.trim());
+    expect(messages).toHaveLength(2);
+    expect(readFileSync(capturePath, 'utf8')).toContain('BOT ERRORS storm collapse');
+    expect(readFileSync(capturePath, 'utf8')).toContain('mini4 tool call failed differently');
+    expect(readdirSync(collapsed)).toHaveLength(3);
+  });
+
+  it('limits storm collapse to one digest per time window', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    ['mini1', 'mini2', 'mini3'].forEach((host) => writeStormEvent(tmpRoot, host, {
+      id: `early-${host}`,
+      createdAt: '2026-05-31T00:00:00Z',
+    }));
+    ['mini4', 'mini5', 'mini6'].forEach((host) => writeStormEvent(tmpRoot, host, {
+      id: `late-${host}`,
+      createdAt: '2026-05-31T00:03:00Z',
+    }));
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        BOT_ERRORS_STORM_THRESHOLD: '3',
+        BOT_ERRORS_STORM_WINDOW_SECONDS: '120',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 2, sent: 2, stormCollapsed: 6, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(2);
+  });
+
+  it('collapses storms that straddle a fixed bucket boundary inside the sliding window', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    [
+      ['mini1', '2026-05-31T00:01:59Z'],
+      ['mini2', '2026-05-31T00:02:00Z'],
+      ['mini3', '2026-05-31T00:02:01Z'],
+    ].forEach(([host, createdAt]) => writeStormEvent(tmpRoot, host!, {
+      id: `boundary-${host}`,
+      createdAt,
+      summary: `${host} missing required tools send_message`,
+    }));
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        BOT_ERRORS_STORM_THRESHOLD: '3',
+        BOT_ERRORS_STORM_WINDOW_SECONDS: '120',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 3, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
+  });
+
+  it('collapses trickle storms across a fixed boundary when the rolling span is inside the window', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    [
+      ['mini1', '2026-05-31T00:01:50Z'],
+      ['mini2', '2026-05-31T00:02:31Z'],
+      ['mini3', '2026-05-31T00:03:12Z'],
+    ].forEach(([host, createdAt]) => writeStormEvent(tmpRoot, host!, {
+      id: `trickle-${host}`,
+      createdAt,
+      summary: `${host} missing required tools send_message`,
+    }));
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        BOT_ERRORS_STORM_THRESHOLD: '3',
+        BOT_ERRORS_STORM_WINDOW_SECONDS: '120',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 3, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8')).toContain('BOT ERRORS storm collapse');
+  });
+
+  it('reuses an already-queued storm digest after a crash before collapsing later originals', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    const outbox = join(tmpRoot, 'outbox');
+    const collapsed = join(tmpRoot, 'storm-collapsed');
+    const manifests = join(tmpRoot, 'storm-manifests');
+    const sent = join(tmpRoot, 'sent');
+    const hosts = ['MACLAB', 'MWLAB', ...Array.from({ length: 11 }, (_, index) => `mini${index + 1}`)];
+    hosts.forEach((host) => writeStormEvent(tmpRoot, host, { id: `first-${host}` }));
+
+    const queuedOnly = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once', '--max-events', '0'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(queuedOnly)).toMatchObject({ processed: 0, sent: 0, stormCollapsed: 13, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+
+    for (const host of ['mini12', 'mini13', 'mini14']) {
+      writeStormEvent(tmpRoot, host, { id: `late-${host}`, createdAt: '2026-05-31T00:00:01Z' });
+    }
+    const replay = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(replay)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 3, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_digest_reused"');
+    expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(0);
+    expect(readdirSync(collapsed)).toHaveLength(16);
+    expect(readdirSync(sent)).toHaveLength(1);
+    const manifest = JSON.parse(readFileSync(join(manifests, readdirSync(manifests)[0]!), 'utf8')) as {
+      entries: unknown[];
+      entriesCollapsed: unknown[];
+    };
+    expect(manifest.entries).toHaveLength(16);
+    expect(manifest.entriesCollapsed).toHaveLength(16);
+  });
+
+  it('keeps daily-health recovery noise suppressed instead of storm-posting it', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    ['mini1', 'mini2', 'mini3'].forEach((host) => writeStormEvent(tmpRoot, host, {
+      id: `recovery-${host}`,
+      severity: 'info',
+      source: 'daily-health',
+      summary: 'BOT ERRORS daily health passed',
+    }));
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 3, sent: 0, suppressed: 3, stormCollapsed: 0, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
   });
 
   it('recovers writefail breadcrumbs into the normal dispatch path', () => {
