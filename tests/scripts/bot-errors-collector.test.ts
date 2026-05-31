@@ -246,7 +246,8 @@ describe('bot-errors-collector', () => {
   it('harvests remote writefail crumbs into the local writefail inbox with provenance', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const remoteRoot = join(tmpRoot, 'remote');
-    writeRemoteWritefail(join(remoteRoot, 'writefail'));
+    const longEventId = 'remote-critical-live-canary-2c837410-eb60-4099-a73b-e29476a38ea7';
+    writeRemoteWritefail(join(remoteRoot, 'writefail'), longEventId);
     const fakeSsh = writeExecFakeSsh(tmpRoot);
 
     const result = runCollectorWithRemote(fakeSsh, remoteRoot);
@@ -260,7 +261,8 @@ describe('bot-errors-collector', () => {
       event: { id: string };
       harvest: { fromHost: string; fromDir: string };
     };
-    expect(crumb.event.id).toBe('remote-writefail-test');
+    expect(files[0]).toMatch(/\.writefail$/);
+    expect(crumb.event.id).toBe(longEventId);
     expect(crumb.harvest.fromHost).toBe('mini5');
     expect(crumb.harvest.fromDir).toContain('writefail');
     expect(readdirSync(join(remoteRoot, 'writefail')).filter((file) => file.endsWith('.writefail'))).toHaveLength(0);
