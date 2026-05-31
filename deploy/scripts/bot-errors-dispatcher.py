@@ -1913,7 +1913,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         atomic_write_json(claimed, event)
         os.replace(claimed, paths["outbox"] / path.name)
         append_dispatch_log(paths, {
-            "type": "failed",
+            "type": "send_failed",
             "eventId": event.get("id"),
             "path": str(paths["outbox"] / path.name),
             "attempts": attempts,

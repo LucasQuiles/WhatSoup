@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -100,6 +100,118 @@ describe('bot-errors-dispatcher', () => {
     const event = JSON.parse(readFileSync(join(sent, sentFiles[0]!), 'utf8')) as { delivery: { attempts: number; status: string } };
     expect(event.delivery.attempts).toBeGreaterThanOrEqual(1);
     expect(event.delivery.status).toBe('sent');
+  });
+
+  it('keeps an alert durable when the WhatsApp socket is unavailable and sends once after recovery', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    const outbox = join(tmpRoot, 'outbox');
+    const sent = join(tmpRoot, 'sent');
+    writeEvent(tmpRoot, 'critical', {
+      id: 'socket-down-test',
+      summary: 'socket unavailable must stay durable',
+    });
+
+    const testGroupJid = ['120363', '000000000000', '@g.us'].join('');
+    const failed = spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: '',
+        BOT_ERRORS_JID: testGroupJid,
+        BOT_ERRORS_EXPECTED_JID: testGroupJid,
+        BOT_ERRORS_SOCKET_PATH: join(tmpRoot, 'missing.sock'),
+      },
+      encoding: 'utf8',
+    });
+
+    expect(failed.status).toBe(1);
+    expect(existsSync(capturePath)).toBe(false);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "send_failed"');
+    const outboxFilesAfterFailure = readdirSync(outbox).filter((file) => file.endsWith('.json'));
+    expect(outboxFilesAfterFailure).toHaveLength(1);
+    const queuedPath = join(outbox, outboxFilesAfterFailure[0]!);
+    const queued = JSON.parse(readFileSync(queuedPath, 'utf8')) as {
+      delivery: { attempts: number; status: string; lastError: string; nextAttemptAtEpoch: number };
+    };
+    expect(queued.delivery.attempts).toBe(1);
+    expect(queued.delivery.status).toBe('queued');
+    expect(queued.delivery.lastError).toContain('missing.sock');
+    expect(queued.delivery.nextAttemptAtEpoch).toBeGreaterThan(Math.floor(Date.now() / 1000));
+
+    const skippedDuringBackoff = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+    expect(JSON.parse(skippedDuringBackoff)).toMatchObject({ processed: 0, sent: 0, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+
+    queued.delivery.nextAttemptAtEpoch = 0;
+    writeFileSync(queuedPath, `${JSON.stringify(queued, null, 2)}\n`, { mode: 0o600 });
+    const recovered = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(recovered)).toMatchObject({ processed: 1, sent: 1, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8').match(/socket unavailable must stay durable/g)).toHaveLength(1);
+    expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(0);
+    expect(readdirSync(sent)).toHaveLength(1);
+  });
+
+  it('reclaims a dispatcher processing claim after a crash and sends it once', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const processing = join(tmpRoot, 'processing');
+    const sent = join(tmpRoot, 'sent');
+    mkdirSync(processing, { recursive: true, mode: 0o700 });
+    const event = {
+      schemaVersion: 1,
+      id: 'crash-reclaim-test',
+      eventType: 'alert',
+      severity: 'critical',
+      createdAt: '2026-05-31T00:00:00Z',
+      machine: 'test-machine',
+      instance: 'q',
+      source: 'dispatcher-crash-drill',
+      summary: 'crash mid-claim must replay once',
+      evidence: 'synthetic orphaned processing claim',
+      process: { pid: 321, cwd: tmpRoot, argv: ['test'] },
+      diagnostics: { logHints: ['journalctl --user -u bot-errors-dispatcher.service'], queue: join(tmpRoot, 'outbox') },
+      delivery: { attempts: 0, status: 'sending', nextAttemptAtEpoch: 0, lastError: null },
+    };
+    writeFileSync(
+      join(processing, '20260531T000000Z.crash-reclaim-test.json.999.processing'),
+      `${JSON.stringify(event, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, reclaimed: 1, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8').match(/crash mid-claim must replay once/g)).toHaveLength(1);
+    expect(readdirSync(processing)).toHaveLength(0);
+    expect(readdirSync(sent)).toHaveLength(1);
   });
 
   it('renders info events as informational with no remediation request', () => {
