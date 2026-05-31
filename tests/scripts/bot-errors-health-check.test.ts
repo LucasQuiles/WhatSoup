@@ -12,6 +12,20 @@ afterEach(() => {
 });
 
 describe('bot-errors-health-check', () => {
+  it('keeps all checked-in health profiles parseable', () => {
+    const profilesDir = join(process.cwd(), 'deploy', 'health-profiles');
+    for (const file of readdirSync(profilesDir).filter((name) => name.endsWith('.json'))) {
+      const profile = JSON.parse(readFileSync(join(profilesDir, file), 'utf8')) as {
+        role?: unknown;
+        instances?: unknown;
+      };
+      expect(profile.role).toEqual(expect.any(String));
+      if ('instances' in profile) {
+        expect(Array.isArray(profile.instances)).toBe(true);
+      }
+    }
+  });
+
   it('reports missing personal socket configuration instead of treating cwd as a socket', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
 

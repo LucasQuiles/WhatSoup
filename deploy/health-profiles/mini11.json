@@ -1,0 +1,9 @@
+{
+  "role": "no-bot",
+  "expectDispatcher": false,
+  "expectQLoop": false,
+  "expectPersonalSocket": false,
+  "expectPersonalTools": false,
+  "expectConfigInventory": false,
+  "instances": []
+}
