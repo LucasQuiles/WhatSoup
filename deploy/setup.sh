@@ -32,15 +32,32 @@ errors=0
 if command -v node &>/dev/null; then
   node_version="$(node -v | sed 's/^v//')"
   node_major="${node_version%%.*}"
-  if [ "$node_major" -ge 24 ]; then
-    echo "  ✓ Node.js $node_version (>= 24.0 required)"
+  engine_max_exclusive_major="$(node -e '
+const fs = require("fs");
+const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const range = pkg.engines && pkg.engines.node;
+if (typeof range !== "string") process.exit(2);
+const match = range.match(/<\s*(\d+)/);
+if (!match) process.exit(3);
+process.stdout.write(match[1]);
+' "$REPO_ROOT/package.json" 2>/dev/null || true)"
+  required_major="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc" 2>/dev/null | sed -E 's/^([0-9]+).*/\1/')"
+  if ! printf '%s' "$required_major" | grep -qE '^[0-9]+$' \
+    || ! printf '%s' "$engine_max_exclusive_major" | grep -qE '^[0-9]+$'; then
+    echo "  ✗ Could not parse Node bounds from .nvmrc and package.json#engines.node"
+    errors=$((errors + 1))
+  elif ! printf '%s' "$node_major" | grep -qE '^[0-9]+$'; then
+    echo "  ✗ Could not parse Node.js major from version $node_version"
+    errors=$((errors + 1))
+  elif [ "$node_major" -ge "$required_major" ] && [ "$node_major" -lt "$engine_max_exclusive_major" ]; then
+    echo "  ✓ Node.js $node_version (>= $required_major and < $engine_max_exclusive_major required)"
   else
-    echo "  ✗ Node.js $node_version found — version 24.0+ required"
+    echo "  ✗ Node.js $node_version found — version >= $required_major and < $engine_max_exclusive_major required"
     echo "    Install: https://nodejs.org/ or use nvm/fnm"
     errors=$((errors + 1))
   fi
 else
-  echo "  ✗ Node.js not found — version 24.0+ required"
+  echo "  ✗ Node.js not found — version $(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc" 2>/dev/null || echo 24.15.0) required"
   echo "    Install: https://nodejs.org/ or use nvm/fnm"
   errors=$((errors + 1))
 fi

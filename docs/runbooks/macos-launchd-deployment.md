@@ -49,6 +49,26 @@ WhatSoup instance plists also set `TMPDIR` to a per-instance directory under
 `$XDG_DATA_HOME/whatsoup/tmp/<name>/` so process temp files stay out of macOS
 system-cleaned `/var/folders`.
 
+## Runtime Node
+
+WhatSoup's default wrappers derive the pinned runtime from `.nvmrc` and enforce
+the compatibility range declared in `package.json#engines.node`. On macOS hosts
+without nvm, set `WHATSOUP_NODE` in the fleet and instance launchd plists to a
+Node binary within that range. When the fleet process has `WHATSOUP_NODE` set,
+newly generated instance plists preserve it.
+
+Current compatibility is `>=24.0.0 <26`; Node 24 and 25 are accepted, Node 26+
+is rejected by the wrappers.
+
+Operator maintenance is not installed by the Linux/systemd setup script on macOS.
+Install the same convenience command explicitly if this host should run the
+harness-maintenance probe:
+
+```bash
+mkdir -p ~/.local/bin
+ln -sf ~/LAB/WhatSoup/deploy/scripts/harness-maintenance.sh ~/.local/bin/whatsoup-harness-maintenance
+```
+
 ## Services
 
 Use one plist per WhatSoup instance plus one optional fleet plist. Optional

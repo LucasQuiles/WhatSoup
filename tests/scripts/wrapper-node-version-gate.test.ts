@@ -49,30 +49,42 @@ function writeExecutable(filePath: string, contents: string): void {
  * @param binDir  Directory to write the `node` file into.
  * @param majorStr  Major version number to report (as string, e.g. "20").
  */
-function writeFakeNode(binDir: string, majorStr: string): string {
+function writeFakeNode(
+  binDir: string,
+  majorStr: string,
+  opts: { engineMaxMajor?: string | null } = {},
+): string {
   const nodePath = path.join(binDir, 'node');
+  const engineMaxMajor = opts.engineMaxMajor === undefined ? '26' : opts.engineMaxMajor;
   // Detect -p 'process.versions.node...' by the presence of "process.versions.node"
   // in the arguments list.  Detect --version by checking $1.
-  writeExecutable(
-    nodePath,
-    [
-      '#!/usr/bin/env bash',
-      'for arg in "$@"; do',
-      '  if [[ "$arg" == *"process.versions.node"* ]]; then',
-      `    printf '%s\\n' '${majorStr}'`,
-      '    exit 0',
-      '  fi',
-      'done',
-      'if [ "${1:-}" = "--version" ]; then',
-      `  printf 'v${majorStr}.0.0\\n'`,
-      '  exit 0',
-      'fi',
-      '# Any other invocation (i.e., the guarded exec reached through)',
-      "printf 'gate-passed\\n'",
-      'exit 0',
-      '',
-    ].join('\n'),
+  const lines = [
+    '#!/usr/bin/env bash',
+    'for arg in "$@"; do',
+    '  if [[ "$arg" == *"process.versions.node"* ]]; then',
+    `    printf '%s\\n' '${majorStr}'`,
+    '    exit 0',
+    '  fi',
+    'done',
+    'if [ "${1:-}" = "--version" ]; then',
+    `  printf 'v${majorStr}.0.0\\n'`,
+    '  exit 0',
+    'fi',
+    'if [ "${1:-}" = "-e" ]; then',
+  ];
+  if (engineMaxMajor === null) {
+    lines.push('  exit 3');
+  } else {
+    lines.push(`  printf '%s\\n' '${engineMaxMajor}'`, '  exit 0');
+  }
+  lines.push(
+    'fi',
+    '# Any other invocation (i.e., the guarded exec reached through)',
+    "printf 'gate-passed\\n'",
+    'exit 0',
+    '',
   );
+  writeExecutable(nodePath, lines.join('\n'));
   return nodePath;
 }
 
@@ -137,14 +149,22 @@ function runWrapper(opts: {
  *
  * @returns the path to the fixture wrapper script.
  */
-function makeFixtureRepoWithNvmrc(nvmrcContents: string): string {
+function makeFixtureRepoWithNvmrc(
+  nvmrcContents: string,
+  wrapperRelPath = path.join('deploy', 'whatsoup'),
+): string {
   const fixtureRoot = makeTmpDir('whatsoup-gate-fixture-repo-');
   fs.mkdirSync(path.join(fixtureRoot, 'deploy'), { recursive: true });
-  const wrapperContents = fs.readFileSync(wrapperPath, 'utf8');
-  const fixtureWrapper = path.join(fixtureRoot, 'deploy', 'whatsoup');
+  const wrapperContents = fs.readFileSync(path.join(repoRoot, wrapperRelPath), 'utf8');
+  const fixtureWrapper = path.join(fixtureRoot, wrapperRelPath);
   fs.writeFileSync(fixtureWrapper, wrapperContents, 'utf8');
   fs.chmodSync(fixtureWrapper, 0o755);
   fs.writeFileSync(path.join(fixtureRoot, '.nvmrc'), `${nvmrcContents}\n`, 'utf8');
+  fs.writeFileSync(
+    path.join(fixtureRoot, 'package.json'),
+    JSON.stringify({ engines: { node: '>=24.0.0 <26' } }),
+    'utf8',
+  );
   return fixtureWrapper;
 }
 
@@ -209,6 +229,68 @@ describe('deploy/whatsoup — Node major-version gate', () => {
     expect(stderr, 'no version-gate failure wording').not.toMatch(
       /incompatible|requires major|resolved Node is/i,
     );
+  });
+
+  it('Test 2b: Node 25 is allowed because package.json engines permits >=24 <26', () => {
+    const binDir = makeTmpDir('whatsoup-gate-node25-bin-');
+    const home = makeBareHome();
+    writeFakeNode(binDir, '25');
+
+    const { stdout, stderr, exitCode } = runWrapper({
+      home,
+      env: {
+        WHATSOUP_NODE: path.join(binDir, 'node'),
+      },
+    });
+
+    expect(exitCode, 'Node 25 is within package.json#engines.node').toBe(0);
+    expect(stdout).toContain('gate-passed');
+    expect(stderr).not.toContain('FATAL');
+  });
+
+  it('Test 2c: Node 26 is rejected because package.json engines caps runtime at <26', () => {
+    for (const wrapperRelPath of [
+      path.join('deploy', 'whatsoup'),
+      path.join('deploy', 'whatsoup-auth'),
+      path.join('deploy', 'whatsoup-fleet'),
+    ]) {
+      const fixtureWrapper = makeFixtureRepoWithNvmrc('24.15.0', wrapperRelPath);
+      const binDir = makeTmpDir('whatsoup-gate-node26-bin-');
+      const home = makeBareHome();
+      writeFakeNode(binDir, '26');
+
+      const { stdout, stderr, exitCode } = runWrapper({
+        home,
+        env: {
+          WHATSOUP_NODE: path.join(binDir, 'node'),
+        },
+        wrapperOverride: fixtureWrapper,
+      });
+
+      expect(exitCode, `${wrapperRelPath} must reject Node 26`).toBe(1);
+      expect(stderr, `${wrapperRelPath} must cite package.json engines`).toContain('package.json#engines.node');
+      expect(stderr, `${wrapperRelPath} must cite the rejected version`).toContain('v26.0.0');
+      expect(stdout, `${wrapperRelPath} must not reach exec`).not.toContain('gate-passed');
+    }
+  });
+
+  it('Test 2d: an unparsable engines upper bound fails closed before exec', () => {
+    const fixtureWrapper = makeFixtureRepoWithNvmrc('24.15.0');
+    const binDir = makeTmpDir('whatsoup-gate-engine-parse-bin-');
+    const home = makeBareHome();
+    writeFakeNode(binDir, '24', { engineMaxMajor: null });
+
+    const { stdout, stderr, exitCode } = runWrapper({
+      home,
+      env: {
+        WHATSOUP_NODE: path.join(binDir, 'node'),
+      },
+      wrapperOverride: fixtureWrapper,
+    });
+
+    expect(exitCode, 'unparseable package engines must fail closed').toBe(1);
+    expect(stderr).toContain('package.json#engines.node');
+    expect(stdout).not.toContain('gate-passed');
   });
 
   it('Test 3: missing pinned Node fails before any system-node fallback', () => {

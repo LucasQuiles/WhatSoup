@@ -102,6 +102,7 @@ export function buildPlist(name: string): string {
   const tmpDir = tmpRoot(name);
   const wrapper = path.join(os.homedir(), '.local', 'bin', 'whatsoup');
   const envPath = process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';
+  const whatsoupNode = process.env.WHATSOUP_NODE;
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -134,6 +135,12 @@ export function buildPlist(name: string): string {
     `    <string>${escapeXml(os.homedir())}</string>`,
     '    <key>TMPDIR</key>',
     `    <string>${escapeXml(tmpDir)}</string>`,
+    ...(whatsoupNode
+      ? [
+          '    <key>WHATSOUP_NODE</key>',
+          `    <string>${escapeXml(whatsoupNode)}</string>`,
+        ]
+      : []),
     '  </dict>',
     '</dict>',
     '</plist>',

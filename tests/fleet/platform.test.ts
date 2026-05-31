@@ -101,6 +101,19 @@ describe('platform', () => {
         else process.env.XDG_DATA_HOME = origDataHome;
       }
     });
+
+    it('threads WHATSOUP_NODE into generated launchd plists when configured', () => {
+      const origNode = process.env.WHATSOUP_NODE;
+      process.env.WHATSOUP_NODE = '/opt/homebrew/bin/node';
+      try {
+        const plist = buildPlist('node-pinned');
+        expect(plist).toContain('<key>WHATSOUP_NODE</key>');
+        expect(plist).toContain('<string>/opt/homebrew/bin/node</string>');
+      } finally {
+        if (origNode === undefined) delete process.env.WHATSOUP_NODE;
+        else process.env.WHATSOUP_NODE = origNode;
+      }
+    });
   });
 
   describe('parseInstanceName', () => {
