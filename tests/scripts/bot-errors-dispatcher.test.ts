@@ -38,6 +38,37 @@ function writeEvent(root: string, severity = 'critical', overrides: Record<strin
   writeFileSync(join(outbox, '20260531T000000Z.attempt-counter-test.json'), `${JSON.stringify(event, null, 2)}\n`, { mode: 0o600 });
 }
 
+function writeWritefail(root: string, eventOverrides: Record<string, unknown> = {}) {
+  const writefail = join(root, 'writefail');
+  mkdirSync(writefail, { recursive: true, mode: 0o700 });
+  const event = {
+    schemaVersion: 1,
+    id: 'writefail-recovery-test',
+    eventType: 'alert',
+    severity: 'critical',
+    createdAt: '2026-05-31T00:00:00Z',
+    machine: 'test-machine',
+    instance: 'ana-bot',
+    source: 'wf',
+    summary: 'recovered from writefail',
+    evidence: 'already redacted phone=[REDACTED PHONE]',
+    process: { pid: 456, cwd: root, argv: ['test'] },
+    diagnostics: { logHints: ['launchd health log'], queue: join(root, 'outbox') },
+    delivery: { attempts: 0, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    ...eventOverrides,
+  };
+  const crumb = {
+    schemaVersion: 1,
+    kind: 'outbox_write_failure',
+    recordedAt: '2026-05-31T00:00:01Z',
+    failedTarget: join(root, 'outbox'),
+    reason: 'PermissionError: denied',
+    emitPid: 456,
+    event,
+  };
+  writeFileSync(join(writefail, `${event.id}.writefail`), `${JSON.stringify(crumb, null, 2)}\n`, { mode: 0o600 });
+}
+
 afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
@@ -150,6 +181,101 @@ describe('bot-errors-dispatcher', () => {
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, suppressed: 0, failed: 0 });
     expect(readFileSync(capturePath, 'utf8')).toContain('BOT WARNING - BOT ERRORS daily health found issues');
+  });
+
+  it('recovers writefail breadcrumbs into the normal dispatch path', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    const sent = join(tmpRoot, 'sent');
+    const recovered = join(tmpRoot, 'writefail-recovered');
+    writeWritefail(tmpRoot);
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_WRITEFAIL_DIR: join(tmpRoot, 'writefail'),
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, writefailRecovered: 1, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8')).toContain('BOT ERROR - recovered from writefail');
+    expect(readFileSync(capturePath, 'utf8')).toContain('writefail_recovered:');
+    expect(readFileSync(capturePath, 'utf8')).toContain('already redacted phone=[REDACTED PHONE]');
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "writefail_recovered"');
+    expect(readdirSync(recovered)).toHaveLength(1);
+    const sentFiles = readdirSync(sent);
+    expect(sentFiles).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(sent, sentFiles[0]!), 'utf8')) as {
+      diagnostics: { writefailRecovery: { breadcrumb: string; reason: string } };
+    };
+    expect(event.diagnostics.writefailRecovery.reason).toContain('PermissionError');
+    expect(event.diagnostics.writefailRecovery.breadcrumb).toContain('writefail-recovery-test.writefail');
+  });
+
+  it('does not replay writefail breadcrumbs for events already known locally', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    const sent = join(tmpRoot, 'sent');
+    const recovered = join(tmpRoot, 'writefail-recovered');
+    mkdirSync(sent, { recursive: true, mode: 0o700 });
+    writeFileSync(join(sent, '20260531T000000Z.writefail-recovery-test.json.sent'), JSON.stringify({
+      id: 'writefail-recovery-test',
+      delivery: { status: 'sent' },
+    }));
+    writeWritefail(tmpRoot);
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_WRITEFAIL_DIR: join(tmpRoot, 'writefail'),
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 0, sent: 0, writefailRecovered: 0, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "writefail_duplicate"');
+    expect(readdirSync(recovered)).toHaveLength(1);
+    expect(readdirSync(sent)).toHaveLength(1);
+  });
+
+  it('does not treat substring event-id matches as writefail duplicates', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const sent = join(tmpRoot, 'sent');
+    mkdirSync(sent, { recursive: true, mode: 0o700 });
+    writeFileSync(join(sent, '20260531T000000Z.evt-ABCDEF123456.json.sent'), JSON.stringify({
+      id: 'evt-ABCDEF123456',
+      delivery: { status: 'sent' },
+    }));
+    writeWritefail(tmpRoot, {
+      id: 'evt-ABCDEF',
+      summary: 'substring collision must still send',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_WRITEFAIL_DIR: join(tmpRoot, 'writefail'),
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, writefailRecovered: 1, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8')).toContain('substring collision must still send');
+    expect(readdirSync(sent)).toHaveLength(2);
   });
 
   it('renders at-sign-bearing diagnostics mention-safely', () => {

@@ -205,6 +205,52 @@ if [ -n "$WF_FILE" ]; then
 else
   fail "breadcrumb file not found for content assertions"
 fi
+BOT_ERRORS_WRITEFAIL_DIR="$WF_DIR" dispatch_once
+assert_in "should fail to write" "$CAPTURE" "dispatcher recovers breadcrumb into dispatch path"
+assert_in "writefail_recovered:" "$CAPTURE" "recovered dispatch declares writefail recovery"
+assert_not_in "+15558675309" "$CAPTURE" "recovered dispatch keeps redaction"
+assert_count "$BOT_ERRORS_STATE_DIR/writefail-recovered" "*.recovered" 1 "breadcrumb moved to writefail-recovered/"
+assert_count "$WF_DIR" "*.writefail" 0 "writefail dir drained after recovery"
+echo
+
+echo "Drill 8b: writefail idempotency does not use substring matches"
+reset_sandbox
+COLLIDE_WF="$SANDBOX/writefail-collision"
+mkdir -p "$BOT_ERRORS_STATE_DIR/sent" "$COLLIDE_WF"
+printf '{"id":"evt-ABCDEF123456","delivery":{"status":"sent"}}\n' \
+  > "$BOT_ERRORS_STATE_DIR/sent/existing.evt-ABCDEF123456.json.sent"
+python3 - "$COLLIDE_WF" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1]) / "collision.writefail"
+event = {
+    "schemaVersion": 1,
+    "id": "evt-ABCDEF",
+    "eventType": "alert",
+    "severity": "critical",
+    "createdAt": "2026-05-31T00:00:00Z",
+    "machine": "drill",
+    "instance": "ana-bot",
+    "source": "wf",
+    "summary": "substring collision must still send",
+    "evidence": "new alert id is a prefix of an old alert id",
+    "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+}
+target.write_text(json.dumps({
+    "schemaVersion": 1,
+    "kind": "outbox_write_failure",
+    "recordedAt": "2026-05-31T00:00:01Z",
+    "failedTarget": "/tmp/outbox",
+    "reason": "synthetic collision",
+    "emitPid": 1,
+    "event": event,
+}) + "\n")
+PY
+BOT_ERRORS_WRITEFAIL_DIR="$COLLIDE_WF" dispatch_once
+assert_in "substring collision must still send" "$CAPTURE" "substring-colliding writefail is sent"
+assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 2 "new prefix-id alert not dropped as duplicate"
 echo
 
 # ── Drill 9: redaction coverage matrix (acceptance: raw_secret_hits == 0)
