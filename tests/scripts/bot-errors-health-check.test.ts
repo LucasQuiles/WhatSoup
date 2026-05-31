@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -100,6 +100,310 @@ describe('bot-errors-health-check', () => {
     expect(event.evidence).toContain('required_missing=missing_tool');
   });
 
+  it('fails daily health when a profile-declared credential is missing', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'bot-host',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+          requiredCredentialFiles: ['tokens.env'],
+        }),
+      },
+    });
+
+    const files = readdirSync(join(tmpRoot, 'outbox'));
+    const event = JSON.parse(readFileSync(join(tmpRoot, 'outbox', files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('critical');
+    expect(event.evidence).toContain('FAIL credential: credential_requirement=tokens.env missing required');
+    expect(event.evidence).toContain('expected_path_basename=tokens.env');
+    expect(event.evidence).not.toContain('TOKEN=');
+  });
+
+  it('fails daily health when a profile-declared credential is unreadable without leaking contents', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const whatsoupDir = join(tmpRoot, '.config', 'whatsoup');
+    mkdirSync(whatsoupDir, { recursive: true });
+    chmodSync(whatsoupDir, 0o700);
+    const tokenPath = join(whatsoupDir, 'tokens.env');
+    writeFileSync(tokenPath, 'TOKEN=super-secret-value\n', { mode: 0o600 });
+    chmodSync(tokenPath, 0o000);
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'bot-host',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+          requiredCredentialFiles: ['tokens.env'],
+        }),
+      },
+    });
+    chmodSync(tokenPath, 0o600);
+
+    const files = readdirSync(join(tmpRoot, 'outbox'));
+    const event = JSON.parse(readFileSync(join(tmpRoot, 'outbox', files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('critical');
+    expect(event.evidence).toContain('FAIL credential: credential_requirement=tokens.env unreadable');
+    expect(event.evidence).toContain('mode=0');
+    expect(event.evidence).not.toContain('super-secret-value');
+  });
+
+  it('warns on over-readable credentials and fails world-writable credentials', () => {
+    for (const [mode, expectedSeverity, expectedLine] of [
+      [0o644, 'critical', 'FAIL credential: credential_requirement=tokens.env mode>600'],
+      [0o666, 'critical', 'FAIL credential: credential_requirement=tokens.env world_writable'],
+    ] as const) {
+      tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+      const whatsoupDir = join(tmpRoot, '.config', 'whatsoup');
+      mkdirSync(whatsoupDir, { recursive: true });
+      chmodSync(whatsoupDir, 0o700);
+      const tokenPath = join(whatsoupDir, 'tokens.env');
+      writeFileSync(tokenPath, 'TOKEN=do-not-print\n', { mode });
+      chmodSync(tokenPath, mode);
+
+      execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: tmpRoot,
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+          BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+          BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+          BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+          BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+            role: 'bot-host',
+            expectDispatcher: false,
+            expectQLoop: false,
+            expectPersonalSocket: false,
+            expectPersonalTools: false,
+            expectConfigInventory: false,
+            expectPluginInventory: false,
+            requiredCredentialFiles: ['tokens.env'],
+          }),
+        },
+      });
+
+      const files = readdirSync(join(tmpRoot, 'outbox'));
+      const event = JSON.parse(readFileSync(join(tmpRoot, 'outbox', files[0]!), 'utf8')) as {
+        severity: string;
+        evidence: string;
+      };
+      expect(event.severity).toBe(expectedSeverity);
+      expect(event.evidence).toContain(expectedLine);
+      expect(event.evidence).toContain(`mode=${mode.toString(8)}`);
+      expect(event.evidence).not.toContain('credential_meta');
+      expect(event.evidence).not.toContain('do-not-print');
+      rmSync(tmpRoot, { recursive: true, force: true });
+      tmpRoot = '';
+    }
+  });
+
+  it('root-anchors fleet credential requirements so nested copies cannot mask a missing root token', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const nestedDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'ana-bot');
+    mkdirSync(nestedDir, { recursive: true });
+    chmodSync(join(tmpRoot, '.config', 'whatsoup'), 0o700);
+    chmodSync(join(tmpRoot, '.config', 'whatsoup', 'instances'), 0o700);
+    chmodSync(nestedDir, 0o700);
+    writeFileSync(join(nestedDir, 'fleet-token'), 'TOKEN=nested-copy-should-not-pass\n', { mode: 0o600 });
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'bot-host',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+          requiredCredentialFiles: ['fleet-token'],
+        }),
+      },
+    });
+
+    const files = readdirSync(join(tmpRoot, 'outbox'));
+    const event = JSON.parse(readFileSync(join(tmpRoot, 'outbox', files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('critical');
+    expect(event.evidence).toContain('FAIL credential: credential_requirement=fleet-token missing required');
+    expect(event.evidence).toContain('expected_path_basename=fleet-token');
+    expect(event.evidence).not.toContain('nested-copy-should-not-pass');
+  });
+
+  it('fails daily health when a profile-declared config is missing', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    mkdirSync(join(tmpRoot, '.config', 'whatsoup', 'instances', 'ana-bot'), { recursive: true });
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'bot-host',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectPluginInventory: false,
+          requiredCredentialFiles: [],
+          requiredConfigFiles: ['config.json'],
+          instances: [{ name: 'ana-bot', expected: 'always_on', service: 'com.whatsoup.ana-bot' }],
+        }),
+      },
+    });
+
+    const files = readdirSync(join(tmpRoot, 'outbox'));
+    const event = JSON.parse(readFileSync(join(tmpRoot, 'outbox', files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('critical');
+    expect(event.evidence.match(/FAIL config ana-bot: missing required config.json/g)).toHaveLength(1);
+  });
+
+  it('warns on world-readable configs by default and fails them under a strict profile', () => {
+    for (const [profile, expectedSeverity, expectedLine] of [
+      [{ role: 'bot-host' }, 'warning', 'WARN config ana-bot: world_readable required config.json'],
+      [{ role: 'bot-host', requiredConfigMaxMode: '0600' }, 'critical', 'FAIL config ana-bot: mode>600 required config.json'],
+    ] as const) {
+      tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+      const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'ana-bot');
+      mkdirSync(configDir, { recursive: true });
+      chmodSync(join(tmpRoot, '.config', 'whatsoup'), 0o700);
+      chmodSync(join(tmpRoot, '.config', 'whatsoup', 'instances'), 0o700);
+      chmodSync(configDir, 0o700);
+      const configPath = join(configDir, 'config.json');
+      writeFileSync(configPath, JSON.stringify({ type: 'agent', enabled: true }), { mode: 0o644 });
+      chmodSync(configPath, 0o644);
+
+      execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: tmpRoot,
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+          BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+          BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+          BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+          BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+            ...profile,
+            allowUnprofiledInstances: true,
+            expectDispatcher: false,
+            expectQLoop: false,
+            expectPersonalSocket: false,
+            expectPersonalTools: false,
+            expectPluginInventory: false,
+            requiredCredentialFiles: [],
+            requiredConfigFiles: ['config.json'],
+            instances: [{ name: 'ana-bot', expected: 'on_demand' }],
+          }),
+        },
+      });
+
+      const files = readdirSync(join(tmpRoot, 'outbox'));
+      const event = JSON.parse(readFileSync(join(tmpRoot, 'outbox', files[0]!), 'utf8')) as {
+        severity: string;
+        evidence: string;
+      };
+      expect(event.severity).toBe(expectedSeverity);
+      expect(event.evidence).toContain(expectedLine);
+      expect(event.evidence).not.toContain('"type"');
+      rmSync(tmpRoot, { recursive: true, force: true });
+      tmpRoot = '';
+    }
+  });
+
+  it('does not warn or fail a no-bot host for absent required files', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'no-bot',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+          requiredCredentialFiles: [],
+          instances: [],
+        }),
+      },
+    });
+
+    const files = readdirSync(join(tmpRoot, 'outbox'));
+    const event = JSON.parse(readFileSync(join(tmpRoot, 'outbox', files[0]!), 'utf8')) as {
+      severity: string;
+      evidence: string;
+    };
+    expect(event.severity).toBe('info');
+    expect(event.evidence).not.toContain('FAIL credential');
+    expect(event.evidence).not.toContain('WARN credential');
+    expect(event.evidence).not.toContain('FAIL config');
+    expect(event.evidence).not.toContain('WARN config');
+  });
+
   it('raises critical daily health severity when inherited agent plugins are not explicitly covered', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'agent');
@@ -171,6 +475,7 @@ describe('bot-errors-health-check', () => {
       type: 'agent',
       agentOptions: { sessionScope: 'per_chat' },
     }));
+    chmodSync(join(configDir, 'config.json'), 0o600);
 
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
       cwd: process.cwd(),

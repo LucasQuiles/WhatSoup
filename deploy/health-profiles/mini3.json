@@ -5,6 +5,7 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
+  "requiredCredentialFiles": ["fleet-token"],
   "instances": [
     { "name": "yl-bot", "expected": "always_on", "service": "com.whatsoup.yl-bot" }
   ]

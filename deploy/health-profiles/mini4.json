@@ -5,6 +5,7 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
+  "requiredCredentialFiles": ["fleet-tokens.json", "instances/eh-bot/tokens.env"],
   "instances": [
     { "name": "eh-bot", "expected": "always_on", "service": "com.whatsoup.eh-bot" }
   ]
