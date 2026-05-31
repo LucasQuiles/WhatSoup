@@ -1,0 +1,11 @@
+{
+  "role": "bot-host",
+  "expectDispatcher": false,
+  "expectQLoop": false,
+  "expectPersonalSocket": false,
+  "expectPersonalTools": false,
+  "expectConfigInventory": true,
+  "instances": [
+    { "name": "ana-bot", "expected": "always_on", "service": "com.whatsoup.ana-bot" }
+  ]
+}
