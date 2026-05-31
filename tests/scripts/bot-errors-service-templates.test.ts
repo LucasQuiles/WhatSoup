@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 
 const serviceTemplates = [
   'deploy/bot-errors-dispatcher.service',
+  'deploy/bot-errors-health-check.service',
+  'deploy/bot-errors-deadman.service',
   'deploy/bot-errors-q-loop.service',
 ];
 const PRIVATE_SOCKET_SEGMENT = ['instances', 'personal', 'whatsoup.sock'].join('/');
