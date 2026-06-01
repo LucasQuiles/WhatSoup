@@ -1,13 +1,16 @@
 import {
   chmodSync,
+  closeSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { homedir, hostname, platform, release } from 'node:os';
-import { join } from 'node:path';
+import { homedir, hostname, platform, release, tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 
 export type BotErrorsSeverity = 'critical' | 'error' | 'warning' | 'info';
 export type BotErrorsEventType = 'alert' | 'clear';
@@ -59,6 +62,18 @@ function safeSegment(value: string): string {
   return cleaned.length > 0 ? cleaned.slice(0, 80) : 'unknown';
 }
 
+function safeFileName(value: string, maxLength = 180): string {
+  const cleaned = value.trim().replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown';
+  if (cleaned.length <= maxLength) return cleaned;
+  for (const suffix of ['.writefail', '.json']) {
+    if (cleaned.endsWith(suffix) && suffix.length < maxLength) {
+      const stem = cleaned.slice(0, maxLength - suffix.length).replace(/[._:-]+$/g, '') || 'unknown';
+      return `${stem}${suffix}`;
+    }
+  }
+  return cleaned.slice(0, maxLength);
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -82,6 +97,82 @@ function hostRelease(): string {
 function ensurePrivateDir(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   chmodSync(path, 0o700);
+}
+
+function writefailDirs(): string[] {
+  const candidates = [
+    process.env['BOT_ERRORS_WRITEFAIL_DIR'],
+    join(stateDir(), 'writefail'),
+    join(homedir(), '.bot-errors-writefail'),
+    join(process.env['TMPDIR'] ?? tmpdir(), 'bot-errors-writefail'),
+  ].filter((path): path is string => Boolean(path));
+
+  return [...new Set(candidates)];
+}
+
+function safeChildPath(directory: string, name: string): string {
+  ensurePrivateDir(directory);
+  const first = join(directory, safeFileName(name));
+  const stem = safeFileName(name, 140);
+  const prefix = `${Math.floor(Date.now() / 1000)}.${process.pid}`;
+  const candidates = [
+    first,
+    ...Array.from({ length: 1000 }, (_value, index) => join(directory, `${prefix}.${index}.${stem}`)),
+  ];
+  for (const target of candidates) {
+    let fd: number | undefined;
+    try {
+      fd = openSync(target, 'wx', 0o600);
+      return target;
+    } catch {
+      continue;
+    } finally {
+      if (fd !== undefined) {
+        closeSync(fd);
+        try {
+          unlinkSync(target);
+        } catch {
+          // The following atomic write owns the final path.
+        }
+      }
+    }
+  }
+  throw new Error(`no available child path in ${directory}: ${name}`);
+}
+
+function fsyncPath(path: string): void {
+  const fd = openSync(path, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function fsyncDir(path: string): void {
+  try {
+    fsyncPath(path);
+  } catch {
+    // Some platforms/filesystems do not allow fsync on directories.
+  }
+}
+
+function writeJsonAtomic(path: string, payload: unknown): void {
+  const tmpPath = join(dirname(path), `.${basename(path)}.${process.pid}.tmp`);
+  try {
+    writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    fsyncPath(tmpPath);
+    renameSync(tmpPath, path);
+    chmodSync(path, 0o600);
+    fsyncDir(dirname(path));
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Best-effort cleanup only; the caller handles the write failure.
+    }
+    throw err;
+  }
 }
 
 function relevantEnvKeys(): string[] {
@@ -187,10 +278,59 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
   };
 }
 
+export function recordBotErrorsWritefail(
+  event: ReturnType<typeof buildBotErrorsEvent>,
+  err: unknown,
+  failedTarget: string,
+): string | null {
+  const reason = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  try {
+    process.stderr.write(
+      `[bot-errors-ts] CRITICAL outbox write FAILED for ${failedTarget}: ${redactText(reason)}; ` +
+      `id=${event.id} instance=${event.instance} source=${event.source} severity=${event.severity} - recording breadcrumb\n`,
+    );
+  } catch {
+    // Stderr is a last-resort trace and must never mask the original write failure.
+  }
+  const breadcrumb = {
+    schemaVersion: 1,
+    kind: 'outbox_write_failure',
+    recordedAt: nowIso(),
+    failedTarget,
+    reason: redactText(reason),
+    emitPid: process.pid,
+    event,
+  };
+  const created = breadcrumb.recordedAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const fileName = `${created}.${safeSegment(event.instance)}.${safeSegment(event.id)}.writefail`;
+
+  for (const directory of writefailDirs()) {
+    try {
+      const path = safeChildPath(directory, fileName);
+      writeJsonAtomic(path, breadcrumb);
+      try {
+        process.stderr.write(`[bot-errors-ts] lost-alert breadcrumb written: ${path}\n`);
+      } catch {
+        // Best effort only.
+      }
+      return path;
+    } catch {
+      continue;
+    }
+  }
+
+  try {
+    process.stderr.write(
+      `[bot-errors-ts] breadcrumb write failed in ALL fallback dirs; lost-event payload follows:\n${JSON.stringify(event)}\n`,
+    );
+  } catch {
+    // Best effort only.
+  }
+  return null;
+}
+
 export function writeBotErrorsEvent(input: BotErrorsOutboxInput): BotErrorsOutboxWrite {
   const outbox = botErrorsOutboxDir();
-  ensurePrivateDir(outbox);
-
   const event = buildBotErrorsEvent(input);
   const created = event.createdAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
   const fileName = `${created}.${safeSegment(event.instance)}.${safeSegment(event.source)}.${event.id}.json`;
@@ -199,15 +339,19 @@ export function writeBotErrorsEvent(input: BotErrorsOutboxInput): BotErrorsOutbo
   const payload = `${JSON.stringify(event, null, 2)}\n`;
 
   try {
+    ensurePrivateDir(outbox);
     writeFileSync(tmpPath, payload, { mode: 0o600, flag: 'wx' });
+    fsyncPath(tmpPath);
     renameSync(tmpPath, finalPath);
     chmodSync(finalPath, 0o600);
+    fsyncDir(outbox);
   } catch (err) {
     try {
       unlinkSync(tmpPath);
     } catch {
       // Best-effort cleanup only; the caller handles the write failure.
     }
+    recordBotErrorsWritefail(event, err, outbox);
     throw err;
   }
 

@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const loggerWarn = vi.hoisted(() => vi.fn());
 const existsSyncMock = vi.hoisted(() => vi.fn(() => true));
@@ -38,7 +38,10 @@ const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----
 const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
 const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
 const PHONE_SAMPLE = '+1 (555) 123-4567';
+const ORIGINAL_HOME = process.env['HOME'];
+const ORIGINAL_TMPDIR = process.env['TMPDIR'];
 let outboxDir = '';
+let writefailDir = '';
 
 function spawnedChild() {
   return vi.mocked(spawn).mock.results.at(-1)?.value;
@@ -50,15 +53,34 @@ function readOnlyEvent() {
   return JSON.parse(readFileSync(join(outboxDir, files[0]!), 'utf8')) as Record<string, unknown>;
 }
 
+function readOnlyWritefail(dir = writefailDir) {
+  const files = readdirSync(dir).filter((file) => file.endsWith('.writefail'));
+  expect(files).toHaveLength(1);
+  return JSON.parse(readFileSync(join(dir, files[0]!), 'utf8')) as Record<string, any>;
+}
+
+afterEach(() => {
+  if (ORIGINAL_HOME === undefined) delete process.env['HOME'];
+  else process.env['HOME'] = ORIGINAL_HOME;
+  if (ORIGINAL_TMPDIR === undefined) delete process.env['TMPDIR'];
+  else process.env['TMPDIR'] = ORIGINAL_TMPDIR;
+  delete process.env['BOT_ERRORS_WRITEFAIL_DIR'];
+  delete process.env['BOT_ERRORS_STATE_DIR'];
+});
+
 describe('emitAlert', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     loggerWarn.mockClear();
     existsSyncMock.mockReturnValue(true);
     if (outboxDir) rmSync(outboxDir, { recursive: true, force: true });
+    if (writefailDir) rmSync(writefailDir, { recursive: true, force: true });
     outboxDir = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-'));
+    writefailDir = mkdtempSync(join(tmpdir(), 'bot-errors-writefail-'));
     process.env['BOT_ERRORS_OUTBOX_DIR'] = outboxDir;
+    process.env['BOT_ERRORS_WRITEFAIL_DIR'] = writefailDir;
     process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    delete process.env['BOT_ERRORS_STATE_DIR'];
     delete process.env['BOT_ERRORS_DRY_PLATFORM'];
     delete process.env['BOT_ERRORS_DRY_PLATFORM_RELEASE'];
   });
@@ -204,6 +226,16 @@ describe('emitAlert', () => {
     const child = spawnedChild();
     expect(child?.unref).toHaveBeenCalledOnce();
     expect(child?.on).toHaveBeenCalledWith('error', expect.any(Function));
+    const crumb = readOnlyWritefail();
+    expect(crumb).toMatchObject({ kind: 'outbox_write_failure', schemaVersion: 1 });
+    expect(crumb.failedTarget).toBe('/dev/null/outbox');
+    expect(crumb.event).toMatchObject({
+      eventType: 'alert',
+      instance: 'whatsoup-prod',
+      source: 'agent_respawn_failed',
+      summary: 'respawn exhausted',
+      evidence: 'crashed 3 times',
+    });
     expect(loggerWarn).toHaveBeenCalledWith(
       {
         instance: 'whatsoup-prod',
@@ -221,10 +253,40 @@ describe('emitAlert', () => {
     emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
 
     expect(spawn).not.toHaveBeenCalled();
+    expect(readOnlyWritefail().event.summary).toBe('respawn exhausted');
     expect(loggerWarn).toHaveBeenCalledWith(
       { instance: 'whatsoup-prod', source: 'agent_respawn_failed' },
       'alert emission failed; legacy helper script not present',
     );
+  });
+
+  it('uses HOME writefail fallback before TMPDIR when override and state writefail dirs are blocked', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bot-errors-writefail-fallback-'));
+    const blockedOverride = join(root, 'blocked-override');
+    const stateRoot = join(root, 'state');
+    const home = join(root, 'home');
+    const writerTmp = join(root, 'writer-tmp');
+    writeFileSync(blockedOverride, 'not a directory');
+    mkdirSync(stateRoot, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    mkdirSync(writerTmp, { recursive: true });
+    writeFileSync(join(stateRoot, 'writefail'), 'not a directory');
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    process.env['BOT_ERRORS_WRITEFAIL_DIR'] = join(blockedOverride, 'writefail');
+    process.env['BOT_ERRORS_STATE_DIR'] = stateRoot;
+    process.env['HOME'] = home;
+    process.env['TMPDIR'] = writerTmp;
+
+    emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
+
+    const homeWritefail = join(home, '.bot-errors-writefail');
+    const tmpWritefail = join(writerTmp, 'bot-errors-writefail');
+    expect(readOnlyWritefail(homeWritefail).event.summary).toBe('respawn exhausted');
+    try {
+      expect(readdirSync(tmpWritefail).filter((file) => file.endsWith('.writefail'))).toHaveLength(0);
+    } catch (err) {
+      expect((err as NodeJS.ErrnoException).code).toBe('ENOENT');
+    }
   });
 });
 
@@ -234,8 +296,12 @@ describe('clearAlertSource', () => {
     loggerWarn.mockClear();
     existsSyncMock.mockReturnValue(true);
     if (outboxDir) rmSync(outboxDir, { recursive: true, force: true });
+    if (writefailDir) rmSync(writefailDir, { recursive: true, force: true });
     outboxDir = mkdtempSync(join(tmpdir(), 'bot-errors-outbox-'));
+    writefailDir = mkdtempSync(join(tmpdir(), 'bot-errors-writefail-'));
     process.env['BOT_ERRORS_OUTBOX_DIR'] = outboxDir;
+    process.env['BOT_ERRORS_WRITEFAIL_DIR'] = writefailDir;
+    delete process.env['BOT_ERRORS_STATE_DIR'];
     delete process.env['BOT_ERRORS_DRY_PLATFORM'];
     delete process.env['BOT_ERRORS_DRY_PLATFORM_RELEASE'];
   });
@@ -268,6 +334,12 @@ describe('clearAlertSource', () => {
     const child = spawnedChild();
     expect(child?.unref).toHaveBeenCalledOnce();
     expect(child?.on).toHaveBeenCalledWith('error', expect.any(Function));
+    expect(readOnlyWritefail().event).toMatchObject({
+      eventType: 'clear',
+      instance: 'whatsoup-prod',
+      source: 'agent_respawn_failed',
+      severity: 'info',
+    });
     expect(loggerWarn).toHaveBeenCalledWith(
       {
         instance: 'whatsoup-prod',
