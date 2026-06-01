@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -67,6 +67,31 @@ function writeStormEvent(root: string, machine: string, overrides: Record<string
     `${JSON.stringify(event, null, 2)}\n`,
     { mode: 0o600 },
   );
+}
+
+function writeRecoveryEvent(root: string, index: number, overrides: Record<string, unknown> = {}) {
+  const outbox = join(root, 'outbox');
+  mkdirSync(outbox, { recursive: true, mode: 0o700 });
+  const event = {
+    schemaVersion: 1,
+    id: `recovery-${index}`,
+    eventType: 'clear',
+    severity: 'info',
+    createdAt: `2026-05-31T00:${String(index).padStart(2, '0')}:00Z`,
+    machine: 'MACLAB',
+    platform: 'darwin',
+    instance: 'Loops',
+    source: 'llm_total_failure',
+    summary: 'alert source cleared: llm_total_failure',
+    evidence: `clear_index=${index}`,
+    process: { pid: 123, cwd: root, argv: ['recovery-test'] },
+    diagnostics: { logHints: [`/tmp/recovery-${index}.log`], queue: outbox },
+    delivery: { attempts: 0, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    ...overrides,
+  };
+  const created = String(event.createdAt).replace(/[-:]/g, '');
+  const eventId = String(event.id).replace(/[^A-Za-z0-9_.:-]+/g, '_');
+  writeFileSync(join(outbox, `${created}.Loops.${eventId}.json`), `${JSON.stringify(event, null, 2)}\n`, { mode: 0o600 });
 }
 
 function writeWritefail(root: string, eventOverrides: Record<string, unknown> = {}) {
@@ -570,6 +595,203 @@ describe('bot-errors-dispatcher', () => {
 
     expect(JSON.parse(output)).toMatchObject({ processed: 3, sent: 0, suppressed: 3, stormCollapsed: 0, failed: 0 });
     expect(existsSync(capturePath)).toBe(false);
+  });
+
+  it('suppresses duplicate clear recoveries while preserving the first visible recovery', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    const sent = join(tmpRoot, 'sent');
+    const suppressed = join(tmpRoot, 'suppressed');
+    const summaries = [
+      'alert source cleared: llm_total_failure',
+      ' Alert   Source   Cleared:   llm_total_failure ',
+    ];
+    for (let index = 0; index < 12; index += 1) {
+      writeRecoveryEvent(tmpRoot, index, {
+        id: `duplicate-clear-${index}`,
+        createdAt: `2026-05-31T00:00:${String(index).padStart(2, '0')}Z`,
+        summary: summaries[index % summaries.length],
+      });
+    }
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        BOT_ERRORS_RECOVERY_DEDUPE_WINDOW_SECONDS: '120',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({
+      processed: 1,
+      sent: 1,
+      suppressed: 11,
+      recoveryDeduped: 11,
+      failed: 0,
+    });
+    expect(readFileSync(capturePath, 'utf8').match(/BOT RECOVERY/g)).toHaveLength(1);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "recovery_duplicate_suppressed"');
+    expect(readdirSync(sent)).toHaveLength(1);
+    expect(readdirSync(suppressed)).toHaveLength(11);
+    const state = JSON.parse(readFileSync(join(tmpRoot, 'dispatcher-state.json'), 'utf8')) as {
+      counts: { outbox: number; sent: number; suppressed: number };
+      recoveryDeduped: number;
+      suppressed: number;
+    };
+    expect(state.counts).toMatchObject({ outbox: 0, sent: 1, suppressed: 11 });
+    expect(state.recoveryDeduped).toBe(11);
+    expect(state.suppressed).toBe(11);
+    const suppressedEvent = JSON.parse(readFileSync(join(suppressed, readdirSync(suppressed)[0]!), 'utf8')) as {
+      delivery: { status: string; suppressedReason: string; attempts: number };
+    };
+    expect(suppressedEvent.delivery.status).toBe('suppressed');
+    expect(suppressedEvent.delivery.suppressedReason).toContain('duplicate recovery/info event');
+    expect(suppressedEvent.delivery.attempts).toBe(0);
+  });
+
+  it('uses conservative recovery normalization without stripping distinguishing tokens', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    writeRecoveryEvent(tmpRoot, 1, {
+      id: 'distinct-run-123',
+      summary: 'alert source cleared: llm_total_failure run=123 at 2026-05-31T00:01:00Z',
+    });
+    writeRecoveryEvent(tmpRoot, 2, {
+      id: 'distinct-run-124',
+      summary: 'alert source cleared: llm_total_failure run=124 at 2026-05-31T00:01:00Z',
+    });
+    writeRecoveryEvent(tmpRoot, 3, {
+      id: 'distinct-host',
+      machine: 'MWLAB',
+      summary: 'alert source cleared: llm_total_failure run=123 at 2026-05-31T00:01:00Z',
+    });
+    writeRecoveryEvent(tmpRoot, 4, {
+      id: 'distinct-source',
+      source: 'tool_call_failure',
+      summary: 'alert source cleared: llm_total_failure run=123 at 2026-05-31T00:01:00Z',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 4, sent: 4, suppressed: 0, recoveryDeduped: 0, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8').match(/BOT RECOVERY/g)).toHaveLength(4);
+  });
+
+  it('does not redact 10-to-15 digit recovery tokens into the same duplicate fingerprint', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const sent = join(tmpRoot, 'sent');
+    writeRecoveryEvent(tmpRoot, 1, {
+      id: 'bytes-free-1733000111',
+      summary: 'disk recovery bytesFree=1733000111 ok',
+    });
+    writeRecoveryEvent(tmpRoot, 2, {
+      id: 'bytes-free-1733000999',
+      summary: 'disk recovery bytesFree=1733000999 ok',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 2, sent: 2, suppressed: 0, recoveryDeduped: 0, failed: 0 });
+    const rendered = readFileSync(capturePath, 'utf8');
+    expect(rendered.match(/BOT RECOVERY/g)).toHaveLength(2);
+    const summaries = readdirSync(sent).map((file) => {
+      const event = JSON.parse(readFileSync(join(sent, file), 'utf8')) as { summary: string };
+      return event.summary;
+    });
+    expect(summaries).toContain('disk recovery bytesFree=1733000111 ok');
+    expect(summaries).toContain('disk recovery bytesFree=1733000999 ok');
+  });
+
+  it('does not suppress a clear separated from the previous clear by a same-fingerprint alert', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    writeRecoveryEvent(tmpRoot, 0, {
+      id: 'flap-clear-before',
+      createdAt: '2026-05-31T00:00:00Z',
+      summary: 'flapping source restored',
+    });
+    writeRecoveryEvent(tmpRoot, 1, {
+      id: 'flap-alert-between',
+      eventType: 'alert',
+      severity: 'critical',
+      createdAt: '2026-05-31T00:00:30Z',
+      summary: 'flapping source restored',
+    });
+    writeRecoveryEvent(tmpRoot, 2, {
+      id: 'flap-clear-after',
+      createdAt: '2026-05-31T00:01:00Z',
+      summary: 'flapping source restored',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        BOT_ERRORS_RECOVERY_DEDUPE_WINDOW_SECONDS: '120',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 3, sent: 3, suppressed: 0, recoveryDeduped: 0, failed: 0 });
+    const rendered = readFileSync(capturePath, 'utf8');
+    expect(rendered.match(/BOT RECOVERY/g)).toHaveLength(2);
+    expect(rendered).toContain('BOT ERROR - flapping source restored');
+  });
+
+  it('caps retained suppressed events after accounting for newly suppressed duplicates', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const suppressed = join(tmpRoot, 'suppressed');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    mkdirSync(suppressed, { recursive: true, mode: 0o700 });
+    for (let index = 0; index < 5; index += 1) {
+      const file = join(suppressed, `old-${index}.json.suppressed`);
+      writeFileSync(file, JSON.stringify({ id: `old-${index}` }), { mode: 0o600 });
+      const mtime = new Date(Date.UTC(2026, 4, 31, 0, index, 0));
+      utimesSync(file, mtime, mtime);
+    }
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_SUPPRESSED_MAX_FILES: '3',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 0, sent: 0, suppressed: 0, suppressedPruned: 2, failed: 0 });
+    expect(readdirSync(suppressed)).toHaveLength(3);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "suppressed_pruned"');
+    const state = JSON.parse(readFileSync(join(tmpRoot, 'dispatcher-state.json'), 'utf8')) as {
+      counts: { suppressed: number };
+      suppressedPruned: number;
+    };
+    expect(state.counts.suppressed).toBe(3);
+    expect(state.suppressedPruned).toBe(2);
   });
 
   it('recovers writefail breadcrumbs into the normal dispatch path', () => {

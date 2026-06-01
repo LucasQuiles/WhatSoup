@@ -34,6 +34,10 @@ EMAIL_FALLBACK = os.environ.get(
     str(Path.home() / ".claude/scripts/email-alert-fallback.sh"),
 )
 MAX_MESSAGE_CHARS = int(os.environ.get("BOT_ERRORS_MAX_MESSAGE_CHARS", "5500"))
+RECOVERY_DUPLICATE_SUPPRESSION_REASON = (
+    "duplicate recovery/info event retained as audit-only; "
+    "earliest matching event in the dedupe window remains dispatchable"
+)
 SECRETISH_ASSIGNMENT = re.compile(
     r"\b(api[_-]?key|token|secret|password|cookie|credential)\b(\s*[:=]\s*)([\"']?)[^\s\"',}]+",
     re.I,
@@ -469,12 +473,47 @@ def should_suppress_send(event: dict[str, Any]) -> str | None:
     return None
 
 
+def move_suppressed_event(
+    path: Path,
+    paths: dict[str, Path],
+    event: dict[str, Any],
+    reason: str,
+    log_type: str = "suppressed",
+    source_name: str | None = None,
+) -> Path:
+    event = mark_suppressed(event, reason)
+    atomic_write_json(path, event)
+    suppressed_name = f"{source_name or path.name}.{int(time.time())}.suppressed"
+    suppressed_path = safe_child_path(paths["suppressed"], suppressed_name)
+    os.replace(path, suppressed_path)
+    fsync_dir(suppressed_path.parent)
+    append_dispatch_log(paths, {
+        "type": log_type,
+        "eventId": event.get("id"),
+        "path": str(suppressed_path),
+        "reason": reason,
+        "source": event.get("source"),
+        "severity": event.get("severity"),
+        "eventType": event.get("eventType"),
+        "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
+    })
+    return suppressed_path
+
+
 def storm_threshold() -> int:
     return max(0, env_int("BOT_ERRORS_STORM_THRESHOLD", 3))
 
 
 def storm_window_seconds() -> int:
     return max(1, env_int("BOT_ERRORS_STORM_WINDOW_SECONDS", 120))
+
+
+def recovery_dedupe_window_seconds() -> int:
+    return max(1, env_int("BOT_ERRORS_RECOVERY_DEDUPE_WINDOW_SECONDS", storm_window_seconds()))
+
+
+def suppressed_max_files() -> int:
+    return max(1, env_int("BOT_ERRORS_SUPPRESSED_MAX_FILES", 2000))
 
 
 def created_epoch(event: dict[str, Any]) -> int:
@@ -531,6 +570,11 @@ def normalized_summary(event: dict[str, Any]) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def recovery_normalized_summary(event: dict[str, Any]) -> str:
+    text = str(event.get("summary") or "unspecified bot error").strip().lower()
+    return re.sub(r"\s+", " ", text)
+
+
 def storm_fingerprint(event: dict[str, Any]) -> str:
     parts = [
         str(event.get("source") or "unknown").strip().lower(),
@@ -567,6 +611,55 @@ def is_storm_candidate(event: dict[str, Any]) -> bool:
         return False
     event_type = str(event.get("eventType") or "alert")
     severity = str(event.get("severity") or "").lower()
+    return event_type == "alert" and severity in {"critical", "warning"}
+
+
+def recovery_identity(event: dict[str, Any]) -> tuple[str, str]:
+    host = ""
+    for key in ("machine", "machineName", "host", "hostname"):
+        host = str(event.get(key) or "").strip().lower()
+        if host:
+            break
+    instance = str(event.get("instance") or "").strip().lower()
+    return host, instance
+
+
+def recovery_episode_fingerprint(event: dict[str, Any]) -> str:
+    host, instance = recovery_identity(event)
+    parts = [
+        str(event.get("source") or "unknown").strip().lower(),
+        recovery_normalized_summary(event),
+        host,
+        instance,
+    ]
+    return "\n".join(parts)
+
+
+def recovery_duplicate_fingerprint(event: dict[str, Any]) -> str:
+    host, instance = recovery_identity(event)
+    parts = [
+        str(event.get("eventType") or "alert").strip().lower(),
+        str(event.get("severity") or "").strip().lower(),
+        str(event.get("source") or "unknown").strip().lower(),
+        recovery_normalized_summary(event),
+        host,
+        instance,
+    ]
+    return "\n".join(parts)
+
+
+def is_recovery_dedupe_candidate(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("eventType") or "alert").strip().lower()
+    severity = str(event.get("severity") or "").strip().lower()
+    source = str(event.get("source") or "").strip().lower()
+    if source == "daily-health" and severity == "info":
+        return False
+    return event_type == "clear" or severity == "info"
+
+
+def is_recovery_episode_barrier(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("eventType") or "alert").strip().lower()
+    severity = str(event.get("severity") or "").strip().lower()
     return event_type == "alert" and severity in {"critical", "warning"}
 
 
@@ -872,6 +965,86 @@ def collapse_ready_storms(paths: dict[str, Path]) -> int:
     return collapsed
 
 
+def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
+    window = recovery_dedupe_window_seconds()
+    groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
+    for path in sorted(paths["outbox"].glob("*.json")):
+        if not ready(path, paths["quarantine"]):
+            continue
+        try:
+            event = read_json(path)
+        except Exception:
+            continue
+        if not is_recovery_dedupe_candidate(event) and not is_recovery_episode_barrier(event):
+            continue
+        groups.setdefault(recovery_episode_fingerprint(event), []).append((path, event, created_epoch(event)))
+
+    suppressed = 0
+    for records in groups.values():
+        kept_by_duplicate_fingerprint: dict[str, int] = {}
+        for path, event, epoch in sorted(records, key=lambda record: (record[2], str(record[0]))):
+            if is_recovery_episode_barrier(event):
+                kept_by_duplicate_fingerprint.clear()
+                append_dispatch_log(paths, {
+                    "type": "recovery_dedupe_barrier",
+                    "eventId": event.get("id"),
+                    "source": event.get("source"),
+                    "severity": event.get("severity"),
+                    "eventType": event.get("eventType"),
+                    "episodeFingerprint": storm_fingerprint_hash(recovery_episode_fingerprint(event)),
+                    "createdAtEpoch": epoch,
+                })
+                continue
+            if not is_recovery_dedupe_candidate(event):
+                continue
+            duplicate_fingerprint = recovery_duplicate_fingerprint(event)
+            first_epoch = kept_by_duplicate_fingerprint.get(duplicate_fingerprint)
+            if first_epoch is not None and first_epoch <= epoch < first_epoch + window:
+                if not path.exists():
+                    continue
+                move_suppressed_event(
+                    path,
+                    paths,
+                    event,
+                    RECOVERY_DUPLICATE_SUPPRESSION_REASON,
+                    "recovery_duplicate_suppressed",
+                )
+                suppressed += 1
+                continue
+            kept_by_duplicate_fingerprint[duplicate_fingerprint] = epoch
+    return suppressed
+
+
+def prune_suppressed(paths: dict[str, Path]) -> int:
+    cap = suppressed_max_files()
+    files = [path for path in paths["suppressed"].glob("*") if path.is_file()]
+    if len(files) <= cap:
+        return 0
+
+    def sort_key(path: Path) -> tuple[int, str]:
+        try:
+            return path.stat().st_mtime_ns, str(path)
+        except OSError:
+            return 0, str(path)
+
+    pruned = 0
+    for path in sorted(files, key=sort_key)[: len(files) - cap]:
+        try:
+            path.unlink()
+            pruned += 1
+        except FileNotFoundError:
+            continue
+    if pruned:
+        fsync_dir(paths["suppressed"])
+        append_dispatch_log(paths, {
+            "type": "suppressed_pruned",
+            "path": str(paths["suppressed"]),
+            "maxFiles": cap,
+            "pruned": pruned,
+        })
+    return pruned
+
+
 def ready(path: Path, quarantine_dir: Path) -> bool:
     try:
         event = read_json(path)
@@ -1100,6 +1273,7 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     counts = {
         "outbox": len(list(paths["outbox"].glob("*.json"))),
         "processing": len(list(paths["processing"].glob("*"))),
+        "sent": len(list(paths["sent"].glob("*"))),
         "stormCollapsed": len(list(paths["storm_collapsed"].glob("*"))),
         "stormManifests": len(list(paths["storm_manifests"].glob("*"))),
         "suppressed": len(list(paths["suppressed"].glob("*"))),
@@ -1133,21 +1307,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     atomic_write_json(claimed, event)
     suppress_reason = should_suppress_send(event)
     if suppress_reason:
-        event = mark_suppressed(event, suppress_reason)
-        atomic_write_json(claimed, event)
-        suppressed_name = f"{path.name}.{int(time.time())}.suppressed"
-        suppressed_path = safe_child_path(paths["suppressed"], suppressed_name)
-        os.replace(claimed, suppressed_path)
-        fsync_dir(suppressed_path.parent)
-        append_dispatch_log(paths, {
-            "type": "suppressed",
-            "eventId": event.get("id"),
-            "path": str(suppressed_path),
-            "reason": suppress_reason,
-            "source": event.get("source"),
-            "severity": event.get("severity"),
-            "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
-        })
+        move_suppressed_event(claimed, paths, event, suppress_reason, source_name=path.name)
         return True, "suppressed"
 
     text = format_event(event)
@@ -1193,10 +1353,11 @@ def run_once(max_events: int) -> dict[str, Any]:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         writefail_recovered = recover_writefail_breadcrumbs(paths)
         reclaimed = reclaim_processing(paths)
+        recovery_deduped = suppress_ready_recovery_duplicates(paths)
         storm_collapsed = collapse_ready_storms(paths)
         processed = 0
         sent = 0
-        suppressed = 0
+        suppressed = recovery_deduped
         failed = 0
         last_error = None
         for path in sorted(paths["outbox"].glob("*.json")):
@@ -1214,6 +1375,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             else:
                 failed += 1
                 last_error = detail
+        suppressed_pruned = prune_suppressed(paths)
         record_state(
             paths,
             lastRunAt=now_iso(),
@@ -1223,7 +1385,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             failed=failed,
             reclaimed=reclaimed,
             writefailRecovered=writefail_recovered,
+            recoveryDeduped=recovery_deduped,
             stormCollapsed=storm_collapsed,
+            suppressedPruned=suppressed_pruned,
             lastError=last_error,
         )
         return {
@@ -1233,7 +1397,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             "failed": failed,
             "reclaimed": reclaimed,
             "writefailRecovered": writefail_recovered,
+            "recoveryDeduped": recovery_deduped,
             "stormCollapsed": storm_collapsed,
+            "suppressedPruned": suppressed_pruned,
             "lastError": last_error,
         }
 
