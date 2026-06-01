@@ -182,7 +182,7 @@ for source in sources:
 
 
 REMOTE_WRITEFAIL_ACK_SCRIPT = r"""
-import errno, os, re, shutil, sys, time
+import errno, hashlib, json, os, re, shutil, sys, time
 from pathlib import Path
 
 claim = Path(sys.argv[1])
@@ -214,6 +214,13 @@ def fsync_dir(path):
     finally:
         os.close(fd)
 
+def payload_sha256():
+    digest = hashlib.sha256()
+    with open(claim, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 def target_path(target_dir, suffix):
     stem = f"{safe(claim.name)}.{int(time.time())}"
     candidates = [target_dir / f"{stem}{suffix}", target_dir / f"{stem}.{os.getpid()}{suffix}"]
@@ -231,6 +238,50 @@ def temp_path(target_dir, target):
             return candidate
     raise FileExistsError(f"no unique temporary writefail ack path in {target_dir}")
 
+def journal_path(target_dir, digest):
+    return target_dir / f".{safe(claim.name)}.{digest[:24]}.ack.json"
+
+def write_ack_journal(target, digest):
+    journal = journal_path(target.parent, digest)
+    tmp = journal.with_name(f".{journal.name}.{os.getpid()}.tmp")
+    payload = {
+        "claim": str(claim),
+        "payloadSha256": digest,
+        "target": str(target),
+        "createdAt": int(time.time()),
+    }
+    try:
+        with open(tmp, "x", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, journal)
+        fsync_dir(target.parent)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return journal
+
+def find_terminal_journal(digest):
+    for target_dir in terminal_dirs():
+        journal = journal_path(target_dir, digest)
+        try:
+            loaded = json.loads(journal.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+        if loaded.get("claim") != str(claim) or loaded.get("payloadSha256") != digest:
+            continue
+        target = Path(str(loaded.get("target") or ""))
+        if target.exists():
+            return target
+    return None
+
 def terminal_dirs():
     tmpdir = Path(os.environ.get("TMPDIR", "/tmp")).expanduser()
     # The local harvest/quarantine copy is authoritative; these terminal archives are forensic breadcrumbs.
@@ -242,6 +293,7 @@ def terminal_dirs():
     ])
 
 def copy_claim_atomic(target_dir, target):
+    digest = payload_sha256()
     tmp = temp_path(target_dir, target)
     try:
         with open(claim, "rb") as source, open(tmp, "xb") as dest:
@@ -252,6 +304,8 @@ def copy_claim_atomic(target_dir, target):
             raise FileExistsError(f"terminal writefail ack target already exists: {target}")
         os.replace(tmp, target)
         fsync_dir(target_dir)
+        # If this journal write fails, a later retry may create a duplicate forensic archive; local harvest stays authoritative.
+        write_ack_journal(target, digest)
         claim.unlink()
         fsync_dir(claim.parent)
     except BaseException:
@@ -280,6 +334,16 @@ def move_claim_terminal(target_dir, suffix):
     return target
 
 if action == "ack":
+    digest = payload_sha256()
+    already_terminal = find_terminal_journal(digest)
+    if already_terminal is not None:
+        try:
+            claim.unlink()
+            fsync_dir(claim.parent)
+            print(already_terminal)
+            raise SystemExit(0)
+        except OSError as exc:
+            raise RuntimeError(f"terminal writefail ack already archived but claim unlink failed: target={already_terminal} error={exc}") from exc
     last_error = None
     for target_dir in terminal_dirs():
         try:
@@ -610,6 +674,13 @@ def prune_state_to_configured_remotes(state: dict[str, Any], remotes: list[str])
             remote = alert_remote_from_key(str(key))
             if remote is not None and remote not in configured:
                 bucket.pop(key, None)
+    ack_failures = state.get("writefailAckFailures")
+    if isinstance(ack_failures, dict):
+        for key, record in list(ack_failures.items()):
+            if not isinstance(record, dict) or record.get("remote") not in configured:
+                ack_failures.pop(key, None)
+    elif ack_failures is not None:
+        state["writefailAckFailures"] = {}
 
 
 def ssh_json_lines(host: str, script: str, args: list[str], timeout: int) -> list[dict[str, Any]]:
@@ -664,6 +735,132 @@ def remote_writefail_ack(host: str, claim: str, remote_root: str, action: str, t
 def remote_writefail_ack_degraded(path: str) -> bool:
     normalized = path.replace("\\", "/")
     return "/bot-errors-writefail-relayed/" in normalized or "/bot-errors-writefail-relayed-" in normalized
+
+
+def writefail_ack_identity(remote: str, record: dict[str, Any]) -> tuple[str, str]:
+    payload_sha256 = writefail_poison_hash(record)
+    key = hashlib.sha256(f"{remote}\0{payload_sha256}".encode("utf-8")).hexdigest()
+    return key, payload_sha256
+
+
+def writefail_ack_failure_bucket(state: dict[str, Any]) -> dict[str, Any]:
+    bucket = state.setdefault("writefailAckFailures", {})
+    if not isinstance(bucket, dict):
+        bucket = {}
+        state["writefailAckFailures"] = bucket
+    return bucket
+
+
+def clear_writefail_ack_failure(remote: str, record: dict[str, Any], state: dict[str, Any]) -> None:
+    key, payload_sha256 = writefail_ack_identity(remote, record)
+    removed = writefail_ack_failure_bucket(state).pop(key, None)
+    if removed is not None:
+        append_log({
+            "type": "writefail_ack_failure_cleared",
+            "remote": remote,
+            "payloadSha256": payload_sha256,
+            "remoteClaim": record.get("claim"),
+        })
+
+
+def enqueue_writefail_ack_failure(
+    remote: str,
+    remote_root: str,
+    record: dict[str, Any],
+    status: str,
+    local_path: Path,
+    error: Exception,
+    state: dict[str, Any],
+    cooldown: int,
+) -> None:
+    current = int(time.time())
+    key, payload_sha256 = writefail_ack_identity(remote, record)
+    bucket = writefail_ack_failure_bucket(state)
+    existing = bucket.get(key)
+    entry = existing if isinstance(existing, dict) else {}
+    first_failure = not entry
+    last_alert = int(entry.get("lastAlertAt") or 0)
+    should_alert = first_failure or not last_alert or current - last_alert >= cooldown
+    entry.update({
+        "remote": remote,
+        "remoteRoot": remote_root,
+        "payloadSha256": payload_sha256,
+        "remoteClaim": record.get("claim"),
+        "remoteName": record.get("name"),
+        "sourceDir": record.get("sourceDir"),
+        "status": status,
+        "localPath": str(local_path),
+        "lastError": str(error),
+        "lastSeenAt": current,
+        "lastSeenIso": now_iso(),
+        "seenCount": int(entry.get("seenCount") or 0) + 1,
+    })
+    if first_failure:
+        entry["firstFailedAt"] = current
+        entry["firstFailedIso"] = now_iso()
+        entry["suppressedCount"] = 0
+    if should_alert:
+        event_id = f"collector-{safe_segment(remote)}-remote-writefail-ack-failed-{payload_sha256[:16]}-{current}"
+        evidence = "\n".join([
+            f"remote={remote}",
+            f"remote_root={remote_root}",
+            f"remote_claim={record.get('claim')}",
+            f"remote_name={record.get('name')}",
+            f"source_dir={record.get('sourceDir')}",
+            f"writefail_status={status}",
+            f"payload_sha256={payload_sha256}",
+            f"local_path={local_path}",
+            f"error={error}",
+            f"alert_path=normal_outbox",
+            f"terminal_ack_dirs_are_not_used_for_this_meta_alert=true",
+            f"collector_log={state_root() / 'logs/collector.jsonl'}",
+        ])
+        event = {
+            "schemaVersion": 1,
+            "id": event_id,
+            "eventType": "alert",
+            "severity": "critical",
+            "createdAt": now_iso(),
+            "machine": socket.gethostname(),
+            "platform": sys.platform,
+            "instance": "bot-errors-collector",
+            "source": "remote-writefail-ack-failed",
+            "summary": f"BOT ERRORS collector cannot terminal-ack remote writefail: {remote}",
+            "evidence": evidence,
+            "process": {"pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv},
+            "diagnostics": {
+                "queue": str(state_root() / "outbox"),
+                "logHints": [str(state_root() / "logs/collector.jsonl")],
+                "collectorLog": str(state_root() / "logs/collector.jsonl"),
+                "remote": remote,
+                "remoteClaim": record.get("claim"),
+                "payloadSha256": payload_sha256,
+            },
+            "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+        }
+        atomic_write_json(local_outbox_path(event, "collector"), event)
+        entry["lastAlertAt"] = current
+        entry["lastAlertIso"] = event["createdAt"]
+        entry["suppressedCount"] = 0
+        append_log({
+            "type": "writefail_ack_failure_alerted",
+            "remote": remote,
+            "payloadSha256": payload_sha256,
+            "remoteClaim": record.get("claim"),
+            "eventId": event_id,
+            "error": str(error),
+        })
+    else:
+        entry["suppressedCount"] = int(entry.get("suppressedCount") or 0) + 1
+        append_log({
+            "type": "writefail_ack_failure_suppressed",
+            "remote": remote,
+            "payloadSha256": payload_sha256,
+            "remoteClaim": record.get("claim"),
+            "suppressedCount": entry["suppressedCount"],
+            "error": str(error),
+        })
+    bucket[key] = entry
 
 
 def local_outbox_path(event: dict[str, Any], remote_host: str) -> Path:
@@ -1019,15 +1216,27 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                 local_path, status = relay_writefail(host, remote_root, record)
                 if status == "poison":
                     writefail_poison += 1
-                    ack_path = remote_writefail_ack(host, str(record["claim"]), remote_root, "ack", timeout)
-                    append_log({
-                        "type": "writefail_harvest_poison_acked",
-                        "remote": remote,
-                        "remoteClaim": record["claim"],
-                        "remoteAckPath": ack_path,
-                        "remoteAckDegraded": remote_writefail_ack_degraded(ack_path),
-                        "localPath": str(local_path),
-                    })
+                    try:
+                        ack_path = remote_writefail_ack(host, str(record["claim"]), remote_root, "ack", timeout)
+                        append_log({
+                            "type": "writefail_harvest_poison_acked",
+                            "remote": remote,
+                            "remoteClaim": record["claim"],
+                            "remoteAckPath": ack_path,
+                            "remoteAckDegraded": remote_writefail_ack_degraded(ack_path),
+                            "localPath": str(local_path),
+                        })
+                        clear_writefail_ack_failure(remote, record, state)
+                    except Exception as ack_exc:  # noqa: BLE001 - poison is already quarantined locally.
+                        failed += 1
+                        append_log({
+                            "type": "writefail_harvest_poison_ack_failed",
+                            "remote": remote,
+                            "remoteClaim": record.get("claim"),
+                            "localPath": str(local_path),
+                            "error": str(ack_exc),
+                        })
+                        enqueue_writefail_ack_failure(remote, remote_root, record, status, local_path, ack_exc, state, alert_cooldown)
                 elif status == "duplicate":
                     writefail_duplicates += 1
                     try:
@@ -1040,13 +1249,16 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                             "remoteAckDegraded": remote_writefail_ack_degraded(ack_path),
                             "localPath": str(local_path),
                         })
+                        clear_writefail_ack_failure(remote, record, state)
                     except Exception as ack_exc:  # noqa: BLE001 - duplicate is already safe locally.
+                        failed += 1
                         append_log({
                             "type": "writefail_harvest_duplicate_ack_failed",
                             "remote": remote,
                             "remoteClaim": record.get("claim"),
                             "error": str(ack_exc),
                         })
+                        enqueue_writefail_ack_failure(remote, remote_root, record, status, local_path, ack_exc, state, alert_cooldown)
                 else:
                     writefail_harvested += 1
                     try:
@@ -1059,7 +1271,9 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                             "remoteAckDegraded": remote_writefail_ack_degraded(ack_path),
                             "localPath": str(local_path),
                         })
+                        clear_writefail_ack_failure(remote, record, state)
                     except Exception as ack_exc:  # noqa: BLE001 - exact-id dedup makes retry safe.
+                        failed += 1
                         append_log({
                             "type": "writefail_harvest_ack_failed",
                             "remote": remote,
@@ -1067,6 +1281,7 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                             "localPath": str(local_path),
                             "error": str(ack_exc),
                         })
+                        enqueue_writefail_ack_failure(remote, remote_root, record, status, local_path, ack_exc, state, alert_cooldown)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 append_log({"type": "writefail_harvest_failed", "remote": remote, "claim": record.get("claim"), "error": str(exc)})

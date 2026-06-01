@@ -421,6 +421,7 @@ describe('bot-errors-collector', () => {
     const quarantineDir = join(tmpRoot, 'writefail-harvest-quarantine');
     const firstFiles = readdirSync(quarantineDir).filter((file) => file.endsWith('.poison'));
     expect(firstFiles).toHaveLength(1);
+    expect(outboxEvents().filter((event) => event.source === 'remote-writefail-ack-failed')).toHaveLength(1);
 
     const second = spawnSync(
       'python3',
@@ -448,6 +449,7 @@ describe('bot-errors-collector', () => {
     );
     expect(second.status).toBe(1);
     expect(JSON.parse(second.stdout)).toMatchObject({ writefailPoison: 1, failed: 1 });
+    expect(outboxEvents().filter((event) => event.source === 'remote-writefail-ack-failed')).toHaveLength(1);
     const secondFiles = readdirSync(quarantineDir).filter((file) => file.endsWith('.poison'));
     expect(secondFiles).toEqual(firstFiles);
     const quarantine = JSON.parse(readFileSync(join(quarantineDir, secondFiles[0]!), 'utf8')) as {
@@ -616,14 +618,18 @@ print(Path(found).name if found else "NONE")
 
     writeRemoteWritefail(remoteWritefail, 'remote-ack-failure-idempotent');
     const firstCollector = runCollectorWithRemote(fakeSsh, remoteRoot, { FAKE_FAIL_WRITEFAIL_ACK: '1' });
-    expect(firstCollector.status).toBe(0);
-    expect(JSON.parse(firstCollector.stdout)).toMatchObject({ writefailHarvested: 1 });
+    expect(firstCollector.status).toBe(1);
+    expect(JSON.parse(firstCollector.stdout)).toMatchObject({ writefailHarvested: 1, failed: 1 });
+    const ackMeta = outboxEvents().filter((event) => event.source === 'remote-writefail-ack-failed');
+    expect(ackMeta).toHaveLength(1);
+    expect(String(ackMeta[0]?.evidence)).toContain('alert_path=normal_outbox');
+    expect(String(ackMeta[0]?.evidence)).toContain('terminal_ack_dirs_are_not_used_for_this_meta_alert=true');
     expect(spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
       cwd: process.cwd(),
       env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath },
       encoding: 'utf8',
     }).status).toBe(0);
-    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
+    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(2);
 
     const secondCollector = spawnSync(
       'python3',
@@ -650,13 +656,42 @@ print(Path(found).name if found else "NONE")
     );
     expect(secondCollector.status).toBe(0);
     expect(JSON.parse(secondCollector.stdout)).toMatchObject({ writefailDuplicates: 1 });
+    const state = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      writefailAckFailures?: Record<string, unknown>;
+    };
+    expect(state.writefailAckFailures).toEqual({});
     expect(spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
       cwd: process.cwd(),
       env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath },
       encoding: 'utf8',
     }).status).toBe(0);
-    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
+    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(2);
     expect((readFileSync(capturePath, 'utf8').match(/remote writefail critical/g) ?? [])).toHaveLength(1);
+  });
+
+  it('alerts distinct remote writefail ack failures independently by payload hash', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const remoteWritefail = join(remoteRoot, 'writefail');
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+
+    writeRemoteWritefail(remoteWritefail, 'remote-ack-failure-one');
+    writeRemoteWritefail(remoteWritefail, 'remote-ack-failure-two');
+    const result = runCollectorWithRemote(fakeSsh, remoteRoot, { FAKE_FAIL_WRITEFAIL_ACK: '1' });
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ writefailHarvested: 2, failed: 2 });
+
+    const events = outboxEvents().filter((event) => event.source === 'remote-writefail-ack-failed');
+    expect(events).toHaveLength(2);
+    const payloadHashes = new Set(events.map((event) => {
+      const diagnostics = event.diagnostics as { payloadSha256?: string } | undefined;
+      return String(diagnostics?.payloadSha256 ?? '');
+    }));
+    expect(payloadHashes.size).toBe(2);
+    const state = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      writefailAckFailures?: Record<string, unknown>;
+    };
+    expect(Object.keys(state.writefailAckFailures ?? {})).toHaveLength(2);
   });
 
   it('drains remote writefail claims into HOME fallback when root relayed archive is blocked', () => {
@@ -759,6 +794,58 @@ exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
     const relayed = readdirSync(relayedDir).filter((file) => file.endsWith('.relayed'));
     expect(relayed).toHaveLength(1);
     expect(readFileSync(join(relayedDir, relayed[0]!), 'utf8')).toBe('exdev payload\n');
+    expect(readdirSync(relayedDir).filter((file) => file.includes('.tmp'))).toHaveLength(0);
+  });
+
+  it('does not create duplicate terminal archives when unlink fails after EXDEV promotion', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const claimDir = join(remoteRoot, 'relay-writefail-processing');
+    mkdirSync(claimDir, { recursive: true, mode: 0o700 });
+    const claim = join(claimDir, 'unlink-fails.writefail.123.relay');
+    writeFileSync(claim, 'unlink failure payload\n', { mode: 0o600 });
+    const input = `
+import errno
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("collector", "deploy/scripts/bot-errors-collector.py")
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
+claim = Path(${JSON.stringify(claim)})
+root = Path(${JSON.stringify(remoteRoot)})
+original_replace = os.replace
+original_unlink = Path.unlink
+
+def fake_replace(src, dst):
+    if str(src) == str(claim):
+        raise OSError(errno.EXDEV, "cross-device link")
+    return original_replace(src, dst)
+
+def fake_unlink(self, *args, **kwargs):
+    if str(self) == str(claim):
+        raise OSError("unlink denied")
+    return original_unlink(self, *args, **kwargs)
+
+os.replace = fake_replace
+Path.unlink = fake_unlink
+sys.argv = ["ack-test", str(claim), str(root), "ack"]
+exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
+`;
+
+    const first = spawnSync('python3', ['-'], { cwd: process.cwd(), input, encoding: 'utf8' });
+    expect(first.status).not.toBe(0);
+    expect(existsSync(claim)).toBe(true);
+    const relayedDir = join(remoteRoot, 'writefail-relayed');
+    expect(readdirSync(relayedDir).filter((file) => file.endsWith('.relayed'))).toHaveLength(1);
+
+    const second = spawnSync('python3', ['-'], { cwd: process.cwd(), input, encoding: 'utf8' });
+    expect(second.status).not.toBe(0);
+    expect(second.stderr).toContain('already archived but claim unlink failed');
+    expect(existsSync(claim)).toBe(true);
+    expect(readdirSync(relayedDir).filter((file) => file.endsWith('.relayed'))).toHaveLength(1);
     expect(readdirSync(relayedDir).filter((file) => file.includes('.tmp'))).toHaveLength(0);
   });
 
