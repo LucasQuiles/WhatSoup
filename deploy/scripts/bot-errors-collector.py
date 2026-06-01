@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -658,14 +659,49 @@ def local_writefail_path(remote_host: str, event_id: str) -> Path:
     return safe_child_path(state_root() / "writefail", name)
 
 
-def local_writefail_quarantine_path(remote_host: str, record: dict[str, Any]) -> Path:
-    stamp = now_iso().replace("-", "").replace(":", "")
-    name = f"{stamp}.harvest-{safe_segment(remote_host)}.{safe_segment(str(record.get('name') or 'poison'))}.poison"
-    return safe_child_path(state_root() / "writefail-harvest-quarantine", name)
+def writefail_poison_hash(record: dict[str, Any]) -> str:
+    payload = str(record.get("payload") or "")
+    return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+
+
+def existing_harvest_quarantine(remote_host: str, remote_root: str, record: dict[str, Any], payload_sha256: str) -> Path | None:
+    directory = state_root() / "writefail-harvest-quarantine"
+    if not directory.exists():
+        return None
+    remote_claim = str(record.get("claim") or "")
+    for path in sorted(directory.glob("*.poison")):
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        if loaded.get("remoteHost") != remote_host or loaded.get("remoteRoot") != remote_root:
+            continue
+        if loaded.get("payloadSha256") == payload_sha256:
+            return path
+        if remote_claim and "payloadSha256" not in loaded and loaded.get("remoteClaim") == remote_claim:
+            return path
+    return None
+
+
+def local_writefail_quarantine_path(remote_host: str, record: dict[str, Any], payload_sha256: str) -> Path:
+    directory = state_root() / "writefail-harvest-quarantine"
+    name = (
+        f"harvest-{safe_segment(remote_host)}."
+        f"{payload_sha256[:24]}."
+        f"{safe_segment(str(record.get('name') or 'poison'))}.poison"
+    )
+    return safe_child_path(directory, name)
 
 
 def write_harvest_quarantine(remote_host: str, remote_root: str, record: dict[str, Any], reason: str) -> Path:
-    path = local_writefail_quarantine_path(remote_host, record)
+    payload_text = str(record.get("payload") or "")
+    payload_sha256 = writefail_poison_hash(record)
+    existing = existing_harvest_quarantine(remote_host, remote_root, record, payload_sha256)
+    if existing is not None:
+        return existing
+    path = local_writefail_quarantine_path(remote_host, record, payload_sha256)
     payload = {
         "schemaVersion": 1,
         "kind": "writefail_harvest_poison",
@@ -675,7 +711,8 @@ def write_harvest_quarantine(remote_host: str, remote_root: str, record: dict[st
         "remoteName": record.get("name"),
         "sourceDir": record.get("sourceDir"),
         "reason": reason,
-        "payload": str(record.get("payload") or "")[:20000],
+        "payloadSha256": payload_sha256,
+        "payload": payload_text[:20000],
         "quarantinedAt": now_iso(),
     }
     atomic_write_json(path, payload)
