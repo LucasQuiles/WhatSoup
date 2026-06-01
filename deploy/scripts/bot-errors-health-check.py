@@ -933,6 +933,101 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+def safe_segment(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    return (cleaned or "unknown")[:80]
+
+
+def safe_child_path(directory: Path, name: str) -> Path:
+    if Path(name).name != name:
+        raise ValueError(f"unsafe child filename: {name}")
+    ensure_private_dir(directory)
+    first = directory / name
+    stem = name[:140].rstrip("._:-") or "unknown"
+    prefix = f"{int(time.time())}.{os.getpid()}"
+    candidates = [first, *[directory / f"{prefix}.{index}.{stem}" for index in range(1000)]]
+    for target in candidates:
+        try:
+            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            continue
+        else:
+            os.close(fd)
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            return target
+    raise FileExistsError(f"no available child path in {directory}: {name}")
+
+
+def writefail_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    override = os.environ.get("BOT_ERRORS_WRITEFAIL_DIR")
+    if override:
+        candidates.append(Path(override))
+    candidates.append(state_root() / "writefail")
+    candidates.append(Path.home() / ".bot-errors-writefail")
+    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) -> Path | None:
+    reason = f"{type(exc).__name__}: {exc}"
+    event_id = event.get("id")
+    instance = event.get("instance")
+    try:
+        sys.stderr.write(
+            f"[bot-errors-health] CRITICAL outbox write FAILED for {redact_event_text(str(target))}: {redact_event_text(reason)}; "
+            f"id={event_id} instance={instance} source={event.get('source')} "
+            f"severity={event.get('severity')} - recording breadcrumb\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+    breadcrumb = redact_json_value({
+        "schemaVersion": 1,
+        "kind": "outbox_write_failure",
+        "recordedAt": now_iso(),
+        "failedTarget": str(target),
+        "reason": reason,
+        "emitPid": os.getpid(),
+        "event": event,
+    })
+    stamp = now_iso().replace("-", "").replace(":", "")
+    name = f"{stamp}.{safe_segment(str(instance))}.{safe_segment(str(event_id))}.writefail"
+    for base in writefail_dirs():
+        try:
+            path = safe_child_path(base, name)
+            atomic_write_json(path, breadcrumb)
+            try:
+                sys.stderr.write(f"[bot-errors-health] lost-alert breadcrumb written: {redact_event_text(str(path))}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            return path
+        except Exception:
+            continue
+    try:
+        sys.stderr.write(
+            "[bot-errors-health] breadcrumb write failed in ALL fallback dirs; "
+            f"lost-event payload follows:\n{json.dumps(redact_json_value(event), sort_keys=True)}\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
+    return None
+
+
 def assert_regular_or_missing(path: Path) -> None:
     try:
         st = path.lstat()
@@ -1261,7 +1356,6 @@ def outbox_event(
     root = state_root()
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))
     ensure_private_dir(root)
-    ensure_private_dir(outbox)
     event_id = f"health-{time.time_ns()}-{os.getpid()}"
     event = {
         "schemaVersion": 1,
@@ -1293,7 +1387,11 @@ def outbox_event(
     if alert_source:
         event["alertSource"] = alert_source
     path = outbox / f"{event['createdAt'].replace(':', '').replace('-', '')}.{event_id}.json"
-    atomic_write_json(path, event)
+    try:
+        atomic_write_json(path, event)
+    except Exception as exc:  # noqa: BLE001 - health alerts must leave a recoverable breadcrumb if queue write fails.
+        record_writefail(event, exc, outbox)
+        raise
     return path
 
 
