@@ -122,6 +122,52 @@ describe('bot-errors-runner', () => {
     expect(event?.evidence).toContain('exit_code=127');
   });
 
+  it('redirects an explicit live outbox under pytest provenance', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
+    const home = join(tmpRoot, 'home');
+    const writerTmp = join(tmpRoot, 'tmp');
+    const liveOutbox = join(home, '.local', 'state', 'bot-errors', 'outbox');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(writerTmp, { recursive: true });
+
+    const result = spawnSync('python3', [
+      'deploy/scripts/bot-errors-runner.py',
+      '--instance', 'pytest-runner',
+      '--summary', 'pytest runner should redirect',
+      '--',
+      'python3',
+      '-c',
+      'import sys; sys.exit(5)',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        TMPDIR: writerTmp,
+        BOT_ERRORS_OUTBOX_DIR: liveOutbox,
+        PYTEST_CURRENT_TEST: 'tests/test_runner.py::test_redirect (call)',
+        VITEST: '',
+        VITEST_WORKER_ID: '',
+        NODE_ENV: '',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(5);
+    expect(existsSync(liveOutbox)).toBe(false);
+    const testRoot = join(writerTmp, 'whatsoup-vitest-bot-errors');
+    const [workerDir] = readdirSync(testRoot);
+    const outbox = join(testRoot, workerDir!, 'outbox');
+    const event = JSON.parse(readFileSync(join(outbox, readdirSync(outbox)[0]!), 'utf8')) as Record<string, any>;
+    expect(event.runtime.provenance).toMatchObject({
+      producer: 'python-runner',
+      test: true,
+      outboxPolicy: 'test-redirect',
+      liveOutboxRedirected: true,
+    });
+    expect(event.runtime.provenance.signals).toEqual(['PYTEST_CURRENT_TEST']);
+  });
+
   it('caps long failure-event filenames while preserving the event id', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
     const eventId = `runner/unsafe-${'x'.repeat(220)}`;
@@ -173,6 +219,9 @@ describe('bot-errors-runner', () => {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        VITEST: '',
+        VITEST_WORKER_ID: '',
+        NODE_ENV: '',
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_OUTBOX_DIR: join(blocked, 'outbox'),
         BOT_ERRORS_WRITEFAIL_DIR: writefail,
@@ -199,6 +248,9 @@ describe('bot-errors-runner', () => {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        VITEST: '',
+        VITEST_WORKER_ID: '',
+        NODE_ENV: '',
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_WRITEFAIL_DIR: writefail,
         BOT_ERRORS_DRY_SEND_CAPTURE: capture,

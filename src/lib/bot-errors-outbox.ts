@@ -4,13 +4,14 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname, platform, release, tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 export type BotErrorsSeverity = 'critical' | 'error' | 'warning' | 'info';
 export type BotErrorsEventType = 'alert' | 'clear';
@@ -78,19 +79,109 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function vitestStateDir(): string | null {
-  if (!process.env['VITEST'] && !process.env['VITEST_WORKER_ID']) return null;
+const STRONG_TEST_SIGNAL_KEYS = ['VITEST', 'VITEST_WORKER_ID', 'JEST_WORKER_ID', 'PYTEST_CURRENT_TEST'] as const;
+
+function envValue(key: string): string | undefined {
+  const value = process.env[key];
+  return value && value.trim() ? value : undefined;
+}
+
+function strongTestSignals(): string[] {
+  return STRONG_TEST_SIGNAL_KEYS.filter((key) => envValue(key));
+}
+
+function provenanceSignals(): string[] {
+  const signals = strongTestSignals();
+  if ((process.env['NODE_ENV'] ?? '').trim().toLowerCase() === 'test') signals.push('NODE_ENV');
+  return [...new Set(signals)].sort();
+}
+
+function testStateDir(): string | null {
+  if (strongTestSignals().length === 0) return null;
   const cwdHash = createHash('sha256').update(process.cwd()).digest('hex').slice(0, 12);
-  const worker = safeSegment(process.env['VITEST_WORKER_ID'] ?? `pid-${process.pid}`);
+  const worker = safeSegment(envValue('VITEST_WORKER_ID') ?? envValue('JEST_WORKER_ID') ?? `pid-${process.pid}`);
   return join(process.env['TMPDIR'] ?? tmpdir(), 'whatsoup-vitest-bot-errors', `${cwdHash}.${worker}`);
 }
 
 function stateDir(): string {
-  return process.env['BOT_ERRORS_STATE_DIR'] ?? vitestStateDir() ?? join(homedir(), '.local', 'state', 'bot-errors');
+  return envValue('BOT_ERRORS_STATE_DIR') ?? testStateDir() ?? join(homedir(), '.local', 'state', 'bot-errors');
+}
+
+function canonicalPath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    try {
+      return join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch {
+      return absolute;
+    }
+  }
+}
+
+function liveOutboxCandidates(): string[] {
+  return [
+    join(homedir(), '.local', 'state', 'bot-errors', 'outbox'),
+    envValue('BOT_ERRORS_LIVE_OUTBOX_DIR'),
+  ].filter((path): path is string => Boolean(path)).map(canonicalPath);
+}
+
+function testLiveOutboxAllowed(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env['BOT_ERRORS_ALLOW_TEST_LIVE_OUTBOX'] ?? '');
+}
+
+interface OutboxResolution {
+  outbox: string;
+  policy: 'explicit-outbox' | 'explicit-state' | 'default' | 'test-default' | 'test-redirect';
+  redirected: boolean;
+  originalOutbox: string;
+}
+
+function resolveBotErrorsOutbox(): OutboxResolution {
+  const explicitOutbox = envValue('BOT_ERRORS_OUTBOX_DIR');
+  const explicitState = envValue('BOT_ERRORS_STATE_DIR');
+  const testState = testStateDir();
+  let policy: OutboxResolution['policy'] = 'default';
+  let outbox = join(homedir(), '.local', 'state', 'bot-errors', 'outbox');
+  if (explicitOutbox) {
+    outbox = explicitOutbox;
+    policy = 'explicit-outbox';
+  } else if (explicitState) {
+    outbox = join(explicitState, 'outbox');
+    policy = 'explicit-state';
+  } else if (testState) {
+    outbox = join(testState, 'outbox');
+    policy = 'test-default';
+  }
+
+  const originalOutbox = outbox;
+  if (
+    strongTestSignals().length > 0
+    && !testLiveOutboxAllowed()
+    && liveOutboxCandidates().includes(canonicalPath(outbox))
+  ) {
+    outbox = join(testState ?? join(process.env['TMPDIR'] ?? tmpdir(), 'whatsoup-vitest-bot-errors', `pid-${process.pid}`), 'outbox');
+    policy = 'test-redirect';
+  }
+  return { outbox, policy, redirected: outbox !== originalOutbox, originalOutbox };
 }
 
 export function botErrorsOutboxDir(): string {
-  return process.env['BOT_ERRORS_OUTBOX_DIR'] ?? join(stateDir(), 'outbox');
+  return resolveBotErrorsOutbox().outbox;
+}
+
+function provenance(producer: string, resolution: OutboxResolution): Record<string, unknown> {
+  const strongSignals = strongTestSignals();
+  return {
+    producer,
+    test: strongSignals.length > 0,
+    signals: provenanceSignals(),
+    strongSignals,
+    outboxPolicy: resolution.policy,
+    liveOutboxRedirected: resolution.redirected,
+    resolvedOutbox: resolution.outbox,
+  };
 }
 
 function hostPlatform(): string {
@@ -241,7 +332,12 @@ function logHints(instance: string): string[] {
   return [...hints];
 }
 
-export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = randomUUID(), createdAt = nowIso()) {
+export function buildBotErrorsEvent(
+  input: BotErrorsOutboxInput,
+  eventId = randomUUID(),
+  createdAt = nowIso(),
+  outboxResolution = resolveBotErrorsOutbox(),
+) {
   const instance = input.instance.trim() || 'unknown';
   const source = input.source.trim() || 'unknown';
   const summary = input.summary.trim() || `${input.eventType} event from ${source}`;
@@ -271,10 +367,11 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
       envKeys: relevantEnvKeys(),
       invocationId: process.env['INVOCATION_ID'] ?? null,
       systemdExecPid: process.env['SYSTEMD_EXEC_PID'] ?? null,
+      provenance: provenance('ts-lib', outboxResolution),
     },
     diagnostics: {
       logHints: logHints(instance),
-      queue: botErrorsOutboxDir(),
+      queue: outboxResolution.outbox,
     },
     delivery: {
       attempts: 0,
@@ -337,8 +434,9 @@ export function recordBotErrorsWritefail(
 }
 
 export function writeBotErrorsEvent(input: BotErrorsOutboxInput): BotErrorsOutboxWrite {
-  const outbox = botErrorsOutboxDir();
-  const event = buildBotErrorsEvent(input);
+  const outboxResolution = resolveBotErrorsOutbox();
+  const outbox = outboxResolution.outbox;
+  const event = buildBotErrorsEvent(input, randomUUID(), nowIso(), outboxResolution);
   const created = event.createdAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
   const fileName = `${created}.${safeSegment(event.instance)}.${safeSegment(event.source)}.${event.id}.json`;
   const finalPath = join(outbox, fileName);

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname, platform, release, tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { sessionStateDir } from './lib/rgp-state.mjs';
 
 const MAX_ERROR_LOG_BYTES = 64 * 1024;
@@ -74,19 +74,101 @@ function isErrorResult(response) {
   return /(sandbox_deny|exit code [1-9]|enoent|eacces|permission denied|error:|⚠️ error)/i.test(text);
 }
 
-function vitestStateDir() {
-  if (!process.env.VITEST && !process.env.VITEST_WORKER_ID) return null;
+const STRONG_TEST_SIGNAL_KEYS = ['VITEST', 'VITEST_WORKER_ID', 'JEST_WORKER_ID', 'PYTEST_CURRENT_TEST'];
+
+function envValue(key) {
+  const value = process.env[key];
+  return value && value.trim() ? value : undefined;
+}
+
+function strongTestSignals() {
+  return STRONG_TEST_SIGNAL_KEYS.filter((key) => envValue(key));
+}
+
+function provenanceSignals() {
+  const signals = strongTestSignals();
+  if ((process.env.NODE_ENV || '').trim().toLowerCase() === 'test') signals.push('NODE_ENV');
+  return [...new Set(signals)].sort();
+}
+
+function testStateDir() {
+  if (strongTestSignals().length === 0) return null;
   const cwdHash = createHash('sha256').update(process.cwd()).digest('hex').slice(0, 12);
-  const worker = safeSegment(process.env.VITEST_WORKER_ID || `pid-${process.pid}`);
+  const worker = safeSegment(envValue('VITEST_WORKER_ID') || envValue('JEST_WORKER_ID') || `pid-${process.pid}`);
   return join(process.env.TMPDIR || tmpdir(), 'whatsoup-vitest-bot-errors', `${cwdHash}.${worker}`);
 }
 
 function stateDir() {
-  return process.env.BOT_ERRORS_STATE_DIR || vitestStateDir() || join(homedir(), '.local', 'state', 'bot-errors');
+  return envValue('BOT_ERRORS_STATE_DIR') || testStateDir() || join(homedir(), '.local', 'state', 'bot-errors');
+}
+
+function canonicalPath(path) {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    try {
+      return join(realpathSync(dirname(absolute)), basename(absolute));
+    } catch {
+      return absolute;
+    }
+  }
+}
+
+function liveOutboxCandidates() {
+  return [
+    join(homedir(), '.local', 'state', 'bot-errors', 'outbox'),
+    envValue('BOT_ERRORS_LIVE_OUTBOX_DIR'),
+  ].filter(Boolean).map(canonicalPath);
+}
+
+function testLiveOutboxAllowed() {
+  return /^(1|true|yes|on)$/i.test(process.env.BOT_ERRORS_ALLOW_TEST_LIVE_OUTBOX || '');
+}
+
+function resolveOutboxDir() {
+  const explicitOutbox = envValue('BOT_ERRORS_OUTBOX_DIR');
+  const explicitState = envValue('BOT_ERRORS_STATE_DIR');
+  const testState = testStateDir();
+  let outbox = join(homedir(), '.local', 'state', 'bot-errors', 'outbox');
+  let policy = 'default';
+  if (explicitOutbox) {
+    outbox = explicitOutbox;
+    policy = 'explicit-outbox';
+  } else if (explicitState) {
+    outbox = join(explicitState, 'outbox');
+    policy = 'explicit-state';
+  } else if (testState) {
+    outbox = join(testState, 'outbox');
+    policy = 'test-default';
+  }
+  const originalOutbox = outbox;
+  if (
+    strongTestSignals().length > 0
+    && !testLiveOutboxAllowed()
+    && liveOutboxCandidates().includes(canonicalPath(outbox))
+  ) {
+    outbox = join(testState || join(process.env.TMPDIR || tmpdir(), 'whatsoup-vitest-bot-errors', `pid-${process.pid}`), 'outbox');
+    policy = 'test-redirect';
+  }
+  return { outbox, policy, redirected: outbox !== originalOutbox };
 }
 
 function outboxDir() {
-  return process.env.BOT_ERRORS_OUTBOX_DIR || join(stateDir(), 'outbox');
+  return resolveOutboxDir().outbox;
+}
+
+function provenance(resolution) {
+  const strongSignals = strongTestSignals();
+  return {
+    producer: 'post-tool-use-hook',
+    test: strongSignals.length > 0,
+    signals: provenanceSignals(),
+    strongSignals,
+    outboxPolicy: resolution.policy,
+    liveOutboxRedirected: resolution.redirected,
+    resolvedOutbox: resolution.outbox,
+  };
 }
 
 function writefailDirs() {
@@ -240,8 +322,8 @@ function recordWritefail(event, err, failedTarget) {
   return null;
 }
 
-function writeEventFile(event) {
-  const outbox = outboxDir();
+function writeEventFile(event, outboxResolution = resolveOutboxDir()) {
+  const outbox = outboxResolution.outbox;
   const created = event.createdAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
   const fileName = `${created}.${safeSegment(event.instance)}.${safeSegment(event.source)}.${event.id}.json`;
   const finalPath = join(outbox, fileName);
@@ -331,6 +413,7 @@ function writeBotErrorsAlert(payload, entry, sessionLogPath) {
   if (hookEvent !== 'PostToolUseFailure' && process.env.BOT_ERRORS_POST_TOOL_USE_ALERTS !== '1') return null;
   const instance = process.env.WHATSOUP_INSTANCE || valueAt(payload, ['instance']) || 'agent-tool';
   const source = sourceFor(entry.toolName, hookEvent);
+  const outboxResolution = resolveOutboxDir();
   const event = {
     schemaVersion: 1,
     id: `tool-${safeSegment(entry.sessionId)}-${safeSegment(entry.toolName)}-${Date.now()}-${randomUUID().slice(0, 8)}`,
@@ -356,10 +439,11 @@ function writeBotErrorsAlert(payload, entry, sessionLogPath) {
       hookEvent: payload.hook_event_name || 'PostToolUse',
       permissionMode: payload.permission_mode || null,
       effort: payload.effort || null,
+      provenance: provenance(outboxResolution),
     },
     diagnostics: {
       logHints: botErrorLogHints(instance, payload, sessionLogPath),
-      queue: outboxDir(),
+      queue: outboxResolution.outbox,
       sessionId: entry.sessionId,
       toolName: entry.toolName,
       toolUseId: valueAt(payload, ['tool_use_id', 'toolUseId']) || '',
@@ -373,7 +457,7 @@ function writeBotErrorsAlert(payload, entry, sessionLogPath) {
       lastError: null,
     },
   };
-  return writeEventFile(event);
+  return writeEventFile(event, outboxResolution);
 }
 
 function summarizeInput(input) {

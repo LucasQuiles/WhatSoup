@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,11 +40,100 @@ def now_iso() -> str:
 
 
 def state_root() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
+    explicit = os.environ.get("BOT_ERRORS_STATE_DIR")
+    if explicit and explicit.strip():
+        return Path(explicit)
+    test_state = test_state_root()
+    return test_state or (Path.home() / ".local/state/bot-errors")
+
+
+STRONG_TEST_SIGNAL_KEYS = ("VITEST", "VITEST_WORKER_ID", "JEST_WORKER_ID", "PYTEST_CURRENT_TEST")
+
+
+def env_value(key: str) -> str | None:
+    value = os.environ.get(key)
+    return value.strip() if value and value.strip() else None
+
+
+def strong_test_signals() -> list[str]:
+    return [key for key in STRONG_TEST_SIGNAL_KEYS if env_value(key)]
+
+
+def provenance_signals() -> list[str]:
+    signals = strong_test_signals()
+    if os.environ.get("NODE_ENV", "").strip().lower() == "test":
+        signals.append("NODE_ENV")
+    return sorted(set(signals))
+
+
+def test_state_root() -> Path | None:
+    if not strong_test_signals():
+        return None
+    cwd_hash = hashlib.sha256(os.getcwd().encode("utf-8")).hexdigest()[:12]
+    worker = safe_segment(env_value("VITEST_WORKER_ID") or env_value("JEST_WORKER_ID") or f"pid-{os.getpid()}")
+    return Path(os.environ.get("TMPDIR", "/tmp")) / "whatsoup-vitest-bot-errors" / f"{cwd_hash}.{worker}"
+
+
+def canonical_path(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve(strict=True)
+    except OSError:
+        try:
+            return path.expanduser().parent.resolve(strict=True) / path.name
+        except OSError:
+            return path.expanduser().absolute()
+
+
+def live_outbox_candidates() -> list[Path]:
+    candidates = [Path.home() / ".local/state/bot-errors/outbox"]
+    override = env_value("BOT_ERRORS_LIVE_OUTBOX_DIR")
+    if override:
+        candidates.append(Path(override))
+    return [canonical_path(path) for path in candidates]
+
+
+def test_live_outbox_allowed() -> bool:
+    return os.environ.get("BOT_ERRORS_ALLOW_TEST_LIVE_OUTBOX", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_outbox_dir() -> tuple[Path, dict[str, Any]]:
+    explicit_outbox = env_value("BOT_ERRORS_OUTBOX_DIR")
+    explicit_state = env_value("BOT_ERRORS_STATE_DIR")
+    test_state = test_state_root()
+    policy = "default"
+    outbox = Path.home() / ".local/state/bot-errors/outbox"
+    if explicit_outbox:
+        outbox = Path(explicit_outbox)
+        policy = "explicit-outbox"
+    elif explicit_state:
+        outbox = Path(explicit_state) / "outbox"
+        policy = "explicit-state"
+    elif test_state:
+        outbox = test_state / "outbox"
+        policy = "test-default"
+    original = outbox
+    if strong_test_signals() and not test_live_outbox_allowed() and canonical_path(outbox) in live_outbox_candidates():
+        outbox = (test_state or (Path(os.environ.get("TMPDIR", "/tmp")) / "whatsoup-vitest-bot-errors" / f"pid-{os.getpid()}")) / "outbox"
+        policy = "test-redirect"
+    provenance = {
+        "producer": "python-emit",
+        "test": bool(strong_test_signals()),
+        "signals": provenance_signals(),
+        "strongSignals": strong_test_signals(),
+        "outboxPolicy": policy,
+        "liveOutboxRedirected": outbox != original,
+        "resolvedOutbox": str(outbox),
+    }
+    return outbox, provenance
 
 
 def outbox_dir() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", state_root() / "outbox"))
+    return resolve_outbox_dir()[0]
+
+
+def runtime_provenance() -> dict[str, Any]:
+    return resolve_outbox_dir()[1]
+
 
 
 def writefail_dirs() -> list[Path]:
@@ -255,6 +345,7 @@ def build_event(args: argparse.Namespace) -> dict[str, Any]:
             "envKeys": env_keys(),
             "invocationId": os.environ.get("INVOCATION_ID"),
             "systemdExecPid": os.environ.get("SYSTEMD_EXEC_PID"),
+            "provenance": runtime_provenance(),
         },
         "diagnostics": {
             "logHints": log_hints(instance, args.log_hint or []),

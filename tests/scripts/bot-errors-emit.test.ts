@@ -126,6 +126,50 @@ describe('bot-errors-emit', () => {
     expect(basename(files[0]!)).not.toMatch(/\\.tmp$/);
   });
 
+  it('redirects an explicit live outbox under pytest provenance', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
+    const home = join(tmpRoot, 'home');
+    const writerTmp = join(tmpRoot, 'tmp');
+    const liveOutbox = join(home, '.local', 'state', 'bot-errors', 'outbox');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(writerTmp, { recursive: true });
+
+    execFileSync('python3', [
+      'deploy/scripts/bot-errors-emit.py',
+      '--instance',
+      'pytest-bot',
+      '--source',
+      'pytest-source',
+      '--summary',
+      'pytest should redirect',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        TMPDIR: writerTmp,
+        BOT_ERRORS_OUTBOX_DIR: liveOutbox,
+        PYTEST_CURRENT_TEST: 'tests/test_bot_errors.py::test_redirect (call)',
+        VITEST: '',
+        VITEST_WORKER_ID: '',
+        NODE_ENV: '',
+      },
+    });
+
+    expect(existsSync(liveOutbox)).toBe(false);
+    const testRoot = join(writerTmp, 'whatsoup-vitest-bot-errors');
+    const [workerDir] = readdirSync(testRoot);
+    const outbox = join(testRoot, workerDir!, 'outbox');
+    const event = JSON.parse(readFileSync(join(outbox, readdirSync(outbox)[0]!), 'utf8')) as Record<string, any>;
+    expect(event.runtime.provenance).toMatchObject({
+      producer: 'python-emit',
+      test: true,
+      outboxPolicy: 'test-redirect',
+      liveOutboxRedirected: true,
+    });
+    expect(event.runtime.provenance.signals).toEqual(['PYTEST_CURRENT_TEST']);
+  });
+
   it('caps and sanitizes long explicit event filenames while preserving the payload id', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
     const eventId = `explicit/unsafe-${'x'.repeat(220)}`;

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -75,6 +75,8 @@ afterEach(() => {
   delete process.env['BOT_ERRORS_WRITEFAIL_DIR'];
   delete process.env['BOT_ERRORS_OUTBOX_DIR'];
   delete process.env['BOT_ERRORS_STATE_DIR'];
+  delete process.env['BOT_ERRORS_LIVE_OUTBOX_DIR'];
+  delete process.env['BOT_ERRORS_ALLOW_TEST_LIVE_OUTBOX'];
   if (ORIGINAL_NODE_ENV === undefined) delete process.env['NODE_ENV'];
   else process.env['NODE_ENV'] = ORIGINAL_NODE_ENV;
   if (ORIGINAL_VITEST === undefined) delete process.env['VITEST'];
@@ -242,6 +244,131 @@ describe('emitAlert', () => {
       } catch (err) {
         expect((err as NodeJS.ErrnoException).code).toBe('ENOENT');
       }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('redirects an explicit live outbox under strong test provenance', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bot-errors-live-redirect-'));
+    const home = join(root, 'home');
+    const temp = join(root, 'tmp');
+    const liveOutbox = join(home, '.local', 'state', 'bot-errors', 'outbox');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(temp, { recursive: true });
+    try {
+      process.env['HOME'] = home;
+      process.env['TMPDIR'] = temp;
+      process.env['BOT_ERRORS_OUTBOX_DIR'] = liveOutbox;
+      process.env['VITEST'] = 'true';
+      process.env['VITEST_WORKER_ID'] = 'worker-live';
+      process.env['NODE_ENV'] = 'test';
+
+      emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
+
+      expect(existsSyncMock).not.toHaveBeenCalledWith(liveOutbox);
+      expect(() => readdirSync(liveOutbox)).toThrow();
+      const testOutbox = join(temp, 'whatsoup-vitest-bot-errors', `${testCwdHash()}.worker-live`, 'outbox');
+      const event = JSON.parse(readFileSync(join(testOutbox, readdirSync(testOutbox)[0]!), 'utf8')) as {
+        runtime: { provenance: Record<string, unknown> };
+        diagnostics: { queue: string };
+      };
+      expect(event.diagnostics.queue).toBe(testOutbox);
+      expect(event.runtime.provenance).toMatchObject({
+        producer: 'ts-lib',
+        test: true,
+        outboxPolicy: 'test-redirect',
+        liveOutboxRedirected: true,
+      });
+      expect(event.runtime.provenance.signals).toEqual(['NODE_ENV', 'VITEST', 'VITEST_WORKER_ID']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('canonicalizes symlinked live outbox paths before test redirect decisions', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bot-errors-live-symlink-'));
+    const home = join(root, 'home');
+    const temp = join(root, 'tmp');
+    const liveParent = join(home, '.local', 'state', 'bot-errors');
+    const liveOutbox = join(liveParent, 'outbox');
+    const symlinkOutbox = join(root, 'outbox-link');
+    mkdirSync(liveParent, { recursive: true });
+    mkdirSync(liveOutbox, { recursive: true });
+    mkdirSync(temp, { recursive: true });
+    symlinkSync(liveOutbox, symlinkOutbox, 'dir');
+    try {
+      process.env['HOME'] = home;
+      process.env['TMPDIR'] = temp;
+      process.env['BOT_ERRORS_OUTBOX_DIR'] = symlinkOutbox;
+      process.env['VITEST'] = 'true';
+      process.env['VITEST_WORKER_ID'] = 'worker-symlink';
+
+      emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
+
+      expect(readdirSync(liveOutbox)).toHaveLength(0);
+      const testOutbox = join(temp, 'whatsoup-vitest-bot-errors', `${testCwdHash()}.worker-symlink`, 'outbox');
+      const event = JSON.parse(readFileSync(join(testOutbox, readdirSync(testOutbox)[0]!), 'utf8')) as {
+        runtime: { provenance: Record<string, unknown> };
+      };
+      expect(event.runtime.provenance).toMatchObject({
+        outboxPolicy: 'test-redirect',
+        liveOutboxRedirected: true,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('allows an explicit live outbox producer write only when the test override is set', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bot-errors-live-allow-'));
+    const home = join(root, 'home');
+    const liveOutbox = join(home, '.local', 'state', 'bot-errors', 'outbox');
+    mkdirSync(home, { recursive: true });
+    try {
+      process.env['HOME'] = home;
+      process.env['BOT_ERRORS_OUTBOX_DIR'] = liveOutbox;
+      process.env['BOT_ERRORS_ALLOW_TEST_LIVE_OUTBOX'] = '1';
+      process.env['VITEST'] = 'true';
+
+      emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
+
+      const event = JSON.parse(readFileSync(join(liveOutbox, readdirSync(liveOutbox)[0]!), 'utf8')) as {
+        runtime: { provenance: Record<string, unknown> };
+      };
+      expect(event.runtime.provenance).toMatchObject({
+        test: true,
+        outboxPolicy: 'explicit-outbox',
+        liveOutboxRedirected: false,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('stamps NODE_ENV=test without treating it as a hard live-outbox blocker', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bot-errors-node-env-only-'));
+    const home = join(root, 'home');
+    const liveOutbox = join(home, '.local', 'state', 'bot-errors', 'outbox');
+    mkdirSync(home, { recursive: true });
+    try {
+      process.env['HOME'] = home;
+      process.env['BOT_ERRORS_OUTBOX_DIR'] = liveOutbox;
+      process.env['NODE_ENV'] = 'test';
+      process.env['VITEST'] = '';
+      process.env['VITEST_WORKER_ID'] = '';
+
+      emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
+
+      const event = JSON.parse(readFileSync(join(liveOutbox, readdirSync(liveOutbox)[0]!), 'utf8')) as {
+        runtime: { provenance: Record<string, unknown> };
+      };
+      expect(event.runtime.provenance).toMatchObject({
+        test: false,
+        signals: ['NODE_ENV'],
+        outboxPolicy: 'explicit-outbox',
+        liveOutboxRedirected: false,
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
