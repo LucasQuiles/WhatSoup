@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,8 +41,15 @@ const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
 const PHONE_SAMPLE = '+1 (555) 123-4567';
 const ORIGINAL_HOME = process.env['HOME'];
 const ORIGINAL_TMPDIR = process.env['TMPDIR'];
+const ORIGINAL_NODE_ENV = process.env['NODE_ENV'];
+const ORIGINAL_VITEST = process.env['VITEST'];
+const ORIGINAL_VITEST_WORKER_ID = process.env['VITEST_WORKER_ID'];
 let outboxDir = '';
 let writefailDir = '';
+
+function testCwdHash(): string {
+  return createHash('sha256').update(process.cwd()).digest('hex').slice(0, 12);
+}
 
 function spawnedChild() {
   return vi.mocked(spawn).mock.results.at(-1)?.value;
@@ -65,7 +73,14 @@ afterEach(() => {
   if (ORIGINAL_TMPDIR === undefined) delete process.env['TMPDIR'];
   else process.env['TMPDIR'] = ORIGINAL_TMPDIR;
   delete process.env['BOT_ERRORS_WRITEFAIL_DIR'];
+  delete process.env['BOT_ERRORS_OUTBOX_DIR'];
   delete process.env['BOT_ERRORS_STATE_DIR'];
+  if (ORIGINAL_NODE_ENV === undefined) delete process.env['NODE_ENV'];
+  else process.env['NODE_ENV'] = ORIGINAL_NODE_ENV;
+  if (ORIGINAL_VITEST === undefined) delete process.env['VITEST'];
+  else process.env['VITEST'] = ORIGINAL_VITEST;
+  if (ORIGINAL_VITEST_WORKER_ID === undefined) delete process.env['VITEST_WORKER_ID'];
+  else process.env['VITEST_WORKER_ID'] = ORIGINAL_VITEST_WORKER_ID;
 });
 
 describe('emitAlert', () => {
@@ -200,6 +215,36 @@ describe('emitAlert', () => {
     expect(event.diagnostics.logHints).toContain("ps -eo pid,etime,cmd | grep -F 'brick-wsl-bot'");
     expect(event.diagnostics.logHints).toContain(join(homedir(), '.claude', 'observability', 'runtime'));
     expect(event.diagnostics.logHints.some((hint) => hint.includes('journalctl'))).toBe(false);
+  });
+
+  it('uses a Vitest temp outbox instead of the real home outbox when bot-errors paths are unset', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bot-errors-vitest-default-'));
+    const home = join(root, 'home');
+    const temp = join(root, 'tmp');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(temp, { recursive: true });
+    try {
+      delete process.env['BOT_ERRORS_OUTBOX_DIR'];
+      delete process.env['BOT_ERRORS_STATE_DIR'];
+      delete process.env['BOT_ERRORS_WRITEFAIL_DIR'];
+      process.env['HOME'] = home;
+      process.env['TMPDIR'] = temp;
+      process.env['NODE_ENV'] = 'test';
+      process.env['VITEST'] = 'true';
+      process.env['VITEST_WORKER_ID'] = 'worker-7';
+
+      emitAlert('whatsoup-prod', 'agent_respawn_failed', 'respawn exhausted', 'crashed 3 times');
+
+      const testOutbox = join(temp, 'whatsoup-vitest-bot-errors', `${testCwdHash()}.worker-7`, 'outbox');
+      expect(readdirSync(testOutbox).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+      try {
+        expect(readdirSync(join(home, '.local', 'state', 'bot-errors', 'outbox'))).toHaveLength(0);
+      } catch (err) {
+        expect((err as NodeJS.ErrnoException).code).toBe('ENOENT');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('falls back to the legacy helper when the outbox write fails', () => {

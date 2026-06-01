@@ -8,7 +8,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname, platform, release, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
@@ -78,8 +78,15 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function vitestStateDir(): string | null {
+  if (!process.env['VITEST'] && !process.env['VITEST_WORKER_ID']) return null;
+  const cwdHash = createHash('sha256').update(process.cwd()).digest('hex').slice(0, 12);
+  const worker = safeSegment(process.env['VITEST_WORKER_ID'] ?? `pid-${process.pid}`);
+  return join(process.env['TMPDIR'] ?? tmpdir(), 'whatsoup-vitest-bot-errors', `${cwdHash}.${worker}`);
+}
+
 function stateDir(): string {
-  return process.env['BOT_ERRORS_STATE_DIR'] ?? join(homedir(), '.local', 'state', 'bot-errors');
+  return process.env['BOT_ERRORS_STATE_DIR'] ?? vitestStateDir() ?? join(homedir(), '.local', 'state', 'bot-errors');
 }
 
 export function botErrorsOutboxDir(): string {
