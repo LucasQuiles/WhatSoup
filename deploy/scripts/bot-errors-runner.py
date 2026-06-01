@@ -45,6 +45,25 @@ def outbox_dir() -> Path:
     return Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", state_root() / "outbox"))
 
 
+def writefail_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    override = os.environ.get("BOT_ERRORS_WRITEFAIL_DIR")
+    if override:
+        candidates.append(Path(override))
+    candidates.append(state_root() / "writefail")
+    candidates.append(Path.home() / ".bot-errors-writefail")
+    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
+
+
 def ensure_private_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -163,6 +182,77 @@ def write_event(event: dict[str, Any]) -> Path:
     return path
 
 
+def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) -> Path | None:
+    reason = f"{type(exc).__name__}: {exc}"
+    event_id = event.get("id")
+    instance = event.get("instance")
+    try:
+        sys.stderr.write(
+            f"[bot-errors-runner] CRITICAL outbox write FAILED for {target}: {redact(reason)}; "
+            f"id={event_id} instance={instance} source={event.get('source')} "
+            f"severity={event.get('severity')} - recording breadcrumb\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+    breadcrumb = {
+        "schemaVersion": 1,
+        "kind": "outbox_write_failure",
+        "recordedAt": now_iso(),
+        "failedTarget": str(target),
+        "reason": redact(reason),
+        "emitPid": os.getpid(),
+        "event": event,
+    }
+    data = (json.dumps(breadcrumb, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    stamp = now_iso().replace("-", "").replace(":", "")
+    name = f"{stamp}.{safe_segment(str(instance))}.{safe_segment(str(event_id))}.writefail"
+    for base in writefail_dirs():
+        tmp_path: Path | None = None
+        try:
+            path = safe_child_path(base, name)
+            tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+            try:
+                dir_fd = os.open(base, os.O_DIRECTORY | os.O_RDONLY)
+            except OSError:
+                dir_fd = None
+            if dir_fd is not None:
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            try:
+                sys.stderr.write(f"[bot-errors-runner] lost-alert breadcrumb written: {path}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            return path
+        except Exception:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            continue
+
+    try:
+        sys.stderr.write(
+            "[bot-errors-runner] breadcrumb write failed in ALL fallback dirs; "
+            f"lost-event payload follows:\n{json.dumps(event, sort_keys=True)}\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
+    return None
+
+
 def log_hints(args: argparse.Namespace) -> list[str]:
     hints = list(args.log_hint or [])
     service = os.environ.get("INVOCATION_ID")
@@ -212,7 +302,7 @@ def build_evidence(
     return redact("\n".join(parts))
 
 
-def emit_failure(
+def build_failure_event(
     args: argparse.Namespace,
     command: list[str],
     returncode: int,
@@ -220,9 +310,9 @@ def emit_failure(
     stdout: str,
     stderr: str,
     failure: str,
-) -> Path:
+) -> dict[str, Any]:
     event_id = args.event_id or f"process-{safe_segment(args.instance)}-{safe_segment(args.source)}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    event = {
+    return {
         "schemaVersion": 1,
         "id": event_id,
         "eventType": "alert",
@@ -248,6 +338,18 @@ def emit_failure(
         },
         "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
     }
+
+
+def emit_failure(
+    args: argparse.Namespace,
+    command: list[str],
+    returncode: int,
+    duration_ms: int,
+    stdout: str,
+    stderr: str,
+    failure: str,
+) -> Path:
+    event = build_failure_event(args, command, returncode, duration_ms, stdout, stderr, failure)
     return write_event(event)
 
 
@@ -302,12 +404,17 @@ def main(argv: list[str] | None = None) -> int:
         failure = "timeout"
     duration_ms = int((time.monotonic() - started) * 1000)
     if stdout:
-        sys.stdout.write(stdout)
+        sys.stdout.write(redact(stdout))
     if stderr:
-        sys.stderr.write(stderr)
+        sys.stderr.write(redact(stderr))
     if returncode != 0:
-        path = emit_failure(args, args.command, returncode, duration_ms, stdout, stderr, failure)
-        print(f"bot-errors-runner: queued failure alert {path}", file=sys.stderr)
+        event = build_failure_event(args, args.command, returncode, duration_ms, stdout, stderr, failure)
+        try:
+            path = write_event(event)
+        except Exception as exc:  # noqa: BLE001 - the wrapped failure must not vanish if outbox write fails.
+            record_writefail(event, exc, outbox_dir())
+        else:
+            print(f"bot-errors-runner: queued failure alert {path}", file=sys.stderr)
     return returncode
 
 

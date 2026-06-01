@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -150,5 +150,149 @@ describe('bot-errors-runner', () => {
     expect(files[0]).not.toContain('/');
     const [event] = events();
     expect(event?.id).toBe(eventId);
+  });
+
+  it('writes a recoverable writefail breadcrumb when the runner outbox is unwritable', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
+    const blocked = join(tmpRoot, 'blocked-outbox-parent');
+    const writefail = join(tmpRoot, 'writefail');
+    const capture = join(tmpRoot, 'capture.txt');
+    writeFileSync(blocked, 'not a directory');
+    const secretLine = `token=runner-secret ${GITHUB_TOKEN_SAMPLE}`;
+
+    const result = spawnSync('python3', [
+      'deploy/scripts/bot-errors-runner.py',
+      '--instance', 'runner-writefail',
+      '--source', 'service-exit',
+      '--summary', 'runner outbox failed',
+      '--',
+      'python3',
+      '-c',
+      `import sys; print(${JSON.stringify(secretLine)}, file=sys.stderr); sys.exit(9)`,
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_OUTBOX_DIR: join(blocked, 'outbox'),
+        BOT_ERRORS_WRITEFAIL_DIR: writefail,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(9);
+    expect(result.stderr).toContain('CRITICAL outbox write FAILED');
+    expect(result.stderr).toContain('lost-alert breadcrumb written');
+    expect(result.stderr).not.toContain('runner-secret');
+    expect(result.stderr).not.toContain(GITHUB_TOKEN_SAMPLE);
+    const crumbs = readdirSync(writefail).filter((name) => name.endsWith('.writefail'));
+    expect(crumbs).toHaveLength(1);
+    const crumb = JSON.parse(readFileSync(join(writefail, crumbs[0]!), 'utf8')) as Record<string, any>;
+    expect(crumb).toMatchObject({ kind: 'outbox_write_failure', schemaVersion: 1 });
+    expect(crumb.event.summary).toBe('runner outbox failed');
+    expect(crumb.event.evidence).toContain('token=[REDACTED]');
+    expect(crumb.event.evidence).toContain('[REDACTED GITHUB TOKEN]');
+    expect(crumb.event.evidence).not.toContain('runner-secret');
+    expect(crumb.event.evidence).not.toContain(GITHUB_TOKEN_SAMPLE);
+
+    const dispatch = spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_WRITEFAIL_DIR: writefail,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capture,
+      },
+      encoding: 'utf8',
+    });
+    expect(dispatch.status).toBe(0);
+    expect(readFileSync(capture, 'utf8')).toContain('runner outbox failed');
+    expect(readFileSync(capture, 'utf8')).toContain('writefail_recovered');
+    expect(readdirSync(join(tmpRoot, 'sent')).filter((name) => name.endsWith('.sent'))).toHaveLength(1);
+  });
+
+  it('prefers HOME writefail fallback before TMPDIR when runner state writefail is blocked', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
+    const blocked = join(tmpRoot, 'blocked-outbox-parent');
+    const stateRoot = join(tmpRoot, 'state');
+    const home = join(tmpRoot, 'home');
+    const writerTmp = join(tmpRoot, 'writer-tmp');
+    writeFileSync(blocked, 'not a directory');
+    mkdirSync(stateRoot, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    mkdirSync(writerTmp, { recursive: true });
+    writeFileSync(join(stateRoot, 'writefail'), 'not a directory');
+
+    const result = spawnSync('python3', [
+      'deploy/scripts/bot-errors-runner.py',
+      '--instance', 'runner-home-fallback',
+      '--summary', 'runner should choose home fallback',
+      '--',
+      'python3',
+      '-c',
+      'import sys; sys.exit(8)',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        TMPDIR: writerTmp,
+        BOT_ERRORS_STATE_DIR: stateRoot,
+        BOT_ERRORS_OUTBOX_DIR: join(blocked, 'outbox'),
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(8);
+    expect(readdirSync(join(home, '.bot-errors-writefail')).filter((name) => name.endsWith('.writefail'))).toHaveLength(1);
+    const tmpFallback = join(writerTmp, 'bot-errors-writefail');
+    expect(existsSync(tmpFallback) ? readdirSync(tmpFallback).filter((name) => name.endsWith('.writefail')) : []).toHaveLength(0);
+  });
+
+  it('prints a redacted lost-event payload when every runner writefail fallback fails', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
+    const blocked = join(tmpRoot, 'blocked-outbox-parent');
+    const overrideFile = join(tmpRoot, 'override-file');
+    const stateRoot = join(tmpRoot, 'state');
+    const home = join(tmpRoot, 'home');
+    const writerTmp = join(tmpRoot, 'writer-tmp');
+    writeFileSync(blocked, 'not a directory');
+    writeFileSync(overrideFile, 'not a directory');
+    mkdirSync(stateRoot, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    mkdirSync(writerTmp, { recursive: true });
+    writeFileSync(join(stateRoot, 'writefail'), 'not a directory');
+    writeFileSync(join(home, '.bot-errors-writefail'), 'not a directory');
+    writeFileSync(join(writerTmp, 'bot-errors-writefail'), 'not a directory');
+    const secretLine = `password=runner-password ${JWT_SAMPLE}`;
+
+    const result = spawnSync('python3', [
+      'deploy/scripts/bot-errors-runner.py',
+      '--instance', 'runner-all-fallbacks-fail',
+      '--summary', 'runner all fallbacks failed',
+      '--',
+      'python3',
+      '-c',
+      `import sys; print(${JSON.stringify(secretLine)}, file=sys.stderr); sys.exit(6)`,
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        TMPDIR: writerTmp,
+        BOT_ERRORS_STATE_DIR: stateRoot,
+        BOT_ERRORS_OUTBOX_DIR: join(blocked, 'outbox'),
+        BOT_ERRORS_WRITEFAIL_DIR: join(overrideFile, 'child'),
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(6);
+    expect(result.stderr).toContain('breadcrumb write failed in ALL fallback dirs');
+    expect(result.stderr).toContain('lost-event payload follows');
+    expect(result.stderr).toContain('password=[REDACTED]');
+    expect(result.stderr).toContain('[REDACTED JWT]');
+    expect(result.stderr).not.toContain('runner-password');
+    expect(result.stderr).not.toContain('eyJhbGci');
   });
 });
