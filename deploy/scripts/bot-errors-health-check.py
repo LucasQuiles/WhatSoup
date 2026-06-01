@@ -45,6 +45,12 @@ DEFAULT_HEALTH_PROFILE = {
     "expectConfigInventory": True,
 }
 ROOT_CREDENTIAL_FILES = {"fleet-token", "fleet.env", "fleet-tokens.json", "secrets.env"}
+SECRETISH_ASSIGNMENT = re.compile(
+    r"\b(api[_-]?key|token|secret|password|authorization|cookie|credential)\b(\s*[:=]\s*)([\"']?)[^\s\"',}]+",
+    re.IGNORECASE,
+)
+BEARER_VALUE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+")
+PHONE_LIKE = re.compile(r"(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])")
 
 
 def kernel_release() -> str:
@@ -144,18 +150,139 @@ def ensure_private_dir(path: Path) -> None:
         pass
 
 
+def writefail_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    override = os.environ.get("BOT_ERRORS_WRITEFAIL_DIR")
+    if override:
+        candidates.append(Path(override))
+    candidates.append(state_root() / "writefail")
+    candidates.append(Path.home() / ".bot-errors-writefail")
+    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(path)
+    return deduped
+
+
+def redact(value: Any) -> str:
+    text = str(value)
+    text = SECRETISH_ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}[REDACTED]", text)
+    text = BEARER_VALUE.sub("Bearer [REDACTED]", text)
+    return PHONE_LIKE.sub(
+        lambda m: f"{m.group(1)}[REDACTED PHONE]"
+        if 10 <= len(re.sub(r"\D", "", m.group(2))) <= 15
+        else m.group(0),
+        text,
+    )
+
+
+def safe_segment(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    return (cleaned or "unknown")[:80]
+
+
+def safe_child_path(directory: Path, name: str) -> Path:
+    ensure_private_dir(directory)
+    first = directory / name
+    stem = name[:140].rstrip("._:-") or "unknown"
+    prefix = f"{int(time.time())}.{os.getpid()}"
+    candidates = [first, *[directory / f"{prefix}.{index}.{stem}" for index in range(1000)]]
+    for target in candidates:
+        try:
+            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        else:
+            os.close(fd)
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            return target
+    raise FileExistsError(f"no available child path in {directory}: {name}")
+
+
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
-        tmp.chmod(0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        try:
+            dir_fd = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) -> Path | None:
+    reason = f"{type(exc).__name__}: {exc}"
+    event_id = event.get("id")
+    instance = event.get("instance")
     try:
-        path.chmod(0o600)
-    except OSError:
+        sys.stderr.write(
+            f"[bot-errors-health] CRITICAL outbox write FAILED for {target}: {redact(reason)}; "
+            f"id={event_id} instance={instance} source={event.get('source')} "
+            f"severity={event.get('severity')} - recording breadcrumb\n"
+        )
+        sys.stderr.flush()
+    except Exception:
         pass
+
+    breadcrumb = {
+        "schemaVersion": 1,
+        "kind": "outbox_write_failure",
+        "recordedAt": now_iso(),
+        "failedTarget": str(target),
+        "reason": redact(reason),
+        "emitPid": os.getpid(),
+        "event": event,
+    }
+    stamp = now_iso().replace("-", "").replace(":", "")
+    name = f"{stamp}.{safe_segment(str(instance))}.{safe_segment(str(event_id))}.writefail"
+    for base in writefail_dirs():
+        try:
+            path = safe_child_path(base, name)
+            atomic_write_json(path, breadcrumb)
+            try:
+                sys.stderr.write(f"[bot-errors-health] lost-alert breadcrumb written: {path}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            return path
+        except Exception:
+            continue
+    try:
+        sys.stderr.write(
+            "[bot-errors-health] breadcrumb write failed in ALL fallback dirs; "
+            f"lost-event payload follows:\n{json.dumps(event, sort_keys=True)}\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
+    return None
 
 
 def append_deadman_log(payload: dict[str, Any]) -> None:
@@ -173,8 +300,6 @@ def append_deadman_log(payload: dict[str, Any]) -> None:
 def outbox_event(summary: str, evidence: str, severity: str = "critical", source: str = "daily-health") -> Path:
     root = state_root()
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))
-    ensure_private_dir(root)
-    ensure_private_dir(outbox)
     event_id = f"health-{int(time.time())}-{os.getpid()}"
     event = {
         "schemaVersion": 1,
@@ -199,7 +324,13 @@ def outbox_event(summary: str, evidence: str, severity: str = "critical", source
         "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
     }
     path = outbox / f"{event['createdAt'].replace(':', '').replace('-', '')}.{event_id}.json"
-    atomic_write_json(path, event)
+    try:
+        ensure_private_dir(root)
+        ensure_private_dir(outbox)
+        atomic_write_json(path, event)
+    except Exception as exc:
+        record_writefail(event, exc, outbox)
+        raise
     return path
 
 

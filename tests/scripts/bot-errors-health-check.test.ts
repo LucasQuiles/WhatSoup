@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -495,6 +495,73 @@ describe('bot-errors-health-check', () => {
     expect(event.severity).toBe('info');
     expect(event.evidence).toContain('plugin_coverage agent: inherits global user_scope_keys=2');
     expect(event.evidence).not.toContain('FAIL plugin_coverage agent');
+  });
+
+  it('records a recoverable writefail breadcrumb when daily health outbox is unwritable', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const blocked = join(tmpRoot, 'blocked-outbox-parent');
+    const writefail = join(tmpRoot, 'writefail');
+    writeFileSync(blocked, 'not a directory');
+
+    const result = spawnSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_OUTBOX_DIR: join(blocked, 'outbox'),
+        BOT_ERRORS_WRITEFAIL_DIR: writefail,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'missing-routing',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalTools: true,
+          expectPersonalSocket: true,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+        }),
+        BOT_ERRORS_SOCKET_PATH: '',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('CRITICAL outbox write FAILED');
+    expect(result.stderr).toContain('lost-alert breadcrumb written');
+    const crumbs = readdirSync(writefail).filter((name) => name.endsWith('.writefail'));
+    expect(crumbs).toHaveLength(1);
+    const crumb = JSON.parse(readFileSync(join(writefail, crumbs[0]!), 'utf8')) as Record<string, any>;
+    expect(crumb).toMatchObject({ kind: 'outbox_write_failure', schemaVersion: 1 });
+    expect(crumb.failedTarget).toBe(join(blocked, 'outbox'));
+    expect(crumb.event).toMatchObject({
+      eventType: 'alert',
+      severity: 'critical',
+      instance: 'bot-errors-health',
+      source: 'daily-health',
+    });
+    expect(crumb.event.evidence).toContain('FAIL personal_socket: <unset> exists=False');
+    expect(crumb.event.evidence).toContain('tools personal: FAIL BOT_ERRORS_SOCKET_PATH is not configured');
+
+    const capture = join(tmpRoot, 'capture.txt');
+    const dispatch = spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_WRITEFAIL_DIR: writefail,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capture,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(dispatch.status).toBe(0);
+    expect(readFileSync(capture, 'utf8')).toContain('BOT ERRORS daily health found issues');
+    expect(readFileSync(capture, 'utf8')).toContain('writefail_recovered');
+    expect(readdirSync(join(tmpRoot, 'sent')).filter((name) => name.endsWith('.sent'))).toHaveLength(1);
   });
 
   it('uses macOS log paths for Darwin-origin daily health diagnostics', () => {
