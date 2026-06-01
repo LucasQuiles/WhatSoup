@@ -406,6 +406,97 @@ describe('bot-errors-collector', () => {
     expect(readdirSync(join(tmpRoot, 'writefail-harvest-quarantine'))).toHaveLength(1);
   });
 
+  it('does not grow quarantine for the same poisoned writefail when ack keeps failing', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const remoteWritefail = join(remoteRoot, 'writefail');
+    mkdirSync(remoteWritefail, { recursive: true, mode: 0o700 });
+    writeFileSync(join(remoteWritefail, 'bad.writefail'), '{not json', { mode: 0o600 });
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+
+    const first = runCollectorWithRemote(fakeSsh, remoteRoot, { FAKE_FAIL_WRITEFAIL_ACK: '1' });
+    expect(first.status).toBe(1);
+    expect(JSON.parse(first.stdout)).toMatchObject({ writefailPoison: 1, failed: 1 });
+    const quarantineDir = join(tmpRoot, 'writefail-harvest-quarantine');
+    const firstFiles = readdirSync(quarantineDir).filter((file) => file.endsWith('.poison'));
+    expect(firstFiles).toHaveLength(1);
+
+    const second = spawnSync(
+      'python3',
+      [
+        'deploy/scripts/bot-errors-collector.py',
+        '--remote',
+        `mini5:${remoteRoot}`,
+        '--max-events',
+        '10',
+        '--timeout',
+        '5',
+        '--lease-seconds',
+        '0',
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+          FAKE_FAIL_WRITEFAIL_ACK: '1',
+        },
+        encoding: 'utf8',
+      },
+    );
+    expect(second.status).toBe(1);
+    expect(JSON.parse(second.stdout)).toMatchObject({ writefailPoison: 1, failed: 1 });
+    const secondFiles = readdirSync(quarantineDir).filter((file) => file.endsWith('.poison'));
+    expect(secondFiles).toEqual(firstFiles);
+    const quarantine = JSON.parse(readFileSync(join(quarantineDir, secondFiles[0]!), 'utf8')) as {
+      payloadSha256?: string;
+    };
+    expect(quarantine.payloadSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('uses remote claim dedupe only for legacy poison quarantine records without hashes', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const quarantineDir = join(tmpRoot, 'writefail-harvest-quarantine');
+    mkdirSync(quarantineDir, { recursive: true, mode: 0o700 });
+    const remoteRoot = join(tmpRoot, 'remote');
+    const remoteClaim = join(remoteRoot, 'relay-writefail-processing', 'same.claim');
+    writeFileSync(join(quarantineDir, 'hashed.poison'), JSON.stringify({
+      kind: 'writefail_harvest_poison',
+      remoteHost: 'mini5',
+      remoteRoot,
+      remoteClaim,
+      payloadSha256: '0'.repeat(64),
+    }));
+    writeFileSync(join(quarantineDir, 'legacy.poison'), JSON.stringify({
+      kind: 'writefail_harvest_poison',
+      remoteHost: 'mini5',
+      remoteRoot,
+      remoteClaim,
+    }));
+
+    const result = spawnSync('python3', ['-'], {
+      cwd: process.cwd(),
+      input: `
+import importlib.util
+import os
+from pathlib import Path
+os.environ["BOT_ERRORS_STATE_DIR"] = ${JSON.stringify(tmpRoot)}
+spec = importlib.util.spec_from_file_location("collector", "deploy/scripts/bot-errors-collector.py")
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
+record = {"claim": ${JSON.stringify(remoteClaim)}, "payload": "different payload"}
+payload_hash = collector.writefail_poison_hash(record)
+found = collector.existing_harvest_quarantine("mini5", ${JSON.stringify(remoteRoot)}, record, payload_hash)
+print(Path(found).name if found else "NONE")
+`,
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('legacy.poison');
+  });
+
   it('continues normal outbox relay when the writefail claim path fails', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const remoteRoot = join(tmpRoot, 'remote');
