@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -398,6 +398,13 @@ describe('bot-errors-collector', () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ writefailHarvested: 1, writefailPoison: 1 });
     expect(readdirSync(join(tmpRoot, 'writefail')).filter((file) => file.endsWith('.writefail'))).toHaveLength(1);
     expect(readdirSync(join(tmpRoot, 'writefail-harvest-quarantine'))).toHaveLength(1);
+    const logEntries = readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const poisonAck = logEntries.find((entry) => entry.type === 'writefail_harvest_poison_acked');
+    expect(poisonAck?.remoteAckPath).toContain(join(remoteRoot, 'writefail-relayed'));
+    expect(poisonAck?.remoteAckDegraded).toBe(false);
   });
 
   it('does not grow quarantine for the same poisoned writefail when ack keeps failing', () => {
@@ -650,6 +657,178 @@ print(Path(found).name if found else "NONE")
     }).status).toBe(0);
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
     expect((readFileSync(capturePath, 'utf8').match(/remote writefail critical/g) ?? [])).toHaveLength(1);
+  });
+
+  it('drains remote writefail claims into HOME fallback when root relayed archive is blocked', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const remoteHome = join(tmpRoot, 'remote-home');
+    const remoteWritefail = join(remoteRoot, 'writefail');
+    mkdirSync(remoteHome, { recursive: true, mode: 0o700 });
+    writeRemoteWritefail(remoteWritefail, 'remote-ack-home-fallback');
+    writeFileSync(join(remoteRoot, 'writefail-relayed'), 'not a directory', { mode: 0o600 });
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+
+    const firstCollector = runCollectorWithRemote(fakeSsh, remoteRoot, { HOME: remoteHome });
+    expect(firstCollector.status).toBe(0);
+    expect(JSON.parse(firstCollector.stdout)).toMatchObject({ writefailHarvested: 1, failed: 0 });
+    expect(readdirSync(join(remoteRoot, 'relay-writefail-processing'))).toHaveLength(0);
+    const fallbackRelayed = join(remoteHome, '.bot-errors-writefail-relayed');
+    expect(readdirSync(fallbackRelayed).filter((file) => file.endsWith('.relayed'))).toHaveLength(1);
+    const logEntries = readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const ack = logEntries.find((entry) => entry.type === 'writefail_harvest_acked');
+    expect(ack?.remoteAckPath).toContain(fallbackRelayed);
+    expect(ack?.remoteAckDegraded).toBe(false);
+
+    const secondCollector = spawnSync(
+      'python3',
+      [
+        'deploy/scripts/bot-errors-collector.py',
+        '--remote',
+        `mini5:${remoteRoot}`,
+        '--max-events',
+        '10',
+        '--timeout',
+        '5',
+        '--lease-seconds',
+        '0',
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: remoteHome,
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+        },
+        encoding: 'utf8',
+      },
+    );
+    expect(secondCollector.status).toBe(0);
+    expect(JSON.parse(secondCollector.stdout)).toMatchObject({
+      writefailHarvested: 0,
+      writefailDuplicates: 0,
+      writefailPoison: 0,
+      failed: 0,
+    });
+    expect(readdirSync(join(tmpRoot, 'writefail')).filter((file) => file.endsWith('.writefail'))).toHaveLength(1);
+  });
+
+  it('atomically drains a remote writefail claim across EXDEV without partial relayed files', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const claimDir = join(remoteRoot, 'relay-writefail-processing');
+    mkdirSync(claimDir, { recursive: true, mode: 0o700 });
+    const claim = join(claimDir, 'exdev.writefail.123.relay');
+    writeFileSync(claim, 'exdev payload\n', { mode: 0o600 });
+
+    const result = spawnSync('python3', ['-'], {
+      cwd: process.cwd(),
+      input: `
+import errno
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("collector", "deploy/scripts/bot-errors-collector.py")
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
+claim = Path(${JSON.stringify(claim)})
+root = Path(${JSON.stringify(remoteRoot)})
+original_replace = os.replace
+
+def fake_replace(src, dst):
+    if str(src) == str(claim):
+        raise OSError(errno.EXDEV, "cross-device link")
+    return original_replace(src, dst)
+
+os.replace = fake_replace
+sys.argv = ["ack-test", str(claim), str(root), "ack"]
+exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
+`,
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(0);
+    expect(existsSync(claim)).toBe(false);
+    const relayedDir = join(remoteRoot, 'writefail-relayed');
+    const relayed = readdirSync(relayedDir).filter((file) => file.endsWith('.relayed'));
+    expect(relayed).toHaveLength(1);
+    expect(readFileSync(join(relayedDir, relayed[0]!), 'utf8')).toBe('exdev payload\n');
+    expect(readdirSync(relayedDir).filter((file) => file.includes('.tmp'))).toHaveLength(0);
+  });
+
+  it('preserves a remote writefail claim when no terminal ack archive is writable', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const claimDir = join(remoteRoot, 'relay-writefail-processing');
+    mkdirSync(claimDir, { recursive: true, mode: 0o700 });
+    const claim = join(claimDir, 'unwritable.writefail.123.relay');
+    writeFileSync(claim, 'still pending\n', { mode: 0o600 });
+
+    const result = spawnSync('python3', ['-'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: join(tmpRoot, 'remote-home'),
+        TMPDIR: join(tmpRoot, 'remote-tmp'),
+      },
+      input: `
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("collector", "deploy/scripts/bot-errors-collector.py")
+collector = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collector)
+original_mkdir = Path.mkdir
+
+def fake_mkdir(self, *args, **kwargs):
+    text = str(self)
+    if "writefail-relayed" in text or ".bot-errors-writefail-relayed" in text:
+        raise OSError("blocked terminal archive dir")
+    return original_mkdir(self, *args, **kwargs)
+
+Path.mkdir = fake_mkdir
+sys.argv = ["ack-test", ${JSON.stringify(claim)}, ${JSON.stringify(remoteRoot)}, "ack"]
+exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
+`,
+      encoding: 'utf8',
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('no writable writefail ack terminal dir');
+    expect(existsSync(claim)).toBe(true);
+  });
+
+  it('marks volatile TMPDIR terminal drains as degraded in the collector log', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const remoteTmp = join(tmpRoot, 'remote-tmp');
+    const remoteHomeFile = join(tmpRoot, 'remote-home-file');
+    const remoteWritefail = join(remoteRoot, 'writefail');
+    mkdirSync(remoteTmp, { recursive: true, mode: 0o700 });
+    writeFileSync(remoteHomeFile, 'not a directory', { mode: 0o600 });
+    writeRemoteWritefail(remoteWritefail, 'remote-ack-tmp-fallback');
+    writeFileSync(join(remoteRoot, 'writefail-relayed'), 'not a directory', { mode: 0o600 });
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+
+    const result = runCollectorWithRemote(fakeSsh, remoteRoot, { HOME: remoteHomeFile, TMPDIR: remoteTmp });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ writefailHarvested: 1, failed: 0 });
+    const tmpRelayed = join(remoteTmp, 'bot-errors-writefail-relayed');
+    expect(readdirSync(tmpRelayed).filter((file) => file.endsWith('.relayed'))).toHaveLength(1);
+    const logEntries = readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const ack = logEntries.find((entry) => entry.type === 'writefail_harvest_acked');
+    expect(ack?.remoteAckPath).toContain(tmpRelayed);
+    expect(ack?.remoteAckDegraded).toBe(true);
   });
 
   it('caps long normal remote relay filenames without mutating event identity', () => {

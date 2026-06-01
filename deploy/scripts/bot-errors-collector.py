@@ -182,7 +182,7 @@ for source in sources:
 
 
 REMOTE_WRITEFAIL_ACK_SCRIPT = r"""
-import os, re, sys, time
+import errno, os, re, shutil, sys, time
 from pathlib import Path
 
 claim = Path(sys.argv[1])
@@ -193,15 +193,105 @@ def safe(value):
     cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value).strip("_")
     return (cleaned or "unknown")[:80]
 
-if action == "ack":
-    target_dir = root / "writefail-relayed"
+def unique(paths):
+    result = []
+    seen = set()
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+def fsync_dir(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def target_path(target_dir, suffix):
+    stem = f"{safe(claim.name)}.{int(time.time())}"
+    candidates = [target_dir / f"{stem}{suffix}", target_dir / f"{stem}.{os.getpid()}{suffix}"]
+    candidates.extend(target_dir / f"{stem}.{os.getpid()}.{index}{suffix}" for index in range(1, 100))
+    for candidate in candidates:
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"no unique terminal writefail ack path in {target_dir}")
+
+def temp_path(target_dir, target):
+    candidates = [target_dir / f".{target.name}.{os.getpid()}.tmp"]
+    candidates.extend(target_dir / f".{target.name}.{os.getpid()}.{index}.tmp" for index in range(1, 100))
+    for candidate in candidates:
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"no unique temporary writefail ack path in {target_dir}")
+
+def terminal_dirs():
+    tmpdir = Path(os.environ.get("TMPDIR", "/tmp")).expanduser()
+    # The local harvest/quarantine copy is authoritative; these terminal archives are forensic breadcrumbs.
+    return unique([
+        root / "writefail-relayed",
+        Path.home() / ".bot-errors-writefail-relayed",
+        tmpdir / "bot-errors-writefail-relayed",
+        Path("/tmp") / f"bot-errors-writefail-relayed-{os.getuid()}",
+    ])
+
+def copy_claim_atomic(target_dir, target):
+    tmp = temp_path(target_dir, target)
+    try:
+        with open(claim, "rb") as source, open(tmp, "xb") as dest:
+            shutil.copyfileobj(source, dest)
+            dest.flush()
+            os.fsync(dest.fileno())
+        if target.exists():
+            raise FileExistsError(f"terminal writefail ack target already exists: {target}")
+        os.replace(tmp, target)
+        fsync_dir(target_dir)
+        claim.unlink()
+        fsync_dir(claim.parent)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+def move_claim_terminal(target_dir, suffix):
     target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    target = target_dir / f"{safe(claim.name)}.{int(time.time())}.relayed"
-    if target.exists():
-        target = target_dir / f"{safe(claim.name)}.{int(time.time())}.{os.getpid()}.relayed"
-    os.replace(claim, target)
-    print(target)
+    try:
+        target_dir.chmod(0o700)
+    except OSError:
+        pass
+    target = target_path(target_dir, suffix)
+    try:
+        os.replace(claim, target)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        copy_claim_atomic(target_dir, target)
+        return target
+    fsync_dir(target_dir)
+    fsync_dir(claim.parent)
+    return target
+
+if action == "ack":
+    last_error = None
+    for target_dir in terminal_dirs():
+        try:
+            target = move_claim_terminal(target_dir, ".relayed")
+            print(target)
+            raise SystemExit(0)
+        except OSError as exc:
+            last_error = exc
+            continue
+    raise RuntimeError(f"no writable writefail ack terminal dir: {last_error}")
 else:
+    # Requeue intentionally returns only to root/writefail; if that write fails, the processing lease preserves retry state.
     target_dir = root / "writefail"
     target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     base = claim.name.split(".writefail.", 1)[0] + ".writefail" if ".writefail." in claim.name else claim.name
@@ -571,6 +661,11 @@ def remote_writefail_ack(host: str, claim: str, remote_root: str, action: str, t
     return proc.stdout.strip()
 
 
+def remote_writefail_ack_degraded(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return "/bot-errors-writefail-relayed/" in normalized or "/bot-errors-writefail-relayed-" in normalized
+
+
 def local_outbox_path(event: dict[str, Any], remote_host: str) -> Path:
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", state_root() / "outbox"))
     created = str(event.get("createdAt") or now_iso()).replace("-", "").replace(":", "")
@@ -924,11 +1019,13 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                 local_path, status = relay_writefail(host, remote_root, record)
                 if status == "poison":
                     writefail_poison += 1
-                    remote_writefail_ack(host, str(record["claim"]), remote_root, "ack", timeout)
+                    ack_path = remote_writefail_ack(host, str(record["claim"]), remote_root, "ack", timeout)
                     append_log({
                         "type": "writefail_harvest_poison_acked",
                         "remote": remote,
                         "remoteClaim": record["claim"],
+                        "remoteAckPath": ack_path,
+                        "remoteAckDegraded": remote_writefail_ack_degraded(ack_path),
                         "localPath": str(local_path),
                     })
                 elif status == "duplicate":
@@ -940,6 +1037,7 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                             "remote": remote,
                             "remoteClaim": record["claim"],
                             "remoteAckPath": ack_path,
+                            "remoteAckDegraded": remote_writefail_ack_degraded(ack_path),
                             "localPath": str(local_path),
                         })
                     except Exception as ack_exc:  # noqa: BLE001 - duplicate is already safe locally.
@@ -958,6 +1056,7 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                             "remote": remote,
                             "remoteClaim": record["claim"],
                             "remoteAckPath": ack_path,
+                            "remoteAckDegraded": remote_writefail_ack_degraded(ack_path),
                             "localPath": str(local_path),
                         })
                     except Exception as ack_exc:  # noqa: BLE001 - exact-id dedup makes retry safe.
