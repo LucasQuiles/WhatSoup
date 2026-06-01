@@ -677,6 +677,90 @@ describe('bot-errors-dispatcher', () => {
     expect(readdirSync(sent)).toHaveLength(2);
   });
 
+  it('does not treat a stable id with a new createdAt as a writefail duplicate', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const sent = join(tmpRoot, 'sent');
+    mkdirSync(sent, { recursive: true, mode: 0o700 });
+    writeFileSync(join(sent, '20260531T000000Z.stable-recurring.json.sent'), JSON.stringify({
+      id: 'stable-recurring',
+      createdAt: '2026-05-31T00:00:00Z',
+      delivery: { status: 'sent' },
+    }));
+    writeWritefail(tmpRoot, {
+      id: 'stable-recurring',
+      createdAt: '2026-05-31T00:05:00Z',
+      summary: 'stable id new occurrence should recover',
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_WRITEFAIL_DIR: join(tmpRoot, 'writefail'),
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, writefailRecovered: 1, failed: 0 });
+    expect(readFileSync(capturePath, 'utf8')).toContain('stable id new occurrence should recover');
+    expect(readdirSync(sent)).toHaveLength(2);
+  });
+
+  it('caps recovered writefail filenames while preserving the recovered event id', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const sent = join(tmpRoot, 'sent');
+    const writefail = join(tmpRoot, 'writefail');
+    const eventId = `writefail/unsafe-${'x'.repeat(220)}`;
+    mkdirSync(writefail, { recursive: true, mode: 0o700 });
+    const event = {
+      schemaVersion: 1,
+      id: eventId,
+      eventType: 'alert',
+      severity: 'critical',
+      createdAt: '2026-05-31T00:00:00Z',
+      machine: 'test-machine',
+      instance: `ana-bot-${'i'.repeat(100)}`,
+      source: `wf/source-${'s'.repeat(100)}`,
+      summary: 'long recovered writefail filename',
+      evidence: 'filename cap regression',
+      diagnostics: { logHints: ['launchd health log'], queue: join(tmpRoot, 'outbox') },
+      delivery: { attempts: 0, status: 'queued', nextAttemptAtEpoch: 0, lastError: null },
+    };
+    writeFileSync(join(writefail, 'unsafe-id-payload.writefail'), JSON.stringify({
+      schemaVersion: 1,
+      kind: 'outbox_write_failure',
+      recordedAt: '2026-05-31T00:00:01Z',
+      failedTarget: join(tmpRoot, 'outbox'),
+      reason: 'PermissionError: denied',
+      emitPid: 456,
+      event,
+    }));
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_WRITEFAIL_DIR: join(tmpRoot, 'writefail'),
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, writefailRecovered: 1, failed: 0 });
+    const sentFiles = readdirSync(sent).filter((file) => file.endsWith('.sent'));
+    expect(sentFiles).toHaveLength(1);
+    expect(sentFiles[0]!.length).toBeLessThanOrEqual(180);
+    expect(sentFiles[0]).toMatch(/\.sent$/);
+    const sentEvent = JSON.parse(readFileSync(join(sent, sentFiles[0]!), 'utf8')) as { id: string };
+    expect(sentEvent.id).toBe(eventId);
+    expect(readFileSync(capturePath, 'utf8')).toContain('long recovered writefail filename');
+  });
+
   it('renders at-sign-bearing diagnostics mention-safely', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');

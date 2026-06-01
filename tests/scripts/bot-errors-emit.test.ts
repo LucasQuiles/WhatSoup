@@ -126,6 +126,32 @@ describe('bot-errors-emit', () => {
     expect(basename(files[0]!)).not.toMatch(/\\.tmp$/);
   });
 
+  it('caps and sanitizes long explicit event filenames while preserving the payload id', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
+    const eventId = `explicit/unsafe-${'x'.repeat(220)}`;
+
+    execFileSync('python3', [
+      'deploy/scripts/bot-errors-emit.py',
+      '--event-id',
+      eventId,
+      '--instance',
+      `unit-instance-${'i'.repeat(100)}`,
+      '--source',
+      `unit/source-${'s'.repeat(100)}`,
+      '--summary',
+      'long filename should stay durable',
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
+    });
+
+    const { name, event } = outboxEvent();
+    expect(name.length).toBeLessThanOrEqual(180);
+    expect(name).toMatch(/\.json$/);
+    expect(name).not.toContain('/');
+    expect(event.id).toBe(eventId);
+  });
+
   it('uses WSL-local diagnostics instead of per-service journalctl hints', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-emit-'));
 

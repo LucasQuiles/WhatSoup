@@ -844,6 +844,35 @@ def safe_segment(value: str) -> str:
     return (cleaned or "unknown")[:80]
 
 
+def safe_filename(value: str, max_length: int = 180) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    cleaned = cleaned or "unknown"
+    if len(cleaned) <= max_length:
+        return cleaned
+    for suffix in (".writefail", ".processing", ".suppressed", ".collapsed", ".recovered", ".duplicate", ".poison", ".sent", ".json"):
+        if cleaned.endswith(suffix) and len(suffix) < max_length:
+            stem = cleaned[: max_length - len(suffix)].rstrip("._-:")
+            return f"{stem or 'unknown'}{suffix}"
+    return cleaned[:max_length]
+
+
+def safe_child_path(directory: Path, name: str, max_length: int = 180) -> Path:
+    ensure_private_dir(directory)
+    directory_resolved = directory.resolve()
+    first = directory / safe_filename(name, max_length)
+    candidates = [first]
+    if first.exists():
+        stem = safe_filename(name, min(140, max_length))
+        prefix = f"{int(time.time())}.{os.getpid()}"
+        candidates = [directory / f"{prefix}.{counter}.{stem}" for counter in range(1000)]
+    for target in candidates:
+        if target.resolve().parent != directory_resolved:
+            raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
+        if not target.exists():
+            return target
+    raise RuntimeError(f"no available child path in {directory}: {name}")
+
+
 def redact(value: Any) -> str:
     text = "" if value is None else str(value)
     text = PEM_PRIVATE_KEY.sub("[REDACTED PEM PRIVATE KEY]", text)
@@ -1132,19 +1161,8 @@ def reset_delivery(event: dict[str, Any]) -> None:
 
 
 def archive_path(directory: Path, original_name: str, status: str, event: dict[str, Any]) -> Path:
-    timestamp = int(time.time())
-    base = directory / f"{original_name}.{timestamp}.{status}"
-    if not base.exists():
-        return base
-    event_id = safe_segment(str(event.get("id") or "event"))[:80] or "event"
-    candidate = directory / f"{original_name}.{timestamp}.{event_id}.{status}"
-    if not candidate.exists():
-        return candidate
-    for index in range(1, 1000):
-        candidate = directory / f"{original_name}.{timestamp}.{event_id}.{index}.{status}"
-        if not candidate.exists():
-            return candidate
-    raise RuntimeError(f"could not allocate unique {status} archive path for {original_name}")
+    _event_id = str(event.get("id") or "")
+    return safe_child_path(directory, f"{original_name}.{int(time.time())}.{status}")
 
 
 def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
@@ -2054,17 +2072,31 @@ def event_has_incident_identity(event: dict[str, Any]) -> bool:
     return bool(event.get("machine") and event.get("instance") and (event.get("source") or event.get("alertSource")))
 
 
+def event_created_identity(event: dict[str, Any]) -> str:
+    return str(event.get("createdAt") or "")
+
+
 def remember_known_event(index: dict[str, dict[str, Any]], event: dict[str, Any]) -> None:
     event_id = str(event.get("id") or "")
     if not event_id:
         return
-    entry = index.setdefault(event_id, {"unqualified": False, "incidentKeys": set()})
+    created_at = event_created_identity(event)
+    entry = index.setdefault(event_id, {"unqualified": set(), "incidentKeys": {}})
     if event_has_incident_identity(event):
-        incident_keys = entry.setdefault("incidentKeys", set())
-        if isinstance(incident_keys, set):
-            incident_keys.add(incident_key(event))
+        incident_keys = entry.setdefault("incidentKeys", {})
+        if isinstance(incident_keys, dict):
+            key = incident_key(event)
+            created_values = incident_keys.setdefault(key, set())
+            if isinstance(created_values, set):
+                created_values.add(created_at)
     else:
-        entry["unqualified"] = True
+        unqualified = entry.setdefault("unqualified", set())
+        if isinstance(unqualified, set):
+            unqualified.add(created_at)
+
+
+def created_matches(known_values: set[str], created_at: str) -> bool:
+    return (not created_at) or (not known_values) or ("" in known_values) or (created_at in known_values)
 
 
 def build_known_event_index(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
@@ -2096,15 +2128,19 @@ def event_already_known(
     entry = index.get(event_id)
     if not entry:
         return False
+    created_at = event_created_identity(event)
+    unqualified = entry.get("unqualified")
+    unqualified_values = unqualified if isinstance(unqualified, set) else set()
     incident_keys = entry.get("incidentKeys")
-    has_incident_keys = isinstance(incident_keys, set) and len(incident_keys) > 0
+    incident_key_values = incident_keys if isinstance(incident_keys, dict) else {}
     if event_has_incident_identity(event):
-        if entry.get("unqualified"):
+        if created_matches(unqualified_values, created_at):
             return True
-        return isinstance(incident_keys, set) and incident_key(event) in incident_keys
-    if entry.get("unqualified") or has_incident_keys:
+        known_created_values = incident_key_values.get(incident_key(event))
+        return isinstance(known_created_values, set) and created_matches(known_created_values, created_at)
+    if created_matches(unqualified_values, created_at):
         return True
-    return False
+    return any(isinstance(values, set) and created_matches(values, created_at) for values in incident_key_values.values())
 
 
 def outbox_path_for_event(event: dict[str, Any], paths: dict[str, Path]) -> Path:
@@ -2112,18 +2148,13 @@ def outbox_path_for_event(event: dict[str, Any], paths: dict[str, Path]) -> Path
     instance = safe_segment(str(event.get("instance") or "unknown"))
     source = safe_segment(str(event.get("source") or "unknown"))
     event_id = safe_segment(str(event.get("id") or f"recovered-{int(time.time())}-{os.getpid()}"))
-    path = paths["outbox"] / f"{created}.{instance}.{source}.{event_id}.json"
-    if path.exists():
-        path = paths["outbox"] / f"{created}.{instance}.{source}.{event_id}.{int(time.time())}.{os.getpid()}.json"
-    return path
+    return safe_child_path(paths["outbox"], f"{created}.{instance}.{source}.{event_id}.json")
 
 
 def move_writefail(path: Path, target_dir: Path, suffix: str) -> Path:
-    ensure_private_dir(target_dir)
-    target = target_dir / f"{path.name}.{int(time.time())}.{suffix}"
-    if target.exists():
-        target = target_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{suffix}"
+    target = safe_child_path(target_dir, f"{path.name}.{int(time.time())}.{suffix}")
     shutil.move(str(path), str(target))
+    fsync_parent(target)
     try:
         target.chmod(0o600)
     except OSError:
@@ -2218,8 +2249,9 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
 
 
 def claim(path: Path, processing_dir: Path) -> Path:
-    dest = processing_dir / f"{path.name}.{os.getpid()}.processing"
+    dest = safe_child_path(processing_dir, f"{path.name}.{os.getpid()}.processing", 240)
     os.replace(path, dest)
+    fsync_parent(dest)
     return dest
 
 
@@ -2238,10 +2270,9 @@ def reclaim_processing(paths: dict[str, Path]) -> int:
     for path in sorted(paths["processing"].glob("*")):
         if not path.is_file():
             continue
-        target = paths["outbox"] / original_name_from_processing(path)
-        if target.exists():
-            target = paths["outbox"] / f"{int(time.time())}.{path.name}.reclaimed.json"
+        target = safe_child_path(paths["outbox"], original_name_from_processing(path))
         os.replace(path, target)
+        fsync_parent(target)
         append_dispatch_log(paths, {"type": "reclaim", "from": str(path), "to": str(target)})
         reclaimed += 1
     return reclaimed
@@ -2343,11 +2374,13 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
             if email_status != "not_attempted":
                 delivery["emailFallbackAt"] = now_iso()
         atomic_write_json(claimed, event)
-        os.replace(claimed, paths["outbox"] / path.name)
+        retry_path = safe_child_path(paths["outbox"], path.name)
+        os.replace(claimed, retry_path)
+        fsync_parent(retry_path)
         append_dispatch_log(paths, {
             "type": "send_failed",
             "eventId": event.get("id"),
-            "path": str(paths["outbox"] / path.name),
+            "path": str(retry_path),
             "attempts": attempts,
             "error": str(exc),
             "emailFallback": email_status,
