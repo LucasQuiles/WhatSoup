@@ -121,4 +121,34 @@ describe('bot-errors-runner', () => {
     expect(event?.evidence).toContain('failure=exec_not_found');
     expect(event?.evidence).toContain('exit_code=127');
   });
+
+  it('caps long failure-event filenames while preserving the event id', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
+    const eventId = `runner/unsafe-${'x'.repeat(220)}`;
+
+    const result = spawnSync('python3', [
+      'deploy/scripts/bot-errors-runner.py',
+      '--event-id', eventId,
+      '--instance', `unit-instance-${'i'.repeat(100)}`,
+      '--source', `process/source-${'s'.repeat(100)}`,
+      '--summary', 'long runner filename failed',
+      '--',
+      'python3',
+      '-c',
+      'import sys; sys.exit(9)',
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(9);
+    const files = readdirSync(join(tmpRoot, 'outbox')).filter((name) => name.endsWith('.json'));
+    expect(files).toHaveLength(1);
+    expect(files[0]!.length).toBeLessThanOrEqual(180);
+    expect(files[0]).toMatch(/\.json$/);
+    expect(files[0]).not.toContain('/');
+    const [event] = events();
+    expect(event?.id).toBe(eventId);
+  });
 });

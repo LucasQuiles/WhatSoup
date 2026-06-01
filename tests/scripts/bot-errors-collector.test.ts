@@ -47,6 +47,11 @@ if [ "$FAKE_FAIL_WRITEFAIL_CLAIM" = "1" ] && grep -q "relay-writefail-processing
   rm -f "$stdin_file"
   exit 255
 fi
+if [ "$FAKE_FAIL_WRITEFAIL_ACK" = "1" ] && grep -q "writefail-relayed" "$stdin_file"; then
+  echo "simulated writefail ack archive failure" >&2
+  rm -f "$stdin_file"
+  exit 255
+fi
 python3 "$@" < "$stdin_file"
 status=$?
 rm -f "$stdin_file"
@@ -345,6 +350,7 @@ describe('bot-errors-collector', () => {
     const localWritefail = join(tmpRoot, 'writefail');
     const files = readdirSync(localWritefail).filter((file) => file.endsWith('.writefail'));
     expect(files).toHaveLength(1);
+    expect(files[0]!.length).toBeLessThanOrEqual(180);
     const crumb = JSON.parse(readFileSync(join(localWritefail, files[0]!), 'utf8')) as {
       event: { id: string };
       harvest: { fromHost: string; fromDir: string };
@@ -422,6 +428,31 @@ describe('bot-errors-collector', () => {
     expect(outboxEvents().some((event) => event.source === 'remote-writefail-harvest-failed')).toBe(true);
   });
 
+  it('alerts on malformed normal remote events while relaying valid events behind them', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const remoteOutbox = join(remoteRoot, 'outbox');
+    mkdirSync(remoteOutbox, { recursive: true, mode: 0o700 });
+    writeFileSync(join(remoteOutbox, 'aaa-bad.json'), '{not json', { mode: 0o600 });
+    writeRemoteEvent(remoteOutbox, 'valid-after-remote-poison', {
+      summary: 'valid event behind malformed remote json',
+    });
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+
+    const result = runCollectorWithRemote(fakeSsh, remoteRoot);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ processed: 1, failed: 1 });
+
+    const events = outboxEvents();
+    expect(events).toHaveLength(2);
+    expect(events.some((event) => event.id === 'valid-after-remote-poison')).toBe(true);
+    const meta = events.find((event) => event.source === 'remote-relay-failed');
+    expect(String(meta?.summary)).toContain('BOT ERRORS collector cannot relay remote event: mini5');
+    expect(String(meta?.evidence)).toContain('remote_name=aaa-bad.json');
+    expect(String(meta?.evidence)).not.toContain('{not json');
+    expect(readdirSync(remoteOutbox).filter((file) => file.endsWith('.json'))).toEqual(['aaa-bad.json']);
+  });
+
   it('lets dispatcher recover a harvested critical remote writefail end to end', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const remoteRoot = join(tmpRoot, 'remote');
@@ -476,5 +507,165 @@ describe('bot-errors-collector', () => {
     }).status).toBe(0);
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
     expect((readFileSync(capturePath, 'utf8').match(/remote writefail critical/g) ?? [])).toHaveLength(1);
+  });
+
+  it('dedupes a stale remote writefail claim left behind by ack archive failure', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const remoteWritefail = join(remoteRoot, 'writefail');
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+    const capturePath = join(tmpRoot, 'capture.txt');
+
+    writeRemoteWritefail(remoteWritefail, 'remote-ack-failure-idempotent');
+    const firstCollector = runCollectorWithRemote(fakeSsh, remoteRoot, { FAKE_FAIL_WRITEFAIL_ACK: '1' });
+    expect(firstCollector.status).toBe(0);
+    expect(JSON.parse(firstCollector.stdout)).toMatchObject({ writefailHarvested: 1 });
+    expect(spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath },
+      encoding: 'utf8',
+    }).status).toBe(0);
+    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
+
+    const secondCollector = spawnSync(
+      'python3',
+      [
+        'deploy/scripts/bot-errors-collector.py',
+        '--remote',
+        `mini5:${remoteRoot}`,
+        '--max-events',
+        '10',
+        '--timeout',
+        '5',
+        '--lease-seconds',
+        '0',
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+        },
+        encoding: 'utf8',
+      },
+    );
+    expect(secondCollector.status).toBe(0);
+    expect(JSON.parse(secondCollector.stdout)).toMatchObject({ writefailDuplicates: 1 });
+    expect(spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath },
+      encoding: 'utf8',
+    }).status).toBe(0);
+    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
+    expect((readFileSync(capturePath, 'utf8').match(/remote writefail critical/g) ?? [])).toHaveLength(1);
+  });
+
+  it('caps long normal remote relay filenames without mutating event identity', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const eventId = `remote-long-${'x'.repeat(180)}`;
+    writeRemoteEvent(join(remoteRoot, 'outbox'), eventId, {
+      instance: `ana-bot-${'i'.repeat(100)}`,
+      source: `remote/source-${'s'.repeat(100)}`,
+    });
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+
+    const result = runCollectorWithRemote(fakeSsh, remoteRoot);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ processed: 1, failed: 0 });
+
+    const files = readdirSync(join(tmpRoot, 'outbox')).filter((file) => file.endsWith('.json'));
+    expect(files).toHaveLength(1);
+    expect(files[0]!.length).toBeLessThanOrEqual(180);
+    expect(files[0]).toMatch(/\.json$/);
+    expect(files[0]).not.toContain('/');
+    const event = JSON.parse(readFileSync(join(tmpRoot, 'outbox', files[0]!), 'utf8')) as { id: string };
+    expect(event.id).toBe(eventId);
+    expect(readdirSync(join(remoteRoot, 'outbox')).filter((file) => file.endsWith('.json'))).toHaveLength(0);
+    expect(readdirSync(join(remoteRoot, 'relayed'))).toHaveLength(1);
+  });
+
+  it('does not collapse two long remote ids that differ only beyond the filename cap', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const sharedPrefix = `remote-collision-${'x'.repeat(190)}`;
+    const firstId = `${sharedPrefix}-a`;
+    const secondId = `${sharedPrefix}-b`;
+    writeRemoteEvent(join(remoteRoot, 'outbox'), firstId, {
+      instance: `ana-bot-${'i'.repeat(100)}`,
+      source: `remote-source-${'s'.repeat(100)}`,
+      summary: 'first long collision candidate',
+    });
+    writeRemoteEvent(join(remoteRoot, 'outbox'), secondId, {
+      instance: `ana-bot-${'i'.repeat(100)}`,
+      source: `remote-source-${'s'.repeat(100)}`,
+      summary: 'second long collision candidate',
+    });
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+
+    const result = runCollectorWithRemote(fakeSsh, remoteRoot);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ processed: 2, failed: 0 });
+
+    const files = readdirSync(join(tmpRoot, 'outbox')).filter((file) => file.endsWith('.json')).sort();
+    expect(files).toHaveLength(2);
+    expect(new Set(files).size).toBe(2);
+    files.forEach((file) => {
+      expect(file.length).toBeLessThanOrEqual(180);
+      expect(file).toMatch(/\.json$/);
+    });
+    const ids = files.map((file) => JSON.parse(readFileSync(join(tmpRoot, 'outbox', file), 'utf8')).id).sort();
+    expect(ids).toEqual([firstId, secondId].sort());
+  });
+
+  it('recognizes duplicate remote events already present in a custom local outbox', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const customOutbox = join(tmpRoot, 'custom-outbox');
+    const remoteRoot = join(tmpRoot, 'remote');
+    mkdirSync(customOutbox, { recursive: true, mode: 0o700 });
+    writeFileSync(join(customOutbox, 'already-local.json'), JSON.stringify({
+      id: 'custom-outbox-duplicate',
+      createdAt: '2026-05-31T00:00:00Z',
+      delivery: { status: 'queued' },
+    }));
+    writeRemoteEvent(join(remoteRoot, 'outbox'), 'custom-outbox-duplicate', {
+      createdAt: '2026-05-31T00:00:00Z',
+    });
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+
+    const result = runCollectorWithRemote(fakeSsh, remoteRoot, { BOT_ERRORS_OUTBOX_DIR: customOutbox });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ processed: 1, failed: 0 });
+    expect(readdirSync(customOutbox).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+    expect(readdirSync(join(remoteRoot, 'outbox')).filter((file) => file.endsWith('.json'))).toHaveLength(0);
+  });
+
+  it('does not suppress a new occurrence that reuses a stable id with a new createdAt', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const remoteRoot = join(tmpRoot, 'remote');
+    const sent = join(tmpRoot, 'sent');
+    mkdirSync(sent, { recursive: true, mode: 0o700 });
+    writeFileSync(join(sent, 'stable-recurring.sent'), JSON.stringify({
+      id: 'stable-recurring',
+      createdAt: '2026-05-31T00:00:00Z',
+      delivery: { status: 'sent' },
+    }));
+    writeRemoteEvent(join(remoteRoot, 'outbox'), 'stable-recurring', {
+      createdAt: '2026-05-31T00:05:00Z',
+      summary: 'stable id second occurrence must alert',
+    });
+    const fakeSsh = writeExecFakeSsh(tmpRoot);
+
+    const result = runCollectorWithRemote(fakeSsh, remoteRoot);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ processed: 1, failed: 0 });
+    const events = outboxEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      id: 'stable-recurring',
+      createdAt: '2026-05-31T00:05:00Z',
+      summary: 'stable id second occurrence must alert',
+    });
   });
 });

@@ -124,9 +124,9 @@ if override:
     sources.append(Path(override).expanduser())
 sources.append(root / "writefail")
 tmpdir = Path(os.environ.get("TMPDIR", "/tmp")).expanduser()
+sources.append(Path.home() / ".bot-errors-writefail")
 sources.append(tmpdir / "bot-errors-writefail")
 sources.append(Path("/tmp") / "bot-errors-writefail")
-sources.append(Path.home() / ".bot-errors-writefail")
 sources = unique(sources)
 
 processing = private_dir([
@@ -193,15 +193,13 @@ def safe(value):
     return (cleaned or "unknown")[:80]
 
 if action == "ack":
-    try:
-        target_dir = root / "writefail-relayed"
-        target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target = target_dir / f"{safe(claim.name)}.{int(time.time())}.relayed"
-        os.replace(claim, target)
-        print(target)
-    except OSError:
-        claim.unlink(missing_ok=True)
-        print("deleted")
+    target_dir = root / "writefail-relayed"
+    target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = target_dir / f"{safe(claim.name)}.{int(time.time())}.relayed"
+    if target.exists():
+        target = target_dir / f"{safe(claim.name)}.{int(time.time())}.{os.getpid()}.relayed"
+    os.replace(claim, target)
+    print(target)
 else:
     target_dir = root / "writefail"
     target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -286,6 +284,15 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         try:
             path.chmod(0o600)
         except OSError:
@@ -486,7 +493,7 @@ def configured_remote_hosts(remotes: list[str]) -> list[str]:
 
 
 def alert_remote_from_key(key: str) -> str | None:
-    for source in ("remote-claim-failed", "remote-drain-stale"):
+    for source in ("remote-claim-failed", "remote-drain-stale", "remote-relay-failed"):
         suffix = f":{source}"
         if key.endswith(suffix):
             return key[: -len(suffix)]
@@ -565,7 +572,6 @@ def remote_writefail_ack(host: str, claim: str, remote_root: str, action: str, t
 
 def local_outbox_path(event: dict[str, Any], remote_host: str) -> Path:
     outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", state_root() / "outbox"))
-    ensure_private_dir(outbox)
     created = str(event.get("createdAt") or now_iso()).replace("-", "").replace(":", "")
     filename = ".".join([
         created,
@@ -575,34 +581,55 @@ def local_outbox_path(event: dict[str, Any], remote_host: str) -> Path:
         safe_segment(str(event.get("id") or f'event-{int(time.time())}')),
         "json",
     ])
-    return outbox / filename
+    return safe_child_path(outbox, filename)
 
 
-def local_record_event_id(path: Path) -> str | None:
+def local_record_event_identity(path: Path) -> tuple[str | None, str]:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return None
+        return None, ""
     if not isinstance(loaded, dict):
-        return None
+        return None, ""
     if isinstance(loaded.get("id"), str):
-        return loaded["id"]
+        return loaded["id"], str(loaded.get("createdAt") or "")
     event = loaded.get("event")
     if isinstance(event, dict) and isinstance(event.get("id"), str):
-        return event["id"]
-    return None
+        return event["id"], str(event.get("createdAt") or "")
+    return None, ""
 
 
-def local_event_exists(event_id: str) -> bool:
+def local_event_exists(event_id: str, created_at: str = "") -> bool:
     if not event_id:
         return False
     root = state_root()
-    for child in ("outbox", "processing", "sent", "suppressed", "writefail", "writefail-recovered"):
-        directory = root / child
+    candidates = [
+        Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox")),
+        root / "processing",
+        root / "sent",
+        root / "storm-collapsed",
+        root / "suppressed",
+        root / "quarantine",
+        root / "writefail",
+        root / "writefail-recovered",
+        root / "writefail-quarantine",
+    ]
+    seen: set[Path] = set()
+    for directory in candidates:
+        try:
+            key = directory.resolve()
+        except OSError:
+            key = directory
+        if key in seen:
+            continue
+        seen.add(key)
         if not directory.exists():
             continue
         for path in directory.glob("*"):
-            if path.is_file() and local_record_event_id(path) == event_id:
+            if not path.is_file():
+                continue
+            existing_id, existing_created_at = local_record_event_identity(path)
+            if existing_id == event_id and (not created_at or not existing_created_at or existing_created_at == created_at):
                 return True
     return False
 
@@ -614,7 +641,14 @@ def safe_child_path(directory: Path, name: str) -> Path:
         raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
     if target.exists():
         stem = safe_filename(name, 140)
-        target = directory / f"{int(time.time())}.{os.getpid()}.{stem}"
+        prefix = f"{int(time.time())}.{os.getpid()}"
+        for counter in range(1000):
+            target = directory / f"{prefix}.{counter}.{stem}"
+            if target.resolve().parent != directory.resolve():
+                raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
+            if not target.exists():
+                return target
+        raise RuntimeError(f"no available child path in {directory}: {name}")
     return target
 
 
@@ -665,7 +699,7 @@ def relay_writefail(remote_host: str, remote_root: str, record: dict[str, Any]) 
         append_log({"type": "harvest_poison", "remote": remote_host, "path": str(path), "reason": "schema"})
         return path, "poison"
     event_id = str(event["id"])
-    if local_event_exists(event_id):
+    if local_event_exists(event_id, str(event.get("createdAt") or "")):
         append_log({
             "type": "writefail_duplicate_already_local",
             "remote": remote_host,
@@ -699,7 +733,7 @@ def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> P
     if not isinstance(event, dict):
         raise ValueError("remote event root must be an object")
     event_id = str(event.get("id") or "")
-    if local_event_exists(event_id):
+    if local_event_exists(event_id, str(event.get("createdAt") or "")):
         append_log({"type": "duplicate_already_local", "remote": remote_host, "eventId": event_id, "remoteClaim": record["claim"]})
         return state_root() / "sent" / f"existing-{safe_segment(event_id)}"
     diagnostics = event.setdefault("diagnostics", {})
@@ -745,6 +779,7 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
     for remote in remotes:
         host, remote_root = parse_remote(remote)
         outbox_claim_failed = False
+        outbox_relay_failed = False
         try:
             records = ssh_json_lines(host, REMOTE_CLAIM_SCRIPT, [remote_root, str(max_events), str(lease_seconds)], timeout)
             remotes_succeeded += 1
@@ -824,12 +859,29 @@ def run_once(remotes: list[str], max_events: int, timeout: int, lease_seconds: i
                 })
                 processed += 1
             except Exception as exc:  # noqa: BLE001
+                outbox_relay_failed = True
                 failed += 1
                 try:
                     remote_ack(host, str(record["claim"]), remote_root, "requeue", timeout)
                 except Exception as ack_exc:  # noqa: BLE001
                     append_log({"type": "remote_requeue_failed", "remote": remote, "claim": record.get("claim"), "error": str(ack_exc)})
                 append_log({"type": "relay_failed", "remote": remote, "claim": record.get("claim"), "error": str(exc)})
+                enqueue_meta_alert(
+                    remote,
+                    "remote-relay-failed",
+                    f"BOT ERRORS collector cannot relay remote event: {remote}",
+                    f"remote={remote}\nremote_root={remote_root}\nremote_name={record.get('name')}\nremote_claim={record.get('claim')}\nerror={exc}\ncollector_log={state_root() / 'logs/collector.jsonl'}",
+                    state,
+                    alert_cooldown,
+                )
+        if not outbox_claim_failed and not outbox_relay_failed:
+            enqueue_meta_recovery(
+                remote,
+                "remote-relay-failed",
+                f"BOT ERRORS collector remote relay recovered: {remote}",
+                f"remote={remote}\nremote_root={remote_root}\nrelay_status=success",
+                state,
+            )
         for record in writefail_records:
             try:
                 local_path, status = relay_writefail(host, remote_root, record)

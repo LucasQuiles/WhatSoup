@@ -84,6 +84,17 @@ def ensure_private_dir(path: Path) -> None:
         pass
 
 
+def fsync_dir(path: Path) -> None:
+    try:
+        dir_fd = os.open(path, os.O_DIRECTORY | os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def setup_dirs() -> dict[str, Path]:
     paths = state_paths()
     for key in (
@@ -106,16 +117,25 @@ def setup_dirs() -> dict[str, Path]:
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
-        tmp.chmod(0o600)
-    except OSError:
-        pass
-    os.replace(tmp, path)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        fsync_dir(path.parent)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def env_int(name: str, default: int) -> int:
@@ -155,6 +175,35 @@ def truncate(value: Any, limit: int) -> str:
 def safe_segment(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
     return (cleaned or "unknown")[:80]
+
+
+def safe_filename(value: str, max_length: int = 180) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    cleaned = cleaned or "unknown"
+    if len(cleaned) <= max_length:
+        return cleaned
+    for suffix in (".writefail", ".processing", ".suppressed", ".collapsed", ".recovered", ".duplicate", ".poison", ".sent", ".json"):
+        if cleaned.endswith(suffix) and len(suffix) < max_length:
+            stem = cleaned[: max_length - len(suffix)].rstrip("._-:")
+            return f"{stem or 'unknown'}{suffix}"
+    return cleaned[:max_length]
+
+
+def safe_child_path(directory: Path, name: str, max_length: int = 180) -> Path:
+    ensure_private_dir(directory)
+    directory_resolved = directory.resolve()
+    first = directory / safe_filename(name, max_length)
+    candidates = [first]
+    if first.exists():
+        stem = safe_filename(name, min(140, max_length))
+        prefix = f"{int(time.time())}.{os.getpid()}"
+        candidates = [directory / f"{prefix}.{counter}.{stem}" for counter in range(1000)]
+    for target in candidates:
+        if target.resolve().parent != directory_resolved:
+            raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
+        if not target.exists():
+            return target
+    raise RuntimeError(f"no available child path in {directory}: {name}")
 
 
 def redact(value: Any) -> str:
@@ -616,7 +665,7 @@ def storm_digest_outbox_path(paths: dict[str, Path], digest_id: str, source: str
     instance = safe_segment("storm-collapse")
     source_segment = safe_segment(source or "unknown")
     event_id = safe_segment(digest_id)
-    return paths["outbox"] / f"{created}.{instance}.{source_segment}.{event_id}.json"
+    return safe_child_path(paths["outbox"], f"{created}.{instance}.{source_segment}.{event_id}.json")
 
 
 def merge_manifest_entries(existing: list[Any], additions: list[dict[str, Any]]) -> list[Any]:
@@ -750,10 +799,12 @@ def collapse_storm_group(
             continue
         event = mark_collapsed(event, str(digest.get("id")), manifest_path)
         atomic_write_json(path, event)
-        target = paths["storm_collapsed"] / (
-            f"{path.name}.{safe_segment(str(digest.get('id')))}.{int(time.time())}.collapsed"
+        target = safe_child_path(
+            paths["storm_collapsed"],
+            f"{path.name}.{safe_segment(str(digest.get('id')))}.{int(time.time())}.collapsed",
         )
         os.replace(path, target)
+        fsync_dir(target.parent)
         collapsed += 1
         collapsed_entries.append({
             "eventId": event.get("id"),
@@ -833,10 +884,10 @@ def ready(path: Path, quarantine_dir: Path) -> bool:
 
 
 def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
-    ensure_private_dir(quarantine_dir)
-    dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.poison"
+    dest = safe_child_path(quarantine_dir, f"{path.name}.{int(time.time())}.{os.getpid()}.poison")
     try:
         shutil.move(str(path), str(dest))
+        fsync_dir(dest.parent)
     except FileNotFoundError:
         return dest
     meta = {
@@ -879,8 +930,8 @@ def writefail_dirs() -> list[Path]:
     if override:
         candidates.append(Path(override))
     candidates.append(state_root() / "writefail")
-    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
     candidates.append(Path.home() / ".bot-errors-writefail")
+    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
     seen: set[str] = set()
     ordered: list[Path] = []
     for path in candidates:
@@ -892,7 +943,7 @@ def writefail_dirs() -> list[Path]:
     return ordered
 
 
-def event_already_known(event_id: str, paths: dict[str, Path]) -> bool:
+def event_already_known(event_id: str, created_at: str, paths: dict[str, Path]) -> bool:
     if not event_id:
         return False
     for key in ("outbox", "processing", "sent", "storm_collapsed", "suppressed", "quarantine"):
@@ -903,7 +954,9 @@ def event_already_known(event_id: str, paths: dict[str, Path]) -> bool:
             if not path.is_file():
                 continue
             try:
-                if read_json(path).get("id") == event_id:
+                known = read_json(path)
+                known_created_at = str(known.get("createdAt") or "")
+                if known.get("id") == event_id and (not created_at or not known_created_at or known_created_at == created_at):
                     return True
             except Exception:
                 continue
@@ -915,18 +968,13 @@ def outbox_path_for_event(event: dict[str, Any], paths: dict[str, Path]) -> Path
     instance = safe_segment(str(event.get("instance") or "unknown"))
     source = safe_segment(str(event.get("source") or "unknown"))
     event_id = safe_segment(str(event.get("id") or f"recovered-{int(time.time())}-{os.getpid()}"))
-    path = paths["outbox"] / f"{created}.{instance}.{source}.{event_id}.json"
-    if path.exists():
-        path = paths["outbox"] / f"{created}.{instance}.{source}.{event_id}.{int(time.time())}.{os.getpid()}.json"
-    return path
+    return safe_child_path(paths["outbox"], f"{created}.{instance}.{source}.{event_id}.json")
 
 
 def move_writefail(path: Path, target_dir: Path, suffix: str) -> Path:
-    ensure_private_dir(target_dir)
-    target = target_dir / f"{path.name}.{int(time.time())}.{suffix}"
-    if target.exists():
-        target = target_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.{suffix}"
+    target = safe_child_path(target_dir, f"{path.name}.{int(time.time())}.{suffix}")
     shutil.move(str(path), str(target))
+    fsync_dir(target.parent)
     try:
         target.chmod(0o600)
     except OSError:
@@ -952,7 +1000,7 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
                 if not isinstance(event, dict):
                     raise ValueError("writefail breadcrumb missing event object")
                 event_id = str(event.get("id") or "")
-                if event_already_known(event_id, paths):
+                if event_already_known(event_id, str(event.get("createdAt") or ""), paths):
                     duplicate = move_writefail(path, paths["writefail_recovered"], "duplicate")
                     append_dispatch_log(paths, {
                         "type": "writefail_duplicate",
@@ -1019,8 +1067,9 @@ def recover_writefail_breadcrumbs(paths: dict[str, Path], limit: int = 25) -> in
 
 
 def claim(path: Path, processing_dir: Path) -> Path:
-    dest = processing_dir / f"{path.name}.{os.getpid()}.processing"
+    dest = safe_child_path(processing_dir, f"{path.name}.{os.getpid()}.processing", 240)
     os.replace(path, dest)
+    fsync_dir(dest.parent)
     return dest
 
 
@@ -1039,10 +1088,9 @@ def reclaim_processing(paths: dict[str, Path]) -> int:
     for path in sorted(paths["processing"].glob("*")):
         if not path.is_file():
             continue
-        target = paths["outbox"] / original_name_from_processing(path)
-        if target.exists():
-            target = paths["outbox"] / f"{int(time.time())}.{path.name}.reclaimed.json"
+        target = safe_child_path(paths["outbox"], original_name_from_processing(path))
         os.replace(path, target)
+        fsync_dir(target.parent)
         append_dispatch_log(paths, {"type": "reclaim", "from": str(path), "to": str(target)})
         reclaimed += 1
     return reclaimed
@@ -1088,8 +1136,9 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         event = mark_suppressed(event, suppress_reason)
         atomic_write_json(claimed, event)
         suppressed_name = f"{path.name}.{int(time.time())}.suppressed"
-        suppressed_path = paths["suppressed"] / suppressed_name
+        suppressed_path = safe_child_path(paths["suppressed"], suppressed_name)
         os.replace(claimed, suppressed_path)
+        fsync_dir(suppressed_path.parent)
         append_dispatch_log(paths, {
             "type": "suppressed",
             "eventId": event.get("id"),
@@ -1107,11 +1156,13 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     except Exception as exc:
         event = mark_failure(event, str(exc))
         atomic_write_json(claimed, event)
-        os.replace(claimed, paths["outbox"] / path.name)
+        retry_path = safe_child_path(paths["outbox"], path.name)
+        os.replace(claimed, retry_path)
+        fsync_dir(retry_path.parent)
         append_dispatch_log(paths, {
             "type": "send_failed",
             "eventId": event.get("id"),
-            "path": str(paths["outbox"] / path.name),
+            "path": str(retry_path),
             "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
             "error": str(exc),
         })
@@ -1123,11 +1174,13 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     event = mark_sent(event)
     atomic_write_json(claimed, event)
     sent_name = f"{path.name}.{int(time.time())}.sent"
-    os.replace(claimed, paths["sent"] / sent_name)
+    sent_path = safe_child_path(paths["sent"], sent_name)
+    os.replace(claimed, sent_path)
+    fsync_dir(sent_path.parent)
     append_dispatch_log(paths, {
         "type": "sent",
         "eventId": event.get("id"),
-        "path": str(paths["sent"] / sent_name),
+        "path": str(sent_path),
         "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
     })
     return True, "sent"

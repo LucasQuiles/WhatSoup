@@ -130,6 +130,35 @@ def safe_segment(value: str) -> str:
     return (cleaned or "unknown")[:80]
 
 
+def safe_filename(value: str, max_length: int = 180) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    cleaned = cleaned or "unknown"
+    if len(cleaned) <= max_length:
+        return cleaned
+    for suffix in (".writefail", ".json"):
+        if cleaned.endswith(suffix) and len(suffix) < max_length:
+            stem = cleaned[: max_length - len(suffix)].rstrip("._-:")
+            return f"{stem or 'unknown'}{suffix}"
+    return cleaned[:max_length]
+
+
+def safe_child_path(directory: Path, name: str) -> Path:
+    ensure_private_dir(directory)
+    directory_resolved = directory.resolve()
+    first = directory / safe_filename(name)
+    candidates = [first]
+    if first.exists():
+        stem = safe_filename(name, 140)
+        prefix = f"{int(time.time())}.{os.getpid()}"
+        candidates = [directory / f"{prefix}.{counter}.{stem}" for counter in range(1000)]
+    for target in candidates:
+        if target.resolve().parent != directory_resolved:
+            raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
+        if not target.exists():
+            return target
+    raise RuntimeError(f"no available child path in {directory}: {name}")
+
+
 def env_keys() -> list[str]:
     patterns = (
         re.compile(r"^LOG_DIR$"),
@@ -273,10 +302,9 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def write_event(event: dict[str, Any]) -> Path:
     outbox = outbox_dir()
-    ensure_private_dir(outbox)
     created = str(event["createdAt"]).replace("-", "").replace(":", "")
     file_name = f"{created}.{safe_segment(str(event['instance']))}.{safe_segment(str(event['source']))}.{event['id']}.json"
-    final = outbox / file_name
+    final = safe_child_path(outbox, file_name)
     atomic_write_json(final, event)
     return final
 
@@ -324,8 +352,7 @@ def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) ->
     for base in writefail_dirs():
         tmp_path: Path | None = None
         try:
-            base.mkdir(parents=True, exist_ok=True, mode=0o700)
-            path = base / name
+            path = safe_child_path(base, name)
             tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
             fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd, "wb") as handle:

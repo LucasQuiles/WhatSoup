@@ -82,6 +82,34 @@ def safe_segment(value: str) -> str:
     return (cleaned or "unknown")[:80]
 
 
+def safe_filename(value: str, max_length: int = 180) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    cleaned = cleaned or "unknown"
+    if len(cleaned) <= max_length:
+        return cleaned
+    if cleaned.endswith(".json") and max_length > len(".json"):
+        stem = cleaned[: max_length - len(".json")].rstrip("._-:")
+        return f"{stem or 'unknown'}.json"
+    return cleaned[:max_length]
+
+
+def safe_child_path(directory: Path, name: str) -> Path:
+    ensure_private_dir(directory)
+    directory_resolved = directory.resolve()
+    first = directory / safe_filename(name)
+    candidates = [first]
+    if first.exists():
+        stem = safe_filename(name, 140)
+        prefix = f"{int(time.time())}.{os.getpid()}"
+        candidates = [directory / f"{prefix}.{counter}.{stem}" for counter in range(1000)]
+    for target in candidates:
+        if target.resolve().parent != directory_resolved:
+            raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
+        if not target.exists():
+            return target
+    raise RuntimeError(f"no available child path in {directory}: {name}")
+
+
 def parse_diagnostics(values: list[str] | None) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for value in values or []:
@@ -101,6 +129,15 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp, path)
         try:
+            dir_fd = os.open(path.parent, os.O_DIRECTORY | os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        try:
             path.chmod(0o600)
         except OSError:
             pass
@@ -114,15 +151,14 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def write_event(event: dict[str, Any]) -> Path:
     outbox = outbox_dir()
-    ensure_private_dir(outbox)
     created = str(event["createdAt"]).replace("-", "").replace(":", "")
-    path = outbox / ".".join([
+    path = safe_child_path(outbox, ".".join([
         created,
         safe_segment(str(event["instance"])),
         safe_segment(str(event["source"])),
         safe_segment(str(event["id"])),
         "json",
-    ])
+    ]))
     atomic_write_json(path, event)
     return path
 
