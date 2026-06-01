@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,10 @@ const URL_USERINFO_SAMPLE = `https://user:pass@${'service'}.invalid/path`;
 const REDACTED_URL_USERINFO = `https://[REDACTED]@${'service'}.invalid/path`;
 
 const tmpDirs: string[] = [];
+
+function testCwdHash(): string {
+  return createHash('sha256').update(process.cwd()).digest('hex').slice(0, 12);
+}
 
 function makeHome(): string {
   const dir = mkdtempSync(join(tmpdir(), 'rgp-hooks-home-'));
@@ -176,7 +181,12 @@ describe('PostToolUse RGP error logger', () => {
         URL_USERINFO_SAMPLE,
       ].join('\n'),
       duration_ms: 120000,
-    }, { HOME: home, WHATSOUP_INSTANCE: 'ana-bot', WHATSOUP_CHAT_JID: 'chat@g.us' });
+    }, {
+      HOME: home,
+      BOT_ERRORS_STATE_DIR: join(home, '.local', 'state', 'bot-errors'),
+      WHATSOUP_INSTANCE: 'ana-bot',
+      WHATSOUP_CHAT_JID: 'chat@g.us',
+    });
 
     expect(result.status).toBe(0);
     const botErrors = readBotErrors(home);
@@ -202,6 +212,38 @@ describe('PostToolUse RGP error logger', () => {
     expect(JSON.stringify(botErrors[0])).not.toContain('eyJhbGci');
     expect(JSON.stringify(botErrors[0])).not.toContain('-----BEGIN');
     expect(JSON.stringify(botErrors[0])).not.toContain(URL_USERINFO_SAMPLE);
+  });
+
+  it('keeps unconfigured Vitest hook alerts out of the real home outbox', () => {
+    const home = makeHome();
+    const temp = mkdtempSync(join(tmpdir(), 'rgp-hooks-vitest-state-'));
+    tmpDirs.push(temp);
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-vitest-default',
+      hook_event_name: 'PostToolUseFailure',
+      transcript_path: '/tmp/transcript.jsonl',
+      cwd: '/tmp/workspace',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      tool_input: { command: 'exit 2' },
+      error: 'Command failed',
+      duration_ms: 1234,
+    }, {
+      HOME: home,
+      TMPDIR: temp,
+      NODE_ENV: 'test',
+      VITEST: 'true',
+      VITEST_WORKER_ID: 'hook-worker',
+      BOT_ERRORS_STATE_DIR: '',
+      BOT_ERRORS_OUTBOX_DIR: '',
+      WHATSOUP_INSTANCE: 'ana-bot',
+      WHATSOUP_CHAT_JID: 'chat@g.us',
+    });
+
+    expect(result.status).toBe(0);
+    expect(readBotErrors(home)).toHaveLength(0);
+    expect(readdirSync(join(temp, 'whatsoup-vitest-bot-errors', `${testCwdHash()}.hook-worker`, 'outbox')).filter((file) => file.endsWith('.json'))).toHaveLength(1);
   });
 
   it('records a recoverable writefail breadcrumb when the BOT ERRORS outbox is unwritable', () => {

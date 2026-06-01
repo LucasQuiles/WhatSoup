@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname, platform, release, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { sessionStateDir } from './lib/rgp-state.mjs';
@@ -74,8 +74,15 @@ function isErrorResult(response) {
   return /(sandbox_deny|exit code [1-9]|enoent|eacces|permission denied|error:|⚠️ error)/i.test(text);
 }
 
+function vitestStateDir() {
+  if (!process.env.VITEST && !process.env.VITEST_WORKER_ID) return null;
+  const cwdHash = createHash('sha256').update(process.cwd()).digest('hex').slice(0, 12);
+  const worker = safeSegment(process.env.VITEST_WORKER_ID || `pid-${process.pid}`);
+  return join(process.env.TMPDIR || tmpdir(), 'whatsoup-vitest-bot-errors', `${cwdHash}.${worker}`);
+}
+
 function stateDir() {
-  return process.env.BOT_ERRORS_STATE_DIR || join(homedir(), '.local', 'state', 'bot-errors');
+  return process.env.BOT_ERRORS_STATE_DIR || vitestStateDir() || join(homedir(), '.local', 'state', 'bot-errors');
 }
 
 function outboxDir() {
