@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { homedir, hostname, platform, release } from 'node:os';
-import { join } from 'node:path';
+import { homedir, hostname, platform, release, tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { sessionStateDir } from './lib/rgp-state.mjs';
 
 const MAX_ERROR_LOG_BYTES = 64 * 1024;
@@ -82,9 +82,30 @@ function outboxDir() {
   return process.env.BOT_ERRORS_OUTBOX_DIR || join(stateDir(), 'outbox');
 }
 
+function writefailDirs() {
+  return [...new Set([
+    process.env.BOT_ERRORS_WRITEFAIL_DIR,
+    join(stateDir(), 'writefail'),
+    join(homedir(), '.bot-errors-writefail'),
+    join(process.env.TMPDIR || tmpdir(), 'bot-errors-writefail'),
+  ].filter(Boolean))];
+}
+
 function safeSegment(value) {
   const cleaned = String(value).trim().replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '');
   return (cleaned || 'unknown').slice(0, 80);
+}
+
+function safeFileName(value, maxLength = 180) {
+  const cleaned = String(value).trim().replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown';
+  if (cleaned.length <= maxLength) return cleaned;
+  for (const suffix of ['.writefail', '.json']) {
+    if (cleaned.endsWith(suffix) && suffix.length < maxLength) {
+      const stem = cleaned.slice(0, maxLength - suffix.length).replace(/[._:-]+$/g, '') || 'unknown';
+      return `${stem}${suffix}`;
+    }
+  }
+  return cleaned.slice(0, maxLength);
 }
 
 function ensurePrivateDir(path) {
@@ -96,21 +117,139 @@ function ensurePrivateDir(path) {
   }
 }
 
+function safeChildPath(directory, name) {
+  ensurePrivateDir(directory);
+  const first = join(directory, safeFileName(name));
+  const stem = safeFileName(name, 140);
+  const prefix = `${Math.floor(Date.now() / 1000)}.${process.pid}`;
+  const candidates = [
+    first,
+    ...Array.from({ length: 1000 }, (_value, index) => join(directory, `${prefix}.${index}.${stem}`)),
+  ];
+  for (const target of candidates) {
+    let fd;
+    try {
+      fd = openSync(target, 'wx', 0o600);
+      return target;
+    } catch {
+      continue;
+    } finally {
+      if (fd !== undefined) {
+        closeSync(fd);
+        try {
+          unlinkSync(target);
+        } catch {
+          // The following atomic write owns the final path.
+        }
+      }
+    }
+  }
+  throw new Error(`no available child path in ${directory}: ${name}`);
+}
+
+function fsyncPath(path) {
+  const fd = openSync(path, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function fsyncDir(path) {
+  try {
+    fsyncPath(path);
+  } catch {
+    // Some platforms/filesystems do not allow fsync on directories.
+  }
+}
+
+function writeJsonAtomic(path, payload) {
+  const tmpPath = join(dirname(path), `.${basename(path)}.${process.pid}.tmp`);
+  try {
+    writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    fsyncPath(tmpPath);
+    renameSync(tmpPath, path);
+    try {
+      chmodSync(path, 0o600);
+    } catch {
+      // Best effort.
+    }
+    fsyncDir(dirname(path));
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      // Best effort.
+    }
+    throw err;
+  }
+}
+
+function recordWritefail(event, err, failedTarget) {
+  const reason = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  try {
+    process.stderr.write(
+      `[post-tool-use-log] CRITICAL outbox write FAILED for ${sanitize(failedTarget)}: ${sanitize(reason)}; ` +
+      `id=${event.id} instance=${event.instance} source=${event.source} severity=${event.severity} - recording breadcrumb\n`,
+    );
+  } catch {
+    // Last-resort trace only.
+  }
+
+  const breadcrumb = {
+    schemaVersion: 1,
+    kind: 'outbox_write_failure',
+    recordedAt: new Date().toISOString(),
+    failedTarget: sanitize(failedTarget),
+    reason: sanitize(reason),
+    emitPid: process.pid,
+    event,
+  };
+  const created = breadcrumb.recordedAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const fileName = `${created}.${safeSegment(event.instance)}.${safeSegment(event.id)}.writefail`;
+  for (const directory of writefailDirs()) {
+    try {
+      const path = safeChildPath(directory, fileName);
+      writeJsonAtomic(path, breadcrumb);
+      try {
+        process.stderr.write(`[post-tool-use-log] lost-alert breadcrumb written: ${path}\n`);
+      } catch {
+        // Best effort.
+      }
+      return path;
+    } catch {
+      continue;
+    }
+  }
+
+  try {
+    process.stderr.write(
+      `[post-tool-use-log] breadcrumb write failed in ALL fallback dirs; lost-event payload follows:\n${JSON.stringify(event)}\n`,
+    );
+  } catch {
+    // Best effort.
+  }
+  return null;
+}
+
 function writeEventFile(event) {
   const outbox = outboxDir();
-  ensurePrivateDir(outbox);
   const created = event.createdAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
   const fileName = `${created}.${safeSegment(event.instance)}.${safeSegment(event.source)}.${event.id}.json`;
   const finalPath = join(outbox, fileName);
   const tmpPath = join(outbox, `.${fileName}.${process.pid}.tmp`);
   try {
+    ensurePrivateDir(outbox);
     writeFileSync(tmpPath, `${JSON.stringify(event, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    fsyncPath(tmpPath);
     renameSync(tmpPath, finalPath);
     try {
       chmodSync(finalPath, 0o600);
     } catch {
       // Best effort.
     }
+    fsyncDir(outbox);
     return finalPath;
   } catch (err) {
     try {
@@ -118,6 +257,7 @@ function writeEventFile(event) {
     } catch {
       // Best effort.
     }
+    recordWritefail(event, err, outbox);
     throw err;
   }
 }

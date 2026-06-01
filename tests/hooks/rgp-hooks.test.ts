@@ -10,8 +10,8 @@ const AWS_KEY_SAMPLE = ['AKIA', 'IOSFODNN7EXAMPLE'].join('');
 const GITHUB_TOKEN_SAMPLE = ['ghp', 'abcdefghijklmnopqrstuvwxyz1234567890'].join('_');
 const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart1234567890'].join('.');
 const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----END ', 'PRIVATE KEY-----'].join('');
-const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
-const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
+const URL_USERINFO_SAMPLE = `https://user:pass@${'service'}.invalid/path`;
+const REDACTED_URL_USERINFO = `https://[REDACTED]@${'service'}.invalid/path`;
 
 const tmpDirs: string[] = [];
 
@@ -70,6 +70,13 @@ function readBotErrors(home: string): unknown[] {
   return readdirSync(outbox)
     .filter((name) => name.endsWith('.json') && !name.startsWith('.'))
     .map((name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')));
+}
+
+function readWritefails(dir: string): Record<string, any>[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith('.writefail'))
+    .map((name) => JSON.parse(readFileSync(join(dir, name), 'utf8')));
 }
 
 afterEach(() => {
@@ -199,6 +206,90 @@ describe('PostToolUse RGP error logger', () => {
     expect(JSON.stringify(botErrors[0])).not.toContain('eyJhbGci');
     expect(JSON.stringify(botErrors[0])).not.toContain('-----BEGIN');
     expect(JSON.stringify(botErrors[0])).not.toContain(URL_USERINFO_SAMPLE);
+  });
+
+  it('records a recoverable writefail breadcrumb when the BOT ERRORS outbox is unwritable', () => {
+    const home = makeHome();
+    const writefail = join(home, 'writefail-override');
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-outbox-fail',
+      hook_event_name: 'PostToolUseFailure',
+      transcript_path: '/tmp/transcript.jsonl',
+      cwd: '/tmp/workspace',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      tool_input: { command: ['curl https://user:pass', 'service.invalid token=plain-secret'].join('@') },
+      error: [
+        'Command failed token=plain-secret',
+        AWS_KEY_SAMPLE,
+        GITHUB_TOKEN_SAMPLE,
+      ].join('\n'),
+      duration_ms: 1234,
+    }, {
+      HOME: home,
+      BOT_ERRORS_OUTBOX_DIR: '/dev/null/outbox',
+      BOT_ERRORS_WRITEFAIL_DIR: writefail,
+      WHATSOUP_INSTANCE: 'ana-bot',
+      WHATSOUP_CHAT_JID: 'chat@g.us',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('CRITICAL outbox write FAILED');
+    expect(result.stderr).toContain('lost-alert breadcrumb written');
+    expect(readBotErrors(home)).toHaveLength(0);
+    const crumbs = readWritefails(writefail);
+    expect(crumbs).toHaveLength(1);
+    expect(crumbs[0]).toMatchObject({ kind: 'outbox_write_failure', schemaVersion: 1 });
+    expect(crumbs[0].event).toMatchObject({
+      eventType: 'alert',
+      severity: 'error',
+      instance: 'ana-bot',
+      source: 'hook-tool-call-failed:Bash',
+      summary: 'Agent tool failure: Bash',
+    });
+    expect(JSON.stringify(crumbs[0])).toContain('token=[REDACTED]');
+    expect(JSON.stringify(crumbs[0])).toContain('[REDACTED AWS ACCESS KEY]');
+    expect(JSON.stringify(crumbs[0])).toContain('[REDACTED GITHUB TOKEN]');
+    expect(JSON.stringify(crumbs[0])).not.toContain('plain-secret');
+    expect(JSON.stringify(crumbs[0])).not.toContain(AWS_KEY_SAMPLE);
+    expect(JSON.stringify(crumbs[0])).not.toContain(GITHUB_TOKEN_SAMPLE);
+    expect(readJsonl(errorsPath(home, 'session-outbox-fail')).at(-1)).toMatchObject({
+      event: 'bot-errors-alert-failed',
+    });
+  });
+
+  it('uses HOME writefail fallback before TMPDIR when override and state writefail dirs are blocked', () => {
+    const root = mkdtempSync(join(tmpdir(), 'rgp-hooks-writefail-fallback-'));
+    tmpDirs.push(root);
+    const blockedOverride = join(root, 'blocked-override');
+    const stateRoot = join(root, 'state');
+    const home = join(root, 'home');
+    const writerTmp = join(root, 'writer-tmp');
+    writeFileSync(blockedOverride, 'not a directory');
+    mkdirSync(stateRoot, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    mkdirSync(writerTmp, { recursive: true });
+    writeFileSync(join(stateRoot, 'writefail'), 'not a directory');
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-home-fallback',
+      hook_event_name: 'PostToolUseFailure',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      error: 'Command failed token=plain-secret',
+    }, {
+      HOME: home,
+      TMPDIR: writerTmp,
+      BOT_ERRORS_OUTBOX_DIR: '/dev/null/outbox',
+      BOT_ERRORS_WRITEFAIL_DIR: join(blockedOverride, 'writefail'),
+      BOT_ERRORS_STATE_DIR: stateRoot,
+      WHATSOUP_INSTANCE: 'ana-bot',
+    });
+
+    expect(result.status).toBe(0);
+    expect(readWritefails(join(home, '.bot-errors-writefail'))).toHaveLength(1);
+    expect(readWritefails(join(writerTmp, 'bot-errors-writefail'))).toHaveLength(0);
   });
 });
 
