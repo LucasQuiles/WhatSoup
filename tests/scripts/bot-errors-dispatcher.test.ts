@@ -804,6 +804,92 @@ describe('bot-errors-dispatcher', () => {
     expect(state.suppressedPruned).toBe(2);
   });
 
+  it('suppresses test-provenance events and sends one path-free debounced meta-alert', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const suppressed = join(tmpRoot, 'suppressed');
+    const eventRuntime = {
+      provenance: {
+        producer: 'ts-lib',
+        test: true,
+        signals: ['VITEST'],
+        strongSignals: ['VITEST'],
+        outboxPolicy: 'explicit-outbox',
+        liveOutboxRedirected: false,
+        resolvedOutbox: join(tmpRoot, 'home', '.local', 'state', 'bot-errors', 'outbox'),
+      },
+    };
+    writeStormEvent(tmpRoot, 'MACLAB', {
+      id: 'test-provenance-1',
+      severity: 'warning',
+      source: 'test-source',
+      summary: 'test event should not page q',
+      runtime: eventRuntime,
+    });
+    writeStormEvent(tmpRoot, 'MWLAB', {
+      id: 'test-provenance-2',
+      severity: 'warning',
+      source: 'test-source',
+      summary: 'second test event should not page q',
+      runtime: eventRuntime,
+    });
+
+    const first = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        BOT_ERRORS_TEST_PROVENANCE_META_WINDOW_SECONDS: '900',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(first)).toMatchObject({
+      processed: 1,
+      sent: 1,
+      suppressed: 2,
+      testProvenanceSuppressed: 2,
+      testProvenanceMetaAlerted: 1,
+      failed: 0,
+    });
+    expect(readdirSync(suppressed)).toHaveLength(2);
+    const rendered = readFileSync(capturePath, 'utf8');
+    expect(rendered.match(/dispatcher refused test-provenance events/g)).toHaveLength(1);
+    expect(rendered).toContain('refused_events:2');
+    expect(rendered).not.toContain(tmpRoot);
+    expect(rendered).not.toContain('/home/');
+    expect(rendered).not.toContain('resolvedOutbox');
+
+    writeStormEvent(tmpRoot, 'mini1', {
+      id: 'test-provenance-3',
+      severity: 'warning',
+      source: 'test-source',
+      summary: 'third test event debounced',
+      runtime: eventRuntime,
+    });
+    const second = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+        BOT_ERRORS_TEST_PROVENANCE_META_WINDOW_SECONDS: '900',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(second)).toMatchObject({
+      processed: 0,
+      sent: 0,
+      suppressed: 1,
+      testProvenanceSuppressed: 1,
+      testProvenanceMetaAlerted: 0,
+      failed: 0,
+    });
+    expect(readFileSync(capturePath, 'utf8').match(/dispatcher refused test-provenance events/g)).toHaveLength(1);
+  });
+
   it('recovers writefail breadcrumbs into the normal dispatch path', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');

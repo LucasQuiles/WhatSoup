@@ -188,6 +188,7 @@ describe('PostToolUse RGP error logger', () => {
     }, {
       HOME: home,
       BOT_ERRORS_STATE_DIR: join(home, '.local', 'state', 'bot-errors'),
+      BOT_ERRORS_ALLOW_TEST_LIVE_OUTBOX: '1',
       WHATSOUP_INSTANCE: 'ana-bot',
       WHATSOUP_CHAT_JID: 'chat@g.us',
     });
@@ -248,6 +249,47 @@ describe('PostToolUse RGP error logger', () => {
     expect(result.status).toBe(0);
     expect(readBotErrors(home)).toHaveLength(0);
     expect(readdirSync(join(temp, 'whatsoup-vitest-bot-errors', `${testCwdHash()}.hook-worker`, 'outbox')).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+  });
+
+  it('redirects an explicit live hook outbox under strong test provenance', () => {
+    const home = makeHome();
+    const temp = mkdtempSync(join(tmpdir(), 'rgp-hooks-vitest-live-'));
+    tmpDirs.push(temp);
+    const liveOutbox = botErrorsOutbox(home);
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-vitest-live',
+      hook_event_name: 'PostToolUseFailure',
+      transcript_path: '/tmp/transcript.jsonl',
+      cwd: '/tmp/workspace',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      tool_input: { command: 'exit 2' },
+      error: 'Command failed',
+      duration_ms: 1234,
+    }, {
+      HOME: home,
+      TMPDIR: temp,
+      NODE_ENV: 'test',
+      VITEST: 'true',
+      VITEST_WORKER_ID: 'hook-live-worker',
+      BOT_ERRORS_OUTBOX_DIR: liveOutbox,
+      WHATSOUP_INSTANCE: 'ana-bot',
+    });
+
+    expect(result.status).toBe(0);
+    expect(readBotErrors(home)).toHaveLength(0);
+    const testOutbox = join(temp, 'whatsoup-vitest-bot-errors', `${testCwdHash()}.hook-live-worker`, 'outbox');
+    const events = readdirSync(testOutbox)
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => JSON.parse(readFileSync(join(testOutbox, file), 'utf8')) as Record<string, any>);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.runtime.provenance).toMatchObject({
+      producer: 'post-tool-use-hook',
+      test: true,
+      outboxPolicy: 'test-redirect',
+      liveOutboxRedirected: true,
+    });
   });
 
   it('records a recoverable writefail breadcrumb when the BOT ERRORS outbox is unwritable', () => {

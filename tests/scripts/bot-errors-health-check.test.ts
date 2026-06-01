@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -62,6 +62,52 @@ describe('bot-errors-health-check', () => {
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('FAIL personal_socket: <unset> exists=False');
     expect(event.evidence).toContain('tools personal: FAIL BOT_ERRORS_SOCKET_PATH is not configured');
+  });
+
+  it('redirects an explicit live health outbox under pytest provenance', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const home = join(tmpRoot, 'home');
+    const writerTmp = join(tmpRoot, 'tmp');
+    const liveOutbox = join(home, '.local', 'state', 'bot-errors', 'outbox');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(writerTmp, { recursive: true });
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        TMPDIR: writerTmp,
+        BOT_ERRORS_OUTBOX_DIR: liveOutbox,
+        PYTEST_CURRENT_TEST: 'tests/test_health.py::test_redirect (call)',
+        VITEST: '',
+        VITEST_WORKER_ID: '',
+        NODE_ENV: '',
+        BOT_ERRORS_DRY_TOOL_NAMES: 'send_message',
+        BOT_ERRORS_REQUIRED_TOOLS: 'send_message,missing_tool',
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'pytest-health',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectConfigInventory: false,
+          expectPluginInventory: false,
+        }),
+      },
+    });
+
+    expect(existsSync(liveOutbox)).toBe(false);
+    const testRoot = join(writerTmp, 'whatsoup-vitest-bot-errors');
+    const [workerDir] = readdirSync(testRoot);
+    const outbox = join(testRoot, workerDir!, 'outbox');
+    const event = JSON.parse(readFileSync(join(outbox, readdirSync(outbox)[0]!), 'utf8')) as Record<string, any>;
+    expect(event.runtime.provenance).toMatchObject({
+      producer: 'python-health',
+      test: true,
+      outboxPolicy: 'test-redirect',
+      liveOutboxRedirected: true,
+    });
+    expect(event.runtime.provenance.signals).toEqual(['PYTEST_CURRENT_TEST']);
   });
 
   it('raises severity when an expected tool is missing', () => {
@@ -522,10 +568,13 @@ describe('bot-errors-health-check', () => {
       env: {
         ...process.env,
         HOME: tmpRoot,
-        BOT_ERRORS_STATE_DIR: tmpRoot,
-        BOT_ERRORS_OUTBOX_DIR: join(blocked, 'outbox'),
-        BOT_ERRORS_WRITEFAIL_DIR: writefail,
-        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_OUTBOX_DIR: join(blocked, 'outbox'),
+          BOT_ERRORS_WRITEFAIL_DIR: writefail,
+          VITEST: '',
+          VITEST_WORKER_ID: '',
+          NODE_ENV: '',
+          BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
@@ -568,6 +617,9 @@ describe('bot-errors-health-check', () => {
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_WRITEFAIL_DIR: writefail,
         BOT_ERRORS_DRY_SEND_CAPTURE: capture,
+        VITEST: '',
+        VITEST_WORKER_ID: '',
+        NODE_ENV: '',
       },
       encoding: 'utf8',
     });

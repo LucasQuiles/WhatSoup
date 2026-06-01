@@ -40,6 +40,7 @@ RECOVERY_DUPLICATE_SUPPRESSION_REASON = (
     "duplicate recovery/info event retained as audit-only; "
     "earliest matching event in the dedupe window remains dispatchable"
 )
+TEST_PROVENANCE_SUPPRESSION_REASON = "test-provenance event refused by dispatcher"
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -261,6 +262,7 @@ def state_paths() -> dict[str, Path]:
         "logs": root / "logs",
         "state": root / "dispatcher-state.json",
         "incident_state": root / "incident-state.json",
+        "meta_state": root / "dispatcher-meta-state.json",
     }
 
 
@@ -1261,6 +1263,17 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     return None
 
 
+def is_test_provenance_event(event: dict[str, Any]) -> bool:
+    runtime = event.get("runtime") if isinstance(event.get("runtime"), dict) else {}
+    provenance = runtime.get("provenance") if isinstance(runtime.get("provenance"), dict) else {}
+    return provenance.get("test") is True
+
+
+def omit_dispatch_log_in_message(event: dict[str, Any]) -> bool:
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    return diagnostics.get("omitDispatchLogInMessage") is True
+
+
 def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
     if not is_incident_clear(event):
         return
@@ -1600,6 +1613,10 @@ def recovery_dedupe_window_seconds() -> int:
 
 def suppressed_max_files() -> int:
     return max(1, env_int("BOT_ERRORS_SUPPRESSED_MAX_FILES", 2000))
+
+
+def test_provenance_meta_window_seconds() -> int:
+    return max(1, env_int("BOT_ERRORS_TEST_PROVENANCE_META_WINDOW_SECONDS", 900))
 
 
 def created_epoch(event: dict[str, Any]) -> int:
@@ -2158,6 +2175,95 @@ def prune_suppressed(paths: dict[str, Path]) -> int:
     return pruned
 
 
+def read_meta_state(paths: dict[str, Path]) -> dict[str, Any]:
+    try:
+        return read_json(paths["meta_state"])
+    except Exception:
+        return {}
+
+
+def write_meta_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
+    atomic_write_json(paths["meta_state"], state)
+
+
+def test_provenance_meta_event(paths: dict[str, Path], refused: int, window: int) -> dict[str, Any]:
+    now = int(time.time())
+    return {
+        "schemaVersion": 1,
+        "eventType": "alert",
+        "severity": "warning",
+        "id": f"dispatcher-test-provenance-refused-{now}",
+        "createdAt": now_iso(),
+        "machine": socket.gethostname(),
+        "platform": sys.platform,
+        "instance": "bot-errors-dispatcher",
+        "source": "test-provenance-refused",
+        "summary": "BOT ERRORS dispatcher refused test-provenance events",
+        "evidence": "\n".join([
+            f"refused_events:{refused}",
+            f"debounce_window_seconds:{window}",
+            "disposition: originals retained in suppressed audit state",
+            "reason: producer test-provenance event reached dispatcher backstop",
+        ]),
+        "process": {"pid": os.getpid()},
+        "diagnostics": {"omitDispatchLogInMessage": True},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def queue_test_provenance_meta_alert(paths: dict[str, Path], refused: int) -> int:
+    if refused <= 0:
+        return 0
+    now = int(time.time())
+    window = test_provenance_meta_window_seconds()
+    state = read_meta_state(paths)
+    last = int(state.get("testProvenanceMetaAlertAtEpoch") or 0)
+    if last and now - last < window:
+        append_dispatch_log(paths, {
+            "type": "test_provenance_meta_debounced",
+            "refused": refused,
+            "windowSeconds": window,
+        })
+        return 0
+
+    event = test_provenance_meta_event(paths, refused, window)
+    path = outbox_path_for_event(event, paths)
+    atomic_write_json(path, event)
+    state["testProvenanceMetaAlertAtEpoch"] = now
+    state["testProvenanceMetaAlertEventId"] = event["id"]
+    write_meta_state(paths, state)
+    append_dispatch_log(paths, {
+        "type": "test_provenance_meta_queued",
+        "eventId": event["id"],
+        "refused": refused,
+        "windowSeconds": window,
+    })
+    return 1
+
+
+def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
+    suppressed = 0
+    for path in sorted(paths["outbox"].glob("*.json")):
+        if not ready(path, paths["quarantine"]):
+            continue
+        try:
+            event = read_json(path)
+        except Exception:
+            continue
+        if not is_test_provenance_event(event):
+            continue
+        move_suppressed_event(
+            path,
+            paths,
+            event,
+            TEST_PROVENANCE_SUPPRESSION_REASON,
+            "test_provenance_suppressed",
+        )
+        suppressed += 1
+    alerted = queue_test_provenance_meta_alert(paths, suppressed)
+    return suppressed, alerted
+
+
 def ready(path: Path, quarantine_dir: Path) -> bool:
     try:
         event = read_json(path)
@@ -2501,7 +2607,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
         return False, "test_leak"
 
     diagnostics = event.setdefault("diagnostics", {})
-    if isinstance(diagnostics, dict):
+    if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):
         diagnostics["dispatchLog"] = str(paths["logs"] / "dispatch.jsonl")
     event = mark_attempt(event)
     atomic_write_json(claimed, event)
@@ -2582,11 +2688,12 @@ def run_once(max_events: int) -> dict[str, Any]:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         writefail_recovered = recover_writefail_breadcrumbs(paths)
         reclaimed = reclaim_processing(paths)
+        test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
         recovery_deduped = suppress_ready_recovery_duplicates(paths)
         storm_collapsed = collapse_ready_storms(paths)
         processed = 0
         sent = 0
-        suppressed = recovery_deduped
+        suppressed = test_provenance_suppressed + recovery_deduped
         failed = 0
         test_leak_dropped = 0
         last_error = None
@@ -2648,6 +2755,8 @@ def run_once(max_events: int) -> dict[str, Any]:
             testLeakDropped=test_leak_dropped,
             reclaimed=reclaimed,
             writefailRecovered=writefail_recovered,
+            testProvenanceSuppressed=test_provenance_suppressed,
+            testProvenanceMetaAlerted=test_provenance_meta_alerted,
             recoveryDeduped=recovery_deduped,
             stormCollapsed=storm_collapsed,
             suppressedPruned=suppressed_pruned,
@@ -2663,6 +2772,8 @@ def run_once(max_events: int) -> dict[str, Any]:
             "testLeakDropped": test_leak_dropped,
             "reclaimed": reclaimed,
             "writefailRecovered": writefail_recovered,
+            "testProvenanceSuppressed": test_provenance_suppressed,
+            "testProvenanceMetaAlerted": test_provenance_meta_alerted,
             "recoveryDeduped": recovery_deduped,
             "stormCollapsed": storm_collapsed,
             "suppressedPruned": suppressed_pruned,
