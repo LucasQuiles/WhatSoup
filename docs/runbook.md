@@ -254,6 +254,18 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
     "validation": "claude-haiku-4-5",
     "fallback": "gpt-5.4"
   },
+  "model_advisories": {
+    "checkedAt": "2026-03-30T14:22:00.000Z",
+    "advisories": [
+      {
+        "model": "claude-opus-4-6",
+        "role": "conversation",
+        "level": "upgrade-available",
+        "recommended": "claude-opus-4-8",
+        "message": "model \"claude-opus-4-6\" has a newer sibling — \"claude-opus-4-8\" is available"
+      }
+    ]
+  },
   "durability": {
     "pendingOutbound": 0,
     "quarantinedOutbound": 0,
@@ -261,6 +273,8 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
   }
 }
 ```
+
+`model_advisories` carries the latest model-currency check (`checkedAt` is `null` until the first check completes; `advisories` is empty when every configured model is current). Levels: `upgrade-available`, `deprecated` (with `retiresAt`), `retired`. See `docs/configuration.md` → "Model currency advisories" for the full behavior.
 
 ### Status Meanings
 
