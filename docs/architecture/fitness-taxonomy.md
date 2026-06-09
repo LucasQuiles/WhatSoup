@@ -77,3 +77,35 @@ Current baseline measurements:
 |------|------|-------|
 | `arch.file-size` | `src/runtimes/agent/runtime.ts` | 6009 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 7043 |
+
+## ESLint Ring (live)
+
+The `eslint` ring is enforced by `npm run guard:lint:src`
+(`scripts/eslint-fitness-check.ts` + `eslint.config.fitness.mjs`), wired into
+`verify:push:branch`, `verify:release`, and the CI quality workflow. The config
+derives its rule set from this registry — a drift test
+(`tests/scripts/eslint-fitness-check.test.ts`) asserts it enforces exactly the
+rules whose `rings` include `eslint`.
+
+| registry id | ESLint rule | notes |
+|-------------|-------------|-------|
+| `arch.file-size` | built-in `max-lines` (max 2000) | advisory mirror only |
+| `arch.god-class` | `fitness/god-class` (maxClassLines 1200 **and** maxMethods 80) | composite — both thresholds must trip |
+| `invariant.fail-closed-scanner` | `fitness/fail-closed-scanner` | catch returning empty without rethrow/exitCode/emit |
+| `test.skip-categorization` | `fitness/categorized-skips` | skip/`skipIf` must carry `@skip-env` or `@skip-timing` |
+
+**Every eslint-ring rule reports at `warn` severity, so `guard:lint:src` exits 0
+on warnings and fails only on configured errors or parser/config faults.** Two
+reasons:
+
+1. **Visibility without blocking.** Known violations (notably the `AgentRuntime`
+   god-class and several oversized files) surface as warnings rather than breaking
+   CI before they are refactored.
+2. **No redundant block** (`meta.no-redundant-gates`). `arch.file-size` is already
+   *blocked* by the guard/ci ring against the ratchet baseline above; the eslint
+   copy is an advisory mirror so blocking authority is not duplicated.
+
+Because the ring is warn-only, the known violations are intentionally **not**
+baseline-suppressed here — they stay visible in the lint output. Local runs use
+`node --experimental-strip-types`; Node 24/25 (the supported engines range) is
+authoritative via CI.
