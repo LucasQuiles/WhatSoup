@@ -98,7 +98,7 @@ export class AnthropicApiProvider implements ProviderSession {
    */
   constructor(config?: ProviderConfig['providerConfig']) {
     this.config = config;
-    this.model = config?.model ?? 'claude-sonnet-4-20250514';
+    this.model = config?.model ?? 'claude-sonnet-4-6';
     this.baseUrl = (config?.baseUrl as string | undefined) ?? 'https://api.anthropic.com/v1';
   }
 

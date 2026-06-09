@@ -10,6 +10,7 @@ import type { ConnectionManager } from '../transport/connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { getModelAdvisories } from '../lib/model-advisor.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -643,6 +644,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           validation: config.models.validation,
           fallback: config.models.fallback,
         },
+        model_advisories: getModelAdvisories(),
         durability: deps.durability?.getHealthStats() ?? null,
         runtime: runtimeBlock,
       });

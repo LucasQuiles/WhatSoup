@@ -98,7 +98,7 @@ export class OpenAIApiProvider implements ProviderSession {
    */
   constructor(config?: ProviderConfig['providerConfig']) {
     this.baseUrl = config?.baseUrl ?? 'https://api.openai.com/v1';
-    this.model = config?.model ?? 'gpt-4o';
+    this.model = config?.model ?? 'gpt-5.4';
     this.apiKeyService = config?.apiKeyService;
   }
 
