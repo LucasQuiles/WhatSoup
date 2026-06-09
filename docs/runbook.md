@@ -249,7 +249,7 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
     "last_run": "2026-03-30T14:22:00.000Z"
   },
   "models": {
-    "conversation": "claude-opus-4-6",
+    "conversation": "claude-opus-4-8",
     "extraction": "claude-sonnet-4-6",
     "validation": "claude-haiku-4-5",
     "fallback": "gpt-5.4"

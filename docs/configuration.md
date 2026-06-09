@@ -28,12 +28,31 @@ before the process starts. They are never written to disk.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `CONVERSATION_MODEL` | string | `claude-opus-4-6` | Primary model for response generation. |
+| `CONVERSATION_MODEL` | string | `claude-opus-4-8` | Primary model for response generation. |
 | `EXTRACTION_MODEL` | string | `claude-sonnet-4-6` | Model for memory extraction and enrichment. |
 | `VALIDATION_MODEL` | string | `claude-haiku-4-5` | Model for validation and lightweight classification. |
 | `FALLBACK_MODEL` | string | `gpt-5.4` | OpenAI fallback when the primary model is unavailable. |
 
 All four can be overridden per-instance via `config.json` `models` object.
+
+#### Model currency advisories
+
+Model IDs are passed through to providers opaquely — any string is accepted, so
+new vendor releases work without a WhatSoup change. On startup (and daily
+thereafter) the bot checks every configured model against the catalog in
+`src/lib/model-catalog.ts`, plus the live Anthropic/OpenAI Models APIs when the
+matching API key is present, and notifies operators through the BOT_ERRORS alert
+pipeline (source `model-currency`) when a configured model:
+
+- has a newer sibling in the same family (`info` severity, e.g. `claude-opus-4-6` → `claude-opus-4-8`), or
+- is deprecated or retired upstream (`warning` severity, with the retirement date and replacement).
+
+The check is advisory and fail-open: unknown providers/IDs, missing API keys,
+and network failures all degrade to silence. The latest result is exposed on
+the `/health` endpoint under `model_advisories`. Future model IDs that follow
+vendor naming conventions (`claude-<family>-<major>-<minor>`,
+`gpt-<major>.<minor>`) are recognized and ordered automatically; only
+lifecycle metadata (deprecations/retirements) needs occasional catalog updates.
 
 ### Conversation
 

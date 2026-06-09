@@ -49,6 +49,7 @@ import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
 import { TriggerPoller } from './core/substrate/poller.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
+import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 
 function resolveTilde(p: string): string {
@@ -183,6 +184,17 @@ durability.preConnectRecovery();
 
 // Parse INSTANCE_CONFIG once — used for warm-start import and instance type selection.
 const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown> : null;
+
+// Model currency advisories — startup + daily check that configured models are
+// still current, with operator notification via BOT_ERRORS when they are not.
+// Advisory-only and fail-open; never blocks startup. See docs/configuration.md.
+startModelCurrencyMonitor(config.botName, {
+  conversation: config.models.conversation,
+  extraction: config.models.extraction,
+  validation: config.models.validation,
+  fallback: config.models.fallback,
+  agent: resolveAgentModel(instanceConfig),
+});
 
 // 2a. Warm-start import: if DB is empty, import from legacy instance DB
 {

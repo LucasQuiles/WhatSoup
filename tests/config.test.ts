@@ -136,7 +136,7 @@ describe('config — no INSTANCE_CONFIG (backward compat)', () => {
     expect(config.maxTokens).toBe(750);
     expect(config.adminPhones).toBeInstanceOf(Set);
     expect(config.adminPhones.size).toBe(0);
-    expect(config.models.conversation).toBe('claude-opus-4-6');
+    expect(config.models.conversation).toBe('claude-opus-4-8');
     expect(config.models.extraction).toBe('claude-sonnet-4-6');
     expect(config.models.validation).toBe('claude-haiku-4-5');
     expect(config.models.fallback).toBe('gpt-5.4');
