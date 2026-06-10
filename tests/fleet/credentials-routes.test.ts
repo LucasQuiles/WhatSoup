@@ -112,3 +112,42 @@ describe('PUT /api/credentials/:service', () => {
     expect(json().code).toBe('KEYRING_LOCKED');
   });
 });
+
+describe('DELETE /api/credentials/:service', () => {
+  it('deletes and reports inUse + envShadowed', async () => {
+    const { res, status, json } = fakeRes();
+    await handleDeleteCredential(fakeReq(), res, { name: 'deepseek' }, { instances: [] });
+    expect(keyringMock.deleteCredential).toHaveBeenCalledWith('deepseek');
+    expect(status()).toBe(200);
+    expect(json()).toEqual({ ok: true, service: 'deepseek', envShadowed: false, inUse: false });
+  });
+
+  it('404s when nothing was deleted, still explaining env shadowing', async () => {
+    keyringMock.deleteCredential.mockReturnValue({ deleted: false, backend: 'macos-keychain' });
+    process.env.DEEPSEEK_API_KEY = 'shadow';
+    const { res, status, json } = fakeRes();
+    await handleDeleteCredential(fakeReq(), res, { name: 'deepseek' }, { instances: [] });
+    expect(status()).toBe(404);
+    expect(json().envShadowed).toBe(true);
+  });
+
+  it('flags inUse when a discovered instance resolves this service as primary or fallback', async () => {
+    const deps = {
+      instances: [
+        { name: 'clanka', agentOptions: { provider: 'claude-cli', fallbackProvider: 'opencode-cli', fallbackModel: 'deepseek/deepseek-chat' } },
+      ],
+    };
+    const { res, json } = fakeRes();
+    await handleDeleteCredential(fakeReq(), res, { name: 'deepseek' }, deps);
+    expect(json().inUse).toBe(true);
+  });
+});
+
+describe('GET /api/credentials/:service — no read-back, ever', () => {
+  it('returns 405', () => {
+    const { res, status, json } = fakeRes();
+    handleGetCredential(fakeReq(), res);
+    expect(status()).toBe(405);
+    expect(json()).toEqual({ error: 'credentials are write-only' });
+  });
+});

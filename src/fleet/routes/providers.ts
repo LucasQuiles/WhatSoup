@@ -33,7 +33,7 @@ const PROVIDER_META: Record<ProviderId, ProviderCatalogMeta> = {
   'codex-cli':     { displayName: 'Codex',      type: 'cli', needsApiKey: false, credentialService: null },
   'gemini-cli':    { displayName: 'Gemini',     type: 'cli', needsApiKey: false, credentialService: null },
   // opencode-cli resolves its service from the model prefix at runtime
-  // (deepseek/minimax — see keyringServiceFor); the catalog advertises null
+  // (deepseek/minimax — see resolveProviderKeyService); the catalog advertises null
   // and the console offers the full allowlist for opencode fallback models.
   'opencode-cli':  { displayName: 'OpenCode',   type: 'cli', needsApiKey: true,  credentialService: null },
   'openai-api':    { displayName: 'OpenAI',     type: 'api', needsApiKey: true,  credentialService: 'openai' },

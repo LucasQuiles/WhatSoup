@@ -19,6 +19,7 @@ import {
   lookupCredential,
   KeyringWriteError,
   SERVICE_ENV_MAP,
+  resolveProviderKeyService,
 } from '../../lib/keyring.ts';
 import { PROVIDER_VERIFY_DESCRIPTORS } from './providers.ts';
 
@@ -161,8 +162,8 @@ function serviceInUse(deps: CredentialDeps, service: string): boolean {
   return deps.instances.some((inst) => {
     const ao = inst.agentOptions ?? {};
     return (
-      keyringServiceFor(ao.provider, ao.model) === service ||
-      keyringServiceFor(ao.fallbackProvider, ao.fallbackModel) === service
+      resolveProviderKeyService(ao.provider, ao.model) === service ||
+      resolveProviderKeyService(ao.fallbackProvider, ao.fallbackModel) === service
     );
   });
 }
@@ -250,25 +251,4 @@ export async function handleVerifyCredential(
   jsonResponse(res, 200, { ok: status === 'valid', service, status, envShadowed: envShadowed(service) });
 }
 
-// ---------------------------------------------------------------------------
-// Internal helper — mirrors keyringServiceFor from lines.ts
-// ---------------------------------------------------------------------------
 
-/**
- * Derive the keyring service for a given provider/model combination.
- * This mirrors the logic in src/fleet/routes/lines.ts (keyringServiceFor).
- * Kept local so credentials.ts does not create a circular dep with lines.ts.
- */
-function keyringServiceFor(provider: string | null | undefined, model: string | null | undefined): string | null {
-  if (!provider) return null;
-  switch (provider) {
-    case 'opencode-cli': {
-      const prefix = typeof model === 'string' ? model.split('/')[0]?.trim() : '';
-      return prefix ? prefix : null;
-    }
-    case 'openai-api':
-      return 'openai';
-    default:
-      return null;
-  }
-}
