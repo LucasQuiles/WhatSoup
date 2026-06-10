@@ -8,7 +8,8 @@ import { FleetDiscovery } from './discovery.ts';
 import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
-import { handleGetLines, handleGetLine } from './routes/lines.ts';
+import { handleGetLines, handleGetLine, handleGetLineProviderStatus } from './routes/lines.ts';
+import { handleGetProviders } from './routes/providers.ts';
 import { handleGetSilences, handleAddSilence, handleRemoveSilence } from './routes/silence.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth, handleMarkRead } from './routes/ops.ts';
@@ -89,8 +90,10 @@ type NameIdRouteParams = { name: string; id: string };
 type NameJidRouteParams = { name: string; jid: string };
 
 type RouteParamsByHandler = {
+  getProviders: EmptyRouteParams;
   getLines: EmptyRouteParams;
   getLine: NameRouteParams;
+  getLineProviderStatus: NameRouteParams;
   getSilences: EmptyRouteParams;
   addSilence: EmptyRouteParams;
   removeSilence: NameRouteParams;
@@ -158,6 +161,7 @@ type RouteHandler<K extends RouteKey> = (
 const EMPTY_ROUTE_PARAMS: EmptyRouteParams = {};
 const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'getLine',
+  'getLineProviderStatus',
   'removeSilence',
   'getChats',
   'getMessages',
@@ -204,8 +208,10 @@ function hasNameParam(handler: RouteKey): handler is NamedRouteKey {
 }
 
 const handlers: { [K in RouteKey]: RouteHandler<K> } = {
+  getProviders: (req, res, _deps, _params) => handleGetProviders(req, res),
   getLines:     (req, res, deps, _params) => handleGetLines(req, res, deps),
   getLine:      (req, res, deps, params) => handleGetLine(req, res, deps, params),
+  getLineProviderStatus: (req, res, deps, params) => handleGetLineProviderStatus(req, res, deps, params),
   getSilences:  (req, res, _deps, _params) => handleGetSilences(req, res),
   addSilence:   (req, res, _deps, _params) => handleAddSilence(req, res),
   removeSilence: (req, res, _deps, params) => handleRemoveSilence(req, res, { instance: params.name }),
@@ -291,9 +297,11 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/typing$/, handler: 'getTyping' },
   { method: 'GET',   path: /^\/api\/feed$/, handler: 'getFeed' },
   { method: 'GET',   path: /^\/api\/directories\/check$/, handler: 'checkDirectory' },
+  { method: 'GET',   path: /^\/api\/providers$/, handler: 'getProviders' },
   { method: 'GET',   path: /^\/api\/lines$/, handler: 'getLines' },
   { method: 'POST',  path: /^\/api\/lines$/, handler: 'createLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/exists$/, handler: 'checkExists' },
+  { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/provider-status$/, handler: 'getLineProviderStatus' },
   { method: 'DELETE', path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'deleteLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)$/, handler: 'getLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/chats$/, handler: 'getChats' },
