@@ -48,7 +48,11 @@ pipeline (source `model-currency`) when a configured model:
 - is deprecated or retired upstream (`warning` severity, with the retirement date and replacement).
 
 The check is advisory and fail-open: unknown providers/IDs, missing API keys,
-and network failures all degrade to silence. The latest result is exposed on
+and network failures all degrade to silence. Note the dependency this implies:
+detecting a brand-new release the static catalog has never heard of requires
+the live Models API (matching API key present); without keys, advisories come
+from the static catalog alone, so an upstream retirement that postdates the
+catalog produces no warning. The latest result is exposed on
 the `/health` endpoint under `model_advisories`. Future model IDs that follow
 vendor naming conventions (`claude-<family>-<major>-<minor>`,
 `gpt-<major>.<minor>`) are recognized and ordered automatically; only
