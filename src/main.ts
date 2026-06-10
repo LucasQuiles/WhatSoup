@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { ConnectionManager } from './transport/connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
+import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
 import { resolveAgentModel } from './instance-loader.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/pinecone.ts';
@@ -268,7 +269,16 @@ if (instanceType === 'agent') {
     sandbox: agentOpts?.sandbox,
     model: agentModel,
     sandboxPerChat: agentOpts?.sandboxPerChat as boolean | undefined,
-    pluginDirs: agentOpts?.pluginDirs?.map(d => resolveTilde(d)),
+    pluginDirs: agentOpts?.pluginDirs?.map(d => {
+      const resolved = resolveTilde(d);
+      // A pinned plugin version dir (e.g. .../superpowers/5.0.7) disappears
+      // after `claude plugin update`; substitute the latest existing sibling.
+      const latest = resolveLatestPluginDir(resolved);
+      if (latest !== resolved) {
+        log.debug({ configured: resolved, resolved: latest }, 'substituted missing plugin dir with latest version sibling');
+      }
+      return latest;
+    }),
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,

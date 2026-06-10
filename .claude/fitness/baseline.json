@@ -6,7 +6,7 @@
       "measurements": [
         {
           "filePath": "src/runtimes/agent/runtime.ts",
-          "lines": 6009
+          "lines": 6359
         },
         {
           "filePath": "tests/runtimes/agent/runtime.test.ts",
