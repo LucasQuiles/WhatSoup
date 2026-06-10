@@ -64,3 +64,25 @@ describe('writeCredential — macos-keychain backend', () => {
     expect(code).toBe('KEYRING_WRITE_FAILED');
   });
 });
+
+describe('writeCredential — secret-tool backend', () => {
+  beforeEach(() => {
+    _resetBackendCache();
+    vi.stubGlobal('process', { ...process, platform: 'linux' } as unknown as NodeJS.Process);
+    execFileSyncMock.mockReset();
+    // detectKeyringBackend probes `secret-tool --help` first — succeed it.
+    execFileSyncMock.mockReturnValue(Buffer.from(''));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('pipes the value via stdin (never argv) with -- separators', () => {
+    writeCredential('minimax', 'mm-secret-VALUE');
+    const storeCall = execFileSyncMock.mock.calls.find((c) => c[1]?.[0] === 'store');
+    expect(storeCall).not.toBe(undefined);
+    const [cmd, args, opts] = storeCall!;
+    expect(cmd).toBe('secret-tool');
+    expect(args).toEqual(['store', '--label=whatsoup minimax', 'service', 'minimax']);
+    expect((opts as { input?: string }).input).toBe('mm-secret-VALUE');
+    expect(JSON.stringify(args)).not.toContain('mm-secret-VALUE');
+  });
+});

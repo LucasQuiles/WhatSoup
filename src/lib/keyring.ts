@@ -226,6 +226,18 @@ export function writeCredential(
       throw new KeyringWriteError(classifyDarwinWriteError(err), `keychain write failed for service ${service}`);
     }
   }
-  // secret-tool and file-store backends land in Tasks 2–3.
+  if (backend === 'secret-tool') {
+    try {
+      execFileSync('secret-tool', ['store', `--label=whatsoup ${service}`, 'service', service], {
+        timeout: 5_000,
+        input: value,
+        stdio: ['pipe', 'ignore', 'pipe'],
+      });
+      return { backend };
+    } catch {
+      throw new KeyringWriteError('KEYRING_WRITE_FAILED', `secret-tool store failed for service ${service}`);
+    }
+  }
+  // file-store backend lands in Task 3.
   throw new KeyringWriteError('KEYRING_WRITE_UNSUPPORTED', `no writable keyring backend (${backend})`);
 }
