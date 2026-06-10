@@ -168,3 +168,64 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
 export function _resetBackendCache(): void {
   _cachedBackend = undefined;
 }
+
+// ─── Write path ───────────────────────────────────────────────────────────────
+
+export type KeyringErrorCode =
+  | 'KEYRING_LOCKED'
+  | 'KEYRING_ACCESS_DENIED'
+  | 'KEYRING_WRITE_FAILED'
+  | 'KEYRING_WRITE_UNSUPPORTED';
+
+/**
+ * Sanitized keyring failure. NEVER constructed from a raw child-process error:
+ * those carry `spawnargs` (may include the secret) and `stderr`, which the
+ * fleet server's global `log.error({ err })` handler would serialize.
+ */
+export class KeyringWriteError extends Error {
+  readonly code: KeyringErrorCode;
+  constructor(code: KeyringErrorCode, message: string) {
+    super(message);
+    this.name = 'KeyringWriteError';
+    this.code = code;
+  }
+}
+
+/** macOS `security` exit statuses / markers that mean "keychain locked". */
+function classifyDarwinWriteError(err: unknown): KeyringErrorCode {
+  const status = (err as { status?: number } | null)?.status;
+  const stderr = String((err as { stderr?: Buffer | string } | null)?.stderr ?? '');
+  if (status === 36 || /interaction is not allowed/i.test(stderr)) return 'KEYRING_LOCKED';
+  if (status === 45 || /errSecAuthFailed|write permissions/i.test(stderr)) return 'KEYRING_ACCESS_DENIED';
+  return 'KEYRING_WRITE_FAILED';
+}
+
+export interface CredentialWriteResult { backend: KeyringBackend }
+
+/**
+ * Store a credential in the platform keyring (create or overwrite).
+ * Throws KeyringWriteError (sanitized — safe to log) on failure.
+ */
+export function writeCredential(
+  service: string,
+  value: string,
+  options: { user?: string } = {},
+): CredentialWriteResult {
+  const backend = detectKeyringBackend();
+  const account = options.user ?? os.userInfo().username;
+
+  if (backend === 'macos-keychain') {
+    try {
+      execFileSync(
+        'security',
+        ['add-generic-password', '-U', '-s', '--', service, '-a', '--', account, '-w', value],
+        { timeout: 5_000, stdio: ['ignore', 'ignore', 'pipe'] },
+      );
+      return { backend };
+    } catch (err) {
+      throw new KeyringWriteError(classifyDarwinWriteError(err), `keychain write failed for service ${service}`);
+    }
+  }
+  // secret-tool and file-store backends land in Tasks 2–3.
+  throw new KeyringWriteError('KEYRING_WRITE_UNSUPPORTED', `no writable keyring backend (${backend})`);
+}
