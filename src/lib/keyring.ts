@@ -145,7 +145,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           const account = index === 0 && options.user ? options.user : username;
           const raw = execFileSync(
             'security',
-            ['find-generic-password', '-s', candidate, '-a', account, '-w'],
+            ['find-generic-password', '-s', '--', candidate, '-a', '--', account, '-w'],
             { timeout: 5_000 },
           );
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();

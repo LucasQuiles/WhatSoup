@@ -132,3 +132,19 @@ describe('writeCredential — file-store backend (env-only hosts)', () => {
     expect(lookupCredential('minimax')).toBe('B');
   });
 });
+
+describe('lookupCredential — flag-injection guards', () => {
+  beforeEach(() => {
+    _resetBackendCache();
+    vi.stubGlobal('process', { ...process, platform: 'darwin' } as unknown as NodeJS.Process);
+    execFileSyncMock.mockReset();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('passes -- separators to security find-generic-password', () => {
+    execFileSyncMock.mockReturnValue(Buffer.from('val'));
+    lookupCredential('deepseek', { skipEnv: true });
+    const call = execFileSyncMock.mock.calls.find((c) => c[0] === 'security');
+    expect(call![1]).toEqual(['find-generic-password', '-s', '--', 'deepseek', '-a', '--', os.userInfo().username, '-w']);
+  });
+});

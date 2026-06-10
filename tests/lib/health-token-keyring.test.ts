@@ -149,13 +149,13 @@ describe('health token keyring canonical service', () => {
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       1,
       'security',
-      ['find-generic-password', '-s', 'whatsoup-health-token', '-a', 'mwlab', '-w'],
+      ['find-generic-password', '-s', '--', 'whatsoup-health-token', '-a', '--', 'mwlab', '-w'],
       expect.any(Object),
     );
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       2,
       'security',
-      ['find-generic-password', '-s', 'whatsoup_health', '-a', 'local-user', '-w'],
+      ['find-generic-password', '-s', '--', 'whatsoup_health', '-a', '--', 'local-user', '-w'],
       expect.any(Object),
     );
   });
