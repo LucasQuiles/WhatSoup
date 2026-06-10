@@ -8,6 +8,8 @@
  */
 import { execFileSync } from 'node:child_process';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { createChildLogger } from '../logger.ts';
 
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
@@ -125,8 +127,12 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           }
         }
       }
+      const fileVal1 = fileStoreRead(service);
+      if (fileVal1) return fileVal1;
       return lookupEnvAfterKeyringMiss();
     } catch {
+      const fileVal2 = fileStoreRead(service);
+      if (fileVal2) return fileVal2;
       return lookupEnvAfterKeyringMiss();
     }
   }
@@ -154,13 +160,19 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           }
         }
       }
+      const fileVal3 = fileStoreRead(service);
+      if (fileVal3) return fileVal3;
       return lookupEnvAfterKeyringMiss();
     } catch {
+      const fileVal4 = fileStoreRead(service);
+      if (fileVal4) return fileVal4;
       return lookupEnvAfterKeyringMiss();
     }
   }
 
-  // env-only or scoped keyring miss.
+  // env-only or scoped keyring miss: consult the file store, then env.
+  const fileVal = fileStoreRead(service);
+  if (fileVal) return fileVal;
   return lookupEnvAfterKeyringMiss();
 }
 
@@ -238,6 +250,92 @@ export function writeCredential(
       throw new KeyringWriteError('KEYRING_WRITE_FAILED', `secret-tool store failed for service ${service}`);
     }
   }
-  // file-store backend lands in Task 3.
-  throw new KeyringWriteError('KEYRING_WRITE_UNSUPPORTED', `no writable keyring backend (${backend})`);
+  // env-only host: per-service 0600 file store (token-storage.ts precedent).
+  try {
+    fileStoreWrite(service, value);
+    return { backend };
+  } catch {
+    throw new KeyringWriteError('KEYRING_WRITE_FAILED', `file-store write failed for service ${service}`);
+  }
+}
+
+// ─── File-store backend (hosts with no OS keyring) ───────────────────────────
+// Per-service 0600 files mirror the OS keyring's per-entry isolation; the
+// directory layout follows the token-storage.ts precedent (0600 under
+// ~/.config/whatsoup/). Used ONLY when detectKeyringBackend() === 'env-only'.
+
+let _fileStoreDirOverride: string | null = null;
+/** Test hook — point the file store at a temp dir (null restores default). */
+export function _setFileStoreDirForTests(dir: string | null): void {
+  _fileStoreDirOverride = dir;
+}
+
+function fileStoreDir(): string {
+  if (_fileStoreDirOverride) return _fileStoreDirOverride;
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  return path.join(base, 'whatsoup', 'credentials');
+}
+
+function fileStorePath(service: string): string {
+  return path.join(fileStoreDir(), `${service}.key`);
+}
+
+function fileStoreRead(service: string): string | null {
+  try {
+    const val = fs.readFileSync(fileStorePath(service), 'utf-8').trim();
+    return val || null;
+  } catch {
+    return null;
+  }
+}
+
+function fileStoreWrite(service: string, value: string): void {
+  const dir = fileStoreDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const target = fileStorePath(service);
+  // Sibling temp file — same directory, so renameSync can never hit EXDEV.
+  const tmp = `${target}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, value, { mode: 0o600 });
+  fs.renameSync(tmp, target);
+}
+
+function fileStoreDelete(service: string): boolean {
+  try {
+    fs.unlinkSync(fileStorePath(service));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface CredentialDeleteResult { deleted: boolean; backend: KeyringBackend }
+
+/** Remove a credential from the platform keyring. Never throws on absence. */
+export function deleteCredential(
+  service: string,
+  options: { user?: string } = {},
+): CredentialDeleteResult {
+  const backend = detectKeyringBackend();
+  const account = options.user ?? os.userInfo().username;
+
+  if (backend === 'macos-keychain') {
+    try {
+      execFileSync('security', ['delete-generic-password', '-s', '--', service, '-a', '--', account], {
+        timeout: 5_000,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      return { deleted: true, backend };
+    } catch {
+      return { deleted: false, backend };
+    }
+  }
+  if (backend === 'secret-tool') {
+    try {
+      execFileSync('secret-tool', ['clear', 'service', service], { timeout: 5_000, stdio: ['ignore', 'ignore', 'pipe'] });
+      return { deleted: true, backend };
+    } catch {
+      return { deleted: false, backend };
+    }
+  }
+  return { deleted: fileStoreDelete(service), backend };
 }

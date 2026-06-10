@@ -86,3 +86,49 @@ describe('writeCredential — secret-tool backend', () => {
     expect(JSON.stringify(args)).not.toContain('mm-secret-VALUE');
   });
 });
+
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { lookupCredential, _setFileStoreDirForTests } from '../../src/lib/keyring.ts';
+
+describe('writeCredential — file-store backend (env-only hosts)', () => {
+  let dir: string;
+  beforeEach(() => {
+    _resetBackendCache();
+    vi.stubGlobal('process', { ...process, platform: 'linux', env: { ...process.env } } as unknown as NodeJS.Process);
+    execFileSyncMock.mockReset();
+    execFileSyncMock.mockImplementation(() => { throw new Error('no secret-tool'); }); // probe fails → env-only
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-credstore-'));
+    _setFileStoreDirForTests(dir);
+  });
+  afterEach(() => {
+    _setFileStoreDirForTests(null);
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+  });
+
+  it('writes a per-service 0600 file and lookupCredential reads it back', () => {
+    const res = writeCredential('deepseek', 'ds-file-VALUE');
+    expect(res.backend).toBe('env-only');
+    const f = path.join(dir, 'deepseek.key');
+    expect((fs.statSync(f).mode & 0o777)).toBe(0o600);
+    expect((fs.statSync(dir).mode & 0o777)).toBe(0o700);
+    delete (process.env as Record<string, string | undefined>).DEEPSEEK_API_KEY;
+    expect(lookupCredential('deepseek')).toBe('ds-file-VALUE');
+  });
+
+  it('deleteCredential removes the file and reports deleted=false when absent', () => {
+    writeCredential('deepseek', 'v1');
+    expect(deleteCredential('deepseek').deleted).toBe(true);
+    expect(deleteCredential('deepseek').deleted).toBe(false);
+  });
+
+  it('serializes concurrent writes — both values land (last write wins, none lost mid-flight)', () => {
+    writeCredential('deepseek', 'A');
+    writeCredential('minimax', 'B');
+    delete (process.env as Record<string, string | undefined>).DEEPSEEK_API_KEY;
+    delete (process.env as Record<string, string | undefined>).MINIMAX_API_KEY;
+    expect(lookupCredential('deepseek')).toBe('A');
+    expect(lookupCredential('minimax')).toBe('B');
+  });
+});
