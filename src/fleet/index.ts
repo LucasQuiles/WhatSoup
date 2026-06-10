@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createChildLogger } from '../logger.ts';
@@ -10,6 +11,7 @@ import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { handleGetLines, handleGetLine, handleGetLineProviderStatus } from './routes/lines.ts';
 import { handleGetProviders } from './routes/providers.ts';
+import { handlePutCredential, handleDeleteCredential, handleVerifyCredential, handleGetCredential, setExtraCredentialServices, type CredentialDeps } from './routes/credentials.ts';
 import { handleGetSilences, handleAddSilence, handleRemoveSilence } from './routes/silence.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
 import { handleSend, handleAccessUpdate, handleSaveContact, handleRestart, handleStop, handleConfigUpdate, handleCreateLine, handleDeleteLine, handleAuth, handleMarkRead } from './routes/ops.ts';
@@ -101,6 +103,10 @@ type NameJidRouteParams = { name: string; jid: string };
 
 type RouteParamsByHandler = {
   getProviders: EmptyRouteParams;
+  putCredential: NameRouteParams;
+  deleteCredential: NameRouteParams;
+  verifyCredential: NameRouteParams;
+  getCredential: NameRouteParams;
   getLines: EmptyRouteParams;
   getLine: NameRouteParams;
   getLineProviderStatus: NameRouteParams;
@@ -172,6 +178,10 @@ const EMPTY_ROUTE_PARAMS: EmptyRouteParams = {};
 const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
   'getLine',
   'getLineProviderStatus',
+  'putCredential',
+  'deleteCredential',
+  'verifyCredential',
+  'getCredential',
   'removeSilence',
   'getChats',
   'getMessages',
@@ -219,6 +229,10 @@ function hasNameParam(handler: RouteKey): handler is NamedRouteKey {
 
 const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getProviders: (req, res, _deps, _params) => handleGetProviders(req, res),
+  putCredential: (req, res, _deps, params) => handlePutCredential(req, res, params),
+  deleteCredential: (req, res, deps, params) => handleDeleteCredential(req, res, params, buildCredentialDeps(deps)),
+  verifyCredential: (req, res, _deps, params) => handleVerifyCredential(req, res, params),
+  getCredential: (req, res) => handleGetCredential(req, res),
   getLines:     (req, res, deps, _params) => handleGetLines(req, res, deps),
   getLine:      (req, res, deps, params) => handleGetLine(req, res, deps, params),
   getLineProviderStatus: (req, res, deps, params) => handleGetLineProviderStatus(req, res, deps, params),
@@ -308,6 +322,10 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/feed$/, handler: 'getFeed' },
   { method: 'GET',   path: /^\/api\/directories\/check$/, handler: 'checkDirectory' },
   { method: 'GET',   path: /^\/api\/providers$/, handler: 'getProviders' },
+  { method: 'PUT',    path: /^\/api\/credentials\/(?<name>[^/]+)$/, handler: 'putCredential' },
+  { method: 'DELETE', path: /^\/api\/credentials\/(?<name>[^/]+)$/, handler: 'deleteCredential' },
+  { method: 'POST',   path: /^\/api\/credentials\/(?<name>[^/]+)\/verify$/, handler: 'verifyCredential' },
+  { method: 'GET',    path: /^\/api\/credentials\/(?<name>[^/]+)$/, handler: 'getCredential' },
   { method: 'GET',   path: /^\/api\/lines$/, handler: 'getLines' },
   { method: 'POST',  path: /^\/api\/lines$/, handler: 'createLine' },
   { method: 'GET',   path: /^\/api\/lines\/(?<name>[^/]+)\/exists$/, handler: 'checkExists' },
@@ -679,6 +697,28 @@ function readSchemaMigrationVersion(rawDb: DatabaseSync): number {
 // ---------------------------------------------------------------------------
 // Server factory
 // ---------------------------------------------------------------------------
+
+/**
+ * Build the CredentialDeps slice that the DELETE credential handler needs:
+ * a list of discovered instances with their agentOptions, read synchronously
+ * from the discovery cache. Follows the same config-read pattern as
+ * handleGetLineProviderStatus (lines.ts).
+ */
+function buildCredentialDeps(deps: RouteDeps): CredentialDeps {
+  const instances: CredentialDeps['instances'] = [];
+  for (const inst of deps.discovery.getInstances().values()) {
+    let agentOptions: CredentialDeps['instances'][number]['agentOptions'] = {};
+    try {
+      const raw = JSON.parse(fs.readFileSync(inst.configPath, 'utf-8')) as Record<string, unknown>;
+      const opts = raw.agentOptions;
+      if (opts && typeof opts === 'object' && !Array.isArray(opts)) {
+        agentOptions = opts as CredentialDeps['instances'][number]['agentOptions'];
+      }
+    } catch { /* config unreadable */ }
+    instances.push({ name: inst.name, agentOptions });
+  }
+  return { instances };
+}
 
 export function createFleetServer(deps: FleetDeps) {
   const discovery = new FleetDiscovery();

@@ -346,6 +346,15 @@ describe('fleet server -- API auth gating (Bearer)', () => {
     const res = await fetch(`${baseUrl}/api/unknown/path`);
     expect(res.status).toBe(401);
   });
+
+  it('PUT /api/credentials/deepseek without Bearer token returns 401', async () => {
+    const res = await fetch(`${baseUrl}/api/credentials/deepseek`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: 'sk-test' }),
+    });
+    expect(res.status).toBe(401);
+  });
 });
 
 // ---------------------------------------------------------------------------
