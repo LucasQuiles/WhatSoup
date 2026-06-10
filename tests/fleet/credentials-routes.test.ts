@@ -1,5 +1,5 @@
 // tests/fleet/credentials-routes.test.ts
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -149,5 +149,65 @@ describe('GET /api/credentials/:service — no read-back, ever', () => {
     handleGetCredential(fakeReq(), res);
     expect(status()).toBe(405);
     expect(json()).toEqual({ error: 'credentials are write-only' });
+  });
+});
+
+describe('POST /api/credentials/:service/verify', () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock);
+    fetchMock.mockReset();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('reports valid on 200, sending the typed auth header and never a body', async () => {
+    fetchMock.mockResolvedValue({ status: 200 });
+    const { res, json } = fakeRes();
+    await handleVerifyCredential(fakeReq(), res, { name: 'deepseek' });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://api.deepseek.com/models');
+    expect(init.headers.Authorization).toBe('Bearer resolved-key');
+    expect(init.body).toBe(undefined);
+    expect(json()).toEqual({ ok: true, service: 'deepseek', status: 'valid', envShadowed: false });
+  });
+
+  it('reports invalid on 401', async () => {
+    fetchMock.mockResolvedValue({ status: 401 });
+    const { res, json } = fakeRes();
+    await handleVerifyCredential(fakeReq(), res, { name: 'deepseek' });
+    expect(json().status).toBe('invalid');
+  });
+
+  it('reports unreachable on network error', async () => {
+    fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
+    const { res, json } = fakeRes();
+    await handleVerifyCredential(fakeReq(), res, { name: 'deepseek' });
+    expect(json().status).toBe('unreachable');
+  });
+
+  it('reports unsupported for an allowlisted service with no descriptor (minimax)', async () => {
+    const { res, json } = fakeRes();
+    await handleVerifyCredential(fakeReq(), res, { name: 'minimax' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(json().status).toBe('unsupported');
+  });
+
+  it('404s when no key is present', async () => {
+    keyringMock.lookupCredential.mockReturnValue(null);
+    const { res, status } = fakeRes();
+    await handleVerifyCredential(fakeReq(), res, { name: 'deepseek' });
+    expect(status()).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('enforces a per-service cooldown with 429 + retryAfter', async () => {
+    fetchMock.mockResolvedValue({ status: 200 });
+    const a = fakeRes();
+    await handleVerifyCredential(fakeReq(), a.res, { name: 'deepseek' });
+    const b = fakeRes();
+    await handleVerifyCredential(fakeReq(), b.res, { name: 'deepseek' });
+    expect(b.status()).toBe(429);
+    expect(typeof b.json().retryAfter).toBe('number');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

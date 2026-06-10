@@ -250,5 +250,3 @@ export async function handleVerifyCredential(
   }
   jsonResponse(res, 200, { ok: status === 'valid', service, status, envShadowed: envShadowed(service) });
 }
-
-
