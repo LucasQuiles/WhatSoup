@@ -2,6 +2,10 @@
 import { validatePhone } from '../../lib/validation'
 import { isRecord } from '../../lib/type-guards'
 import { ACCESS_MODE_VALUES } from '../../lib/access-modes'
+import { PROVIDERS } from '../../lib/providers'
+
+/** Provider ids sourced from the single console catalog — never a second hardcoded list. */
+const PROVIDER_IDS = PROVIDERS.map((p) => p.id)
 
 export { isRecord }
 
@@ -105,6 +109,11 @@ export const AGENT_OPTION_FIELDS: Record<string, AgentOptionFieldDefinition> = {
   'agentOptions.sandboxPerChat': { type: 'boolean' },
   'agentOptions.pluginDirs': { type: 'array' },
   'agentOptions.mcp.inheritUserConfig': { type: 'boolean' },
+  // Fallback provider/model — typed so they render as editable rows in
+  // ConfigEditDialog instead of falling into the read-only "agentOptions (other)"
+  // JSON blob. Saved via the existing PATCH /api/lines/:name/config path.
+  'agentOptions.fallbackProvider': { type: 'enum', enum: PROVIDER_IDS },
+  'agentOptions.fallbackModel': { type: 'string' },
 }
 
 export function buildConfigEntries(rawConfig: Record<string, unknown>): { key: string; value: string; type: ConfigEntryType }[] {

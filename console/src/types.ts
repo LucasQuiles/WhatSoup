@@ -234,3 +234,35 @@ export interface ContactResult {
   notify?: string;
   number?: string;
 }
+
+// ---------------------------------------------------------------------------
+//  Provider catalog + per-instance provider/key/fallback status
+//  Mirrors GET /api/providers and GET /api/lines/:name/provider-status
+//  (src/fleet/routes/providers.ts, src/fleet/routes/lines.ts).
+// ---------------------------------------------------------------------------
+
+export interface ProviderCatalogEntry {
+  id: string;
+  displayName: string;
+  type: 'cli' | 'api';
+  needsApiKey: boolean;
+  providerConfig: string[];
+}
+
+/** One provider slot (primary or fallback) in the provider-status response. */
+export interface ProviderSlotStatus {
+  provider: string | null;
+  model: string | null;
+  /** true = key set, false = no key, null = native auth (no key required). */
+  keyPresent: boolean | null;
+}
+
+export interface ProviderStatus {
+  primary: ProviderSlotStatus;
+  fallback: ProviderSlotStatus & {
+    /** Whether the runtime is currently serving on its fallback provider. */
+    active: boolean;
+    /** Epoch ms the fallback window reverts, or null when inactive/unset. */
+    activeUntil: number | null;
+  };
+}

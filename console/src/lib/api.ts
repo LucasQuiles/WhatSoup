@@ -41,6 +41,8 @@ import type {
   LogEntry,
   Message,
   MetricsRange,
+  ProviderCatalogEntry,
+  ProviderStatus,
   ScheduledMessage,
 } from '../types.js';
 
@@ -381,6 +383,14 @@ export const api = {
 
   getVersion: () =>
     apiFetch<{ sha: string; remoteSha: string; updateAvailable: boolean; checkedAt: string }>('/api/version'),
+
+  // ── Provider catalog + per-instance provider/key/fallback status ──
+
+  getProviders: () =>
+    apiFetch<ProviderCatalogEntry[]>('/api/providers'),
+
+  getProviderStatus: (name: string) =>
+    apiFetch<ProviderStatus>(`/api/lines/${encodeURIComponent(name)}/provider-status`),
 
   // ── MCP proxy operations ──
 
