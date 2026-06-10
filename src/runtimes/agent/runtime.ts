@@ -5259,6 +5259,22 @@ export class AgentRuntime implements Runtime {
       : this.agentProvider;
   }
 
+  /**
+   * Public, read-only view of the provider-fallback state for observability
+   * (health snapshot / fleet provider-status). Returns the currently effective
+   * provider and the epoch-ms expiry of an active fallback window (`null` when
+   * the bot is on its primary provider). Mirrors {@link effectiveProvider} but
+   * does not widen the underlying fields' visibility.
+   */
+  getFallbackState(): { effectiveProvider: string; fallbackActiveUntil: number | null } {
+    const active =
+      this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil;
+    return {
+      effectiveProvider: this.effectiveProvider,
+      fallbackActiveUntil: active ? this.fallbackActiveUntil : null,
+    };
+  }
+
   /** Model paired with {@link effectiveProvider}: fallbackModel while the window is active, else the primary model. */
   private get effectiveModel(): string | undefined {
     return this.fallbackActiveUntil &&

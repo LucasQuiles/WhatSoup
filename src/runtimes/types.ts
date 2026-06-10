@@ -29,4 +29,10 @@ export interface Runtime {
   handleControlTurn?(reportId: string, payload: string): Promise<void>;
   /** Execute an internal agent command without routing through WhatsApp ingest. */
   handleAgentCommand?(request: AgentCommandRequest): Promise<AgentCommandResult>;
+  /**
+   * Provider-fallback observability (agent runtimes only). Returns the
+   * currently effective provider and the epoch-ms expiry of an active fallback
+   * window (`null` when running on the primary provider).
+   */
+  getFallbackState?(): { effectiveProvider: string; fallbackActiveUntil: number | null };
 }

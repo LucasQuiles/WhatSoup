@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
+import { lookupCredential } from '../../lib/keyring.ts';
 import { extractLocal } from '../../core/access-list.ts';
 import { bareNumber } from '../../core/jid-constants.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
@@ -417,5 +418,96 @@ export async function handleGetLine(
     dbStats: dbStats.ok ? dbStats.data : null,
     config: instanceConfig,
     ...(adminPhonesDisplay ? { adminPhonesDisplay } : {}),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Provider status
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the keyring service name used to look up an API key for a given
+ * provider/model, or `null` when the provider uses native/subscription auth
+ * (no key needed). Mirrors the runtime's API-key resolution:
+ *   - opencode-cli → the model's provider prefix (e.g. `minimax/x` → `minimax`)
+ *   - openai-api   → `openai`
+ *   - claude-cli / codex-cli / gemini-cli / anthropic-api → null (N/A)
+ */
+function keyringServiceFor(provider: string | null | undefined, model: string | null | undefined): string | null {
+  if (!provider) return null;
+  switch (provider) {
+    case 'opencode-cli': {
+      const prefix = typeof model === 'string' ? model.split('/')[0]?.trim() : '';
+      return prefix ? prefix : null;
+    }
+    case 'openai-api':
+      return 'openai';
+    default:
+      // claude-cli, codex-cli, gemini-cli, anthropic-api: native auth, no key.
+      return null;
+  }
+}
+
+/**
+ * Boolean presence of the API key for a provider/model, or `null` when no key
+ * is required (native-auth providers). Never returns or logs the key value —
+ * only whether one is resolvable via env or keyring.
+ */
+function keyPresentFor(provider: string | null | undefined, model: string | null | undefined): boolean | null {
+  const service = keyringServiceFor(provider, model);
+  if (service === null) return null;
+  return lookupCredential(service) !== null;
+}
+
+/**
+ * GET /api/lines/:name/provider-status — per-instance provider / key / fallback
+ * status. Read-only: surfaces the configured primary + fallback providers, the
+ * presence (never the value) of any required API key, and whether the runtime
+ * is currently serving on its fallback provider.
+ */
+export async function handleGetLineProviderStatus(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  deps: LinesDeps,
+  params: { name: string },
+): Promise<void> {
+  const instance = requireInstance(deps.discovery, params.name, res);
+  if (!instance) return;
+
+  let agentOptions: Record<string, unknown> = {};
+  try {
+    const raw = await fs.promises.readFile(instance.configPath, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const opts = parsed.agentOptions;
+    if (opts && typeof opts === 'object' && !Array.isArray(opts)) {
+      agentOptions = opts as Record<string, unknown>;
+    }
+  } catch { /* config unreadable — treat as empty (provider defaults to null) */ }
+
+  const primaryProvider = (agentOptions.provider as string | undefined) ?? null;
+  const primaryModel = (agentOptions.model as string | undefined) ?? null;
+  const fallbackProvider = (agentOptions.fallbackProvider as string | undefined) ?? null;
+  const fallbackModel = (agentOptions.fallbackModel as string | undefined) ?? null;
+
+  // Fallback window state from the instance health snapshot (surface C emits
+  // instance.fallbackActiveUntil as epoch ms or null).
+  const poll = deps.healthPoller.getStatus(params.name);
+  const fallbackActiveUntilRaw = dig(poll?.health as Record<string, unknown> | null | undefined, 'instance', 'fallbackActiveUntil');
+  const activeUntil = typeof fallbackActiveUntilRaw === 'number' ? fallbackActiveUntilRaw : null;
+  const active = activeUntil !== null && Date.now() < activeUntil;
+
+  jsonResponse(res, 200, {
+    primary: {
+      provider: primaryProvider,
+      model: primaryModel,
+      keyPresent: keyPresentFor(primaryProvider, primaryModel),
+    },
+    fallback: {
+      provider: fallbackProvider,
+      model: fallbackModel,
+      keyPresent: fallbackProvider ? keyPresentFor(fallbackProvider, fallbackModel) : null,
+      active,
+      activeUntil,
+    },
   });
 }

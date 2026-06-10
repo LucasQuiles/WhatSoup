@@ -258,6 +258,29 @@ describe('GET /health', () => {
     expect(status).toBe(404);
   });
 
+  it('surfaces effectiveProvider and fallbackActiveUntil from the agent runtime fallback state', async () => {
+    db.close();
+    const db2 = makeDb();
+    const activeUntil = Date.now() + 600_000;
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({ status: 'healthy', details: { active: true } }),
+      getFallbackState: () => ({ effectiveProvider: 'openai-api', fallbackActiveUntil: activeUntil }),
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.instance.effectiveProvider).toBe('openai-api');
+    expect(json.instance.fallbackActiveUntil).toBe(activeUntil);
+    db2.close();
+  });
+
   it('includes instance block with expected fields', async () => {
     const { status, body } = await httpReq(port, '/health', 'GET');
     expect(status).toBe(200);

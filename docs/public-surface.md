@@ -43,7 +43,7 @@ status; before that cut, documented surfaces still inherit the bootstrap caveat 
 
 ## HTTP API — Fleet server
 
-Canonical route table: [`src/fleet/index.ts:287-340`](../src/fleet/index.ts) (`ROUTES`
+Canonical route table: [`src/fleet/index.ts:293-348`](../src/fleet/index.ts) (`ROUTES`
 array). Operator-facing description: [README §Fleet API](../README.md#fleet-api). The fleet
 server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 (`Authorization: Bearer`), an audience-scoped ticket, or the legacy `?token=` query string
@@ -51,60 +51,62 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:fleet.lines.list` | `GET /api/lines` | `src/fleet/index.ts:294` | stable | active | List instances + health |
-| `http:fleet.lines.create` | `POST /api/lines` | `src/fleet/index.ts:295` | stable | active | Create instance |
-| `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:298` | stable | active | Instance detail + config |
-| `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:297` | stable | active | Stop + cleanup |
-| `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:296` | stable | active | Registration probe |
-| `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:312` | stable | active | Update `config.json` |
-| `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:313` | stable | active | QR-code SSE stream |
-| `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:310` | stable | active | Restart unit |
-| `http:fleet.lines.stop` | `POST /api/lines/:name/stop` | `src/fleet/index.ts:311` | stable | active | Stop unit |
-| `http:fleet.lines.send` | `POST /api/lines/:name/send` | `src/fleet/index.ts:306` | stable | active | Send message; accepts `chatJid` or alias `to` + optional `profile` |
-| `http:fleet.lines.access-update` | `POST /api/lines/:name/access` | `src/fleet/index.ts:308` | stable | active | Update access control |
-| `http:fleet.lines.access-view` | `GET /api/lines/:name/access` | `src/fleet/index.ts:304` | stable | active | View access list |
-| `http:fleet.lines.mark-read` | `POST /api/lines/:name/mark-read` | `src/fleet/index.ts:309` | stable | active | Zero unread + chatModify |
-| `http:fleet.lines.contacts-save` | `POST /api/lines/:name/contacts` | `src/fleet/index.ts:307` | stable | active | Save contact |
-| `http:fleet.lines.contacts-search` | `GET /api/lines/:name/contacts/search` | `src/fleet/index.ts:335` | stable | active | Search saved contacts |
-| `http:fleet.lines.chats` | `GET /api/lines/:name/chats` | `src/fleet/index.ts:299` | stable | active | List chats |
-| `http:fleet.lines.messages` | `GET /api/lines/:name/messages` | `src/fleet/index.ts:300` | stable | active | Fetch messages |
-| `http:fleet.lines.messages-search` | `GET /api/lines/:name/messages/search` | `src/fleet/index.ts:301` | stable | active | Full-text search |
-| `http:fleet.lines.metrics` | `GET /api/lines/:name/metrics` | `src/fleet/index.ts:303` | stable | active | 24h / 7d / 30d |
-| `http:fleet.lines.logs` | `GET /api/lines/:name/logs` | `src/fleet/index.ts:305` | stable | active | Instance logs |
-| `http:fleet.lines.scheduled.list` | `GET /api/lines/:name/scheduled` | `src/fleet/index.ts:314` | stable | active | List scheduled; filter `?status=` |
-| `http:fleet.lines.scheduled.create` | `POST /api/lines/:name/scheduled` | `src/fleet/index.ts:315` | stable | active | Schedule a new message |
-| `http:fleet.lines.scheduled.cancel-query` | `DELETE /api/lines/:name/scheduled` | `src/fleet/index.ts:316` | stable | active | Cancel by `?id=` |
-| `http:fleet.lines.scheduled.get` | `GET /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:317` | stable | active | Single scheduled |
-| `http:fleet.lines.scheduled.update` | `PUT /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:318` | stable | active | Update scheduled |
-| `http:fleet.lines.scheduled.cancel` | `DELETE /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:319` | stable | active | Cancel scheduled |
-| `http:fleet.lines.groups.list` | `GET /api/lines/:name/groups` | `src/fleet/index.ts:320` | stable | active | List groups |
-| `http:fleet.lines.groups.create` | `POST /api/lines/:name/groups` | `src/fleet/index.ts:321` | stable | active | Create group |
-| `http:fleet.lines.groups.detail` | `GET /api/lines/:name/groups/:jid` | `src/fleet/index.ts:333` | stable | active | Group detail |
-| `http:fleet.lines.groups.leave` | `DELETE /api/lines/:name/groups/:jid` | `src/fleet/index.ts:334` | stable | active | Leave group |
-| `http:fleet.lines.groups.subject` | `PUT /api/lines/:name/groups/:jid/subject` | `src/fleet/index.ts:322` | stable | active | Update subject |
-| `http:fleet.lines.groups.description` | `PUT /api/lines/:name/groups/:jid/description` | `src/fleet/index.ts:323` | stable | active | Update description |
-| `http:fleet.lines.groups.participants` | `POST /api/lines/:name/groups/:jid/participants` | `src/fleet/index.ts:324` | stable | active | Add/remove/promote/demote |
-| `http:fleet.lines.groups.settings` | `PUT /api/lines/:name/groups/:jid/settings` | `src/fleet/index.ts:325` | stable | active | Announce / locked |
-| `http:fleet.lines.groups.invite` | `GET /api/lines/:name/groups/:jid/invite` | `src/fleet/index.ts:326` | stable | active | Fetch invite code |
-| `http:fleet.lines.groups.invite-revoke` | `POST /api/lines/:name/groups/:jid/invite/revoke` | `src/fleet/index.ts:327` | stable | active | Revoke + rotate |
-| `http:fleet.lines.groups.ephemeral` | `PUT /api/lines/:name/groups/:jid/ephemeral` | `src/fleet/index.ts:328` | stable | active | Disappearing-message duration |
-| `http:fleet.lines.groups.member-add-mode` | `PUT /api/lines/:name/groups/:jid/member-add-mode` | `src/fleet/index.ts:329` | stable | active | Toggle who can add members |
-| `http:fleet.lines.groups.join-approval` | `PUT /api/lines/:name/groups/:jid/join-approval` | `src/fleet/index.ts:330` | stable | active | Toggle join-approval requirement |
-| `http:fleet.lines.groups.requests.list` | `GET /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:331` | stable | active | List pending join requests |
-| `http:fleet.lines.groups.requests.update` | `POST /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:332` | stable | active | Approve / reject |
-| `http:fleet.feed` | `GET /api/feed` | `src/fleet/index.ts:292` | stable | active | Activity feed across instances |
-| `http:fleet.typing` | `GET /api/typing` | `src/fleet/index.ts:291` | stable | active | Currently-typing indicators |
-| `http:fleet.directories.check` | `GET /api/directories/check?path=...` | `src/fleet/index.ts:293` | stable | active | Path writable probe |
-| `http:fleet.metrics` | `GET /api/metrics` | `src/fleet/index.ts:302` | stable | active | Fleet-wide metrics |
-| `http:fleet.version` | `GET /api/version` | `src/fleet/index.ts:336` | stable | active | Build version |
-| `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:337` | stable | active | Self-update trigger |
-| `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:338` | stable | active | List cross-instance LID mappings |
-| `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:339` | stable | active | Sync mappings between instances |
-| `http:fleet.silences.list` | `GET /api/fleet/silences` | `src/fleet/index.ts:288` | beta | active | List active fleet-wide alert silences |
-| `http:fleet.silences.add` | `POST /api/fleet/silence` | `src/fleet/index.ts:289` | beta | active | Add a silence rule (instance, duration). Persisted under `~/.config/whatsoup/fleet-silences.json`. |
-| `http:fleet.silences.remove` | `DELETE /api/fleet/silence/:name` | `src/fleet/index.ts:290` | beta | active | Remove a named silence rule |
-| `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:760`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer required) |
-| `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:786`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer required) |
+| `http:fleet.providers.list` | `GET /api/providers` | `src/fleet/index.ts:300` | beta | active | Provider catalog (id, displayName, type, needsApiKey, providerConfig fields) derived from `PROVIDER_IDS` |
+| `http:fleet.lines.list` | `GET /api/lines` | `src/fleet/index.ts:301` | stable | active | List instances + health |
+| `http:fleet.lines.create` | `POST /api/lines` | `src/fleet/index.ts:302` | stable | active | Create instance |
+| `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:306` | stable | active | Instance detail + config |
+| `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:305` | stable | active | Stop + cleanup |
+| `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:303` | stable | active | Registration probe |
+| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:304` | beta | active | Per-instance primary/fallback provider, key presence (boolean), and active fallback window |
+| `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:320` | stable | active | Update `config.json` |
+| `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:321` | stable | active | QR-code SSE stream |
+| `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:318` | stable | active | Restart unit |
+| `http:fleet.lines.stop` | `POST /api/lines/:name/stop` | `src/fleet/index.ts:319` | stable | active | Stop unit |
+| `http:fleet.lines.send` | `POST /api/lines/:name/send` | `src/fleet/index.ts:314` | stable | active | Send message; accepts `chatJid` or alias `to` + optional `profile` |
+| `http:fleet.lines.access-update` | `POST /api/lines/:name/access` | `src/fleet/index.ts:316` | stable | active | Update access control |
+| `http:fleet.lines.access-view` | `GET /api/lines/:name/access` | `src/fleet/index.ts:312` | stable | active | View access list |
+| `http:fleet.lines.mark-read` | `POST /api/lines/:name/mark-read` | `src/fleet/index.ts:317` | stable | active | Zero unread + chatModify |
+| `http:fleet.lines.contacts-save` | `POST /api/lines/:name/contacts` | `src/fleet/index.ts:315` | stable | active | Save contact |
+| `http:fleet.lines.contacts-search` | `GET /api/lines/:name/contacts/search` | `src/fleet/index.ts:343` | stable | active | Search saved contacts |
+| `http:fleet.lines.chats` | `GET /api/lines/:name/chats` | `src/fleet/index.ts:307` | stable | active | List chats |
+| `http:fleet.lines.messages` | `GET /api/lines/:name/messages` | `src/fleet/index.ts:308` | stable | active | Fetch messages |
+| `http:fleet.lines.messages-search` | `GET /api/lines/:name/messages/search` | `src/fleet/index.ts:309` | stable | active | Full-text search |
+| `http:fleet.lines.metrics` | `GET /api/lines/:name/metrics` | `src/fleet/index.ts:311` | stable | active | 24h / 7d / 30d |
+| `http:fleet.lines.logs` | `GET /api/lines/:name/logs` | `src/fleet/index.ts:313` | stable | active | Instance logs |
+| `http:fleet.lines.scheduled.list` | `GET /api/lines/:name/scheduled` | `src/fleet/index.ts:322` | stable | active | List scheduled; filter `?status=` |
+| `http:fleet.lines.scheduled.create` | `POST /api/lines/:name/scheduled` | `src/fleet/index.ts:323` | stable | active | Schedule a new message |
+| `http:fleet.lines.scheduled.cancel-query` | `DELETE /api/lines/:name/scheduled` | `src/fleet/index.ts:324` | stable | active | Cancel by `?id=` |
+| `http:fleet.lines.scheduled.get` | `GET /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:325` | stable | active | Single scheduled |
+| `http:fleet.lines.scheduled.update` | `PUT /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:326` | stable | active | Update scheduled |
+| `http:fleet.lines.scheduled.cancel` | `DELETE /api/lines/:name/scheduled/:id` | `src/fleet/index.ts:327` | stable | active | Cancel scheduled |
+| `http:fleet.lines.groups.list` | `GET /api/lines/:name/groups` | `src/fleet/index.ts:328` | stable | active | List groups |
+| `http:fleet.lines.groups.create` | `POST /api/lines/:name/groups` | `src/fleet/index.ts:329` | stable | active | Create group |
+| `http:fleet.lines.groups.detail` | `GET /api/lines/:name/groups/:jid` | `src/fleet/index.ts:341` | stable | active | Group detail |
+| `http:fleet.lines.groups.leave` | `DELETE /api/lines/:name/groups/:jid` | `src/fleet/index.ts:342` | stable | active | Leave group |
+| `http:fleet.lines.groups.subject` | `PUT /api/lines/:name/groups/:jid/subject` | `src/fleet/index.ts:330` | stable | active | Update subject |
+| `http:fleet.lines.groups.description` | `PUT /api/lines/:name/groups/:jid/description` | `src/fleet/index.ts:331` | stable | active | Update description |
+| `http:fleet.lines.groups.participants` | `POST /api/lines/:name/groups/:jid/participants` | `src/fleet/index.ts:332` | stable | active | Add/remove/promote/demote |
+| `http:fleet.lines.groups.settings` | `PUT /api/lines/:name/groups/:jid/settings` | `src/fleet/index.ts:333` | stable | active | Announce / locked |
+| `http:fleet.lines.groups.invite` | `GET /api/lines/:name/groups/:jid/invite` | `src/fleet/index.ts:334` | stable | active | Fetch invite code |
+| `http:fleet.lines.groups.invite-revoke` | `POST /api/lines/:name/groups/:jid/invite/revoke` | `src/fleet/index.ts:335` | stable | active | Revoke + rotate |
+| `http:fleet.lines.groups.ephemeral` | `PUT /api/lines/:name/groups/:jid/ephemeral` | `src/fleet/index.ts:336` | stable | active | Disappearing-message duration |
+| `http:fleet.lines.groups.member-add-mode` | `PUT /api/lines/:name/groups/:jid/member-add-mode` | `src/fleet/index.ts:337` | stable | active | Toggle who can add members |
+| `http:fleet.lines.groups.join-approval` | `PUT /api/lines/:name/groups/:jid/join-approval` | `src/fleet/index.ts:338` | stable | active | Toggle join-approval requirement |
+| `http:fleet.lines.groups.requests.list` | `GET /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:339` | stable | active | List pending join requests |
+| `http:fleet.lines.groups.requests.update` | `POST /api/lines/:name/groups/:jid/requests` | `src/fleet/index.ts:340` | stable | active | Approve / reject |
+| `http:fleet.feed` | `GET /api/feed` | `src/fleet/index.ts:298` | stable | active | Activity feed across instances |
+| `http:fleet.typing` | `GET /api/typing` | `src/fleet/index.ts:297` | stable | active | Currently-typing indicators |
+| `http:fleet.directories.check` | `GET /api/directories/check?path=...` | `src/fleet/index.ts:299` | stable | active | Path writable probe |
+| `http:fleet.metrics` | `GET /api/metrics` | `src/fleet/index.ts:310` | stable | active | Fleet-wide metrics |
+| `http:fleet.version` | `GET /api/version` | `src/fleet/index.ts:344` | stable | active | Build version |
+| `http:fleet.update` | `POST /api/update` | `src/fleet/index.ts:345` | stable | active | Self-update trigger |
+| `http:fleet.lid-mappings.list` | `GET /api/lid-mappings` | `src/fleet/index.ts:346` | stable | active | List cross-instance LID mappings |
+| `http:fleet.lid-mappings.sync` | `POST /api/lid-mappings/sync` | `src/fleet/index.ts:347` | stable | active | Sync mappings between instances |
+| `http:fleet.silences.list` | `GET /api/fleet/silences` | `src/fleet/index.ts:294` | beta | active | List active fleet-wide alert silences |
+| `http:fleet.silences.add` | `POST /api/fleet/silence` | `src/fleet/index.ts:295` | beta | active | Add a silence rule (instance, duration). Persisted under `~/.config/whatsoup/fleet-silences.json`. |
+| `http:fleet.silences.remove` | `DELETE /api/fleet/silence/:name` | `src/fleet/index.ts:296` | beta | active | Remove a named silence rule |
+| `http:fleet.auth-ticket.mint` | `POST /api/auth-ticket` | `src/fleet/index.ts:768`, `src/fleet/auth-ticket.ts` | stable | active | Mint short-lived API/SSE ticket (root Bearer required) |
+| `http:fleet.ws-ticket.mint` | `POST /api/ws-ticket` | `src/fleet/index.ts:794`, `src/fleet/ws-ticket.ts` | stable | active | Mint short-lived WebSocket ticket (root Bearer required) |
 | `http:fleet.legacy-query-token` | `?token=<root>` on `/api/*` and `/ws/*` | [README §Legacy authentication](../README.md#legacy-authentication-deprecated) | stable | deprecated | Deprecation notice: [2026-05-12 public-surface baseline](releases/2026-05-12-public-surface-baseline.md#deprecations). Removal target: v2.0.0 after 2026-06-30. Use `/api/auth-ticket` or Bearer. Emits one-shot `http_legacy_token_path` / `ws_legacy_token_path` warning. |
 
 ### Health server (per-instance)
