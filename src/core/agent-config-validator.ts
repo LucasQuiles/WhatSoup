@@ -504,6 +504,27 @@ function validateAgentOptions(
         );
       }
     }
+    // baseUrl: custom OpenAI-compatible cloud endpoint (the opencode-cli
+    // "different cloud provider" surface). When present it must be a non-empty,
+    // parseable absolute URL — it is written into opencode.json's provider
+    // block as `options.baseURL`, so a malformed value would silently break
+    // routing at agent-start time.
+    if (pc['baseUrl'] !== undefined) {
+      if (typeof pc['baseUrl'] !== 'string' || pc['baseUrl'].trim() === '') {
+        return err(
+          'agentOptions.providerConfig.baseUrl',
+          'agentOptions.providerConfig.baseUrl must be a non-empty string when provided',
+        );
+      }
+      try {
+        void new URL(pc['baseUrl'] as string);
+      } catch {
+        return err(
+          'agentOptions.providerConfig.baseUrl',
+          'agentOptions.providerConfig.baseUrl must be a valid URL when provided',
+        );
+      }
+    }
   }
 
   return null;
