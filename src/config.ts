@@ -864,6 +864,13 @@ export const config = {
   agentProvider: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['provider'] as string | undefined) ?? 'claude-cli',
   agentProviderConfig: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
 
+  // Automatic provider fallback — read from agentOptions.fallbackProvider /
+  // agentOptions.fallbackModel. When the primary provider hits a usage limit,
+  // new sessions are routed to the fallback provider until the limit resets.
+  // Undefined disables fallback (the default).
+  agentFallbackProvider: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['fallbackProvider'] as string | undefined) ?? undefined,
+  agentFallbackModel: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['fallbackModel'] as string | undefined) ?? undefined,
+
   // Voice (ElevenLabs TTS)
   elevenlabs: {
     defaultVoiceId: (instance?.elevenlabs?.defaultVoiceId as string | undefined) ?? 'pNInz6obpgDQGcFmaJgB',

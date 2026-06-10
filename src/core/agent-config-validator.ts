@@ -445,6 +445,34 @@ function validateAgentOptions(
     }
   }
 
+  // fallbackProvider: when present, must be a canonical PROVIDER_ID, same as
+  // `provider`. Routes new sessions to this provider when the primary hits a
+  // usage limit. An unknown ID would fall through the session.ts switches.
+  if (opts['fallbackProvider'] !== undefined) {
+    if (
+      typeof opts['fallbackProvider'] !== 'string' ||
+      !(PROVIDER_IDS as readonly string[]).includes(opts['fallbackProvider'] as string)
+    ) {
+      return err(
+        'agentOptions.fallbackProvider',
+        `agentOptions.fallbackProvider must be one of: ${PROVIDER_IDS.join(', ')}`,
+      );
+    }
+  }
+
+  // fallbackModel: a non-empty model string for the fallback provider when present.
+  if (opts['fallbackModel'] !== undefined) {
+    if (
+      typeof opts['fallbackModel'] !== 'string' ||
+      opts['fallbackModel'].trim() === ''
+    ) {
+      return err(
+        'agentOptions.fallbackModel',
+        'agentOptions.fallbackModel must be a non-empty string when provided',
+      );
+    }
+  }
+
   // providerConfig: plain object when present.
   if (opts['providerConfig'] !== undefined) {
     if (

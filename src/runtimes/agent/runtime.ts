@@ -122,6 +122,14 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
+// Default provider-fallback window when the usage-limit message names no reset
+// time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
+// upper-bound estimate for when the primary provider becomes available again.
+const DEFAULT_FALLBACK_WINDOW_MS = 5 * 60 * 60 * 1000; // 18_000_000 ms (5h)
+// Clamp the fallback window so a malformed/adversarial reset time can neither
+// revert almost immediately nor pin the fallback for an unreasonable span.
+const MIN_FALLBACK_WINDOW_MS = 60 * 1000; // 1 minute
+const MAX_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 // Time to wait for an auto-triggered /compact to complete before giving up.
 // A /compact must summarize the whole conversation, so on large contexts it can
 // legitimately take a few minutes; 2 min was too short and produced false
@@ -1047,6 +1055,72 @@ export function isUsageLimitMessage(text: string): boolean {
 }
 
 /**
+ * Extract the usage-limit reset time from a provider usage-limit message.
+ *
+ * Claude usage-limit notices often name when the cap resets — e.g.
+ *   "resets at 3pm", "resets at 15:00", "try again at 9:30am",
+ *   "will be available at 11pm", or a raw Unix-epoch seconds value.
+ * The fallback state machine uses this to schedule auto-revert to the primary
+ * provider. Parsing is conservative: anything it cannot confidently interpret
+ * yields `null`, and the caller then applies a default rolling-window estimate.
+ *
+ * Returned times are always in the future relative to `now` — a clock time like
+ * "3pm" that has already passed today is rolled forward to tomorrow.
+ *
+ * @param text the usage-limit message text
+ * @param now  injectable clock for deterministic tests (defaults to Date.now)
+ * @returns the reset Date, or null when unparseable
+ */
+export function extractUsageLimitResetTime(text: string, now: Date = new Date()): Date | null {
+  if (typeof text !== 'string' || text.length === 0) return null;
+  const lower = text.toLowerCase();
+
+  // 1) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
+  //    Milliseconds (13 digits) are also accepted.
+  const epochMatch = lower.match(/\b(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/);
+  if (epochMatch) {
+    const seconds = epochMatch[1]!;
+    const millis = epochMatch[2];
+    const epochMs = millis
+      ? Number.parseInt(seconds + millis, 10)
+      : Number.parseInt(seconds, 10) * 1000;
+    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
+      return new Date(epochMs);
+    }
+  }
+
+  // 2) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
+  //    "come back at 9:30am", "try again at 11 pm".
+  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
+  const m = lower.match(cue);
+  if (m) {
+    let hour = Number.parseInt(m[1]!, 10);
+    const minute = m[2] ? Number.parseInt(m[2], 10) : 0;
+    const meridiem = m[3];
+    if (
+      Number.isFinite(hour) &&
+      Number.isFinite(minute) &&
+      hour >= 0 &&
+      minute >= 0 &&
+      minute < 60 &&
+      (meridiem ? hour >= 1 && hour <= 12 : hour <= 23)
+    ) {
+      if (meridiem === 'pm' && hour < 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+      const candidate = new Date(now);
+      candidate.setHours(hour, minute, 0, 0);
+      // A clock time already past today rolls forward to tomorrow.
+      if (candidate.getTime() <= now.getTime()) {
+        candidate.setDate(candidate.getDate() + 1);
+      }
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Detect context-window overflow errors from the Claude provider.
  *
  * When the accumulated conversation exceeds the model's context window, Claude
@@ -1138,6 +1212,10 @@ export class AgentRuntime implements Runtime {
   private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
+  // Automatic provider fallback (claude-cli → opencode-cli etc.) on usage limit.
+  // Both undefined unless configured via agentOptions.fallback{Provider,Model}.
+  private readonly agentFallbackProvider: string | undefined;
+  private readonly agentFallbackModel: string | undefined;
   private readonly replyGuaranteeTimeoutMs: number;
   private readonly registry: ToolRegistry;
 
@@ -1179,6 +1257,10 @@ export class AgentRuntime implements Runtime {
   private workspaceSweepTimer: ReturnType<typeof setInterval> | null = null;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
+  // Provider-fallback window: epoch ms until which new sessions route to the
+  // fallback provider, or null when the primary provider is active.
+  private fallbackActiveUntil: number | null = null;
+  private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -1922,6 +2004,8 @@ export class AgentRuntime implements Runtime {
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
+    this.agentFallbackProvider = config.agentFallbackProvider;
+    this.agentFallbackModel = config.agentFallbackModel;
 
     this.registry = new ToolRegistry();
     this.registerAllTools();
@@ -4362,6 +4446,9 @@ export class AgentRuntime implements Runtime {
           // Suppress usage-limit messages — log and skip instead of forwarding
           if (isUsageLimitMessage(event.text)) {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
+            // Route the auto-respawned next session to the fallback provider
+            // (if configured) until the limit resets, before tearing down.
+            this.activateProviderFallback(extractUsageLimitResetTime(event.text));
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
@@ -4871,6 +4958,11 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
     }
+    if (this.revertTimer) {
+      clearTimeout(this.revertTimer);
+      this.revertTimer = null;
+    }
+    this.fallbackActiveUntil = null;
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
     }
@@ -5140,6 +5232,92 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Provider routing for the *next* session. While a fallback window is active
+   * (and a fallback provider is configured), new sessions use the fallback
+   * provider/model; otherwise the primary. Existing sessions are unaffected —
+   * `SessionManager.provider`/`model` are per-session and read-only, so fallback
+   * takes effect on the next auto-respawned or freshly created session.
+   */
+  private get effectiveProvider(): string {
+    return this.fallbackActiveUntil &&
+      Date.now() < this.fallbackActiveUntil &&
+      this.agentFallbackProvider
+      ? this.agentFallbackProvider
+      : this.agentProvider;
+  }
+
+  /** Model paired with {@link effectiveProvider}: fallbackModel while the window is active, else the primary model. */
+  private get effectiveModel(): string | undefined {
+    return this.fallbackActiveUntil &&
+      Date.now() < this.fallbackActiveUntil &&
+      this.agentFallbackProvider
+      ? this.agentFallbackModel
+      : this.model;
+  }
+
+  /**
+   * Activate provider fallback after the primary provider hit a usage limit.
+   *
+   * No-op unless a fallback provider is configured. The window ends at the
+   * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
+   * clamped to [MIN_FALLBACK_WINDOW_MS, MAX_FALLBACK_WINDOW_MS]. Idempotent: a
+   * second activation while already active extends the window to the later of
+   * the two. Schedules an auto-revert timer (unref'd so it never keeps the
+   * process alive).
+   */
+  private activateProviderFallback(resetAt: Date | null): void {
+    if (!this.agentFallbackProvider) return;
+
+    const now = Date.now();
+    const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
+    const clampedUntil = Math.min(
+      now + MAX_FALLBACK_WINDOW_MS,
+      Math.max(now + MIN_FALLBACK_WINDOW_MS, rawUntil),
+    );
+    // Extend rather than shorten an already-active window.
+    const until = this.fallbackActiveUntil
+      ? Math.max(this.fallbackActiveUntil, clampedUntil)
+      : clampedUntil;
+
+    const wasActive = this.fallbackActiveUntil !== null;
+    this.fallbackActiveUntil = until;
+
+    if (this.revertTimer) {
+      clearTimeout(this.revertTimer);
+      this.revertTimer = null;
+    }
+    this.revertTimer = setTimeout(() => {
+      this.deactivateProviderFallback('window-elapsed');
+    }, Math.max(0, until - now));
+    // Do not let the revert timer keep the process alive at shutdown.
+    this.revertTimer.unref?.();
+
+    log.info({
+      instanceName: this.instanceName,
+      fallbackProvider: this.agentFallbackProvider,
+      fallbackModel: this.agentFallbackModel,
+      resetAt: resetAt ? resetAt.toISOString() : null,
+      activeUntil: new Date(until).toISOString(),
+      extended: wasActive,
+    }, 'activating provider fallback after usage limit');
+  }
+
+  /** Clear the fallback window + timer, reverting new sessions to the primary provider. */
+  private deactivateProviderFallback(reason: string): void {
+    if (this.revertTimer) {
+      clearTimeout(this.revertTimer);
+      this.revertTimer = null;
+    }
+    if (this.fallbackActiveUntil === null) return;
+    this.fallbackActiveUntil = null;
+    log.info({
+      instanceName: this.instanceName,
+      primaryProvider: this.agentProvider,
+      reason,
+    }, 'reverting to primary provider');
+  }
+
+  /**
    * Construct a SessionManager with all instance-level fields pre-filled.
    * Callers supply only the variable parts: chatJid, cwd, and the three callbacks.
    */
@@ -5181,10 +5359,10 @@ export class AgentRuntime implements Runtime {
       cwd: opts.cwd,
       configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
-      model: this.model,
+      model: this.effectiveModel,
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
-      provider: this.agentProvider,
+      provider: this.effectiveProvider,
       providerConfig: this.agentProviderConfig,
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
@@ -5977,6 +6155,9 @@ export class AgentRuntime implements Runtime {
           // Suppress usage-limit messages — log and kill session instead of forwarding
           if (isUsageLimitMessage(event.text)) {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
+            // Route the auto-respawned next session to the fallback provider
+            // (if configured) until the limit resets, before tearing down.
+            this.activateProviderFallback(extractUsageLimitResetTime(event.text));
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),
