@@ -15,6 +15,7 @@ import {
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
 import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
+import { lookupCredential } from '../../lib/keyring.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   ensureAgentSchema,
@@ -1075,23 +1076,13 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
   if (typeof text !== 'string' || text.length === 0) return null;
   const lower = text.toLowerCase();
 
-  // 1) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
-  //    Milliseconds (13 digits) are also accepted.
-  const epochMatch = lower.match(/\b(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/);
-  if (epochMatch) {
-    const seconds = epochMatch[1]!;
-    const millis = epochMatch[2];
-    const epochMs = millis
-      ? Number.parseInt(seconds + millis, 10)
-      : Number.parseInt(seconds, 10) * 1000;
-    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
-      return new Date(epochMs);
-    }
-  }
-
-  // 2) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
+  // 1) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
   //    "come back at 9:30am", "try again at 11 pm".
-  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
+  //    Parsed FIRST so an explicit clock cue always wins over an incidental
+  //    long number elsewhere in the message (e.g. an order/quota figure).
+  //    The trailing (?!\d) prevents the clock hour from matching the leading
+  //    digits of a longer number (e.g. "5551234567").
+  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?(?!\d)\s*(am|pm)?/i;
   const m = lower.match(cue);
   if (m) {
     let hour = Number.parseInt(m[1]!, 10);
@@ -1114,6 +1105,24 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
         candidate.setDate(candidate.getDate() + 1);
       }
       return candidate;
+    }
+  }
+
+  // 2) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
+  //    Milliseconds (13 digits) are also accepted. Cue-anchored: the epoch must
+  //    directly follow a reset cue, so an incidental long number (order/quota
+  //    figure) is never mistaken for a reset time.
+  const epochMatch = lower.match(
+    /(?:reset[s]?|available|try\s+again|come\s+back|back)\D{0,12}(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/,
+  );
+  if (epochMatch) {
+    const seconds = epochMatch[1]!;
+    const millis = epochMatch[2];
+    const epochMs = millis
+      ? Number.parseInt(seconds + millis, 10)
+      : Number.parseInt(seconds, 10) * 1000;
+    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
+      return new Date(epochMs);
     }
   }
 
@@ -4330,7 +4339,11 @@ export class AgentRuntime implements Runtime {
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
           if (!normalizedText) break;
-          // Suppress usage-limit messages — don't flood WhatsApp with them
+          // Suppress usage-limit messages — don't flood WhatsApp with them.
+          // Fallback activation is intentionally NOT triggered here: it is
+          // deferred to the 'result' event. Activating on streaming text would
+          // race the usage-limit session kill/respawn (the result path also
+          // shuts the session down), so we only observe + suppress here.
           if (isUsageLimitMessage(normalizedText)) {
             log.warn({ chatJid: queue.targetChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
             break;
@@ -5265,8 +5278,46 @@ export class AgentRuntime implements Runtime {
    * the two. Schedules an auto-revert timer (unref'd so it never keeps the
    * process alive).
    */
+  /**
+   * Whether the keyring holds an API key for the configured fallback target.
+   *
+   * Returns:
+   *  - `true`  — a key is present for the resolved service.
+   *  - `false` — a key is expected but absent (opencode sessions would fail auth).
+   *  - `null`  — not applicable: CLI/native-auth providers (claude-cli, codex-cli,
+   *              gemini-cli, anthropic-api) authenticate via subscription/login,
+   *              so no keyring key is checked.
+   *
+   * Service mapping: opencode-cli → the model's provider prefix
+   * (`minimax/...` → `minimax`); openai-api → `openai`. Never logs the value.
+   */
+  private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
+    let service: string | null = null;
+    if (provider === 'opencode-cli') {
+      const prefix = model?.split('/')[0]?.trim();
+      service = prefix ? prefix.toLowerCase() : null;
+    } else if (provider === 'openai-api') {
+      service = 'openai';
+    }
+    // CLI/native-auth providers (claude-cli/codex-cli/gemini-cli/anthropic-api)
+    // and an opencode model with no provider prefix → not applicable.
+    if (!service) return null;
+    return lookupCredential(service) !== null;
+  }
+
   private activateProviderFallback(resetAt: Date | null): void {
     if (!this.agentFallbackProvider) return;
+
+    // Visibility guard: if the fallback target needs an API key the keyring
+    // doesn't hold, warn (do not block — the operator chose this fallback).
+    const keyPresent = this.fallbackKeyPresent(this.agentFallbackProvider, this.agentFallbackModel);
+    if (keyPresent === false) {
+      log.warn({
+        instanceName: this.instanceName,
+        fallbackProvider: this.agentFallbackProvider,
+        fallbackModel: this.agentFallbackModel,
+      }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
+    }
 
     const now = Date.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
@@ -6033,7 +6084,11 @@ export class AgentRuntime implements Runtime {
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event);
           if (!normalizedText) break;
-          // Suppress usage-limit messages — don't flood WhatsApp with them
+          // Suppress usage-limit messages — don't flood WhatsApp with them.
+          // Fallback activation is intentionally NOT triggered here: it is
+          // deferred to the 'result' event. Activating on streaming text would
+          // race the usage-limit session kill/respawn (the result path also
+          // shuts the session down), so we only observe + suppress here.
           if (isUsageLimitMessage(normalizedText)) {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
             break;

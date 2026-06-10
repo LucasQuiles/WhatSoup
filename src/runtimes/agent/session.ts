@@ -29,6 +29,7 @@ import {
   type ProviderId,
 } from './providers/index.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
+import { lookupCredential, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -138,6 +139,14 @@ export function buildChildEnv(
       // OpenCode reads from its own config or standard API keys
       if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
       if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+      // Forward the standard fleet keys (deepseek/minimax) from the standard
+      // keychain so `opencode run -m minimax/...` / `deepseek/...` can auth.
+      // lookupCredential resolves env → keychain; SERVICE_ENV_MAP is the single
+      // source of truth for the service→env-var mapping (no second copy).
+      for (const svc of ['deepseek', 'minimax'] as const) {
+        const key = lookupCredential(svc);
+        if (key) env[SERVICE_ENV_MAP[svc]!] = key;
+      }
       break;
     case 'openai-api':
     case 'anthropic-api':

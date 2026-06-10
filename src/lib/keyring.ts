@@ -12,9 +12,11 @@ import * as os from 'node:os';
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
 
 /** Map service names to their conventional env var names. */
-const SERVICE_ENV_MAP: Record<string, string> = {
+export const SERVICE_ENV_MAP: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
+  deepseek: 'DEEPSEEK_API_KEY',
+  minimax: 'MINIMAX_API_KEY',
   pinecone: 'PINECONE_API_KEY',
   elevenlabs: 'ELEVENLABS_API_KEY',
   'whatsoup-health-token': 'WHATSOUP_HEALTH_TOKEN',

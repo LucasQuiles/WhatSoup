@@ -63,6 +63,19 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
   },
 }));
 
+// Mock the credential lookup so the key-presence guard is deterministic and
+// independent of the host machine's real keychain (the live fleet machine
+// genuinely holds deepseek/minimax keys, which would contaminate "absent"
+// assertions). Tests drive lookupCredentialMock per-case.
+const lookupCredentialMock = vi.fn<(service: string) => string | null>(() => null);
+vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/lib/keyring.ts')>();
+  return {
+    ...actual,
+    lookupCredential: (service: string) => lookupCredentialMock(service),
+  };
+});
+
 // ─── Imports after mocks ──────────────────────────────────────────────────────
 
 import {
@@ -116,6 +129,7 @@ type FallbackView = {
   effectiveModel: string | undefined;
   activateProviderFallback(resetAt: Date | null): void;
   deactivateProviderFallback(reason: string): void;
+  fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -177,6 +191,26 @@ describe('extractUsageLimitResetTime', () => {
   it('returns null for a past epoch (already elapsed)', () => {
     const past = Math.floor(now.getTime() / 1000) - 3600;
     expect(extractUsageLimitResetTime(`old ${past}`, now)).toBeNull();
+  });
+
+  it('prefers an explicit clock cue over an incidental long number (no epoch hijack)', () => {
+    // The 10-digit order number must NOT be parsed as an epoch and override
+    // the explicit "resets at 2pm" clock cue.
+    const out = extractUsageLimitResetTime(
+      'Order #5551234567 — usage limit reached, resets at 2pm.',
+      now,
+    );
+    expect(out).not.toBeNull();
+    expect(out!.getHours()).toBe(14);
+    expect(out!.getMinutes()).toBe(0);
+    expect(out!.getDate()).toBe(now.getDate());
+  });
+
+  it('returns null for a bare long number with no reset cue', () => {
+    // An incidental 10-digit quota figure is not a reset time.
+    expect(
+      extractUsageLimitResetTime('You have 5000000000 tokens of quota remaining.', now),
+    ).toBeNull();
   });
 });
 
@@ -275,5 +309,171 @@ describe('AgentRuntime — provider fallback state machine', () => {
     await runtime.shutdown();
     expect(view(runtime).fallbackActiveUntil).toBeNull();
     expect(view(runtime).revertTimer).toBeNull();
+  });
+});
+
+// ─── Key-presence guard at activation (Change 2) ──────────────────────────────
+
+describe('AgentRuntime — fallback key-presence guard', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    lookupCredentialMock.mockReset();
+    lookupCredentialMock.mockReturnValue(null);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reports a present key for opencode-cli/minimax (service from model prefix)', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    lookupCredentialMock.mockImplementation((svc) => (svc === 'minimax' ? 'mm-key' : null));
+    const present = view(runtime).fallbackKeyPresent('opencode-cli', 'minimax/MiniMax-M2.7');
+    expect(present).toBe(true);
+    expect(lookupCredentialMock).toHaveBeenCalledWith('minimax');
+  });
+
+  it('reports an absent key for opencode-cli/minimax when the keyring has none', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    lookupCredentialMock.mockReturnValue(null);
+    const present = view(runtime).fallbackKeyPresent('opencode-cli', 'minimax/MiniMax-M2.7');
+    expect(present).toBe(false);
+  });
+
+  it('maps openai-api to the openai service', () => {
+    const runtime = makeRuntime({ agentFallbackProvider: 'openai-api' });
+    lookupCredentialMock.mockImplementation((svc) => (svc === 'openai' ? 'oa-key' : null));
+    const present = view(runtime).fallbackKeyPresent('openai-api', 'gpt-5');
+    expect(present).toBe(true);
+    expect(lookupCredentialMock).toHaveBeenCalledWith('openai');
+  });
+
+  it('returns null (not-applicable) for native-auth CLI providers', () => {
+    const runtime = makeRuntime({ agentFallbackProvider: 'claude-cli' });
+    for (const p of ['claude-cli', 'codex-cli', 'gemini-cli', 'anthropic-api']) {
+      expect(view(runtime).fallbackKeyPresent(p, undefined)).toBeNull();
+    }
+    expect(lookupCredentialMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT block activation when the fallback key is absent (warn-only)', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    lookupCredentialMock.mockReturnValue(null);
+    view(runtime).activateProviderFallback(null);
+    expect(view(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(view(runtime).effectiveProvider).toBe('opencode-cli');
+  });
+
+  it('activates normally when the fallback key is present', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    lookupCredentialMock.mockImplementation((svc) => (svc === 'minimax' ? 'mm-key' : null));
+    view(runtime).activateProviderFallback(null);
+    expect(view(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(view(runtime).effectiveProvider).toBe('opencode-cli');
+  });
+});
+
+// ─── assistant_text vs result asymmetry (Change 4) ────────────────────────────
+
+/** Minimal IOutboundQueue stub — only the members the usage-limit paths touch. */
+function makeFakeQueue(): { targetChatJid: string; getLastOpId(): number | undefined; flush(): Promise<void> } {
+  return {
+    targetChatJid: 'fake@s.whatsapp.net',
+    getLastOpId: () => undefined,
+    flush: async () => {},
+  };
+}
+
+type EventDriveView = {
+  fallbackActiveUntil: number | null;
+  handleEventWithContext(
+    event: unknown,
+    queue: unknown,
+    session: unknown,
+    conversationKey?: string,
+    inboundSeq?: number,
+    mapKey?: string,
+  ): void;
+};
+
+function driveView(runtime: AgentRuntime): EventDriveView {
+  return runtime as unknown as EventDriveView;
+}
+
+describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    lookupCredentialMock.mockReset();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const USAGE_LIMIT_TEXT = 'Claude usage limit reached. Resets at 3pm.';
+
+  it('does NOT activate fallback on a usage-limit assistant_text event', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    const queue = makeFakeQueue();
+    driveView(runtime).handleEventWithContext(
+      { type: 'assistant_text', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+    );
+    expect(driveView(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).effectiveProvider).toBe('claude-cli');
+  });
+
+  it('DOES activate fallback on a usage-limit result event (the deferred site)', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    const queue = makeFakeQueue();
+    driveView(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+    );
+    expect(driveView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(view(runtime).effectiveProvider).toBe('opencode-cli');
+    expect(view(runtime).effectiveModel).toBe('minimax/MiniMax-M2.7');
+  });
+
+  it('assistant_text then result: fallback stays null until the result fires', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    const queue = makeFakeQueue();
+    driveView(runtime).handleEventWithContext(
+      { type: 'assistant_text', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+    );
+    expect(driveView(runtime).fallbackActiveUntil).toBeNull();
+    driveView(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+    );
+    expect(driveView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(view(runtime).effectiveProvider).toBe('opencode-cli');
   });
 });
