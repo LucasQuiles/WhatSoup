@@ -1,0 +1,98 @@
+# Layout & density — grid, surface usage, two-density model, target and reflow floors
+
+v3.0.0-draft · G2-locked direction · pending G3
+
+Sources: v2.html (locked), research-digest signals 1/2, seed-2 (24px target, 320px reflow),
+seed-3 ("more items vs more detail", touch targets), inconsistency-register P3-7.
+
+## 1. The 4px grid
+
+Every dimension — spacing, control heights, row heights, leadings, icon boxes — sits on the 4px
+grid: spacing steps 4/8/12/16/20/24/32/40/48, control heights 24/28/32, row heights 28/36,
+leadings 16/20/24/28/32. The grid is closed: no half steps (the legacy 3/6/10px tokens are
+rejected — tokens-v3 §6.11). Off-grid values are lint findings; the only exceptions are 1px
+hairlines and component-internal optical corrections declared in a component spec.
+
+## 2. Surface ladder usage
+
+Four named surfaces per theme (tokens-v3 §3.1); assignment is by role:
+
+| Surface | Used for | Never used for |
+|---|---|---|
+| `--surface-base` | app canvas, page background, thread bed | cards, overlays |
+| `--surface-raised` | cards, panels, toolbars, table wraps, KPI tiles | modals, inputs |
+| `--surface-overlay` | modals, drawer, popovers, toasts | page-level content |
+| `--surface-inset` | input wells, log beds, code blocks, expanded-row beds, radio cards | anything floating |
+
+Stacking depth is at most: base → raised → overlay. Nesting raised-on-raised is banned; content
+inside a panel sits directly on the panel or in an inset well.
+
+## 3. Two-density model
+
+Exactly two designed densities, carried by `--row-default` (36px) and `--row-compressed` (28px):
+
+| Density | Surfaces |
+|---|---|
+| **compressed** (28px rows, compact controls 28px, `--type-caption`/`--type-data-sm` lanes) | Fleet table, Ops, log streams, toolbars, any monitoring/triage list |
+| **default** (36px rows, 32px controls, `--type-body`/`--type-data` lanes) | forms, the add-line wizard, settings, browse lists, Inbox panes |
+
+Density is a component property (`density="compressed"`), never a per-screen font-size override.
+A third density does not exist; per-screen ad-hoc sizing is a lint finding. Forms and the wizard
+never go compressed (EUI precedent, digest §b).
+
+## 4. Target floors
+
+- **24×24 CSS px minimum** for every interactive element (WCAG 2.2). The xs button (24px) sits
+  exactly on the floor; nothing interactive goes below it. Small visual elements (pill close
+  buttons, expanders) reach the floor through padded hit areas (`min-width/min-height: 24px`).
+- **44px touch-desirable**: any surface designed for touch-heavy contexts (future mobile/pairing
+  flows, QR link step) raises primary targets to 44px. Density never undercuts tap targets.
+- Choice rows (checkbox/radio/switch labels) give the full-height 24px target row.
+
+## 5. Reflow and breakpoint posture
+
+- **320px reflow floor**: every surface remains operable at 320px viewport width without
+  two-dimensional scrolling (WCAG 1.4.10), except data tables, which may scroll horizontally as a
+  documented exception while their toolbar and headers reflow.
+- **Breakpoints are content-driven, never device names.** Layout changes happen where the layout
+  visibly stresses (the v2 thresholds: side column folds under ~1080px, contact pane hides, radio
+  cards stack under ~920px) — expressed as container queries on the stressed container wherever
+  possible, viewport queries otherwise. No `sm/md/lg` device-class semantics in specs; name the
+  threshold after the stress ("inbox loses contact pane", "dashboard single-column").
+- **"More items vs more detail" rule** (seed-3): when space shrinks, prefer showing *more items
+  with less detail per item* on monitoring surfaces (drop columns, keep rows) and *more detail on
+  fewer items* on focus surfaces (Inbox keeps the active conversation, drops the contact pane).
+  Each list/table spec declares its column-collapse priority (e.g. `components/drawer.md` §4 for
+  the Fleet table squeeze).
+
+## 6. Composition primitives (replacing layout utilities)
+
+Open-item-3 consequence (tokens-v3 §8): ad-hoc flex/margin utilities are forbidden. Layout is
+composed from:
+
+- **Container** — page shell, `--container-max` 1280px, `--sp-6` gutters.
+- **Stack** — vertical flow, `gap` bound to spacing tokens.
+- **Cluster** — horizontal wrap-row, `gap` bound to spacing tokens, alignment props.
+- **Prose** — 80ch measure for running text.
+
+Margins between siblings are banned (`no-margin`); parents own spacing via `gap`.
+
+## 7. Panel and drawer widths
+
+Component-owned width tokens (tokens-v3 §4): drawer `min(360px, 86%)`; modal 480/560/720; Fleet
+side column 320px; Inbox panes 264px (chats) / 248px (contact). Panels are content-height; only
+scroll regions (table wraps, log beds, chat lists, drawer body) scroll internally.
+
+## 8. Migration notes
+
+- Legacy half-steps and the 60+ globalized component dimensions: dispositions in tokens-v3 §6.11–12.
+- The legacy `--sk-col-*` fixed column widths are replaced by content-sized columns + the collapse
+  priority list (drawer.md).
+- Route-level layout (4 pages + line-detail tabs) is unchanged — this program reskins, it does not
+  restructure IA.
+
+## 9. Enforcement hooks
+
+`no-margin-utilities`, `no-magic-width`, `no-off-grid-values`, `density-as-prop` (no font-size
+overrides on table/list internals), and the 320px reflow check in the visual QA matrix (both
+themes, per cutover plan).
