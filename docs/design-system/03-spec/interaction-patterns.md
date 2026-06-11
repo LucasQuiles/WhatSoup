@@ -102,5 +102,5 @@ rows must carry `aria-label`s describing their action.
 ## 9. Enforcement hooks
 
 `interactive-needs-focus-visible`, `modal-must-restore-focus`, `no-focus-outline-suppression`,
-`single-toolbar-pattern` (import restriction), `confirm-on-destructive` (review checklist + 
+`single-toolbar-pattern` (import restriction), `confirm-on-destructive` (review checklist +
 `useConfirm` helper adoption), dead-affordance review lane in the QA matrix.

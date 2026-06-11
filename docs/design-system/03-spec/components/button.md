@@ -73,5 +73,5 @@ mechanic copies, DUP-01) → ActionButton; 24 raw buttons re-wrapped; Ops inline
 
 ## Enforcement hooks
 
-`no-raw-button` (import restriction + JSX element ban outside the primitive), 
+`no-raw-button` (import restriction + JSX element ban outside the primitive),
 `button-variant-closed-set`, reveal-label single-source (the mechanic exists only in ActionButton).
