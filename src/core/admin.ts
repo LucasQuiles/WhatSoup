@@ -60,6 +60,9 @@ export async function handleAdminCommand(
   durability?: DurabilityEngine,
 ): Promise<void> {
   if (action === 'allow') {
+    // Phone subjects are keyed by resolvePhoneFromJid output (full digits) —
+    // normalize so a 10-digit admin command flips the stored row, not a miss.
+    if (subjectType === 'phone') subjectId = normalizePhoneE164(subjectId);
     updateAccess(db, subjectType, subjectId, 'allowed');
     log.info({ subjectType, subjectId, action: 'allowed_by_admin' }, 'access granted by admin');
 
@@ -71,6 +74,12 @@ export async function handleAdminCommand(
       // SMS rows are stored under '+<digits>@sms' — include that form so
       // ALLOW over the Twilio transport replays the queued messages too.
       jidFormats.push(toSmsJid(`+${normalizePhoneE164(subjectId)}`));
+      if (normalizePhoneE164(subjectId) !== subjectId) {
+        // A 10-digit subject (admin typed without country code) must also flip
+        // the access row stored under the full-digit key resolvePhoneFromJid
+        // produces — otherwise replay succeeds while the sender stays pending.
+        jidFormats.push(toPersonalJid(normalizePhoneE164(subjectId)));
+      }
       const lidMap = getAllLidMappings(db);
       for (const [lid, mappedPhone] of lidMap) {
         if (isAdminPhone(mappedPhone, new Set([subjectId]))) {
@@ -88,6 +97,7 @@ export async function handleAdminCommand(
       // Filter already-replayed, sort by timestamp ascending, take most recent N
       const toReplay = allStored
         .filter(m => !replayedIds.has(m.messageId))
+        .sort((a, b) => a.timestamp - b.timestamp)
         .slice(-config.adminReplayMax);
 
       const replayCount = toReplay.length;
@@ -121,6 +131,7 @@ export async function handleAdminCommand(
       await sendTracked(messenger, adminChatJid, `Got it, allowed group ${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
     }
   } else {
+    if (subjectType === 'phone') subjectId = normalizePhoneE164(subjectId);
     updateAccess(db, subjectType, subjectId, 'blocked');
     log.info({ subjectType, subjectId, action: 'blocked_by_admin' }, 'access blocked by admin');
 
@@ -160,7 +171,7 @@ function resolveAdminChatJid(db: Database): string | null {
   for (const phone of config.adminPhones) {
     // SMS: sender_jid is '+<phone>@sms' — exact LIKE with no wildcard needed,
     // but LIKE is fine here; we use the exact string for precision.
-    const smsRow = msgStmt.get(`+${phone}@sms`) as { chat_jid: string } | undefined;
+    const smsRow = msgStmt.get(`+${normalizePhoneE164(phone)}@sms`) as { chat_jid: string } | undefined;
     if (smsRow) return smsRow.chat_jid;
 
     // WhatsApp: sender_jid starts with '<phone>' (e.g. '15550100001@s.whatsapp.net')

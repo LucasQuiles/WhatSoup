@@ -46,16 +46,19 @@ export function toSmsJid(address: string): string {
 }
 
 /**
- * Strip the SMS JID suffix from an address (e.g. '+15551230000@sms' → '+15551230000').
- * Tolerates an already-bare address.
+ * Resolve an SMS JID to the repo's phone-subject convention: digits without
+ * the leading '+' (e.g. '+15551230000@sms' → '15551230000'), matching what
+ * personal WhatsApp JIDs yield. Tolerates an already-bare address.
  */
 export function smsJidToPhone(jid: string): string {
-  // '+15551230000@sms' → '15551230000' — the repo's phone-subject convention
-  // (digits without leading '+'), matching what personal WhatsApp JIDs yield.
   const bare = fromSmsJid(jid);
   return bare.startsWith('+') ? bare.slice(1) : bare;
 }
 
+/**
+ * Strip the SMS JID suffix from an address (e.g. '+15551230000@sms' → '+15551230000').
+ * Tolerates an already-bare address.
+ */
 export function fromSmsJid(jid: string): string {
   return jid.endsWith(JID_SMS) ? jid.slice(0, -JID_SMS.length) : jid;
 }

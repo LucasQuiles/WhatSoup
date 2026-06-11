@@ -383,3 +383,25 @@ describe('TwilioConnection bridge — fromMe echo mapping', () => {
     bridge.shutdown();
   });
 });
+
+describe('TwilioConnection isResponseWorthy derivation', () => {
+  it('blank and whitespace-only bodies are not response-worthy (stored, never replied to)', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { bridge, port } = makeBridge();
+    const received: IncomingMessage[] = [];
+    bridge.onMessage = (m) => received.push(m);
+
+    await bridge.connect();
+    port.injectInbound(makeInboundSms({ sid: 'SMblank', body: '' }));
+    port.injectInbound(makeInboundSms({ sid: 'SMspace', body: '   ', sentAt: new Date(1) }));
+    port.injectInbound(makeInboundSms({ sid: 'SMreal', body: 'hello', sentAt: new Date(2) }));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(received.map((m) => [m.messageId, m.isResponseWorthy])).toEqual([
+      ['SMblank', false],
+      ['SMspace', false],
+      ['SMreal', true],
+    ]);
+    bridge.shutdown();
+  });
+});

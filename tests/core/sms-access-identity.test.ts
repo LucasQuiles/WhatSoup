@@ -314,3 +314,37 @@ describe('handleAdminCommand — SMS queued-message replay', () => {
     expect(replayed[0].chatJid).toBe('+15550100002@sms');
   });
 });
+
+describe('handleAdminCommand — 10-digit subject normalization', () => {
+  it('ALLOW with a 10-digit subject flips the full-digit access row AND replays the @sms queue', async () => {
+    const { handleAdminCommand } = await import('../../src/core/admin.ts');
+
+    // Pending row stored under the full-digit key resolvePhoneFromJid produces
+    insertPending(db, 'phone', '15550100004', null);
+    db.raw.prepare(
+      `INSERT INTO messages
+         (message_id, chat_jid, conversation_key, sender_jid, sender_name,
+          content, content_type, is_from_me, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+    ).run(
+      'queued-sms-10digit', '+15550100004@sms', '+15550100004_at_sms',
+      '+15550100004@sms', null, 'queued', 'text', 1700000200,
+    );
+
+    const messenger = {
+      sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+      sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+    };
+    const replayed: IncomingMessage[] = [];
+    // Admin typed the 10-digit form (no country code)
+    await handleAdminCommand(db, messenger as never, 'allow', 'phone', '5550100004',
+      '+15550100005@sms', async (msg: IncomingMessage) => {
+        replayed.push(msg);
+      });
+
+    // The full-digit access row flipped (not a silent miss on '5550100004')
+    expect(lookupAccess(db, 'phone', '15550100004')?.status).toBe('allowed');
+    // And the queued SMS message replayed
+    expect(replayed.map((m) => m.messageId)).toEqual(['queued-sms-10digit']);
+  });
+});
