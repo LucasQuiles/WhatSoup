@@ -16,6 +16,7 @@ import { ContactsDirectory } from '../../core/mentions.ts';
 import { PresenceCache } from '../presence-cache.ts';
 import type { WhatsAppSocket, ConnectionStateSnapshot } from '../connection.ts';
 import type { Subscription } from '../contract/subscription.ts';
+import { toSmsJid as _toSmsJid, fromSmsJid as _fromSmsJid } from '../../core/jid-constants.ts';
 
 /** Error thrown when an operation is not supported by the SMS transport. */
 export class UnsupportedTransportOperationError extends Error {
@@ -40,17 +41,19 @@ export class UnsupportedTransportOperationError extends Error {
 // `<address>_at_sms` (toConversationKey's default-domain branch), a keyspace
 // that cannot collide with WhatsApp (`@s.whatsapp.net`) keys for the same
 // phone number.
+//
+// The helpers are canonical in src/core/jid-constants.ts (DOMAIN_SMS / JID_SMS).
+// Re-exported here for callers that already import from this module.
 // ---------------------------------------------------------------------------
-const SMS_JID_SUFFIX = '@sms';
 
-/** `+15551230000` → `+15551230000@sms` (idempotent). */
+/** `+15551230000` → `+15551230000@sms` (idempotent). Re-export of core helper. */
 export function toSmsJid(address: string): string {
-  return address.endsWith(SMS_JID_SUFFIX) ? address : `${address}${SMS_JID_SUFFIX}`;
+  return _toSmsJid(address);
 }
 
-/** `+15551230000@sms` → `+15551230000` (tolerates an already-bare address). */
+/** `+15551230000@sms` → `+15551230000` (tolerates an already-bare address). Re-export of core helper. */
 export function fromSmsJid(jid: string): string {
-  return jid.endsWith(SMS_JID_SUFFIX) ? jid.slice(0, -SMS_JID_SUFFIX.length) : jid;
+  return _fromSmsJid(jid);
 }
 
 /**
@@ -66,8 +69,8 @@ export function fromSmsJid(jid: string): string {
 function contractToIncoming(msg: ContractInboundMessage): IncomingMessage {
   return {
     messageId: msg.ref.id,
-    chatJid: toSmsJid(msg.conversation.id),
-    senderJid: toSmsJid(msg.sender.id),
+    chatJid: _toSmsJid(msg.conversation.id),
+    senderJid: _toSmsJid(msg.sender.id),
     senderName: null,
     content: msg.text,
     contentText: null,
@@ -138,7 +141,7 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
 
     // Set sender identity from adapter after connect (JID-shaped for any
     // consumer that derives a conversation key from it).
-    this.botJid = toSmsJid(this.adapter.selfRef().id);
+    this.botJid = _toSmsJid(this.adapter.selfRef().id);
 
     // Subscribe inbound messages and translate to IncomingMessage for ingest.
     // Dispose any previous subscription first so a double connect() cannot
@@ -190,7 +193,7 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
    */
   async sendMessage(chatJid: string, text: string): Promise<SubmissionReceipt> {
     // Strip the synthetic @sms suffix — the adapter addresses raw E.164.
-    const target = { channel: this.adapter.capabilities.channel, id: fromSmsJid(chatJid) };
+    const target = { channel: this.adapter.capabilities.channel, id: _fromSmsJid(chatJid) };
     const ref = await this.adapter.sendText(target, text);
     return { waMessageId: ref.id };
   }

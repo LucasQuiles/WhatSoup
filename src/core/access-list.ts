@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID, normalizeLid } from './jid-constants.ts';
+import { DOMAIN_LID, DOMAIN_SMS, normalizeLid } from './jid-constants.ts';
 import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
@@ -106,12 +106,15 @@ export function extractLocal(jid: string): string {
 }
 
 /**
- * Resolve a JID to an actual phone number, handling LID→phone translation.
+ * Resolve a JID to an actual phone number, handling LID→phone translation
+ * and SMS E.164→digits normalization.
  *
  * For personal JIDs (`@s.whatsapp.net`), returns the phone digits directly.
  * For LID JIDs (`@lid`), resolves through the lid_mappings DB table to find
  * the real phone number. Returns the raw LID number as fallback only if
  * resolution fails (caller should handle this case).
+ * For SMS JIDs (`@sms`), strips the leading '+' from the E.164 local part
+ * to match the repo phone-subject convention (digits without leading '+').
  *
  * This is the ONLY function that should be used when you need an actual
  * phone number for:
@@ -125,6 +128,7 @@ export function extractLocal(jid: string): string {
  *   resolvePhoneFromJid('15555550101@s.whatsapp.net', db) → '15555550101'
  *   resolvePhoneFromJid('11111119999@lid', db)            → '15555551234' (resolved)
  *   resolvePhoneFromJid('99999999@lid', db)               → '99999999'   (unresolvable fallback)
+ *   resolvePhoneFromJid('+14155550100@sms', db)           → '14155550100' (E.164 → digits)
  */
 export function resolvePhoneFromJid(jid: string, db: Database): string {
   const atIdx = jid.indexOf('@');
@@ -138,6 +142,13 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
     const resolved = resolveLid(db, local);
     // Fallback: return normalized LID (colon-device suffix stripped)
     return resolved ?? normalizeLid(local);
+  }
+
+  if (domain === DOMAIN_SMS) {
+    // SMS JIDs carry E.164 addresses (e.g. '+15551230100'). Strip the leading
+    // '+' so the result matches the repo's phone-subject convention (digits
+    // without leading '+') — the same format personal WhatsApp JIDs yield.
+    return local.startsWith('+') ? local.slice(1) : local;
   }
 
   // Personal JID or other — delegate to extractLocal
