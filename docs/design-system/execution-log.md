@@ -203,7 +203,7 @@ Hygiene: "Phase N" prose labels guard-blocked → renamed to C-stage labels. Com
 ## T7 — Enforcement + Cutover Plans — 2026-06-11
 
 **Verdict: Pass.** `04-enforcement/lint-plan.md` (22-rule catalog, 7-state lifecycle, 5-field waiver
-policy w/ YAML registry, 15-check rg regression suite wired to husky + verify:push:branch, readiness
+policy w/ YAML registry, 15-check rg regression suite (opt-in scripts; husky/verify wiring is a P6 enforcement-stage task), readiness
 scorecard), `05-cutover/cutover-plan.md` (C0–C4 reversible, driver mapping, rehearsal rule
 dense/expressive/transactional, 8-axis visual QA matrix, rollback per stage), `05-cutover/
 branding-touchpoints.md` (exhaustive: 27 console/src lines, 84 test lines, 8 docs/html — all tagged;
@@ -345,3 +345,32 @@ origin/main, design docs merged branch-local. 1,619/1,619 tests. Commit-email fi
 as push-gate (origin/main's own author identity; controlled at squash). All remaining audit items
 dispositioned as DD-6..DD-10 debt with phases or scheduled C2-C4 work. Full table:
 `06-implementation/d1-3-4-evidence.md`. **D1 token-foundation stage COMPLETE.**
+
+---
+
+## D1.5 — Oversight Round-2 Remediation — 2026-06-11
+
+**Verdict: Pass.** Ten fresh findings, all closed or formally dispositioned:
+1. D1.3 evidence packet — already on branch (audit raced the e88af6ae merge); confirmed present.
+2. "Wired to husky/verify" over-claim — execution-log wording corrected; actual wiring is a P6
+   enforcement-stage task (regression suite + baseline + parity remain opt-in scripts until then).
+3. Report-only language — script summary now states "Report-only baseline: no checks promoted to
+   blocking (EXIT_ON_FAIL empty)".
+4. Theme parity — REAL script created (`console/scripts/check-theme-parity.mjs`, 101 tokens verified
+   in both scopes); regression check 9 now executes it; npm script `design:theme-parity`.
+5. Shadow drift ceiling — `console/lint-shadow-baseline.json` committed (615 warnings across 8
+   per-rule buckets, keyed by [soup/*] message tags) + `check-shadow-baseline.mjs` ratchet (counts
+   may fall, never rise; `--update` to tighten); npm script `lint:shadow:baseline`.
+6. Stub rules — acknowledged as designed: each stub activates with its enabling primitive per the
+   lint-plan lifecycle table (no change).
+7. Waiver closed-loop — registry extended with expiration_phase / cleanup_trigger /
+   user_approval_required on all entries; WVR-007..011 added; ALL 7 inline suppressions now carry
+   waiver:<id> tags (check 15 = 0 untagged).
+8. Brand SSOT — regression check 5 now exempts ConfigStep.tsx (bot-identity/protocol copy) in
+   lockstep with the ESLint rule; branding-touchpoints.md is the classification SSOT; remaining
+   non-contract count = 1 (UpdateModal, P4 flip).
+9. Trailing whitespace in button.md / interaction-patterns.md — fixed.
+10. Scope framing — recorded PR strategy: the branch is a FOUNDATION PACKAGE (C0+C1 tokens, shadow
+    lint infra, docs, tests). At push-gate, evaluate splitting into stacked PRs (docs / C0 / C1 /
+    lint-infra) per the one-PR-per-phase rule; single-package framing requires explicit operator
+    choice. Push remains gated on operator approval + author-email decision.
