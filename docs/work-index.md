@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 179
+**Total entries:** 180
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | bead=113, doc=14, handoff=4, plan=15, review=1, spec=13, state=19 |
-| Status | active=2, closed=7, completed=115, deferred=8, pending=38, unknown=9 |
-| Status source | bead-manifest=3, body-marker=102, directory=7, fallback=4, phase-log=7, state-md-status=56 |
+| Kind | bead=113, doc=14, handoff=4, plan=16, review=1, spec=13, state=19 |
+| Status | active=2, closed=7, completed=115, deferred=8, pending=38, unknown=10 |
+| Status source | bead-manifest=3, body-marker=102, directory=7, fallback=5, phase-log=7, state-md-status=56 |
 
 ## Inconsistencies
 
@@ -41,7 +41,7 @@ scoped markdown files currently on disk.
 | `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | agent-layer-hardening | state-md-status |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | agent-layer-hardening | state-md-status |
 
-### Unknown-status — triage needed (9)
+### Unknown-status — triage needed (10)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -50,7 +50,8 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-05-12 |
 | `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
-| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | twilio-sms-transport | 2026-06-10 |
+| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | twilio-sms-transport | 2026-06-11 |
+| `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | twilio-voice-webhook | 2026-06-11 |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | colony-orchestration-design | 2026-04-04 |
 | `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | scheduled-groups-tabs-design | 2026-04-06 |
 | `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md` | spec | console-test-jsx-runtime-fix | 2026-04-25 |
@@ -318,7 +319,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 
-### docs/superpowers/plans  _(15 entries)_
+### docs/superpowers/plans  _(16 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -336,7 +337,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | completed | body-marker | operation-tracker | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-04-25-pr-0a-transport-contract-foundation.md` | plan | completed | body-marker | pr-0a-transport-contract-foundation | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-05-29-harness-maintenance.md` | plan | completed | body-marker | harness-maintenance | 2026-05-29 |  |
-| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | unknown | fallback | twilio-sms-transport | 2026-06-10 |  |
+| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | unknown | fallback | twilio-sms-transport | 2026-06-11 |  |
+| `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | unknown | fallback | twilio-voice-webhook | 2026-06-11 |  |
 
 ### docs/superpowers/reviews  _(1 entries)_
 
@@ -365,4 +367,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-11T04:18:46Z from commit `87d1cd9639be79d48ca414d66dc7118673ae2779`
+- Generated at 2026-06-11T16:35:50Z from commit `7184763d73e044632a4bef0a9a85e08682bf8ae8`
