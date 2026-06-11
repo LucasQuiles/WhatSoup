@@ -547,13 +547,15 @@ function validateTransportConfig(
     if (typeof twilioConfig !== 'object' || Array.isArray(twilioConfig)) {
       return err('twilioConfig', 'twilioConfig must be an object');
     }
-    return validateTwilioConfig(twilioConfig as Record<string, unknown>);
+    const healthPort =
+      typeof raw['healthPort'] === 'number' ? (raw['healthPort'] as number) : undefined;
+    return validateTwilioConfig(twilioConfig as Record<string, unknown>, healthPort);
   }
 
   return null;
 }
 
-function validateTwilioConfig(tc: Record<string, unknown>): ValidationError | null {
+function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number): ValidationError | null {
   // account: non-empty, matches ACCOUNT_RE
   const account = tc['account'];
   if (typeof account !== 'string' || account === '' || !ACCOUNT_RE.test(account)) {
@@ -623,20 +625,128 @@ function validateTwilioConfig(tc: Record<string, unknown>): ValidationError | nu
     }
   }
 
-  // inboundMode: if present must be 'poll' or 'webhook'; 'webhook' is rejected
+  // inboundMode: if present must be 'poll' or 'webhook'
   const inboundMode = tc['inboundMode'];
-  if (inboundMode !== undefined) {
-    if (inboundMode === 'webhook') {
+  if (inboundMode !== undefined && inboundMode !== 'poll' && inboundMode !== 'webhook') {
+    return err(
+      'twilioConfig.inboundMode',
+      "twilioConfig.inboundMode must be 'poll' or 'webhook'",
+    );
+  }
+  const effectiveInboundMode = inboundMode ?? 'poll';
+
+  // webhook block: required iff inboundMode === 'webhook', forbidden otherwise (fail closed).
+  const webhookBlock = tc['webhook'];
+  if (effectiveInboundMode === 'webhook') {
+    if (webhookBlock === undefined || webhookBlock === null) {
       return err(
-        'twilioConfig.inboundMode',
-        "webhook inbound is not yet supported; use inboundMode:'poll'",
+        'twilioConfig.webhook',
+        "twilioConfig.webhook is required when inboundMode is 'webhook'",
       );
     }
-    if (inboundMode !== 'poll') {
+    if (typeof webhookBlock !== 'object' || Array.isArray(webhookBlock)) {
+      return err('twilioConfig.webhook', 'twilioConfig.webhook must be an object');
+    }
+    const wb = webhookBlock as Record<string, unknown>;
+    const publicBaseUrl = wb['publicBaseUrl'];
+    if (typeof publicBaseUrl !== 'string' || publicBaseUrl === '') {
       return err(
-        'twilioConfig.inboundMode',
-        "twilioConfig.inboundMode must be 'poll' (webhook is not yet supported)",
+        'twilioConfig.webhook.publicBaseUrl',
+        'twilioConfig.webhook.publicBaseUrl must be a non-empty string',
       );
+    }
+    let parsed: URL | null = null;
+    try { parsed = new URL(publicBaseUrl); } catch { /* fall through */ }
+    if (!parsed || parsed.protocol !== 'https:') {
+      return err(
+        'twilioConfig.webhook.publicBaseUrl',
+        'twilioConfig.webhook.publicBaseUrl must be an https:// URL',
+      );
+    }
+    const listenPort = wb['listenPort'];
+    if (
+      typeof listenPort !== 'number' ||
+      !Number.isInteger(listenPort) ||
+      listenPort < 1 ||
+      listenPort > 65535
+    ) {
+      return err(
+        'twilioConfig.webhook.listenPort',
+        'twilioConfig.webhook.listenPort must be an integer between 1 and 65535',
+      );
+    }
+    if (healthPort !== undefined && listenPort === healthPort) {
+      return err(
+        'twilioConfig.webhook.listenPort',
+        `twilioConfig.webhook.listenPort ${listenPort} conflicts with healthPort`,
+      );
+    }
+    const listenAddress = wb['listenAddress'];
+    if (listenAddress !== undefined && typeof listenAddress !== 'string') {
+      return err(
+        'twilioConfig.webhook.listenAddress',
+        'twilioConfig.webhook.listenAddress must be a string',
+      );
+    }
+  } else if (webhookBlock !== undefined) {
+    // poll mode: webhook block is forbidden (fail closed)
+    return err(
+      'twilioConfig.webhook',
+      "twilioConfig.webhook must not be set when inboundMode is 'poll'",
+    );
+  }
+
+  // voice optional block
+  const voiceBlock = tc['voice'];
+  if (voiceBlock !== undefined && voiceBlock !== null) {
+    if (typeof voiceBlock !== 'object' || Array.isArray(voiceBlock)) {
+      return err('twilioConfig.voice', 'twilioConfig.voice must be an object');
+    }
+    const vb = voiceBlock as Record<string, unknown>;
+    const voiceEnabled = vb['enabled'];
+    if (voiceEnabled !== undefined && typeof voiceEnabled !== 'boolean') {
+      return err('twilioConfig.voice.enabled', 'twilioConfig.voice.enabled must be a boolean');
+    }
+    const maxLen = vb['voicemailMaxLengthSec'];
+    if (maxLen !== undefined) {
+      if (
+        typeof maxLen !== 'number' ||
+        !Number.isInteger(maxLen) ||
+        (maxLen as number) < 5 ||
+        (maxLen as number) > 600
+      ) {
+        return err(
+          'twilioConfig.voice.voicemailMaxLengthSec',
+          'twilioConfig.voice.voicemailMaxLengthSec must be an integer between 5 and 600',
+        );
+      }
+    }
+    const greeting = vb['voicemailGreeting'];
+    if (greeting !== undefined) {
+      if (typeof greeting !== 'string' || (greeting as string).length > 500) {
+        return err(
+          'twilioConfig.voice.voicemailGreeting',
+          'twilioConfig.voice.voicemailGreeting must be a string of at most 500 characters',
+        );
+      }
+    }
+    // Coherence rules for voice.enabled
+    if (voiceEnabled === true) {
+      if (effectiveInboundMode !== 'webhook') {
+        return err(
+          'twilioConfig.voice',
+          "voice requires inboundMode:'webhook' (transcription arrives via webhook callbacks)",
+        );
+      }
+      // calls.create requires from: string — messagingServiceSid-only configs cannot place calls
+      const hasPhone =
+        typeof tc['phoneNumber'] === 'string' && (tc['phoneNumber'] as string).length > 0;
+      if (!hasPhone) {
+        return err(
+          'twilioConfig.voice',
+          'voice requires phoneNumber (calls cannot originate from a messagingServiceSid)',
+        );
+      }
     }
   }
 
