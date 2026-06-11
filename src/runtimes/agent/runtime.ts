@@ -30,6 +30,12 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
+import {
+  ensureFallbackStateSchema,
+  saveFallbackState,
+  loadFallbackState,
+  clearFallbackState,
+} from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writePrivateFileSync, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
 import { SessionManager, formatAge, type SessionCrashInfo } from './session.ts';
@@ -2246,6 +2252,7 @@ export class AgentRuntime implements Runtime {
 
   async start(): Promise<void> {
     ensureAgentSchema(this.db);
+    this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
 
     // Write sandbox policy and hook settings when sandbox config is present
@@ -5286,16 +5293,6 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Activate provider fallback after the primary provider hit a usage limit.
-   *
-   * No-op unless a fallback provider is configured. The window ends at the
-   * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
-   * clamped to [MIN_FALLBACK_WINDOW_MS, MAX_FALLBACK_WINDOW_MS]. Idempotent: a
-   * second activation while already active extends the window to the later of
-   * the two. Schedules an auto-revert timer (unref'd so it never keeps the
-   * process alive).
-   */
-  /**
    * Whether the keyring holds an API key for the configured fallback target.
    *
    * Returns:
@@ -5330,6 +5327,59 @@ export class AgentRuntime implements Runtime {
       : '_Hit my usage limit — please try again after the limit resets._';
   }
 
+  /** Arm (or move) the fallback window to `until`, schedule the revert timer,
+   *  and persist best-effort so a restart mid-window resumes on fallback. */
+  private armFallbackWindow(until: number, reason: string): void {
+    this.fallbackActiveUntil = until;
+    if (this.revertTimer) {
+      clearTimeout(this.revertTimer);
+      this.revertTimer = null;
+    }
+    this.revertTimer = setTimeout(() => {
+      this.deactivateProviderFallback('window-elapsed');
+    }, Math.max(0, until - Date.now()));
+    // Do not let the revert timer keep the process alive at shutdown.
+    this.revertTimer.unref?.();
+    try {
+      saveFallbackState(this.db, { activeUntil: until, activatedAt: Date.now(), reason });
+    } catch (err) {
+      log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
+    }
+  }
+
+  /**
+   * Re-arm a persisted fallback window after a process restart. Never throws —
+   * a corrupt or stale row is cleared and startup proceeds on the primary.
+   */
+  private restorePersistedFallbackWindow(): void {
+    try {
+      ensureFallbackStateSchema(this.db);
+      const persisted = loadFallbackState(this.db);
+      if (!persisted) return;
+      if (!this.agentFallbackProvider || persisted.activeUntil <= Date.now()) {
+        clearFallbackState(this.db);
+        return;
+      }
+      this.armFallbackWindow(persisted.activeUntil, 'restored');
+      log.info({
+        activeUntil: new Date(persisted.activeUntil).toISOString(),
+        originalReason: persisted.reason,
+      }, 'restored provider-fallback window from persisted state');
+    } catch (err) {
+      log.warn({ err }, 'failed to restore persisted fallback window');
+    }
+  }
+
+  /**
+   * Activate provider fallback after the primary provider hit a usage limit.
+   *
+   * No-op unless a fallback provider is configured. The window ends at the
+   * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
+   * clamped to [MIN_FALLBACK_WINDOW_MS, MAX_FALLBACK_WINDOW_MS]. Idempotent: a
+   * second activation while already active extends the window to the later of
+   * the two. Schedules an auto-revert timer (unref'd so it never keeps the
+   * process alive).
+   */
   private activateProviderFallback(resetAt: Date | null): void {
     if (!this.agentFallbackProvider) return;
 
@@ -5356,17 +5406,7 @@ export class AgentRuntime implements Runtime {
       : clampedUntil;
 
     const wasActive = this.fallbackActiveUntil !== null;
-    this.fallbackActiveUntil = until;
-
-    if (this.revertTimer) {
-      clearTimeout(this.revertTimer);
-      this.revertTimer = null;
-    }
-    this.revertTimer = setTimeout(() => {
-      this.deactivateProviderFallback('window-elapsed');
-    }, Math.max(0, until - now));
-    // Do not let the revert timer keep the process alive at shutdown.
-    this.revertTimer.unref?.();
+    this.armFallbackWindow(until, 'usage-limit');
 
     log.info({
       instanceName: this.instanceName,
@@ -5386,6 +5426,11 @@ export class AgentRuntime implements Runtime {
     }
     if (this.fallbackActiveUntil === null) return;
     this.fallbackActiveUntil = null;
+    try {
+      clearFallbackState(this.db);
+    } catch (err) {
+      log.warn({ err }, 'failed to clear persisted fallback state');
+    }
     log.info({
       instanceName: this.instanceName,
       primaryProvider: this.agentProvider,

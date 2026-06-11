@@ -12,6 +12,7 @@
  * 5-hour default revert window is exercised without real wall-clock delay.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
 
 // ─── Mocks (declared before importing the runtime) ────────────────────────────
 
@@ -539,5 +540,120 @@ describe('usage-limit user notice', () => {
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('switching to a backup model'),
     );
+  });
+});
+
+// ─── Persistence hooks (Work item 2) ─────────────────────────────────────────
+
+type PersistenceView = {
+  fallbackActiveUntil: number | null;
+  effectiveProvider: string;
+  activateProviderFallback(resetAt: Date | null): void;
+  deactivateProviderFallback(reason: string): void;
+  restorePersistedFallbackWindow(): void;
+};
+
+function persistView(runtime: AgentRuntime): PersistenceView {
+  return runtime as unknown as PersistenceView;
+}
+
+describe('AgentRuntime — fallback persistence hooks', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    lookupCredentialMock.mockReset();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('persists the window on activation and clears it on deactivation', () => {
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    persistView(runtime).activateProviderFallback(null);
+    expect(saveSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reason: 'usage-limit' }),
+    );
+
+    persistView(runtime).deactivateProviderFallback('test');
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it('restores a persisted future window on startup and auto-reverts when it elapses', () => {
+    const now = Date.now();
+    const activeUntil = now + 60 * 60_000;
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil,
+      activatedAt: now - 1000,
+      reason: 'usage-limit',
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    persistView(runtime).restorePersistedFallbackWindow();
+    expect(persistView(runtime).effectiveProvider).toBe('opencode-cli');
+
+    vi.advanceTimersByTime(61 * 60_000);
+    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it('discards a stale persisted window (past expiry) without re-arming', () => {
+    const now = Date.now();
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil: now - 1000,
+      activatedAt: now - 10_000,
+      reason: 'usage-limit',
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    persistView(runtime).restorePersistedFallbackWindow();
+    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it('a throwing loadFallbackState never crashes restore', () => {
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockImplementation(() => {
+      throw new Error('db exploded');
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    expect(() => persistView(runtime).restorePersistedFallbackWindow()).not.toThrow();
+    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
   });
 });
