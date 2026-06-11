@@ -16,9 +16,9 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
 | Task | Description | Status |
 |---|---|---|
 | T1 | Worktree, discovery, scaffold | ✅ Complete |
-| T2 | Inventory, IA, workflow, DRY audit | ⬜ Pending |
-| T3 | Research + reference library | ⬜ Pending |
-| T4 | Three direction mockups | ⬜ Pending |
+| T2 | Inventory, IA, workflow, DRY audit | ✅ Complete |
+| T3 | Research + reference library | ✅ Complete (motion addendum landing) |
+| T4 | Three direction mockups | 🔄 In progress |
 | **G1** | **Direction selection gate** | ⬜ Awaiting user |
 | T5 | Winner refinement | ⬜ Blocked on G1 |
 | **G2** | **Visual/spec lock gate** | ⬜ Awaiting user |

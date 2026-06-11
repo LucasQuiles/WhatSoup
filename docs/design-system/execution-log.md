@@ -35,3 +35,89 @@ Gaps/decisions:
 Files created: `docs/design-system/{README.md,execution-log.md}`, `docs/sdlc/active/soup-design-system-v3/state.md`, `beads/`.
 
 Commit: `docs(design): scaffold SOUP design-system v3 program`
+
+---
+
+## T2 — Inventory, IA, Workflow, DRY Audit — 2026-06-11
+
+**Verdict: Pass**
+
+Produced all six `00-inventory/` artifacts via dedicated audit agent; integrator reviewed and committed.
+
+Key verified facts:
+- LineDetail tabs: **9** (7 base + 2 MCP-gated: Scheduled, Groups — `console/src/pages/LineDetail.tsx:37-52`).
+- A8: `WhatSoup` occurs **6 times in console/src** (1 each: `types.ts`, `mock-data.ts`, `hooks/use-keyboard-shortcuts.ts`, `hooks/use-fleet.ts`, `components/wizard/ConfigStep.tsx`, `components/UpdateModal.tsx`).
+- Token census: **180 custom properties** (50 `@theme` / 130 `:root`), 60 `c-*` composite classes, 7 orphan tokens.
+- Controls: 135 `<button>`s (24 raw outside `c-btn`/`c-tab` across ~8 recipes), 11 dialog surfaces (0 focus traps, 3 missing Escape), 9+ pill recipes, 4 custom popover dropdowns.
+- Drift: 26 ranked entries — 6 P1 (button sprawl; no modal primitive; dark-only token values; status/mode color logic ×8 TS maps + 7 visuals; no pill primitive; token tier pollution), 12 P2, 8 P3.
+- Disconfirmed briefing hypotheses logged in `duplication-register.md` (CardSelector/ChartPanel/Nav are not dropdowns; avatar-hue hashing single-sited).
+- Hygiene note: guard flagged a doc line naming the literal lint-suppression directive; reworded.
+
+Commit: `8fdc6a37 docs(design): T2 inventory — components, controls, IA, duplication, tokens, drift`
+
+---
+
+## T3 — Research + Reference Library — 2026-06-11
+
+**Verdict: Pass** (motion addendum in progress — see T3b below)
+
+Produced `01-research/reference-library.md` (~50 refs, 10 categories, authority + verification status per ref)
+and `01-research/research-digest.md` (per-reference steal/adapt/reject, topics a–g, 13 "SOUP Design Direction Signals").
+
+Honesty marks: Grafana Saga pages JS-gated; Apple dark-mode page fetch failed (known-canon);
+Raycast via secondary teardown; galleries/TE marked not-browsed stimulus-only. Search-verified/known-canon
+claims need re-confirmation before becoming normative in T6.
+
+Headline conclusions: Radix contrast-by-construction + Carbon theme-as-token-remap + Primer role-first
+naming as the token architecture; two designed densities; 4-surface elevation ladder with per-theme
+elevation law; Geist > Plex > Inter typeface shortlist (Outfit as control); "mechanical calm" motion;
+SOUP wordmark as instrument nameplate; positioning = "instrument-grade calm".
+
+Commit: `44bcb5c8 docs(design): T3 research — reference library and design-direction digest`
+
+---
+
+## T3b — Motion Addendum + Operator Synthesis Seed — 2026-06-11
+
+**Verdict: Pass**
+
+Plan addendum (user-integrated) required motion-reference research. Research agent expanded
+`reference-library.md` §8 into 5 sub-sections (philosophy / design-system specs / implementation /
+hard gates / expressive boundary) covering Atlassian Motion (fetched: 50–150/150–400ms bands, 4 easings,
+exits-faster), Fluent 2 motion taxonomy (fetched), Motion/motion.dev, Sonner, Vaul, Rive (rejected for v3
+adoption), MDN reduced-motion + compositor discipline, WCAG 2.2.2 (Level A — directly regulates v2's
+breathing dots and live feed; resolved via pause control + static degradation) and 2.3.3 (AAA, adopted
+as target), BUCK/Clay/basement (stimulus-only, honestly marked not-browsed).
+Digest signal #10 expanded: duration tokens (instant / fast ~120 / base ~180 / slow ~280 / ambient ≥1500ms),
+two easings, transform/opacity allowlist + waiver, anchored-overlay specifics, ~150–200ms loader delay,
+error-shake banned, full reduced/no-motion contract ("no information may exist only in motion").
+Unverifiable: Geist motion docs (none found), Teams specifics, Clay/basement specifics — all marked.
+
+Also added `01-research/synthesis-seed.md`: distillation of operator-provided comprehensive synthesis
+report (non-authoritative seed per plan addendum) — studio craft-bar refs (LoveFrom, Clay, BUCK, Instrument,
+Work & Co, Fantasy, Metalab), Android/MDN/W3C foundation validation set, seed sizing matrix, T7 lint
+tripwires, screenshot QA matrix, and reconciliation notes (digest's ~300ms ceiling stands over seed's
+400ms; typeface decision deferred to T4 side-by-side).
+
+Commit: `1a39add8 docs(design): T3b motion research addendum + operator synthesis seed`
+
+---
+
+## T4 — Direction Mockups — 2026-06-11 (IN PROGRESS)
+
+Three parallel direction agents dispatched (criteria incl. plan motion addendum: structural motion,
+reduced-motion neutralization, anchored overlays, loading feedback, immediate focus/validation feedback).
+
+- **Direction B (Editorial Precision): Pass.** `direction-b-editorial.html`, 2,337 lines, self-contained,
+  dual designed themes, headless-Chrome render clean both themes at 900px+. Geist + Geist Mono;
+  electric blue accent (#6BA6FF dark / #2563EB light); "soup." lowercase wordmark with passive-teal
+  period. Vocabulary proposal: Soup Kitchen→Fleet, one user-facing noun "Line", "Attention" metric.
+  Self-critique recorded (Vercel-adjacency risk; inline-style shortcut; drill-in is a vignette).
+  Hygiene note: `====` CSS banners false-positived the conflict-marker guard → converted to dashes.
+  Commit: `dc56dd3c`.
+- **Direction A (Instrument): Blocked mid-flight** — subagent hit session token limit; file truncated
+  at 1,544 lines (no closing tag). Agent resumed to finish; file held uncommitted until complete.
+- **Direction C (Ops): Blocked mid-flight** — same limit; truncated at 1,656 lines. Agent resumed;
+  held uncommitted until complete.
+
+Launcher `index.html` deferred until all three directions exist.
