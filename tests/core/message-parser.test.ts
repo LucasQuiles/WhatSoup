@@ -649,4 +649,8 @@ describe('extractContextInfo', () => {
     expect(extractContextInfo(undefined)).toBeNull();
     expect(extractContextInfo('string')).toBeNull();
   });
+
+  it('returns null when contextInfo is explicitly null on the content node', () => {
+    expect(extractContextInfo({ imageMessage: { caption: 'pic', contextInfo: null } })).toBeNull();
+  });
 });
