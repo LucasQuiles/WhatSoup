@@ -5350,13 +5350,19 @@ export class AgentRuntime implements Runtime {
 
   /**
    * Re-arm a persisted fallback window after a process restart. Never throws —
-   * a corrupt or stale row is cleared and startup proceeds on the primary.
+   * a corrupt, missing, or stale row is cleared and startup proceeds on the primary.
+   * loadFallbackState returns null for both "no row" and "bad-typed row" (SQLite
+   * affinity can store TEXT in INTEGER columns); clearing on null ensures corrupt
+   * rows do not linger across restarts.
    */
   private restorePersistedFallbackWindow(): void {
     try {
       ensureFallbackStateSchema(this.db);
       const persisted = loadFallbackState(this.db);
-      if (!persisted) return;
+      if (!persisted) {
+        clearFallbackState(this.db);
+        return;
+      }
       if (!this.agentFallbackProvider || persisted.activeUntil <= Date.now()) {
         clearFallbackState(this.db);
         return;
