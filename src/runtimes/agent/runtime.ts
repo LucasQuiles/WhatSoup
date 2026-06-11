@@ -4600,7 +4600,7 @@ export class AgentRuntime implements Runtime {
               responseText.trim() !== '' ||
               (typeof event.text === 'string' && event.text.trim() !== '');
             this.recordFallbackTurnOutcome(queue, hadVisible);
-            if (!hadVisible && this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil) {
+            if (!hadVisible && this.isFallbackWindowActive) {
               // This path has no '_(no response)_' fallback and the reply guarantee
               // was just disarmed — without this the user gets pure silence.
               queue.enqueueText('_The backup model returned no reply — please resend or rephrase your message._');
@@ -5282,11 +5282,14 @@ export class AgentRuntime implements Runtime {
    * takes effect on the next auto-respawned or freshly created session.
    */
   private get effectiveProvider(): string {
-    return this.fallbackActiveUntil &&
-      Date.now() < this.fallbackActiveUntil &&
-      this.agentFallbackProvider
+    return this.isFallbackWindowActive && this.agentFallbackProvider
       ? this.agentFallbackProvider
       : this.agentProvider;
+  }
+
+  /** True while a fallback window is armed and not yet expired. */
+  private get isFallbackWindowActive(): boolean {
+    return this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil;
   }
 
   /**
@@ -5307,8 +5310,7 @@ export class AgentRuntime implements Runtime {
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
   } {
-    const active =
-      this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil;
+    const active = this.isFallbackWindowActive;
     return {
       effectiveProvider: this.effectiveProvider,
       fallbackActiveUntil: active ? this.fallbackActiveUntil : null,
@@ -5320,9 +5322,7 @@ export class AgentRuntime implements Runtime {
 
   /** Model paired with {@link effectiveProvider}: fallbackModel while the window is active, else the primary model. */
   private get effectiveModel(): string | undefined {
-    return this.fallbackActiveUntil &&
-      Date.now() < this.fallbackActiveUntil &&
-      this.agentFallbackProvider
+    return this.isFallbackWindowActive && this.agentFallbackProvider
       ? this.agentFallbackModel
       : this.model;
   }
@@ -5365,7 +5365,7 @@ export class AgentRuntime implements Runtime {
   /** Count a completed turn during an active fallback window; alert when it
    *  produced zero visible output — the silent-dead-bot signal. */
   private recordFallbackTurnOutcome(queue: IOutboundQueue, hadVisibleOutput: boolean): void {
-    if (this.fallbackActiveUntil === null || Date.now() >= this.fallbackActiveUntil) return;
+    if (!this.isFallbackWindowActive) return;
     this.fallbackTurnsServed += 1;
     this.lastFallbackTurnAt = Date.now();
     if (hadVisibleOutput) return;
