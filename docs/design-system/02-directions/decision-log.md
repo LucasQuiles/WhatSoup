@@ -126,7 +126,36 @@ production needs squeeze-layout (table reflows) rather than pure overlay; (2) na
 leaves trailing letter-space after "P", optical centering untuned; (3) `.w-160`/`.mt-3`-style utilities are
 spec-smell — T6 must replace with composition-level primitives, not carry them into the codebase.
 
-## G2 — Visual and spec lock
+## G2 — Visual and spec lock — APPROVED
+
+**Approved G2 on 2026-06-11: Option A — conditional lock of v2 Blend.**
+Decision source: operator's "Operationalization Prompt — SOUP Frontend Implementation Driver"
+(2026-06-11), which explicitly authorizes implementation work and declares "SOUP — v2 (Blend) is the
+leading/locked implementation direction unless explicitly superseded" — recorded as Option A from the
+G2 review package, with the three open items carried as **mandatory resolution criteria**:
+1. Drawer squeeze-layout rule (T6 spec requirement — `components/drawer.md` + table reflow rule).
+2. Nameplate tracking/optical centering (T6 spec requirement — `brand.md` tuning rules).
+3. Utility/spec-smell conversion to composition primitives (T6 spec requirement + T7 lint tripwire).
+
+Locked: visual language (B chassis + A/C grafts), Geist typography, both palettes, electric-blue accent
+strategy, motion strategy (instant/120/180/280, paired easings, exits-faster, reduced-motion
+off-and-instant, single ambient budget on ok-breathing, crit-blink rejected), SOUP nameplate direction,
+state taxonomy + shape-coded status law, density model (36/28), one-table strategy, log-stream strategy,
+drawer/inspector strategy, toolbar anatomy, locked naming vocabulary.
+
+**T8: DECLINED (superseded).** The G2 package recommended declining absent a need for live palette
+evidence; the operator's implementation authorization makes the throwaway spike moot — the token
+foundation stage of implementation provides real-screen validation under full review instead.
+No T8 spike will run.
+
+**Scope transition note:** the operator-supplied implementation driver constitutes the "separate
+implementation plan" the design-phase plan required post-G3. Sequence honored: T6/T7 now execute
+(post-G2 per plan), the G3 package follows, and production edits begin only with the token
+foundation stage after the implementation-readiness packet is approved. All implementation stages
+run under the driver's hard-stop conditions (no push/PR/deploy/main-checkout edits/protocol renames
+without approval).
+
+## (superseded heading) Visual and spec lock
 
 Review package: `g2-review-package.md`.
 
