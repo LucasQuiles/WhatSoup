@@ -200,6 +200,17 @@ Each item below is verified against the code on this branch.
   per-row: the scheduler retries it up to `maxRetries` and then marks it
   `failed`. There is no special terminal-failure routing for
   unsupported-transport errors yet — they burn the normal retry budget first.
+- **The enforcement envelope from the design spec is not yet wired.** No
+  fitness rules (`transport.twilio-credential-gate`,
+  `transport.webhook-signature-required`,
+  `invariant.no-outbound-without-consent`, `transport.destructive-op-gate`),
+  no consent guard, and no per-iteration self-review artifact/guard exist on
+  this branch — they are a later enforcement stage. Do not assume an
+  invariant layer is active when working under `src/transport/twilio/`.
+- **No outbound-status events.** The adapter's `extensions` set is empty;
+  delivery confirmation uses the inbound echo path instead (the bot's own
+  sends arrive as `fromMe: true` records via polling and settle durability
+  through `matchEcho`).
 - **`rateLimit.smsPerMinute` is validated config with no enforcement.** No
   code consumes it on the send path yet. Do not rely on it to cap outbound
   volume; it exists so configs written today stay valid when the limiter

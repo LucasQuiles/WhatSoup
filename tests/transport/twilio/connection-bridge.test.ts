@@ -439,16 +439,18 @@ describe('TwilioConnection background error logging', () => {
     const { bridge, port } = makeBridge();
     const logged: Array<{ fields: Record<string, unknown>; msg: string }> = [];
     bridgeLogRecorder.onError = (fields, msg) => logged.push({ fields, msg });
+    try {
+      await bridge.connect();
+      // Arm a transient poll failure; the adapter emits it on the error channel
+      port.failNextList(Object.assign(new Error('twilio 503'), { status: 503 }));
+      await vi.advanceTimersByTimeAsync(1000);
 
-    await bridge.connect();
-    // Arm a transient poll failure; the adapter emits it on the error channel
-    port.failNextList(Object.assign(new Error('twilio 503'), { status: 503 }));
-    await vi.advanceTimersByTimeAsync(1000);
-
-    expect(logged.length).toBeGreaterThanOrEqual(1);
-    expect(logged[0].msg).toContain('twilio transport error');
-    expect(logged[0].fields).toMatchObject({ retryable: true, operation: 'pollInbound' });
-    bridge.shutdown();
-    bridgeLogRecorder.onError = null;
+      expect(logged.length).toBeGreaterThanOrEqual(1);
+      expect(logged[0].msg).toContain('twilio transport error');
+      expect(logged[0].fields).toMatchObject({ retryable: true, operation: 'pollInbound' });
+      bridge.shutdown();
+    } finally {
+      bridgeLogRecorder.onError = null;
+    }
   });
 });

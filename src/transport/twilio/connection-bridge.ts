@@ -97,6 +97,9 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
   private readonly log = createChildLogger('twilio-bridge');
   private messageSubscription: Subscription | null = null;
   private errorSubscription: Subscription | null = null;
+  // NOTE: the adapter also emits 'state' events, but the bridge deliberately
+  // does not subscribe — health reporting is pull-based via
+  // getConnectionState() (health.ts polls), matching the Baileys path.
 
   // ── RuntimeConnection fields ──────────────────────────────────────────────
 

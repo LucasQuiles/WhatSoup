@@ -150,5 +150,9 @@ Every check emits **what failed / why it matters / where (file:line) / remediati
 
 ## 14. Decomposition / open questions
 - **In this spec:** SMS+Voice transport (webhook+poll, recorded voice), enforcement extensions, mock/tests/docs.
-- **Deferred:** live voice AI (ConversationRelay/wss), console UI, A2P brand-registration tooling, failover auto-routing.
+- **Delivered in stage 1 (PR #731):** SMS send + poll-mode inbound, config validation/loading, runtime factory + bridge, mock/tests/docs. The remaining spec scope was decomposed into later stages (see the stage 1 plan's decomposition section).
+- **Deferred to stage 2:** webhook inbound + signature validation (`webhook-routes.ts`, `inbound-poll.ts` split), recorded voice (`contract/voice.ts`, `VoiceCapableTransport`), outbound-status events (stage 1 confirms delivery via the inbound `fromMe` echo path instead).
+- **Deferred to stage 3 (enforcement envelope):** `transport.twilio-credential-gate`, `transport.webhook-signature-required`, `invariant.no-outbound-without-consent` (`consent-guard.ts`), `transport.destructive-op-gate`, the per-iteration self-review artifact + guard (`docs/runbooks/twilio-self-review.md`), and adding `twilio` to `arch.approved-api-client`. None of these are active on this branch.
+- **Dropped as unnecessary:** the §7 `buildChildEnv` credential-allowlist extension — Twilio auth is keyring-only with no `SERVICE_ENV_MAP` entry, so the token never enters `process.env` and there is nothing to block.
+- **Deferred (unchanged):** live voice AI (ConversationRelay/wss), console UI, A2P brand-registration tooling, failover auto-routing.
 - **Open:** (Q1) approve `twilio` SDK vs raw fetch for `approved-api-client`? (Q2) transcription provider for voicemail (Twilio vs configured STT)? (Q3) should the webhook routes live in the transport or a shared HTTP module? — resolve during planning.
