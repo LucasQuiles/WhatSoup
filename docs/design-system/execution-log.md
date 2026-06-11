@@ -302,3 +302,18 @@ Files changed:
 - `docs/design-system/execution-log.md`
 
 No production implementation, push, PR, deploy, main checkout edit, or protocol/internal rename performed.
+
+---
+
+## D1.1 — C0 Token Split (implementation worktree) — 2026-06-11
+
+**Verdict: Pass.** Worktree `soup-impl` created (`feat/soup-v3-foundation` @ `2d5f813c`, zero console
+drift from spec baseline). index.css (1,236 lines) split into styles/tokens.{primitive,semantic,
+component}.css + composites.css with slim importer; 41-token semantic vocabulary added (aliasing
+legacy canonical values at C0); 7 orphans deleted; avatar-hue dynamic-consumer comment added.
+Evidence: token-resolution diff exact (7 removals = orphans, 41 additions = semantic, all else
+byte-identical); lint clean; build green; 1,614/1,614 console tests (3 design-token test files
+updated to read the tier set; orphan assertion corrected); dev render + computed-style probes
+identical. One spec ambiguity resolved and documented (alias direction at C0 — cutover plan
+precedence over tokens-v3 §7; inverts at C1). Full packet: `06-implementation/d1-1-evidence.md`.
+Implementation commit: `4e98f0b5`.
