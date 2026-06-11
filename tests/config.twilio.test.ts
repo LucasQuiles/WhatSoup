@@ -323,6 +323,8 @@ describe('resolveTwilioSmsConfig — webhook and voice fields', () => {
       phoneNumber: '+15550000001',
     });
     expect(result?.voice).toBeUndefined();
+    expect(result?.webhook).toBeUndefined();
+    expect(result?.phoneNumber).toBe('+15550000001');
   });
 
   it('passes through voice block with defaults applied', async () => {

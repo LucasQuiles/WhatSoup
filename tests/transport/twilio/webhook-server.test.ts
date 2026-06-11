@@ -196,8 +196,14 @@ describe('TwilioWebhookServer hardening (review wave)', () => {
 
   it('double stop() resolves cleanly (idempotent close)', async () => {
     const { server } = makeServer();
-    await server.start();
-    await Promise.all([server.stop(), server.stop()]);
-    await server.stop();
+    const port = await server.start();
+    expect(port).toBeGreaterThan(0);
+    await expect(Promise.all([server.stop(), server.stop()])).resolves.toEqual([undefined, undefined]);
+    await expect(server.stop()).resolves.toBeUndefined();
+    // Port actually released: a fresh server can bind it again
+    const { server: again } = makeServer();
+    const port2 = await again.start();
+    expect(port2).toBeGreaterThan(0);
+    await again.stop();
   });
 });
