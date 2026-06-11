@@ -7,8 +7,6 @@ describe('twilio config defaults', () => {
     expect(DEFAULT_TWILIO_SMS.inboundMode).toBe('poll');
     expect(DEFAULT_TWILIO_SMS.pollIntervalMs).toBe(15000);
     expect(DEFAULT_TWILIO_SMS.rateLimit.smsPerMinute).toBe(30);
-    // floor enforced by config validation; defaults must respect it
-    expect(DEFAULT_TWILIO_SMS.pollIntervalMs).toBeGreaterThanOrEqual(5000);
   });
 
   it('DEFAULT_TWILIO_SMS is deeply frozen', () => {

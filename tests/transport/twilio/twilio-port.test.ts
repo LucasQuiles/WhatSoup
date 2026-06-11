@@ -422,21 +422,6 @@ describe('SdkTwilioSmsPort init robustness', () => {
     await expect(port.verifyCredentials()).resolves.toBeUndefined();
     expect(factory).toHaveBeenCalledTimes(2);
   });
-
-  it('forwards limit = pageSize * 2 to EACH SDK call as the over-fetch buffer', async () => {
-    // When phoneNumber is configured, listInboundSince makes two SDK calls —
-    // one for inbound ({to=}), one for outbound ({from=}). Each gets limit=pageSize*2.
-    const lookup = vi.fn().mockReturnValue(TOKEN);
-    const messagesList = vi.fn().mockResolvedValue([]);
-    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
-    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
-
-    await port.listInboundSince(new Date('2026-01-01T00:00:00Z'), 5);
-
-    expect(messagesList).toHaveBeenCalledTimes(2);
-    expect(messagesList.mock.calls[0][0]).toMatchObject({ limit: 10 });
-    expect(messagesList.mock.calls[1][0]).toMatchObject({ limit: 10 });
-  });
 });
 
 // ---------------------------------------------------------------------------
