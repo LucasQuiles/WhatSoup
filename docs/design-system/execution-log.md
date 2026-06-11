@@ -317,3 +317,17 @@ updated to read the tier set; orphan assertion corrected); dev render + computed
 identical. One spec ambiguity resolved and documented (alias direction at C0 — cutover plan
 precedence over tokens-v3 §7; inverts at C1). Full packet: `06-implementation/d1-1-evidence.md`.
 Implementation commit: `4e98f0b5`.
+
+---
+
+## D1.2 — C1 Token Values + Dual Themes (implementation worktree) — 2026-06-11
+
+**Verdict: Pass.** Commit `9b0087ef`. Semantic tokens canonical with per-theme values (50 tokens both
+scopes, parity-checked); legacy @theme inverted to @theme inline aliases (sanctioned shifts: d4→
+translucent interaction surface, t3/t4→text-2, d5→overlay, base #050709→#0E1013); all four AA fixes
+confirmed in light scope; Geist + Geist Mono landed (Google Fonts fallback, DD-4 self-host by C2);
+motion tokens v3; theme toggle in Nav (lucide Sun/Moon, aria-label, pre-paint init, persisted
+whatsoup:theme). lint clean, build green, 1,614/1,614 tests (5 assertions tightened for the new nav
+button — name-specific queries). Visual review: Fleet dark + LIGHT and Inbox light verified live —
+light theme is designed (hairlines/shadows/darker chromatics), not inverted. Evidence:
+`06-implementation/d1-2-evidence.md`.
