@@ -55,7 +55,15 @@ vi.mock('../../src/logger.ts', () => ({
 import { Database } from '../../src/core/database.ts';
 import { resolvePhoneFromJid, lookupAccess, insertPending, updateAccess } from '../../src/core/access-list.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
-import { parseAdminCommand } from '../../src/core/command-router.ts';
+import { parseAdminCommand, type AdminCommand } from '../../src/core/command-router.ts';
+
+/** Narrow an AdminCommand to the allow/block variant (fails the test otherwise). */
+function asAccessCommand(cmd: AdminCommand | null): Extract<AdminCommand, { action: 'allow' | 'block' }> {
+  if (cmd === null || cmd.action === 'fallback') {
+    throw new Error(`expected allow/block command, got ${JSON.stringify(cmd)}`);
+  }
+  return cmd;
+}
 import { sendApprovalRequest } from '../../src/core/admin.ts';
 import type { IncomingMessage } from '../../src/core/types.ts';
 
@@ -133,19 +141,17 @@ describe('resolvePhoneFromJid — SMS JID', () => {
 
 describe('parseAdminCommand — ALLOW <digits from SMS>', () => {
   it('parses ALLOW 14155550100 as a phone command', () => {
-    const cmd = parseAdminCommand('ALLOW 14155550100');
-    expect(cmd).not.toBeNull();
-    expect(cmd!.action).toBe('allow');
-    expect(cmd!.subjectType).toBe('phone');
-    expect(cmd!.subjectId).toBe('14155550100');
+    const cmd = asAccessCommand(parseAdminCommand('ALLOW 14155550100'));
+    expect(cmd.action).toBe('allow');
+    expect(cmd.subjectType).toBe('phone');
+    expect(cmd.subjectId).toBe('14155550100');
   });
 
   it('parses BLOCK 14155550100', () => {
-    const cmd = parseAdminCommand('BLOCK 14155550100');
-    expect(cmd).not.toBeNull();
-    expect(cmd!.action).toBe('block');
-    expect(cmd!.subjectType).toBe('phone');
-    expect(cmd!.subjectId).toBe('14155550100');
+    const cmd = asAccessCommand(parseAdminCommand('BLOCK 14155550100'));
+    expect(cmd.action).toBe('block');
+    expect(cmd.subjectType).toBe('phone');
+    expect(cmd.subjectId).toBe('14155550100');
   });
 });
 
@@ -220,12 +226,11 @@ describe('SMS allowlist round-trip', () => {
     expect(result2.accessStatus).toBe('pending');
 
     // Step 4: admin replies "ALLOW 14155550100" — parseAdminCommand parses it
-    const cmd = parseAdminCommand(`ALLOW ${phone}`);
-    expect(cmd).not.toBeNull();
-    expect(cmd!.subjectId).toBe(PHONE_DIGITS);
+    const cmd = asAccessCommand(parseAdminCommand(`ALLOW ${phone}`));
+    expect(cmd.subjectId).toBe(PHONE_DIGITS);
 
     // Step 5: updateAccess applies the command
-    updateAccess(db, cmd!.subjectType, cmd!.subjectId, 'allowed');
+    updateAccess(db, cmd.subjectType, cmd.subjectId, 'allowed');
 
     // Step 6: shouldRespond now allows
     const result3 = shouldRespond(msg, BOT_JID, null, db);
@@ -239,9 +244,8 @@ describe('SMS allowlist round-trip', () => {
     const phone = resolvePhoneFromJid('+14155550199@sms', db);
     insertPending(db, 'phone', phone, 'BlockMe');
 
-    const cmd = parseAdminCommand(`BLOCK ${phone}`);
-    expect(cmd).not.toBeNull();
-    updateAccess(db, cmd!.subjectType, cmd!.subjectId, 'blocked');
+    const cmd = asAccessCommand(parseAdminCommand(`BLOCK ${phone}`));
+    updateAccess(db, cmd.subjectType, cmd.subjectId, 'blocked');
 
     const result = shouldRespond(msg, BOT_JID, null, db);
     expect(result.respond).toBe(false);
