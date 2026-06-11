@@ -171,7 +171,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       patch.claudeMd = defaultClaudeMd(name, agentOptions.cwd ?? '')
     }
     if (Object.keys(patch).length > 0) onChange(patch)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- intentional mount-only
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- waiver:WVR-011 intentional mount-only effect; expires 2026-12-31
 
   const pineconeIndex = (data.pineconeIndex as string) ?? ''
   const pineconeSearchMode = (data.pineconeSearchMode as string) ?? 'Memory'

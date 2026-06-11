@@ -11,6 +11,9 @@
 #   replacement_plan              concrete change that retires this waiver
 #   safer_alternative_considered  one line: alternative + why rejected
 #   status                        temporary | permanent
+#   expiration_phase              cutover phase at which this waiver must be re-evaluated
+#   cleanup_trigger               concrete event that retires the waiver
+#   user_approval_required        yes | no (qa-hardening exception-aging contract)
 #
 # Lint-plan section 4: no permanent waivers without spec-section citation.
 # All suppressions in source must carry "waiver:<id>" tag in their comment.
@@ -38,6 +41,9 @@ waivers:
       CSS-var indirection — rejected: recharts reads numbers pre-render
       (before layout), so runtime getComputedStyle is not available.
     status: temporary
+    expiration_phase: C3
+    cleanup_trigger: chart surface migration slice
+    user_approval_required: no
 
   - id: WVR-002
     rule: soup/no-untokenized-values
@@ -56,6 +62,9 @@ waivers:
     safer_alternative_considered: >
       none exists — this is a third-party numeric API with no CSS alternative.
     status: temporary
+    expiration_phase: C2
+    cleanup_trigger: QR/link surface migration slice
+    user_approval_required: no
 
   - id: WVR-003
     rule: soup/no-raw-color (hex)
@@ -74,6 +83,9 @@ waivers:
       CSS custom properties in the recharts style prop — rejected: recharts
       does not interpolate CSS variables in its inline style objects.
     status: temporary
+    expiration_phase: C3
+    cleanup_trigger: chart surface migration slice
+    user_approval_required: no
 
   - id: WVR-004
     rule: soup/no-raw-color (hex)
@@ -93,6 +105,9 @@ waivers:
       CSS custom property in the color option — rejected: QRCode library
       renders to canvas/SVG and does not support CSS variable syntax.
     status: temporary
+    expiration_phase: C2
+    cleanup_trigger: QR/link surface migration slice
+    user_approval_required: no
 
   - id: WVR-005
     rule: soup/no-infinite-animation
@@ -114,6 +129,9 @@ waivers:
       Remove immediately — rejected: loading skeletons provide meaningful
       perceived-performance feedback and blank rectangles are worse UX.
     status: temporary
+    expiration_phase: C5-motion
+    cleanup_trigger: motion-stage skeleton disposition
+    user_approval_required: no
 
   - id: WVR-006
     rule: soup/no-infinite-animation
@@ -134,3 +152,67 @@ waivers:
       Remove immediately — rejected: typing indicators are a standard chat
       UI affordance and their absence degrades perceived responsiveness.
     status: temporary
+    expiration_phase: C5-motion
+    cleanup_trigger: motion-stage typing-indicator disposition
+    user_approval_required: no
+
+  - id: WVR-007
+    rule: no-restricted-syntax (inline-style restriction)
+    owner: console-maintainer
+    reason: recharts Tooltip contentStyle only accepts an inline style object; className is not supported by the library API.
+    scope: console/src/lib/chart-utils.ts:14
+    expiry: 2026-12-31
+    replacement_plan: chart theming consolidates into the Card/Chart primitive at C2/C3; revisit recharts wrapper there.
+    safer_alternative_considered: CSS class injection via wrapperClassName — rejected, recharts applies contentStyle after class styles.
+    status: temporary
+    expiration_phase: C3
+    cleanup_trigger: chart surface migration slice
+    user_approval_required: no
+  - id: WVR-008
+    rule: react-refresh/only-export-components
+    owner: console-maintainer
+    reason: provider + hook co-located by design; HMR limitation only.
+    scope: console/src/hooks/use-websocket.tsx:1
+    expiry: 2026-12-31
+    replacement_plan: split provider/hook files if the module is next edited substantively.
+    safer_alternative_considered: file split now — rejected as unrelated-refactor under the single-concern rule.
+    status: temporary
+    expiration_phase: C4
+    cleanup_trigger: next substantive edit to use-websocket.tsx
+    user_approval_required: no
+  - id: WVR-009
+    rule: react-hooks/incompatible-library
+    owner: console-maintainer
+    reason: "@tanstack/react-virtual useVirtualizer trips the compiler heuristic; library hook is stable and supported."
+    scope: console/src/hooks/use-virtual-messages.ts:63
+    expiry: 2026-12-31
+    replacement_plan: remove when react-hooks lint adds first-party support for tanstack virtual.
+    safer_alternative_considered: rewriting virtualization in-house — rejected, regression risk.
+    status: temporary
+    expiration_phase: C4
+    cleanup_trigger: react-hooks plugin/library compatibility update
+    user_approval_required: no
+  - id: WVR-010
+    rule: "@typescript-eslint/no-explicit-any"
+    owner: console-maintainer
+    reason: SSE stream JSON has no typed schema yet.
+    scope: console/src/components/UpdateModal.tsx:227
+    expiry: 2026-07-01
+    replacement_plan: type the update-stream events when UpdateModal migrates to the Modal primitive (C2).
+    safer_alternative_considered: unknown + narrowing — rejected pending the C2 rewrite to avoid double churn.
+    status: temporary
+    expiration_phase: C2
+    cleanup_trigger: UpdateModal migration slice
+    user_approval_required: no
+  - id: WVR-011
+    rule: react-hooks/exhaustive-deps
+    owner: console-maintainer
+    reason: intentional mount-only effect (wizard default seeding must not re-run on dep changes).
+    scope: console/src/components/wizard/ConfigStep.tsx:174
+    expiry: 2026-12-31
+    replacement_plan: re-express with useRef-guarded init or React 19 idiom during the wizard C2/C3 migration.
+    safer_alternative_considered: adding deps — rejected, would re-seed user-edited wizard state.
+    status: temporary
+    expiration_phase: C3
+    cleanup_trigger: wizard migration slice
+    user_approval_required: no

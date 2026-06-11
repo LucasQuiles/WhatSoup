@@ -14,7 +14,7 @@ const QrDisplay: FC<QrDisplayProps> = ({ value, size = 256 }) => {
       const styles = getComputedStyle(document.documentElement)
       const dark = styles.getPropertyValue('--color-t1').trim()
       const light = styles.getPropertyValue('--color-d1').trim()
-      // eslint-disable-next-line no-restricted-syntax -- margin:2 is QRCode library option (cell count), not a CSS px value; expires 2026-12-31
+      // eslint-disable-next-line no-restricted-syntax -- waiver:WVR-002 margin:2 is QRCode library option (cell count), not a CSS px value; expires 2026-12-31
       QRCode.toCanvas(canvasRef.current, value, { width: size, margin: 2, color: { dark, light } })
     }
   }, [value, size])

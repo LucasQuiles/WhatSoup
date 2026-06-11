@@ -224,7 +224,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
               if (!eventMatch || !dataMatch) continue
 
               const event = eventMatch[1]
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SSE stream JSON has no typed schema; expires 2026-07-01
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- waiver:WVR-010 SSE stream JSON has no typed schema; expires 2026-07-01
               const data = JSON.parse(dataMatch[1]) as any
 
               if (event === 'progress') {

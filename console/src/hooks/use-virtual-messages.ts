@@ -60,6 +60,6 @@ export function createVirtualMessagesOptions({
 }
 
 export function useVirtualMessages(options: VirtualMessagesOptions) {
-  // eslint-disable-next-line react-hooks/incompatible-library
+  // eslint-disable-next-line react-hooks/incompatible-library -- waiver:WVR-009 @tanstack/react-virtual's useVirtualizer is flagged by the react-hooks compiler heuristic but is a stable supported library hook; expires 2026-12-31
   return useVirtualizer(createVirtualMessagesOptions(options))
 }

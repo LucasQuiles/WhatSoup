@@ -7,11 +7,11 @@ export const AXIS_TICK = {
   fill: 'var(--color-t4)',
 };
 
-/* eslint-disable no-restricted-syntax -- recharts margin accepts raw pixel offsets for SVG layout, not CSS tokens; expires 2026-12-31 */
+/* eslint-disable no-restricted-syntax -- waiver:WVR-001 recharts margin accepts raw pixel offsets for SVG layout, not CSS tokens; expires 2026-12-31 */
 export const CHART_MARGIN = { top: 4, right: 8, left: -12, bottom: 0 };
 /* eslint-enable no-restricted-syntax */
 
-/* eslint-disable no-restricted-syntax -- recharts Tooltip contentStyle is an inline style object; className not supported */
+/* eslint-disable no-restricted-syntax -- waiver:WVR-007 recharts Tooltip contentStyle is an inline style object; className not supported; expires 2026-12-31 */
 export const TOOLTIP_STYLE = {
   background: 'var(--color-d6)',
   color: 'var(--color-t2)',

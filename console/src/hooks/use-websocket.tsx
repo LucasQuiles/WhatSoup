@@ -1,4 +1,4 @@
-/* eslint-disable react-refresh/only-export-components -- file exports the RealtimeProvider component alongside the useRealtime hook so HMR cannot tell them apart; safe because the provider is stable and rarely edited; expires 2026-12-31 */
+/* eslint-disable react-refresh/only-export-components -- waiver:WVR-008 file exports the RealtimeProvider component alongside the useRealtime hook so HMR cannot tell them apart; safe because the provider is stable and rarely edited; expires 2026-12-31 */
 // ---------------------------------------------------------------------------
 //  WebSocket provider — single connection, invalidation-first architecture.
 //

@@ -15,7 +15,9 @@
     "lint:shadow": "eslint . -c eslint.config.shadow.mjs",
     "design:regression": "bash scripts/design-regression.sh",
     "preview": "vite preview",
-    "prepare": "husky"
+    "prepare": "husky",
+    "design:theme-parity": "node scripts/check-theme-parity.mjs",
+    "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "5.96.0",

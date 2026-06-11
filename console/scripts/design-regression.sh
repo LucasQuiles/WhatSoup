@@ -160,14 +160,16 @@ FILTERED=$(echo "$RAW_MATCHES" | awk -F: 'NF>=3 {
   if (stripped ~ /^\/\//) next;
   if (stripped ~ /^\/\*/) next;
   print $0
-}' | grep -v 'WhatSoupError\|mcp__whatsoup__\|whatsoup:\|/run/whatsoup/\|whatsoup/instances\|whatsoup@\|config/whatsoup' || true)
+}' | grep -v 'WhatSoupError\|mcp__whatsoup__\|whatsoup:\|/run/whatsoup/\|whatsoup/instances\|whatsoup@\|config/whatsoup' | grep -v 'wizard/ConfigStep.tsx' || true)
+# ConfigStep.tsx exemption: system-prompt template is bot-identity/protocol copy (EXEMPT-PROTECTED
+# in branding-touchpoints.md) — kept in lockstep with the soup/no-brand-regression ESLint exemption.
 C5_COUNT=$(echo "$FILTERED" | grep -c 'WhatSoup' || echo 0)
 echo "    Non-contract matches: $C5_COUNT"
 if [ -n "$FILTERED" ] && [ "$C5_COUNT" -gt 0 ]; then
   echo "$FILTERED" | head -10 | sed 's/^/    /'
 fi
 echo "    Expectation: only EXEMPT-PROTECTED sites after P4 (shadow: baseline)"
-echo "    Current known UI copy: UpdateModal.tsx:318 (P4 flip), Nav.tsx:39-40 (split wordmark)"
+echo "    Current known UI copy: UpdateModal.tsx (P4 flip), Nav.tsx (split wordmark)"
 check_result "5" "$C5_COUNT" "only EXEMPT-PROTECTED after P4" "WARN"
 
 # ---------------------------------------------------------------------------
@@ -363,6 +365,6 @@ if [ "${#FAILED_CHECKS[@]}" -gt 0 ] 2>/dev/null; then
   echo "  (These are promoted to CI-blocking; fix before pushing.)"
   exit 1
 else
-  echo "  No blocking failures."
+  echo "  Report-only baseline: no checks are promoted to blocking yet (EXIT_ON_FAIL is empty)."
   exit 0
 fi

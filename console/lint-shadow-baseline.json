@@ -1,0 +1,14 @@
+{
+  "generated": "shadow lint per-rule warning ceiling",
+  "total": 615,
+  "rules": {
+    "(no-rule)": 2,
+    "soup/no-adhoc-modal": 19,
+    "soup/no-brand-regression": 2,
+    "soup/no-focus-suppression": 2,
+    "soup/no-legacy-tokens": 407,
+    "soup/no-raw-button": 136,
+    "soup/no-raw-form-control": 38,
+    "soup/no-utility-smell": 9
+  }
+}
