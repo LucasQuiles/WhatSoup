@@ -25,7 +25,7 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
 | T6 | Formal design-system spec | ✅ Complete (21 files) |
 | T7 | Enforcement + cutover plans | ✅ Complete |
 | T8 | Optional throwaway token spike | ❌ Declined (superseded by authorized implementation) |
-| **G3** | **Design program sign-off** | 🔶 **OPEN — package ready** (`g3-signoff-package.md`) |
+| **G3** | **Design program sign-off** | ✅ **Approved 2026-06-11** |
 
 ## Gate decisions
 

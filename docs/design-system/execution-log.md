@@ -268,3 +268,12 @@ Files changed:
 
 No T6/T7/T8 work started. No production implementation, push, PR, deploy, main checkout edit, or internal
 identifier rename performed.
+
+---
+
+## G3 — Design Program Sign-Off — 2026-06-11
+
+**Approved G3 on 2026-06-11: specs/enforcement/cutover accepted; implementation proceeds under the
+operator driver.** D0 readiness packet approved in the same decision (pilot slice, worktree strategy,
+D1 slices). Implementation worktree: `soup-impl` @ `feat/soup-v3-foundation` off origin/main.
+Design worktree remains the docs/spec SSOT.

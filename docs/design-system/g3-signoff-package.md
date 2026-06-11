@@ -1,6 +1,6 @@
 # G3 Sign-Off Package — SOUP Design System v3
 
-Status: **OPEN — awaiting operator sign-off.** Approval format:
+Status: **APPROVED 2026-06-11** — implementation authorized under the operator driver. Approval format:
 `Approved G3 on YYYY-MM-DD: specs/enforcement/cutover accepted; implementation proceeds under the operator driver.`
 
 ## What is being signed off
