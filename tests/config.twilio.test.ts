@@ -123,16 +123,16 @@ describe('config — transport defaults', () => {
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig());
     const { config } = await import('../src/config.ts');
 
-    expect(config.transport).toBe('baileys');
     expect(config.twilioConfig).toBeUndefined();
+    expect(config.transport).toBe('baileys');
   });
 
   it('no INSTANCE_CONFIG → transport "baileys", twilioConfig undefined', async () => {
     delete process.env.INSTANCE_CONFIG;
     const { config } = await import('../src/config.ts');
 
-    expect(config.transport).toBe('baileys');
     expect(config.twilioConfig).toBeUndefined();
+    expect(config.transport).toBe('baileys');
   });
 });
 
@@ -227,8 +227,8 @@ describe('config — transport twilio without twilioConfig', () => {
     }));
     // Must not throw; twilioConfig is undefined since no block provided
     const { config } = await import('../src/config.ts');
-    expect(config.transport).toBe('twilio');
     expect(config.twilioConfig).toBeUndefined();
+    expect(config.transport).toBe('twilio');
   });
 });
 

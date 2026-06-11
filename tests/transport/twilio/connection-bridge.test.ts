@@ -73,11 +73,13 @@ describe('TwilioConnection bridge', () => {
       expect(bridge.botJid).toBe('+15559990000@sms');
     });
 
-    it('botLid is always null', async () => {
+    it('botLid is always null (LIDs are WhatsApp-specific)', async () => {
       vi.useFakeTimers({ now: 0 });
       const { bridge } = makeBridge();
       await bridge.connect();
       expect(bridge.botLid).toBeNull();
+      // connect really completed — null is not a not-yet-initialised artifact
+      expect(bridge.botJid).toBe('+15559990000@sms');
     });
   });
 
@@ -122,11 +124,11 @@ describe('TwilioConnection bridge', () => {
       expect(msg.isGroup).toBe(false);
       expect(msg.mentionedJids).toEqual([]);
       expect(msg.isResponseWorthy).toBe(true);
-      expect(typeof msg.timestamp).toBe('number');      // epoch seconds
-      expect(msg.timestamp).toBe(0);                   // new Date(0) / 1000 = 0s
       expect(msg.quotedMessageId).toBeNull();
       expect(msg.senderName).toBeNull();
       expect(msg.contentText).toBeNull();
+      expect(typeof msg.timestamp).toBe('number');      // epoch seconds
+      expect(msg.timestamp).toBe(0);                   // new Date(0) / 1000 = 0s
     });
 
     it('inbound message not delivered after shutdown', async () => {

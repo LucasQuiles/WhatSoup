@@ -118,12 +118,12 @@ describe('TwilioSmsAdapter sendText', () => {
     expect(ref.id.length).toBeGreaterThan(0);
 
     expect(port.sent).toHaveLength(1);
+    expect(port.sent[0].messagingServiceSid).toBeUndefined();
     expect(port.sent[0]).toMatchObject({
       to: '+15551230000',
       from: '+15559990000',
       body: 'hello',
     });
-    expect(port.sent[0].messagingServiceSid).toBeUndefined();
   });
 
   it('messagingServiceSid preferred over phoneNumber when both present', async () => {
@@ -136,8 +136,8 @@ describe('TwilioSmsAdapter sendText', () => {
     await adapter.sendText({ channel, id: '+15551230000' }, 'test msg');
 
     expect(port.sent).toHaveLength(1);
-    expect(port.sent[0].messagingServiceSid).toBe('MGabcdef1234567890abcdef1234567890');
     expect(port.sent[0].from).toBeUndefined();
+    expect(port.sent[0].messagingServiceSid).toBe('MGabcdef1234567890abcdef1234567890');
   });
 
   it('returns MessageRef with sid from port', async () => {
