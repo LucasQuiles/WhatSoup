@@ -4,6 +4,7 @@ import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { TwilioSmsAdapter } from '../../../src/transport/twilio/adapter.ts';
 import { MockTwilioSmsPort } from '../../../src/transport/twilio/testing/mock-port.ts';
 import type { TwilioSmsConfig } from '../../../src/transport/twilio/types.ts';
+import { makeTwilioConfig } from './helpers.ts';
 import type { InboundMessage } from '../../../src/transport/contract/events.ts';
 import {
   AuthRequiredError,
@@ -13,18 +14,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function makeConfig(overrides?: Partial<TwilioSmsConfig>): TwilioSmsConfig {
-  return {
-    account: 'ml-bot',
-    accountSid: 'AC00000000000000000000000000000000',
-    authTokenService: 'twilio-ml-bot',
-    phoneNumber: '+15559990000',
-    inboundMode: 'poll',
-    pollIntervalMs: 1000,
-    rateLimit: { smsPerMinute: 30 },
-    ...overrides,
-  };
-}
+const makeConfig = (overrides?: Partial<TwilioSmsConfig>): TwilioSmsConfig =>
+  makeTwilioConfig({ pollIntervalMs: 1000, ...overrides });
 
 describe('TwilioSmsAdapter inbound poll — full InboundMessage contract', () => {
   it('maps an injected record to a complete InboundMessage, asserting every contract field', async () => {
@@ -491,7 +482,6 @@ describe('TwilioSmsAdapter inbound poll — outbound echo (fromMe: true)', () =>
     const port = new MockTwilioSmsPort();
     const adapter = new TwilioSmsAdapter(makeConfig(), port);
 
-    const { makeChannelId: _mk } = await import('../../../src/core/transport-refs.ts');
     const convRef = { channel: makeChannelId('sms', 'ml-bot'), id: '+15551230000' };
 
     const msgs: InboundMessage[] = [];

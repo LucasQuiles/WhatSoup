@@ -4,6 +4,7 @@ import { TwilioConnection, UnsupportedTransportOperationError } from '../../../s
 import { TwilioSmsAdapter } from '../../../src/transport/twilio/adapter.ts';
 import { MockTwilioSmsPort } from '../../../src/transport/twilio/testing/mock-port.ts';
 import type { TwilioSmsConfig } from '../../../src/transport/twilio/types.ts';
+import { makeTwilioConfig } from './helpers.ts';
 import type { IncomingMessage } from '../../../src/core/types.ts';
 import type { InboundSms } from '../../../src/transport/twilio/port.ts';
 
@@ -12,18 +13,8 @@ afterEach(() => {
 });
 
 /** Config with a 1s poll interval so tests can advance fake timers to trigger a poll. */
-function makeConfig(overrides?: Partial<TwilioSmsConfig>): TwilioSmsConfig {
-  return {
-    account: 'ml-bot',
-    accountSid: 'AC00000000000000000000000000000000',
-    authTokenService: 'twilio-ml-bot',
-    phoneNumber: '+15559990000',
-    inboundMode: 'poll',
-    pollIntervalMs: 1000,
-    rateLimit: { smsPerMinute: 30 },
-    ...overrides,
-  };
-}
+const makeConfig = (overrides?: Partial<TwilioSmsConfig>): TwilioSmsConfig =>
+  makeTwilioConfig({ pollIntervalMs: 1000, ...overrides });
 
 function makeInboundSms(overrides?: Partial<InboundSms>): InboundSms {
   return {

@@ -309,11 +309,13 @@ export class SdkTwilioSmsPort implements TwilioSmsPort {
     // can theoretically overlap under race conditions).
     const seen = new Set<string>();
     const results: InboundSms[] = [];
-    for (const m of [...rawInbound, ...rawOutbound]) {
-      if (seen.has(m.sid)) continue;
-      seen.add(m.sid);
-      const mapped = mapRecord(m);
-      if (mapped !== null) results.push(mapped);
+    for (const batch of [rawInbound, rawOutbound]) {
+      for (const m of batch) {
+        if (seen.has(m.sid)) continue;
+        seen.add(m.sid);
+        const mapped = mapRecord(m);
+        if (mapped !== null) results.push(mapped);
+      }
     }
 
     // Sort ascending by sentAt (Twilio returns newest-first by default).

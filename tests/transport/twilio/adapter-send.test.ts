@@ -4,6 +4,7 @@ import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { TwilioSmsAdapter } from '../../../src/transport/twilio/adapter.ts';
 import { MockTwilioSmsPort } from '../../../src/transport/twilio/testing/mock-port.ts';
 import type { TwilioSmsConfig } from '../../../src/transport/twilio/types.ts';
+import { makeTwilioConfig } from './helpers.ts';
 import {
   AuthRequiredError,
   PayloadTooLargeError,
@@ -13,18 +14,7 @@ import {
   TransientProviderError,
 } from '../../../src/transport/contract/errors.ts';
 
-function makeConfig(overrides?: Partial<TwilioSmsConfig>): TwilioSmsConfig {
-  return {
-    account: 'ml-bot',
-    accountSid: 'AC00000000000000000000000000000000',
-    authTokenService: 'twilio-ml-bot',
-    phoneNumber: '+15559990000',
-    inboundMode: 'poll',
-    pollIntervalMs: 15000,
-    rateLimit: { smsPerMinute: 30 },
-    ...overrides,
-  };
-}
+const makeConfig = makeTwilioConfig;
 
 describe('TwilioSmsAdapter capabilities', () => {
   it('reports kind sms with correct channel id', () => {

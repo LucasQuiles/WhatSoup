@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { DOMAIN_LID, DOMAIN_SMS, normalizeLid } from './jid-constants.ts';
+import { DOMAIN_LID, DOMAIN_SMS, normalizeLid, smsJidToPhone } from './jid-constants.ts';
 import { resolveLid } from './lid-resolver.ts';
 
 export type AccessStatus = 'allowed' | 'blocked' | 'pending' | 'seen';
@@ -145,10 +145,9 @@ export function resolvePhoneFromJid(jid: string, db: Database): string {
   }
 
   if (domain === DOMAIN_SMS) {
-    // SMS JIDs carry E.164 addresses (e.g. '+15551230100'). Strip the leading
-    // '+' so the result matches the repo's phone-subject convention (digits
-    // without leading '+') — the same format personal WhatsApp JIDs yield.
-    return local.startsWith('+') ? local.slice(1) : local;
+    // Delegate to the canonical SMS JID→phone normalization (digits without
+    // leading '+', the repo's phone-subject convention).
+    return smsJidToPhone(jid);
   }
 
   // Personal JID or other — delegate to extractLocal
