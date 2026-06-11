@@ -74,6 +74,12 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
   verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')),
 }));
 
+// Unit tests must never spawn the real fallback binary; 'unknown' is the
+// safe fail-open value (no alert, no version log).
+vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
+  probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+}));
+
 // ─── Imports ──────────────────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
