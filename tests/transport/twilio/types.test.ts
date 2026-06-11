@@ -14,3 +14,9 @@ describe('twilio config defaults', () => {
     expect(Object.isFrozen(DEFAULT_TWILIO_SMS.rateLimit)).toBe(true);
   });
 });
+
+describe('webhook + voice config defaults', () => {
+  it('webhook defaults are absent until configured; voice defaults off', () => {
+    expect(DEFAULT_TWILIO_SMS.voice).toEqual({ enabled: false, voicemailMaxLengthSec: 120 });
+  });
+});
