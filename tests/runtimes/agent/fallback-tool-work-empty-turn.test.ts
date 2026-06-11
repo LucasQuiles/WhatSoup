@@ -247,4 +247,58 @@ describe('fallback empty-turn suppression when turn had tool work', () => {
       expect.stringContaining('no reply'),
     );
   });
+
+  it('tool activity flag is reset on result so SAME mapKey second turn without tool fires notice', () => {
+    // Mutation survivor pin: the delete at runtime.ts line ~4482 clears the Set
+    // entry for toolScopeKey on result. Without that delete the flag persists
+    // across turns for the same mapKey, permanently suppressing future notices.
+    // This test uses the SAME mapKey for both turns to catch the mutation.
+    const runtime = makeRuntime();
+    v(runtime).activateProviderFallback(null);
+
+    const queue = makeFakeQueue();
+    const SHARED_MAP_KEY = 'mapkey-same-scope';
+
+    // Turn 1: tool work on SHARED_MAP_KEY → suppressed (no notice, no counter).
+    v(runtime).handleEventWithContext(
+      { type: 'tool_use', toolId: 'tid-reset-1', toolName: 'send_message', toolInput: {} },
+      queue,
+      null,
+      'conv',
+      1,
+      SHARED_MAP_KEY,
+    );
+    v(runtime).handleEventWithContext(
+      { type: 'result', text: null },
+      queue,
+      null,
+      'conv',
+      1,
+      SHARED_MAP_KEY,
+    );
+    expect(runtime.getFallbackState().fallbackTurnsServed).toBe(1);
+    expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
+
+    // Turn 2: NO tool_use on the SAME mapKey → the reset must have cleared the
+    // flag; this genuinely-empty turn MUST fire the notice.
+    v(runtime).handleEventWithContext(
+      { type: 'result', text: null },
+      queue,
+      null,
+      'conv',
+      2,
+      SHARED_MAP_KEY,
+    );
+    expect(runtime.getFallbackState().fallbackTurnsServed).toBe(2);
+    expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(1);
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
+      'test',
+      'fallback_empty_turn',
+      expect.any(String),
+      expect.stringContaining('chat=fake@s.whatsapp.net'),
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('no reply'),
+    );
+  });
 });

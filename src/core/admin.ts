@@ -217,7 +217,7 @@ export async function handleFallbackCommand(
 
   if (cmd.sub === 'help') {
     await reply(
-      'Fallback commands: FALLBACK ON [<n>m|<n>h] — force backup-provider window (default 5h); FALLBACK OFF — revert to primary; FALLBACK STATUS — current provider, window, turn counters.',
+      'Fallback commands: FALLBACK ON [<n>m|<n>h] — force backup-provider window (default 5h); FALLBACK OFF — revert to primary; FALLBACK STATUS — current provider, window, turn counters. (support varies by instance type)',
     );
     return;
   }

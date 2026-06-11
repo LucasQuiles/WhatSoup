@@ -198,4 +198,39 @@ describe('fallback reason provenance', () => {
     if (!secondCall) throw new Error('saveFallbackState not called on forceFallback');
     expect(secondCall[1].reason).toBe('admin-forced');
   });
+
+  it('usage-limit extension after admin force carries admin-forced reason in DB (belt-and-suspenders)', () => {
+    // Sequence: usage-limit activate → FALLBACK ON (forceFallback) → advance 1h
+    // → usage-limit hit again (activateProviderFallback extension).
+    // The re-save on the extension must carry 'admin-forced', not 'usage-limit',
+    // because forceFallback established 'admin-forced' as the new epoch cause.
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    // Step 1: automatic usage-limit activation.
+    pv(runtime).activateProviderFallback(null);
+    expect(saveSpy.mock.calls[0]?.[1].reason).toBe('usage-limit');
+
+    // Step 2: admin forces a window — new cause epoch 'admin-forced'.
+    // Use 3h so the 1h advance below does not expire the window.
+    runtime.forceFallback(3 * 60 * 60_000);
+    expect(saveSpy.mock.calls[1]?.[1].reason).toBe('admin-forced');
+
+    // Step 3: advance 1 hour (within the 3h admin window), then fallback provider
+    // also hits a usage limit.
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    pv(runtime).activateProviderFallback(null);
+
+    // Extension re-save must carry the admin-forced cause, not 'usage-limit'.
+    const extensionCall = saveSpy.mock.calls[2];
+    if (!extensionCall) throw new Error('saveFallbackState not called on extension');
+    expect(extensionCall[1].reason).toBe('admin-forced');
+  });
 });

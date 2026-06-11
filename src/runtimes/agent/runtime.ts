@@ -5490,15 +5490,19 @@ export class AgentRuntime implements Runtime {
     }, Math.max(0, until - Date.now()));
     // Do not let the revert timer keep the process alive at shutdown.
     this.revertTimer.unref?.();
+    // Belt-and-suspenders: persist the memory-authoritative reason (fallbackArmReason
+    // after the set-when-null guard above) so the DB can never diverge from the
+    // in-memory value even if a caller passes an incorrect reason directly.
+    const persistReason = this.fallbackArmReason ?? reason;
     try {
-      saveFallbackState(this.db, { activeUntil: until, activatedAt, reason });
+      saveFallbackState(this.db, { activeUntil: until, activatedAt, reason: persistReason });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
       emitAlert(
         this.instanceName,
         'fallback_persist_failed',
         'Failed to persist fallback window — will not survive restart',
-        `until=${new Date(until).toISOString()} reason=${reason}`,
+        `until=${new Date(until).toISOString()} reason=${persistReason}`,
       );
     }
     // Pre-flight: check key presence and probe validity; never blocks or reverts

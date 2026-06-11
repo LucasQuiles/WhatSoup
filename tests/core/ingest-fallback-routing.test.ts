@@ -6,13 +6,12 @@
  * `await importOriginal<T>()` pattern used in ingest.test.ts, blocking Edit.
  * The harness is copied from ingest.test.ts following the established pattern.
  *
- * Mutation-style RED verification (per task spec): each test was confirmed to
- * FAIL when the assertion was temporarily pointed at the wrong method:
- *   - FALLBACK ON test: changing `forceFallback` assertion to `disableFallback`
- *     → AssertionError (disableFallback not called).
- *   - FALLBACK OFF test: changing `disableFallback` assertion to `forceFallback`
- *     → AssertionError (forceFallback not called).
- * Neither test was committed in the RED state.
+ * ON/OFF call-through assertions (forceFallback / disableFallback): removed in
+ * the fix-round review — they were circular because the mock itself wired the
+ * call-through, making the assertion measure the mock not the production path.
+ * Routing is verified by: parsed-command shape, handleFallbackCommand called,
+ * handleAdminCommand not called, journal/skip sequence, handleMessage never
+ * reached. That set is sufficient and non-circular.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
@@ -207,7 +206,7 @@ describe('REQ-002.AC-02c: fallback help routing — FALLBACK HELP', () => {
     const msg = makeIncomingMessage({ content: 'FALLBACK HELP' });
     await runIngest(handler, msg);
 
-    // Routed to handleFallbackCommand with the help command.
+    // Routed to handleFallbackCommand with the help command shape.
     expect(mockHandleFallbackCommand).toHaveBeenCalledWith(
       runtime,
       messenger,
@@ -229,26 +228,17 @@ describe('REQ-002.AC-02c: fallback help routing — FALLBACK HELP', () => {
 // ===========================================================================
 
 describe('REQ-002.AC-02b: fallback admin command routing — ON / OFF', () => {
-  it('FALLBACK ON 5m consumed as admin command, calls runtime.forceFallback, never reaches runtime.handleMessage', async () => {
+  it('FALLBACK ON 5m: parsed command shape routed to handleFallbackCommand, never reaches runtime.handleMessage', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();
-    // Extend the runtime stub with the optional fallback methods.
-    const runtime = {
-      ...makeRuntime(),
-      forceFallback: vi.fn().mockReturnValue({ ok: true, activeUntil: Date.now() + 5 * 60_000, clamped: false }),
-      disableFallback: vi.fn().mockReturnValue({ ok: true }),
-    } as unknown as Runtime;
+    const runtime = makeRuntime();
     const durability = new DurabilityEngine(db);
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
 
     mockIsAdminMessage.mockReturnValue(true);
     const onCmd = { action: 'fallback' as const, sub: 'on' as const, durationMs: 5 * 60_000 };
     mockParseAdminCommand.mockReturnValue(onCmd);
-    // Wire handleFallbackCommand to call through to runtime.forceFallback so we
-    // can assert the method received the command (mirrors the real implementation).
-    mockHandleFallbackCommand.mockImplementationOnce(async (rt) => {
-      (rt as typeof runtime).forceFallback?.(5 * 60_000);
-    });
+    mockHandleFallbackCommand.mockResolvedValue(undefined);
 
     const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(42);
     const skipSpy = vi.spyOn(durability, 'markInboundSkipped');
@@ -256,7 +246,7 @@ describe('REQ-002.AC-02b: fallback admin command routing — ON / OFF', () => {
     const msg = makeIncomingMessage({ content: 'fallback on 5m' });
     await runIngest(handler, msg);
 
-    // Routed to handleFallbackCommand with the correct parsed command.
+    // Routing: handleFallbackCommand called with correct shape.
     expect(mockHandleFallbackCommand).toHaveBeenCalledWith(
       runtime,
       messenger,
@@ -264,8 +254,6 @@ describe('REQ-002.AC-02b: fallback admin command routing — ON / OFF', () => {
       msg.chatJid,
       durability,
     );
-    // handleFallbackCommand's call-through hit forceFallback, not disableFallback.
-    expect(vi.mocked(runtime.forceFallback!)).toHaveBeenCalledWith(5 * 60_000);
     // Different code path — handleAdminCommand must not be called.
     expect(mockHandleAdminCommand).not.toHaveBeenCalled();
     // Journaled as 'admin' and marked skipped.
@@ -276,24 +264,17 @@ describe('REQ-002.AC-02b: fallback admin command routing — ON / OFF', () => {
     expect(mockShouldRespond).not.toHaveBeenCalled();
   });
 
-  it('FALLBACK OFF consumed as admin command, calls runtime.disableFallback, never reaches runtime.handleMessage', async () => {
+  it('FALLBACK OFF: parsed command shape routed to handleFallbackCommand, never reaches runtime.handleMessage', async () => {
     const db = makeTempDb();
     const messenger = makeMessenger();
-    const runtime = {
-      ...makeRuntime(),
-      forceFallback: vi.fn().mockReturnValue({ ok: true, activeUntil: Date.now() + 5 * 60_000, clamped: false }),
-      disableFallback: vi.fn().mockReturnValue({ ok: true }),
-    } as unknown as Runtime;
+    const runtime = makeRuntime();
     const durability = new DurabilityEngine(db);
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
 
     mockIsAdminMessage.mockReturnValue(true);
     const offCmd = { action: 'fallback' as const, sub: 'off' as const };
     mockParseAdminCommand.mockReturnValue(offCmd);
-    // Wire handleFallbackCommand to call through to runtime.disableFallback.
-    mockHandleFallbackCommand.mockImplementationOnce(async (rt) => {
-      (rt as typeof runtime).disableFallback?.();
-    });
+    mockHandleFallbackCommand.mockResolvedValue(undefined);
 
     const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(43);
     const skipSpy = vi.spyOn(durability, 'markInboundSkipped');
@@ -301,7 +282,7 @@ describe('REQ-002.AC-02b: fallback admin command routing — ON / OFF', () => {
     const msg = makeIncomingMessage({ content: 'fallback off' });
     await runIngest(handler, msg);
 
-    // Routed to handleFallbackCommand with the correct parsed command.
+    // Routing: handleFallbackCommand called with correct shape.
     expect(mockHandleFallbackCommand).toHaveBeenCalledWith(
       runtime,
       messenger,
@@ -309,10 +290,6 @@ describe('REQ-002.AC-02b: fallback admin command routing — ON / OFF', () => {
       msg.chatJid,
       durability,
     );
-    // handleFallbackCommand's call-through hit disableFallback, not forceFallback.
-    expect(vi.mocked(runtime.disableFallback!)).toHaveBeenCalledOnce();
-    // forceFallback must NOT have been called.
-    expect(vi.mocked(runtime.forceFallback!)).not.toHaveBeenCalled();
     expect(mockHandleAdminCommand).not.toHaveBeenCalled();
     expect(journalSpy).toHaveBeenCalledOnce();
     expect(skipSpy).toHaveBeenCalledWith(43, 'admin_command');
