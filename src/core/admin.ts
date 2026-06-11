@@ -235,6 +235,17 @@ export async function sendApprovalRequest(
 // handleFallbackCommand
 // ---------------------------------------------------------------------------
 
+/** Format a remaining-time duration for the STATUS reply. */
+function formatRelativeWindow(activeUntil: number): string {
+  const remainingMs = activeUntil - Date.now();
+  const totalMinutes = Math.round(remainingMs / 60_000);
+  if (totalMinutes < 90) {
+    return `≈${totalMinutes}m`;
+  }
+  const hours = Math.round(totalMinutes / 60 * 10) / 10;
+  return `≈${hours}h`;
+}
+
 export async function handleFallbackCommand(
   runtime: Runtime,
   messenger: Messenger,
@@ -245,10 +256,19 @@ export async function handleFallbackCommand(
   const reply = (text: string) =>
     sendTracked(messenger, adminChatJid, text, durability, { replayPolicy: 'safe', isTerminal: true });
 
+  if (cmd.sub === 'help') {
+    await reply(
+      'Fallback commands: FALLBACK ON [<n>m|<n>h] — force backup-provider window (default 5h); FALLBACK OFF — revert to primary; FALLBACK STATUS — current provider, window, turn counters. (support varies by instance type)',
+    );
+    return;
+  }
+
   if (cmd.sub === 'status') {
     const state = runtime.getFallbackState?.();
     if (!state) { await reply('Fallback status not supported on this instance.'); return; }
-    const window = state.fallbackActiveUntil ? `until ${new Date(state.fallbackActiveUntil).toISOString()}` : 'none';
+    const window = state.fallbackActiveUntil
+      ? `until ${new Date(state.fallbackActiveUntil).toISOString()} (${formatRelativeWindow(state.fallbackActiveUntil)})`
+      : 'none';
     await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty`);
     return;
   }

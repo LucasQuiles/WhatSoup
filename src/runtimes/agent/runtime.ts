@@ -1279,6 +1279,11 @@ export class AgentRuntime implements Runtime {
   // Epoch ms when the current fallback window was first activated. Preserved
   // across extensions so the original engagement time is never overwritten.
   private fallbackActivatedAt: number | null = null;
+  // The ORIGINAL cause that first armed the current window. Set once on first
+  // activation and preserved across extensions and restores so the root cause
+  // is never overwritten by a later extension or restart. Cleared alongside
+  // fallbackActivatedAt on deactivation and shutdown.
+  private fallbackArmReason: string | null = null;
   // Process-local fallback telemetry — deliberately NOT persisted (reset on
   // restart); the durable artifact is the window itself (agent_fallback_state).
   private fallbackTurnsServed = 0;
@@ -1330,6 +1335,23 @@ export class AgentRuntime implements Runtime {
   /** Maps toolScopeKey → (toolId → toolName) so tool_result errors stay isolated per session scope. */
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
+
+  /**
+   * Tracks toolScopeKeys where at least one non-phantom tool_use event was
+   * processed for the current turn. Used to suppress the empty-turn fallback
+   * notice when the agent's entire reply was tool work (e.g. send_message,
+   * send_media MCP tools) — in that case the user already received a visible
+   * result via the outbound channel and the "no reply" notice would be wrong.
+   *
+   * Lifecycle: set on tool_use (after post-turn-gate check); cleared by
+   * clearToolNames at the start of each result event (same lifecycle as
+   * activeToolNames). Not persisted — process-local only.
+   */
+  private turnHadToolActivity = new Set<string>();
+
+  /** For the single/shared path (handleEvent): mirrors turnHadToolActivity
+   *  as a boolean since that path uses a single global scope key. */
+  private singleTurnHadToolActivity = false;
 
   /** Count of swallowed pending_polls persistence failures (persist/remove/rehydrate). Surfaced in health. */
   private pollPersistenceErrors = 0;
@@ -1387,6 +1409,8 @@ export class AgentRuntime implements Runtime {
 
   private clearToolNames(toolScopeKey: string): void {
     this.activeToolNames.delete(toolScopeKey);
+    // Note: turnHadToolActivity is NOT cleared here — the result handler captures
+    // it for the empty-turn check and clears it explicitly after the check.
   }
 
   private beginSilentCompact(scopeKey: string): void {
@@ -4396,6 +4420,7 @@ export class AgentRuntime implements Runtime {
         }
 
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
+        this.turnHadToolActivity.add(toolScopeKey);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           queue.enqueueToolUpdate(toolUpdate);
@@ -4452,6 +4477,9 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(compactScopeKey);
         session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        // Capture before clearToolNames so the empty-turn check can read it.
+        const turnHadToolWork = this.turnHadToolActivity.has(toolScopeKey);
+        this.turnHadToolActivity.delete(toolScopeKey);
         this.clearToolNames(toolScopeKey);
         // Activate post-turn gate — suppress any SDK-injected events until next user turn
         const hasPendingPoll = mapKey !== undefined && this.pendingPollQuestions.has(mapKey);
@@ -4595,13 +4623,16 @@ export class AgentRuntime implements Runtime {
             this.perChatTurnText.delete(mapKey);
           }
           if (!isSystemResult && !hasPendingPoll && !wasSilentCompact) {
-            // A media/poll-only turn can read as empty here — acceptable for a
-            // warn-level signal; hasPendingPoll removes the common case.
             const hadVisible =
               responseText.trim() !== '' ||
               (typeof event.text === 'string' && event.text.trim() !== '');
-            this.recordFallbackTurnOutcome(queue, hadVisible);
-            if (!hadVisible && this.isFallbackWindowActive) {
+            // A fallback turn whose entire reply was MCP tool sends (e.g.
+            // send_message, send_media) is NOT silent — the user received the
+            // result through the outbound channel. Only fire the notice and
+            // increment the empty counter when neither text nor tool work occurred.
+            // turnHadToolWork was captured before clearToolNames above.
+            this.recordFallbackTurnOutcome(queue, hadVisible, turnHadToolWork);
+            if (!hadVisible && !turnHadToolWork && this.isFallbackWindowActive) {
               // This path has no '_(no response)_' fallback and the reply guarantee
               // was just disarmed — without this the user gets pure silence.
               queue.enqueueText('_The backup model returned no reply — please resend or rephrase your message._');
@@ -5007,6 +5038,7 @@ export class AgentRuntime implements Runtime {
     }
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
+    this.fallbackArmReason = null;
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
     }
@@ -5143,6 +5175,7 @@ export class AgentRuntime implements Runtime {
     this.chatQueues.clear();
     this.perChatCrashCount.clear();
     this.activeToolNames.clear();
+    this.turnHadToolActivity.clear();
     this.perChatInboundSeqQueue.clear();
     this.perChatPendingSystemResults.clear();
     this.currentTurnInboundContentType = null;
@@ -5326,6 +5359,11 @@ export class AgentRuntime implements Runtime {
    * activation, the window is set EXACTLY — it may shorten an active window;
    * operator intent wins over extend-never-shorten. Arms via the shared
    * hardened path (persistence + credential pre-flight).
+   *
+   * Reason provenance: an admin force is always treated as a NEW cause, even
+   * when a usage-limit window is already active. The stored reason is reset to
+   * 'admin-forced' so the persisted record accurately reflects the current
+   * operator action rather than the original automatic trigger.
    */
   forceFallback(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string } {
     if (!this.agentFallbackProvider) {
@@ -5334,6 +5372,9 @@ export class AgentRuntime implements Runtime {
     const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
     const dur = Math.min(MAX_FALLBACK_WINDOW_MS, Math.max(MIN_FALLBACK_WINDOW_MS, requested));
     const until = Date.now() + dur;
+    // Reset reason so armFallbackWindow stores 'admin-forced' as the new
+    // original cause, replacing any prior reason (e.g. 'usage-limit').
+    this.fallbackArmReason = null;
     this.armFallbackWindow(until, 'admin-forced');
     log.info({ activeUntil: new Date(until).toISOString() }, 'fallback window forced by admin');
     return { ok: true, activeUntil: until, clamped: dur !== requested };
@@ -5399,13 +5440,20 @@ export class AgentRuntime implements Runtime {
       : '_Hit my usage limit — please try again after the limit resets._';
   }
 
-  /** Count a completed turn during an active fallback window; alert when it
-   *  produced zero visible output — the silent-dead-bot signal. */
-  private recordFallbackTurnOutcome(queue: IOutboundQueue, hadVisibleOutput: boolean): void {
+  /**
+   * Count a completed turn during an active fallback window; alert and enqueue
+   * a user notice when the turn produced neither visible text nor tool activity.
+   *
+   * A turn whose entire reply was MCP tool sends (send_message, send_media, etc.)
+   * is NOT silent — the user already received the visible result through the
+   * outbound channel. hadToolWork suppresses both the counter and the notice for
+   * those turns, preserving the signal for genuinely empty ones.
+   */
+  private recordFallbackTurnOutcome(queue: IOutboundQueue, hadVisibleOutput: boolean, hadToolWork: boolean = false): void {
     if (!this.isFallbackWindowActive) return;
     this.fallbackTurnsServed += 1;
     this.lastFallbackTurnAt = Date.now();
-    if (hadVisibleOutput) return;
+    if (hadVisibleOutput || hadToolWork) return;
     this.fallbackTurnsEmpty += 1;
     log.warn({
       chatJid: queue.targetChatJid,
@@ -5418,7 +5466,7 @@ export class AgentRuntime implements Runtime {
       this.instanceName,
       'fallback_empty_turn',
       'Fallback turn produced no visible output',
-      `provider=${this.agentFallbackProvider} model=${this.agentFallbackModel} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty}`,
+      `provider=${this.agentFallbackProvider} model=${this.agentFallbackModel} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
     );
   }
 
@@ -5428,6 +5476,11 @@ export class AgentRuntime implements Runtime {
   private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now()): void {
     this.fallbackActiveUntil = until;
     this.fallbackActivatedAt = activatedAt;
+    // Preserve original cause: only set on first arm; extensions and restores
+    // must pass the original reason so it is not overwritten.
+    if (this.fallbackArmReason === null) {
+      this.fallbackArmReason = reason;
+    }
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
       this.revertTimer = null;
@@ -5437,10 +5490,20 @@ export class AgentRuntime implements Runtime {
     }, Math.max(0, until - Date.now()));
     // Do not let the revert timer keep the process alive at shutdown.
     this.revertTimer.unref?.();
+    // Belt-and-suspenders: persist the memory-authoritative reason (fallbackArmReason
+    // after the set-when-null guard above) so the DB can never diverge from the
+    // in-memory value even if a caller passes an incorrect reason directly.
+    const persistReason = this.fallbackArmReason ?? reason;
     try {
-      saveFallbackState(this.db, { activeUntil: until, activatedAt, reason });
+      saveFallbackState(this.db, { activeUntil: until, activatedAt, reason: persistReason });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
+      emitAlert(
+        this.instanceName,
+        'fallback_persist_failed',
+        'Failed to persist fallback window — will not survive restart',
+        `until=${new Date(until).toISOString()} reason=${persistReason}`,
+      );
     }
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
@@ -5496,9 +5559,13 @@ export class AgentRuntime implements Runtime {
       // Clamp the restored window so a clock-skew or tampered row cannot pin
       // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
       const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
-      this.armFallbackWindow(clampedUntil, 'restored', persisted.activatedAt);
+      // Pass persisted.reason so the original cause survives the restart.
+      // 'restored' is already captured in the log line below.
+      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt);
+      const wasClamped = clampedUntil < persisted.activeUntil;
       log.info({
-        activeUntil: new Date(persisted.activeUntil).toISOString(),
+        activeUntil: new Date(clampedUntil).toISOString(),
+        ...(wasClamped ? { persistedUntil: new Date(persisted.activeUntil).toISOString() } : {}),
         originalReason: persisted.reason,
       }, 'restored provider-fallback window from persisted state');
     } catch (err) {
@@ -5537,7 +5604,11 @@ export class AgentRuntime implements Runtime {
     const activatedAt = wasActive && this.fallbackActivatedAt !== null
       ? this.fallbackActivatedAt
       : now;
-    this.armFallbackWindow(until, 'usage-limit', activatedAt);
+    // Pass the original cause on extension so the root cause is preserved;
+    // on first activation fallbackArmReason is null so armFallbackWindow
+    // stores 'usage-limit' as the original cause.
+    const reason = wasActive && this.fallbackArmReason !== null ? this.fallbackArmReason : 'usage-limit';
+    this.armFallbackWindow(until, reason, activatedAt);
 
     log.info({
       instanceName: this.instanceName,
@@ -5558,6 +5629,7 @@ export class AgentRuntime implements Runtime {
     if (this.fallbackActiveUntil === null) return;
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
+    this.fallbackArmReason = null;
     try {
       clearFallbackState(this.db);
     } catch (err) {
@@ -6009,6 +6081,8 @@ export class AgentRuntime implements Runtime {
 
   private cleanupSharedCrashTurnState(): void {
     this.activeToolNames.clear();
+    this.turnHadToolActivity.clear();
+    this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
     this.currentTurnInboundContentType = null;
@@ -6029,6 +6103,8 @@ export class AgentRuntime implements Runtime {
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
     this.activeToolNames.clear();
+    this.turnHadToolActivity.clear();
+    this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
     this.perChatTurnContentType.delete(mapKey);
@@ -6324,6 +6400,7 @@ export class AgentRuntime implements Runtime {
         }
 
         this.getToolNames(GLOBAL_TOOL_SCOPE_KEY).set(event.toolId, event.toolName);
+        this.singleTurnHadToolActivity = true;
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           queue.enqueueToolUpdate(toolUpdate);
@@ -6447,8 +6524,9 @@ export class AgentRuntime implements Runtime {
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
         if (!wasSilentCompact && !isSystemResult) {
-          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput);
+          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, this.singleTurnHadToolActivity);
         }
+        this.singleTurnHadToolActivity = false;
         // If nothing visible was emitted this turn, send an explicit fallback
         if (!this.turnHadVisibleOutput && !wasSilentCompact) {
           queue.enqueueText('_(no response)_');
@@ -6587,6 +6665,8 @@ export class AgentRuntime implements Runtime {
     const { inboundSeq, conversationKey, mapKey, clearCurrentInboundSeq = false } = opts
 
     this.activeToolNames.clear()
+    this.turnHadToolActivity.clear()
+    this.singleTurnHadToolActivity = false
     this.currentTurnChatJid = null
     this.turnHadVisibleOutput = false
 
