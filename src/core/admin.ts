@@ -10,6 +10,8 @@ import { isAdminPhone } from '../lib/phone.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
+import type { Runtime } from '../runtimes/types.ts';
+import type { AdminCommand } from './command-router.ts';
 
 const log = createChildLogger('admin');
 
@@ -186,4 +188,40 @@ export async function sendApprovalRequest(
   await sendTracked(messenger, adminJid, text, durability, { replayPolicy: 'safe', isTerminal: true });
 
   log.info({ phone, displayName, adminJid, action: 'approval_requested' }, 'approval requested');
+}
+
+// ---------------------------------------------------------------------------
+// handleFallbackCommand
+// ---------------------------------------------------------------------------
+
+export async function handleFallbackCommand(
+  runtime: Runtime,
+  messenger: Messenger,
+  cmd: Extract<AdminCommand, { action: 'fallback' }>,
+  adminChatJid: string,
+  durability?: DurabilityEngine,
+): Promise<void> {
+  const reply = (text: string) =>
+    sendTracked(messenger, adminChatJid, text, durability, { replayPolicy: 'safe', isTerminal: true });
+
+  if (cmd.sub === 'status') {
+    const state = runtime.getFallbackState?.();
+    if (!state) { await reply('Fallback status not supported on this instance.'); return; }
+    const window = state.fallbackActiveUntil ? `until ${new Date(state.fallbackActiveUntil).toISOString()}` : 'none';
+    await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty`);
+    return;
+  }
+
+  if (cmd.sub === 'on') {
+    if (!runtime.forceFallback) { await reply('Fallback control not supported on this instance.'); return; }
+    const result = runtime.forceFallback(cmd.durationMs);
+    if (!result.ok) { await reply(`Cannot force fallback: ${result.reason}`); return; }
+    await reply(`Fallback forced until ${new Date(result.activeUntil).toISOString()}.` + (result.clamped ? ' (duration clamped to the allowed window)' : ''));
+    return;
+  }
+
+  // sub === 'off'
+  if (!runtime.disableFallback) { await reply('Fallback control not supported on this instance.'); return; }
+  runtime.disableFallback();
+  await reply('Fallback disabled — primary provider active.');
 }

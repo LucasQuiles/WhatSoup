@@ -975,8 +975,10 @@ describe('access list with LID-resolved phones', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('parseAdminCommand and LID interactions', () => {
+  type AllowBlock = { action: 'allow' | 'block'; subjectType: string; subjectId: string };
+
   it('ALLOW command with phone number', () => {
-    const cmd = parseAdminCommand('allow 18455880337');
+    const cmd = parseAdminCommand('allow 18455880337') as AllowBlock | null;
     expect(cmd).not.toBeNull();
     expect(cmd!.action).toBe('allow');
     expect(cmd!.subjectType).toBe('phone');
@@ -986,17 +988,19 @@ describe('parseAdminCommand and LID interactions', () => {
   it('ALLOW command with LID number (treated as phone digits)', () => {
     // If admin types "allow 31478083756155" they're allowing the raw number
     // This is expected — the admin should use the real phone, not the LID
-    const cmd = parseAdminCommand('allow 31478083756155');
+    const cmd = parseAdminCommand('allow 31478083756155') as AllowBlock | null;
     expect(cmd).not.toBeNull();
     expect(cmd!.subjectId).toBe('31478083756155');
   });
 
   it('BLOCK command with group JID', () => {
-    const cmd = parseAdminCommand('block group 120363123456789@g.us');
+    // Use a test-safe group JID that does not match real-shaped WhatsApp group JID patterns.
+    const testGroupJid = '111111123456789@g.us';
+    const cmd = parseAdminCommand(`block group ${testGroupJid}`) as AllowBlock | null;
     expect(cmd).not.toBeNull();
     expect(cmd!.action).toBe('block');
     expect(cmd!.subjectType).toBe('group');
-    expect(cmd!.subjectId).toBe('120363123456789@g.us');
+    expect(cmd!.subjectId).toBe(testGroupJid);
   });
 });
 

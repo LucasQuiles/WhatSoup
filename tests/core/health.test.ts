@@ -258,13 +258,19 @@ describe('GET /health', () => {
     expect(status).toBe(404);
   });
 
-  it('surfaces effectiveProvider and fallbackActiveUntil from the agent runtime fallback state', async () => {
+  it('surfaces all fallback state fields from the agent runtime', async () => {
     db.close();
     const db2 = makeDb();
     const activeUntil = Date.now() + 600_000;
     const fakeAgentRuntime = {
       getHealthSnapshot: () => ({ status: 'healthy', details: { active: true } }),
-      getFallbackState: () => ({ effectiveProvider: 'openai-api', fallbackActiveUntil: activeUntil }),
+      getFallbackState: () => ({
+        effectiveProvider: 'openai-api',
+        fallbackActiveUntil: activeUntil,
+        fallbackTurnsServed: 3,
+        fallbackTurnsEmpty: 1,
+        lastFallbackTurnAt: 1_000_000,
+      }),
     };
     const deps = makeDeps(db2, {
       instanceType: 'agent',
@@ -278,6 +284,9 @@ describe('GET /health', () => {
     const json = JSON.parse(body);
     expect(json.instance.effectiveProvider).toBe('openai-api');
     expect(json.instance.fallbackActiveUntil).toBe(activeUntil);
+    expect(json.instance.fallbackTurnsServed).toBe(3);
+    expect(json.instance.fallbackTurnsEmpty).toBe(1);
+    expect(json.instance.lastFallbackTurnAt).toBe(1_000_000);
     db2.close();
   });
 

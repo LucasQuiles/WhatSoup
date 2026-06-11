@@ -30,6 +30,12 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
+import {
+  ensureFallbackStateSchema,
+  saveFallbackState,
+  loadFallbackState,
+  clearFallbackState,
+} from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writePrivateFileSync, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
 import { SessionManager, formatAge, type SessionCrashInfo } from './session.ts';
@@ -64,6 +70,7 @@ import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { createProviderMcpBridge, generateMcpConfigFile } from './providers/mcp-bridge.ts';
+import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -1269,6 +1276,14 @@ export class AgentRuntime implements Runtime {
   // Provider-fallback window: epoch ms until which new sessions route to the
   // fallback provider, or null when the primary provider is active.
   private fallbackActiveUntil: number | null = null;
+  // Epoch ms when the current fallback window was first activated. Preserved
+  // across extensions so the original engagement time is never overwritten.
+  private fallbackActivatedAt: number | null = null;
+  // Process-local fallback telemetry — deliberately NOT persisted (reset on
+  // restart); the durable artifact is the window itself (agent_fallback_state).
+  private fallbackTurnsServed = 0;
+  private fallbackTurnsEmpty = 0;
+  private lastFallbackTurnAt: number | null = null;
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
@@ -2246,6 +2261,7 @@ export class AgentRuntime implements Runtime {
 
   async start(): Promise<void> {
     ensureAgentSchema(this.db);
+    this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
 
     // Write sandbox policy and hook settings when sandbox config is present
@@ -4462,6 +4478,7 @@ export class AgentRuntime implements Runtime {
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
             this.activateProviderFallback(extractUsageLimitResetTime(event.text));
+            queue.enqueueText(this.usageLimitNotice());
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
@@ -4576,6 +4593,19 @@ export class AgentRuntime implements Runtime {
           if (mapKey !== undefined) {
             this.perChatTurnContentType.delete(mapKey);
             this.perChatTurnText.delete(mapKey);
+          }
+          if (!isSystemResult && !hasPendingPoll && !wasSilentCompact) {
+            // A media/poll-only turn can read as empty here — acceptable for a
+            // warn-level signal; hasPendingPoll removes the common case.
+            const hadVisible =
+              responseText.trim() !== '' ||
+              (typeof event.text === 'string' && event.text.trim() !== '');
+            this.recordFallbackTurnOutcome(queue, hadVisible);
+            if (!hadVisible && this.isFallbackWindowActive) {
+              // This path has no '_(no response)_' fallback and the reply guarantee
+              // was just disarmed — without this the user gets pure silence.
+              queue.enqueueText('_The backup model returned no reply — please resend or rephrase your message._');
+            }
           }
           queue.flush()
             .then(() => {
@@ -4976,6 +5006,7 @@ export class AgentRuntime implements Runtime {
       this.revertTimer = null;
     }
     this.fallbackActiveUntil = null;
+    this.fallbackActivatedAt = null;
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
     }
@@ -5252,48 +5283,95 @@ export class AgentRuntime implements Runtime {
    * takes effect on the next auto-respawned or freshly created session.
    */
   private get effectiveProvider(): string {
-    return this.fallbackActiveUntil &&
-      Date.now() < this.fallbackActiveUntil &&
-      this.agentFallbackProvider
+    return this.isFallbackWindowActive && this.agentFallbackProvider
       ? this.agentFallbackProvider
       : this.agentProvider;
+  }
+
+  /** True while a fallback window is armed and not yet expired. */
+  private get isFallbackWindowActive(): boolean {
+    return this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil;
   }
 
   /**
    * Public, read-only view of the provider-fallback state for observability
    * (health snapshot / fleet provider-status). Returns the currently effective
-   * provider and the epoch-ms expiry of an active fallback window (`null` when
-   * the bot is on its primary provider). Mirrors {@link effectiveProvider} but
-   * does not widen the underlying fields' visibility.
+   * provider, the epoch-ms expiry of an active fallback window (`null` when
+   * the bot is on its primary provider), and process-local turn counters (reset
+   * on restart). Mirrors {@link effectiveProvider} but does not widen the
+   * underlying fields' visibility.
+   *
+   * Hand-constructed scalar fields only — health.ts spreads this object
+   * verbatim into /health; do not add non-scalar fields.
    */
-  getFallbackState(): { effectiveProvider: string; fallbackActiveUntil: number | null } {
-    const active =
-      this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil;
+  getFallbackState(): {
+    effectiveProvider: string;
+    fallbackActiveUntil: number | null;
+    fallbackTurnsServed: number;
+    fallbackTurnsEmpty: number;
+    lastFallbackTurnAt: number | null;
+  } {
+    const active = this.isFallbackWindowActive;
     return {
       effectiveProvider: this.effectiveProvider,
       fallbackActiveUntil: active ? this.fallbackActiveUntil : null,
+      fallbackTurnsServed: this.fallbackTurnsServed,
+      fallbackTurnsEmpty: this.fallbackTurnsEmpty,
+      lastFallbackTurnAt: this.lastFallbackTurnAt,
     };
+  }
+
+  /**
+   * Admin override (FALLBACK ON): force a fallback window. Unlike usage-limit
+   * activation, the window is set EXACTLY — it may shorten an active window;
+   * operator intent wins over extend-never-shorten. Arms via the shared
+   * hardened path (persistence + credential pre-flight).
+   */
+  forceFallback(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string } {
+    if (!this.agentFallbackProvider) {
+      return { ok: false, reason: 'no fallbackProvider configured for this instance' };
+    }
+    const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
+    const dur = Math.min(MAX_FALLBACK_WINDOW_MS, Math.max(MIN_FALLBACK_WINDOW_MS, requested));
+    const until = Date.now() + dur;
+    this.armFallbackWindow(until, 'admin-forced');
+    log.info({ activeUntil: new Date(until).toISOString() }, 'fallback window forced by admin');
+    return { ok: true, activeUntil: until, clamped: dur !== requested };
+  }
+
+  /** Admin override (FALLBACK OFF): end any active fallback window now. Idempotent. */
+  disableFallback(): { ok: true } {
+    this.deactivateProviderFallback('admin-disabled');
+    return { ok: true };
   }
 
   /** Model paired with {@link effectiveProvider}: fallbackModel while the window is active, else the primary model. */
   private get effectiveModel(): string | undefined {
-    return this.fallbackActiveUntil &&
-      Date.now() < this.fallbackActiveUntil &&
-      this.agentFallbackProvider
+    return this.isFallbackWindowActive && this.agentFallbackProvider
       ? this.agentFallbackModel
       : this.model;
   }
 
   /**
-   * Activate provider fallback after the primary provider hit a usage limit.
+   * Map a fallback provider/model to its keyring service (shared by the
+   * presence guard and the validity pre-flight).
    *
-   * No-op unless a fallback provider is configured. The window ends at the
-   * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
-   * clamped to [MIN_FALLBACK_WINDOW_MS, MAX_FALLBACK_WINDOW_MS]. Idempotent: a
-   * second activation while already active extends the window to the later of
-   * the two. Schedules an auto-revert timer (unref'd so it never keeps the
-   * process alive).
+   * Returns null when the provider authenticates via subscription/login
+   * (claude-cli, codex-cli, gemini-cli, anthropic-api) — no keyring key applies.
    */
+  private resolveFallbackService(provider: string | undefined, model: string | undefined): string | null {
+    if (provider === 'opencode-cli') {
+      const prefix = model?.split('/')[0]?.trim();
+      return prefix ? prefix.toLowerCase() : null;
+    }
+    if (provider === 'openai-api') {
+      return 'openai';
+    }
+    // CLI/native-auth providers (claude-cli/codex-cli/gemini-cli/anthropic-api)
+    // and an opencode model with no provider prefix → not applicable.
+    return null;
+  }
+
   /**
    * Whether the keyring holds an API key for the configured fallback target.
    *
@@ -5308,32 +5386,138 @@ export class AgentRuntime implements Runtime {
    * (`minimax/...` → `minimax`); openai-api → `openai`. Never logs the value.
    */
   private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
-    let service: string | null = null;
-    if (provider === 'opencode-cli') {
-      const prefix = model?.split('/')[0]?.trim();
-      service = prefix ? prefix.toLowerCase() : null;
-    } else if (provider === 'openai-api') {
-      service = 'openai';
-    }
-    // CLI/native-auth providers (claude-cli/codex-cli/gemini-cli/anthropic-api)
-    // and an opencode model with no provider prefix → not applicable.
+    const service = this.resolveFallbackService(provider, model);
     if (!service) return null;
     return lookupCredential(service) !== null;
   }
 
+  /** User-facing notice for a usage-limit teardown. Asks the user to resend
+   *  rather than auto-replaying the triggering message (double-execution risk). */
+  private usageLimitNotice(): string {
+    return this.agentFallbackProvider
+      ? '_Hit my usage limit — switching to a backup model. Please resend your last message._'
+      : '_Hit my usage limit — please try again after the limit resets._';
+  }
+
+  /** Count a completed turn during an active fallback window; alert when it
+   *  produced zero visible output — the silent-dead-bot signal. */
+  private recordFallbackTurnOutcome(queue: IOutboundQueue, hadVisibleOutput: boolean): void {
+    if (!this.isFallbackWindowActive) return;
+    this.fallbackTurnsServed += 1;
+    this.lastFallbackTurnAt = Date.now();
+    if (hadVisibleOutput) return;
+    this.fallbackTurnsEmpty += 1;
+    log.warn({
+      chatJid: queue.targetChatJid,
+      fallbackProvider: this.agentFallbackProvider,
+      fallbackModel: this.agentFallbackModel,
+      served: this.fallbackTurnsServed,
+      empty: this.fallbackTurnsEmpty,
+    }, 'fallback turn completed with zero visible output');
+    emitAlert(
+      this.instanceName,
+      'fallback_empty_turn',
+      'Fallback turn produced no visible output',
+      `provider=${this.agentFallbackProvider} model=${this.agentFallbackModel} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty}`,
+    );
+  }
+
+  /** Arm (or move) the fallback window to `until`, schedule the revert timer,
+   *  and persist best-effort so a restart mid-window resumes on fallback.
+   *  Pass `activatedAt` explicitly when restoring to preserve the original time. */
+  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now()): void {
+    this.fallbackActiveUntil = until;
+    this.fallbackActivatedAt = activatedAt;
+    if (this.revertTimer) {
+      clearTimeout(this.revertTimer);
+      this.revertTimer = null;
+    }
+    this.revertTimer = setTimeout(() => {
+      this.deactivateProviderFallback('window-elapsed');
+    }, Math.max(0, until - Date.now()));
+    // Do not let the revert timer keep the process alive at shutdown.
+    this.revertTimer.unref?.();
+    try {
+      saveFallbackState(this.db, { activeUntil: until, activatedAt, reason });
+    } catch (err) {
+      log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
+    }
+    // Pre-flight: check key presence and probe validity; never blocks or reverts
+    // the window — fail-open on anything except a definitive 401/403.
+    const service = this.resolveFallbackService(this.agentFallbackProvider, this.agentFallbackModel);
+    if (service) {
+      const key = lookupCredential(service);
+      if (!key) {
+        log.warn({
+          instanceName: this.instanceName,
+          fallbackProvider: this.agentFallbackProvider,
+          fallbackModel: this.agentFallbackModel,
+        }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
+        emitAlert(
+          this.instanceName,
+          'fallback_credential_missing',
+          'Fallback provider key not found in keyring',
+          `service=${service} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+        );
+      } else {
+        void verifyFallbackCredential(service, key).then((result) => {
+          if (result !== 'invalid') return;
+          log.error({ service, fallbackProvider: this.agentFallbackProvider }, 'fallback credential rejected by provider (401/403)');
+          emitAlert(
+            this.instanceName,
+            'fallback_credential_invalid',
+            'Fallback API key rejected by provider',
+            `service=${service} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+          );
+        });
+      }
+    }
+  }
+
+  /**
+   * Re-arm a persisted fallback window after a process restart. Never throws —
+   * a corrupt, missing, or stale row is cleared and startup proceeds on the primary.
+   * loadFallbackState returns null for both "no row" and "bad-typed row" (SQLite
+   * affinity can store TEXT in INTEGER columns); clearing on null ensures corrupt
+   * rows do not linger across restarts.
+   */
+  private restorePersistedFallbackWindow(): void {
+    try {
+      ensureFallbackStateSchema(this.db);
+      const persisted = loadFallbackState(this.db);
+      if (!persisted) {
+        clearFallbackState(this.db);
+        return;
+      }
+      if (!this.agentFallbackProvider || persisted.activeUntil <= Date.now()) {
+        clearFallbackState(this.db);
+        return;
+      }
+      // Clamp the restored window so a clock-skew or tampered row cannot pin
+      // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
+      const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
+      this.armFallbackWindow(clampedUntil, 'restored', persisted.activatedAt);
+      log.info({
+        activeUntil: new Date(persisted.activeUntil).toISOString(),
+        originalReason: persisted.reason,
+      }, 'restored provider-fallback window from persisted state');
+    } catch (err) {
+      log.warn({ err }, 'failed to restore persisted fallback window');
+    }
+  }
+
+  /**
+   * Activate provider fallback after the primary provider hit a usage limit.
+   *
+   * No-op unless a fallback provider is configured. The window ends at the
+   * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
+   * clamped to [MIN_FALLBACK_WINDOW_MS, MAX_FALLBACK_WINDOW_MS]. Idempotent: a
+   * second activation while already active extends the window to the later of
+   * the two. Schedules an auto-revert timer (unref'd so it never keeps the
+   * process alive).
+   */
   private activateProviderFallback(resetAt: Date | null): void {
     if (!this.agentFallbackProvider) return;
-
-    // Visibility guard: if the fallback target needs an API key the keyring
-    // doesn't hold, warn (do not block — the operator chose this fallback).
-    const keyPresent = this.fallbackKeyPresent(this.agentFallbackProvider, this.agentFallbackModel);
-    if (keyPresent === false) {
-      log.warn({
-        instanceName: this.instanceName,
-        fallbackProvider: this.agentFallbackProvider,
-        fallbackModel: this.agentFallbackModel,
-      }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
-    }
 
     const now = Date.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
@@ -5347,17 +5531,13 @@ export class AgentRuntime implements Runtime {
       : clampedUntil;
 
     const wasActive = this.fallbackActiveUntil !== null;
-    this.fallbackActiveUntil = until;
-
-    if (this.revertTimer) {
-      clearTimeout(this.revertTimer);
-      this.revertTimer = null;
-    }
-    this.revertTimer = setTimeout(() => {
-      this.deactivateProviderFallback('window-elapsed');
-    }, Math.max(0, until - now));
-    // Do not let the revert timer keep the process alive at shutdown.
-    this.revertTimer.unref?.();
+    // Preserve the original first-engagement time across extensions so the
+    // persisted record always reflects when the fallback was first triggered,
+    // not when it was last extended.
+    const activatedAt = wasActive && this.fallbackActivatedAt !== null
+      ? this.fallbackActivatedAt
+      : now;
+    this.armFallbackWindow(until, 'usage-limit', activatedAt);
 
     log.info({
       instanceName: this.instanceName,
@@ -5377,6 +5557,12 @@ export class AgentRuntime implements Runtime {
     }
     if (this.fallbackActiveUntil === null) return;
     this.fallbackActiveUntil = null;
+    this.fallbackActivatedAt = null;
+    try {
+      clearFallbackState(this.db);
+    } catch (err) {
+      log.warn({ err }, 'failed to clear persisted fallback state');
+    }
     log.info({
       instanceName: this.instanceName,
       primaryProvider: this.agentProvider,
@@ -6229,6 +6415,7 @@ export class AgentRuntime implements Runtime {
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
             this.activateProviderFallback(extractUsageLimitResetTime(event.text));
+            queue.enqueueText(this.usageLimitNotice());
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),
@@ -6259,6 +6446,9 @@ export class AgentRuntime implements Runtime {
         this.currentTurnAssistantItemText.clear();
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
+        if (!wasSilentCompact && !isSystemResult) {
+          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput);
+        }
         // If nothing visible was emitted this turn, send an explicit fallback
         if (!this.turnHadVisibleOutput && !wasSilentCompact) {
           queue.enqueueText('_(no response)_');

@@ -9,7 +9,7 @@ import type { Runtime } from '../runtimes/types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { storeMessageIfNew } from './messages.ts';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
-import { handleAdminCommand, sendApprovalRequest } from './admin.ts';
+import { handleAdminCommand, handleFallbackCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
 import { resolvePhoneFromJid } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
@@ -276,16 +276,20 @@ export function createIngestHandler(
             seq = durability.journalInbound(msg.messageId, conversationKey, msg.chatJid, 'admin');
           }
           try {
-            await handleAdminCommand(
-              db,
-              messenger,
-              cmd.action,
-              cmd.subjectType,
-              cmd.subjectId,
-              msg.chatJid,
-              (m) => runtime.handleMessage(m),
-              durability,
-            );
+            if (cmd.action === 'fallback') {
+              await handleFallbackCommand(runtime, messenger, cmd, msg.chatJid, durability);
+            } else {
+              await handleAdminCommand(
+                db,
+                messenger,
+                cmd.action,
+                cmd.subjectType,
+                cmd.subjectId,
+                msg.chatJid,
+                (m) => runtime.handleMessage(m),
+                durability,
+              );
+            }
           } catch (err) {
             log.error({ err, messageId: msg.messageId }, 'failed to handle admin command');
           }
