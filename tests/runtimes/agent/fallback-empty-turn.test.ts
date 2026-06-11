@@ -135,6 +135,11 @@ type RuntimeView = {
   lastFallbackTurnAt: number | null;
   turnHadVisibleOutput: boolean;
   queue: unknown;
+  // Private state maps used by isSilentCompact / isSystemResult in handleEvent.
+  // silentCompactScopes values are NodeJS Timeout handles; Map<string, unknown>
+  // avoids the ReturnType construct that some grammars cannot parse.
+  silentCompactScopes: Map<string, unknown>;
+  perChatPendingSystemResults: Map<string, number>;
   activateProviderFallback(resetAt: Date | null): void;
   handleEventWithContext(
     event: unknown,
@@ -152,6 +157,9 @@ type RuntimeView = {
 function v(runtime: AgentRuntime): RuntimeView {
   return runtime as unknown as RuntimeView;
 }
+
+// GLOBAL_TOOL_SCOPE_KEY mirrors the module constant (runtime.ts line 129).
+const GLOBAL_SCOPE = '__global__';
 
 // ─── zero-text fallback turn signal ──────────────────────────────────────────
 
@@ -251,7 +259,7 @@ describe('zero-text fallback turn signal', () => {
     v(runtime).activateProviderFallback(null);
 
     const queue = makeFakeQueue();
-    // 7th arg = toolScopeKey (undefined → default), 8th arg = isSystemResult
+    // 7th arg = toolScopeKey (undefined -> default), 8th arg = isSystemResult
     v(runtime).handleEventWithContext(
       { type: 'result', text: null },
       queue,
@@ -311,5 +319,48 @@ describe('zero-text fallback turn signal', () => {
 
     // The usage-limit branch breaks early; counters must not be incremented.
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
+  });
+
+  it('handleEvent path: silent-compact turn is not counted', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    v(runtime).activateProviderFallback(null);
+
+    const fakeQueue = makeFakeQueue();
+    v(runtime).queue = fakeQueue;
+    // isSilentCompact(GLOBAL_TOOL_SCOPE_KEY) checks silentCompactScopes.has(key).
+    // Inject a sentinel value (0) so the presence check is satisfied without
+    // creating a real timer — the value is never used, only the key matters.
+    v(runtime).silentCompactScopes.set(GLOBAL_SCOPE, 0);
+    v(runtime).turnHadVisibleOutput = false;
+
+    v(runtime).handleEvent({ type: 'result', text: null });
+
+    expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
+    expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
+    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+  });
+
+  it('handleEvent path: system-result turn is not counted', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    v(runtime).activateProviderFallback(null);
+
+    const fakeQueue = makeFakeQueue();
+    v(runtime).queue = fakeQueue;
+    // isSystemResult derives from perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) > 0.
+    // Setting 1 mirrors what markPendingSystemResult writes before a system turn fires.
+    v(runtime).perChatPendingSystemResults.set(GLOBAL_SCOPE, 1);
+    v(runtime).turnHadVisibleOutput = false;
+
+    v(runtime).handleEvent({ type: 'result', text: null });
+
+    expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
+    expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
+    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
   });
 });

@@ -5292,9 +5292,13 @@ export class AgentRuntime implements Runtime {
   /**
    * Public, read-only view of the provider-fallback state for observability
    * (health snapshot / fleet provider-status). Returns the currently effective
-   * provider and the epoch-ms expiry of an active fallback window (`null` when
-   * the bot is on its primary provider). Mirrors {@link effectiveProvider} but
-   * does not widen the underlying fields' visibility.
+   * provider, the epoch-ms expiry of an active fallback window (`null` when
+   * the bot is on its primary provider), and process-local turn counters (reset
+   * on restart). Mirrors {@link effectiveProvider} but does not widen the
+   * underlying fields' visibility.
+   *
+   * Hand-constructed scalar fields only — health.ts spreads this object
+   * verbatim into /health; do not add non-scalar fields.
    */
   getFallbackState(): {
     effectiveProvider: string;
@@ -6386,7 +6390,9 @@ export class AgentRuntime implements Runtime {
         this.currentTurnAssistantItemText.clear();
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
-        this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput);
+        if (!wasSilentCompact && !isSystemResult) {
+          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput);
+        }
         // If nothing visible was emitted this turn, send an explicit fallback
         if (!this.turnHadVisibleOutput && !wasSilentCompact) {
           queue.enqueueText('_(no response)_');
