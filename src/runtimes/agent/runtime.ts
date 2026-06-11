@@ -1336,6 +1336,23 @@ export class AgentRuntime implements Runtime {
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
 
+  /**
+   * Tracks toolScopeKeys where at least one non-phantom tool_use event was
+   * processed for the current turn. Used to suppress the empty-turn fallback
+   * notice when the agent's entire reply was tool work (e.g. send_message,
+   * send_media MCP tools) — in that case the user already received a visible
+   * result via the outbound channel and the "no reply" notice would be wrong.
+   *
+   * Lifecycle: set on tool_use (after post-turn-gate check); cleared by
+   * clearToolNames at the start of each result event (same lifecycle as
+   * activeToolNames). Not persisted — process-local only.
+   */
+  private turnHadToolActivity = new Set<string>();
+
+  /** For the single/shared path (handleEvent): mirrors turnHadToolActivity
+   *  as a boolean since that path uses a single global scope key. */
+  private singleTurnHadToolActivity = false;
+
   /** Count of swallowed pending_polls persistence failures (persist/remove/rehydrate). Surfaced in health. */
   private pollPersistenceErrors = 0;
 
@@ -1392,6 +1409,8 @@ export class AgentRuntime implements Runtime {
 
   private clearToolNames(toolScopeKey: string): void {
     this.activeToolNames.delete(toolScopeKey);
+    // Note: turnHadToolActivity is NOT cleared here — the result handler captures
+    // it for the empty-turn check and clears it explicitly after the check.
   }
 
   private beginSilentCompact(scopeKey: string): void {
@@ -4401,6 +4420,7 @@ export class AgentRuntime implements Runtime {
         }
 
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
+        this.turnHadToolActivity.add(toolScopeKey);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           queue.enqueueToolUpdate(toolUpdate);
@@ -4457,6 +4477,9 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(compactScopeKey);
         session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        // Capture before clearToolNames so the empty-turn check can read it.
+        const turnHadToolWork = this.turnHadToolActivity.has(toolScopeKey);
+        this.turnHadToolActivity.delete(toolScopeKey);
         this.clearToolNames(toolScopeKey);
         // Activate post-turn gate — suppress any SDK-injected events until next user turn
         const hasPendingPoll = mapKey !== undefined && this.pendingPollQuestions.has(mapKey);
@@ -4600,13 +4623,16 @@ export class AgentRuntime implements Runtime {
             this.perChatTurnText.delete(mapKey);
           }
           if (!isSystemResult && !hasPendingPoll && !wasSilentCompact) {
-            // A media/poll-only turn can read as empty here — acceptable for a
-            // warn-level signal; hasPendingPoll removes the common case.
             const hadVisible =
               responseText.trim() !== '' ||
               (typeof event.text === 'string' && event.text.trim() !== '');
-            this.recordFallbackTurnOutcome(queue, hadVisible);
-            if (!hadVisible && this.isFallbackWindowActive) {
+            // A fallback turn whose entire reply was MCP tool sends (e.g.
+            // send_message, send_media) is NOT silent — the user received the
+            // result through the outbound channel. Only fire the notice and
+            // increment the empty counter when neither text nor tool work occurred.
+            // turnHadToolWork was captured before clearToolNames above.
+            this.recordFallbackTurnOutcome(queue, hadVisible, turnHadToolWork);
+            if (!hadVisible && !turnHadToolWork && this.isFallbackWindowActive) {
               // This path has no '_(no response)_' fallback and the reply guarantee
               // was just disarmed — without this the user gets pure silence.
               queue.enqueueText('_The backup model returned no reply — please resend or rephrase your message._');
@@ -5149,6 +5175,7 @@ export class AgentRuntime implements Runtime {
     this.chatQueues.clear();
     this.perChatCrashCount.clear();
     this.activeToolNames.clear();
+    this.turnHadToolActivity.clear();
     this.perChatInboundSeqQueue.clear();
     this.perChatPendingSystemResults.clear();
     this.currentTurnInboundContentType = null;
@@ -5413,13 +5440,20 @@ export class AgentRuntime implements Runtime {
       : '_Hit my usage limit — please try again after the limit resets._';
   }
 
-  /** Count a completed turn during an active fallback window; alert when it
-   *  produced zero visible output — the silent-dead-bot signal. */
-  private recordFallbackTurnOutcome(queue: IOutboundQueue, hadVisibleOutput: boolean): void {
+  /**
+   * Count a completed turn during an active fallback window; alert and enqueue
+   * a user notice when the turn produced neither visible text nor tool activity.
+   *
+   * A turn whose entire reply was MCP tool sends (send_message, send_media, etc.)
+   * is NOT silent — the user already received the visible result through the
+   * outbound channel. hadToolWork suppresses both the counter and the notice for
+   * those turns, preserving the signal for genuinely empty ones.
+   */
+  private recordFallbackTurnOutcome(queue: IOutboundQueue, hadVisibleOutput: boolean, hadToolWork: boolean = false): void {
     if (!this.isFallbackWindowActive) return;
     this.fallbackTurnsServed += 1;
     this.lastFallbackTurnAt = Date.now();
-    if (hadVisibleOutput) return;
+    if (hadVisibleOutput || hadToolWork) return;
     this.fallbackTurnsEmpty += 1;
     log.warn({
       chatJid: queue.targetChatJid,
@@ -6037,6 +6071,8 @@ export class AgentRuntime implements Runtime {
 
   private cleanupSharedCrashTurnState(): void {
     this.activeToolNames.clear();
+    this.turnHadToolActivity.clear();
+    this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
     this.currentTurnInboundContentType = null;
@@ -6057,6 +6093,8 @@ export class AgentRuntime implements Runtime {
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
     this.activeToolNames.clear();
+    this.turnHadToolActivity.clear();
+    this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
     this.perChatTurnContentType.delete(mapKey);
@@ -6352,6 +6390,7 @@ export class AgentRuntime implements Runtime {
         }
 
         this.getToolNames(GLOBAL_TOOL_SCOPE_KEY).set(event.toolId, event.toolName);
+        this.singleTurnHadToolActivity = true;
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           queue.enqueueToolUpdate(toolUpdate);
@@ -6475,8 +6514,9 @@ export class AgentRuntime implements Runtime {
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
         if (!wasSilentCompact && !isSystemResult) {
-          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput);
+          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, this.singleTurnHadToolActivity);
         }
+        this.singleTurnHadToolActivity = false;
         // If nothing visible was emitted this turn, send an explicit fallback
         if (!this.turnHadVisibleOutput && !wasSilentCompact) {
           queue.enqueueText('_(no response)_');
@@ -6615,6 +6655,8 @@ export class AgentRuntime implements Runtime {
     const { inboundSeq, conversationKey, mapKey, clearCurrentInboundSeq = false } = opts
 
     this.activeToolNames.clear()
+    this.turnHadToolActivity.clear()
+    this.singleTurnHadToolActivity = false
     this.currentTurnChatJid = null
     this.turnHadVisibleOutput = false
 
