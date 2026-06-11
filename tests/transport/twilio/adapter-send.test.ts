@@ -342,3 +342,19 @@ describe('TwilioSmsAdapter construction guard', () => {
     expect(() => new TwilioSmsAdapter(broken, port)).toThrow(/phoneNumber or messagingServiceSid/);
   });
 });
+
+describe('TwilioSmsAdapter destination validation', () => {
+  it('rejects non-E.164 destinations BEFORE the port receives a call', async () => {
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+    await adapter.connect();
+    const channel = makeChannelId('sms', 'ml-bot');
+
+    for (const bad of ['', 'not-a-number', '15551230000', '+0123456', 'x@s.whatsapp.net']) {
+      await expect(
+        adapter.sendText({ channel, id: bad }, 'hi'),
+      ).rejects.toBeInstanceOf(ConversationNotFoundError);
+    }
+    expect(port.sent).toHaveLength(0);
+  });
+});

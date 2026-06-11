@@ -1,5 +1,32 @@
 // tests/transport/twilio/connection-bridge.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
+
+// Recorder for the bridge's child logger — vi.mock is hoisted, so the holder
+// must be hoisted too. Only the 'twilio-bridge' child is intercepted.
+const bridgeLogRecorder = vi.hoisted(() => ({
+  onError: null as ((fields: Record<string, unknown>, msg: string) => void) | null,
+}));
+vi.mock('../../../src/logger.ts', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../../src/logger.ts')>();
+  return {
+    ...orig,
+    createChildLogger: (name: string) => {
+      const real = orig.createChildLogger(name);
+      if (name !== 'twilio-bridge') return real;
+      return new Proxy(real, {
+        get(target, prop, receiver) {
+          if (prop === 'error') {
+            return (fields: Record<string, unknown>, msg: string) => {
+              bridgeLogRecorder.onError?.(fields, msg);
+              return (target as { error: (f: unknown, m: string) => unknown }).error(fields, msg);
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+    },
+  };
+});
 import { TwilioConnection, UnsupportedTransportOperationError } from '../../../src/transport/twilio/connection-bridge.ts';
 import { TwilioSmsAdapter } from '../../../src/transport/twilio/adapter.ts';
 import { MockTwilioSmsPort } from '../../../src/transport/twilio/testing/mock-port.ts';
@@ -403,5 +430,25 @@ describe('TwilioConnection isResponseWorthy derivation', () => {
       ['SMreal', true],
     ]);
     bridge.shutdown();
+  });
+});
+
+describe('TwilioConnection background error logging', () => {
+  it('logs adapter error events through the twilio-bridge child logger', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { bridge, port } = makeBridge();
+    const logged: Array<{ fields: Record<string, unknown>; msg: string }> = [];
+    bridgeLogRecorder.onError = (fields, msg) => logged.push({ fields, msg });
+
+    await bridge.connect();
+    // Arm a transient poll failure; the adapter emits it on the error channel
+    port.failNextList(Object.assign(new Error('twilio 503'), { status: 503 }));
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(logged.length).toBeGreaterThanOrEqual(1);
+    expect(logged[0].msg).toContain('twilio transport error');
+    expect(logged[0].fields).toMatchObject({ retryable: true, operation: 'pollInbound' });
+    bridge.shutdown();
+    bridgeLogRecorder.onError = null;
   });
 });

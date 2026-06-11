@@ -24,7 +24,7 @@ import {
   RateLimitedError,
   TransientProviderError,
 } from '../contract/errors.ts';
-import type { TwilioSmsConfig } from './types.ts';
+import { E164_RE, type TwilioSmsConfig } from './types.ts';
 import type { InboundSms, TwilioSmsPort } from './port.ts';
 
 // ---------------------------------------------------------------------------
@@ -268,6 +268,19 @@ export class TwilioSmsAdapter implements TransportAdapter {
         correlationId,
         scope: 'conversation',
         message: `target channel ${target.channel} does not match adapter channel ${this.channelId}`,
+      });
+    }
+
+    // 1b. Destination must be E.164 — fail before the network call rather
+    // than paying a round-trip for Twilio's 21211 rejection. Covers every
+    // caller (bridge, MCP), not just config-time validation of our own number.
+    if (!E164_RE.test(target.id)) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'sendText',
+        correlationId,
+        scope: 'conversation',
+        message: `target id is not a valid E.164 destination`,
       });
     }
 

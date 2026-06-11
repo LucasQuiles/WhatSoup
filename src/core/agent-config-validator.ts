@@ -19,6 +19,7 @@
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
+import { E164_RE } from '../transport/twilio/types.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -509,7 +510,7 @@ function validateAgentOptions(
 }
 
 const _TWILIO_ACCOUNT_SID_RE = /^AC[0-9a-f]{32}$/;
-const _TWILIO_PHONE_RE = /^\+[1-9]\d{6,14}$/;
+
 const _TWILIO_MSG_SVC_SID_RE = /^MG[0-9a-f]{32}$/;
 
 function validateTransportConfig(
@@ -605,7 +606,7 @@ function validateTwilioConfig(tc: Record<string, unknown>): ValidationError | nu
   }
 
   if (hasPhone) {
-    if (typeof phoneNumber !== 'string' || !_TWILIO_PHONE_RE.test(phoneNumber)) {
+    if (typeof phoneNumber !== 'string' || !E164_RE.test(phoneNumber)) {
       return err(
         'twilioConfig.phoneNumber',
         'twilioConfig.phoneNumber must be an E.164 number (e.g. +15559990000)',
