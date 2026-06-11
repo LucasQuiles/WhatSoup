@@ -128,7 +128,7 @@ export function extractLocal(jid: string): string {
  *   resolvePhoneFromJid('15555550101@s.whatsapp.net', db) → '15555550101'
  *   resolvePhoneFromJid('11111119999@lid', db)            → '15555551234' (resolved)
  *   resolvePhoneFromJid('99999999@lid', db)               → '99999999'   (unresolvable fallback)
- *   resolvePhoneFromJid('+14155550100@sms', db)           → '14155550100' (E.164 → digits)
+ *   resolvePhoneFromJid('+15555550100@sms', db)           → '15555550100' (E.164 → digits)
  */
 export function resolvePhoneFromJid(jid: string, db: Database): string {
   const atIdx = jid.indexOf('@');
