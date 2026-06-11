@@ -464,7 +464,7 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
    * modes share one `seen` set and one emitter. Returns true if emitted.
    */
   handleInboundRecord(record: InboundSms): boolean {
-    if (this.disposed) return false;
+    if (this.disposed || this.health.state !== 'connected') return false;
     if (this.seen.has(record.sid)) return false;
     this.seen.add(record.sid);
     const msg = this.buildInboundMessage(record);
@@ -484,7 +484,8 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
    * Returns true if emitted.
    */
   handleTranscript(t: TranscriptDelivery): boolean {
-    if (this.disposed || this.seen.has(t.recordingSid)) return false;
+    if (this.disposed || this.health.state !== 'connected') return false;
+    if (this.seen.has(t.recordingSid)) return false;
     this.seen.add(t.recordingSid);
     const peer = t.from;
     this.safeEmit(this.listeners.message, {

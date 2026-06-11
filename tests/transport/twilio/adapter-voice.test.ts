@@ -58,3 +58,22 @@ describe('TwilioSmsAdapter voicemail transcript ingestion', () => {
     await adapter.disconnect();
   });
 });
+
+describe('TwilioSmsAdapter blank transcript handling', () => {
+  it('a completed transcription with blank text emits text null (degenerate, not response-worthy downstream)', async () => {
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(
+      makeTwilioConfig({ voice: { enabled: true, voicemailMaxLengthSec: 120 } }), port);
+    const got: InboundMessage[] = [];
+    adapter.on('message', (m) => got.push(m));
+    await adapter.connect();
+    adapter.handleTranscript({
+      text: '   ', recordingSid: 'RE00000000000000000000000000000009',
+      callSid: 'CA9', from: '+15551230001', to: '+15559990000',
+    });
+    expect(got).toHaveLength(1);
+    expect(got[0].text).toBeNull();
+    expect(got[0].attachments[0].kind).toBe('voice');
+    await adapter.disconnect();
+  });
+});

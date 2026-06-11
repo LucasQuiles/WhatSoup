@@ -190,15 +190,18 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
   /**
    * Consumer: main.ts:850 (connectionManager.shutdown())
    */
-  shutdown(): void {
+  // RuntimeConnection declares shutdown(): void; returning a promise is
+  // assignable, lets tests await deterministic teardown (port release), and
+  // keeps main.ts's fire-and-forget call site unchanged.
+  async shutdown(): Promise<void> {
     this.messageSubscription?.dispose();
     this.messageSubscription = null;
     this.errorSubscription?.dispose();
     this.errorSubscription = null;
     if (this.webhookServer !== null) {
-      void this.webhookServer.stop();
+      await this.webhookServer.stop();
     }
-    void this.adapter.disconnect();
+    await this.adapter.disconnect();
   }
 
   // ── Messenger implementation (src/core/types.ts:24-29) ───────────────────

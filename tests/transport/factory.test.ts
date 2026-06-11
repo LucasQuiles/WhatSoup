@@ -61,8 +61,7 @@ describe('createConnection factory — webhook mode', () => {
     await conn.connect();
     expect(typeof conn.getBoundPort()).toBe('number');
     expect(conn.getBoundPort()).toBeGreaterThan(0);
-    conn.shutdown();
-    // Allow the async stop to settle
-    await new Promise((r) => setTimeout(r, 10));
+    // TwilioConnection.shutdown returns a promise (deterministic teardown)
+    await (conn as TwilioConnection).shutdown();
   });
 });

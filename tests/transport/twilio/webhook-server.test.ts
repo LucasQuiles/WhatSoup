@@ -136,3 +136,68 @@ describe('TwilioWebhookServer voice routes', () => {
     expect(transcripts).toHaveLength(0);
   });
 });
+
+describe('TwilioWebhookServer hardening (review wave)', () => {
+  it('voice route rejects a bad signature with 403 (no TwiML produced)', async () => {
+    const { server } = makeServer({ voice: { enabled: true, voicemailMaxLengthSec: 120 } });
+    const port = await server.start(); active = server;
+    const res = await post(port, '/twilio/voice', { CallSid: 'CA1', From: '+15551230001', To: '+15559990000' }, 'bogus');
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain('<Response');
+  });
+
+  it('transcription route rejects a bad signature with 403 and forwards nothing', async () => {
+    const transcripts: unknown[] = [];
+    const { server } = makeServer({
+      voice: { enabled: true, voicemailMaxLengthSec: 120 },
+      onTranscript: (t) => transcripts.push(t),
+    });
+    const port = await server.start(); active = server;
+    const res = await post(port, '/twilio/voice/transcription', {
+      TranscriptionText: 'x', TranscriptionStatus: 'completed',
+      RecordingSid: 'RE1', CallSid: 'CA1', From: '+1', To: '+2',
+    }, 'bogus');
+    expect(res.status).toBe(403);
+    expect(transcripts).toHaveLength(0);
+  });
+
+  it('rejects non-form content types with 415 before parsing', async () => {
+    const { server, smsRecords } = makeServer();
+    const port = await server.start(); active = server;
+    const res = await fetch(`http://127.0.0.1:${port}/twilio/sms`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-twilio-signature': 'anything' },
+      body: JSON.stringify({ MessageSid: 'SM1' }),
+    });
+    expect(res.status).toBe(415);
+    expect(smsRecords).toHaveLength(0);
+  });
+
+  it('acks a signed-but-malformed sms body with 204 and forwards nothing (no field oracle)', async () => {
+    const { server, smsRecords } = makeServer();
+    const port = await server.start(); active = server;
+    const params = { From: '+15551230001', To: '+15559990000', Body: 'no sid' };
+    const sig = getExpectedTwilioSignature(TOKEN, `${PUBLIC}/twilio/sms`, params);
+    const res = await post(port, '/twilio/sms', params, sig);
+    expect(res.status).toBe(204);
+    expect(await res.text()).toBe('');
+    expect(smsRecords).toHaveLength(0);
+  });
+
+  it('normalizes a trailing slash in publicBaseUrl so signatures still validate', async () => {
+    const { server, smsRecords } = makeServer({ publicBaseUrl: `${PUBLIC}/` });
+    const port = await server.start(); active = server;
+    const params = { MessageSid: 'SM00000000000000000000000000000002', From: '+15551230001', To: '+15559990000', Body: 'hi' };
+    const sig = getExpectedTwilioSignature(TOKEN, `${PUBLIC}/twilio/sms`, params);
+    const res = await post(port, '/twilio/sms', params, sig);
+    expect(res.status).toBe(204);
+    expect(smsRecords).toHaveLength(1);
+  });
+
+  it('double stop() resolves cleanly (idempotent close)', async () => {
+    const { server } = makeServer();
+    await server.start();
+    await Promise.all([server.stop(), server.stop()]);
+    await server.stop();
+  });
+});

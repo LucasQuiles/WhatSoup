@@ -42,17 +42,37 @@ export interface TwilioWebhookServerOptions {
 export class TwilioWebhookServer {
   private readonly opts: TwilioWebhookServerOptions;
   private server: http.Server | null = null;
+  private closing: Promise<void> | null = null;
 
   constructor(opts: TwilioWebhookServerOptions) {
-    this.opts = opts;
+    // Trailing-slash drift in publicBaseUrl would make EVERY signature check
+    // fail (Twilio signs the exact URL) — normalize defensively here even
+    // though the config loader also normalizes.
+    this.opts = {
+      ...opts,
+      publicBaseUrl: opts.publicBaseUrl.replace(/\/+$/, ''),
+    };
   }
 
   /** Start listening. Returns the bound port number (useful when listenPort: 0). */
   start(): Promise<number> {
     return new Promise((resolve, reject) => {
       const server = http.createServer((req, res) => {
-        void this.handleRequest(req, res);
+        // A throw anywhere in the async handler must never become an
+        // unhandled rejection (process-fatal on modern Node) — fail the
+        // request with 500 instead.
+        this.handleRequest(req, res).catch((err: unknown) => {
+          log.error(
+            { path: req.url, err: err instanceof Error ? err.message : String(err) },
+            'twilio-webhook: handler error',
+          );
+          if (!res.headersSent) res.writeHead(500).end();
+          else res.end();
+        });
       });
+      // Slowloris defense: Twilio webhooks complete in well under a second;
+      // 10s is generous. Without this a dripped body holds the socket forever.
+      server.requestTimeout = 10_000;
       server.on('error', reject);
       const address = this.opts.listenAddress ?? '127.0.0.1';
       server.listen(this.opts.listenPort, address, () => {
@@ -67,16 +87,21 @@ export class TwilioWebhookServer {
     });
   }
 
-  /** Stop the server and wait for all connections to close. */
+  /** Stop the server and wait for all connections to close. Idempotent: a
+   *  second concurrent call waits for the same close. */
   stop(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (this.server === null) { resolve(); return; }
-      this.server.close((err) => {
+    if (this.closing !== null) return this.closing;
+    const server = this.server;
+    if (server === null) return Promise.resolve();
+    this.closing = new Promise((resolve, reject) => {
+      server.close((err) => {
+        this.server = null;
+        this.closing = null;
         if (err) reject(err);
         else resolve();
       });
-      this.server = null;
     });
+    return this.closing;
   }
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -108,15 +133,25 @@ export class TwilioWebhookServer {
       return;
     }
 
-    const params = Object.fromEntries(new URLSearchParams(rawBody));
-
-    // Signature gate
+    // Token first: with no token nothing can be validated — reject before
+    // spending any parse work on the request.
     const token = this.opts.getAuthToken();
     if (token === null) {
       log.warn({ path: url }, 'twilio-webhook: auth token unavailable, rejecting 503');
       res.writeHead(503).end();
       return;
     }
+
+    // Twilio sends application/x-www-form-urlencoded; anything else cannot
+    // carry a valid signature over form params — reject explicitly (415)
+    // rather than mis-parsing it into garbage that fails HMAC opaquely.
+    const contentType = req.headers['content-type'] ?? '';
+    if (!contentType.includes('application/x-www-form-urlencoded')) {
+      res.writeHead(415).end();
+      return;
+    }
+
+    const params = Object.fromEntries(new URLSearchParams(rawBody));
 
     const sig = (req.headers['x-twilio-signature'] as string | undefined) ?? '';
     const fullUrl = this.opts.publicBaseUrl + url;
@@ -142,8 +177,11 @@ export class TwilioWebhookServer {
   private handleSms(params: Record<string, string>, res: http.ServerResponse): void {
     const result = parseInboundSmsWebhook(params, new Date());
     if (!result.ok) {
-      log.warn({ reason: result.reason }, 'twilio-webhook: sms parse failed');
-      res.writeHead(400, { 'Content-Type': 'text/plain' }).end(result.reason);
+      // Ack 204 like the transcription route: the request passed HMAC, so a
+      // malformed body is provider-side weirdness — log it, don't make Twilio
+      // retry, and don't hand probers a field-name oracle.
+      log.warn({ reason: result.reason }, 'twilio-webhook: sms parse failed, not forwarded');
+      res.writeHead(204).end();
       return;
     }
     this.opts.onSms(result.record);
