@@ -134,3 +134,42 @@ blank frames in this environment and fullpage capture downscales — content ver
 extraction instead. G1 review should use a real browser via `file://`; that is the designed review path.
 
 → **G1 gate: OPEN, awaiting user review.**
+
+---
+
+## G1 — Direction Selection — 2026-06-11
+
+**Approved G1 on 2026-06-11** (via gate question): blend = B-Editorial chassis + A grafts
+(nameplate/wordmark, lamp/shape status coding) + C grafts (table densities, toolbar, log-stream);
+converged naming vocabulary locked. Full record in `02-directions/decision-log.md` and README.
+Commit: `be38e9f8` (also added `01-research/synthesis-seed-2.md` — second operator report distilled).
+
+---
+
+## T5 — Winner Refinement (Round 1) — 2026-06-11
+
+**Verdict: Pass**
+
+`02-directions/iterations/v2.html` (2,799 lines) built by the Direction-B agent resumed with full
+chassis context. Verified: balanced HTML (closing tag, zero eq-runs, zero local paths), both themes
+render-checked in headless Chrome (dark + light, control sheet + nameplate + shape-law + graft tags
+visible). Grafts: A nameplate (`--type-nameplate`, mono spaced-caps + teal tick; crit-blink REJECTED,
+ambient budget spent once on ok-breathing), A shape law (.shape--ok/warn/crit/off everywhere),
+C densities (--row-default 36 / --row-compressed 28, Fleet compressed), C toolbar (×3 identical),
+C log-stream (×3 incl. drawer-scoped). Seed-2 constraints honored (easing pair, exits-faster,
+reduced-motion off-and-instant, glass chrome-only, 24px floor, 80ch measure). All three B
+self-critique items resolved (nameplate vs Vercel-adjacency; functional drawer/inspector replaces
+vignette; inline-style rule: var() refs / data-driven custom properties only).
+
+Open items carried to G2 review (from builder's fresh self-critique):
+1. Drawer overlays compressed-table right columns when open — production needs squeeze-layout.
+2. Nameplate trailing letter-space + untuned optical centering.
+3. `.w-160`/`.mt-3` utility classes are spec-smell — T6 must replace with composition primitives.
+
+Also added `01-research/synthesis-seed-3.md` (third operator report distilled per plan Seed addendum 3:
+OkLCh ramp method, DTCG/Style Dictionary/Storybook/Chromatic/Playwright as reference-only, enforcement
+ladder refinement, focus-visible + modal-focus-restoration lint intents, dense/expressive/transactional
+cutover-rehearsal rule, studio watchlist).
+
+→ **G2 gate: OPEN, awaiting user review of v2 (both themes).** Decisions: lock visual language/type/
+palettes/motion/naming/state taxonomy/density/table+log strategy; T8 spike allowed yes/no.

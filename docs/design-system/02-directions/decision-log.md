@@ -101,4 +101,32 @@ Target: `iterations/v2.html`. Brief: B chassis integrating A + C grafts; resolve
 drill-in vignette with fuller treatment; keep tokens-only discipline). Motion per T3b token set;
 reduced-motion off-and-instant; glass/translucency accent-only per synthesis-seed-2.
 
-_In progress._
+**Delivered:** `iterations/v2.html`, 2,799 lines, both themes render-verified.
+
+Grafts executed:
+- **A → nameplate:** mono spaced-caps `SOUP` (Geist Mono 600, +0.38em) + one teal square tick,
+  codified as ramp style `--type-nameplate`, reserved for the mark.
+- **A → shape law:** `.shape--ok/warn/crit/off` (disc/diamond/square/outline) everywhere status renders,
+  always with text label. A's crit-blink **rejected** — single ambient-motion budget spent on ok-breathing.
+- **C → densities:** `--row-default: 36px` / `--row-compressed: 28px` as tier-1 tokens; control sheet
+  shows both; Fleet runs compressed, forms stay default.
+- **C → toolbar:** `[filters | time-range · search · primary]` anatomy, used identically ×3.
+- **C → log stream:** first-class block (E/W/I/D letter tags, expandable, live level-filter), ×3 incl.
+  drawer-scoped log.
+- **Seed-2 constraints honored:** enter/exit easing pair, exits faster (modal 180/120, drawer 280/180),
+  reduced-motion off-and-instant, glass confined to header chrome + scrim, 24px target floor, 80ch measure.
+
+Self-critique resolutions: Vercel-adjacency countered (nameplate + mode-trio presence); drill-in vignette
+replaced by functional drawer/inspector over Fleet (row-retarget, Escape, remedies, scoped log);
+inline-style shortcut resolved (utility/ramp classes; lintable rule: inline style may carry only `var()`
+refs or data-driven custom properties).
+
+Fresh self-critique (carried to G2 review): (1) drawer overlays the compressed table's right columns —
+production needs squeeze-layout (table reflows) rather than pure overlay; (2) nameplate +0.38em tracking
+leaves trailing letter-space after "P", optical centering untuned; (3) `.w-160`/`.mt-3`-style utilities are
+spec-smell — T6 must replace with composition-level primitives, not carry them into the codebase.
+
+## G2 — Visual and spec lock
+
+_Awaiting user review of `iterations/v2.html` (both themes). Decisions: lock visual language/type/
+palettes/motion/naming/state taxonomy/density/table+log strategy; T8 allowed yes/no._

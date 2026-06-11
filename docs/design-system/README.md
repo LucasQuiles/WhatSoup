@@ -20,8 +20,8 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
 | T3 | Research + reference library (+motion addendum, +synthesis seed) | ✅ Complete |
 | T4 | Three direction mockups | ✅ Complete |
 | **G1** | **Direction selection gate** | ✅ **Approved 2026-06-11** |
-| T5 | Winner refinement (blend) | 🔄 In progress |
-| **G2** | **Visual/spec lock gate** | ⬜ Awaiting user |
+| T5 | Winner refinement (blend) | ✅ Round 1 complete (`iterations/v2.html`) |
+| **G2** | **Visual/spec lock gate** | 🔶 **OPEN — awaiting user review of v2** |
 | T6 | Formal design-system spec | ⬜ Blocked on G2 |
 | T7 | Enforcement + cutover plans | ⬜ Blocked on G2 |
 | T8 | Optional throwaway token spike | ⬜ Blocked on G2 + explicit approval |
