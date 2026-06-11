@@ -3,8 +3,9 @@
 /** Transport library / protocol family. */
 export type ChannelKind =
   | 'whatsapp'
-  | 'telegram';
-  // future: 'imessage' | 'signal' | 'discord' | 'sms'
+  | 'telegram'
+  | 'sms';
+  // future: 'imessage' | 'signal' | 'discord'
 
 declare const __channelIdBrand: unique symbol;
 
