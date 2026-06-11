@@ -66,6 +66,13 @@ vi.mock('../../../src/lib/keyring.ts', () => ({
   lookupCredential: vi.fn(() => 'present-key'),
 }));
 
+// Credential probe — stub out to prevent real network calls. The probe is
+// fire-and-forget (void) and this file does not assert its outcome; 'unknown'
+// is the safe fail-open value.
+vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
+  verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')),
+}));
+
 // ─── Imports after mocks ──────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';

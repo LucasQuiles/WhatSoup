@@ -70,6 +70,7 @@ import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { createProviderMcpBridge, generateMcpConfigFile } from './providers/mcp-bridge.ts';
+import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -5328,6 +5329,26 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Map a fallback provider/model to its keyring service (shared by the
+   * presence guard and the validity pre-flight).
+   *
+   * Returns null when the provider authenticates via subscription/login
+   * (claude-cli, codex-cli, gemini-cli, anthropic-api) — no keyring key applies.
+   */
+  private resolveFallbackService(provider: string | undefined, model: string | undefined): string | null {
+    if (provider === 'opencode-cli') {
+      const prefix = model?.split('/')[0]?.trim();
+      return prefix ? prefix.toLowerCase() : null;
+    }
+    if (provider === 'openai-api') {
+      return 'openai';
+    }
+    // CLI/native-auth providers (claude-cli/codex-cli/gemini-cli/anthropic-api)
+    // and an opencode model with no provider prefix → not applicable.
+    return null;
+  }
+
+  /**
    * Whether the keyring holds an API key for the configured fallback target.
    *
    * Returns:
@@ -5341,15 +5362,7 @@ export class AgentRuntime implements Runtime {
    * (`minimax/...` → `minimax`); openai-api → `openai`. Never logs the value.
    */
   private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
-    let service: string | null = null;
-    if (provider === 'opencode-cli') {
-      const prefix = model?.split('/')[0]?.trim();
-      service = prefix ? prefix.toLowerCase() : null;
-    } else if (provider === 'openai-api') {
-      service = 'openai';
-    }
-    // CLI/native-auth providers (claude-cli/codex-cli/gemini-cli/anthropic-api)
-    // and an opencode model with no provider prefix → not applicable.
+    const service = this.resolveFallbackService(provider, model);
     if (!service) return null;
     return lookupCredential(service) !== null;
   }
@@ -5405,6 +5418,36 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
     }
+    // Pre-flight: check key presence and probe validity; never blocks or reverts
+    // the window — fail-open on anything except a definitive 401/403.
+    const service = this.resolveFallbackService(this.agentFallbackProvider, this.agentFallbackModel);
+    if (service) {
+      const key = lookupCredential(service);
+      if (!key) {
+        log.warn({
+          instanceName: this.instanceName,
+          fallbackProvider: this.agentFallbackProvider,
+          fallbackModel: this.agentFallbackModel,
+        }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
+        emitAlert(
+          this.instanceName,
+          'fallback_credential_missing',
+          'Fallback provider key not found in keyring',
+          `service=${service} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+        );
+      } else {
+        void verifyFallbackCredential(service, key).then((result) => {
+          if (result !== 'invalid') return;
+          log.error({ service, fallbackProvider: this.agentFallbackProvider }, 'fallback credential rejected by provider (401/403)');
+          emitAlert(
+            this.instanceName,
+            'fallback_credential_invalid',
+            'Fallback API key rejected by provider',
+            `service=${service} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+          );
+        });
+      }
+    }
   }
 
   /**
@@ -5451,17 +5494,6 @@ export class AgentRuntime implements Runtime {
    */
   private activateProviderFallback(resetAt: Date | null): void {
     if (!this.agentFallbackProvider) return;
-
-    // Visibility guard: if the fallback target needs an API key the keyring
-    // doesn't hold, warn (do not block — the operator chose this fallback).
-    const keyPresent = this.fallbackKeyPresent(this.agentFallbackProvider, this.agentFallbackModel);
-    if (keyPresent === false) {
-      log.warn({
-        instanceName: this.instanceName,
-        fallbackProvider: this.agentFallbackProvider,
-        fallbackModel: this.agentFallbackModel,
-      }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
-    }
 
     const now = Date.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;

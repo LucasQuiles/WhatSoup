@@ -11,6 +11,7 @@ import * as os from 'node:os';
 
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
 
+// Probe URLs for fallback credential pre-flight live in src/runtimes/agent/providers/credential-verify.ts (PROBE_ENDPOINTS) — keep services in sync.
 /** Map service names to their conventional env var names. */
 export const SERVICE_ENV_MAP: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',

@@ -79,6 +79,13 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
   };
 });
 
+// Credential probe — stub to prevent real network calls from the fire-and-forget
+// pre-flight in armFallbackWindow. This file does not assert probe outcomes;
+// 'unknown' is the safe fail-open value that produces no credential alerts.
+vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
+  verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')),
+}));
+
 // ─── Imports after mocks ──────────────────────────────────────────────────────
 
 import {
