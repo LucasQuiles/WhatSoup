@@ -4,10 +4,18 @@ import { resolve } from 'node:path'
 
 const repoRoot = resolve(import.meta.dirname, '../..')
 const read = (path: string) => readFileSync(resolve(repoRoot, path), 'utf8')
+// C0 token split: index.css is now a slim importer; design-token assertions read the full tier set.
+const readTokenCss = () => [
+  'console/src/index.css',
+  'console/src/styles/tokens.primitive.css',
+  'console/src/styles/tokens.semantic.css',
+  'console/src/styles/tokens.component.css',
+  'console/src/styles/composites.css',
+].map(read).join('\n')
 
 describe('design token component classes', () => {
   it('defines reusable input, dialog, and card classes in index.css', () => {
-    const css = read('console/src/index.css')
+    const css = readTokenCss()
 
     for (const selector of [
       '.c-input',
@@ -37,7 +45,7 @@ describe('design token component classes', () => {
   })
 
   it('keeps c-dialog visual-only and documents the canonical panel border token', () => {
-    const css = read('console/src/index.css')
+    const css = readTokenCss()
 
     expect(css).not.toContain('width: min(100%, var(--panel-confirm));')
     expect(css).not.toContain('max-height: var(--modal-max-h);')

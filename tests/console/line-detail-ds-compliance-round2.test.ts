@@ -4,6 +4,14 @@ import { resolve } from 'node:path'
 
 const repoRoot = resolve(import.meta.dirname, '../..')
 const read = (path: string) => readFileSync(resolve(repoRoot, path), 'utf8')
+// C0 token split: index.css is now a slim importer; design-token assertions read the full tier set.
+const readTokenCss = () => [
+  'console/src/index.css',
+  'console/src/styles/tokens.primitive.css',
+  'console/src/styles/tokens.semantic.css',
+  'console/src/styles/tokens.component.css',
+  'console/src/styles/composites.css',
+].map(read).join('\n')
 
 const lineDetailFiles = [
   'console/src/components/line-detail/ScheduledTab.tsx',
@@ -57,11 +65,13 @@ describe('design system compliance — round 2 shared search inputs', () => {
 })
 
 describe('design system compliance — round 2 token cleanup', () => {
-  it('defines the added opacity and circular radius tokens in index.css', () => {
-    const css = read('console/src/index.css')
+  it('defines the added opacity token and keeps orphan tokens deleted', () => {
+    const css = readTokenCss()
 
     expect(css).toContain('--opacity-faint:')
-    expect(css).toContain('--radius-circle:')
+    // --radius-circle was removed at the C0 token split as a zero-consumer orphan
+    // (docs/design-system cutover plan); it must stay deleted.
+    expect(css).not.toContain('--radius-circle:')
   })
 
   it('removes raw hex fallbacks from the new line-detail files', () => {

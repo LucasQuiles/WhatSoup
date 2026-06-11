@@ -4,6 +4,14 @@ import { resolve } from 'node:path'
 
 const repoRoot = resolve(import.meta.dirname, '../..')
 const read = (path: string) => readFileSync(resolve(repoRoot, path), 'utf8')
+// C0 token split: index.css is now a slim importer; design-token assertions read the full tier set.
+const readTokenCss = () => [
+  'console/src/index.css',
+  'console/src/styles/tokens.primitive.css',
+  'console/src/styles/tokens.semantic.css',
+  'console/src/styles/tokens.component.css',
+  'console/src/styles/composites.css',
+].map(read).join('\n')
 
 describe('design system compliance — Shannon slice', () => {
   it('uses design tokens for Nav hardcoded pixel values', () => {
@@ -115,7 +123,7 @@ describe('design system compliance — Shannon slice', () => {
   })
 
   it('uses --text-* tokens in @theme (not --font-size-*) and text-* utility classes', () => {
-    const css = read('console/src/index.css')
+    const css = readTokenCss()
     // @theme uses --text-* naming for Tailwind v4 native utility generation
     expect(css).toContain('--text-xs:')
     expect(css).toContain('--text-sm:')
@@ -131,7 +139,7 @@ describe('design system compliance — Shannon slice', () => {
   })
 
   it('wraps form reset and body styles in @layer base (not unlayered)', () => {
-    const css = read('console/src/index.css')
+    const css = readTokenCss()
     // Unlayered button/input { font: inherit } would override @layer utilities text-* classes
     // The form reset MUST be inside @layer base
     const formResetMatch = css.match(/input,\s*select,\s*textarea,\s*button\s*\{[^}]*font:\s*inherit/)

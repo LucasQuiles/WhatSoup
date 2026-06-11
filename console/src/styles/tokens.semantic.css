@@ -1,0 +1,84 @@
+/* tokens.semantic.css - semantic tier
+   Legacy semantic-tier values (canonical at C0) plus the v3 semantic vocabulary as aliases. At C1 the vocabulary becomes canonical per-theme and legacy names invert to aliases.
+   C0 split of the former index.css token monolith - values are verbatim (zero visual change). */
+:root {
+  --b1: rgba(255,255,255, 0.05);
+  --b2: rgba(255,255,255, 0.09);
+  --b3: rgba(255,255,255, 0.16);
+  --b4: rgba(255,255,255, 0.24);
+  /* Card elevation — subtle depth for dark containers */
+  --card-shadow: 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
+  --m-pas-soft: rgba(45,212,168, 0.19);
+  --m-pas-wash: rgba(45,212,168, 0.06);
+  --m-cht-soft: rgba(56,189,248, 0.19);
+  --m-cht-wash: rgba(56,189,248, 0.06);
+  --m-agt-soft: rgba(167,139,250, 0.19);
+  --m-agt-wash: rgba(167,139,250, 0.06);
+  /* Status semantics — separate from mode colors */
+  --s-ok-glow: rgba(45,212,168, 0.25);
+  --s-ok-soft: rgba(45,212,168, 0.19);
+  --s-ok-wash: rgba(45,212,168, 0.06);
+  --s-warn-glow: rgba(246,173,85, 0.25);
+  --s-warn-wash: rgba(246,173,85, 0.07);
+  --s-crit-glow: rgba(252,129,129, 0.25);
+  --s-crit-wash: rgba(252,129,129, 0.07);
+  --s-crit-soft: rgba(252,129,129, 0.19);
+  --overlay: rgba(5,7,9, 0.75);
+  --overlay-badge: rgba(0,0,0, 0.6);
+  /* Semantic tier — spec completeness */
+  --s-warn-soft: rgba(246,173,85, 0.19);
+  --s-warn-border: rgba(246,173,85, 0.12);
+  --s-crit-border: rgba(252,129,129, 0.1);
+  --s-crit-ring: rgba(252,129,129, 0.3);
+  --s-ok-ring: rgba(45,212,168, 0.3);
+  --s-warn-ring: rgba(246,173,85, 0.3);
+  /* ═══ Elevation shadows ═══ */
+  --shadow-inset: inset 0 -2px 8px rgba(0,0,0,0.15);
+  --shadow-md: 0 8px 24px rgba(0,0,0,0.4);
+  --shadow-lg: 0 16px 48px rgba(0,0,0,0.5);
+}
+
+/* v3 semantic vocabulary (03-spec/tokens-v3.md section 3). C0 direction note: these alias the
+   legacy canonical values so computed values are identical; the alias direction inverts at C1
+   (legacy @theme entries become @theme inline aliases of these, with per-theme value sets). */
+:root,
+[data-theme="dark"] {
+  --surface-base: var(--color-d0);
+  --surface-inset: var(--color-d1);
+  --surface-raised: var(--color-d2);
+  --surface-overlay: var(--color-d5);
+  --text-1: var(--color-t1);
+  --text-2: var(--color-t2);
+  --text-3: var(--color-t5);
+  --border-hairline: var(--b1);
+  --border-subtle: var(--b2);
+  --border-strong: var(--b3);
+  --mode-passive-solid: var(--color-m-pas);
+  --mode-passive-wash: var(--m-pas-wash);
+  --mode-passive-border: var(--m-pas-soft);
+  --mode-passive-fg: var(--color-m-pas);
+  --mode-chat-solid: var(--color-m-cht);
+  --mode-chat-wash: var(--m-cht-wash);
+  --mode-chat-border: var(--m-cht-soft);
+  --mode-chat-fg: var(--color-m-cht);
+  --mode-agent-solid: var(--color-m-agt);
+  --mode-agent-wash: var(--m-agt-wash);
+  --mode-agent-border: var(--m-agt-soft);
+  --mode-agent-fg: var(--color-m-agt);
+  --status-ok-solid: var(--color-s-ok);
+  --status-ok-wash: var(--s-ok-wash);
+  --status-ok-border: var(--s-ok-ring);
+  --status-ok-fg: var(--color-s-ok);
+  --status-warn-solid: var(--color-s-warn);
+  --status-warn-wash: var(--s-warn-wash);
+  --status-warn-border: var(--s-warn-border);
+  --status-warn-fg: var(--color-s-warn);
+  --status-crit-solid: var(--color-s-crit);
+  --status-crit-wash: var(--s-crit-wash);
+  --status-crit-border: var(--s-crit-border);
+  --status-crit-fg: var(--color-s-crit);
+  --focus-ring: var(--color-m-cht);
+  --scrim: var(--overlay);
+  --ease-enter: var(--ease);
+  --dur-base: var(--dur-norm);
+}
