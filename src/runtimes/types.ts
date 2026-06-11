@@ -31,8 +31,15 @@ export interface Runtime {
   handleAgentCommand?(request: AgentCommandRequest): Promise<AgentCommandResult>;
   /**
    * Provider-fallback observability (agent runtimes only). Returns the
-   * currently effective provider and the epoch-ms expiry of an active fallback
-   * window (`null` when running on the primary provider).
+   * currently effective provider, the epoch-ms expiry of an active fallback
+   * window (`null` when running on the primary provider), and process-local
+   * turn counters (reset on restart).
    */
-  getFallbackState?(): { effectiveProvider: string; fallbackActiveUntil: number | null };
+  getFallbackState?(): {
+    effectiveProvider: string;
+    fallbackActiveUntil: number | null;
+    fallbackTurnsServed: number;
+    fallbackTurnsEmpty: number;
+    lastFallbackTurnAt: number | null;
+  };
 }

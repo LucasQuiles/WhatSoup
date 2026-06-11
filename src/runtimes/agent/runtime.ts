@@ -1278,6 +1278,11 @@ export class AgentRuntime implements Runtime {
   // Epoch ms when the current fallback window was first activated. Preserved
   // across extensions so the original engagement time is never overwritten.
   private fallbackActivatedAt: number | null = null;
+  // Process-local fallback telemetry — deliberately NOT persisted (reset on
+  // restart); the durable artifact is the window itself (agent_fallback_state).
+  private fallbackTurnsServed = 0;
+  private fallbackTurnsEmpty = 0;
+  private lastFallbackTurnAt: number | null = null;
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
@@ -4588,6 +4593,19 @@ export class AgentRuntime implements Runtime {
             this.perChatTurnContentType.delete(mapKey);
             this.perChatTurnText.delete(mapKey);
           }
+          if (!isSystemResult && !hasPendingPoll && !wasSilentCompact) {
+            // A media/poll-only turn can read as empty here — acceptable for a
+            // warn-level signal; hasPendingPoll removes the common case.
+            const hadVisible =
+              responseText.trim() !== '' ||
+              (typeof event.text === 'string' && event.text.trim() !== '');
+            this.recordFallbackTurnOutcome(queue, hadVisible);
+            if (!hadVisible && this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil) {
+              // This path has no '_(no response)_' fallback and the reply guarantee
+              // was just disarmed — without this the user gets pure silence.
+              queue.enqueueText('_The backup model returned no reply — please resend or rephrase your message._');
+            }
+          }
           queue.flush()
             .then(() => {
               // Send voice reply after text is delivered (non-fatal, SP4)
@@ -5278,12 +5296,21 @@ export class AgentRuntime implements Runtime {
    * the bot is on its primary provider). Mirrors {@link effectiveProvider} but
    * does not widen the underlying fields' visibility.
    */
-  getFallbackState(): { effectiveProvider: string; fallbackActiveUntil: number | null } {
+  getFallbackState(): {
+    effectiveProvider: string;
+    fallbackActiveUntil: number | null;
+    fallbackTurnsServed: number;
+    fallbackTurnsEmpty: number;
+    lastFallbackTurnAt: number | null;
+  } {
     const active =
       this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil;
     return {
       effectiveProvider: this.effectiveProvider,
       fallbackActiveUntil: active ? this.fallbackActiveUntil : null,
+      fallbackTurnsServed: this.fallbackTurnsServed,
+      fallbackTurnsEmpty: this.fallbackTurnsEmpty,
+      lastFallbackTurnAt: this.lastFallbackTurnAt,
     };
   }
 
@@ -5329,6 +5356,29 @@ export class AgentRuntime implements Runtime {
     return this.agentFallbackProvider
       ? '_Hit my usage limit — switching to a backup model. Please resend your last message._'
       : '_Hit my usage limit — please try again after the limit resets._';
+  }
+
+  /** Count a completed turn during an active fallback window; alert when it
+   *  produced zero visible output — the silent-dead-bot signal. */
+  private recordFallbackTurnOutcome(queue: IOutboundQueue, hadVisibleOutput: boolean): void {
+    if (this.fallbackActiveUntil === null || Date.now() >= this.fallbackActiveUntil) return;
+    this.fallbackTurnsServed += 1;
+    this.lastFallbackTurnAt = Date.now();
+    if (hadVisibleOutput) return;
+    this.fallbackTurnsEmpty += 1;
+    log.warn({
+      chatJid: queue.targetChatJid,
+      fallbackProvider: this.agentFallbackProvider,
+      fallbackModel: this.agentFallbackModel,
+      served: this.fallbackTurnsServed,
+      empty: this.fallbackTurnsEmpty,
+    }, 'fallback turn completed with zero visible output');
+    emitAlert(
+      this.instanceName,
+      'fallback_empty_turn',
+      'Fallback turn produced no visible output',
+      `provider=${this.agentFallbackProvider} model=${this.agentFallbackModel} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty}`,
+    );
   }
 
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,
@@ -6336,6 +6386,7 @@ export class AgentRuntime implements Runtime {
         this.currentTurnAssistantItemText.clear();
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
+        this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput);
         // If nothing visible was emitted this turn, send an explicit fallback
         if (!this.turnHadVisibleOutput && !wasSilentCompact) {
           queue.enqueueText('_(no response)_');

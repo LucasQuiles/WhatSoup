@@ -14,6 +14,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
 
+vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+
 // ─── Mocks (declared before importing the runtime) ────────────────────────────
 
 // Mutable config object — tests mutate fallback fields, then construct a runtime.
@@ -85,6 +87,7 @@ import {
 } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import { emitAlert } from '../../../src/lib/emit-alert.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -388,12 +391,15 @@ describe('AgentRuntime — fallback key-presence guard', () => {
 
 // ─── assistant_text vs result asymmetry ──────────────────────────────────────
 
-/** IOutboundQueue stub covering all members the usage-limit paths touch. */
+/** IOutboundQueue stub covering all members the result paths touch. */
 function makeFakeQueue() {
   return {
     targetChatJid: 'fake@s.whatsapp.net',
     enqueueText: vi.fn(),
     enqueueResultText: vi.fn(),
+    enqueueStreamingText: vi.fn(),
+    enqueueToolUpdate: vi.fn(),
+    markLastTerminal: vi.fn(),
     flush: vi.fn(async () => {}),
     getLastOpId: vi.fn(() => undefined),
     clearLastOpId: vi.fn(),
@@ -415,6 +421,33 @@ type EventDriveView = {
 
 function driveView(runtime: AgentRuntime): EventDriveView {
   return runtime as unknown as EventDriveView;
+}
+
+/** Extended drive view that exposes the full 8-arg handleEventWithContext
+ *  signature plus the process-local fallback telemetry counters. */
+type FullEventDriveView = {
+  fallbackActiveUntil: number | null;
+  fallbackTurnsServed: number;
+  fallbackTurnsEmpty: number;
+  lastFallbackTurnAt: number | null;
+  turnHadVisibleOutput: boolean;
+  queue: unknown;
+  handleEventWithContext(
+    event: unknown,
+    queue: unknown,
+    session: unknown,
+    conversationKey?: string,
+    inboundSeq?: number,
+    mapKey?: string,
+    toolScopeKey?: string,
+    isSystemResult?: boolean,
+  ): void;
+  handleEvent(event: unknown): void;
+  activateProviderFallback(resetAt: Date | null): void;
+};
+
+function fullView(runtime: AgentRuntime): FullEventDriveView {
+  return runtime as unknown as FullEventDriveView;
 }
 
 describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
