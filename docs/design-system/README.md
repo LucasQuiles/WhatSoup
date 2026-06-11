@@ -21,7 +21,7 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
 | T4 | Three direction mockups | ✅ Complete |
 | **G1** | **Direction selection gate** | ✅ **Approved 2026-06-11** |
 | T5 | Winner refinement (blend) | ✅ Round 1 complete (`iterations/v2.html`) |
-| **G2** | **Visual/spec lock gate** | 🔶 **OPEN — awaiting user review of v2** |
+| **G2** | **Visual/spec lock gate** | 🔶 **OPEN — review package ready** |
 | T6 | Formal design-system spec | ⬜ Blocked on G2 |
 | T7 | Enforcement + cutover plans | ⬜ Blocked on G2 |
 | T8 | Optional throwaway token spike | ⬜ Blocked on G2 + explicit approval |
@@ -34,6 +34,9 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
   log-stream treatment); naming vocabulary = converged set locked (Soup Kitchen→Fleet, single noun "Line",
   instance demoted to process copy, Inbox/Ops kept, unified "attention" metric, SOUP wordmark carries
   playfulness); required changes = none beyond blend integration. Full record: `02-directions/decision-log.md`.
+- **G2 review package prepared on 2026-06-11:** see `02-directions/g2-review-package.md`. Recommendation:
+  conditional lock of `iterations/v2.html`; T6/T7 remain blocked until explicit G2 approval, and T8 remains
+  optional/blocked until separately approved.
 
 ## User decisions (locked 2026-06-11)
 
@@ -63,7 +66,7 @@ A8 (branding occurrences) and A11 (screenshot tooling) verified during T2/T4.
 
 - `00-inventory/` — component inventory, control catalogue, IA/workflow review, duplication register, token census, inconsistency register (T2)
 - `01-research/` — reference library + research digest (T3)
-- `02-directions/` — direction mockups A/B/C, comparison launcher, iterations, decision log (T4/T5)
+- `02-directions/` — direction mockups A/B/C, comparison launcher, iterations, G2 review package, decision log (T4/T5)
 - `03-spec/` — tokens v3, typography, color, layout/density, motion, interaction, iconography, component specs, brand (T6)
 - `04-enforcement/lint-plan.md` (T7)
 - `05-cutover/` — cutover plan + branding touchpoints (T7)

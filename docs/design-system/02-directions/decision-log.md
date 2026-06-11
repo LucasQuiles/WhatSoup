@@ -128,5 +128,17 @@ spec-smell — T6 must replace with composition-level primitives, not carry them
 
 ## G2 — Visual and spec lock
 
-_Awaiting user review of `iterations/v2.html` (both themes). Decisions: lock visual language/type/
-palettes/motion/naming/state taxonomy/density/table+log strategy; T8 allowed yes/no._
+Review package: `g2-review-package.md`.
+
+Recommendation: **Option A — lock v2 Blend with conditions.** The three open items are conditional
+approval items, not reasons to reopen the full direction space unless user review finds them unacceptable:
+drawer squeeze-layout rule, nameplate optical centering/tracking, and utility/spec-smell conversion into
+primitives/composites or anti-patterns.
+
+Awaiting user review of `iterations/v2.html` (both themes) and `g2-review-package.md`.
+Decisions required:
+- Option A / B / C for G2 lock.
+- Whether optional T8 is approved or declined.
+- Any specific visual/spec refinements to carry into T6/T7 or a targeted Round 2.
+
+T6, T7, and T8 remain blocked until explicit G2 approval and, for T8, separate explicit approval.

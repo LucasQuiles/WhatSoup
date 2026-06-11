@@ -173,3 +173,50 @@ cutover-rehearsal rule, studio watchlist).
 
 → **G2 gate: OPEN, awaiting user review of v2 (both themes).** Decisions: lock visual language/type/
 palettes/motion/naming/state taxonomy/density/table+log strategy; T8 spike allowed yes/no.
+
+---
+
+## G2 Review Package Preparation — 2026-06-11
+
+**Verdict: Pass**
+
+Prepared `02-directions/g2-review-package.md` as the driver for G2 review, T6 formal specification,
+T7 enforcement/cutover planning, and the optional T8 spike decision.
+
+Commands run:
+```
+pwd
+git status --short
+git branch --show-current
+git rev-parse --show-toplevel
+git log --oneline -8
+rg --files -g 'AGENTS.md' -g 'CLAUDE.md' -g 'docs/design-system/**'
+sed -n '1,220p' CLAUDE.md
+sed -n '1,260p' docs/design-system/README.md
+sed -n '1,260p' docs/design-system/02-directions/decision-log.md
+sed -n '1,260p' docs/design-system/execution-log.md
+rg -n 'SOUP|v2|Blend|nameplate|drawer|row-default|row-compressed|shape--|log|toolbar|reduced|motion|glass|target|80' docs/design-system/02-directions/iterations/v2.html
+sed -n '40,185p' docs/design-system/02-directions/iterations/v2.html
+sed -n '1,240p' docs/design-system/02-directions/g2-review-package.md
+find docs/design-system/03-spec docs/design-system/04-enforcement docs/design-system/05-cutover -maxdepth 3 -type f | sort
+rg -n 'Option A|Option B|Option C|T8|conditional lock|No T6/T7/T8|G2 review package|squeeze-layout|nameplate|utility/spec-smell' docs/design-system/README.md docs/design-system/02-directions/decision-log.md docs/design-system/02-directions/g2-review-package.md docs/design-system/execution-log.md
+```
+
+Package contents:
+- Direction lock summary for visual language, typography, dark/light palettes, accent, motion, naming/nameplate,
+  state taxonomy, shape-coded status law, density model, tables, logs, drawer/inspector, and toolbar anatomy.
+- Open item disposition for drawer squeeze-layout, nameplate optical centering/tracking, and utility/spec-smell
+  conversion.
+- G2 options A/B/C and optional T8 approval/decline decision.
+- Post-G2 T6/T7 drivers and G3 readiness checklist.
+
+Recommendation recorded: **Option A — conditional lock**. T8 is optional, not required.
+
+Files changed:
+- `docs/design-system/README.md`
+- `docs/design-system/02-directions/decision-log.md`
+- `docs/design-system/02-directions/g2-review-package.md`
+- `docs/design-system/execution-log.md`
+
+No T6/T7/T8 work started. No production implementation, push, PR, deploy, main checkout edit, or internal
+identifier rename performed.
