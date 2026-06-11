@@ -7,6 +7,7 @@
  * - the Darwin branch checks launchctl
  * - wrapper installs (step 3) are outside any platform conditional
  * - Darwin key-check uses macOS Keychain conventions matching src/lib/keyring.ts
+ * - the key check covers the fallback-provider services on both platforms
  */
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
@@ -91,6 +92,17 @@ describe('deploy/setup.sh platform portability', () => {
     const linuxKeyAnchor = '# --- linux (secret-tool) key check ---';
     const darwinKeySection = sliceBetween(setupSource, darwinKeyAnchor, linuxKeyAnchor);
     expect(darwinKeySection).toContain('add-generic-password');
+  });
+
+  it('key check covers the fallback-provider services on both platforms', () => {
+    const darwinKeyAnchor = '# --- darwin (macos keychain) key check ---';
+    const linuxKeyAnchor = '# --- linux (secret-tool) key check ---';
+    const darwinKeySection = sliceBetween(setupSource, darwinKeyAnchor, linuxKeyAnchor);
+    const linuxKeySection = setupSource.slice(setupSource.indexOf(linuxKeyAnchor));
+    for (const service of ['minimax', 'deepseek']) {
+      expect(darwinKeySection, `darwin key check missing ${service}`).toContain(`check_key "${service}" "optional"`);
+      expect(linuxKeySection, `linux key check missing ${service}`).toContain(`check_key "${service}" "optional"`);
+    }
   });
 
   it('existing wrapper install targets remain intact (regression guard)', () => {
