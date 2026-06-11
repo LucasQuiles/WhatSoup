@@ -33,10 +33,10 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
     <nav
       role="navigation"
       aria-label="Main navigation"
-      className="bg-d1 flex items-center justify-between flex-shrink-0 h-[var(--nav-h)] py-0 px-[var(--sp-5)] c-border-b gap-[var(--sp-6)]"
+      className="bg-d1 flex items-center justify-between flex-shrink-0 h-[var(--nav-h)] py-0 px-[var(--sp-3)] sm:px-[var(--sp-5)] c-border-b gap-[var(--sp-3)] sm:gap-[var(--sp-6)] min-w-0"
     >
       {/* Left cluster: logo + nav items */}
-      <div className="flex items-center gap-[var(--sp-6)]">
+      <div className="flex items-center gap-[var(--sp-2)] sm:gap-[var(--sp-6)] min-w-0">
         <span
           className="text-xl font-sans font-black select-none tracking-[var(--tracking-tighter)]"
         >
@@ -53,8 +53,8 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               : "text-t4 hover:text-t2"
           }`}
         >
-          <LayoutDashboard size={18} strokeWidth={1.75} />
-          <span>Soup Kitchen</span>
+          <LayoutDashboard size={18} strokeWidth={1.75} aria-hidden="true" />
+          <span className="max-sm:sr-only">Soup Kitchen</span>
           {isFleetActive && (
             <span
               className="absolute h-[var(--bw-accent)] bg-s-ok rounded-sm"
@@ -79,8 +79,8 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         >
           {({ isActive }) => (
             <>
-              <Inbox size={18} strokeWidth={1.75} />
-              <span>Inbox</span>
+              <Inbox size={18} strokeWidth={1.75} aria-hidden="true" />
+              <span className="max-sm:sr-only">Inbox</span>
               {unreadCount > 0 && (
                 <span
                   className="text-xs font-mono font-semibold rounded-md min-w-[var(--sp-4)] text-center ml-[var(--sp-0h)] bg-[var(--color-s-warn)] text-d0 py-[var(--sp-0h)] px-[var(--sp-1)]"
@@ -114,8 +114,8 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         >
           {({ isActive }) => (
             <>
-              <Terminal size={18} strokeWidth={1.75} />
-              <span>Ops</span>
+              <Terminal size={18} strokeWidth={1.75} aria-hidden="true" />
+              <span className="max-sm:sr-only">Ops</span>
               {isActive && (
                 <span
                   className="absolute h-[var(--bw-accent)] bg-s-ok rounded-sm"
@@ -132,7 +132,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
       </div>
 
       {/* Right cluster: theme toggle + system status */}
-      <div className="text-xs flex items-center gap-2 font-mono">
+      <div className="text-xs flex items-center gap-2 font-mono flex-shrink-0">
         <button
           type="button"
           onClick={toggleTheme}
@@ -144,19 +144,19 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         {connected ? (
           <span className="flex items-center gap-1 text-s-ok" title="Realtime connected">
             <Wifi size={12} strokeWidth={1.75} />
-            <span>Live</span>
+            <span className="hidden md:inline">Live</span>
           </span>
         ) : (
           <span className="flex items-center gap-1 text-t5" title="Polling (WebSocket disconnected)">
             <WifiOff size={12} strokeWidth={1.75} />
-            <span>Polling</span>
+            <span className="hidden md:inline">Polling</span>
           </span>
         )}
-        <span className="text-t5">|</span>
+        <span className="text-t5 hidden md:inline">|</span>
         {alertCount === 0 ? (
           <>
             <CheckCircle2 size={14} strokeWidth={1.75} className="text-s-ok" />
-            <span className="text-t4">All systems operational</span>
+            <span className="text-t4 hidden md:inline">All systems operational</span>
           </>
         ) : (
           <>
@@ -179,7 +179,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               <span>{version} → {remoteSha}</span>
             </button>
           ) : (
-            <span className="text-t5" title={`Version ${version}`}>
+            <span className="text-t5 hidden md:inline" title={`Version ${version}`}>
               v{version}
             </span>
           )

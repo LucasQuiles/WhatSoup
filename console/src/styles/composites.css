@@ -949,7 +949,9 @@ body::before {
 
 /* ═══ Interaction states — from design spec §1.9 ═══ */
 
-/* Focus ring: --m-cht with 2px box-shadow at wash opacity, 0.2s */
+/* Focus ring: --m-cht with 2px box-shadow at wash opacity.
+   Focus feedback is INSTANT per motion spec (interaction-patterns/motion: focus and
+   validation feedback never animate) — no transition on the ring. */
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
@@ -958,7 +960,7 @@ a:focus-visible {
   outline: none;
   box-shadow: 0 0 0 var(--bw-focus) var(--m-cht-wash), 0 0 0 var(--bw-focus-outer) var(--m-cht-soft);
   border-color: var(--color-m-cht);
-  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+  transition: none;
 }
 
 /* Hover transition base: 0.15s background + border-color */
@@ -1013,4 +1015,19 @@ a:focus-visible {
 /* Input focus transition */
 input, textarea {
   transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+
+/* Reduced motion: GLOBAL off-and-instant policy (motion spec reduced/no-motion contract).
+   All animation and transition collapse to imperceptible durations; ambient loops run once;
+   smooth scrolling disabled. The .fc-scoped rule above is retained for specificity but this
+   block is the system-wide guarantee: no information may exist only in motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
