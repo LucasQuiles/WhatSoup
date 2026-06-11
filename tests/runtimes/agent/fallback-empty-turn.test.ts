@@ -207,7 +207,7 @@ describe('zero-text fallback turn signal', () => {
       'test',
       'fallback_empty_turn',
       expect.any(String),
-      expect.any(String),
+      expect.stringContaining('chat=fake@s.whatsapp.net'),
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('no reply'),

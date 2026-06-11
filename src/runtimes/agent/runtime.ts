@@ -5466,7 +5466,7 @@ export class AgentRuntime implements Runtime {
       this.instanceName,
       'fallback_empty_turn',
       'Fallback turn produced no visible output',
-      `provider=${this.agentFallbackProvider} model=${this.agentFallbackModel} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty}`,
+      `provider=${this.agentFallbackProvider} model=${this.agentFallbackModel} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
     );
   }
 
@@ -5494,6 +5494,12 @@ export class AgentRuntime implements Runtime {
       saveFallbackState(this.db, { activeUntil: until, activatedAt, reason });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
+      emitAlert(
+        this.instanceName,
+        'fallback_persist_failed',
+        'Failed to persist fallback window — will not survive restart',
+        `until=${new Date(until).toISOString()} reason=${reason}`,
+      );
     }
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
