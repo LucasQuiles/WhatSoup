@@ -32,6 +32,7 @@ function makeInboundSms(overrides?: Partial<InboundSms>): InboundSms {
     to: '+15559990000',
     body: 'hello world',
     sentAt: new Date(0),
+    fromMe: false,
     ...overrides,
   };
 }
@@ -302,5 +303,92 @@ describe('TwilioConnection event/lifecycle robustness', () => {
     await expect(bridge.sendPollMessage('+1@sms', 'poll', ['a'], 1)).rejects.toBeInstanceOf(
       UnsupportedTransportOperationError,
     );
+  });
+});
+
+describe('TwilioConnection bridge — fromMe echo mapping', () => {
+  it('fromMe record surfaces as IncomingMessage with isFromMe: true and chatJid = peer@sms', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { bridge, port } = makeBridge();
+
+    const received: IncomingMessage[] = [];
+    bridge.onMessage = (msg) => received.push(msg);
+
+    await bridge.connect();
+
+    // Inject an outbound echo record (bot's own message)
+    port.injectInbound(makeInboundSms({
+      sid: 'SMecho001',
+      from: '+15559990000',   // our number
+      to: '+14155550100',     // remote peer
+      body: 'bot reply',
+      fromMe: true,
+      sentAt: new Date(0),
+    }));
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(received).toHaveLength(1);
+    const msg = received[0]!;
+
+    // isFromMe must be true
+    expect(msg.isFromMe).toBe(true);
+
+    // chatJid must be the PEER (remote number) with @sms suffix
+    expect(msg.chatJid).toBe('+14155550100@sms');
+
+    // senderJid is our number with @sms suffix
+    expect(msg.senderJid).toBe('+15559990000@sms');
+
+    // messageId is the Twilio SID — used by durability.matchEcho
+    expect(msg.messageId).toBe('SMecho001');
+
+    bridge.shutdown();
+  });
+
+  it('chatJid is consistent between inbound and outbound records for the same peer', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { bridge, port } = makeBridge();
+    const { toConversationKey } = await import('../../../src/core/conversation-key.ts');
+
+    const received: IncomingMessage[] = [];
+    bridge.onMessage = (msg) => received.push(msg);
+
+    await bridge.connect();
+
+    // Inbound message from peer
+    port.injectInbound(makeInboundSms({
+      sid: 'SMin001',
+      from: '+14155550100',
+      to: '+15559990000',
+      body: 'hi bot',
+      fromMe: false,
+      sentAt: new Date(0),
+    }));
+
+    // Outbound echo (bot replied)
+    port.injectInbound(makeInboundSms({
+      sid: 'SMout001',
+      from: '+15559990000',
+      to: '+14155550100',
+      body: 'hello user',
+      fromMe: true,
+      sentAt: new Date(1),
+    }));
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(received).toHaveLength(2);
+    const inbound = received.find((m) => !m.isFromMe)!;
+    const outbound = received.find((m) => m.isFromMe)!;
+
+    // Both must have the same chatJid (peer number) so they share a conversation thread
+    expect(inbound.chatJid).toBe('+14155550100@sms');
+    expect(outbound.chatJid).toBe('+14155550100@sms');
+
+    // And thus the same conversation key
+    expect(toConversationKey(inbound.chatJid)).toBe(toConversationKey(outbound.chatJid));
+
+    bridge.shutdown();
   });
 });

@@ -574,7 +574,7 @@ provisioning live in the runbook:
 | `accountSid` | string | yes | — | Twilio Account SID. Must match `^AC[0-9a-f]{32}$` (hex must be lowercase). |
 | `authTokenService` | string | yes | — | OS keyring **service name** for the auth token — never the token itself. Non-empty, no whitespace, max 128 chars. Resolved via `src/lib/keyring.ts` `lookupCredential` at first use; no environment-variable fallback exists for Twilio. |
 | `phoneNumber` | string | XOR | — | E.164 sender number (`^\+[1-9]\d{6,14}$`). Exactly one of `phoneNumber` or `messagingServiceSid` must be set. |
-| `messagingServiceSid` | string | XOR | — | Messaging Service SID sender. Must match `^MG[0-9a-f]{32}$` (lowercase hex). Without `phoneNumber`, inbound polling lists all inbound messages on the account (no destination filter). |
+| `messagingServiceSid` | string | XOR | — | Messaging Service SID sender. Must match `^MG[0-9a-f]{32}$` (lowercase hex). Without `phoneNumber`, inbound polling uses a single unfiltered call listing all messages on the account in both directions (no targeted per-number filtering). |
 | `inboundMode` | string | no | `poll` | Only `poll` is accepted; `webhook` is rejected (not yet supported). |
 | `pollIntervalMs` | integer | no | `15000` | Inbound poll interval; also the lookback window at connect. Range `[5000, 86400000]`. |
 | `rateLimit.smsPerMinute` | integer | no | `30` | Range `[1, 600]`. Validated config only — **no rate limiter enforces it yet**. |

@@ -411,21 +411,28 @@ export class TwilioSmsAdapter implements TransportAdapter {
 
   private buildInboundMessage(record: InboundSms): InboundMessage {
     const channelId = this.channelId;
+    // For inbound messages, the peer is the sender (record.from).
+    // For outbound messages (fromMe: true), the peer is the recipient (record.to).
+    // The conversation must always key on the PEER so that send and receive for
+    // the same remote number share one conversation thread.
+    const peer = record.fromMe ? record.to : record.from;
+    // For outbound echoes the sender is us (our own phone number / MSS id).
+    const senderId = record.fromMe ? this.selfRef().id : record.from;
     return {
       ref: {
         channel: channelId,
-        conversation: record.from,
+        conversation: peer,
         id: record.sid,
       },
       conversation: {
         channel: channelId,
-        id: record.from,
+        id: peer,
       },
       sender: {
         channel: channelId,
-        id: record.from,
+        id: senderId,
       },
-      fromMe: false,
+      fromMe: record.fromMe,
       text: record.body,
       attachments: [],
       timestamp: record.sentAt,

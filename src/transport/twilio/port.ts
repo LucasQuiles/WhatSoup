@@ -10,13 +10,19 @@ export interface SendSmsArgs {
   readonly body: string;
 }
 
-/** A single inbound SMS record as returned from the provider. */
+/**
+ * A single SMS record returned from the provider. Includes both inbound
+ * messages (from a remote peer to our number, fromMe: false) and our own
+ * outbound messages (fromMe: true). Callers use `fromMe` to distinguish
+ * direction; the record set returned by listInboundSince now covers both.
+ */
 export interface InboundSms {
   readonly sid: string;
   readonly from: string;
   readonly to: string;
   readonly body: string;
   readonly sentAt: Date;
+  readonly fromMe: boolean;
   readonly status?: string;
 }
 
@@ -43,9 +49,14 @@ export interface TwilioSmsPort {
   sendSms(args: SendSmsArgs): Promise<{ sid: string }>;
 
   /**
-   * List inbound messages received at or after `since`.
+   * List messages sent at or after `since` in BOTH directions (inbound and
+   * our own outbound). `fromMe` on each record distinguishes direction.
    *
    * Contract:
+   * - Returns both inbound messages (fromMe: false) and our own outbound
+   *   messages (fromMe: true). The adapter uses fromMe records as echo
+   *   confirmation so the durability engine can transition submitted ops to
+   *   echoed.
    * - The boundary is INCLUSIVE (`sentAt >= since`): delivery is at-least-once
    *   so a cursor equal to a message timestamp re-delivers rather than drops.
    *   Callers MUST deduplicate by `sid`.

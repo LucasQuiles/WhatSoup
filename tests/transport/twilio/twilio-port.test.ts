@@ -279,22 +279,38 @@ describe('SdkTwilioSmsPort listInboundSince', () => {
     expect(callArg['dateSentAfter']).toEqual(expectedDateSentAfter);
   });
 
-  it('filters out non-inbound messages (e.g. outbound-api)', async () => {
+  it('includes outbound-api messages with fromMe: true alongside inbound messages', async () => {
+    // Previously this test verified that outbound-api was filtered out.
+    // Now outbound messages are included with fromMe: true so the adapter can
+    // emit them as echo confirmations for the durability engine.
+    // When phoneNumber is configured, listInboundSince makes TWO calls:
+    //   call 1: {to: phoneNumber} — inbound messages
+    //   call 2: {from: phoneNumber} — outbound messages
     const since = new Date('2025-01-01T00:00:00Z');
-    const messages = [
+    const inboundMessages = [
       makeMsg({ sid: 'SM1', direction: 'inbound', dateSent: new Date('2025-01-01T12:00:00Z') }),
-      makeMsg({ sid: 'SM2', direction: 'outbound-api', dateSent: new Date('2025-01-01T12:01:00Z') }),
       makeMsg({ sid: 'SM3', direction: 'inbound', dateSent: new Date('2025-01-01T12:02:00Z') }),
     ];
-    const messagesList = vi.fn().mockResolvedValue(messages);
+    const outboundMessages = [
+      makeMsg({ sid: 'SM2', direction: 'outbound-api', dateSent: new Date('2025-01-01T12:01:00Z') }),
+    ];
+    // First call (to=) returns inbound, second call (from=) returns outbound
+    const messagesList = vi.fn()
+      .mockResolvedValueOnce(inboundMessages)
+      .mockResolvedValueOnce(outboundMessages);
     const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
     const lookup = vi.fn().mockReturnValue(TOKEN);
     const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
 
     const result = await port.listInboundSince(since);
 
-    expect(result).toHaveLength(2);
-    expect(result.map((m) => m.sid)).toEqual(['SM1', 'SM3']);
+    // All three records returned, sorted ascending
+    expect(result).toHaveLength(3);
+    expect(result.map((m) => m.sid)).toEqual(['SM1', 'SM2', 'SM3']);
+    // Direction mapping
+    expect(result[0].fromMe).toBe(false);  // inbound
+    expect(result[1].fromMe).toBe(true);   // outbound-api
+    expect(result[2].fromMe).toBe(false);  // inbound
   });
 
   it('applies client-side inclusive filter: message exactly at since is included', async () => {
@@ -407,7 +423,9 @@ describe('SdkTwilioSmsPort init robustness', () => {
     expect(factory).toHaveBeenCalledTimes(2);
   });
 
-  it('forwards limit = pageSize * 2 to the SDK as the over-fetch buffer', async () => {
+  it('forwards limit = pageSize * 2 to EACH SDK call as the over-fetch buffer', async () => {
+    // When phoneNumber is configured, listInboundSince makes two SDK calls —
+    // one for inbound ({to=}), one for outbound ({from=}). Each gets limit=pageSize*2.
     const lookup = vi.fn().mockReturnValue(TOKEN);
     const messagesList = vi.fn().mockResolvedValue([]);
     const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
@@ -415,7 +433,171 @@ describe('SdkTwilioSmsPort init robustness', () => {
 
     await port.listInboundSince(new Date('2026-01-01T00:00:00Z'), 5);
 
-    expect(messagesList).toHaveBeenCalledTimes(1);
+    expect(messagesList).toHaveBeenCalledTimes(2);
     expect(messagesList.mock.calls[0][0]).toMatchObject({ limit: 10 });
+    expect(messagesList.mock.calls[1][0]).toMatchObject({ limit: 10 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listInboundSince — outbound echo support (two-call split, fromMe mapping)
+// ---------------------------------------------------------------------------
+
+describe('SdkTwilioSmsPort listInboundSince — outbound echo support', () => {
+  function makeMsg(overrides: Partial<{
+    sid: string;
+    from: string;
+    to: string;
+    body: string;
+    direction: string;
+    dateSent: Date;
+    dateCreated: Date;
+    status: string;
+  }> = {}) {
+    const base = new Date('2025-06-01T12:00:00Z');
+    return {
+      sid: overrides.sid ?? 'SMout001',
+      from: overrides.from ?? '+15559990000',
+      to: overrides.to ?? '+15551230000',
+      body: overrides.body ?? 'bot reply',
+      direction: overrides.direction ?? 'outbound-api',
+      dateSent: overrides.dateSent ?? base,
+      dateCreated: overrides.dateCreated ?? base,
+      status: overrides.status ?? 'sent',
+    };
+  }
+
+  it('makes TWO SDK list calls when phoneNumber is configured: one {to} and one {from}', async () => {
+    const messagesList = vi.fn().mockResolvedValue([]);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    await port.listInboundSince(new Date('2025-06-01T00:00:00Z'));
+
+    expect(messagesList).toHaveBeenCalledTimes(2);
+    const call0 = messagesList.mock.calls[0][0] as Record<string, unknown>;
+    const call1 = messagesList.mock.calls[1][0] as Record<string, unknown>;
+    // One call has {to: phoneNumber}, the other has {from: phoneNumber}
+    const toCall = [call0, call1].find((c) => 'to' in c);
+    const fromCall = [call0, call1].find((c) => 'from' in c);
+    expect(toCall?.['to']).toBe(BASE_CONFIG.phoneNumber);
+    expect(fromCall?.['from']).toBe(BASE_CONFIG.phoneNumber);
+  });
+
+  it('makes ONE SDK list call when messagingServiceSid-only config (no phoneNumber)', async () => {
+    const messagesList = vi.fn().mockResolvedValue([]);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const mssConfig: TwilioSmsConfig = { ...BASE_CONFIG, phoneNumber: undefined, messagingServiceSid: 'mg00000000000000000000000000000000' };
+    const port = new SdkTwilioSmsPort(mssConfig, { credentialLookup: lookup, clientFactory: factory });
+
+    await port.listInboundSince(new Date('2025-06-01T00:00:00Z'));
+
+    expect(messagesList).toHaveBeenCalledTimes(1);
+    const callArg = messagesList.mock.calls[0][0] as Record<string, unknown>;
+    expect(callArg).not.toHaveProperty('to');
+    expect(callArg).not.toHaveProperty('from');
+  });
+
+  it('maps outbound-api direction → fromMe: true', async () => {
+    const since = new Date('2025-01-01T00:00:00Z');
+    const messages = [makeMsg({ direction: 'outbound-api', dateSent: new Date('2025-06-01T12:00:00Z') })];
+    // First call (to=) returns nothing, second call (from=) returns the outbound msg
+    const messagesList = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(messages);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const result = await port.listInboundSince(since);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].fromMe).toBe(true);
+    expect(result[0].sid).toBe('SMout001');
+  });
+
+  it('maps outbound-reply direction → fromMe: true', async () => {
+    const since = new Date('2025-01-01T00:00:00Z');
+    const messages = [makeMsg({ sid: 'SMreply', direction: 'outbound-reply', dateSent: new Date('2025-06-01T12:00:00Z') })];
+    const messagesList = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(messages);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const result = await port.listInboundSince(since);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].fromMe).toBe(true);
+  });
+
+  it('maps inbound direction → fromMe: false', async () => {
+    const since = new Date('2025-01-01T00:00:00Z');
+    const messages = [makeMsg({ sid: 'SMin', from: '+15551230000', to: '+15559990000', direction: 'inbound', dateSent: new Date('2025-06-01T12:00:00Z') })];
+    const messagesList = vi.fn()
+      .mockResolvedValueOnce(messages)  // to= call returns this
+      .mockResolvedValueOnce([]);       // from= call returns nothing
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const result = await port.listInboundSince(since);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].fromMe).toBe(false);
+    expect(result[0].sid).toBe('SMin');
+  });
+
+  it('deduplicates by SID when the same record appears in both API call results', async () => {
+    const since = new Date('2025-01-01T00:00:00Z');
+    const duplicate = makeMsg({ sid: 'SMdup', direction: 'outbound-api', dateSent: new Date('2025-06-01T12:00:00Z') });
+    // Same SID in both calls — can happen under race conditions
+    const messagesList = vi.fn()
+      .mockResolvedValueOnce([duplicate])
+      .mockResolvedValueOnce([duplicate]);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const result = await port.listInboundSince(since);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].sid).toBe('SMdup');
+  });
+
+  it('merges inbound and outbound records, sorted ascending by sentAt', async () => {
+    const since = new Date('2025-01-01T00:00:00Z');
+    const inMsg = makeMsg({ sid: 'SMin', from: '+15551230000', to: '+15559990000', direction: 'inbound', dateSent: new Date('2025-06-01T12:00:00Z') });
+    const outMsg = makeMsg({ sid: 'SMout', from: '+15559990000', to: '+15551230000', direction: 'outbound-api', dateSent: new Date('2025-06-01T12:01:00Z') });
+    const messagesList = vi.fn()
+      .mockResolvedValueOnce([inMsg])   // to= call returns inbound
+      .mockResolvedValueOnce([outMsg]); // from= call returns outbound
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    const result = await port.listInboundSince(since);
+
+    expect(result).toHaveLength(2);
+    expect(result[0].sid).toBe('SMin');
+    expect(result[1].sid).toBe('SMout');
+    expect(result[0].fromMe).toBe(false);
+    expect(result[1].fromMe).toBe(true);
+  });
+
+  it('forwards limit = pageSize * 2 to EACH SDK call when pageSize is set', async () => {
+    const messagesList = vi.fn().mockResolvedValue([]);
+    const factory = vi.fn().mockReturnValue(makeMockClient({ messagesList }));
+    const lookup = vi.fn().mockReturnValue(TOKEN);
+    const port = new SdkTwilioSmsPort(BASE_CONFIG, { credentialLookup: lookup, clientFactory: factory });
+
+    await port.listInboundSince(new Date('2026-01-01T00:00:00Z'), 5);
+
+    expect(messagesList).toHaveBeenCalledTimes(2);
+    expect(messagesList.mock.calls[0][0]).toMatchObject({ limit: 10 });
+    expect(messagesList.mock.calls[1][0]).toMatchObject({ limit: 10 });
   });
 });

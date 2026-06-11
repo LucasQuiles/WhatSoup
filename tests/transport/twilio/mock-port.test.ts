@@ -113,4 +113,21 @@ describe('MockTwilioSmsPort', () => {
     // Reset after one use
     await expect(port.verifyCredentials()).resolves.toBeUndefined();
   });
+
+  describe('fromMe field handling', () => {
+    it('injectInbound defaults fromMe to false when not specified', async () => {
+      const port = new MockTwilioSmsPort();
+      port.injectInbound({ sid: 'SMin1', from: '+15551230000', to: '+15559990000', body: 'hi', sentAt: new Date(0) });
+      const got = await port.listInboundSince(new Date(0));
+      expect(got[0].fromMe).toBe(false);
+    });
+
+    it('injectInbound stores fromMe: true when explicitly set', async () => {
+      const port = new MockTwilioSmsPort();
+      port.injectInbound({ sid: 'SMout1', from: '+15559990000', to: '+15551230000', body: 'bot reply', sentAt: new Date(0), fromMe: true });
+      const got = await port.listInboundSince(new Date(0));
+      expect(got[0].fromMe).toBe(true);
+    });
+  });
+
 });

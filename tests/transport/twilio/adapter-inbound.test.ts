@@ -407,3 +407,119 @@ describe('TwilioSmsAdapter inbound poll — robustness', () => {
     await adapter.disconnect();
   });
 });
+
+describe('TwilioSmsAdapter inbound poll — outbound echo (fromMe: true)', () => {
+  it('outbound record → InboundMessage with fromMe: true, conversation = peer (record.to), sender = our number', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const channel = makeChannelId('sms', 'ml-bot');
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const msgs: InboundMessage[] = [];
+    adapter.on('message', (m) => msgs.push(m));
+
+    await adapter.connect();
+
+    // Inject an outbound record (bot sent a message to a peer)
+    const sentAt = new Date(0);
+    port.injectInbound({
+      sid: 'SMout001',
+      from: '+15559990000',   // our number (sender)
+      to: '+15551230000',     // remote peer (recipient)
+      body: 'bot reply',
+      sentAt,
+      fromMe: true,
+    });
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(msgs).toHaveLength(1);
+    const m = msgs[0];
+
+    // conversation must key on the PEER so inbound and outbound share a thread
+    expect(m.conversation.id).toBe('+15551230000');
+    expect(m.ref.conversation).toBe('+15551230000');
+
+    // sender is us (our phone number)
+    expect(m.sender.id).toBe('+15559990000');
+
+    // fromMe must be true
+    expect(m.fromMe).toBe(true);
+
+    expect(m.ref.channel).toBe(channel);
+    expect(m.ref.id).toBe('SMout001');
+    expect(m.text).toBe('bot reply');
+    expect(m.inboundEventKey).toBe('SMout001');
+
+    await adapter.disconnect();
+  });
+
+  it('inbound record still produces conversation = record.from, sender = record.from, fromMe: false', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const msgs: InboundMessage[] = [];
+    adapter.on('message', (m) => msgs.push(m));
+
+    await adapter.connect();
+
+    const sentAt = new Date(0);
+    port.injectInbound({
+      sid: 'SMi001',
+      from: '+15551230000',   // remote peer (sender)
+      to: '+15559990000',     // our number (recipient)
+      body: 'user msg',
+      sentAt,
+      fromMe: false,
+    });
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(msgs).toHaveLength(1);
+    const m = msgs[0];
+
+    expect(m.conversation.id).toBe('+15551230000');
+    expect(m.sender.id).toBe('+15551230000');
+    expect(m.fromMe).toBe(false);
+
+    await adapter.disconnect();
+  });
+
+  it('echo flow: sendText returns sid X, then a fromMe record with sid X arrives → emitted exactly once with fromMe: true', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const { makeChannelId: _mk } = await import('../../../src/core/transport-refs.ts');
+    const convRef = { channel: makeChannelId('sms', 'ml-bot'), id: '+15551230000' };
+
+    const msgs: InboundMessage[] = [];
+    adapter.on('message', (m) => msgs.push(m));
+
+    await adapter.connect();
+
+    // Send a message — mock port assigns SM000001
+    const msgRef = await adapter.sendText(convRef, 'hello');
+    const sid = msgRef.id; // 'SM000001'
+
+    // Now the outbound echo arrives in the next poll
+    port.injectInbound({
+      sid,
+      from: '+15559990000',
+      to: '+15551230000',
+      body: 'hello',
+      sentAt: new Date(0),
+      fromMe: true,
+    });
+
+    await vi.advanceTimersByTimeAsync(1000); // tick 1 — emits fromMe record
+    await vi.advanceTimersByTimeAsync(1000); // tick 2 — SID in seen set, must NOT re-emit
+
+    // Exactly once
+    expect(msgs.filter((m) => m.ref.id === sid)).toHaveLength(1);
+    expect(msgs[0].fromMe).toBe(true);
+
+    await adapter.disconnect();
+  });
+});

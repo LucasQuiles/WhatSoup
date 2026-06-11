@@ -43,6 +43,7 @@ interface MessageListLike {
   }): Promise<MessageInstanceLike>;
   list(params: {
     to?: string;
+    from?: string;
     dateSentAfter?: Date;
     limit?: number;
   }): Promise<MessageInstanceLike[]>;
@@ -222,53 +223,98 @@ export class SdkTwilioSmsPort implements TwilioSmsPort {
     // client-side with sentAt >= since.
     const dateSentAfter = new Date(since.getTime() - 1000);
 
-    const listParams: {
-      to?: string;
-      dateSentAfter: Date;
-      limit?: number;
-    } = { dateSentAfter };
-
-    if (this.config.phoneNumber) {
-      listParams.to = this.config.phoneNumber;
-    }
-
     // Over-fetch when a cap is requested: client-side filters (direction,
     // inclusive boundary) can discard records, so a raw limit === pageSize
     // could under-fill the page. 2x is a best-effort buffer, not a guarantee —
     // the port contract makes pageSize an upper bound on the result count,
     // not a promise of a full page.
-    if (pageSize !== undefined) {
-      listParams.limit = pageSize * 2;
+    const limitPerCall = pageSize !== undefined ? pageSize * 2 : undefined;
+
+    let rawInbound: MessageInstanceLike[] = [];
+    let rawOutbound: MessageInstanceLike[] = [];
+
+    if (this.config.phoneNumber) {
+      // When phoneNumber is configured we make TWO SDK calls:
+      //   1. {to: phoneNumber}   — messages sent TO our number (inbound from peers)
+      //   2. {from: phoneNumber} — messages sent FROM our number (our outbound)
+      // Outbound messages cannot be fetched with a `to=ourNumber` filter because
+      // for those records, `to` is the remote peer's number, not ours.
+      // Both calls are issued in parallel for efficiency.
+      const inboundParams: Parameters<MessageListLike['list']>[0] = {
+        to: this.config.phoneNumber,
+        dateSentAfter,
+        ...(limitPerCall !== undefined ? { limit: limitPerCall } : {}),
+      };
+      const outboundParams: Parameters<MessageListLike['list']>[0] = {
+        from: this.config.phoneNumber,
+        dateSentAfter,
+        ...(limitPerCall !== undefined ? { limit: limitPerCall } : {}),
+      };
+
+      try {
+        [rawInbound, rawOutbound] = await Promise.all([
+          c.messages.list(inboundParams),
+          c.messages.list(outboundParams),
+        ]);
+      } catch (err) {
+        scrubAndRethrow(err, this._token);
+      }
+    } else {
+      // messagingServiceSid-only config: single unfiltered call (no phoneNumber
+      // to filter on). This returns all messages on the account. The fromMe
+      // field is still derived from direction, but the call is coarser.
+      const listParams: Parameters<MessageListLike['list']>[0] = {
+        dateSentAfter,
+        ...(limitPerCall !== undefined ? { limit: limitPerCall } : {}),
+      };
+      try {
+        rawInbound = await c.messages.list(listParams);
+      } catch (err) {
+        scrubAndRethrow(err, this._token);
+      }
+      rawOutbound = [];
     }
 
-    let raw: MessageInstanceLike[] = [];
-    try {
-      raw = await c.messages.list(listParams);
-    } catch (err) {
-      scrubAndRethrow(err, this._token);
-    }
+    // Map direction → fromMe.
+    // Directions: 'inbound' | 'outbound-api' | 'outbound-call' | 'outbound-reply'
+    // Any direction starting with 'outbound' is our own message; drop anything
+    // that is neither (defensive — should not occur in practice).
+    const directionToFromMe = (direction: string): boolean | null => {
+      if (direction === 'inbound') return false;
+      if (direction.startsWith('outbound')) return true;
+      return null; // unknown direction — skip
+    };
 
-    const results: InboundSms[] = raw
-      .filter((m) => m.direction === 'inbound')
-      .filter((m) => {
-        // Use dateSent for inbound messages: per the SDK docs, dateSent for an
-        // inbound message is "when Twilio sent the HTTP request to your incoming
-        // message webhook URL" — i.e. when Twilio received the SMS.
-        // dateCreated is when the Message resource was created in Twilio's
-        // system; for inbound messages dateSent is the better receipt proxy.
-        const ts = m.dateSent ?? m.dateCreated;
-        return ts >= since;
-      })
-      .map(
-        (m): InboundSms => ({
-          sid: m.sid,
-          from: m.from,
-          to: m.to,
-          body: m.body,
-          sentAt: m.dateSent ?? m.dateCreated,
-          status: m.status,
-        }),
-      );
+    // Use dateSent for the inclusive client-side filter. For inbound messages
+    // dateSent is "when Twilio sent the webhook request" — the best receipt
+    // proxy. For outbound messages dateSent is when the message was sent.
+    // Fall back to dateCreated when dateSent is absent.
+    const mapRecord = (m: MessageInstanceLike): InboundSms | null => {
+      const fromMe = directionToFromMe(m.direction);
+      if (fromMe === null) return null; // skip non-message directions
+      const ts = m.dateSent ?? m.dateCreated;
+      if (ts < since) return null; // client-side inclusive boundary enforcement
+      return {
+        sid: m.sid,
+        from: m.from,
+        to: m.to,
+        body: m.body,
+        sentAt: ts,
+        fromMe,
+        status: m.status,
+      };
+    };
+
+    // Merge both arrays, map, drop nulls, dedupe by SID (the two API calls
+    // can theoretically overlap under race conditions).
+    const seen = new Set<string>();
+    const results: InboundSms[] = [];
+    for (const m of [...rawInbound, ...rawOutbound]) {
+      if (seen.has(m.sid)) continue;
+      seen.add(m.sid);
+      const mapped = mapRecord(m);
+      if (mapped !== null) results.push(mapped);
+    }
 
     // Sort ascending by sentAt (Twilio returns newest-first by default).
     results.sort((a, b) => a.sentAt.getTime() - b.sentAt.getTime());

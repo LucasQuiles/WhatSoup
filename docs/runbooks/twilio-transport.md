@@ -76,7 +76,7 @@ Per-field notes (validation rules are exact — see
 | `twilioConfig.accountSid` | yes | — | Must match `^AC[0-9a-f]{32}$` — hex must be **lowercase**. |
 | `twilioConfig.authTokenService` | yes | — | Keyring **service name**, not the token itself. Non-empty, no whitespace, max 128 chars. See [Credentials](#credentials-keyring). |
 | `twilioConfig.phoneNumber` | XOR | — | E.164 sender (`^\+[1-9]\d{6,14}$`). Exactly **one** of `phoneNumber` or `messagingServiceSid` must be set — both or neither is rejected. |
-| `twilioConfig.messagingServiceSid` | XOR | — | Must match `^MG[0-9a-f]{32}$` (lowercase hex). Used as the sender instead of `phoneNumber`. Caveat: with no `phoneNumber`, inbound polling does **not** filter by destination number — it lists all inbound messages on the Twilio account (`twilio-port.ts` only sets the `to` filter when `phoneNumber` is configured). |
+| `twilioConfig.messagingServiceSid` | XOR | — | Must match `^MG[0-9a-f]{32}$` (lowercase hex). Used as the sender instead of `phoneNumber`. Caveat: with no `phoneNumber`, inbound polling uses a single unfiltered SDK call — it lists all messages on the Twilio account in both directions (`twilio-port.ts` makes two targeted calls only when `phoneNumber` is configured). |
 | `twilioConfig.inboundMode` | no | `poll` | Only `'poll'` is accepted. `'webhook'` is rejected with `webhook inbound is not yet supported; use inboundMode:'poll'`. Any other value is also rejected. |
 | `twilioConfig.pollIntervalMs` | no | `15000` | Integer in `[5000, 86400000]`. Floor protects against rate-limit storms; the 24h ceiling catches typos that would silently disable inbound. Also the inbound *lookback window* at connect (see below). |
 | `twilioConfig.rateLimit.smsPerMinute` | no | `30` | Integer in `[1, 600]`. **Config-only today** — see [Current limitations](#current-limitations). |
@@ -147,9 +147,12 @@ mentions, `contentType: 'text'`.
   (covered by SID dedupe).
 - Overlapping ticks are prevented (a slow poll skips the next tick rather than
   double-listing).
-- Outbound messages echoed by Twilio are filtered out (`direction ===
-  'inbound'` filter in `twilio-port.ts`), so the bot does not ingest its own
-  sends.
+- Outbound messages sent by the bot are now included in the poll results
+  (`fromMe: true`). The adapter emits them with `fromMe: true`, and ingest
+  calls `durability.matchEcho` to transition the corresponding submitted
+  outbound op to `echoed`. This closes the conversation window gap where
+  the chat runtime lost bot replies, and prevents durability from
+  indefinitely parking ops as `submitted → maybe_sent → quarantined`.
 
 Latency note: inbound latency is bounded by `pollIntervalMs` (default 15s).
 This is a polling transport; there is no push path in stage 1.

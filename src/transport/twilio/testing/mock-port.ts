@@ -58,9 +58,14 @@ export class MockTwilioSmsPort implements TwilioSmsPort {
 
   // ─── Test helpers ──────────────────────────────────────────────────────────
 
-  /** Queue an inbound record to be returned by listInboundSince. */
-  injectInbound(record: InboundSms): void {
-    this.inbound.push(record);
+  /**
+   * Queue a record to be returned by listInboundSince.
+   * `fromMe` defaults to false (inbound from remote peer) when not specified,
+   * matching the common test case. Pass `fromMe: true` to inject an outbound
+   * echo record (simulates the bot's own sent message appearing in the poll).
+   */
+  injectInbound(record: Omit<InboundSms, 'fromMe'> & { fromMe?: boolean }): void {
+    this.inbound.push({ ...record, fromMe: record.fromMe ?? false });
   }
 
   /**
