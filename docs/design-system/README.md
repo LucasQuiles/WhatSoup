@@ -39,9 +39,10 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
   spec (drawer squeeze rule, nameplate tuning, utility-class disposition). **T8 declined** — superseded by
   authorized implementation. Review package: `02-directions/g2-review-package.md`; full record:
   `02-directions/decision-log.md`.
-- **G3: OPEN** — sign-off package at `g3-signoff-package.md`; first implementation packet at
-  `06-implementation/d0-readiness-packet.md`. Implementation (operator-driver stages D0–D8 → cutover
-  C0–C4) begins in a separate worktree only after G3 sign-off + D0 packet approval.
+- **Approved G3 on 2026-06-11:** specs/enforcement/cutover accepted; implementation proceeds under the
+  operator driver. Sign-off package: `g3-signoff-package.md`; first implementation packet:
+  `06-implementation/d0-readiness-packet.md`; QA hardening protocol:
+  `06-implementation/qa-hardening.md`.
 
 ## User decisions (locked 2026-06-11)
 
@@ -75,4 +76,5 @@ A8 (branding occurrences) and A11 (screenshot tooling) verified during T2/T4.
 - `03-spec/` — tokens v3, typography, color, layout/density, motion, interaction, iconography, component specs, brand (T6)
 - `04-enforcement/lint-plan.md` (T7)
 - `05-cutover/` — cutover plan + branding touchpoints (T7)
+- `06-implementation/` — D0 readiness packet + QA hardening protocol for implementation slices
 - `execution-log.md` — per-task evidence log

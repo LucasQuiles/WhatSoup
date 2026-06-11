@@ -277,3 +277,28 @@ identifier rename performed.
 operator driver.** D0 readiness packet approved in the same decision (pilot slice, worktree strategy,
 D1 slices). Implementation worktree: `soup-impl` @ `feat/soup-v3-foundation` off origin/main.
 Design worktree remains the docs/spec SSOT.
+
+---
+
+## Implementation QA Hardening Add-On — 2026-06-11
+
+**Verdict: Pass**
+
+Added `06-implementation/qa-hardening.md` as a binding assurance layer for frontend implementation
+slices. It requires positive-path, negative-path, omission, regression, and design-system conformance
+reviews before a slice can be accepted. It also adds `/frontend-design` review checkpoints, an
+omission audit, negative-path matrix, visual drift sentinel, deterministic coverage matrix, no-silent-
+fallback rule, design debt register, exception aging rules, spec ambiguity protocol, cross-surface
+consistency audit, regression traps, reviewer challenge prompts, real-data stress validation, manual
+QA scripts, final acceptance rubric, and "done means durable" rule.
+
+Files changed:
+- `docs/design-system/06-implementation/qa-hardening.md`
+- `docs/design-system/06-implementation/d0-readiness-packet.md`
+- `docs/design-system/05-cutover/cutover-plan.md`
+- `docs/design-system/04-enforcement/lint-plan.md`
+- `docs/design-system/g3-signoff-package.md`
+- `docs/design-system/README.md`
+- `docs/design-system/execution-log.md`
+
+No production implementation, push, PR, deploy, main checkout edit, or protocol/internal rename performed.

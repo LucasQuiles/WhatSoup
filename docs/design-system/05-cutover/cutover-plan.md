@@ -9,7 +9,8 @@ approval) apply throughout.
 Companion documents: `docs/design-system/04-enforcement/lint-plan.md` (rule catalog + lifecycle),
 `docs/design-system/05-cutover/branding-touchpoints.md` (exhaustive brand audit),
 `docs/design-system/03-spec/` (T6 formal spec — tokens, typography, color, layout/density, motion,
-interaction, iconography, components, brand; per `docs/design-system/README.md:70`).
+interaction, iconography, components, brand; per `docs/design-system/README.md:70`), and
+`docs/design-system/06-implementation/qa-hardening.md` (binding per-slice oversight protocol).
 
 ---
 
@@ -41,6 +42,9 @@ Universal rules (apply to every phase):
   reverts safe: visual changes are value swaps behind stable names.
 - **Stop/go is evaluated at phase exit** against the listed criteria; a red criterion stops the
   next phase, not the current revert (revert only on regression evidence).
+- **No slice is accepted on appearance alone.** Each slice must complete the QA hardening protocol:
+  positive path, negative path, omission audit, regression review, and design-system conformance
+  review. Missing proof is `INCONCLUSIVE`, not PASS.
 
 ## 2. C0 — Alias layer + CSS file split (zero visual change)
 
@@ -282,6 +286,9 @@ revert (copy + assets + tests in one commit).
 6. One migration concern per PR.
 7. Screenshots for all affected states: default/hover/focus/disabled, loading/empty/error/
    degraded, both themes, both densities where the surface supports them.
+8. QA hardening packet complete: omission audit, negative-path matrix, visual drift sentinel,
+   cross-surface consistency audit, design debt register, exception aging, and reviewer challenge
+   prompts from `06-implementation/qa-hardening.md`.
 
 ### New-primitive request process
 
@@ -316,6 +323,10 @@ screenshots and demos"). C0 expects pixel-identical; C1+ expects intentional dif
 explained in the PR body. Tooling (Storybook/Chromatic/Playwright) remains reference-only per
 synthesis-seed-3 — until adopted, comparison is manual against the archived per-phase screenshot
 set.
+
+The visual QA matrix is necessary but not sufficient. Every surface must also pass the
+`06-implementation/qa-hardening.md` visual drift sentinel and negative-path QA matrix before
+acceptance.
 
 ## 9. Post-cutover regression controls and completion definition
 

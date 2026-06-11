@@ -13,6 +13,7 @@ Status: **APPROVED 2026-06-11** — implementation authorized under the operator
 | Lint plan (22-rule catalog, 7-state lifecycle, 5-field waiver policy, 15-check regression suite) | `04-enforcement/lint-plan.md` | complete |
 | Cutover plan (C0–C4 reversible, rehearsal rule, 8-axis visual QA matrix, rollback per phase) | `05-cutover/cutover-plan.md` | complete |
 | Branding touchpoints (exhaustive, every hit tagged, 3 unknowns queued) | `05-cutover/branding-touchpoints.md` | complete |
+| Implementation QA hardening (omission audit, negative paths, drift sentinels, coverage, debt, exceptions) | `06-implementation/qa-hardening.md` | binding add-on |
 | Decision log (G1, G2 Option-A conditional lock, T8 declined-superseded) | `02-directions/decision-log.md` | current |
 | Evidence ledger | `execution-log.md` | current |
 

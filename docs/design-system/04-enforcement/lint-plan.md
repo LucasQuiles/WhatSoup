@@ -585,6 +585,13 @@ repo root):
 | 14 | Expired waivers | script compares `expiry:` dates in `console/eslint-waivers.yaml` to today | none expired |
 | 15 | Suppression-without-waiver | `rg -n "no-restricted-syntax|soup/" console/src -g '*.ts*'` filtered to lint-suppression directives lacking `waiver:` | zero |
 
+Each rule must also carry either a negative fixture or a documented negative example before it moves
+to `scoped-error`. The required trap list is maintained in
+`docs/design-system/06-implementation/qa-hardening.md` and includes raw colors, raw controls,
+UI-facing WhatSoup copy, protected-identifier over-renames, missing modal focus restoration, missing
+focus-visible treatment, color-only status, missing light-theme token values, deprecated tokens in
+migrated directories, and utility/spec-smell classes.
+
 Integration points:
 
 - **Pre-commit (existing):** `lint-staged` → `eslint --max-warnings 0` on staged console TSX/TS

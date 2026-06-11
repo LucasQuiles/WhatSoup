@@ -1,7 +1,8 @@
 # D0 — Implementation Readiness Packet (first execution packet, for review)
 
-Owned by the operator implementation driver. Status: **ready for operator review.** No production
-files have been touched. Approval of this packet + G3 sign-off unlocks D1 (token foundation).
+Owned by the operator implementation driver. Status: **approved for implementation readiness; QA
+hardening added before D1 execution.** No production files have been touched. D1 execution must use
+the QA hardening protocol before any slice can be accepted.
 
 ## 1. Grounding (driver D0 requirements)
 
@@ -48,6 +49,11 @@ log-stream block, loading/empty/error/degraded states — while staying inside o
 The per-stage checklists, acceptance criteria, visual QA matrix (8 axes), rehearsal rule, and rollback
 procedures live in `05-cutover/cutover-plan.md` and are not duplicated here.
 
+The per-slice omission audit, negative-path QA, visual drift sentinel, coverage matrix, design debt
+register, exception aging, ambiguity protocol, cross-surface consistency audit, manual QA scripts,
+and final design acceptance rubric live in `06-implementation/qa-hardening.md`. That protocol is
+binding for every D1+ implementation slice.
+
 ## 6. Stop conditions (inherited, binding)
 
 Backend/protocol behavior changes, protected `WhatSoup` identifier risk, main-checkout edits,
@@ -59,5 +65,8 @@ changes beyond spec → stop and ask.
 
 - [x] Implementation path aligned to locked v2 Blend + specs.
 - [x] First change and rationale explained (D1.1 above).
+- [x] QA hardening protocol added: `06-implementation/qa-hardening.md`.
 - [x] Zero production changes made during readiness.
-- [ ] Operator approves this packet + signs off G3 → D1 begins.
+- [ ] Before D1 begins, the implementation agent must use `qa-hardening.md` as the slice evidence
+      template and may not accept a slice without PASS or documented non-PASS verdicts across every
+      required review dimension.
