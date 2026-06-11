@@ -223,6 +223,22 @@ describe('parseAdminCommand -- fallback positive', () => {
   it('parses fallback status (lowercase)', () => {
     expect(parseAdminCommand('fallback status')).toEqual({ action: 'fallback', sub: 'status' });
   });
+
+  it('parses FALLBACK HELP', () => {
+    expect(parseAdminCommand('FALLBACK HELP')).toEqual({ action: 'fallback', sub: 'help' });
+  });
+
+  it('parses fallback help (lowercase)', () => {
+    expect(parseAdminCommand('fallback help')).toEqual({ action: 'fallback', sub: 'help' });
+  });
+
+  it('parses bare FALLBACK as help', () => {
+    expect(parseAdminCommand('FALLBACK')).toEqual({ action: 'fallback', sub: 'help' });
+  });
+
+  it('parses bare fallback with trailing spaces as help', () => {
+    expect(parseAdminCommand('fallback  ')).toEqual({ action: 'fallback', sub: 'help' });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -230,10 +246,6 @@ describe('parseAdminCommand -- fallback positive', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseAdminCommand -- fallback negative', () => {
-  it('returns null for bare FALLBACK (no sub-command)', () => {
-    expect(parseAdminCommand('FALLBACK')).toBeNull();
-  });
-
   it('returns null for FALLBACK ON 0m (zero is not a positive integer)', () => {
     expect(parseAdminCommand('FALLBACK ON 0m')).toBeNull();
   });

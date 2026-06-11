@@ -1,5 +1,6 @@
 /**
- * Fallback admin command routing through ingest — FALLBACK ON and FALLBACK OFF.
+ * Fallback admin command routing through ingest — FALLBACK ON, FALLBACK OFF,
+ * and FALLBACK HELP.
  *
  * Added as a separate file because tree-sitter's grammar rejects the top-level
  * `await importOriginal<T>()` pattern used in ingest.test.ts, blocking Edit.
@@ -181,6 +182,46 @@ function setHappyPath(): void {
 beforeEach(() => {
   vi.clearAllMocks();
   setHappyPath();
+});
+
+// ===========================================================================
+// REQ-002.AC-02c: fallback help routing — FALLBACK HELP
+// ===========================================================================
+
+describe('REQ-002.AC-02c: fallback help routing — FALLBACK HELP', () => {
+  it('FALLBACK HELP consumed as admin command, calls handleFallbackCommand, never reaches runtime.handleMessage', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+
+    mockIsAdminMessage.mockReturnValue(true);
+    const helpCmd = { action: 'fallback' as const, sub: 'help' as const };
+    mockParseAdminCommand.mockReturnValue(helpCmd);
+    mockHandleFallbackCommand.mockResolvedValue(undefined);
+
+    const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(44);
+    const skipSpy = vi.spyOn(durability, 'markInboundSkipped');
+
+    const msg = makeIncomingMessage({ content: 'FALLBACK HELP' });
+    await runIngest(handler, msg);
+
+    // Routed to handleFallbackCommand with the help command.
+    expect(mockHandleFallbackCommand).toHaveBeenCalledWith(
+      runtime,
+      messenger,
+      helpCmd,
+      msg.chatJid,
+      durability,
+    );
+    // Other handlers must not fire.
+    expect(mockHandleAdminCommand).not.toHaveBeenCalled();
+    expect(journalSpy).toHaveBeenCalledOnce();
+    expect(skipSpy).toHaveBeenCalledWith(44, 'admin_command');
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+    expect(mockShouldRespond).not.toHaveBeenCalled();
+  });
 });
 
 // ===========================================================================
