@@ -7,6 +7,7 @@
 // Members that have no SMS equivalent reject or no-op with typed errors.
 
 import { EventEmitter } from 'node:events';
+import { createChildLogger } from '../../logger.ts';
 import type { TransportAdapter } from '../contract/adapter.ts';
 import type { InboundMessage as ContractInboundMessage } from '../contract/events.ts';
 import type { RuntimeConnection } from '../runtime-connection.ts';
@@ -99,7 +100,9 @@ function contractToIncoming(msg: ContractInboundMessage): IncomingMessage {
  */
 export class TwilioConnection extends EventEmitter implements RuntimeConnection {
   private readonly adapter: TransportAdapter;
+  private readonly log = createChildLogger('twilio-bridge');
   private messageSubscription: Subscription | null = null;
+  private errorSubscription: Subscription | null = null;
 
   // ── RuntimeConnection fields ──────────────────────────────────────────────
 
@@ -147,6 +150,18 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
       }
     });
 
+    // Surface background transport errors (poll failures, auth-stop) in the
+    // logs — without this subscriber they are silent and an auth-parked poll
+    // loop is only visible as health flipping to disconnected.
+    this.errorSubscription?.dispose();
+    this.errorSubscription = this.adapter.on('error', (err) => {
+      const p = err.payload;
+      this.log.error(
+        { code: p.code, operation: p.operation, correlationId: p.correlationId, retryable: p.retryable },
+        `twilio transport error: ${err.message}`,
+      );
+    });
+
     // Emit historySyncComplete so waitForHistorySyncThenRecover doesn't wait
     // the full 15s timeout (src/core/post-connect-recovery.ts:20-23).
     // Deferred via setImmediate: main.ts registers its once-listener in the
@@ -162,6 +177,8 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
   shutdown(): void {
     this.messageSubscription?.dispose();
     this.messageSubscription = null;
+    this.errorSubscription?.dispose();
+    this.errorSubscription = null;
     void this.adapter.disconnect();
   }
 
