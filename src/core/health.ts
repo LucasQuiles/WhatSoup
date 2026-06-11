@@ -615,12 +615,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           accessMode: deps.accessMode,
           socketPath: deps.socketPath ?? null,
           provider: config.agentProvider,
-          ...(fallbackState
-            ? {
-                effectiveProvider: fallbackState.effectiveProvider,
-                fallbackActiveUntil: fallbackState.fallbackActiveUntil,
-              }
-            : {}),
+          ...(fallbackState ? { ...fallbackState } : {}),
         },
         whatsapp: {
           connected: isConnected,

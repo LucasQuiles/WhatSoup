@@ -12,6 +12,9 @@
  * 5-hour default revert window is exercised without real wall-clock delay.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
+
+vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
 
 // ─── Mocks (declared before importing the runtime) ────────────────────────────
 
@@ -76,6 +79,13 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
   };
 });
 
+// Credential probe — stub to prevent real network calls from the fire-and-forget
+// pre-flight in armFallbackWindow. This file does not assert probe outcomes;
+// 'unknown' is the safe fail-open value that produces no credential alerts.
+vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
+  verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')),
+}));
+
 // ─── Imports after mocks ──────────────────────────────────────────────────────
 
 import {
@@ -84,6 +94,7 @@ import {
 } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import { emitAlert } from '../../../src/lib/emit-alert.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -312,7 +323,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
   });
 });
 
-// ─── Key-presence guard at activation (Change 2) ──────────────────────────────
+// ─── Key-presence guard at activation ────────────────────────────────────────
 
 describe('AgentRuntime — fallback key-presence guard', () => {
   beforeEach(() => {
@@ -385,14 +396,21 @@ describe('AgentRuntime — fallback key-presence guard', () => {
   });
 });
 
-// ─── assistant_text vs result asymmetry (Change 4) ────────────────────────────
+// ─── assistant_text vs result asymmetry ──────────────────────────────────────
 
-/** Minimal IOutboundQueue stub — only the members the usage-limit paths touch. */
-function makeFakeQueue(): { targetChatJid: string; getLastOpId(): number | undefined; flush(): Promise<void> } {
+/** IOutboundQueue stub covering all members the result paths touch. */
+function makeFakeQueue() {
   return {
     targetChatJid: 'fake@s.whatsapp.net',
-    getLastOpId: () => undefined,
-    flush: async () => {},
+    enqueueText: vi.fn(),
+    enqueueResultText: vi.fn(),
+    enqueueStreamingText: vi.fn(),
+    enqueueToolUpdate: vi.fn(),
+    markLastTerminal: vi.fn(),
+    flush: vi.fn(async () => {}),
+    getLastOpId: vi.fn(() => undefined),
+    clearLastOpId: vi.fn(),
+    indicateTyping: vi.fn(),
   };
 }
 
@@ -410,6 +428,33 @@ type EventDriveView = {
 
 function driveView(runtime: AgentRuntime): EventDriveView {
   return runtime as unknown as EventDriveView;
+}
+
+/** Extended drive view that exposes the full 8-arg handleEventWithContext
+ *  signature plus the process-local fallback telemetry counters. */
+type FullEventDriveView = {
+  fallbackActiveUntil: number | null;
+  fallbackTurnsServed: number;
+  fallbackTurnsEmpty: number;
+  lastFallbackTurnAt: number | null;
+  turnHadVisibleOutput: boolean;
+  queue: unknown;
+  handleEventWithContext(
+    event: unknown,
+    queue: unknown,
+    session: unknown,
+    conversationKey?: string,
+    inboundSeq?: number,
+    mapKey?: string,
+    toolScopeKey?: string,
+    isSystemResult?: boolean,
+  ): void;
+  handleEvent(event: unknown): void;
+  activateProviderFallback(resetAt: Date | null): void;
+};
+
+function fullView(runtime: AgentRuntime): FullEventDriveView {
+  return runtime as unknown as FullEventDriveView;
 }
 
 describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
@@ -475,5 +520,305 @@ describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
     );
     expect(driveView(runtime).fallbackActiveUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
+  });
+});
+
+// ─── Usage-limit user notice ──────────────────────────────────────────────────
+
+describe('usage-limit user notice', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    lookupCredentialMock.mockReset();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const USAGE_LIMIT_TEXT = 'Claude usage limit reached. Your limit will reset at 3pm.';
+
+  it('enqueues a switch notice when a fallback provider is configured (per-chat path)', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    const queue = makeFakeQueue();
+    driveView(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('switching to a backup model'),
+    );
+  });
+
+  it('enqueues a plain limit notice when no fallback is configured', () => {
+    const runtime = makeRuntime({});
+    const queue = makeFakeQueue();
+    driveView(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('try again after the limit resets'),
+    );
+  });
+
+  it('enqueues the notice on the single/shared path too', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    const queue = makeFakeQueue();
+    (runtime as unknown as { queue: unknown }).queue = queue;
+    (runtime as unknown as { handleEvent(e: unknown): void }).handleEvent(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('switching to a backup model'),
+    );
+  });
+});
+
+// ─── Persistence hooks ────────────────────────────────────────────────────────
+
+type PersistenceView = {
+  fallbackActiveUntil: number | null;
+  effectiveProvider: string;
+  activateProviderFallback(resetAt: Date | null): void;
+  deactivateProviderFallback(reason: string): void;
+  restorePersistedFallbackWindow(): void;
+};
+
+function persistView(runtime: AgentRuntime): PersistenceView {
+  return runtime as unknown as PersistenceView;
+}
+
+describe('AgentRuntime — fallback persistence hooks', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    lookupCredentialMock.mockReset();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('persists the window on activation and clears it on deactivation', () => {
+    // ensureFallbackStateSchema spy omitted — not called by activate/deactivate.
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    persistView(runtime).activateProviderFallback(null);
+    expect(saveSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reason: 'usage-limit' }),
+    );
+
+    persistView(runtime).deactivateProviderFallback('test');
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it('restores a persisted future window, preserves original activatedAt, and auto-reverts', () => {
+    // Verify armFallbackWindow re-saves with the original activatedAt (not Date.now())
+    // so the persisted record retains provenance across restarts.
+    const now = Date.now();
+    const activeUntil = now + 60 * 60_000;
+    const originalActivatedAt = now - 1000;
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil,
+      activatedAt: originalActivatedAt,
+      reason: 'usage-limit',
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    persistView(runtime).restorePersistedFallbackWindow();
+    expect(persistView(runtime).effectiveProvider).toBe('opencode-cli');
+
+    // The re-save must carry the original activatedAt, not a fresh Date.now().
+    expect(saveSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        activatedAt: originalActivatedAt,
+        reason: 'restored',
+      }),
+    );
+
+    vi.advanceTimersByTime(61 * 60_000);
+    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it('discards a stale persisted window (past expiry) without re-arming', () => {
+    const now = Date.now();
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil: now - 1000,
+      activatedAt: now - 10_000,
+      reason: 'usage-limit',
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    persistView(runtime).restorePersistedFallbackWindow();
+    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it('discards a persisted window when no fallback provider is configured', () => {
+    // Covers the branch where agentFallbackProvider is undefined at restart —
+    // the stale row must be cleared and the runtime must remain on the primary.
+    const now = Date.now();
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil: now + 60 * 60_000,
+      activatedAt: now - 1000,
+      reason: 'usage-limit',
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    // No agentFallbackProvider configured.
+    const runtime = makeRuntime({});
+
+    persistView(runtime).restorePersistedFallbackWindow();
+    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it('clears a corrupt persisted row that fails load validation', () => {
+    // loadFallbackState returns null for both "no row" and "bad-typed row" (SQLite
+    // affinity allows e.g. TEXT in an INTEGER column). On the null path the row must
+    // be cleared so corruption does not linger across restarts — consistent with the
+    // stale-row and no-fallback-provider treatments.
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue(null);
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    persistView(runtime).restorePersistedFallbackWindow();
+    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it('a throwing loadFallbackState never crashes restore', () => {
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockImplementation(() => {
+      throw new Error('db exploded');
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    expect(() => persistView(runtime).restorePersistedFallbackWindow()).not.toThrow();
+    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
+  });
+
+  it('clamps a persisted window that exceeds MAX_FALLBACK_WINDOW_MS on restore', () => {
+    // A clock-skew or tampered row could carry activeUntil = now + 72h, which
+    // exceeds MAX (24h). Restore must clamp it so the in-memory window stays
+    // within the expected range.
+    const now = Date.now();
+    const farFuture = now + 72 * 60 * 60 * 1000; // 72 hours
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil: farFuture,
+      activatedAt: now - 1000,
+      reason: 'usage-limit',
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    persistView(runtime).restorePersistedFallbackWindow();
+
+    // The runtime must be on fallback.
+    expect(persistView(runtime).effectiveProvider).toBe('opencode-cli');
+
+    // The re-save must carry activeUntil <= now + MAX_FALLBACK_WINDOW_MS (24h).
+    const MAX = 24 * 60 * 60 * 1000;
+    expect(saveSpy).toHaveBeenCalled();
+    const savedState = saveSpy.mock.calls[0];
+    if (!savedState) throw new Error('saveFallbackState was not called');
+    expect(savedState[1].activeUntil).toBeLessThanOrEqual(now + MAX);
+  });
+
+  it('preserves the original activatedAt when the window is extended by a second activation', () => {
+    // When a second activateProviderFallback fires while already active, the
+    // first-engagement time must survive in the persisted row — only the window
+    // end-time may advance.
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    // First activation — record the activatedAt it persists.
+    persistView(runtime).activateProviderFallback(null);
+    const firstCall = saveSpy.mock.calls[0];
+    if (!firstCall) throw new Error('saveFallbackState was not called on first activation');
+    const originalActivatedAt = firstCall[1].activatedAt;
+    const firstActiveUntil = firstCall[1].activeUntil;
+
+    // Advance 1 hour so Date.now() has moved; a naive re-activation would
+    // stamp a fresh activatedAt. Request a window that extends past the first
+    // (now+1h + 20h = now+21h, which is beyond the initial now+5h).
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    persistView(runtime).activateProviderFallback(new Date(Date.now() + 20 * 60 * 60 * 1000));
+
+    const secondCall = saveSpy.mock.calls[1];
+    if (!secondCall) throw new Error('saveFallbackState was not called on second activation');
+    expect(secondCall[1].activatedAt).toBe(originalActivatedAt);
+    expect(secondCall[1].activeUntil).toBeGreaterThan(firstActiveUntil);
   });
 });

@@ -10,11 +10,10 @@ export function isAdminMessage(msg: IncomingMessage, db: Database): boolean {
   return isAdminPhone(phone, config.adminPhones) && msg.isGroup === false;
 }
 
-export interface AdminCommand {
-  action: 'allow' | 'block';
-  subjectType: SubjectType;
-  subjectId: string;
-}
+export type AdminCommand =
+  | { action: 'allow' | 'block'; subjectType: SubjectType; subjectId: string }
+  | { action: 'fallback'; sub: 'on'; durationMs?: number }
+  | { action: 'fallback'; sub: 'off' | 'status' };
 
 export function parseAdminCommand(content: string): AdminCommand | null {
   // ALLOW GROUP <jid> / BLOCK GROUP <jid>
@@ -36,6 +35,18 @@ export function parseAdminCommand(content: string): AdminCommand | null {
       subjectId: phoneMatch[2],
     };
   }
+
+  // FALLBACK ON [<n>m|<n>h] — n must be a positive integer; 0m/0h/garbage → null
+  const fallbackOn = content.match(/^fallback\s+on(?:\s+([1-9]\d*)\s*([mh]))?\s*$/i);
+  if (fallbackOn) {
+    const n = fallbackOn[1] ? Number(fallbackOn[1]) : undefined;
+    const unit = fallbackOn[2]?.toLowerCase();
+    return { action: 'fallback', sub: 'on', ...(n !== undefined ? { durationMs: n * (unit === 'h' ? 3_600_000 : 60_000) } : {}) };
+  }
+
+  // FALLBACK OFF / FALLBACK STATUS
+  const fallbackCtl = content.match(/^fallback\s+(off|status)\s*$/i);
+  if (fallbackCtl) return { action: 'fallback', sub: fallbackCtl[1].toLowerCase() as 'off' | 'status' };
 
   return null;
 }
