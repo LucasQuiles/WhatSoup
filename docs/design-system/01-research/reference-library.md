@@ -122,14 +122,53 @@ Current: **Outfit** (sans) + **IBM Plex Mono**. Candidates below are open-licens
 
 ## 8. Motion / Interaction
 
+Expanded 2026-06-11 (motion research addendum). Synthesis in `research-digest.md` §(g).
+
+### 8a. Motion philosophy & doctrine
+
 | Reference | URL | Description | Authority | Verified |
 |---|---|---|---|---|
-| Linear design refresh | https://linear.app/now/behind-the-latest-design-refresh | Motion subordinated to calm: reduce chrome, don't animate structure. | **adopt-pattern** | fetched |
-| Emil Kowalski — animation principles | https://emilkowal.ski (essays); secondary summaries | Restraint doctrine for productivity tools: animations serve purpose and "don't announce themselves"; UI transitions ≲200–300ms; keyboard-initiated actions should not animate. Source of Sonner/Vaul motion craft. | **adopt-pattern** (doctrine) | search-verified (secondary; exact thresholds treated as guidance, not gospel) |
-| Framer Motion (motion.dev) | https://motion.dev | Already in the stack (framer-motion 12.x, verified T1). Study for: `MotionConfig reducedMotion`, layout animations, exit transitions. Authority is *implementation*, not personality. | study | known-canon |
-| MDN `prefers-reduced-motion` | https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion | OS-level reduced-motion media query; the enforcement hook for motion discipline (every SOUP animation must have a reduced-motion path). | **adopt-pattern** | known-canon |
+| Linear design refresh | https://linear.app/now/behind-the-latest-design-refresh | Motion subordinated to calm: reduce chrome, don't animate structure ("structure should be felt not seen"). | **adopt-pattern** | fetched |
+| Emil Kowalski — "Great Animations" essay | https://emilkowal.ski/ui/great-animations | The clearest restrained-motion doctrine in print: animations <300ms with ease-out; springs for natural, interruptible motion; animate only `transform`/`opacity` ("if our animations won't run at 60 frames per second, everything else… becomes useless"); never animate keyboard-initiated actions (they occur "hundreds of times a day"); respect reduced-motion. | **adopt-pattern** (doctrine) | fetched |
+| Vercel/Geist motion stance | https://vercel.com/geist/introduction | Geist publishes no standalone motion-guidance page we could locate; secondary sources (a vercel-labs Remotion skill) describe a Geist *video* aesthetic of damped springs. Treat Geist motion as embodied-in-product, not documented — **Inconclusive** beyond "minimal, spring-damped, content-first". | study (weak) | search-verified; dedicated motion docs not found |
+| Raycast (applied) | https://manual.raycast.com/themes ; teardown via getdesign.md | Launcher whose brand promise is near-instant response; motion essentially limited to overlay appearance and list rendering. Applied example of "speed is the animation". | study | search-verified (secondary) |
 | NN/g animation duration | https://www.nngroup.com/articles/animation-duration/ | Research-backed duration bounds (~100–500ms band; faster for frequent actions). | study | search-verified |
-| v2 motion doctrine | `docs/console-mockups/design-principles.html` §5 | "Motion with purpose": status-dot breathing, staggered load, hover lift; **no** animation on mode switch/tab/table-sort. Carries forward; needs added reduced-motion + duration-token formalization. | adopt-pattern (carry-forward) | fetched (local) |
+| v2 motion doctrine | `docs/console-mockups/design-principles.html` §5 | "Motion with purpose": status-dot breathing, staggered load, hover lift; **no** animation on mode switch/tab/table-sort. Carries forward; needs reduced-motion + duration-token formalization, and a WCAG 2.2.2 pause path for ambient motion (see §8d). | adopt-pattern (carry-forward) | fetched (local) |
+
+### 8b. Design-system motion specs
+
+| Reference | URL | Description | Authority | Verified |
+|---|---|---|---|---|
+| Atlassian Design System — Motion | https://atlassian.design/foundations/motion | The most concrete published motion spec found: "motion is a clarifying layer, not decoration"; duration bands — interactions 50–150ms, transitions 150–400ms, brand moments longer; four named easings with published cubic-beziers (ease-out bold `cubic-bezier(0,0.4,0,1)`, ease-in-out bold `cubic-bezier(0.4,0,0,1)`, ease-in practical `cubic-bezier(0.6,0,0.8,0.6)`, ease-out practical `cubic-bezier(0.4,1,0.6,1)`); duration scales with element size; exits faster than entrances; never block the next step in a flow. | **adopt-pattern** (duration/easing token structure precedent) | fetched |
+| Microsoft Fluent 2 — Motion | https://fluent2.microsoft.design/motion | Four principles (functional, natural, consistent, appealing); purpose taxonomy: enter/exit, elevation change, top-level page fades, container transform; duration scales with size/distance traveled; linear easing reserved for rotation only; staggered choreography with short offsets; explicit functional-over-decorative stance. Microsoft Teams is the applied dense-collaboration example (Teams-specific motion not separately verified). | **study** (purpose taxonomy) | fetched (Fluent docs); Teams application known-canon |
+
+### 8c. Motion implementation & canonical components
+
+| Reference | URL | Description | Authority | Verified |
+|---|---|---|---|---|
+| Motion (motion.dev, formerly Framer Motion) | https://motion.dev/docs/react-transitions | Already in the stack (framer-motion 12.x, verified T1; library continues as "Motion"). Two transition families: tweens (duration+easing, for precision timing; default ≈0.3s) and springs — physics-based (`stiffness`/`damping`/`mass`, inherits gesture velocity) or duration-based (`duration`+`bounce`); global defaults via `MotionConfig` (incl. `reducedMotion`); orchestration via `delayChildren`/`stagger`. Authority is *implementation*, not personality. | study (implementation) | fetched |
+| Sonner | https://sonner.emilkowal.ski | Kowalski's "opinionated toast component for React": stacked toasts, position-aware swipe-to-dismiss, restrained enter/exit animation, promise/loading toast states, headless variant. The canonical reference for SOUP toast/notification motion. | **adopt-pattern** (component motion reference) | fetched |
+| Vaul | https://vaul.emilkowal.ski | Kowalski's drawer component: drag-to-dismiss, snap points, background scaling. Canonical *gesture-driven dismissal* reference — but its mobile-sheet physicality (background scale) is more motion than a desktop ops console needs; study the dismissal/interruption model, reject the theatrics. | study (gesture model; background-scale **rejected** for desktop SOUP) | fetched |
+| Rive | https://rive.app | Runtime interactive vector animation with state machines; GPU renderer, claims 120fps and ~90% smaller files than Lottie-class workflows; shipped in product UI and brand moments (Duolingo, Spotify). For SOUP: wrong-shaped — a second animation runtime + asset pipeline for a console whose entire motion budget is tweens on transform/opacity. Only plausible niche: a single brand moment (e.g., setup-wizard success), and that is a G2+ decision, not v3 scope. | study (**rejected for v3 adoption**) | fetched |
+
+### 8d. Motion accessibility & performance (hard gates)
+
+| Reference | URL | Description | Authority | Verified |
+|---|---|---|---|---|
+| MDN `prefers-reduced-motion` | https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion | OS-level reduced-motion media query; the enforcement hook for motion discipline (every SOUP animation must have a reduced/no-motion path). | **adopt-pattern** | known-canon |
+| web.dev — high-performance animations / compositor properties | https://web.dev/articles/animations-guide , https://web.dev/articles/animations-overview | Compositor discipline: animate only `transform` and `opacity` (composite-only; the GPU manipulates already-painted bitmaps off the main thread); layout-triggering properties (width/height/top/left) cascade layout→paint→composite; `will-change` sparingly and only against a measured problem. | **adopt-pattern** | search-verified (multiple concordant sources) |
+| WCAG 2.2.2 Pause, Stop, Hide (Level A) | https://www.w3.org/WAI/WCAG22/Understanding/pause-stop-hide.html | Auto-starting moving/blinking content lasting >5s alongside other content needs a pause/stop/hide mechanism unless essential; auto-updating content (live feeds) needs pause/stop/hide or frequency control with **no** 5-second grace. Directly governs SOUP's breathing status dots and live activity feed. | **adopt-pattern** (Level A — non-negotiable) | fetched |
+| WCAG 2.3.3 Animation from Interactions (Level AAA) | https://www.w3.org/WAI/WCAG22/Understanding/animation-from-interactions.html | Interaction-triggered motion animation must be disableable unless essential; "motion animation" = perceived position/size change (pure color/blur/opacity changes are exempt); vestibular-disorder rationale; `prefers-reduced-motion` is the standard mechanism. AAA — adopted as a design target because compositor discipline makes it nearly free. | **adopt-pattern** (target) | fetched |
+
+### 8e. Expressive-motion boundary (stimulus only)
+
+Studios that define the *upper bound* of expressive motion — what SOUP deliberately is **not**. Zero decision authority; listed so T4 reviewers can name the boundary.
+
+| Reference | URL | Description | Authority | Verified |
+|---|---|---|---|---|
+| BUCK | https://buck.co | Global art/design/motion studio (founded 2004; Apple, Google, Nike campaigns; Facebook's Alegria illustration/animation system; Instagram AR filters). Brand-moment motion at cinematic intensity — campaign language, not console language. | stimulus-only | search-verified |
+| Clay | https://clay.global | SF brand/UX agency known for polished marketing-site interaction work. | stimulus-only | not-browsed (Inconclusive beyond identity) |
+| basement.studio | https://basement.studio | Studio known for expressive WebGL-heavy web experiences. | stimulus-only | not-browsed (Inconclusive beyond identity) |
 
 ## 9. Iconography
 

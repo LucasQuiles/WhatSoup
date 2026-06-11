@@ -177,12 +177,84 @@ Dense ops tables stay legible through: fixed-width mono for timestamps/ids/numer
 
 ## (g) Restrained motion in pro tools
 
-- **Observed:** Linear refresh treats *removing* visual motion/noise as the feature; Kowalski doctrine (search-verified secondary): animation must serve purpose and not announce itself, productivity-tool transitions ≈100–300ms, keyboard-initiated actions should not animate; NN/g duration band ~100–500ms with faster for frequent actions; v2 already bans animation on mode switch/tab/table sort and reserves motion for liveness (dot breathing), arrival (feed prepend), and affordance (hover lift).
-- **Verdict: STEAL + FORMALIZE into motion tokens:** duration ramp (e.g., `instant: 0 / fast: ~120ms / base: ~180ms / slow: ~280ms` — exact values fixed in T6), one or two easing tokens (standard ease-out family; v2's `cubic-bezier(0.22,1,0.36,1)` is a candidate `--ease-out-soft`), and a rule table: *state changes the operator caused = instant; spatial changes (drawer, modal, pane) = fast/base; ambient liveness = slow, subtle, loopable*. Every animated property must have a `prefers-reduced-motion` fallback (Framer Motion `MotionConfig reducedMotion="user"` plus CSS media query for non-FM animation). Keyboard-driven actions never animate.
-- **Risk:** framer-motion is already in the stack (T1) — the temptation is to use it because it's there. The motion-token table is the budget; anything not in the table is lint-flagged.
-- **SOUP decisions affected:** motion (primary), enforcement, modals/drawers.
-- **Evidence:** https://linear.app/now/behind-the-latest-design-refresh (fetched); https://www.nngroup.com/articles/animation-duration/ , Kowalski summaries (search-verified); https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion (known-canon) — 2026-06-11.
-- **Directions:** all three; **A-Instrument** is the most static (instrument panels don't tween), **B-Editorial** allows the softest spatial transitions.
+Expanded 2026-06-11 (motion research addendum). Library entries: `reference-library.md` §8a–§8e. These findings feed hard T4 mockup criteria and the T6 `motion.md` requirements.
+
+### Doctrine baseline (Linear, Kowalski, NN/g, v2)
+
+- **Observed:** Linear refresh treats *removing* visual motion/noise as the feature; Kowalski's "Great Animations" essay (now **fetched**, upgrading the prior secondary sourcing): <300ms with ease-out, springs for natural interruptible motion, `transform`/`opacity` only, keyboard-initiated actions never animate, reduced-motion respected; NN/g duration band ~100–500ms with faster for frequent actions; v2 already bans animation on mode switch/tab/table sort and reserves motion for liveness (dot breathing), arrival (feed prepend), and affordance (hover lift).
+- **Verdict: STEAL.** This is SOUP's motion personality source. **Risk:** none material.
+- **SOUP decisions affected:** motion (primary).
+- **Evidence:** https://linear.app/now/behind-the-latest-design-refresh ; https://emilkowal.ski/ui/great-animations (both fetched); https://www.nngroup.com/articles/animation-duration/ (search-verified) — 2026-06-11.
+- **Directions:** all three; **A-Instrument** most static (instrument panels don't tween), **B-Editorial** softest spatial transitions.
+
+### Atlassian Motion: the token-structure precedent
+
+- **Observed (fetched):** "Motion is a clarifying layer, not decoration." Duration bands by purpose: interactions 50–150ms (hover/press), transitions 150–400ms (enter/exit/reposition), brand moments longer and rare. Four named easings with published curves — ease-out bold `cubic-bezier(0,0.4,0,1)`, ease-in-out bold `cubic-bezier(0.4,0,0,1)`, ease-in practical `cubic-bezier(0.6,0,0.8,0.6)`, ease-out practical `cubic-bezier(0.4,1,0.6,1)`. Duration scales with element size; exits run faster than entrances; motion must never block the next step in a flow.
+- **Verdict: STEAL the *shape* (named duration bands + a closed set of named easings + entrance/exit asymmetry), ADAPT the values** — Atlassian's 400ms ceiling is generous for an ops console; SOUP's ceiling should sit lower (~300ms) per Kowalski/Linear.
+- **Risk:** importing four easings invites misuse; SOUP should ship two (standard ease-out + one ease-in-out for repositioning) and add more only on demonstrated need.
+- **SOUP decisions affected:** motion tokens (primary), enforcement (closed easing set is lintable).
+- **Evidence:** https://atlassian.design/foundations/motion (fetched 2026-06-11).
+- **Directions:** all three.
+
+### Fluent 2 Motion: the purpose taxonomy
+
+- **Observed (fetched):** principles functional/natural/consistent/appealing; purpose categories: enter/exit, elevation change, top-level navigation (quick fades), container transform; duration scales with size and travel distance; linear easing only for rotation (e.g., spinners); stagger with short offsets to direct attention. Teams as applied example: known-canon only — Teams-specific motion behavior was not separately verified; no claims made.
+- **Verdict: ADAPT the taxonomy as SOUP's motion *rule table* rows** — every permitted animation in T6 `motion.md` must be classified as one of: enter/exit, reposition/resize, page transition, ambient liveness, or feedback. Anything unclassifiable is decorative and rejected. **REJECT** "appealing/delight" as a SOUP category — expressiveness budget is zero outside brand moments.
+- **Risk:** taxonomy without budget becomes permission; pair each category with a duration band and a frequency rule (high-frequency = shorter or none).
+- **SOUP decisions affected:** motion, modals/drawers, navigation.
+- **Evidence:** https://fluent2.microsoft.design/motion (fetched 2026-06-11).
+- **Directions:** all three.
+
+### Motion library (motion.dev): springs vs tweens
+
+- **Observed (fetched):** tweens = duration+easing (precision, default ≈0.3s); springs = physics (`stiffness`/`damping`/`mass`, inherits gesture velocity — best for drag/gesture continuity) or duration-based (`duration`+`bounce`); `MotionConfig` sets global defaults including `reducedMotion`; stagger/`delayChildren` orchestration.
+- **Verdict: ADAPT — tweens are SOUP's default; springs are permitted *only* where a gesture hands off velocity** (drawer drag-release, swipe-to-dismiss toast). Duration-token semantics stay tween-based so CSS and Motion animations share one vocabulary; spring use must still settle within the same perceived-duration band. `MotionConfig reducedMotion="user"` is mandatory at the app root.
+- **Risk:** spring "bounce" leaking into non-gesture transitions reads playful, off-brand; lint/review rule — `bounce: 0` or tween unless gesture-driven.
+- **SOUP decisions affected:** motion tokens, form controls (drawer/toast), enforcement.
+- **Evidence:** https://motion.dev/docs/react-transitions (fetched 2026-06-11).
+- **Directions:** all three.
+
+### Sonner & Vaul: canonical restrained components
+
+- **Observed (fetched):** Sonner — opinionated toast: stacking, position-aware swipe-to-dismiss, promise/loading states, headless variant, restrained enter/exit. Vaul — drawer: drag-to-dismiss, snap points, background scaling.
+- **Verdict:** Sonner: **STEAL the motion model** for SOUP notifications (and likely the library itself at implementation time — it composes with the token skin). Vaul: **study the gesture/dismissal model, REJECT the background-scale theatric** — desktop ops drawers should slide on transform with a scrim fade, leaving the fleet context visually stable behind them.
+- **Risk:** Sonner's `richColors` defaults would bypass SOUP status tokens — must be skinned to semantic tokens; toast frequency in an ops console can become alarm spam (interaction with §e's calm-by-default: toasts only for operator-caused outcomes, never for ambient fleet events — those belong to the feed).
+- **SOUP decisions affected:** modals/drawers, status color, motion, navigation (feed vs toast boundary).
+- **Evidence:** https://sonner.emilkowal.ski ; https://vaul.emilkowal.ski (fetched 2026-06-11).
+- **Directions:** all three.
+
+### Rive: where runtime-animated graphics do NOT belong
+
+- **Observed (fetched):** state-machine-driven interactive vector animation; GPU renderer, 120fps and ~90% smaller-than-Lottie claims; shipped at Duolingo/Spotify scale; use cases skew product delight, game UI, brand moments.
+- **Verdict: REJECT for v3.** A pro console's motion is state feedback on existing DOM, not animated assets: Rive adds a runtime, an authoring tool, and an asset pipeline against zero console need. The *only* defensible niche is a single low-frequency brand moment (setup-wizard completion), which Atlassian's own "brand moments" band sanctions — deferred to G2+ as an explicit opt-in, default no.
+- **Risk of ignoring it entirely:** none for v3; revisit only if SOUP ever needs an animated empty-state/onboarding identity.
+- **SOUP decisions affected:** motion, brand.
+- **Evidence:** https://rive.app (fetched 2026-06-11).
+- **Directions:** none (boundary reference).
+
+### Compositor discipline (web.dev/MDN)
+
+- **Observed (search-verified, concordant):** animate only `transform` and `opacity` — composite-only properties the GPU can move without main-thread work; layout properties (width/height/top/left/margin) trigger layout→paint→composite cascades; `will-change` sparingly, only against measured jank.
+- **Verdict: ADOPT as a hard rule:** SOUP animations may touch `transform` and `opacity` only. Drawer = `translateX`, modal = `opacity`+`scale`, accordion/expand = measured-height via transform techniques or instant snap (preferred for tables), hover lift = `translateY`. Exception process: any other property requires a named waiver in T6 `motion.md`. This rule is *also* the WCAG 2.3.3 cheat code — opacity-only fallbacks are exempt from "motion animation" by definition.
+- **SOUP decisions affected:** motion, tables (inline expand = snap not slide), enforcement (lintable: animated-property allowlist).
+- **Evidence:** https://web.dev/articles/animations-guide , https://web.dev/articles/animations-overview (search-verified 2026-06-11).
+- **Directions:** all three.
+
+### WCAG 2.2.2 / 2.3.3: the legal floor for ambient motion
+
+- **Observed (both fetched):** 2.2.2 (Level A): auto-starting moving content >5s alongside other content requires pause/stop/hide unless essential; auto-updating content (live feeds) requires pause/stop/hide or frequency control with no 5-second grace. 2.3.3 (Level AAA): interaction-triggered motion animation (perceived position/size change) must be disableable unless essential; color/blur/opacity changes are exempt; `prefers-reduced-motion` is the mechanism.
+- **Verdict: ADOPT — and this lands directly on v2 carry-overs:** the **breathing status dots** and **live activity feed** are exactly the content 2.2.2 regulates. Resolution: (1) a single console-level "reduce ambient motion / pause live motion" control (the spec's preferred one-mechanism-for-all pattern) plus auto-respecting `prefers-reduced-motion`; (2) feed gets an explicit pause affordance (also operationally useful — operators want to freeze a scrolling log); (3) dot breathing under reduced/paused motion degrades to static color+shape, which still carries the status (per §f's dual-channel rule). 2.3.3 adopted as a *target* since transform/opacity discipline + reduced-motion fallbacks satisfy it nearly for free.
+- **SOUP decisions affected:** motion (primary), status color, tables/feed, enforcement (a11y gate in T7).
+- **Evidence:** https://www.w3.org/WAI/WCAG22/Understanding/pause-stop-hide.html , https://www.w3.org/WAI/WCAG22/Understanding/animation-from-interactions.html (fetched 2026-06-11).
+- **Directions:** all three (non-negotiable layer).
+
+### Expressive-motion boundary (BUCK / Clay / basement.studio) — stimulus only
+
+- **Observed:** BUCK (search-verified): cinematic brand/campaign motion at the highest craft level (Apple/Google/Nike, Facebook Alegria). Clay and basement.studio: **not-browsed; no specific observations claimed** — listed as named boundary markers only.
+- **Verdict: stimulus-only, boundary-defining.** Their register — narrative, illustrated, physics-rich — is the upper bound SOUP consciously stays far below. Useful in G1 review language: "this mockup's motion is drifting toward studio-expressive" is now a citable objection.
+- **SOUP decisions affected:** motion personality (negatively defined), brand voice.
+- **Evidence:** https://buck.co (search-verified 2026-06-11); https://clay.global , https://basement.studio (not-browsed).
+- **Directions:** boundary for all three.
 
 ---
 
@@ -234,7 +306,15 @@ Opinionated conclusions from the corpus. These are T3 inputs to the T4 mockups, 
 
 9. **Theme approach — light is not inversion.** One semantic token vocabulary (Carbon), two hand-designed value sets (Grafana's parallel kits, Apple doctrine). Concretely re-derived per theme: elevation direction (lighter-when-raised vs shadow-when-raised), border alphas (white-alpha vs black-alpha at different strengths), status/mode chroma+lightness (darker, more saturated chromatics on white), wash percentages (6–12% dark ≈ 8–14% light, tuned), text ladder values, and shadow tokens (near-none in dark, real in light). Theme switch = token-set swap (`.dark`-style scope or `data-theme`), zero component code branches. Both themes ship at G2 quality simultaneously — light is not a follow-up.
 
-10. **Motion personality.** "Mechanical calm": operator-caused state changes are instant; spatial changes are brief ease-out tweens (~120–280ms ramp); the only ambient motion is liveness (dot breathing, feed arrival). Keyboard actions never animate. Full `prefers-reduced-motion` coverage. Motion tokens are the budget; unbudgeted animation is a lint finding.
+10. **Motion personality.** "Mechanical calm": motion exists to confirm state, indicate liveness, and preserve spatial continuity — never to entertain. Feeds T4 mockup criteria and T6 `motion.md` directly:
+    - **Semantic duration/easing tokens (recommendation for T6):** `--motion-instant: 0ms` (operator-caused state changes, keyboard actions, tab/mode switches, table sorts), `--motion-fast: ~120ms` (hover/press feedback, tooltips — Atlassian's 50–150ms interaction band), `--motion-base: ~180ms` (enter/exit of small elements, toasts, popovers), `--motion-slow: ~280ms` (drawers, modals, large reposition — deliberately under Atlassian's 400ms ceiling per Kowalski's <300ms rule), `--motion-ambient: ≥1500ms` (liveness loops only). Two easings: `--ease-out` (default; v2's `cubic-bezier(0.22,1,0.36,1)` as candidate) and `--ease-in-out` (on-screen repositioning only). Exits ≤ entrances (Atlassian asymmetry). Closed set — new durations/easings require a spec change, not a one-off.
+    - **Allowed animated properties (compositor discipline):** `transform` and `opacity` only (web.dev/Kowalski). Anything else needs a named waiver in `motion.md`. Table inline-expand snaps rather than slides.
+    - **Structural vs decorative boundary:** every animation must classify into the Fluent-derived taxonomy — enter/exit, reposition/resize, page transition, ambient liveness, feedback. Unclassifiable = decorative = rejected. Studio-expressive register (BUCK/Clay/basement) is the named upper bound SOUP stays far below; Rive-class animated assets rejected for v3 (single brand-moment exception deferred to G2+, default no).
+    - **Anchored overlay motion:** popovers/menus fade+scale (~0.96→1) from their anchor at `fast/base`; drawers slide on `translateX` with scrim fade at `slow`, no background scaling (Vaul's theatric rejected); modals fade+slight-scale at `base`. Springs permitted only where a gesture hands off velocity (drawer drag-release, toast swipe — Sonner/Vaul model), with no bounce otherwise.
+    - **Loading feedback:** skeletons/spinners appear only after a ~150–200ms delay (avoid flash-of-loader on fast responses); spinner rotation is the sole sanctioned `linear`-easing use (Fluent); skeleton shimmer is opacity-only, slow, and disabled under reduced motion; prefer optimistic/instant updates where the fleet API allows.
+    - **Immediate feedback:** focus rings, hover states, press states, and validation errors render instantly (no transition on focus/error appearance) — feedback latency is trust in an ops console; error shake/attention animations are banned (use color+icon+text per §f dual-channel rule).
+    - **Reduced-motion / no-motion degradation contract:** every animation declares its reduced-motion behavior — spatial transitions degrade to opacity-only or instant; ambient liveness (dot breathing) degrades to static color+shape; feed auto-scroll pauses. Mechanisms: CSS `prefers-reduced-motion` + Motion `MotionConfig reducedMotion="user"` at the root, **plus** a console-level "pause live motion" control covering the activity feed and ambient indicators (WCAG 2.2.2 Level A requires this independently of OS settings). The console must remain 100% operable and legible with all motion off — no information may exist only in motion.
+    - Motion tokens are the budget; unbudgeted animation is a lint finding (animated-property allowlist + duration/easing token enforcement in T7).
 
 11. **Brand voice for the SOUP wordmark.** Per the locked naming decision (professional, calm, precise, slightly playful-ambiguous): treat SOUP as an instrument nameplate — wordmark set in the system's own sans or mono (small-caps/spaced-caps treatment candidate), monochrome with at most a single mode-accent tick; no soup-bowl illustration, no mascot, no gradient mark. The kitchen metaphor may survive in *naming* (Soup Kitchen page) but not in *imagery*. Mock at least one mono-wordmark and one sans-wordmark in T4.
 
