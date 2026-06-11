@@ -3,7 +3,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
-import { toPersonalJid, toLidJid, toSmsJid } from './jid-constants.ts';
+import { toPersonalJid, toLidJid, toSmsJid, isGroupJid } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender, type StoredMessage } from './messages.ts';
 import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
@@ -94,8 +94,16 @@ export async function handleAdminCommand(
       }
       const totalQueued = allStored.length;
 
+      // Exclude group-chat messages before applying the cap:
+      // group messages never replay — mentioned ones dispatched at ingest; unmentioned ones must not re-enter as pseudo-DMs.
+      const dmStored = allStored.filter(m => !isGroupJid(m.chatJid));
+      const groupSkipped = allStored.length - dmStored.length;
+      if (groupSkipped > 0) {
+        log.info({ subjectId, groupSkipped }, 'replay: skipped group messages');
+      }
+
       // Filter already-replayed, sort by timestamp ascending, take most recent N
-      const toReplay = allStored
+      const toReplay = dmStored
         .filter(m => !replayedIds.has(m.messageId))
         .sort((a, b) => a.timestamp - b.timestamp)
         .slice(-config.adminReplayMax);

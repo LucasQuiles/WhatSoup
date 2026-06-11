@@ -23,7 +23,7 @@ import { startHealthServer } from './core/health.ts';
 import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
+import { toPersonalJid, toLidJid, isGroupJid } from './core/jid-constants.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
@@ -601,7 +601,14 @@ const healthServer = startHealthServer({
       const jidFormats = [toPersonalJid(subjectId), toLidJid(subjectId)];
       for (const senderJid of jidFormats) {
         const stored = getMessagesBySender(db, senderJid);
-        for (const msg of stored) {
+        // Exclude group-chat messages before replay:
+        // group messages never replay — mentioned ones dispatched at ingest; unmentioned ones must not re-enter as pseudo-DMs.
+        const dmStored = stored.filter(m => !isGroupJid(m.chatJid));
+        const groupSkipped = stored.length - dmStored.length;
+        if (groupSkipped > 0) {
+          log.info({ subjectId, senderJid, groupSkipped }, 'access replay: skipped group messages');
+        }
+        for (const msg of dmStored) {
           await runtime.handleMessage({
             messageId: msg.messageId,
             chatJid: msg.chatJid,
@@ -611,6 +618,7 @@ const healthServer = startHealthServer({
             contentText: msg.contentText ?? null,
             contentType: msg.contentType,
             isFromMe: false,
+            // group messages never replay: mentioned ones dispatched at ingest; unmentioned ones must not re-enter as pseudo-DMs
             isGroup: false,
             mentionedJids: [],
             timestamp: msg.timestamp,
