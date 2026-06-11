@@ -471,10 +471,78 @@ When the primary provider returns a usage-limit `result` (`src/runtimes/agent/ru
 1. **Tears down and notifies.** The in-flight session is killed and the user receives a notice in the chat — with a fallback configured: "_Hit my usage limit — switching to a backup model. Please resend your last message._"; without one: "_Hit my usage limit — please try again after the limit resets._". The triggering message is deliberately **not** auto-replayed (double-execution risk); the user must resend it.
 2. **Arms a fallback window** (only when `fallbackProvider` is set). New sessions route to the fallback provider until the window expires, then revert to the primary automatically. The window ends at the reset time parsed from the usage-limit message when available, else 5 hours from now, clamped to [1 minute, 24 hours]. A second usage-limit hit while a window is active extends it — never shortens.
 3. **Persists the window across restarts.** The window is written to the singleton `agent_fallback_state` SQLite table (`src/runtimes/agent/fallback-state-db.ts`) and re-armed on startup, so a restart mid-window resumes on the fallback provider. Restored windows are clamped to at most 24 hours from startup; expired, corrupt, or no-longer-applicable rows are cleared and startup proceeds on the primary. The original activation time is preserved across extensions and restores.
-4. **Pre-flights credentials on every window arm — without ever blocking.** When the fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2.7` → `minimax`; `openai-api` → `openai`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`). The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The window arms in all cases, and the key value is never logged. CLI/native-auth providers (`claude-cli`, `codex-cli`, `gemini-cli`, `anthropic-api`) have no keyring key to check, so the pre-flight does not apply. Credential validity is probed asynchronously after the window arms — an invalid key surfaces as the `fallback_credential_invalid` alert shortly after activation; the probe never blocks or reverts activation.
+4. **Pre-flights credentials and binary on every window arm — without ever blocking.** When the fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2.7` → `minimax`; `openai-api` → `openai`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`). The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The key value is never logged. In addition, CLI-backed providers (`opencode-cli`, `claude-cli`, `codex-cli`, `gemini-cli`) have their binary probed via `binary --version` (`src/runtimes/agent/providers/binary-preflight.ts`): a definitive ENOENT raises `fallback_binary_missing`; anything else is fail-open. Managed-loop providers (`openai-api`, `anthropic-api`) have no binary to probe. The window arms in all cases — no pre-flight blocks or reverts activation.
 5. **Counts fallback turns.** Every completed user turn during an active window (compact and system turns excluded) increments process-local counters — `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt` — surfaced in the `GET /health` `instance` block and reset on restart. A turn that completes with zero visible output raises the `fallback_empty_turn` operator alert (the silent-dead-bot signal). On `per_chat` sessions the user additionally gets "_The backup model returned no reply — please resend or rephrase your message._"; `single`/`shared` sessions surface their existing generic `_(no response)_` fallback instead.
 
 Admins can force, end, or inspect the window from WhatsApp with `FALLBACK ON [<n>m|<n>h]` / `FALLBACK OFF` / `FALLBACK STATUS` — see [docs/runbook.md §7.2](runbook.md#72-force-or-inspect-provider-fallback).
+
+#### Enabling provider fallback on a new host
+
+When deploying an instance config that uses `fallbackProvider` to a machine where the stack has not run before, complete these steps before starting the service. The runtime will alert on any gap at activation time (`fallback_binary_missing`, `fallback_credential_missing`, `fallback_credential_invalid`), but early provisioning avoids the first-activation surprise.
+
+1. **Install the fallback provider CLI and confirm it is on the service user's PATH.**
+
+   For `opencode-cli`:
+   ```sh
+   # Install opencode per the upstream instructions, then confirm:
+   opencode --version
+   ```
+   The runtime spawns `opencode --version` at window-arm time (`src/runtimes/agent/providers/binary-preflight.ts`) and raises `fallback_binary_missing` if the binary is absent. The check runs on the service user's PATH, so install under that user or ensure the binary is in a PATH entry that the service environment inherits.
+
+2. **Provision the provider API key** via one of three portable routes. The lookup order is: environment variable first (when no per-user scoping is requested), then platform keyring (`src/lib/keyring.ts:82`).
+
+   **Route A — environment variable (universal).**
+   Set the variable named in `SERVICE_ENV_MAP` (`src/lib/keyring.ts:16–25`):
+
+   | Provider service | Environment variable |
+   |-----------------|---------------------|
+   | `minimax`       | `MINIMAX_API_KEY`   |
+   | `deepseek`      | `DEEPSEEK_API_KEY`  |
+   | `openai`        | `OPENAI_API_KEY`    |
+
+   For **systemd** managed instances, add a drop-in or `EnvironmentFile`:
+   ```ini
+   # ~/.config/systemd/user/whatsoup@<name>.service.d/fallback-key.conf
+   [Service]
+   Environment="MINIMAX_API_KEY=sk-…"
+   # or: EnvironmentFile=%h/.config/whatsoup/<name>.env
+   ```
+   For **launchd** managed instances, add an `EnvironmentVariables` key to the plist (or regenerate via `npm run deploy:launchd.generated`):
+   ```xml
+   <key>EnvironmentVariables</key>
+   <dict>
+     <key>MINIMAX_API_KEY</key>
+     <string>sk-…</string>
+   </dict>
+   ```
+
+   **Route B — macOS Keychain.**
+   The keyring reads via `security find-generic-password -s <service> -a <username> -w` (`src/lib/keyring.ts:128–134`), where `<service>` is the service name (e.g. `minimax`) and `<username>` is the OS username (`os.userInfo().username`). Store with the matching attributes:
+   ```sh
+   security add-generic-password -s minimax -a "$USER" -w "sk-…"
+   ```
+
+   **Route C — Linux GNOME Keyring (`secret-tool`).**
+   The keyring reads via `secret-tool lookup service <service>` (`src/lib/keyring.ts:99–103, 109`), where `service` is the attribute name and the service name (e.g. `minimax`) is its value. Store with the matching attribute:
+   ```sh
+   secret-tool store --label="WhatSoup minimax key" service minimax
+   # enter the key at the password prompt
+   ```
+
+3. **Set `agentOptions.fallbackProvider` and `fallbackModel`** in the instance `config.json`:
+   ```json
+   "agentOptions": {
+     "fallbackProvider": "opencode-cli",
+     "fallbackModel": "minimax/MiniMax-M2.7"
+   }
+   ```
+
+4. **Restart the instance** so the runtime loads the new config and arms any previously-persisted fallback window with the new pre-flight checks active.
+
+5. **Verify.** From an admin WhatsApp DM:
+   - `FALLBACK STATUS` — confirms the current window state and configured provider/model.
+   - `FALLBACK ON 5m` — forces a 5-minute canary window; expect a reply served by the fallback provider. Check the `/health` endpoint `instance` block for `fallbackProvider`, `fallbackTurnsServed`, and related fields.
+   - Watch for the three arm-time alert sources: `fallback_binary_missing` (binary absent), `fallback_credential_missing` (key absent from keyring/env), `fallback_credential_invalid` (key rejected by provider API). Any of these surfaces via the BOT_ERRORS alert pipeline within seconds of window activation.
 
 #### Session Scopes
 
