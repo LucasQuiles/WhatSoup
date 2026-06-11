@@ -331,3 +331,17 @@ whatsoup:theme). lint clean, build green, 1,614/1,614 tests (5 assertions tighte
 button — name-specific queries). Visual review: Fleet dark + LIGHT and Inbox light verified live —
 light theme is designed (hairlines/shadows/darker chromatics), not inverted. Evidence:
 `06-implementation/d1-2-evidence.md`.
+
+---
+
+## D1.3 + D1.4 — Lint Shadow Stage + QA Remediation — 2026-06-11
+
+**Verdict: Pass (both).** D1.3 `5e7a9979`: soup/* shadow plugin (9 rules + stubs), opt-in shadow
+config (default lint untouched), 15-check regression suite, waiver registry WVR-001..006; baseline
+615 warnings (legacy tokens 406, raw buttons 135, controls 38, modals 19). D1.4 `472c5b5a` answers
+three operator audit passes: global reduced-motion off-and-instant, instant focus ring, responsive
+nav (390px overflow 657→390 fixed, accessible names kept), 5 theme-persistence tests, rebase onto
+origin/main, design docs merged branch-local. 1,619/1,619 tests. Commit-email finding dispositioned
+as push-gate (origin/main's own author identity; controlled at squash). All remaining audit items
+dispositioned as DD-6..DD-10 debt with phases or scheduled C2-C4 work. Full table:
+`06-implementation/d1-3-4-evidence.md`. **D1 token-foundation stage COMPLETE.**
