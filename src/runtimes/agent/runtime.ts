@@ -4462,6 +4462,7 @@ export class AgentRuntime implements Runtime {
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
             this.activateProviderFallback(extractUsageLimitResetTime(event.text));
+            queue.enqueueText(this.usageLimitNotice());
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
@@ -5319,6 +5320,14 @@ export class AgentRuntime implements Runtime {
     // and an opencode model with no provider prefix → not applicable.
     if (!service) return null;
     return lookupCredential(service) !== null;
+  }
+
+  /** User-facing notice for a usage-limit teardown. Asks the user to resend
+   *  rather than auto-replaying the triggering message (double-execution risk). */
+  private usageLimitNotice(): string {
+    return this.agentFallbackProvider
+      ? '_Hit my usage limit — switching to a backup model. Please resend your last message._'
+      : '_Hit my usage limit — please try again after the limit resets._';
   }
 
   private activateProviderFallback(resetAt: Date | null): void {
@@ -6229,6 +6238,7 @@ export class AgentRuntime implements Runtime {
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
             this.activateProviderFallback(extractUsageLimitResetTime(event.text));
+            queue.enqueueText(this.usageLimitNotice());
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),

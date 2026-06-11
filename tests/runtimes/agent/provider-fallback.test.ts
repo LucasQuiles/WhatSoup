@@ -387,12 +387,16 @@ describe('AgentRuntime — fallback key-presence guard', () => {
 
 // ─── assistant_text vs result asymmetry (Change 4) ────────────────────────────
 
-/** Minimal IOutboundQueue stub — only the members the usage-limit paths touch. */
-function makeFakeQueue(): { targetChatJid: string; getLastOpId(): number | undefined; flush(): Promise<void> } {
+/** IOutboundQueue stub covering all members the usage-limit paths touch. */
+function makeFakeQueue() {
   return {
     targetChatJid: 'fake@s.whatsapp.net',
-    getLastOpId: () => undefined,
-    flush: async () => {},
+    enqueueText: vi.fn(),
+    enqueueResultText: vi.fn(),
+    flush: vi.fn(async () => {}),
+    getLastOpId: vi.fn(() => undefined),
+    clearLastOpId: vi.fn(),
+    indicateTyping: vi.fn(),
   };
 }
 
@@ -475,5 +479,65 @@ describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
     );
     expect(driveView(runtime).fallbackActiveUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
+  });
+});
+
+// ─── Usage-limit user notice (Change 5) ──────────────────────────────────────
+
+describe('usage-limit user notice', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    lookupCredentialMock.mockReset();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const USAGE_LIMIT_TEXT = 'Claude usage limit reached. Your limit will reset at 3pm.';
+
+  it('enqueues a switch notice when a fallback provider is configured (per-chat path)', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    const queue = makeFakeQueue();
+    driveView(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('switching to a backup model'),
+    );
+  });
+
+  it('enqueues a plain limit notice when no fallback is configured', () => {
+    const runtime = makeRuntime({});
+    const queue = makeFakeQueue();
+    driveView(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('try again after the limit resets'),
+    );
+  });
+
+  it('enqueues the notice on the single/shared path too', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    const queue = makeFakeQueue();
+    (runtime as unknown as { queue: unknown }).queue = queue;
+    (runtime as unknown as { handleEvent(e: unknown): void }).handleEvent(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('switching to a backup model'),
+    );
   });
 });
