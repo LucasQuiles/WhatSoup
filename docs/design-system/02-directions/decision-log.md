@@ -84,4 +84,21 @@ A or B as the data layer; A's lamp/shape status coding adoptable by any winner.
 
 ## G1 — Direction selection
 
-_Awaiting user review._
+**Approved G1 on 2026-06-11:** direction/blend = **B-Editorial chassis + A grafts + C grafts** —
+B supplies the chassis (Geist typography, elevation law, electric-blue accent, inbox idiom, light theme);
+A grafts the nameplate/wordmark discipline and lamp/shape status coding; C grafts the two table densities
+(default/compressed), the toolbar pattern, and the log-stream treatment.
+Naming vocabulary = **converged set locked**: Soup Kitchen → Fleet; single user-facing noun "Line"
+("instance" demoted to process-level copy); Inbox/Ops kept; one unified "attention" metric;
+the SOUP wordmark carries the brand playfulness.
+Required changes = none beyond blend integration. Decision captured via gate question
+(blend option selected as recommended).
+
+## Round 1 — Blend refinement (T5)
+
+Target: `iterations/v2.html`. Brief: B chassis integrating A + C grafts; resolve B's self-critique
+(Vercel-adjacency → counter with nameplate distinctiveness + mode-trio chroma; replace single-state
+drill-in vignette with fuller treatment; keep tokens-only discipline). Motion per T3b token set;
+reduced-motion off-and-instant; glass/translucency accent-only per synthesis-seed-2.
+
+_In progress._

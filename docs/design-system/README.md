@@ -19,8 +19,8 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
 | T2 | Inventory, IA, workflow, DRY audit | ✅ Complete |
 | T3 | Research + reference library (+motion addendum, +synthesis seed) | ✅ Complete |
 | T4 | Three direction mockups | ✅ Complete |
-| **G1** | **Direction selection gate** | 🔶 **OPEN — awaiting user review** |
-| T5 | Winner refinement | ⬜ Blocked on G1 |
+| **G1** | **Direction selection gate** | ✅ **Approved 2026-06-11** |
+| T5 | Winner refinement (blend) | 🔄 In progress |
 | **G2** | **Visual/spec lock gate** | ⬜ Awaiting user |
 | T6 | Formal design-system spec | ⬜ Blocked on G2 |
 | T7 | Enforcement + cutover plans | ⬜ Blocked on G2 |
@@ -29,7 +29,11 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
 
 ## Gate decisions
 
-_None recorded yet. Format: `Approved G<N> on YYYY-MM-DD: <decisions>`._
+- **Approved G1 on 2026-06-11:** direction/blend = B-Editorial chassis + A grafts (nameplate/wordmark
+  discipline, lamp/shape status coding) + C grafts (table densities default/compressed, toolbar pattern,
+  log-stream treatment); naming vocabulary = converged set locked (Soup Kitchen→Fleet, single noun "Line",
+  instance demoted to process copy, Inbox/Ops kept, unified "attention" metric, SOUP wordmark carries
+  playfulness); required changes = none beyond blend integration. Full record: `02-directions/decision-log.md`.
 
 ## User decisions (locked 2026-06-11)
 
