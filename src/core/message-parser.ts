@@ -29,6 +29,28 @@ export function unwrapMessage(message: any): any {
   return message;
 }
 
+/**
+ * Locate the `contextInfo` carried by a (already unwrapped) message payload.
+ * Baileys attaches contextInfo to the content node — extendedTextMessage,
+ * imageMessage, documentMessage, videoMessage, … — never to the message
+ * wrapper itself. Scanning first-level values covers every content type,
+ * including ones added later, so caption mentions and media replies are not
+ * silently dropped.
+ */
+export function extractContextInfo(message: any): any | null {
+  if (!message || typeof message !== 'object') return null;
+  if (message.contextInfo && typeof message.contextInfo === 'object') {
+    return message.contextInfo;
+  }
+  for (const value of Object.values(message)) {
+    if (value && typeof value === 'object') {
+      const ci = (value as { contextInfo?: unknown }).contextInfo;
+      if (ci && typeof ci === 'object') return ci;
+    }
+  }
+  return null;
+}
+
 export const MEDIA_CONTENT_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
 
 export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {

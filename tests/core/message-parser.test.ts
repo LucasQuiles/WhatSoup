@@ -50,7 +50,7 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-import { parseIncomingMessage, unwrapMessage } from '../../src/core/message-parser.ts';
+import { parseIncomingMessage, unwrapMessage, extractContextInfo } from '../../src/core/message-parser.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -598,5 +598,55 @@ describe('parseIncomingMessage — structured content (SP2)', () => {
     expect(result.contentType).toBe('text');
     expect(result.content).toBe('Hello world');
     expect(result.contentText).toStrictEqual(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractContextInfo — contextInfo lives on the content node, not the wrapper
+// ---------------------------------------------------------------------------
+
+describe('extractContextInfo', () => {
+  it('finds contextInfo on extendedTextMessage', () => {
+    const ci = extractContextInfo({
+      extendedTextMessage: { text: 'hi @bot', contextInfo: { mentionedJid: ['111@lid'] } },
+    });
+    expect(ci).toEqual({ mentionedJid: ['111@lid'] });
+  });
+
+  it('finds contextInfo on documentMessage', () => {
+    const ci = extractContextInfo({
+      documentMessage: { fileName: 'a.pdf', contextInfo: { mentionedJid: ['111@lid'] } },
+    });
+    expect(ci).toEqual({ mentionedJid: ['111@lid'] });
+  });
+
+  it('finds contextInfo on imageMessage', () => {
+    const ci = extractContextInfo({
+      imageMessage: { caption: 'pic', contextInfo: { stanzaId: 'Q1' } },
+    });
+    expect(ci).toEqual({ stanzaId: 'Q1' });
+  });
+
+  it('returns top-level contextInfo when present', () => {
+    const ci = extractContextInfo({ contextInfo: { mentionedJid: ['222@lid'] }, conversation: 'x' });
+    expect(ci).toEqual({ mentionedJid: ['222@lid'] });
+  });
+
+  it('skips sibling metadata objects without contextInfo (messageContextInfo)', () => {
+    const ci = extractContextInfo({
+      messageContextInfo: { deviceListMetadataVersion: 2 },
+      documentMessage: { contextInfo: { mentionedJid: ['111@lid'] } },
+    });
+    expect(ci).toEqual({ mentionedJid: ['111@lid'] });
+  });
+
+  it('returns null for plain conversation payloads', () => {
+    expect(extractContextInfo({ conversation: 'hello' })).toBeNull();
+  });
+
+  it('returns null for null/undefined/non-object input', () => {
+    expect(extractContextInfo(null)).toBeNull();
+    expect(extractContextInfo(undefined)).toBeNull();
+    expect(extractContextInfo('string')).toBeNull();
   });
 });
