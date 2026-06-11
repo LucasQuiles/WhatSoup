@@ -654,3 +654,87 @@ describe('extractContextInfo', () => {
     expect(extractContextInfo({ imageMessage: { caption: 'pic', contextInfo: null } })).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Media caption mentions + media replies (regression: BOT - GENERAL ADMIN
+// group, 2026-06-11 — document caption @mention dropped as not_mentioned)
+// ---------------------------------------------------------------------------
+
+describe('parseIncomingMessage — contextInfo on media content nodes', () => {
+  it('document-with-caption @mention → mentionedJids extracted (production shape)', () => {
+    const msg = msgWith(
+      {
+        messageContextInfo: { deviceListMetadataVersion: 2 },
+        documentWithCaptionMessage: {
+          message: {
+            documentMessage: {
+              caption: '@111111199834183 Review the attached PDF',
+              fileName: 'invoice.pdf',
+              mimetype: 'application/pdf',
+              contextInfo: { mentionedJid: ['111111199834183@lid'] },
+            },
+          },
+        },
+      },
+      {
+        key: {
+          id: 'msg-doc-mention',
+          remoteJid: '120363555555555000@g.us',
+          fromMe: false,
+          participant: '15557654321@s.whatsapp.net',
+        },
+      },
+    );
+    const result = parseIncomingMessage(msg);
+    expect(result).not.toBeNull();
+    expect(result!.contentType).toBe('document');
+    expect(result!.content).toBe('@111111199834183 Review the attached PDF');
+    expect(result!.mentionedJids).toContain('111111199834183@lid');
+  });
+
+  it('image caption @mention → mentionedJids extracted', () => {
+    const msg = msgWith({
+      imageMessage: {
+        caption: '@111111199834183 look at this',
+        contextInfo: { mentionedJid: ['111111199834183@lid'] },
+      },
+    });
+    expect(parseIncomingMessage(msg)!.mentionedJids).toContain('111111199834183@lid');
+  });
+
+  it('video caption @mention → mentionedJids extracted', () => {
+    const msg = msgWith({
+      videoMessage: {
+        caption: '@111111199834183 watch',
+        seconds: 12,
+        contextInfo: { mentionedJid: ['111111199834183@lid'] },
+      },
+    });
+    expect(parseIncomingMessage(msg)!.mentionedJids).toContain('111111199834183@lid');
+  });
+
+  it('reply-with-image → quotedMessageId taken from media contextInfo.stanzaId', () => {
+    const msg = msgWith({
+      imageMessage: {
+        caption: 'replying with a pic',
+        contextInfo: { stanzaId: 'QUOTED-123', participant: '15551234567@s.whatsapp.net' },
+      },
+    });
+    expect(parseIncomingMessage(msg)!.quotedMessageId).toBe('QUOTED-123');
+  });
+
+  it('plain text reply still carries quotedMessageId (no regression)', () => {
+    const msg = msgWith({
+      extendedTextMessage: { text: 'replying', contextInfo: { stanzaId: 'QUOTED-456' } },
+    });
+    expect(parseIncomingMessage(msg)!.quotedMessageId).toBe('QUOTED-456');
+  });
+
+  it('plain conversation → mentionedJids=[] and quotedMessageId=null (no regression)', () => {
+    const result = parseIncomingMessage(msgWith({ conversation: 'hi' }))!;
+    expect({ mentionedJids: result.mentionedJids, quotedMessageId: result.quotedMessageId }).toEqual({
+      mentionedJids: [],
+      quotedMessageId: null,
+    });
+  });
+});
