@@ -5,6 +5,8 @@ import { normalizePhoneE164 } from './lib/phone.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
 import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
+import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
+import { DEFAULT_TWILIO_SMS, type TwilioSmsConfig, type TwilioInboundMode } from './transport/twilio/types.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -586,6 +588,56 @@ function mergeKnowledgeProfiles(
   return profiles;
 }
 
+// ---------------------------------------------------------------------------
+// resolveTwilioSmsConfig — resolve and apply defaults to a raw twilioConfig block.
+// Returns undefined when the source is absent or missing the required 'account'
+// field. Mirrors the resolveMemoryConfig pattern: record/stringProp/numberProp
+// helpers + default merging. Does NOT resolve keyring secrets or instantiate
+// any SDK; config data only.
+// ---------------------------------------------------------------------------
+export function resolveTwilioSmsConfig(
+  rawSource: Record<string, unknown> | null | undefined,
+): TwilioSmsConfig | undefined {
+  const src = record(rawSource ?? undefined);
+  if (!src) return undefined;
+
+  // Required discriminator: abort if 'account' is absent (not a twilioConfig block)
+  const account = stringProp(src, 'account');
+  if (!account) return undefined;
+
+  const accountSid = stringProp(src, 'accountSid') ?? '';
+  const authTokenService = stringProp(src, 'authTokenService') ?? '';
+  const phoneNumber = stringProp(src, 'phoneNumber');
+  const messagingServiceSid = stringProp(src, 'messagingServiceSid');
+
+  // inboundMode: validated string, default to DEFAULT_TWILIO_SMS.inboundMode
+  const rawMode = src['inboundMode'];
+  const inboundMode: TwilioInboundMode =
+    rawMode === 'poll' || rawMode === 'webhook'
+      ? rawMode
+      : DEFAULT_TWILIO_SMS.inboundMode;
+
+  const pollIntervalMs = numberProp(src, 'pollIntervalMs', DEFAULT_TWILIO_SMS.pollIntervalMs);
+
+  // rateLimit: nested object with smsPerMinute
+  const rateLimitSrc = record(src['rateLimit']);
+  const smsPerMinute = numberProp(rateLimitSrc, 'smsPerMinute', DEFAULT_TWILIO_SMS.rateLimit.smsPerMinute);
+
+  // Build result without optional fields, then spread them in only if defined.
+  // This preserves the XOR invariant: absent fields remain undefined (not present),
+  // matching the type signature readonly phoneNumber?: string.
+  return {
+    account,
+    accountSid,
+    authTokenService,
+    inboundMode,
+    pollIntervalMs,
+    rateLimit: { smsPerMinute },
+    ...(phoneNumber !== undefined ? { phoneNumber } : {}),
+    ...(messagingServiceSid !== undefined ? { messagingServiceSid } : {}),
+  };
+}
+
 export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | undefined): MemoryConfig {
   const migrated = migrateLegacyMemoryConfig(rawSource ?? {}, { removeLegacy: false }).config;
   const memoryRoot = record(migrated.memory);
@@ -699,6 +751,21 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
 }
 
 const resolvedMemory = resolveMemoryConfig(instance);
+
+const resolvedTransport: TransportId = (() => {
+  const raw = instance?.transport;
+  if (typeof raw === 'string' && isTransportId(raw)) return raw;
+  return DEFAULT_TRANSPORT_ID;
+})();
+
+// Only resolved when the twilio transport is selected — validation rejects a
+// twilioConfig on other transports, and this gate keeps the invariant
+// self-documenting at the resolution site too.
+const resolvedTwilioConfig: TwilioSmsConfig | undefined =
+  resolvedTransport === 'twilio' && record(instance?.twilioConfig) != null
+    ? resolveTwilioSmsConfig(instance?.twilioConfig as Record<string, unknown>)
+    : undefined;
+
 export const config = {
   // Identity
   botName: (instance?.name as string | undefined) ?? 'Loops',
@@ -925,6 +992,14 @@ export const config = {
     }
     return raw as AccessMode;
   })(),
+
+  // Transport selection — read from instance.transport, defaults to DEFAULT_TRANSPORT_ID.
+  // Mirroring agentProvider: simple inline read with a default.
+  transport: resolvedTransport,
+
+  // Twilio SMS config — present only when instance.twilioConfig is set.
+  // Defaults for inboundMode/pollIntervalMs/rateLimit are applied by resolveTwilioSmsConfig.
+  twilioConfig: resolvedTwilioConfig,
 } as const;
 
 // Make intEnv available for external use (e.g. tests, future env-driven fields)

@@ -331,3 +331,12 @@ describe('TwilioSmsAdapter disconnect', () => {
     expect(states).toContain('disconnected');
   });
 });
+
+describe('TwilioSmsAdapter construction guard', () => {
+  it('throws loud when neither phoneNumber nor messagingServiceSid is provided', () => {
+    const port = new MockTwilioSmsPort();
+    const config = makeConfig();
+    const broken = { ...config, phoneNumber: undefined, messagingServiceSid: undefined };
+    expect(() => new TwilioSmsAdapter(broken, port)).toThrow(/phoneNumber or messagingServiceSid/);
+  });
+});

@@ -115,7 +115,7 @@ export class TwilioSmsAdapter implements TransportAdapter {
   private readonly channelId: ChannelId;
   private readonly self: ParticipantRef;
   private readonly port: TwilioSmsPort;
-  private readonly from: string;
+  private readonly from: string | undefined;
   private readonly messagingServiceSid?: string;
   private readonly pollIntervalMs: number;
 
@@ -150,6 +150,11 @@ export class TwilioSmsAdapter implements TransportAdapter {
   private polling = false;
 
   constructor(config: TwilioSmsConfig, port: TwilioSmsPort) {
+    // Config validation enforces the sender XOR, but direct construction can
+    // bypass it — fail loud rather than run with an empty sender identity.
+    if (config.phoneNumber === undefined && config.messagingServiceSid === undefined) {
+      throw new Error('TwilioSmsAdapter requires phoneNumber or messagingServiceSid');
+    }
     this.channelId = makeChannelId('sms', config.account);
     this.port = port;
     this.from = config.phoneNumber;
@@ -174,7 +179,9 @@ export class TwilioSmsAdapter implements TransportAdapter {
       },
     };
 
-    this.self = { channel: this.channelId, id: this.from };
+    // selfRef identity: prefer phoneNumber; fall back to messagingServiceSid
+    // (the constructor guard above guarantees one of the two is present)
+    this.self = { channel: this.channelId, id: (this.from ?? this.messagingServiceSid) as string };
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────

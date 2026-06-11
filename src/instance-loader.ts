@@ -11,6 +11,8 @@ import {
   VALID_SESSION_SCOPES as _VALID_SESSION_SCOPES,
   type AccessMode,
 } from './core/agent-config-validator.ts';
+import type { TransportId } from './transport/registry.ts';
+import type { TwilioSmsConfig } from './transport/twilio/types.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,6 +81,10 @@ interface InstanceConfig {
   gui?: boolean;
   guiPort?: number;
   agentOptions?: AgentOptions;
+  // Transport selection — defaults to 'baileys' when absent
+  transport?: TransportId;
+  // Twilio SMS transport config — present only when transport === 'twilio'
+  twilioConfig?: TwilioSmsConfig;
   // Resolved paths (added by loader)
   paths: InstancePaths;
 }

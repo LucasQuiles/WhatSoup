@@ -658,9 +658,31 @@ function validateTwilioConfig(tc: Record<string, unknown>): ValidationError | nu
     }
   }
 
+  // rateLimit.smsPerMinute: if present, integer in [1, 600] — protects the
+  // rate-limiter layer from zero/negative caps.
+  const rateLimit = tc['rateLimit'];
+  if (rateLimit !== undefined) {
+    if (typeof rateLimit !== 'object' || rateLimit === null || Array.isArray(rateLimit)) {
+      return err('twilioConfig.rateLimit', 'twilioConfig.rateLimit must be an object');
+    }
+    const smsPerMinute = (rateLimit as Record<string, unknown>)['smsPerMinute'];
+    if (smsPerMinute !== undefined) {
+      if (
+        typeof smsPerMinute !== 'number' ||
+        !Number.isInteger(smsPerMinute) ||
+        smsPerMinute < 1 ||
+        smsPerMinute > 600
+      ) {
+        return err(
+          'twilioConfig.rateLimit.smsPerMinute',
+          'twilioConfig.rateLimit.smsPerMinute must be an integer between 1 and 600',
+        );
+      }
+    }
+  }
+
   return null;
 }
-
 
 function validateNumericBounds(raw: Record<string, unknown>): ValidationError | null {
   if (

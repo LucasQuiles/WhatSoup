@@ -605,3 +605,38 @@ describe('validateInstanceConfig — transport review hardening', () => {
     expect(err?.field).toBe('twilioConfig.account');
   });
 });
+
+describe('validateInstanceConfig — twilio rateLimit bounds', () => {
+  it('rejects zero, negative, and non-integer smsPerMinute', () => {
+    for (const bad of [0, -5, 1.5, '30']) {
+      const raw = baseRaw({
+        transport: 'twilio',
+        twilioConfig: validTwilioConfig({ rateLimit: { smsPerMinute: bad } }),
+      });
+      const err = validateInstanceConfig(raw, ctx());
+      expect(err?.field).toBe('twilioConfig.rateLimit.smsPerMinute');
+    }
+  });
+
+  it('rejects a non-object rateLimit', () => {
+    const raw = baseRaw({
+      transport: 'twilio',
+      twilioConfig: validTwilioConfig({ rateLimit: 'fast' }),
+    });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('twilioConfig.rateLimit');
+  });
+
+  it('accepts absent rateLimit and bounds 1 and 600', () => {
+    const noRate = validTwilioConfig();
+    delete (noRate as Record<string, unknown>)['rateLimit'];
+    expect(validateInstanceConfig(baseRaw({ transport: 'twilio', twilioConfig: noRate }), ctx())).toBeNull();
+    for (const ok of [1, 600]) {
+      const raw = baseRaw({
+        transport: 'twilio',
+        twilioConfig: validTwilioConfig({ rateLimit: { smsPerMinute: ok } }),
+      });
+      expect(validateInstanceConfig(raw, ctx())).toBeNull();
+    }
+  });
+});
