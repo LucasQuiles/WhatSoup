@@ -38,7 +38,7 @@ import {
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writePrivateFileSync, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
-import { SessionManager, formatAge, type SessionCrashInfo } from './session.ts';
+import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
 import {
   OutboundQueue,
   type IOutboundQueue,
@@ -71,6 +71,7 @@ import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { createProviderMcpBridge, generateMcpConfigFile } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
+import { probeFallbackBinary } from './providers/binary-preflight.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -5534,6 +5535,33 @@ export class AgentRuntime implements Runtime {
           );
         });
       }
+    }
+    // Pre-flight: check binary presence for CLI-backed fallback providers.
+    // Managed-loop providers (openai-api, anthropic-api) have no binary to probe.
+    // Never blocks or reverts the window — fail-open on anything except ENOENT.
+    const fallbackBinary = this.agentFallbackProvider
+      ? getProviderBinary(this.agentFallbackProvider)
+      : null;
+    if (fallbackBinary) {
+      void probeFallbackBinary(fallbackBinary).then((r) => {
+        if (r.status === 'missing') {
+          log.error(
+            { fallbackProvider: this.agentFallbackProvider, binary: fallbackBinary },
+            'fallback provider binary not found on this host',
+          );
+          emitAlert(
+            this.instanceName,
+            'fallback_binary_missing',
+            'Fallback provider binary not found on this host',
+            `binary=${fallbackBinary} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+          );
+        } else if (r.status === 'present' && r.version) {
+          log.info(
+            { fallbackProvider: this.agentFallbackProvider, binary: fallbackBinary, version: r.version },
+            'fallback provider binary present',
+          );
+        }
+      });
     }
   }
 
