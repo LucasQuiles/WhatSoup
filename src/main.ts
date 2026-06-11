@@ -8,7 +8,8 @@ import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
 import { deleteOldMessages, getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { execFileSync } from 'node:child_process';
-import { ConnectionManager } from './transport/connection.ts';
+import { createConnection } from './transport/factory.ts';
+import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
 import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
@@ -237,7 +238,7 @@ startModelCurrencyMonitor(config.botName, {
 const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
 
 // 4. Connection
-const connectionManager = new ConnectionManager();
+const connectionManager: RuntimeConnection = createConnection(config);
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;

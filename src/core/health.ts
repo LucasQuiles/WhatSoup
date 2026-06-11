@@ -6,7 +6,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
-import type { ConnectionManager } from '../transport/connection.ts';
+import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
@@ -47,7 +47,7 @@ function verifyBearer(header: string | undefined, expectedToken: string | undefi
 
 export interface HealthDeps {
   db: Database;
-  connectionManager: ConnectionManager;
+  connectionManager: RuntimeConnection;
   startedAt: number;
   getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;

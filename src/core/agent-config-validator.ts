@@ -17,6 +17,9 @@
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
+import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
+import { ACCOUNT_RE } from './transport-refs.ts';
+import { E164_RE } from '../transport/twilio/types.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -301,6 +304,9 @@ export function validateInstanceConfig(
   const pineconeGuardErr = validatePineconeProjectGuard(raw, ctx);
   if (pineconeGuardErr) return pineconeGuardErr;
 
+  const transportErr = validateTransportConfig(raw);
+  if (transportErr) return transportErr;
+
   // Auth-only mode (loader bootstrap-auth path) stops here.
   if (ctx.authOnly) return null;
 
@@ -495,6 +501,182 @@ function validateAgentOptions(
         return err(
           'agentOptions.providerConfig.budget',
           'agentOptions.providerConfig.budget must be an object when provided',
+        );
+      }
+    }
+  }
+
+  return null;
+}
+
+const _TWILIO_ACCOUNT_SID_RE = /^AC[0-9a-f]{32}$/;
+
+const _TWILIO_MSG_SVC_SID_RE = /^MG[0-9a-f]{32}$/;
+
+function validateTransportConfig(
+  raw: Record<string, unknown>,
+): ValidationError | null {
+  const transport = raw['transport'];
+  const twilioConfig = raw['twilioConfig'];
+
+  // transport, if present, must be a known TransportId.
+  if (transport !== undefined) {
+    if (!isTransportId(transport)) {
+      return err(
+        'transport',
+        `transport must be one of: ${TRANSPORT_IDS.join(', ')} (got ${JSON.stringify(transport)})`,
+      );
+    }
+  }
+
+  // twilioConfig present with non-twilio transport (or absent transport) → reject as inconsistent.
+  const effectiveTransport = transport ?? DEFAULT_TRANSPORT_ID;
+  if (twilioConfig !== undefined && effectiveTransport !== 'twilio') {
+    return err(
+      'twilioConfig',
+      'twilioConfig is inconsistent with transport ' + JSON.stringify(effectiveTransport) +
+        ' — twilioConfig is only valid when transport is "twilio"',
+    );
+  }
+
+  // twilioConfig is REQUIRED when transport === 'twilio'.
+  if (effectiveTransport === 'twilio') {
+    if (twilioConfig === undefined || twilioConfig === null) {
+      return err('twilioConfig', 'twilioConfig is required when transport is "twilio"');
+    }
+    if (typeof twilioConfig !== 'object' || Array.isArray(twilioConfig)) {
+      return err('twilioConfig', 'twilioConfig must be an object');
+    }
+    return validateTwilioConfig(twilioConfig as Record<string, unknown>);
+  }
+
+  return null;
+}
+
+function validateTwilioConfig(tc: Record<string, unknown>): ValidationError | null {
+  // account: non-empty, matches ACCOUNT_RE
+  const account = tc['account'];
+  if (typeof account !== 'string' || account === '' || !ACCOUNT_RE.test(account)) {
+    return err(
+      'twilioConfig.account',
+      'twilioConfig.account must be a non-empty lowercase alphanumeric-and-dash string starting with a letter',
+    );
+  }
+
+  // accountSid: matches ^AC[0-9a-f]{32}$
+  const accountSid = tc['accountSid'];
+  if (typeof accountSid !== 'string' || !_TWILIO_ACCOUNT_SID_RE.test(accountSid)) {
+    return err(
+      'twilioConfig.accountSid',
+      'twilioConfig.accountSid must match AC[0-9a-f]{32} (hex must be lowercase)',
+    );
+  }
+
+  // authTokenService: non-empty, no whitespace, max 128 chars
+  const authTokenService = tc['authTokenService'];
+  if (
+    typeof authTokenService !== 'string' ||
+    authTokenService === '' ||
+    /\s/.test(authTokenService) ||
+    authTokenService.length > 128
+  ) {
+    return err(
+      'twilioConfig.authTokenService',
+      'twilioConfig.authTokenService must be a non-empty keyring service name (no whitespace, max 128 chars)',
+    );
+  }
+
+  // Sender XOR: phoneNumber XOR messagingServiceSid
+  const phoneNumber = tc['phoneNumber'];
+  const messagingServiceSid = tc['messagingServiceSid'];
+  const hasPhone = phoneNumber !== undefined && phoneNumber !== null;
+  const hasMss = messagingServiceSid !== undefined && messagingServiceSid !== null;
+
+  if (hasPhone && hasMss) {
+    return err(
+      'twilioConfig.phoneNumber',
+      'twilioConfig: set exactly one of phoneNumber or messagingServiceSid, not both',
+    );
+  }
+  if (!hasPhone && !hasMss) {
+    return err(
+      'twilioConfig.phoneNumber',
+      'twilioConfig: exactly one of phoneNumber or messagingServiceSid is required',
+    );
+  }
+
+  if (hasPhone) {
+    if (typeof phoneNumber !== 'string' || !E164_RE.test(phoneNumber)) {
+      return err(
+        'twilioConfig.phoneNumber',
+        'twilioConfig.phoneNumber must be an E.164 number (e.g. +15559990000)',
+      );
+    }
+  }
+
+  if (hasMss) {
+    if (typeof messagingServiceSid !== 'string' || !_TWILIO_MSG_SVC_SID_RE.test(messagingServiceSid)) {
+      return err(
+        'twilioConfig.messagingServiceSid',
+        'twilioConfig.messagingServiceSid must match MG[0-9a-f]{32} (hex must be lowercase)',
+      );
+    }
+  }
+
+  // inboundMode: if present must be 'poll' or 'webhook'; 'webhook' is rejected
+  const inboundMode = tc['inboundMode'];
+  if (inboundMode !== undefined) {
+    if (inboundMode === 'webhook') {
+      return err(
+        'twilioConfig.inboundMode',
+        "webhook inbound is not yet supported; use inboundMode:'poll'",
+      );
+    }
+    if (inboundMode !== 'poll') {
+      return err(
+        'twilioConfig.inboundMode',
+        "twilioConfig.inboundMode must be 'poll' (webhook is not yet supported)",
+      );
+    }
+  }
+
+  // pollIntervalMs: if present, integer in [5000, 86400000] — the floor protects
+  // against rate-limit storms, the 24h ceiling against a config typo silently
+  // disabling inbound polling.
+  const pollIntervalMs = tc['pollIntervalMs'];
+  if (pollIntervalMs !== undefined) {
+    if (
+      typeof pollIntervalMs !== 'number' ||
+      !Number.isFinite(pollIntervalMs) ||
+      !Number.isInteger(pollIntervalMs) ||
+      pollIntervalMs < 5000 ||
+      pollIntervalMs > 86_400_000
+    ) {
+      return err(
+        'twilioConfig.pollIntervalMs',
+        'twilioConfig.pollIntervalMs must be an integer between 5000 and 86400000',
+      );
+    }
+  }
+
+  // rateLimit.smsPerMinute: if present, integer in [1, 600] — protects the
+  // rate-limiter layer from zero/negative caps.
+  const rateLimit = tc['rateLimit'];
+  if (rateLimit !== undefined) {
+    if (typeof rateLimit !== 'object' || rateLimit === null || Array.isArray(rateLimit)) {
+      return err('twilioConfig.rateLimit', 'twilioConfig.rateLimit must be an object');
+    }
+    const smsPerMinute = (rateLimit as Record<string, unknown>)['smsPerMinute'];
+    if (smsPerMinute !== undefined) {
+      if (
+        typeof smsPerMinute !== 'number' ||
+        !Number.isInteger(smsPerMinute) ||
+        smsPerMinute < 1 ||
+        smsPerMinute > 600
+      ) {
+        return err(
+          'twilioConfig.rateLimit.smsPerMinute',
+          'twilioConfig.rateLimit.smsPerMinute must be an integer between 1 and 600',
         );
       }
     }

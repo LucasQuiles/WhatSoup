@@ -13,6 +13,8 @@ export const DOMAIN_PERSONAL = 's.whatsapp.net';
 export const DOMAIN_LID = 'lid';
 /** Bare domain for group chats (after the @) */
 export const DOMAIN_GROUP = 'g.us';
+/** Bare domain for SMS transport JIDs (after the @) */
+export const DOMAIN_SMS = 'sms';
 
 /** WhatsApp personal chat JID suffix */
 export const JID_PERSONAL = `@${DOMAIN_PERSONAL}`;
@@ -20,6 +22,8 @@ export const JID_PERSONAL = `@${DOMAIN_PERSONAL}`;
 export const JID_LID = `@${DOMAIN_LID}`;
 /** WhatsApp group chat JID suffix */
 export const JID_GROUP = `@${DOMAIN_GROUP}`;
+/** SMS transport JID suffix */
+export const JID_SMS = `@${DOMAIN_SMS}`;
 
 // ── JID builders ────────────────────────────────────────────────────────────
 
@@ -31,6 +35,32 @@ export function toPersonalJid(phone: string): string {
 /** Build a LID JID from a number */
 export function toLidJid(number: string): string {
   return `${number}${JID_LID}`;
+}
+
+/**
+ * Build an SMS JID from an E.164 address (e.g. '+15551230000').
+ * Idempotent: already-suffixed addresses are returned as-is.
+ */
+export function toSmsJid(address: string): string {
+  return address.endsWith(JID_SMS) ? address : `${address}${JID_SMS}`;
+}
+
+/**
+ * Resolve an SMS JID to the repo's phone-subject convention: digits without
+ * the leading '+' (e.g. '+15551230000@sms' → '15551230000'), matching what
+ * personal WhatsApp JIDs yield. Tolerates an already-bare address.
+ */
+export function smsJidToPhone(jid: string): string {
+  const bare = fromSmsJid(jid);
+  return bare.startsWith('+') ? bare.slice(1) : bare;
+}
+
+/**
+ * Strip the SMS JID suffix from an address (e.g. '+15551230000@sms' → '+15551230000').
+ * Tolerates an already-bare address.
+ */
+export function fromSmsJid(jid: string): string {
+  return jid.endsWith(JID_SMS) ? jid.slice(0, -JID_SMS.length) : jid;
 }
 
 // ── JID type detection ──────────────────────────────────────────────────────
@@ -50,6 +80,11 @@ export function isGroupJid(jid: string): boolean {
   return jid.endsWith(JID_GROUP);
 }
 
+/** Check if a JID is an SMS JID (@sms). */
+export function isSmsJid(jid: string | null | undefined): boolean {
+  return !!jid && jid.endsWith(JID_SMS);
+}
+
 // ── JID parsing ─────────────────────────────────────────────────────────────
 
 /** Extract the local part (everything before @) from a JID. Returns the input if no @ present. */
@@ -66,4 +101,3 @@ export function normalizeLid(raw: string): string {
   const colon = raw.indexOf(':');
   return colon >= 0 ? raw.slice(0, colon) : raw;
 }
-

@@ -3,10 +3,10 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
-import { toPersonalJid, toLidJid } from './jid-constants.ts';
+import { toPersonalJid, toLidJid, toSmsJid } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender, type StoredMessage } from './messages.ts';
-import { isAdminPhone } from '../lib/phone.ts';
+import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
@@ -60,6 +60,9 @@ export async function handleAdminCommand(
   durability?: DurabilityEngine,
 ): Promise<void> {
   if (action === 'allow') {
+    // Phone subjects are keyed by resolvePhoneFromJid output (full digits) —
+    // normalize so a 10-digit admin command flips the stored row, not a miss.
+    if (subjectType === 'phone') subjectId = normalizePhoneE164(subjectId);
     updateAccess(db, subjectType, subjectId, 'allowed');
     log.info({ subjectType, subjectId, action: 'allowed_by_admin' }, 'access granted by admin');
 
@@ -68,6 +71,15 @@ export async function handleAdminCommand(
       // to this phone. toLidJid(phone) is wrong — LIDs are opaque numbers
       // unrelated to phone numbers. We must reverse-lookup from lid_mappings.
       const jidFormats: string[] = [toPersonalJid(subjectId)];
+      // SMS rows are stored under '+<digits>@sms' — include that form so
+      // ALLOW over the Twilio transport replays the queued messages too.
+      jidFormats.push(toSmsJid(`+${normalizePhoneE164(subjectId)}`));
+      if (normalizePhoneE164(subjectId) !== subjectId) {
+        // A 10-digit subject (admin typed without country code) must also flip
+        // the access row stored under the full-digit key resolvePhoneFromJid
+        // produces — otherwise replay succeeds while the sender stays pending.
+        jidFormats.push(toPersonalJid(normalizePhoneE164(subjectId)));
+      }
       const lidMap = getAllLidMappings(db);
       for (const [lid, mappedPhone] of lidMap) {
         if (isAdminPhone(mappedPhone, new Set([subjectId]))) {
@@ -85,6 +97,7 @@ export async function handleAdminCommand(
       // Filter already-replayed, sort by timestamp ascending, take most recent N
       const toReplay = allStored
         .filter(m => !replayedIds.has(m.messageId))
+        .sort((a, b) => a.timestamp - b.timestamp)
         .slice(-config.adminReplayMax);
 
       const replayCount = toReplay.length;
@@ -118,6 +131,7 @@ export async function handleAdminCommand(
       await sendTracked(messenger, adminChatJid, `Got it, allowed group ${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
     }
   } else {
+    if (subjectType === 'phone') subjectId = normalizePhoneE164(subjectId);
     updateAccess(db, subjectType, subjectId, 'blocked');
     log.info({ subjectType, subjectId, action: 'blocked_by_admin' }, 'access blocked by admin');
 
@@ -134,18 +148,35 @@ export async function handleAdminCommand(
 // ---------------------------------------------------------------------------
 
 /**
- * Find the admin's chat JID — checks personal JIDs and reverse-mapped LIDs
- * from the lid_mappings table using a targeted query.
+ * Find the admin's chat JID — checks SMS senders first (when present),
+ * then personal JIDs and reverse-mapped LIDs from the lid_mappings table.
+ *
+ * SMS sender rows are stored as '+<digits>@sms'. The admin phones config
+ * stores digit strings (no leading '+'). We try the exact SMS JID
+ * ('+<phone>@sms') for each admin phone, so the approval reply reaches
+ * the admin over the same transport they used to contact the bot.
+ *
+ * WhatsApp fallback: LIKE `<phone>%` matches '<phone>@s.whatsapp.net'.
+ * Final fallback: when config.transport is 'twilio' and no message rows
+ * exist yet, synthesise a '+<phone>@sms' JID rather than a WhatsApp JID
+ * that the Twilio transport cannot deliver to.
  */
 function resolveAdminChatJid(db: Database): string | null {
   const msgStmt = db.raw.prepare(
     'SELECT chat_jid FROM messages WHERE sender_jid LIKE ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
   );
 
-  // Search by admin phone numbers first (fast path)
+  // Search by admin phone numbers — try SMS JID exact match first, then
+  // WhatsApp LIKE prefix (fast path for both transports).
   for (const phone of config.adminPhones) {
-    const row = msgStmt.get(`${phone}%`) as { chat_jid: string } | undefined;
-    if (row) return row.chat_jid;
+    // SMS: sender_jid is '+<phone>@sms' — exact LIKE with no wildcard needed,
+    // but LIKE is fine here; we use the exact string for precision.
+    const smsRow = msgStmt.get(`+${normalizePhoneE164(phone)}@sms`) as { chat_jid: string } | undefined;
+    if (smsRow) return smsRow.chat_jid;
+
+    // WhatsApp: sender_jid starts with '<phone>' (e.g. '15550100001@s.whatsapp.net')
+    const waRow = msgStmt.get(`${phone}%`) as { chat_jid: string } | undefined;
+    if (waRow) return waRow.chat_jid;
   }
 
   // Search by LIDs that map to admin phones (scans lid_mappings — typically small table)
@@ -157,12 +188,22 @@ function resolveAdminChatJid(db: Database): string | null {
     }
   }
 
-  // Fallback to phone@s.whatsapp.net format
+  // No message rows found — synthesise a fallback JID.
   const firstAdmin = [...config.adminPhones][0];
   if (!firstAdmin) {
     log.error('resolveAdminJid: no admin phones configured — cannot resolve admin JID');
     return null;
   }
+
+  // When running on the Twilio transport, return an @sms JID so the
+  // approval message is delivered over SMS rather than failing with a
+  // WhatsApp JID that the bridge cannot route.
+  if (config.transport === 'twilio') {
+    // adminPhones entries may omit the country code (suffix-matching design);
+    // normalize so the SMS JID is valid E.164.
+    return toSmsJid(`+${normalizePhoneE164(firstAdmin)}`);
+  }
+
   return toPersonalJid(firstAdmin);
 }
 

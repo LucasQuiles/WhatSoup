@@ -1,5 +1,5 @@
 // src/transport/testing/minimal-text.ts
-import { makeChannelId, type ChannelId, type ConversationRef, type MessageRef, type ParticipantRef } from '../../core/transport-refs.ts';
+import { makeChannelId, type ChannelId, type ChannelKind, type ConversationRef, type MessageRef, type ParticipantRef } from '../../core/transport-refs.ts';
 import type {
   AdapterHealth, Capabilities, InboundMessage, SendTextOptions,
   Subscription, TransportAdapter, TransportError,
@@ -30,7 +30,7 @@ export class MinimalTextAdapter implements TransportAdapter {
   constructor(channel: ChannelId = makeChannelId('whatsapp', 'minimal-test')) {
     this.capabilities = {
       channel,
-      kind: channel.split(':', 1)[0] as 'whatsapp' | 'telegram',
+      kind: channel.split(':', 1)[0] as ChannelKind,
       extensions: new Set(),                      // empty — core only
       maxTextLength: 65536,
       auth: 'qr',
