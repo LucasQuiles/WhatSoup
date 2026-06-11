@@ -541,7 +541,7 @@ When deploying an instance config that uses `fallbackProvider` to a machine wher
 
 5. **Verify.** From an admin WhatsApp DM:
    - `FALLBACK STATUS` — confirms the current window state and configured provider/model.
-   - `FALLBACK ON 5m` — forces a 5-minute canary window; expect a reply served by the fallback provider. Check the `/health` endpoint `instance` block for `fallbackProvider`, `fallbackTurnsServed`, and related fields.
+   - `FALLBACK ON 5m` — forces a 5-minute canary window; expect a reply served by the fallback provider. Check the `/health` endpoint `instance` block for `effectiveProvider` (flips to the fallback while the window is active), `fallbackTurnsServed`, and related fields.
    - Watch for the three arm-time alert sources: `fallback_binary_missing` (binary absent), `fallback_credential_missing` (key absent from keyring/env), `fallback_credential_invalid` (key rejected by provider API). Any of these surfaces via the BOT_ERRORS alert pipeline within seconds of window activation.
 
 #### Session Scopes

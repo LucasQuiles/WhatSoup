@@ -228,6 +228,9 @@ if [ "$PLATFORM" = "Darwin" ]; then
   check_key "anthropic" "required"
   check_key "openai" "optional"
   check_key "pinecone" "optional"
+  # minimax/deepseek keys are required when agentOptions.fallbackProvider uses those model prefixes
+  check_key "minimax" "optional"
+  check_key "deepseek" "optional"
 else
   # --- linux (secret-tool) key check ---
   if command -v secret-tool &>/dev/null; then
@@ -245,6 +248,9 @@ else
     check_key "anthropic" "required"
     check_key "openai" "optional"
     check_key "pinecone" "optional"
+    # minimax/deepseek keys are required when agentOptions.fallbackProvider uses those model prefixes
+    check_key "minimax" "optional"
+    check_key "deepseek" "optional"
   else
     echo "  Skipped — no secret-tool (set keys via environment variables)"
     echo "  Required: ANTHROPIC_API_KEY"
