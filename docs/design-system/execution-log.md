@@ -115,9 +115,22 @@ reduced-motion neutralization, anchored overlays, loading feedback, immediate fo
   Self-critique recorded (Vercel-adjacency risk; inline-style shortcut; drill-in is a vignette).
   Hygiene note: `====` CSS banners false-positived the conflict-marker guard → converted to dashes.
   Commit: `dc56dd3c`.
-- **Direction A (Instrument): Blocked mid-flight** — subagent hit session token limit; file truncated
-  at 1,544 lines (no closing tag). Agent resumed to finish; file held uncommitted until complete.
-- **Direction C (Ops): Blocked mid-flight** — same limit; truncated at 1,656 lines. Agent resumed;
-  held uncommitted until complete.
+- **Direction A (Instrument): Pass after resume** — subagent hit session token limit at 1,544 lines;
+  resumed and completed to 1,744 lines (balanced HTML verified). IBM Plex Mono+Sans, instrument orange,
+  faceplate nameplate, lamp/shape status coding, focus trap + single-fire Escape in modal,
+  stated AA contrast 15.7:1/15.2:1. Render-checked in headless Chrome (dark, top sections).
+- **Direction C (Ops): Pass after resume** — same limit at 1,656 lines; completed to 2,265 lines
+  (balanced HTML + `node --check` on JS verified by builder). Plex Condensed/Sans/Mono, achromatic
+  chrome (color = semantics only), two table densities, toolbar + log-stream specimens, working
+  drill-in drawer, SOUP rack-label lozenge. Render-checked (dark, top sections incl. live modal demo).
 
-Launcher `index.html` deferred until all three directions exist.
+**T4 Verdict: Pass.** All three directions complete + committed with comparison launcher `index.html`
+(neutral chrome) and critique/scorecards in `decision-log.md`. Vocabulary convergence across all three
+builders: Soup Kitchen→Fleet, noun "Line", unified "attention" metric.
+
+**A11 (screenshot tooling): Partially Inconclusive.** Headless Chrome viewport captures work at
+top-of-page (both themes verified for B, dark verified for A/C); deep-scroll viewport captures return
+blank frames in this environment and fullpage capture downscales — content verified via DOM/markdown
+extraction instead. G1 review should use a real browser via `file://`; that is the designed review path.
+
+→ **G1 gate: OPEN, awaiting user review.**
