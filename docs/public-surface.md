@@ -117,7 +117,7 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:health.status` | `GET /health` | `src/core/health.ts:522` | stable | active | Liveness probe |
+| `http:health.status` | `GET /health` | `src/core/health.ts:522` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
 | `http:health.send` | `POST /send` | `src/core/health.ts:140` | stable | active | Send a text message |
 | `http:health.access` | `POST /access` | `src/core/health.ts:358` | stable | active | Allow / block contact or group |
 | `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:441` | stable | active | Zero unread + chatModify |
