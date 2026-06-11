@@ -12,6 +12,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "lint:shadow": "eslint . -c eslint.config.shadow.mjs",
+    "design:regression": "bash scripts/design-regression.sh",
     "preview": "vite preview",
     "prepare": "husky"
   },

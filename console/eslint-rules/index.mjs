@@ -1,0 +1,271 @@
+/**
+ * console/eslint-rules/index.mjs
+ *
+ * Local ESLint plugin: soup/* custom rules.
+ * Registered as { soup: soupPlugin } in eslint.config.shadow.mjs.
+ *
+ * Rules implemented here (shadow stage, entry per lint-plan section 3):
+ *   soup/no-brand-regression  — flags "WhatSoup" in JSXText / JSX string attrs
+ *                               + the split-span wordmark detector
+ *
+ * Rules stubbed (proposed / needs primitives / CSS-side):
+ *   soup/no-legacy-tokens            — proposed; enabled at P2-complete
+ *   soup/no-duplicate-shell          — heuristic, warn-ceiling
+ *   soup/no-literal-status-colors    — shadow; P2
+ *   soup/focus-visible-required      — shadow; primitives-first (P2)
+ *   soup/modal-must-restore-focus    — proposed; Modal primitive must exist first
+ *   soup/motion-needs-reduced-variant — shadow; CSS-script-primary (section 5)
+ *   soup/no-format-bypass            — shadow; enabled after lib gains epoch overloads (P3)
+ *   soup/no-inline-dismiss-handler   — shadow; lands with useDismissable (P2)
+ */
+
+// ---------------------------------------------------------------------------
+// Frozen contract identifier list (soup/protected-identifiers allowlist).
+// These strings are protocol contracts that must NOT be renamed by a UI rebrand.
+// ---------------------------------------------------------------------------
+const PROTECTED_CONTRACT_PATTERNS = [
+  'WhatSoupError',
+  'mcp__whatsoup__',
+  'whatsoup:',
+  '/run/whatsoup/',
+  '~/.local/share/whatsoup/',
+  'whatsoup@',
+  'whatsoup/instances',
+  '~/.config/whatsoup/',
+]
+
+/**
+ * Returns true if the string contains a protected contract identifier.
+ * Used to build the allowlist so those occurrences are not flagged by
+ * soup/no-brand-regression.
+ */
+function isProtectedContract(str) {
+  if (typeof str !== 'string') return false
+  return PROTECTED_CONTRACT_PATTERNS.some((p) => str.includes(p))
+}
+
+// ---------------------------------------------------------------------------
+// Files that hold the EXEMPT-PROTECTED template literal (ConfigStep system-prompt).
+// Matched against the resolved filename using a path-suffix test.
+// ---------------------------------------------------------------------------
+const EXEMPT_FILE_SUFFIXES = [
+  'components/wizard/ConfigStep.tsx',
+]
+
+function isExemptFile(filename) {
+  if (!filename) return false
+  return EXEMPT_FILE_SUFFIXES.some((s) => filename.endsWith(s))
+}
+
+// ---------------------------------------------------------------------------
+// soup/no-brand-regression
+// Lint-plan section 3: shadow entry state, P4 target.
+// ---------------------------------------------------------------------------
+const noBrandRegression = {
+  meta: {
+    type: 'suggestion',
+    docs: {
+      description:
+        'Prevent the string "WhatSoup" from appearing in user-facing JSX after the P4 branding flip. ' +
+        'Also detects the split-wordmark pattern (adjacent spans rendering "What" + "Soup"). ' +
+        'See lint-plan section 3 soup/no-brand-regression for dispositions and exemptions.',
+    },
+    messages: {
+      jsxText:
+        '[soup/no-brand-regression] "WhatSoup" in JSX text — replace with the locked brand name. ' +
+        'See lint-plan section 3 for P4 copy dispositions.',
+      jsxAttr:
+        '[soup/no-brand-regression] "WhatSoup" in JSX string attribute — replace with the locked brand name.',
+      splitWordmark:
+        '[soup/no-brand-regression] Split wordmark detected: adjacent JSX spans render "What"+"Soup". ' +
+        'These two spans must flip together at P4 (Nav.tsx:39-40).',
+      documentTitle:
+        '[soup/no-brand-regression] "WhatSoup" in document.title assignment — flip at P4.',
+    },
+    schema: [],
+  },
+
+  create(context) {
+    const filename = context.getFilename ? context.getFilename() : (context.filename ?? '')
+
+    // The ConfigStep system-prompt template literal is EXEMPT-PROTECTED.
+    if (isExemptFile(filename)) return {}
+
+    function checkStringValue(node, str, messageId) {
+      if (typeof str !== 'string') return
+      // Skip protected contract identifiers (whatsoup:, WhatSoupError, etc.)
+      if (isProtectedContract(str)) return
+      if (str.includes('WhatSoup')) {
+        context.report({ node, messageId })
+      }
+    }
+
+    return {
+      // (a) JSXText containing "WhatSoup"
+      JSXText(node) {
+        const raw = node.value
+        if (raw && raw.includes('WhatSoup')) {
+          context.report({ node, messageId: 'jsxText' })
+        }
+      },
+
+      // (b) Literal in JSX attribute position
+      'JSXAttribute > Literal'(node) {
+        checkStringValue(node, node.value, 'jsxAttr')
+      },
+
+      // (b2) Literal in JSX expression container (inline text, e.g. ternaries)
+      // Catches: {cond ? 'Update WhatSoup' : 'Done'}
+      'JSXExpressionContainer Literal'(node) {
+        // Skip if this is inside a JSXAttribute (already covered by (b))
+        let parent = node.parent
+        while (parent) {
+          if (parent.type === 'JSXAttribute') return
+          if (parent.type === 'JSXExpressionContainer') break
+          parent = parent.parent
+        }
+        checkStringValue(node, node.value, 'jsxText')
+      },
+
+      // (c) TemplateLiteral in JSX attribute position
+      'JSXAttribute > JSXExpressionContainer > TemplateLiteral'(node) {
+        for (const quasi of node.quasis) {
+          if (quasi.value.raw && quasi.value.raw.includes('WhatSoup')) {
+            if (!isProtectedContract(quasi.value.raw)) {
+              context.report({ node, messageId: 'jsxAttr' })
+            }
+          }
+        }
+      },
+
+      // (d) document.title = "..." assignments
+      'AssignmentExpression'(node) {
+        if (
+          node.left.type === 'MemberExpression' &&
+          node.left.object.name === 'document' &&
+          node.left.property.name === 'title'
+        ) {
+          if (node.right.type === 'Literal') {
+            checkStringValue(node.right, node.right.value, 'documentTitle')
+          }
+        }
+      },
+
+      // (e) Split-wordmark detector:
+      // A JSXElement containing an adjacent "What" span followed by a "Soup" span.
+      // Matches the Nav pattern: <span>What</span><span>Soup</span>
+      'JSXElement'(node) {
+        const children = node.children.filter(
+          (c) =>
+            (c.type === 'JSXText' && c.value.trim() !== '') ||
+            c.type === 'JSXElement'
+        )
+        for (let i = 0; i < children.length - 1; i++) {
+          const a = children[i]
+          const b = children[i + 1]
+
+          const textOf = (n) => {
+            if (n.type === 'JSXText') return n.value.trim()
+            // JSXElement with a single JSXText child
+            if (n.type === 'JSXElement') {
+              const textChildren = n.children.filter(
+                (c) => c.type === 'JSXText'
+              )
+              if (textChildren.length === 1) return textChildren[0].value.trim()
+            }
+            return ''
+          }
+
+          if (textOf(a) === 'What' && textOf(b) === 'Soup') {
+            context.report({ node: a, messageId: 'splitWordmark' })
+          }
+        }
+      },
+    }
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Stubs for rules that are proposed or need primitives / CSS-side work first.
+// Each stub is a valid rule that fires zero violations (returns {}).
+// Documented so the lifecycle table remains consistent.
+// ---------------------------------------------------------------------------
+
+function makeStub(description) {
+  return {
+    meta: {
+      type: 'suggestion',
+      docs: { description },
+      schema: [],
+      messages: {},
+    },
+    create() {
+      return {}
+    },
+  }
+}
+
+const noLegacyTokens = makeStub(
+  '[stub] soup/no-legacy-tokens — PROPOSED. Enabled at P2-complete once the alias layer and ' +
+    'primitives have landed. Selectors: var(--color-d*), var(--color-t*), var(--b1..4), ' +
+    'bg-d*, text-t* utilities.'
+)
+
+const noDuplicateShell = makeStub(
+  '[stub] soup/no-duplicate-shell — SHADOW advisory. Full implementation is a warn-ceiling ' +
+    'heuristic flagging surface+border+radius class combinations outside primitives. ' +
+    'Currently a stub pending P2 primitive landing.'
+)
+
+const noLiteralStatusColors = makeStub(
+  '[stub] soup/no-literal-status-colors — SHADOW. Will flag var(--color-s-*) and ' +
+    'bg/text-s-* utilities outside lib/status.ts + status primitives. ' +
+    'Enabled with P2 helper consolidation.'
+)
+
+const focusVisibleRequired = makeStub(
+  '[stub] soup/focus-visible-required — SHADOW primitives-first. Will fire in ' +
+    'components/primitives/** once that directory exists (P2).'
+)
+
+const modalMustRestoreFocus = makeStub(
+  '[stub] soup/modal-must-restore-focus — PROPOSED. Presence-check rule; requires Modal ' +
+    'primitive with restoreFocusOnClose marker (P2).'
+)
+
+const motionNeedsReducedVariant = makeStub(
+  '[stub] soup/motion-needs-reduced-variant — SHADOW. Primary check is CSS-script-side ' +
+    '(section 5). TSX side: motion.* usage without useReducedMotion import. ' +
+    'Full implementation at P5.'
+)
+
+const noFormatBypass = makeStub(
+  '[stub] soup/no-format-bypass — SHADOW. Enabled after format-time.ts gains epoch overloads ' +
+    '(P3). Will flag toLocaleString/toLocaleDateString outside lib/.'
+)
+
+const noInlineDismissHandler = makeStub(
+  '[stub] soup/no-inline-dismiss-handler — SHADOW. Enabled with useDismissable hook (P2). ' +
+    "Will flag e.key === 'Escape' comparisons outside the hook and keyboard-shortcuts hook."
+)
+
+// ---------------------------------------------------------------------------
+// Plugin export
+// ---------------------------------------------------------------------------
+export default {
+  meta: {
+    name: 'soup',
+    version: '0.1.0',
+  },
+  rules: {
+    'no-brand-regression': noBrandRegression,
+    'no-legacy-tokens': noLegacyTokens,
+    'no-duplicate-shell': noDuplicateShell,
+    'no-literal-status-colors': noLiteralStatusColors,
+    'focus-visible-required': focusVisibleRequired,
+    'modal-must-restore-focus': modalMustRestoreFocus,
+    'motion-needs-reduced-variant': motionNeedsReducedVariant,
+    'no-format-bypass': noFormatBypass,
+    'no-inline-dismiss-handler': noInlineDismissHandler,
+  },
+}

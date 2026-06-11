@@ -1,0 +1,136 @@
+# console/eslint-waivers.yaml
+#
+# Waiver / exception registry for SOUP Design System v3 lint rules.
+# Schema (all 7 fields mandatory):
+#   id                            unique identifier (WVR-NNN)
+#   rule                          soup/* rule or no-restricted-syntax selector group
+#   owner                         accountable person/agent handle
+#   reason                        technical reason rule cannot be satisfied here
+#   scope                         exact files/lines or rule+directory pair
+#   expiry                        ISO date; expired waivers fail CI (check 14)
+#   replacement_plan              concrete change that retires this waiver
+#   safer_alternative_considered  one line: alternative + why rejected
+#   status                        temporary | permanent
+#
+# Lint-plan section 4: no permanent waivers without spec-section citation.
+# All suppressions in source must carry "waiver:<id>" tag in their comment.
+#
+# P6 seeds: WVR-001..WVR-002 from existing inline suppressions (chart-utils, QrDisplay).
+# Adds: WVR-003 (chart-utils hex), WVR-004 (QrDisplay hex), WVR-005 (shimmer), WVR-006 (typing-bounce).
+
+waivers:
+  - id: WVR-001
+    rule: soup/no-untokenized-values
+    owner: console-maintainer
+    reason: >
+      recharts margin prop takes raw SVG pixel offsets, not CSS lengths.
+      The <CartesianGrid> and Tooltip accept numeric margin objects;
+      CSS variable indirection is not supported by recharts' pre-render
+      geometry calculations.
+    scope:
+      - console/src/lib/chart-utils.ts
+    expiry: 2026-12-31
+    replacement_plan: >
+      Wrap recharts margins in a CHART_MARGIN token adapter at P3.
+      The adapter reads CSS var values at runtime (getComputedStyle) and
+      returns numeric equivalents, making the token system the SSOT.
+    safer_alternative_considered: >
+      CSS-var indirection — rejected: recharts reads numbers pre-render
+      (before layout), so runtime getComputedStyle is not available.
+    status: temporary
+
+  - id: WVR-002
+    rule: soup/no-untokenized-values
+    owner: console-maintainer
+    reason: >
+      QRCode library margin option counts QR cells (integer), not CSS px values.
+      The value 2 means "2 QR modules of quiet zone" and cannot be expressed
+      as a CSS token.
+    scope:
+      - console/src/components/QrDisplay.tsx
+    expiry: 2026-12-31
+    replacement_plan: >
+      Investigate whether the rule can gain a named-option-object exemption
+      for QRCode at P6. If not, this waiver becomes permanent with the
+      spec-section citation: lint-plan section 4 "third-party numeric API".
+    safer_alternative_considered: >
+      none exists — this is a third-party numeric API with no CSS alternative.
+    status: temporary
+
+  - id: WVR-003
+    rule: soup/no-raw-color (hex)
+    owner: console-maintainer
+    reason: >
+      chart-utils.ts contains recharts Tooltip contentStyle and CartesianGrid
+      stroke values that require raw hex at point of use. These are existing
+      suppressions migrated from the inline disable registry.
+    scope:
+      - console/src/lib/chart-utils.ts
+    expiry: 2026-12-31
+    replacement_plan: >
+      Same adapter work as WVR-001: a CHART_MARGIN + CHART_COLORS token
+      adapter at P3 will replace these raw values with token lookups.
+    safer_alternative_considered: >
+      CSS custom properties in the recharts style prop — rejected: recharts
+      does not interpolate CSS variables in its inline style objects.
+    status: temporary
+
+  - id: WVR-004
+    rule: soup/no-raw-color (hex)
+    owner: console-maintainer
+    reason: >
+      QrDisplay.tsx uses a hex color for the QR code module color (#000000)
+      via the QRCode library's color option. The library does not accept
+      CSS variables.
+    scope:
+      - console/src/components/QrDisplay.tsx
+    expiry: 2026-12-31
+    replacement_plan: >
+      Investigate runtime getComputedStyle shim at P3. If the QRCode library
+      can accept a resolved CSS color value, use a wrapper that reads
+      var(--text-1) at render time.
+    safer_alternative_considered: >
+      CSS custom property in the color option — rejected: QRCode library
+      renders to canvas/SVG and does not support CSS variable syntax.
+    status: temporary
+
+  - id: WVR-005
+    rule: soup/no-infinite-animation
+    owner: console-maintainer
+    reason: >
+      The shimmer animation (console/src/styles/composites.css:510) is used
+      for loading skeleton states. Its disposition under the P5 motion strategy
+      has not yet been decided: it may be absorbed into the sanctioned ambient
+      budget or replaced with a CSS transition. Until the P5 motion.md spec
+      lands and disposition is confirmed, the animation holds a waiver.
+    scope:
+      - console/src/styles/composites.css (shimmer keyframe and animate-shimmer utility)
+    expiry: 2026-12-31
+    replacement_plan: >
+      At P5: either (a) add shimmer to the sanctioned ambient token list with
+      a named token per 03-spec/motion.md, or (b) replace with a CSS transition
+      on opacity. Either path retires this waiver.
+    safer_alternative_considered: >
+      Remove immediately — rejected: loading skeletons provide meaningful
+      perceived-performance feedback and blank rectangles are worse UX.
+    status: temporary
+
+  - id: WVR-006
+    rule: soup/no-infinite-animation
+    owner: console-maintainer
+    reason: >
+      The typing-bounce animation (console/src/styles/composites.css:108) drives
+      the typing indicator dots in chat composers. Like shimmer, its P5
+      disposition (sanctioned vs. replaced) has not yet been decided.
+    scope:
+      - console/src/styles/composites.css (typing-bounce keyframe and .typing-dot)
+    expiry: 2026-12-31
+    replacement_plan: >
+      At P5: either (a) add typing-bounce to the sanctioned ambient budget with
+      a named token, or (b) replace with a CSS offset-path or transform sequence.
+      Note: the lint-plan calls out typing-bounce explicitly as needing
+      "explicit spec disposition at P5".
+    safer_alternative_considered: >
+      Remove immediately — rejected: typing indicators are a standard chat
+      UI affordance and their absence degrades perceived responsiveness.
+    status: temporary
