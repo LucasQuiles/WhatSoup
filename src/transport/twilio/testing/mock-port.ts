@@ -1,23 +1,28 @@
 // src/transport/twilio/testing/mock-port.ts
-import type { InboundSms, SendSmsArgs, TwilioSmsPort } from '../port.ts';
+import type { InboundSms, PlaceCallArgs, SendSmsArgs, TwilioSmsPort } from '../port.ts';
 
 /**
  * In-memory test double for TwilioSmsPort.
- * Records outbound sends, supports inbound injection, and allows deterministic
- * one-shot failure injection for every method so adapter tests can exercise
- * every typed error path without network access.
+ * Records outbound sends and calls, supports inbound injection, and allows
+ * deterministic one-shot failure injection for every method so adapter tests
+ * can exercise every typed error path without network access.
  */
 export class MockTwilioSmsPort implements TwilioSmsPort {
   /** Captured outbound send arguments, in call order. */
   readonly sent: SendSmsArgs[] = [];
 
+  /** Captured outbound call arguments, in call order. */
+  readonly calls: PlaceCallArgs[] = [];
+
   private readonly inbound: InboundSms[] = [];
   private counter = 0;
+  private callCounter = 0;
 
   // One-shot failure injection: set to a non-null Error to throw it once, then reset.
   private pendingVerifyError: Error | null = null;
   private pendingSendError: Error | null = null;
   private pendingListError: Error | null = null;
+  private pendingCallError: Error | null = null;
 
   // ─── TwilioSmsPort implementation ─────────────────────────────────────────
 
@@ -56,6 +61,17 @@ export class MockTwilioSmsPort implements TwilioSmsPort {
     return pageSize !== undefined ? filtered.slice(0, pageSize) : filtered;
   }
 
+  async placeCall(args: PlaceCallArgs): Promise<{ sid: string; status: string }> {
+    if (this.pendingCallError !== null) {
+      const err = this.pendingCallError;
+      this.pendingCallError = null;
+      throw err;
+    }
+    this.calls.push(args);
+    const sid = 'CA' + String(++this.callCounter).padStart(6, '0');
+    return { sid, status: 'queued' };
+  }
+
   // ─── Test helpers ──────────────────────────────────────────────────────────
 
   /**
@@ -85,5 +101,10 @@ export class MockTwilioSmsPort implements TwilioSmsPort {
   /** Cause the next listInboundSince call to throw `err`, then reset. */
   failNextList(err: Error): void {
     this.pendingListError = err;
+  }
+
+  /** Cause the next placeCall call to throw `err`, then reset. */
+  failNextCall(err: Error): void {
+    this.pendingCallError = err;
   }
 }

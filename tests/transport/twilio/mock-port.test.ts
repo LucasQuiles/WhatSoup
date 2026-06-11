@@ -131,3 +131,14 @@ describe('MockTwilioSmsPort', () => {
   });
 
 });
+
+describe('placeCall', () => {
+  it('records the call and returns a CA-prefixed sid with queued status', async () => {
+    const port = new MockTwilioSmsPort();
+    const ref = await port.placeCall({ to: '+15551230001', from: '+15559990000', twiml: '<Response/>' });
+    expect(ref.sid).toMatch(/^CA/);
+    expect(ref.status).toBe('queued');
+    expect(port.calls).toHaveLength(1);
+    expect(port.calls[0].to).toBe('+15551230001');
+  });
+});

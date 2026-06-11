@@ -23,8 +23,10 @@ import {
   PermanentProviderError,
   RateLimitedError,
   TransientProviderError,
+  UnsupportedCapabilityError,
 } from '../contract/errors.ts';
-import { E164_RE, type TwilioSmsConfig } from './types.ts';
+import type { CallRef, VoiceCapableTransport, PlaceCallOptions } from '../contract/voice.ts';
+import { E164_RE, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioVoiceConfig } from './types.ts';
 import type { InboundSms, TwilioSmsPort } from './port.ts';
 
 // ---------------------------------------------------------------------------
@@ -113,10 +115,12 @@ function mapPortError(
 // ---------------------------------------------------------------------------
 const DEDUPE_CAP = 1000;
 
+const DEFAULT_PLACE_CALL_TWIML = '<Response><Say>This line is text-first. Please leave a message.</Say></Response>';
+
 // ---------------------------------------------------------------------------
 // TwilioSmsAdapter
 // ---------------------------------------------------------------------------
-export class TwilioSmsAdapter implements TransportAdapter {
+export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport {
   readonly capabilities: Capabilities;
 
   private health: AdapterHealth = { state: 'disconnected', since: new Date() };
@@ -132,6 +136,7 @@ export class TwilioSmsAdapter implements TransportAdapter {
   private readonly from: string | undefined;
   private readonly messagingServiceSid?: string;
   private readonly pollIntervalMs: number;
+  private readonly voice: TwilioVoiceConfig;
 
   // Monotonic per-adapter ingest counter — incremented for each emitted message.
   private ingestSeq = 0;
@@ -174,6 +179,7 @@ export class TwilioSmsAdapter implements TransportAdapter {
     this.from = config.phoneNumber;
     this.messagingServiceSid = config.messagingServiceSid;
     this.pollIntervalMs = config.pollIntervalMs;
+    this.voice = config.voice ?? DEFAULT_TWILIO_VOICE;
 
     this.capabilities = {
       channel: this.channelId,
@@ -316,6 +322,50 @@ export class TwilioSmsAdapter implements TransportAdapter {
       channel: this.channelId,
       conversation: target.id,
       id: sid,
+    };
+  }
+
+  // ── Voice (VoiceCapableTransport) ─────────────────────────────────────────
+
+  async placeCall(target: ConversationRef, opts?: PlaceCallOptions): Promise<CallRef> {
+    const correlationId = opts?.correlationId ?? this.nextCorrelationId();
+
+    if (!this.voice.enabled) {
+      throw new UnsupportedCapabilityError({
+        channelId: this.channelId,
+        operation: 'placeCall',
+        correlationId,
+        scope: 'request',
+        message: 'voice is not enabled for this transport; set voice.enabled: true in twilioConfig',
+      });
+    }
+
+    if (!E164_RE.test(target.id)) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'placeCall',
+        correlationId,
+        scope: 'conversation',
+        message: `target id is not a valid E.164 destination`,
+      });
+    }
+
+    const twiml = opts?.twiml ?? DEFAULT_PLACE_CALL_TWIML;
+
+    let result: { sid: string; status: string };
+    try {
+      result = await this.port.placeCall({
+        to: target.id,
+        from: this.from,
+        twiml,
+      });
+    } catch (err) {
+      throw mapPortError(err, this.channelId, 'placeCall', correlationId, 'request');
+    }
+
+    return {
+      id: result.sid,
+      status: result.status as CallRef['status'],
     };
   }
 
