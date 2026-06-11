@@ -263,3 +263,50 @@ describe('SMS allowlist round-trip', () => {
     expect(entry!.status).toBe('pending');
   });
 });
+
+// ---------------------------------------------------------------------------
+// handleAdminCommand — ALLOW over SMS replays queued messages stored under @sms
+// ---------------------------------------------------------------------------
+
+describe('handleAdminCommand — SMS queued-message replay', () => {
+  it('replays a message stored under the +<digits>@sms sender JID after ALLOW', async () => {
+    const { handleAdminCommand } = await import('../../src/core/admin.ts');
+
+    db.raw.prepare(
+      `INSERT INTO messages
+         (message_id, chat_jid, conversation_key, sender_jid, sender_name,
+          content, content_type, is_from_me, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+    ).run(
+      'queued-sms-001',
+      '+15550100002@sms',
+      '+15550100002_at_sms',
+      '+15550100002@sms',
+      null,
+      'queued while pending',
+      'text',
+      1700000100,
+    );
+
+    const messenger = {
+      sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+      sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+    };
+    const replayed: IncomingMessage[] = [];
+    await handleAdminCommand(
+      db,
+      messenger as never,
+      'allow',
+      'phone',
+      '15550100002',
+      '+15550100003@sms',
+      async (msg: IncomingMessage) => {
+        replayed.push(msg);
+      },
+    );
+
+    expect(replayed).toHaveLength(1);
+    expect(replayed[0].messageId).toBe('queued-sms-001');
+    expect(replayed[0].chatJid).toBe('+15550100002@sms');
+  });
+});

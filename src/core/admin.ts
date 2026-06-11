@@ -6,7 +6,7 @@ import type { SubjectType } from './access-list.ts';
 import { toPersonalJid, toLidJid, toSmsJid } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender, type StoredMessage } from './messages.ts';
-import { isAdminPhone } from '../lib/phone.ts';
+import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
@@ -66,6 +66,9 @@ export async function handleAdminCommand(
       // to this phone. toLidJid(phone) is wrong — LIDs are opaque numbers
       // unrelated to phone numbers. We must reverse-lookup from lid_mappings.
       const jidFormats: string[] = [toPersonalJid(subjectId)];
+      // SMS rows are stored under '+<digits>@sms' — include that form so
+      // ALLOW over the Twilio transport replays the queued messages too.
+      jidFormats.push(toSmsJid(`+${normalizePhoneE164(subjectId)}`));
       const lidMap = getAllLidMappings(db);
       for (const [lid, mappedPhone] of lidMap) {
         if (isAdminPhone(mappedPhone, new Set([subjectId]))) {
@@ -183,7 +186,9 @@ function resolveAdminChatJid(db: Database): string | null {
   // approval message is delivered over SMS rather than failing with a
   // WhatsApp JID that the bridge cannot route.
   if (config.transport === 'twilio') {
-    return toSmsJid(`+${firstAdmin}`);
+    // adminPhones entries may omit the country code (suffix-matching design);
+    // normalize so the SMS JID is valid E.164.
+    return toSmsJid(`+${normalizePhoneE164(firstAdmin)}`);
   }
 
   return toPersonalJid(firstAdmin);
