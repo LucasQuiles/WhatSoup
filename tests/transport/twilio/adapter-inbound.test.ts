@@ -1,0 +1,395 @@
+// tests/transport/twilio/adapter-inbound.test.ts
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { makeChannelId } from '../../../src/core/transport-refs.ts';
+import { TwilioSmsAdapter } from '../../../src/transport/twilio/adapter.ts';
+import { MockTwilioSmsPort } from '../../../src/transport/twilio/testing/mock-port.ts';
+import type { TwilioSmsConfig } from '../../../src/transport/twilio/types.ts';
+import type { InboundMessage } from '../../../src/transport/contract/events.ts';
+import {
+  AuthRequiredError,
+} from '../../../src/transport/contract/errors.ts';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+function makeConfig(overrides?: Partial<TwilioSmsConfig>): TwilioSmsConfig {
+  return {
+    account: 'ml-bot',
+    accountSid: 'AC00000000000000000000000000000000',
+    authTokenService: 'twilio-ml-bot',
+    phoneNumber: '+15559990000',
+    inboundMode: 'poll',
+    pollIntervalMs: 1000,
+    rateLimit: { smsPerMinute: 30 },
+    ...overrides,
+  };
+}
+
+describe('TwilioSmsAdapter inbound poll — full InboundMessage contract', () => {
+  it('maps an injected record to a complete InboundMessage, asserting every contract field', async () => {
+    // Start fake time at epoch so the lookback window (epoch - 1s = -1000ms)
+    // includes any record with sentAt >= new Date(-1000), i.e. the epoch itself.
+    vi.useFakeTimers({ now: 0 });
+    const channel = makeChannelId('sms', 'ml-bot');
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const msgs: InboundMessage[] = [];
+    adapter.on('message', (m) => msgs.push(m));
+
+    await adapter.connect();
+
+    // sentAt = epoch; cursor = epoch - 1000ms = -1000ms, so sentAt >= cursor
+    const sentAt = new Date(0);
+    port.injectInbound({ sid: 'SMabc001', from: '+15551230000', to: '+15559990000', body: 'hello world', sentAt });
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(msgs).toHaveLength(1);
+    const m = msgs[0];
+
+    // ref: MessageRef
+    expect(m.ref.channel).toBe(channel);
+    expect(m.ref.conversation).toBe('+15551230000');
+    expect(m.ref.id).toBe('SMabc001');
+
+    // conversation: ConversationRef
+    expect(m.conversation.channel).toBe(channel);
+    expect(m.conversation.id).toBe('+15551230000');
+
+    // sender: ParticipantRef
+    expect(m.sender.channel).toBe(channel);
+    expect(m.sender.id).toBe('+15551230000');
+
+    // scalar fields
+    expect(m.fromMe).toBe(false);
+    expect(m.text).toBe('hello world');
+    expect(m.attachments).toEqual([]);
+
+    // timestamp / transportTimestamp = sentAt
+    expect(m.timestamp).toEqual(sentAt);
+    expect(m.transportTimestamp).toEqual(sentAt);
+
+    // inboundEventKey: stable per SID — equals the SID itself
+    expect(m.inboundEventKey).toBe('SMabc001');
+
+    // ingestSeq: positive integer (first message from this adapter instance)
+    expect(typeof m.ingestSeq).toBe('number');
+    expect(m.ingestSeq).toBeGreaterThan(0);
+
+    await adapter.disconnect();
+  });
+
+  it('ingestSeq is monotonically increasing across two records in one tick', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const msgs: InboundMessage[] = [];
+    adapter.on('message', (m) => msgs.push(m));
+
+    await adapter.connect();
+
+    // Both sentAt values are within the lookback window (epoch - 1s)
+    const t1 = new Date(0);        // epoch
+    const t2 = new Date(500);      // 500ms after epoch
+    port.injectInbound({ sid: 'SM001', from: '+15551230001', to: '+15559990000', body: 'first', sentAt: t1 });
+    port.injectInbound({ sid: 'SM002', from: '+15551230002', to: '+15559990000', body: 'second', sentAt: t2 });
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0].ingestSeq).toBeLessThan(msgs[1].ingestSeq);
+
+    await adapter.disconnect();
+  });
+
+  it('ascending sentAt order is preserved in emission order', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const texts: string[] = [];
+    adapter.on('message', (m) => texts.push(m.text ?? ''));
+
+    await adapter.connect();
+
+    // Inject in reversed sentAt order — port sorts ascending before returning
+    const t1 = new Date(100);  // earlier
+    const t2 = new Date(200);  // later
+    port.injectInbound({ sid: 'SM_late', from: '+15551230000', to: '+15559990000', body: 'later', sentAt: t2 });
+    port.injectInbound({ sid: 'SM_early', from: '+15551230000', to: '+15559990000', body: 'earlier', sentAt: t1 });
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(texts).toEqual(['earlier', 'later']);
+
+    await adapter.disconnect();
+  });
+});
+
+describe('TwilioSmsAdapter inbound poll — dedupe', () => {
+  it('same SID across two ticks emits exactly once', async () => {
+    vi.useFakeTimers();
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const got: string[] = [];
+    adapter.on('message', (m) => { if (m.text) got.push(m.text); });
+
+    await adapter.connect();
+
+    // sentAt = Date.now() at fake-timer time, which is within the lookback window
+    port.injectInbound({ sid: 'SMa', from: '+15551230000', to: '+15559990000', body: 'one', sentAt: new Date() });
+
+    await vi.advanceTimersByTimeAsync(1000); // tick 1 — emits
+    await vi.advanceTimersByTimeAsync(1000); // tick 2 — same SID, must NOT re-emit
+
+    await adapter.disconnect();
+    expect(got).toEqual(['one']);
+  });
+
+  it('boundary-equal record (sentAt === cursor) is not double-emitted thanks to dedupe', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const msgs: InboundMessage[] = [];
+    adapter.on('message', (m) => msgs.push(m));
+
+    await adapter.connect();
+    // After connect, cursor = new Date(0 - 1000) = new Date(-1000)
+    // Inject sentAt = epoch (new Date(0)) which is >= cursor
+    // Port uses inclusive filter (sentAt >= since) so it will be returned on every tick.
+    // After first tick, cursor advances to new Date(0) (the max sentAt seen).
+    // On subsequent ticks, the same record (sentAt = new Date(0)) is still returned
+    // because sentAt >= cursor (inclusive), but SID dedupe must prevent re-emission.
+    const sentAt = new Date(0);
+    port.injectInbound({ sid: 'SMboundary', from: '+15551230000', to: '+15559990000', body: 'boundary', sentAt });
+
+    await vi.advanceTimersByTimeAsync(1000); // tick 1 — cursor = new Date(-1000), record included, emits, cursor advances to new Date(0)
+    await vi.advanceTimersByTimeAsync(1000); // tick 2 — cursor = new Date(0), record still returned (inclusive), deduped
+    await vi.advanceTimersByTimeAsync(1000); // tick 3 — same, deduped
+
+    await adapter.disconnect();
+    expect(msgs.filter((m) => m.ref.id === 'SMboundary')).toHaveLength(1);
+  });
+
+  it('dedupe set stays bounded: evicted SID re-emits on next tick', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const emittedSids: string[] = [];
+    adapter.on('message', (m) => emittedSids.push(m.ref.id));
+
+    await adapter.connect();
+
+    // Inject CAP+1 unique records at epoch so they always fall within any
+    // listInboundSince window, forcing the dedupe set to evict when adding
+    // the (CAP+1)th entry. All at the same sentAt so cursor stays at epoch
+    // after the first tick, meaning all records continue to be returned by
+    // the port on subsequent ticks.
+    const CAP = 1000;
+    const sharedAt = new Date(0); // epoch — within lookback window (cursor starts at new Date(-1000))
+    for (let i = 0; i < CAP + 1; i++) {
+      port.injectInbound({ sid: `SM_cap_${i}`, from: '+15551230000', to: '+15559990000', body: `msg${i}`, sentAt: sharedAt });
+    }
+
+    // First tick: emits all CAP+1 records; when adding SM_cap_1000 the set size
+    // exceeds CAP, so SM_cap_0 (oldest/first inserted) is evicted.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(emittedSids).toHaveLength(CAP + 1);
+
+    // Second tick: all records returned again (sentAt = epoch <= cursor = epoch, inclusive).
+    // SM_cap_1 through SM_cap_1000 are still in the seen set → deduped.
+    // SM_cap_0 was evicted → it re-emits.
+    await vi.advanceTimersByTimeAsync(1000);
+    const secondTickSids = emittedSids.slice(CAP + 1);
+    expect(secondTickSids).toContain('SM_cap_0');
+    expect(secondTickSids).toHaveLength(1);
+
+    await adapter.disconnect();
+  });
+});
+
+describe('TwilioSmsAdapter inbound poll — error handling', () => {
+  it('transient list failure emits typed error via on("error"), poll continues and recovers', async () => {
+    vi.useFakeTimers();
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const errors: Error[] = [];
+    const msgs: string[] = [];
+    adapter.on('error', (e) => errors.push(e));
+    adapter.on('message', (m) => { if (m.text) msgs.push(m.text); });
+
+    await adapter.connect();
+
+    // Arm a transient failure for the first tick
+    port.failNextList(Object.assign(new Error('connection reset'), { status: 500 }));
+
+    await vi.advanceTimersByTimeAsync(1000); // tick 1 — fails, emits error
+    expect(errors).toHaveLength(1);
+    expect(msgs).toHaveLength(0);
+    expect(adapter.state().state).toBe('connected'); // still connected — not stopped
+
+    // Tick 2: inject a record at current fake time (within lookback); poll recovers
+    port.injectInbound({ sid: 'SM_recover', from: '+15551230000', to: '+15559990000', body: 'after recovery', sentAt: new Date() });
+    await vi.advanceTimersByTimeAsync(1000); // tick 2 — succeeds
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toBe('after recovery');
+
+    await adapter.disconnect();
+  });
+
+  it('auth failure during poll emits AuthRequiredError, stops loop, transitions to auth_required', async () => {
+    vi.useFakeTimers();
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const errors: Error[] = [];
+    adapter.on('error', (e) => errors.push(e));
+
+    await adapter.connect();
+
+    let listCallCount = 0;
+    const origList = port.listInboundSince.bind(port);
+    port.listInboundSince = async (since: Date, pageSize?: number) => {
+      listCallCount++;
+      return origList(since, pageSize);
+    };
+
+    // Arm auth failure on first tick
+    port.failNextList(Object.assign(new Error('401 unauthorized'), { status: 401, code: 20003 }));
+
+    await vi.advanceTimersByTimeAsync(1000); // tick 1 — auth failure
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(AuthRequiredError);
+    expect(adapter.state().state).toBe('auth_required');
+
+    const callsAfterAuthFail = listCallCount;
+
+    // Subsequent ticks must NOT call the port — loop is stopped
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(listCallCount).toBe(callsAfterAuthFail);
+
+    await adapter.disconnect();
+  });
+});
+
+describe('TwilioSmsAdapter inbound poll — lifecycle', () => {
+  it('disconnect clears the interval — no further port calls after disconnect', async () => {
+    vi.useFakeTimers();
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    await adapter.connect();
+    await adapter.disconnect();
+
+    let listCallCount = 0;
+    port.listInboundSince = async (_since: Date, _pageSize?: number) => {
+      listCallCount++;
+      return [];
+    };
+
+    // Advance well past multiple intervals — no port calls should happen
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(listCallCount).toBe(0);
+  });
+
+  it('in-flight pollOnce does not emit after disconnect (disposed guard)', async () => {
+    vi.useFakeTimers();
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+
+    const msgs: InboundMessage[] = [];
+    adapter.on('message', (m) => msgs.push(m));
+
+    await adapter.connect();
+
+    // Inject a record at current fake time (within lookback window)
+    port.injectInbound({ sid: 'SM_inflight', from: '+15551230000', to: '+15559990000', body: 'inflight', sentAt: new Date() });
+
+    // Disconnect before any timer fires
+    await adapter.disconnect();
+
+    // Now advance — timer is cleared so pollOnce should never run
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(msgs).toHaveLength(0);
+  });
+
+  it('pollIntervalMs 0: no polling started, no port list calls on connect', async () => {
+    const port = new MockTwilioSmsPort();
+    let listCallCount = 0;
+    port.listInboundSince = async () => {
+      listCallCount++;
+      return [];
+    };
+    const adapter = new TwilioSmsAdapter(makeConfig({ pollIntervalMs: 0 }), port);
+    await adapter.connect();
+    expect(listCallCount).toBe(0);
+    await adapter.disconnect();
+    expect(listCallCount).toBe(0);
+  });
+});
+
+describe('TwilioSmsAdapter inbound poll — robustness', () => {
+  it('a throwing message listener does not break the batch, other listeners, or polling', async () => {
+    vi.useFakeTimers();
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig({ pollIntervalMs: 5000 }), port);
+
+    const received: string[] = [];
+    adapter.on('message', () => {
+      throw new Error('listener bug');
+    });
+    adapter.on('message', (m) => received.push(m.inboundEventKey));
+
+    await adapter.connect();
+    port.injectInbound({ sid: 'SM_rb1', from: '+1', to: '+2', body: 'a', sentAt: new Date() });
+    port.injectInbound({ sid: 'SM_rb2', from: '+1', to: '+2', body: 'b', sentAt: new Date() });
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // Both records emitted to the healthy listener despite the throwing one
+    expect(received).toEqual(['SM_rb1', 'SM_rb2']);
+
+    // Polling continues on the next tick
+    port.injectInbound({ sid: 'SM_rb3', from: '+1', to: '+2', body: 'c', sentAt: new Date() });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(received).toEqual(['SM_rb1', 'SM_rb2', 'SM_rb3']);
+    await adapter.disconnect();
+  });
+
+  it('overlapping ticks do not overlap polls (reentrancy guard)', async () => {
+    vi.useFakeTimers();
+    const port = new MockTwilioSmsPort();
+    let listCalls = 0;
+    const gate: { release: (() => void) | null } = { release: null };
+    port.listInboundSince = async () => {
+      listCalls++;
+      // Hang until the test releases — simulates a poll slower than the interval
+      await new Promise<void>((resolve) => {
+        gate.release = resolve;
+      });
+      return [];
+    };
+
+    const adapter = new TwilioSmsAdapter(makeConfig({ pollIntervalMs: 5000 }), port);
+    await adapter.connect();
+
+    // Three intervals elapse while the first poll is still in flight
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(listCalls).toBe(1);
+
+    // Release the hung poll; the next tick may poll again
+    gate.release?.();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(listCalls).toBe(2);
+    gate.release?.();
+    await adapter.disconnect();
+  });
+});
