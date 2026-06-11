@@ -660,12 +660,14 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     persistView(runtime).restorePersistedFallbackWindow();
     expect(persistView(runtime).effectiveProvider).toBe('opencode-cli');
 
-    // The re-save must carry the original activatedAt, not a fresh Date.now().
+    // The re-save must carry the original activatedAt and the original reason
+    // (not 'restored' — the restore event is captured in the log line, not
+    // the persisted record).
     expect(saveSpy).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         activatedAt: originalActivatedAt,
-        reason: 'restored',
+        reason: 'usage-limit',
       }),
     );
 

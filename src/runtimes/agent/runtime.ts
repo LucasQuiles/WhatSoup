@@ -1279,6 +1279,11 @@ export class AgentRuntime implements Runtime {
   // Epoch ms when the current fallback window was first activated. Preserved
   // across extensions so the original engagement time is never overwritten.
   private fallbackActivatedAt: number | null = null;
+  // The ORIGINAL cause that first armed the current window. Set once on first
+  // activation and preserved across extensions and restores so the root cause
+  // is never overwritten by a later extension or restart. Cleared alongside
+  // fallbackActivatedAt on deactivation and shutdown.
+  private fallbackArmReason: string | null = null;
   // Process-local fallback telemetry — deliberately NOT persisted (reset on
   // restart); the durable artifact is the window itself (agent_fallback_state).
   private fallbackTurnsServed = 0;
@@ -5007,6 +5012,7 @@ export class AgentRuntime implements Runtime {
     }
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
+    this.fallbackArmReason = null;
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
     }
@@ -5326,6 +5332,11 @@ export class AgentRuntime implements Runtime {
    * activation, the window is set EXACTLY — it may shorten an active window;
    * operator intent wins over extend-never-shorten. Arms via the shared
    * hardened path (persistence + credential pre-flight).
+   *
+   * Reason provenance: an admin force is always treated as a NEW cause, even
+   * when a usage-limit window is already active. The stored reason is reset to
+   * 'admin-forced' so the persisted record accurately reflects the current
+   * operator action rather than the original automatic trigger.
    */
   forceFallback(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string } {
     if (!this.agentFallbackProvider) {
@@ -5334,6 +5345,9 @@ export class AgentRuntime implements Runtime {
     const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
     const dur = Math.min(MAX_FALLBACK_WINDOW_MS, Math.max(MIN_FALLBACK_WINDOW_MS, requested));
     const until = Date.now() + dur;
+    // Reset reason so armFallbackWindow stores 'admin-forced' as the new
+    // original cause, replacing any prior reason (e.g. 'usage-limit').
+    this.fallbackArmReason = null;
     this.armFallbackWindow(until, 'admin-forced');
     log.info({ activeUntil: new Date(until).toISOString() }, 'fallback window forced by admin');
     return { ok: true, activeUntil: until, clamped: dur !== requested };
@@ -5428,6 +5442,11 @@ export class AgentRuntime implements Runtime {
   private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now()): void {
     this.fallbackActiveUntil = until;
     this.fallbackActivatedAt = activatedAt;
+    // Preserve original cause: only set on first arm; extensions and restores
+    // must pass the original reason so it is not overwritten.
+    if (this.fallbackArmReason === null) {
+      this.fallbackArmReason = reason;
+    }
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
       this.revertTimer = null;
@@ -5496,9 +5515,13 @@ export class AgentRuntime implements Runtime {
       // Clamp the restored window so a clock-skew or tampered row cannot pin
       // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
       const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
-      this.armFallbackWindow(clampedUntil, 'restored', persisted.activatedAt);
+      // Pass persisted.reason so the original cause survives the restart.
+      // 'restored' is already captured in the log line below.
+      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt);
+      const wasClamped = clampedUntil < persisted.activeUntil;
       log.info({
-        activeUntil: new Date(persisted.activeUntil).toISOString(),
+        activeUntil: new Date(clampedUntil).toISOString(),
+        ...(wasClamped ? { persistedUntil: new Date(persisted.activeUntil).toISOString() } : {}),
         originalReason: persisted.reason,
       }, 'restored provider-fallback window from persisted state');
     } catch (err) {
@@ -5537,7 +5560,11 @@ export class AgentRuntime implements Runtime {
     const activatedAt = wasActive && this.fallbackActivatedAt !== null
       ? this.fallbackActivatedAt
       : now;
-    this.armFallbackWindow(until, 'usage-limit', activatedAt);
+    // Pass the original cause on extension so the root cause is preserved;
+    // on first activation fallbackArmReason is null so armFallbackWindow
+    // stores 'usage-limit' as the original cause.
+    const reason = wasActive && this.fallbackArmReason !== null ? this.fallbackArmReason : 'usage-limit';
+    this.armFallbackWindow(until, reason, activatedAt);
 
     log.info({
       instanceName: this.instanceName,
@@ -5558,6 +5585,7 @@ export class AgentRuntime implements Runtime {
     if (this.fallbackActiveUntil === null) return;
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
+    this.fallbackArmReason = null;
     try {
       clearFallbackState(this.db);
     } catch (err) {
