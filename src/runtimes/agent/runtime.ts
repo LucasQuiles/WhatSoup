@@ -5321,6 +5321,30 @@ export class AgentRuntime implements Runtime {
     };
   }
 
+  /**
+   * Admin override (FALLBACK ON): force a fallback window. Unlike usage-limit
+   * activation, the window is set EXACTLY — it may shorten an active window;
+   * operator intent wins over extend-never-shorten. Arms via the shared
+   * hardened path (persistence + credential pre-flight).
+   */
+  forceFallback(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string } {
+    if (!this.agentFallbackProvider) {
+      return { ok: false, reason: 'no fallbackProvider configured for this instance' };
+    }
+    const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
+    const dur = Math.min(MAX_FALLBACK_WINDOW_MS, Math.max(MIN_FALLBACK_WINDOW_MS, requested));
+    const until = Date.now() + dur;
+    this.armFallbackWindow(until, 'admin-forced');
+    log.info({ activeUntil: new Date(until).toISOString() }, 'fallback window forced by admin');
+    return { ok: true, activeUntil: until, clamped: dur !== requested };
+  }
+
+  /** Admin override (FALLBACK OFF): end any active fallback window now. Idempotent. */
+  disableFallback(): { ok: true } {
+    this.deactivateProviderFallback('admin-disabled');
+    return { ok: true };
+  }
+
   /** Model paired with {@link effectiveProvider}: fallbackModel while the window is active, else the primary model. */
   private get effectiveModel(): string | undefined {
     return this.isFallbackWindowActive && this.agentFallbackProvider

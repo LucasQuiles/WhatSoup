@@ -42,4 +42,8 @@ export interface Runtime {
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
   };
+  /** Admin override: force a fallback window of the given duration (or the default). */
+  forceFallback?(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string };
+  /** Admin override: end any active fallback window immediately. Idempotent. */
+  disableFallback?(): { ok: true };
 }

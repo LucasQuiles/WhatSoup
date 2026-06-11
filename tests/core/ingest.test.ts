@@ -32,6 +32,7 @@ vi.mock('../../src/core/command-router.ts', () => ({
 
 vi.mock('../../src/core/admin.ts', () => ({
   handleAdminCommand: vi.fn(),
+  handleFallbackCommand: vi.fn(),
   sendApprovalRequest: vi.fn(),
 }));
 
@@ -56,7 +57,7 @@ import { createIngestHandler, getIngestStats } from '../../src/core/ingest.ts';
 import { drainIngest } from './_helpers/ingest-drain.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router.ts';
-import { handleAdminCommand, sendApprovalRequest } from '../../src/core/admin.ts';
+import { handleAdminCommand, handleFallbackCommand, sendApprovalRequest } from '../../src/core/admin.ts';
 import { shouldRespond } from '../../src/core/access-policy.ts';
 import { extractLocal } from '../../src/core/access-list.ts';
 import { getMessagesBySender } from '../../src/core/messages.ts';
@@ -69,6 +70,7 @@ import { config } from '../../src/config.ts';
 const mockIsAdminMessage = vi.mocked(isAdminMessage);
 const mockParseAdminCommand = vi.mocked(parseAdminCommand);
 const mockHandleAdminCommand = vi.mocked(handleAdminCommand);
+const mockHandleFallbackCommand = vi.mocked(handleFallbackCommand);
 const mockSendApprovalRequest = vi.mocked(sendApprovalRequest);
 const mockShouldRespond = vi.mocked(shouldRespond);
 const mockExtractLocal = vi.mocked(extractLocal);
@@ -178,6 +180,7 @@ function setHappyPath(): void {
   mockParseAdminCommand.mockReturnValue(null);
   mockShouldRespond.mockReturnValue({ respond: true, reason: 'dm_allowed', accessStatus: 'allowed' });
   mockHandleAdminCommand.mockResolvedValue(undefined);
+  mockHandleFallbackCommand.mockResolvedValue(undefined);
   mockSendApprovalRequest.mockResolvedValue(undefined);
   mockExtractLocal.mockImplementation((jid: string) => jid.split('@')[0]);
 }
@@ -901,5 +904,40 @@ describe('REQ-010: passive instance short-circuit', () => {
     await runIngest(handler, makeIncomingMessage());
 
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+  });
+});
+
+// ===========================================================================
+// REQ-002.AC-02b: fallback admin command routing
+// ===========================================================================
+
+describe('REQ-002.AC-02b: fallback admin command routing', () => {
+  it('FALLBACK STATUS consumed as admin command, never reaches runtime.handleMessage', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+
+    mockIsAdminMessage.mockReturnValue(true);
+    mockParseAdminCommand.mockReturnValue({ action: 'fallback', sub: 'status' });
+
+    const msg = makeIncomingMessage({ content: 'fallback status' });
+    await runIngest(handler, msg);
+
+    // handleFallbackCommand invoked with runtime + messenger
+    expect(mockHandleFallbackCommand).toHaveBeenCalledWith(
+      runtime,
+      messenger,
+      { action: 'fallback', sub: 'status' },
+      msg.chatJid,
+      undefined,
+    );
+
+    // handleAdminCommand NOT called (different code path)
+    expect(mockHandleAdminCommand).not.toHaveBeenCalled();
+
+    // Runtime NOT dispatched
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+    expect(mockShouldRespond).not.toHaveBeenCalled();
   });
 });
