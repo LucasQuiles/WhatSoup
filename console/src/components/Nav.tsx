@@ -9,8 +9,11 @@ import {
   Download,
   Wifi,
   WifiOff,
+  Sun,
+  Moon,
 } from "lucide-react";
 import { useRealtime } from "../hooks/use-websocket";
+import { useTheme } from "../hooks/use-theme";
 
 interface NavProps {
   alertCount?: number;
@@ -23,6 +26,7 @@ interface NavProps {
 
 const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAvailable, remoteSha, onUpdateClick }) => {
   const { connected } = useRealtime();
+  const { theme, toggleTheme } = useTheme();
   const location = useLocation();
   const isFleetActive = location.pathname === '/' || location.pathname.startsWith('/lines/');
   return (
@@ -127,8 +131,16 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         </NavLink>
       </div>
 
-      {/* Right cluster: system status */}
+      {/* Right cluster: theme toggle + system status */}
       <div className="text-xs flex items-center gap-2 font-mono">
+        <button
+          type="button"
+          onClick={toggleTheme}
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          className="c-btn-ghost flex items-center justify-center w-[var(--sp-6)] h-[var(--sp-6)] rounded-sm c-hover text-t4 hover:text-t2"
+        >
+          {theme === 'dark' ? <Sun size={14} strokeWidth={1.75} /> : <Moon size={14} strokeWidth={1.75} />}
+        </button>
         {connected ? (
           <span className="flex items-center gap-1 text-s-ok" title="Realtime connected">
             <Wifi size={12} strokeWidth={1.75} />

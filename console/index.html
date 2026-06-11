@@ -5,6 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>WhatSoup Console</title>
+    <!-- Theme init: apply persisted theme before first paint to avoid flash.
+         Reads whatsoup:theme from localStorage; defaults to dark (tokens-v3 §5). -->
+    <script>
+      (function() {
+        try {
+          var t = localStorage.getItem('whatsoup:theme');
+          document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
