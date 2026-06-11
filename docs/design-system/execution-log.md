@@ -176,6 +176,54 @@ palettes/motion/naming/state taxonomy/density/table+log strategy; T8 spike allow
 
 ---
 
+## G2 — Visual/Spec Lock — 2026-06-11
+
+**Approved G2 on 2026-06-11: Option A conditional lock** (source: operator implementation driver
+declaring v2 Blend the locked direction). Three open items carried as mandatory T6 resolution criteria.
+**T8 DECLINED (superseded by authorized implementation).** Record: `02-directions/decision-log.md`.
+Also distilled fourth operator dossier → `01-research/synthesis-seed-4.md` (scorecard rubric, NN/g
+rules, pointer/hover resilience, Stylelint precedent, Awwwards leaderboard as stimulus-only).
+Commit: `3b601252`.
+
+---
+
+## T6 — Formal Design-System Spec — 2026-06-11
+
+**Verdict: Pass.** 21 files under `03-spec/` (tokens-v3 + 7 foundations + 13 component specs).
+All 180 census tokens dispositioned (49 formalized / 40 component / 84 superseded / 7 orphan-rejected);
+all 72 v2.html properties mapped. G2 items resolved: drawer squeeze rule (container-query dual mode +
+column-collapse priority), nameplate tuning (tracking cancellation, optical centering, tick spec),
+utility-class disposition (Stack/Cluster/Container/Prose primitives + forbidden list). Four light-theme
+AA failures found and FIXED in spec (ok/warn/passive wash-fg + --text-3). Open: feed BEM decision (C2),
+squeeze transition mode (implementer), v2.html carries pre-fix hexes (spec authoritative).
+Hygiene: "Phase N" prose labels guard-blocked → renamed to C-stage labels. Commit: `7b3889ef`.
+
+---
+
+## T7 — Enforcement + Cutover Plans — 2026-06-11
+
+**Verdict: Pass.** `04-enforcement/lint-plan.md` (22-rule catalog, 7-state lifecycle, 5-field waiver
+policy w/ YAML registry, 15-check rg regression suite wired to husky + verify:push:branch, readiness
+scorecard), `05-cutover/cutover-plan.md` (C0–C4 reversible, driver mapping, rehearsal rule
+dense/expressive/transactional, 8-axis visual QA matrix, rollback per stage), `05-cutover/
+branding-touchpoints.md` (exhaustive: 27 console/src lines, 84 test lines, 8 docs/html — all tagged;
+3 unknowns queued). Contradictions caught: eslint-rules/ dir does not exist (stale reference; custom
+rules will live at console/eslint-rules/); Nav wordmark grep-invisible (split spans — rule includes
+split-sibling detector); P2-11 line cites off-by-one; tabular-nums has zero current occurrences
+(whole-surface gap, rule enters at proposed); four infinite animations vs ambient budget (shimmer/
+typing-bounce waivered pending motion-stage disposition). Commit: `5105f8b2`.
+
+---
+
+## G3 package + D0 readiness — 2026-06-11
+
+`g3-signoff-package.md` (sign-off recommendation, unresolved risks, verification matrix) and
+`06-implementation/d0-readiness-packet.md` (pilot slice = Fleet table+toolbar+chips+drawer+log;
+implementation worktree proposal soup-impl / feat/soup-v3-foundation off origin/main; first three
+D1 slices specified). **Awaiting operator: G3 sign-off + D0 packet approval → D1 begins.**
+
+---
+
 ## G2 Review Package Preparation — 2026-06-11
 
 **Verdict: Pass**

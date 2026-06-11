@@ -21,11 +21,11 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
 | T4 | Three direction mockups | ✅ Complete |
 | **G1** | **Direction selection gate** | ✅ **Approved 2026-06-11** |
 | T5 | Winner refinement (blend) | ✅ Round 1 complete (`iterations/v2.html`) |
-| **G2** | **Visual/spec lock gate** | 🔶 **OPEN — review package ready** |
-| T6 | Formal design-system spec | ⬜ Blocked on G2 |
-| T7 | Enforcement + cutover plans | ⬜ Blocked on G2 |
-| T8 | Optional throwaway token spike | ⬜ Blocked on G2 + explicit approval |
-| **G3** | **Design program sign-off** | ⬜ Awaiting user |
+| **G2** | **Visual/spec lock gate** | ✅ **Approved 2026-06-11 — Option A conditional lock** |
+| T6 | Formal design-system spec | ✅ Complete (21 files) |
+| T7 | Enforcement + cutover plans | ✅ Complete |
+| T8 | Optional throwaway token spike | ❌ Declined (superseded by authorized implementation) |
+| **G3** | **Design program sign-off** | 🔶 **OPEN — package ready** (`g3-signoff-package.md`) |
 
 ## Gate decisions
 
@@ -34,9 +34,14 @@ separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans d
   log-stream treatment); naming vocabulary = converged set locked (Soup Kitchen→Fleet, single noun "Line",
   instance demoted to process copy, Inbox/Ops kept, unified "attention" metric, SOUP wordmark carries
   playfulness); required changes = none beyond blend integration. Full record: `02-directions/decision-log.md`.
-- **G2 review package prepared on 2026-06-11:** see `02-directions/g2-review-package.md`. Recommendation:
-  conditional lock of `iterations/v2.html`; T6/T7 remain blocked until explicit G2 approval, and T8 remains
-  optional/blocked until separately approved.
+- **Approved G2 on 2026-06-11: Option A — conditional lock of `iterations/v2.html`** (source: operator
+  implementation driver declaring v2 Blend the locked direction). Three conditional items resolved in T6
+  spec (drawer squeeze rule, nameplate tuning, utility-class disposition). **T8 declined** — superseded by
+  authorized implementation. Review package: `02-directions/g2-review-package.md`; full record:
+  `02-directions/decision-log.md`.
+- **G3: OPEN** — sign-off package at `g3-signoff-package.md`; first implementation packet at
+  `06-implementation/d0-readiness-packet.md`. Implementation (operator-driver stages D0–D8 → cutover
+  C0–C4) begins in a separate worktree only after G3 sign-off + D0 packet approval.
 
 ## User decisions (locked 2026-06-11)
 
