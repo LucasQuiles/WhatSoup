@@ -101,8 +101,7 @@ describe('probeFallbackBinary', () => {
   it('returns present with null version when binary produces no stdout', async () => {
     const spawnImpl = makeSpawnImpl({ stdoutLines: [] });
     const result = await probeFallbackBinary('opencode', spawnImpl);
-    expect(result.status).toBe('present');
-    expect(result.version).toBeNull();
+    expect(result).toEqual({ status: 'present', version: null });
   });
 
   it('returns the first line only when stdout has multiple lines', async () => {
