@@ -100,13 +100,13 @@ function mapPortError(
 // Dedupe-set capacity.
 //
 // The seen Set is bounded to DEDUPE_CAP entries (insertion-order eviction).
-// After processing each poll batch, the set is trimmed to DEDUPE_CAP by
-// removing the oldest entries (first inserted). This bounds memory while
-// preserving the dedup guarantee for the most recently seen SIDs.
+// Trimming happens per accepted record inside handleInboundRecord — the
+// shared seam used by both the poll loop and the webhook push path — by
+// removing the oldest entries (first inserted) until the set is back at cap.
 //
-// Eviction is post-batch (not per-record) to prevent cascade: if eviction
-// happened mid-iteration, each new entry in the same batch could evict the
-// previous entry, turning O(1) dedupe into O(n) re-emission.
+// Per-record trimming cannot cascade re-emissions here because the poll
+// fetch is capped at 500 records per tick (< DEDUPE_CAP), so a single batch
+// can never evict entries added earlier in the same batch.
 //
 // Note: a restart that replays within the lookback window will re-emit any
 // message whose SID was evicted — replay within the window is best-effort,
@@ -392,10 +392,10 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
    * On transient/rate-limit failure: emits error, keeps polling (interval
    * cadence is unchanged — no tight loop).
    *
-   * Dedupe eviction is post-batch: all new SIDs in a batch are first processed
-   * and emitted, then the seen set is trimmed to DEDUPE_CAP oldest-first. This
-   * prevents cascade re-emission that would occur if we evicted per-record
-   * mid-iteration (each eviction would expose the next record as "unseen").
+   * Dedupe eviction happens per accepted record inside handleInboundRecord
+   * (shared with the webhook push path); the 500-record fetch cap keeps a
+   * single batch below DEDUPE_CAP, so per-record trimming cannot evict
+   * same-batch entries.
    */
   async pollOnce(): Promise<void> {
     // Guards: skip if disconnected/disposed, not in a pollable state, or a

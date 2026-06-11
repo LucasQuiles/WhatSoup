@@ -142,3 +142,16 @@ describe('placeCall', () => {
     expect(port.calls[0].to).toBe('+15551230001');
   });
 });
+
+describe('failNextCall', () => {
+  it('causes one rejection then the next call succeeds (failed call not recorded)', async () => {
+    const port = new MockTwilioSmsPort();
+    port.failNextCall(new Error('circuit open'));
+    await expect(port.placeCall({ to: '+1', from: '+2', twiml: '<Response/>' }))
+      .rejects.toThrow('circuit open');
+    expect(port.calls).toHaveLength(0);
+    const ref = await port.placeCall({ to: '+1', from: '+2', twiml: '<Response/>' });
+    expect(ref.sid).toMatch(/^CA/);
+    expect(port.calls).toHaveLength(1);
+  });
+});
