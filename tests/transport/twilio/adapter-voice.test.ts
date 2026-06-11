@@ -5,6 +5,7 @@ import { MockTwilioSmsPort } from '../../../src/transport/twilio/testing/mock-po
 import { makeTwilioConfig } from './helpers.ts';
 import { isVoiceCallCapable } from '../../../src/transport/contract/voice.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
+import type { InboundMessage } from '../../../src/transport/contract/index.ts';
 
 describe('TwilioSmsAdapter voice capability', () => {
   it('is voice-call capable and delegates placeCall to the port', async () => {
@@ -26,5 +27,34 @@ describe('TwilioSmsAdapter voice capability', () => {
     await expect(
       adapter.placeCall({ channel: makeChannelId('sms', 'ml-bot'), id: '+15551230001' }),
     ).rejects.toThrow(/voice is not enabled/);
+  });
+});
+
+
+describe('TwilioSmsAdapter voicemail transcript ingestion', () => {
+  it('handleTranscript emits an InboundMessage with voice attachment + transcript text', async () => {
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(
+      makeTwilioConfig({ voice: { enabled: true, voicemailMaxLengthSec: 120 } }), port);
+    const got: InboundMessage[] = [];
+    adapter.on('message', (m) => got.push(m));
+    await adapter.connect();
+
+    adapter.handleTranscript({
+      text: 'call me back', recordingSid: 'RE00000000000000000000000000000000',
+      recordingUrl: 'https://api.twilio.test/media', callSid: 'CA9',
+      from: '+15551230001', to: '+15559990000',
+    });
+    expect(got).toHaveLength(1);
+    expect(got[0].text).toBe('call me back');
+    expect(got[0].attachments).toEqual([
+      { id: 'RE00000000000000000000000000000000', kind: 'voice', mime: 'audio/mpeg' },
+    ]);
+    expect(got[0].inboundEventKey).toBe('RE00000000000000000000000000000000');
+    expect(got[0].fromMe).toBe(false);
+    // dedupe by recording sid
+    adapter.handleTranscript({ text: 'call me back', recordingSid: 'RE00000000000000000000000000000000', callSid: 'CA9', from: '+15551230001', to: '+15559990000' });
+    expect(got).toHaveLength(1);
+    await adapter.disconnect();
   });
 });

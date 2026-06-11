@@ -531,3 +531,18 @@ describe('TwilioSmsAdapter handleInboundRecord (webhook push seam)', () => {
     await adapter.disconnect();
   });
 });
+
+describe('TwilioSmsAdapter webhook mode', () => {
+  it('does not start the poll loop when inboundMode is webhook', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const port = new MockTwilioSmsPort();
+    let listCalls = 0;
+    port.listInboundSince = async () => { listCalls++; return []; };
+    const adapter = new TwilioSmsAdapter(
+      makeConfig({ inboundMode: 'webhook', pollIntervalMs: 15000 }), port);
+    await adapter.connect();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(listCalls).toBe(0);
+    await adapter.disconnect();
+  });
+});

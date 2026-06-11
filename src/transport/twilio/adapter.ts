@@ -28,6 +28,7 @@ import {
 import type { CallRef, VoiceCapableTransport, PlaceCallOptions } from '../contract/voice.ts';
 import { E164_RE, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioVoiceConfig } from './types.ts';
 import type { InboundSms, TwilioSmsPort } from './port.ts';
+import type { TranscriptDelivery } from './webhook-payloads.ts';
 
 // ---------------------------------------------------------------------------
 // Listener registry
@@ -137,6 +138,7 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
   private readonly messagingServiceSid?: string;
   private readonly pollIntervalMs: number;
   private readonly voice: TwilioVoiceConfig;
+  private readonly inboundMode: string;
 
   // Monotonic per-adapter ingest counter — incremented for each emitted message.
   private ingestSeq = 0;
@@ -180,6 +182,7 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
     this.messagingServiceSid = config.messagingServiceSid;
     this.pollIntervalMs = config.pollIntervalMs;
     this.voice = config.voice ?? DEFAULT_TWILIO_VOICE;
+    this.inboundMode = config.inboundMode;
 
     this.capabilities = {
       channel: this.channelId,
@@ -225,10 +228,10 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
     }
     this.transitionTo({ state: 'connected', since: new Date() });
 
-    // Start inbound poll loop when pollIntervalMs > 0.
+    // Start inbound poll loop when pollIntervalMs > 0 and inboundMode is 'poll'.
     // Cursor initialised to (now - pollIntervalMs) as a lookback window so
     // messages that arrived just before connect are not silently dropped.
-    if (this.pollIntervalMs > 0) {
+    if (this.inboundMode === 'poll' && this.pollIntervalMs > 0) {
       this.lastPolledAt = new Date(Date.now() - this.pollIntervalMs);
       this.pollTimer = setInterval(() => {
         void this.pollOnce();
@@ -468,6 +471,35 @@ export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport
     this.safeEmit(this.listeners.message, msg);
     // Post-record eviction: trim the seen set to DEDUPE_CAP by removing the
     // oldest entries (first inserted by insertion-order of Set).
+    for (const oldest of this.seen) {
+      if (this.seen.size <= DEDUPE_CAP) break;
+      this.seen.delete(oldest);
+    }
+    return true;
+  }
+
+  /**
+   * Process a completed voicemail transcription through the shared dedupe + emit pipeline.
+   * Dedupes on recordingSid (same key-space as message SIDs in the seen set).
+   * Returns true if emitted.
+   */
+  handleTranscript(t: TranscriptDelivery): boolean {
+    if (this.disposed || this.seen.has(t.recordingSid)) return false;
+    this.seen.add(t.recordingSid);
+    const peer = t.from;
+    this.safeEmit(this.listeners.message, {
+      ref: { channel: this.channelId, conversation: peer, id: t.recordingSid },
+      conversation: { channel: this.channelId, id: peer },
+      sender: { channel: this.channelId, id: peer },
+      fromMe: false,
+      text: t.text.trim().length > 0 ? t.text : null,
+      attachments: [{ id: t.recordingSid, kind: 'voice', mime: 'audio/mpeg' }],
+      timestamp: new Date(),
+      inboundEventKey: t.recordingSid,
+      transportTimestamp: new Date(),
+      ingestSeq: ++this.ingestSeq,
+    });
+    // Post-record eviction: trim the seen set to DEDUPE_CAP.
     for (const oldest of this.seen) {
       if (this.seen.size <= DEDUPE_CAP) break;
       this.seen.delete(oldest);
