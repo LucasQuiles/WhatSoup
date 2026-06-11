@@ -22,6 +22,7 @@ import {
   PayloadTooLargeError,
   PermanentProviderError,
   RateLimitedError,
+  TransientProviderError,
 } from '../contract/errors.ts';
 import type { TwilioSmsConfig } from './types.ts';
 import type { InboundSms, TwilioSmsPort } from './port.ts';
@@ -52,6 +53,13 @@ function isTwilioRateLimit(err: PortErrorLike): boolean {
   return err.status === 429 || err.code === 20429;
 }
 
+function isTwilioTransient(err: PortErrorLike): boolean {
+  // 5xx = provider-side fault; no status AND no Twilio code = network-level
+  // failure (DNS, timeout, connection reset) that never produced an API reply.
+  return (typeof err.status === 'number' && err.status >= 500)
+    || (err.status === undefined && err.code === undefined);
+}
+
 // ---------------------------------------------------------------------------
 // mapPortError: translate a raw port error to a typed TransportError.
 // Rule: throw ALWAYS as typed error; never swallow; never retry automatically.
@@ -76,6 +84,12 @@ function mapPortError(
     // retryAfterMs intentionally omitted: the port error shape does not carry
     // Retry-After yet. If the SDK port (twilio-port.ts) ever surfaces it, wire it here.
     return new RateLimitedError({ ...base, message: `Twilio rate limit: ${msg}`, providerCode: String(pe.code ?? pe.status ?? '') });
+  }
+  if (isTwilioTransient(pe)) {
+    // NOTE for send-path callers: a network failure after handoff is ambiguous
+    // — Twilio may have accepted the message. Generic retry loops risk
+    // duplicate SMS on this class of error.
+    return new TransientProviderError({ ...base, message: `Twilio transient error: ${msg}`, providerCode: String(pe.code ?? pe.status ?? '') });
   }
   return new PermanentProviderError({ ...base, message: `Twilio provider error: ${msg}`, providerCode: String(pe.code ?? pe.status ?? '') });
 }
@@ -187,6 +201,11 @@ export class TwilioSmsAdapter implements TransportAdapter {
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
   async connect(): Promise<void> {
+    // A repeated connect() must not leak the previous poll interval.
+    if (this.pollTimer !== null) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     this.disposed = false;
     this.transitionTo({ state: 'starting', since: new Date() });
     try {
@@ -331,7 +350,9 @@ export class TwilioSmsAdapter implements TransportAdapter {
   private async pollOnceInner(): Promise<void> {
     let records: readonly InboundSms[];
     try {
-      records = await this.port.listInboundSince(this.lastPolledAt);
+      // Cap the per-tick fetch: DEDUPE_CAP bounds the seen-set, not the batch;
+      // an unbounded burst would otherwise arrive as one giant page.
+      records = await this.port.listInboundSince(this.lastPolledAt, 500);
     } catch (err) {
       if (this.disposed) return;
       const mapped = mapPortError(err, this.channelId, 'pollInbound', this.nextCorrelationId(), 'channel');

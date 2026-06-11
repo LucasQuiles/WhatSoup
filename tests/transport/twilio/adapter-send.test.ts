@@ -10,6 +10,7 @@ import {
   ConversationNotFoundError,
   PermanentProviderError,
   RateLimitedError,
+  TransientProviderError,
 } from '../../../src/transport/contract/errors.ts';
 
 function makeConfig(overrides?: Partial<TwilioSmsConfig>): TwilioSmsConfig {
@@ -93,9 +94,18 @@ describe('TwilioSmsAdapter connect', () => {
     expect(adapter.state().state).toBe('disconnected');
   });
 
-  it('non-auth failure: throws PermanentProviderError and leaves state disconnected', async () => {
+  it('5xx failure: throws TransientProviderError and leaves state disconnected', async () => {
     const port = new MockTwilioSmsPort();
     port.failNextVerify(Object.assign(new Error('boom'), { status: 500 }));
+
+    const adapter = new TwilioSmsAdapter(makeConfig(), port);
+    await expect(adapter.connect()).rejects.toBeInstanceOf(TransientProviderError);
+    expect(adapter.state().state).toBe('disconnected');
+  });
+
+  it('4xx provider failure: throws PermanentProviderError and leaves state disconnected', async () => {
+    const port = new MockTwilioSmsPort();
+    port.failNextVerify(Object.assign(new Error('invalid sid'), { status: 404, code: 20404 }));
 
     const adapter = new TwilioSmsAdapter(makeConfig(), port);
     await expect(adapter.connect()).rejects.toBeInstanceOf(PermanentProviderError);
@@ -194,18 +204,20 @@ describe('TwilioSmsAdapter sendText', () => {
     expect(port.sent).toHaveLength(0);
   });
 
-  it('port send failure throws PermanentProviderError', async () => {
+  it('bare network-style send failure throws TransientProviderError', async () => {
     const port = new MockTwilioSmsPort();
     const adapter = new TwilioSmsAdapter(makeConfig(), port);
     await adapter.connect();
 
-    port.failNextSend(new Error('unknown provider error'));
+    port.failNextSend(new Error('socket hang up'));
 
     const channel = makeChannelId('sms', 'ml-bot');
 
+    // No status, no Twilio code → network-level → transient (and ambiguous:
+    // Twilio may have accepted the message; callers must not blind-retry).
     await expect(
       adapter.sendText({ channel, id: '+15551230000' }, 'hello'),
-    ).rejects.toBeInstanceOf(PermanentProviderError);
+    ).rejects.toBeInstanceOf(TransientProviderError);
 
     expect(port.sent).toHaveLength(0);
   });

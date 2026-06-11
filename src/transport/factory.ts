@@ -42,6 +42,14 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
           'Instance config must include a valid twilioConfig block.',
         );
       }
+      // Validation rejects these upstream, but an unvalidated path (e.g. a
+      // hand-injected INSTANCE_CONFIG) must still fail loud, not construct a
+      // port with empty credentials.
+      if (config.twilioConfig.accountSid === '' || config.twilioConfig.authTokenService === '') {
+        throw new Error(
+          '[createConnection] twilioConfig is missing accountSid or authTokenService.',
+        );
+      }
       const port = new SdkTwilioSmsPort(config.twilioConfig);
       const adapter = new TwilioSmsAdapter(config.twilioConfig, port);
       return new TwilioConnection(adapter);

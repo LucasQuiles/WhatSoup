@@ -177,7 +177,9 @@ describe('TwilioSmsAdapter inbound poll — dedupe', () => {
   });
 
   it('dedupe set stays bounded: evicted SID re-emits on next tick', async () => {
-    vi.useFakeTimers({ now: 0 });
+    // now=1_000_000 → connect() lookback cursor = 999_000; all injected
+    // records (sentAt >= 1_001_000) are inside the window.
+    vi.useFakeTimers({ now: 1_000_000 });
     const port = new MockTwilioSmsPort();
     const adapter = new TwilioSmsAdapter(makeConfig(), port);
 
@@ -186,29 +188,41 @@ describe('TwilioSmsAdapter inbound poll — dedupe', () => {
 
     await adapter.connect();
 
-    // Inject CAP+1 unique records at epoch so they always fall within any
-    // listInboundSince window, forcing the dedupe set to evict when adding
-    // the (CAP+1)th entry. All at the same sentAt so cursor stays at epoch
-    // after the first tick, meaning all records continue to be returned by
-    // the port on subsequent ticks.
+    // The adapter fetches at most 500 records per tick, so drive CAP+1 unique
+    // records through in three timestamp-advancing waves (the cursor advances
+    // to max sentAt each tick, pulling the next wave into the page).
     const CAP = 1000;
-    const sharedAt = new Date(0); // epoch — within lookback window (cursor starts at new Date(-1000))
-    for (let i = 0; i < CAP + 1; i++) {
-      port.injectInbound({ sid: `SM_cap_${i}`, from: '+15551230000', to: '+15559990000', body: `msg${i}`, sentAt: sharedAt });
+    const t = (i: number) => new Date(1_000_000 + i * 1000);
+    for (let i = 1; i <= 500; i++) {
+      port.injectInbound({ sid: `SM_cap_${i}`, from: '+15551230000', to: '+15559990000', body: `m${i}`, sentAt: t(i) });
     }
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(emittedSids).toHaveLength(500);
 
-    // First tick: emits all CAP+1 records; when adding SM_cap_1000 the set size
-    // exceeds CAP, so SM_cap_0 (oldest/first inserted) is evicted.
+    for (let i = 501; i <= 1000; i++) {
+      port.injectInbound({ sid: `SM_cap_${i}`, from: '+15551230000', to: '+15559990000', body: `m${i}`, sentAt: t(i) });
+    }
+    // The inclusive cursor boundary means the previous max-sentAt record
+    // occupies one page slot per tick, so this wave drains in two ticks.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(emittedSids).toHaveLength(CAP - 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(emittedSids).toHaveLength(CAP);
+
+    // The CAP+1th unique record pushes the seen set over the bound; the
+    // oldest entry (SM_cap_1) is evicted post-batch.
+    port.injectInbound({ sid: `SM_cap_${CAP + 1}`, from: '+15551230000', to: '+15559990000', body: 'overflow', sentAt: t(CAP + 1) });
     await vi.advanceTimersByTimeAsync(1000);
     expect(emittedSids).toHaveLength(CAP + 1);
 
-    // Second tick: all records returned again (sentAt = epoch <= cursor = epoch, inclusive).
-    // SM_cap_1 through SM_cap_1000 are still in the seen set → deduped.
-    // SM_cap_0 was evicted → it re-emits.
+    // Proof of eviction: a record re-arriving with the EVICTED sid re-emits…
+    port.injectInbound({ sid: 'SM_cap_1', from: '+15551230000', to: '+15559990000', body: 'replay-evicted', sentAt: t(CAP + 2) });
+    // …while a record with a still-seen sid stays deduped.
+    port.injectInbound({ sid: 'SM_cap_900', from: '+15551230000', to: '+15559990000', body: 'replay-seen', sentAt: t(CAP + 3) });
     await vi.advanceTimersByTimeAsync(1000);
-    const secondTickSids = emittedSids.slice(CAP + 1);
-    expect(secondTickSids).toContain('SM_cap_0');
-    expect(secondTickSids).toHaveLength(1);
+
+    const tail = emittedSids.slice(CAP + 1);
+    expect(tail).toEqual(['SM_cap_1']);
 
     await adapter.disconnect();
   });

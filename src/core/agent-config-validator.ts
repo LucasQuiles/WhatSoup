@@ -17,7 +17,7 @@
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
-import { isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
+import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
@@ -529,7 +529,7 @@ function validateTransportConfig(
   }
 
   // twilioConfig present with non-twilio transport (or absent transport) → reject as inconsistent.
-  const effectiveTransport = transport ?? 'baileys';
+  const effectiveTransport = transport ?? DEFAULT_TRANSPORT_ID;
   if (twilioConfig !== undefined && effectiveTransport !== 'twilio') {
     return err(
       'twilioConfig',
