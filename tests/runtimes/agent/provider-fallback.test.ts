@@ -313,7 +313,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
   });
 });
 
-// ─── Key-presence guard at activation (Change 2) ──────────────────────────────
+// ─── Key-presence guard at activation ────────────────────────────────────────
 
 describe('AgentRuntime — fallback key-presence guard', () => {
   beforeEach(() => {
@@ -386,7 +386,7 @@ describe('AgentRuntime — fallback key-presence guard', () => {
   });
 });
 
-// ─── assistant_text vs result asymmetry (Change 4) ────────────────────────────
+// ─── assistant_text vs result asymmetry ──────────────────────────────────────
 
 /** IOutboundQueue stub covering all members the usage-limit paths touch. */
 function makeFakeQueue() {
@@ -483,7 +483,7 @@ describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
   });
 });
 
-// ─── Usage-limit user notice (Change 5) ──────────────────────────────────────
+// ─── Usage-limit user notice ──────────────────────────────────────────────────
 
 describe('usage-limit user notice', () => {
   beforeEach(() => {
@@ -543,7 +543,7 @@ describe('usage-limit user notice', () => {
   });
 });
 
-// ─── Persistence hooks (Work item 2) ─────────────────────────────────────────
+// ─── Persistence hooks ────────────────────────────────────────────────────────
 
 type PersistenceView = {
   fallbackActiveUntil: number | null;
@@ -712,5 +712,73 @@ describe('AgentRuntime — fallback persistence hooks', () => {
 
     expect(() => persistView(runtime).restorePersistedFallbackWindow()).not.toThrow();
     expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
+  });
+
+  it('clamps a persisted window that exceeds MAX_FALLBACK_WINDOW_MS on restore', () => {
+    // A clock-skew or tampered row could carry activeUntil = now + 72h, which
+    // exceeds MAX (24h). Restore must clamp it so the in-memory window stays
+    // within the expected range.
+    const now = Date.now();
+    const farFuture = now + 72 * 60 * 60 * 1000; // 72 hours
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil: farFuture,
+      activatedAt: now - 1000,
+      reason: 'usage-limit',
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    persistView(runtime).restorePersistedFallbackWindow();
+
+    // The runtime must be on fallback.
+    expect(persistView(runtime).effectiveProvider).toBe('opencode-cli');
+
+    // The re-save must carry activeUntil <= now + MAX_FALLBACK_WINDOW_MS (24h).
+    const MAX = 24 * 60 * 60 * 1000;
+    expect(saveSpy).toHaveBeenCalled();
+    const savedState = saveSpy.mock.calls[0];
+    if (!savedState) throw new Error('saveFallbackState was not called');
+    expect(savedState[1].activeUntil).toBeLessThanOrEqual(now + MAX);
+  });
+
+  it('preserves the original activatedAt when the window is extended by a second activation', () => {
+    // When a second activateProviderFallback fires while already active, the
+    // first-engagement time must survive in the persisted row — only the window
+    // end-time may advance.
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    // First activation — record the activatedAt it persists.
+    persistView(runtime).activateProviderFallback(null);
+    const firstCall = saveSpy.mock.calls[0];
+    if (!firstCall) throw new Error('saveFallbackState was not called on first activation');
+    const originalActivatedAt = firstCall[1].activatedAt;
+    const firstActiveUntil = firstCall[1].activeUntil;
+
+    // Advance 1 hour so Date.now() has moved; a naive re-activation would
+    // stamp a fresh activatedAt. Request a window that extends past the first
+    // (now+1h + 20h = now+21h, which is beyond the initial now+5h).
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    persistView(runtime).activateProviderFallback(new Date(Date.now() + 20 * 60 * 60 * 1000));
+
+    const secondCall = saveSpy.mock.calls[1];
+    if (!secondCall) throw new Error('saveFallbackState was not called on second activation');
+    expect(secondCall[1].activatedAt).toBe(originalActivatedAt);
+    expect(secondCall[1].activeUntil).toBeGreaterThan(firstActiveUntil);
   });
 });

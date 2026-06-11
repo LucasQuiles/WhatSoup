@@ -1275,6 +1275,9 @@ export class AgentRuntime implements Runtime {
   // Provider-fallback window: epoch ms until which new sessions route to the
   // fallback provider, or null when the primary provider is active.
   private fallbackActiveUntil: number | null = null;
+  // Epoch ms when the current fallback window was first activated. Preserved
+  // across extensions so the original engagement time is never overwritten.
+  private fallbackActivatedAt: number | null = null;
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
@@ -4984,6 +4987,7 @@ export class AgentRuntime implements Runtime {
       this.revertTimer = null;
     }
     this.fallbackActiveUntil = null;
+    this.fallbackActivatedAt = null;
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
     }
@@ -5332,6 +5336,7 @@ export class AgentRuntime implements Runtime {
    *  Pass `activatedAt` explicitly when restoring to preserve the original time. */
   private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now()): void {
     this.fallbackActiveUntil = until;
+    this.fallbackActivatedAt = activatedAt;
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
       this.revertTimer = null;
@@ -5367,7 +5372,10 @@ export class AgentRuntime implements Runtime {
         clearFallbackState(this.db);
         return;
       }
-      this.armFallbackWindow(persisted.activeUntil, 'restored', persisted.activatedAt);
+      // Clamp the restored window so a clock-skew or tampered row cannot pin
+      // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
+      const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
+      this.armFallbackWindow(clampedUntil, 'restored', persisted.activatedAt);
       log.info({
         activeUntil: new Date(persisted.activeUntil).toISOString(),
         originalReason: persisted.reason,
@@ -5413,7 +5421,13 @@ export class AgentRuntime implements Runtime {
       : clampedUntil;
 
     const wasActive = this.fallbackActiveUntil !== null;
-    this.armFallbackWindow(until, 'usage-limit');
+    // Preserve the original first-engagement time across extensions so the
+    // persisted record always reflects when the fallback was first triggered,
+    // not when it was last extended.
+    const activatedAt = wasActive && this.fallbackActivatedAt !== null
+      ? this.fallbackActivatedAt
+      : now;
+    this.armFallbackWindow(until, 'usage-limit', activatedAt);
 
     log.info({
       instanceName: this.instanceName,
@@ -5433,6 +5447,7 @@ export class AgentRuntime implements Runtime {
     }
     if (this.fallbackActiveUntil === null) return;
     this.fallbackActiveUntil = null;
+    this.fallbackActivatedAt = null;
     try {
       clearFallbackState(this.db);
     } catch (err) {
