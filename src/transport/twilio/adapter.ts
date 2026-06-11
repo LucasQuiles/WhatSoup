@@ -388,29 +388,12 @@ export class TwilioSmsAdapter implements TransportAdapter {
     let maxSentAt: Date | null = null;
 
     for (const record of records) {
-      // SID-based dedupe — skip already-seen records
-      if (this.seen.has(record.sid)) continue;
-
-      // Add to seen set (eviction happens post-batch to prevent cascade)
-      this.seen.add(record.sid);
-
       // Track maximum sentAt to advance the cursor after this batch.
       if (maxSentAt === null || record.sentAt > maxSentAt) {
         maxSentAt = record.sentAt;
       }
-
-      // Build the InboundMessage and emit.
-      const msg = this.buildInboundMessage(record);
-      this.safeEmit(this.listeners.message, msg);
-    }
-
-    // Post-batch eviction: trim the seen set to DEDUPE_CAP by removing the
-    // oldest entries (first inserted by insertion-order of Set). This is done
-    // after the full batch loop to avoid cascade: mid-loop eviction would cause
-    // the just-evicted SID to appear "unseen" for the next record in the same tick.
-    for (const oldest of this.seen) {
-      if (this.seen.size <= DEDUPE_CAP) break;
-      this.seen.delete(oldest);
+      // Delegate dedupe + emit + trim to shared seam
+      this.handleInboundRecord(record);
     }
 
     // Advance cursor to max sentAt seen (not Date.now()) to avoid clock-skew
@@ -418,6 +401,28 @@ export class TwilioSmsAdapter implements TransportAdapter {
     if (maxSentAt !== null) {
       this.lastPolledAt = maxSentAt;
     }
+  }
+
+  // ── Shared inbound pipeline ───────────────────────────────────────────────
+
+  /**
+   * Process one provider record through the shared dedupe + emit pipeline.
+   * Used by the poll loop AND (stage 2) the webhook push path, so both
+   * modes share one `seen` set and one emitter. Returns true if emitted.
+   */
+  handleInboundRecord(record: InboundSms): boolean {
+    if (this.disposed) return false;
+    if (this.seen.has(record.sid)) return false;
+    this.seen.add(record.sid);
+    const msg = this.buildInboundMessage(record);
+    this.safeEmit(this.listeners.message, msg);
+    // Post-record eviction: trim the seen set to DEDUPE_CAP by removing the
+    // oldest entries (first inserted by insertion-order of Set).
+    for (const oldest of this.seen) {
+      if (this.seen.size <= DEDUPE_CAP) break;
+      this.seen.delete(oldest);
+    }
+    return true;
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────

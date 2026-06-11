@@ -513,3 +513,21 @@ describe('TwilioSmsAdapter inbound poll — outbound echo (fromMe: true)', () =>
     await adapter.disconnect();
   });
 });
+
+describe('TwilioSmsAdapter handleInboundRecord (webhook push seam)', () => {
+  it('emits exactly once for a record pushed twice (shared SID dedupe with polling)', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const port = new MockTwilioSmsPort();
+    const adapter = new TwilioSmsAdapter(makeConfig({ pollIntervalMs: 0 }), port);
+    const got: InboundMessage[] = [];
+    adapter.on('message', (m) => got.push(m));
+    await adapter.connect();
+
+    const rec = { sid: 'SMwh1', from: '+15551230001', to: '+15559990000', body: 'via webhook', sentAt: new Date(5), fromMe: false };
+    adapter.handleInboundRecord(rec);
+    adapter.handleInboundRecord(rec);
+    expect(got).toHaveLength(1);
+    expect(got[0].text).toBe('via webhook');
+    await adapter.disconnect();
+  });
+});
