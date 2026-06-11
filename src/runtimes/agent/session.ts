@@ -192,6 +192,26 @@ function resolveProviderBinary(provider: ProviderId): string {
   }
 }
 
+/**
+ * Return the CLI binary name for `provider`, or `null` for managed-loop
+ * providers that do not spawn a child process (`openai-api`, `anthropic-api`).
+ *
+ * Exported for use by the binary pre-flight in
+ * `src/runtimes/agent/providers/binary-preflight.ts`. Unknown provider IDs
+ * throw (defence in depth — callers should validate with `isProviderId` first).
+ */
+export function getProviderBinary(provider: string): string | null {
+  if (!isProviderId(provider)) {
+    throw new Error(
+      `[session-manager:getProviderBinary] unknown provider id: ${JSON.stringify(provider)}. ` +
+        `Valid: ${PROVIDER_IDS.join(', ')}.`,
+    );
+  }
+  // Managed-loop providers have no binary.
+  if (provider === 'openai-api' || provider === 'anthropic-api') return null;
+  return resolveProviderBinary(provider);
+}
+
 /** Resolve the argv for a CLI-backed provider. */
 function resolveProviderArgs(
   provider: ProviderId,
