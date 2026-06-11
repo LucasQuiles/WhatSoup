@@ -80,3 +80,59 @@ describe('TwilioWebhookServer signature gate', () => {
     expect((await fetch(`http://127.0.0.1:${port}/twilio/sms`)).status).toBe(405);
   });
 });
+
+describe('TwilioWebhookServer voice routes', () => {
+  it('answers an inbound call with say+record TwiML when voice is enabled', async () => {
+    const { server } = makeServer({ voice: { enabled: true, voicemailMaxLengthSec: 90, voicemailGreeting: 'Leave a message.' } });
+    const port = await server.start(); active = server;
+    const params = { CallSid: 'CA00000000000000000000000000000000', From: '+15551230001', To: '+15559990000' };
+    const sig = getExpectedTwilioSignature(TOKEN, `${PUBLIC}/twilio/voice`, params);
+    const res = await post(port, '/twilio/voice', params, sig);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/xml');
+    const xml = await res.text();
+    expect(xml).toContain('<Say>Leave a message.</Say>');
+    expect(xml).toContain('transcribeCallback="https://example.test/twilio/voice/transcription"');
+    expect(xml).toContain('maxLength="90"');
+  });
+
+  it('rejects an inbound call with TwiML <Reject> when voice is disabled', async () => {
+    const { server } = makeServer(); // voice disabled
+    const port = await server.start(); active = server;
+    const params = { CallSid: 'CA1', From: '+15551230001', To: '+15559990000' };
+    const sig = getExpectedTwilioSignature(TOKEN, `${PUBLIC}/twilio/voice`, params);
+    const res = await post(port, '/twilio/voice', params, sig);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('<Reject');
+  });
+
+  it('forwards a completed transcription to onTranscript', async () => {
+    const transcripts: unknown[] = [];
+    const { server } = makeServer({
+      voice: { enabled: true, voicemailMaxLengthSec: 120 },
+      onTranscript: (t) => transcripts.push(t),
+    });
+    const port = await server.start(); active = server;
+    const params = {
+      TranscriptionText: 'call me back', TranscriptionStatus: 'completed',
+      RecordingSid: 'RE00000000000000000000000000000000',
+      RecordingUrl: 'https://api.twilio.test/media', CallSid: 'CA2',
+      From: '+15551230001', To: '+15559990000',
+    };
+    const sig = getExpectedTwilioSignature(TOKEN, `${PUBLIC}/twilio/voice/transcription`, params);
+    const res = await post(port, '/twilio/voice/transcription', params, sig);
+    expect(res.status).toBe(204);
+    expect(transcripts).toHaveLength(1);
+  });
+
+  it('acknowledges failed transcription with 204 but forwards nothing', async () => {
+    const transcripts: unknown[] = [];
+    const { server } = makeServer({ voice: { enabled: true, voicemailMaxLengthSec: 120 }, onTranscript: (t) => transcripts.push(t) });
+    const port = await server.start(); active = server;
+    const params = { TranscriptionStatus: 'failed', RecordingSid: 'RE1', CallSid: 'CA3', From: '+1', To: '+2' };
+    const sig = getExpectedTwilioSignature(TOKEN, `${PUBLIC}/twilio/voice/transcription`, params);
+    const res = await post(port, '/twilio/voice/transcription', params, sig);
+    expect(res.status).toBe(204);
+    expect(transcripts).toHaveLength(0);
+  });
+});
