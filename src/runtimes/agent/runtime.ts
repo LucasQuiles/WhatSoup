@@ -5328,8 +5328,9 @@ export class AgentRuntime implements Runtime {
   }
 
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,
-   *  and persist best-effort so a restart mid-window resumes on fallback. */
-  private armFallbackWindow(until: number, reason: string): void {
+   *  and persist best-effort so a restart mid-window resumes on fallback.
+   *  Pass `activatedAt` explicitly when restoring to preserve the original time. */
+  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now()): void {
     this.fallbackActiveUntil = until;
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -5341,7 +5342,7 @@ export class AgentRuntime implements Runtime {
     // Do not let the revert timer keep the process alive at shutdown.
     this.revertTimer.unref?.();
     try {
-      saveFallbackState(this.db, { activeUntil: until, activatedAt: Date.now(), reason });
+      saveFallbackState(this.db, { activeUntil: until, activatedAt, reason });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
     }
@@ -5360,7 +5361,7 @@ export class AgentRuntime implements Runtime {
         clearFallbackState(this.db);
         return;
       }
-      this.armFallbackWindow(persisted.activeUntil, 'restored');
+      this.armFallbackWindow(persisted.activeUntil, 'restored', persisted.activatedAt);
       log.info({
         activeUntil: new Date(persisted.activeUntil).toISOString(),
         originalReason: persisted.reason,

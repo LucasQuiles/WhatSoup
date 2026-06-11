@@ -570,13 +570,13 @@ describe('AgentRuntime — fallback persistence hooks', () => {
   });
 
   it('persists the window on activation and clears it on deactivation', () => {
+    // Finding 3: ensureFallbackStateSchema spy removed — not called by this path.
     const saveSpy = vi
       .spyOn(fallbackStateDb, 'saveFallbackState')
       .mockImplementation(() => {});
     const clearSpy = vi
       .spyOn(fallbackStateDb, 'clearFallbackState')
       .mockImplementation(() => {});
-    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
 
     const runtime = makeRuntime({
       agentFallbackProvider: 'opencode-cli',
@@ -593,16 +593,21 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     expect(clearSpy).toHaveBeenCalled();
   });
 
-  it('restores a persisted future window on startup and auto-reverts when it elapses', () => {
+  it('restores a persisted future window, preserves original activatedAt, and auto-reverts', () => {
+    // Finding 2: verify that armFallbackWindow re-saves with the original activatedAt
+    // (not Date.now()) so the persisted record retains provenance across restarts.
     const now = Date.now();
     const activeUntil = now + 60 * 60_000;
+    const originalActivatedAt = now - 1000;
     vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
       activeUntil,
-      activatedAt: now - 1000,
+      activatedAt: originalActivatedAt,
       reason: 'usage-limit',
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
-    vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
     const clearSpy = vi
       .spyOn(fallbackStateDb, 'clearFallbackState')
       .mockImplementation(() => {});
@@ -614,6 +619,15 @@ describe('AgentRuntime — fallback persistence hooks', () => {
 
     persistView(runtime).restorePersistedFallbackWindow();
     expect(persistView(runtime).effectiveProvider).toBe('opencode-cli');
+
+    // The re-save must carry the original activatedAt, not a fresh Date.now().
+    expect(saveSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        activatedAt: originalActivatedAt,
+        reason: 'restored',
+      }),
+    );
 
     vi.advanceTimersByTime(61 * 60_000);
     expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
@@ -636,6 +650,28 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       agentFallbackProvider: 'opencode-cli',
       agentFallbackModel: 'minimax/minimax-m2',
     });
+
+    persistView(runtime).restorePersistedFallbackWindow();
+    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it('discards a persisted window when no fallback provider is configured', () => {
+    // Finding 1: covers the branch where agentFallbackProvider is undefined at restart —
+    // the stale row must be cleared and the runtime must remain on the primary.
+    const now = Date.now();
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil: now + 60 * 60_000,
+      activatedAt: now - 1000,
+      reason: 'usage-limit',
+    });
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    // No agentFallbackProvider configured.
+    const runtime = makeRuntime({});
 
     persistView(runtime).restorePersistedFallbackWindow();
     expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
