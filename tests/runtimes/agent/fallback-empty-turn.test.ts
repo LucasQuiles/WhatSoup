@@ -64,6 +64,12 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
 // Keyring — mock the whole module; this test file does not need the real exports.
 vi.mock('../../../src/lib/keyring.ts', () => ({
   lookupCredential: vi.fn(() => 'present-key'),
+  resolveProviderKeyService: vi.fn((provider: unknown, model: unknown) => {
+    if (provider === 'opencode-cli' && typeof model === 'string') return model.split('/')[0]?.trim().toLowerCase() || null;
+    if (provider === 'openai-api') return 'openai';
+    if (provider === 'anthropic-api') return 'anthropic';
+    return null;
+  }),
 }));
 
 // Credential probe — stub out to prevent real network calls. The probe is
