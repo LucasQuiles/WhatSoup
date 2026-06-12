@@ -1712,10 +1712,13 @@ def systemctl_is_active(unit: str) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=3,
             check=False,
         )
     except FileNotFoundError:
         return "unavailable:systemctl"
+    except subprocess.TimeoutExpired:
+        return "timeout:systemctl is-active"
     return proc.stdout.strip() or f"rc={proc.returncode}"
 
 
@@ -1726,9 +1729,12 @@ def launchctl_print(label: str) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=3,
             check=False,
         )
     except FileNotFoundError:
+        return ""
+    except subprocess.TimeoutExpired:
         return ""
     return proc.stdout if proc.returncode == 0 else ""
 
@@ -1817,9 +1823,10 @@ def process_uptime_seconds(pid: int) -> int | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=3,
             check=False,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     try:
         return int(proc.stdout.strip())
@@ -1849,9 +1856,12 @@ def systemctl_show_properties(unit: str, properties: list[str]) -> dict[str, str
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=3,
             check=False,
         )
     except FileNotFoundError:
+        return {}
+    except subprocess.TimeoutExpired:
         return {}
     values: dict[str, str] = {}
     for line in proc.stdout.splitlines():
