@@ -8,22 +8,22 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>${WHATSOUP_REPO_ROOT}/deploy/scripts/reply-guarantee-drain.sh</string>
+    <string>__WHATSOUP_REPO_ROOT__/deploy/scripts/reply-guarantee-drain.sh</string>
   </array>
   <key>StartInterval</key>
   <integer>60</integer>
   <key>RunAtLoad</key>
   <false/>
   <key>WorkingDirectory</key>
-  <string>${WHATSOUP_REPO_ROOT}</string>
+  <string>__WHATSOUP_REPO_ROOT__</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>StandardOutPath</key>
-  <string>${HOME}/Library/Logs/whatsoup/reply-guarantee.log</string>
+  <string>__HOME__/Library/Logs/whatsoup/reply-guarantee.log</string>
   <key>StandardErrorPath</key>
-  <string>${HOME}/Library/Logs/whatsoup/reply-guarantee.err.log</string>
+  <string>__HOME__/Library/Logs/whatsoup/reply-guarantee.err.log</string>
 </dict>
 </plist>

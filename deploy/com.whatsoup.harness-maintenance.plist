@@ -8,7 +8,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>${WHATSOUP_REPO_ROOT}/deploy/scripts/harness-maintenance.sh</string>
+    <string>__WHATSOUP_REPO_ROOT__/deploy/scripts/harness-maintenance.sh</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>
@@ -20,15 +20,15 @@
   <key>RunAtLoad</key>
   <false/>
   <key>WorkingDirectory</key>
-  <string>${WHATSOUP_REPO_ROOT}</string>
+  <string>__WHATSOUP_REPO_ROOT__</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>StandardOutPath</key>
-  <string>${HOME}/Library/Logs/whatsoup/harness-maintenance.log</string>
+  <string>__HOME__/Library/Logs/whatsoup/harness-maintenance.log</string>
   <key>StandardErrorPath</key>
-  <string>${HOME}/Library/Logs/whatsoup/harness-maintenance.err.log</string>
+  <string>__HOME__/Library/Logs/whatsoup/harness-maintenance.err.log</string>
 </dict>
 </plist>

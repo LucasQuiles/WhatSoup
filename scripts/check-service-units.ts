@@ -229,7 +229,7 @@ const UNEXPANDED_VAR = /\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*/;
 // launchd silently fails to expand), `__HOME__` is a sentinel that setup.sh
 // replaces with the operator's absolute home via `sed` BEFORE the plist is
 // loaded. It is therefore install-correct, not a launchd-expansion defect.
-const INSTALL_TOKEN = /^__[A-Z][A-Z0-9_]*__\//;
+const INSTALL_TOKEN = /^__[A-Z][A-Z0-9_]*__(?:\/|$)/;
 // A path is the wrapper if it ends in a whatsoup* launcher under .local/bin or deploy.
 const WHATSOUP_WRAPPER =
   /(?:\.local\/bin\/|deploy\/)whatsoup(?:-[a-z-]+)?$/;

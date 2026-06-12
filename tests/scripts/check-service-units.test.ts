@@ -287,6 +287,15 @@ ExecStart=/usr/bin/env node /home/testuser/app/fleet.mjs
     expect(codes(dir)).toContain('env-node-where-pinned-required');
   });
 
+  it('accepts a bare install-token as a whole-path WorkingDirectory', () => {
+    const { name, body } = plist({
+      filename: 'com.whatsoup.reply-guarantee.plist',
+      extraStrings: [{ key: 'WorkingDirectory', value: '__WHATSOUP_REPO_ROOT__' }],
+    });
+    const dir = makeRepo({ [name]: body });
+    expect(codes(dir)).not.toContain('non-absolute-path');
+  });
+
   it('ignores commented-out example $HOME / ${VAR} in plist comments', () => {
     const body = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
