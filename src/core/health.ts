@@ -534,6 +534,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         connectionState.state === 'connecting'
         || connectionState.state === 'reconnecting'
         || connectionState.state === 'cooldown';
+      const exposeDisconnectMetadata = !(isConnected && connectionState.state === 'connected');
       const enrichmentStaleness = enrichmentStats.lastRun
         ? Date.now() - new Date(enrichmentStats.lastRun).getTime()
         : null;
@@ -628,8 +629,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             first_failure_at: connectionState.firstFailureAt,
             last_ping_at: connectionState.lastPingAt,
             last_pong_at: connectionState.lastPongAt,
-            last_disconnect_reason: connectionState.lastDisconnectReason ?? null,
-            last_status_code: connectionState.lastStatusCode ?? null,
+            last_disconnect_reason: exposeDisconnectMetadata ? connectionState.lastDisconnectReason ?? null : null,
+            last_status_code: exposeDisconnectMetadata ? connectionState.lastStatusCode ?? null : null,
           },
         },
         sqlite: {
