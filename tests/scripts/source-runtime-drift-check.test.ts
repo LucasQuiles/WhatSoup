@@ -23,7 +23,7 @@ function shellQuote(value: string): string {
 }
 
 function execGit(cwd: string, command: string): void {
-  execSync(`git -C ${shellQuote(cwd)} ${command}`, { stdio: 'pipe' });
+  execSync("git -c core.hooksPath=.git/hooks -C " + shellQuote(cwd) + " " + command, { stdio: "pipe" });
 }
 
 function makeRepo(): string {
