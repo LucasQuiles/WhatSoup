@@ -1,161 +1,149 @@
 /**
+ * @vitest-environment jsdom
+ *
  * Behavioral contract-lock for KeyboardShortcutsHelp dialog.
- * Pure-render component (no hooks); tests inspect the returned ReactElement
- * tree directly (no DOM/jsdom). Locks open/closed gate, dialog a11y wiring,
- * SHORTCUTS row arity + text+keycap structure, and overlay-vs-panel click handling.
+ *
+ * Migration note (C2): This test was rewritten from raw React-element inspection
+ * (calling component as function + flattenElements tree walk) to DOM-level RTL tests.
+ * Reason: After migration to the Modal primitive, KeyboardShortcutsHelp returns
+ * <Modal ...> (not a bare <div>), so raw element inspection no longer works —
+ * Modal renders via createPortal and the root element type is 'Modal' not 'div'.
+ *
+ * All behavioral contracts are preserved:
+ *   - open/closed gate
+ *   - dialog a11y wiring (role=dialog, aria-modal, aria-labelledby, title id)
+ *   - click-outside dismisses (dismissable=true in the migration)
+ *   - SHORTCUTS row arity + text+keycap structure
+ *   - footer hint with ? and Esc keycaps
+ *
+ * NEW contract that was a bug in the old implementation:
+ *   - Escape key now actually closes the dialog (was broken before: UI claimed
+ *     "Press Esc to close" but no handler was wired).
  */
-import { describe, expect, it, vi } from 'vitest';
-import { createElement, type MouseEvent, type ReactElement, type ReactNode } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { KeyboardShortcutsHelp } from '../../console/src/components/KeyboardShortcutsHelp.tsx';
 
-type AnyProps = {
-  children?: ReactNode;
-  className?: string;
-  role?: string;
-  id?: string;
-  onClick?: (e: MouseEvent) => void;
-  'aria-modal'?: string | boolean;
-  'aria-labelledby'?: string;
-};
+afterEach(() => { cleanup(); });
 
-type TestElement = ReactElement<AnyProps>;
-
-function propsOf(el: TestElement): AnyProps {
-  return el.props;
-}
-
-function flattenElements(node: ReactNode): TestElement[] {
-  if (typeof node !== 'object' || node === null) return [];
-  if (Array.isArray(node)) return node.flatMap(flattenElements);
-  if ('type' in node) {
-    const el = node as TestElement;
-    return [el, ...flattenElements(propsOf(el).children)];
-  }
-  return [];
-}
-
-function collectStrings(node: ReactNode): string[] {
-  if (typeof node === 'string') return [node];
-  if (typeof node === 'number') return [String(node)];
-  if (Array.isArray(node)) return node.flatMap(collectStrings);
-  if (typeof node === 'object' && node !== null && 'props' in node) {
-    return collectStrings(propsOf(node as TestElement).children);
-  }
-  return [];
-}
-
-function plainText(node: ReactNode): string {
-  return collectStrings(node).join('');
-}
-
-function render(component: ReactElement): TestElement | null {
-  const fn = component.type as (props: unknown) => TestElement | null;
-  return fn(component.props);
-}
+// ---------------------------------------------------------------------------
+// Open/closed gate
+// ---------------------------------------------------------------------------
 
 describe('KeyboardShortcutsHelp — open/closed gate', () => {
-  it('returns null when open=false (renders nothing)', () => {
-    const onClose = vi.fn();
-    const tree = render(createElement(KeyboardShortcutsHelp, { open: false, onClose }));
-    expect(tree).toBeNull();
-    expect(onClose).not.toHaveBeenCalled();
+  it('renders nothing when open=false', () => {
+    const { container } = render(
+      <KeyboardShortcutsHelp open={false} onClose={vi.fn()} />
+    );
+    expect(screen.queryByRole('dialog')).toBeNull();
+    // portal renders to document.body — make sure nothing leaked
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it('returns a non-null overlay element when open=true', () => {
-    const tree = render(createElement(KeyboardShortcutsHelp, { open: true, onClose: vi.fn() }));
-    expect(tree).not.toBeNull();
-    expect(tree!.type).toBe('div');
-    expect(propsOf(tree!).className).toContain('fixed inset-0');
+  it('renders dialog when open=true', () => {
+    render(<KeyboardShortcutsHelp open={true} onClose={vi.fn()} />);
+    expect(screen.getByRole('dialog')).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Dialog a11y contract
+// ---------------------------------------------------------------------------
 
 describe('KeyboardShortcutsHelp — dialog a11y contract', () => {
-  function getDialog(): TestElement {
-    const tree = render(createElement(KeyboardShortcutsHelp, { open: true, onClose: vi.fn() }))!;
-    const dialog = flattenElements(propsOf(tree).children).find(
-      (el) => propsOf(el).role === 'dialog',
-    );
-    expect(dialog).toBeDefined();
-    return dialog!;
-  }
-
   it('inner panel carries role=dialog with aria-modal=true and labelledby wiring', () => {
-    const dialog = getDialog();
-    expect(propsOf(dialog).role).toBe('dialog');
-    expect(propsOf(dialog)['aria-modal']).toBe('true');
-    expect(propsOf(dialog)['aria-labelledby']).toBe('kbd-shortcuts-title');
+    render(<KeyboardShortcutsHelp open onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(dialog.getAttribute('aria-labelledby')).toBe('kbd-shortcuts-title');
   });
 
-  it('a labelled element with matching id="kbd-shortcuts-title" exists and reads "Keyboard Shortcuts"', () => {
-    const dialog = getDialog();
-    const title = flattenElements(propsOf(dialog).children).find(
-      (el) => propsOf(el).id === 'kbd-shortcuts-title',
-    );
-    expect(title).toBeDefined();
-    expect(plainText(title!)).toBe('Keyboard Shortcuts');
+  it('a labelled element with id="kbd-shortcuts-title" exists and reads "Keyboard Shortcuts"', () => {
+    render(<KeyboardShortcutsHelp open onClose={vi.fn()} />);
+    const titleEl = document.getElementById('kbd-shortcuts-title');
+    expect(titleEl).not.toBeNull();
+    expect(titleEl!.textContent?.trim()).toBe('Keyboard Shortcuts');
   });
 });
 
-describe('KeyboardShortcutsHelp — overlay vs panel click handling', () => {
-  it('overlay onClick invokes onClose (click-outside-to-close)', () => {
+// ---------------------------------------------------------------------------
+// Escape key — NEW CONTRACT (was broken before migration, now fixed)
+// ---------------------------------------------------------------------------
+
+describe('KeyboardShortcutsHelp — Escape key (real bug fix)', () => {
+  it('Escape key calls onClose when dialog is open', () => {
     const onClose = vi.fn();
-    const tree = render(createElement(KeyboardShortcutsHelp, { open: true, onClose }))!;
-    const overlayOnClick = propsOf(tree).onClick;
-    expect(overlayOnClick).toBeInstanceOf(Function);
-    overlayOnClick!({} as MouseEvent);
+    render(<KeyboardShortcutsHelp open onClose={onClose} />);
+    fireEvent.keyDown(document, { key: 'Escape', bubbles: true });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('inner panel onClick stops propagation and does NOT invoke onClose', () => {
+  it('Escape key does NOT call onClose when dialog is closed', () => {
     const onClose = vi.fn();
-    const tree = render(createElement(KeyboardShortcutsHelp, { open: true, onClose }))!;
-    const dialog = flattenElements(propsOf(tree).children).find(
-      (el) => propsOf(el).role === 'dialog',
-    )!;
-    const stopPropagation = vi.fn();
-    const panelOnClick = propsOf(dialog).onClick;
-    expect(panelOnClick).toBeInstanceOf(Function);
-    panelOnClick!({ stopPropagation } as unknown as MouseEvent);
-    expect(stopPropagation).toHaveBeenCalledTimes(1);
+    render(<KeyboardShortcutsHelp open={false} onClose={onClose} />);
+    fireEvent.keyDown(document, { key: 'Escape', bubbles: true });
     expect(onClose).not.toHaveBeenCalled();
   });
 });
 
-describe('KeyboardShortcutsHelp — SHORTCUTS list contract', () => {
-  function getRows(): TestElement[] {
-    const tree = render(createElement(KeyboardShortcutsHelp, { open: true, onClose: vi.fn() }))!;
-    const dialog = flattenElements(propsOf(tree).children).find(
-      (el) => propsOf(el).role === 'dialog',
-    )!;
-    const allElements = flattenElements(propsOf(dialog).children);
-    return allElements.filter(
-      (el) =>
-        el.type === 'div' &&
-        typeof propsOf(el).className === 'string' &&
-        propsOf(el).className!.includes('justify-between'),
-    );
-  }
+// ---------------------------------------------------------------------------
+// Click-outside behavior (dismissable=true)
+// ---------------------------------------------------------------------------
 
-  it('renders exactly 6 shortcut rows, each row containing both a label and at least one <kbd>', () => {
-    const rows = getRows();
+describe('KeyboardShortcutsHelp — overlay vs panel click handling', () => {
+  it('clicking outside the dialog shell (on backdrop) calls onClose', () => {
+    const onClose = vi.fn();
+    render(<KeyboardShortcutsHelp open onClose={onClose} />);
+    // Fire pointerdown on document.body (outside the dialog shell)
+    fireEvent.pointerDown(document.body);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('clicking inside the dialog shell does NOT call onClose', () => {
+    const onClose = vi.fn();
+    render(<KeyboardShortcutsHelp open onClose={onClose} />);
+    const dialog = screen.getByRole('dialog');
+    fireEvent.pointerDown(dialog);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SHORTCUTS list contract
+// ---------------------------------------------------------------------------
+
+describe('KeyboardShortcutsHelp — SHORTCUTS list contract', () => {
+  it('renders exactly 6 shortcut rows', () => {
+    render(<KeyboardShortcutsHelp open onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    // Each row has a div with flex + justify-between
+    const rows = Array.from(dialog.querySelectorAll('div.flex.items-center.justify-between'));
     expect(rows.length).toBe(6);
+  });
+
+  it('each row contains both a label span and at least one kbd element', () => {
+    render(<KeyboardShortcutsHelp open onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    const rows = Array.from(dialog.querySelectorAll('div.flex.items-center.justify-between'));
     for (const row of rows) {
-      const text = plainText(row).trim();
-      expect(text.length).toBeGreaterThan(0);
-      const kbdElems = flattenElements(propsOf(row).children).filter((el) => el.type === 'kbd');
-      expect(kbdElems.length).toBeGreaterThanOrEqual(1);
+      const kbds = row.querySelectorAll('kbd');
+      expect(kbds.length).toBeGreaterThanOrEqual(1);
+      // Label span — has text-data class
+      const labelSpan = row.querySelector('.text-data');
+      expect(labelSpan).not.toBeNull();
+      expect(labelSpan!.textContent!.trim().length).toBeGreaterThan(0);
     }
   });
 
   it('locks the canonical label set (order-independent)', () => {
-    const rows = getRows();
-    const labels = rows.map((row) => {
-      const labelSpan = flattenElements(propsOf(row).children).find(
-        (el) => el.type === 'span' && typeof propsOf(el).className === 'string' && propsOf(el).className!.includes('text-data'),
-      );
-      return labelSpan ? plainText(labelSpan) : '';
-    });
-    expect(labels.sort()).toEqual(
+    render(<KeyboardShortcutsHelp open onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    const rows = Array.from(dialog.querySelectorAll('div.flex.items-center.justify-between'));
+    const labels = rows
+      .map((row) => row.querySelector('.text-data')?.textContent?.trim() ?? '')
+      .filter(Boolean)
+      .sort();
+    expect(labels).toEqual(
       [
         'Close modals',
         'Focus search',
@@ -163,31 +151,30 @@ describe('KeyboardShortcutsHelp — SHORTCUTS list contract', () => {
         'Go to Ops',
         'Go to Soup Kitchen',
         'Show this help',
-      ].sort(),
+      ].sort()
     );
   });
 
-  it('platform-aware modifier: the "Focus search" row uses ⌘ on Mac or Ctrl elsewhere, suffixed with +K', () => {
-    const rows = getRows();
-    const focusRow = rows.find((row) => plainText(row).includes('Focus search'));
+  it('platform-aware modifier: "Focus search" row uses ⌘ or Ctrl+K', () => {
+    render(<KeyboardShortcutsHelp open onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    const rows = Array.from(dialog.querySelectorAll('div.flex.items-center.justify-between'));
+    const focusRow = rows.find((row) => row.querySelector('.text-data')?.textContent?.includes('Focus search'));
     expect(focusRow).toBeDefined();
-    const kbd = flattenElements(propsOf(focusRow!).children).find((el) => el.type === 'kbd');
-    expect(kbd).toBeDefined();
-    const keyText = plainText(kbd!);
+    const kbd = focusRow!.querySelector('kbd');
+    expect(kbd).not.toBeNull();
+    const keyText = kbd!.textContent!;
     expect(keyText === '⌘+K' || keyText === 'Ctrl+K').toBe(true);
   });
 
-  it('numeric nav rows ("1","2","3") and special rows ("Esc","?") each render their literal keycap', () => {
-    const rows = getRows();
+  it('numeric and special rows render their literal keycaps', () => {
+    render(<KeyboardShortcutsHelp open onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    const rows = Array.from(dialog.querySelectorAll('div.flex.items-center.justify-between'));
     const keysByLabel = new Map<string, string[]>();
     for (const row of rows) {
-      const labelSpan = flattenElements(propsOf(row).children).find(
-        (el) => el.type === 'span' && typeof propsOf(el).className === 'string' && propsOf(el).className!.includes('text-data'),
-      );
-      const label = labelSpan ? plainText(labelSpan) : '';
-      const kbds = flattenElements(propsOf(row).children)
-        .filter((el) => el.type === 'kbd')
-        .map((el) => plainText(el));
+      const label = row.querySelector('.text-data')?.textContent?.trim() ?? '';
+      const kbds = Array.from(row.querySelectorAll('kbd')).map((k) => k.textContent!);
       keysByLabel.set(label, kbds);
     }
     expect(keysByLabel.get('Go to Soup Kitchen')).toEqual(['1']);
@@ -198,22 +185,18 @@ describe('KeyboardShortcutsHelp — SHORTCUTS list contract', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Footer hint
+// ---------------------------------------------------------------------------
+
 describe('KeyboardShortcutsHelp — footer hint', () => {
-  it('renders a centered footer string mentioning "?" and "Esc" as keycaps', () => {
-    const tree = render(createElement(KeyboardShortcutsHelp, { open: true, onClose: vi.fn() }))!;
-    const dialog = flattenElements(propsOf(tree).children).find(
-      (el) => propsOf(el).role === 'dialog',
-    )!;
-    const footer = flattenElements(propsOf(dialog).children).find(
-      (el) =>
-        el.type === 'div' &&
-        typeof propsOf(el).className === 'string' &&
-        propsOf(el).className!.includes('text-center'),
-    );
-    expect(footer).toBeDefined();
-    const kbds = flattenElements(propsOf(footer!).children).filter((el) => el.type === 'kbd');
-    expect(kbds.length).toBe(2);
-    expect(kbds.map((el) => plainText(el))).toEqual(['?', 'Esc']);
-    expect(plainText(footer!)).toContain('to close');
+  it('renders a centered footer with ? and Esc keycaps and "to close" text', () => {
+    render(<KeyboardShortcutsHelp open onClose={vi.fn()} />);
+    const dialog = screen.getByRole('dialog');
+    const footer = dialog.querySelector('.text-center');
+    expect(footer).not.toBeNull();
+    const kbds = Array.from(footer!.querySelectorAll('kbd')).map((k) => k.textContent!);
+    expect(kbds).toEqual(['?', 'Esc']);
+    expect(footer!.textContent).toContain('to close');
   });
 });

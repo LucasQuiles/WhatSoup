@@ -21,8 +21,7 @@ export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; fi
               key={l}
               label={l}
               isActive={filter === l}
-              activeColor={l === 'error' ? 'text-s-crit' : l === 'warn' ? 'text-s-warn' : 'text-t2'}
-              activeBorder={filter === l ? 'var(--bw) solid var(--b3)' : undefined}
+              tone={l === 'error' ? 'crit' : l === 'warn' ? 'warn' : 'neutral'}
               onClick={() => onFilterChange(l)}
             />
           ))}

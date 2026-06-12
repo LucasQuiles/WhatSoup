@@ -165,10 +165,14 @@ function getKpiCard(label: string): HTMLElement {
   return card as HTMLElement;
 }
 
-/** Mode pills live in the toolbar — anchor on "All" (only one in DOM). */
+/** Mode pills are interactive Pills: <button> whose accessible name is the label
+ * (the count badge is aria-hidden, so it does not join the name). */
 function getModePill(label: string): HTMLElement {
-  const pillsContainer = screen.getByText('All').parentElement as HTMLElement;
-  return within(pillsContainer).getByText(label).closest('button') as HTMLElement;
+  const pills = screen.getAllByRole('button', { name: label });
+  // Chart-range pills share the toolbar; mode pills are the aria-pressed toggles.
+  const pill = pills.find((p) => p.hasAttribute('aria-pressed'));
+  if (!pill) throw new Error(`mode pill "${label}" not found`);
+  return pill;
 }
 
 /** Table body — scoped queries here ignore the KPI strip, alert banner, etc. */

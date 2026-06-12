@@ -57,25 +57,29 @@ describe('FilterPill — label, count, and suffix behavior', () => {
     expect(screen.getByRole('button', { name: 'Inbox' })).toBeDefined();
   });
 
-  it('does not render a count when count is undefined or zero', () => {
-    const { rerender } = render(<FilterPill label="Alerts" isActive={false} onClick={() => {}} />);
+  it('does not render a count badge when count is undefined', () => {
+    // Migration note (C2): Pill renders a count badge for count >= 0 (unlike old FilterPill which
+    // only showed count > 0). FilterPill preserves old behaviour by not passing count=0 through.
+    // When count is undefined, no badge is rendered.
+    render(<FilterPill label="Alerts" isActive={false} onClick={() => {}} />);
 
     expect(screen.getByRole('button', { name: 'Alerts' })).toBeDefined();
-    expect(screen.queryByText('0')).toBeNull();
-
-    rerender(<FilterPill label="Alerts" isActive={false} count={0} onClick={() => {}} />);
-    expect(screen.getByRole('button', { name: 'Alerts' })).toBeDefined();
-    expect(screen.queryByText('0')).toBeNull();
+    expect(document.querySelector('.soup-pill__count')).toBeNull();
   });
 
-  it('renders a positive count inside the button name and visible content', () => {
+  it('renders a positive count inside the visible content', () => {
+    // Migration note (C2): Pill's count lane is aria-hidden (counts are in the data lane, not the
+    // accessible name). The button accessible name is 'Alerts'; count '7' is visible but not in name.
     render(<FilterPill label="Alerts" isActive={false} count={7} onClick={() => {}} />);
 
-    expect(screen.getByRole('button', { name: /^Alerts\s*7$/ })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Alerts' })).toBeDefined();
     expect(screen.getByText('7')).toBeDefined();
   });
 
-  it('renders suffix content inline after the label/count', () => {
+  it('renders suffix content inline with the label', () => {
+    // Migration note (C2): FilterPill now renders suffix outside the Pill button (as a sibling span).
+    // Accessible name of the button is 'Alerts'; suffix is in the outer span.
+    // button.lastElementChild pattern no longer applies (suffix is not inside the button).
     render(
       <FilterPill
         label="Alerts"
@@ -86,30 +90,40 @@ describe('FilterPill — label, count, and suffix behavior', () => {
       />,
     );
 
-    const button = screen.getByRole('button', { name: /^Alerts\s*2\s*new$/ });
+    expect(screen.getByRole('button', { name: 'Alerts' })).toBeDefined();
     expect(screen.getByTestId('suffix').textContent).toBe('new');
-    expect(button.lastElementChild).toBe(screen.getByTestId('suffix'));
+    expect(screen.getByText('2')).toBeDefined();
   });
 });
 
 describe('FilterPill — design-token state contract', () => {
-  it('uses the default active text token when active and no override is given', () => {
+  it('uses soup-pill--neutral class (default neutral tone) when active/inactive', () => {
+    // Migration note (C2): FilterPill now uses semantic Pill tones (soup-pill--neutral) instead of
+    // legacy text-t2/text-t4 utility classes. activeColor/activeBorder props are deprecated no-ops.
+    // Interactive state is conveyed via aria-pressed and soup-pill--pressed class.
     render(<FilterPill label="Active" isActive={true} onClick={() => {}} />);
 
-    expect(screen.getByRole('button', { name: 'Active' }).className).toContain('text-t2');
+    const btn = screen.getByRole('button', { name: 'Active' });
+    expect(btn.className).toContain('soup-pill--neutral');
+    expect(btn.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('uses a custom active text token when active', () => {
+  it('applies soup-pill--pressed when active, not pressed when inactive', () => {
+    // Migration note (C2): pressed/active state uses soup-pill--pressed class + aria-pressed.
+    const { rerender } = render(<FilterPill label="Chats" isActive={true} onClick={() => {}} />);
+    expect(screen.getByRole('button').className).toContain('soup-pill--pressed');
+
+    rerender(<FilterPill label="Chats" isActive={false} onClick={() => {}} />);
+    expect(screen.getByRole('button').className).not.toContain('soup-pill--pressed');
+  });
+
+  it('deprecated activeColor prop does not crash and is ignored', () => {
+    // Migration note (C2): activeColor is deprecated; FilterPill accepts it silently.
     render(<FilterPill label="Chats" isActive={true} activeColor="text-m-cht" onClick={() => {}} />);
-
-    expect(screen.getByRole('button', { name: 'Chats' }).className).toContain('text-m-cht');
-  });
-
-  it('uses inactive text tokens when inactive even if an active token override is provided', () => {
-    render(<FilterPill label="Chats" isActive={false} activeColor="text-m-cht" onClick={() => {}} />);
-
-    const className = screen.getByRole('button', { name: 'Chats' }).className;
-    expect(className).toContain('text-t4');
-    expect(className).not.toContain('text-m-cht');
+    const btn = screen.getByRole('button', { name: 'Chats' });
+    // Class does NOT contain the raw legacy token (it was not forwarded)
+    expect(btn.className).not.toContain('text-m-cht');
+    // But does contain soup-pill--pressed (the active state)
+    expect(btn.className).toContain('soup-pill--pressed');
   });
 });

@@ -1,4 +1,14 @@
+/**
+ * KeyboardShortcutsHelp — migrated to Modal primitive (C2 migration, modal.md).
+ *
+ * REAL BUG FIXED: The previous implementation had no Escape handler despite the
+ * UI copy reading "Press ? or Esc to close". Escape now works via useDismissable
+ * inside Modal, stacking-aware.
+ *
+ * The outer overlay click-to-close is preserved via dismissable=true.
+ */
 import { Keyboard } from 'lucide-react';
+import { Modal, ModalBody } from './primitives';
 
 const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
 const mod = isMac ? '⌘' : 'Ctrl';
@@ -13,28 +23,23 @@ const SHORTCUTS = [
 ];
 
 export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClose: () => void }) {
-  if (!open) return null;
-
   return (
-    <div
-      className="fixed inset-0 flex items-center justify-center bg-[var(--overlay)] z-[var(--z-overlay)]"
-      onClick={onClose}
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="sm"
+      dismissable={true}
+      labelledById="kbd-shortcuts-title"
     >
-      <div
-        className="c-dialog font-mono w-[var(--panel-shortcuts)] max-w-[90vw] p-[var(--sp-5)]"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="kbd-shortcuts-title"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-2 mb-[var(--sp-4)]">
+      <ModalBody>
+        <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-4)]">
           <Keyboard size={16} strokeWidth={1.75} className="text-t3" />
           <span id="kbd-shortcuts-title" className="text-body font-sans font-semibold text-t1">
             Keyboard Shortcuts
           </span>
         </div>
 
-        <div className="flex flex-col gap-[var(--sp-2h)]">
+        <div className="flex flex-col gap-[var(--sp-2h)] font-mono">
           {SHORTCUTS.map((s) => (
             <div key={s.label} className="flex items-center justify-between">
               <span className="text-data text-t3">{s.label}</span>
@@ -52,7 +57,7 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
         <div className="text-xs text-t5 text-center mt-[var(--sp-4)]">
           Press <kbd className="c-kbd">?</kbd> or <kbd className="c-kbd">Esc</kbd> to close
         </div>
-      </div>
-    </div>
+      </ModalBody>
+    </Modal>
   );
 }

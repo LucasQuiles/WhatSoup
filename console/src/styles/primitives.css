@@ -306,3 +306,314 @@
     margin-left: var(--sp-1h);
   }
 }
+
+/* --------------------------------------------------------------------------
+   MODAL PRIMITIVE — backdrop + shell + header/body/footer (modal.md)
+   Enter: fade + scale(0.985) + 8px rise, --dur-base --ease-enter.
+   Exit:  --dur-fast --ease-exit (faster out per motion.md §5).
+   Reduced-motion: appear/disappear instantly (global policy handles this).
+   -------------------------------------------------------------------------- */
+
+/* Backdrop — fixed scrim, z-overlay */
+.soup-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: clamp(var(--sp-8), 8vh, 80px);
+  z-index: var(--z-overlay);
+  animation: soup-modal-backdrop-in var(--dur-base) var(--ease-linear) forwards;
+}
+
+/* Shell — elevated surface */
+.soup-modal-shell {
+  background: var(--surface-overlay);
+  border: var(--bw) solid var(--border-subtle);
+  border-radius: var(--r-3, var(--radius-lg));
+  box-shadow: var(--shadow-overlay);
+  max-height: var(--modal-max-h);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: soup-modal-shell-in var(--dur-base) var(--ease-enter) forwards;
+  outline: none; /* focus ring applied via :focus-visible below */
+}
+
+.soup-modal-shell:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+/* Exit animation — applied via class when closing (future enhancement);
+   for now exits are instant (open=false returns null). */
+
+/* Size modifiers (modal.md: sm/md/lg) */
+.soup-modal-shell--sm {
+  width: min(480px, calc(100% - var(--sp-8)));
+}
+
+.soup-modal-shell--md {
+  width: min(560px, calc(100% - var(--sp-8)));
+}
+
+.soup-modal-shell--lg {
+  width: min(var(--panel-wizard), calc(100% - var(--sp-8)));
+}
+
+/* Header — title + optional close X */
+.soup-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: var(--bw) solid var(--border-hairline);
+  flex: none;
+}
+
+.soup-modal-title {
+  font: var(--type-heading, 600 13px/20px var(--font-sans));
+  color: var(--text-1);
+}
+
+/* Body — scrollable, grid layout per modal.md */
+.soup-modal-body {
+  padding: var(--sp-5);
+  overflow-y: auto;
+  flex: 1 1 auto;
+  display: grid;
+  gap: var(--sp-4);
+  align-content: start;
+}
+
+/* Footer — right-aligned actions; split variant for note + actions */
+.soup-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5);
+  border-top: var(--bw) solid var(--border-hairline);
+  flex: none;
+}
+
+.soup-modal-footer__note {
+  flex: 1 1 auto;
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  color: var(--text-2);
+}
+
+.soup-modal-footer__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+/* Enter keyframes — modal.md: fade + 8px rise + scale 0.985 */
+@keyframes soup-modal-backdrop-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes soup-modal-shell-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Reduced motion: appear instantly (off-and-instant, motion.md §9) */
+@media (prefers-reduced-motion: reduce) {
+  .soup-modal-backdrop,
+  .soup-modal-shell {
+    animation: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   PILL PRIMITIVE — tone × size × static/interactive/removable (pill.md)
+   Base: height 20px static (24px interactive — target floor), font 500 11/16
+   sans, 0.01em tracking, radius --r-1, 1px border, inline-flex.
+   -------------------------------------------------------------------------- */
+
+.soup-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  height: 20px;
+  padding: 0 var(--sp-2);
+  font: 500 11px/16px var(--font-sans);
+  letter-spacing: var(--tracking-pill, 0.01em);
+  border-radius: var(--r-1, var(--radius-sm));
+  border: var(--bw) solid transparent;
+  white-space: nowrap;
+  flex: none;
+}
+
+/* Size modifier: sm — 16px height */
+.soup-pill--sm {
+  height: 16px;
+  padding: 0 var(--sp-1);
+  font: 500 10px/14px var(--font-sans);
+}
+
+/* Interactive: must be a <button> with 24px height target floor (pill.md §Anatomy) */
+button.soup-pill,
+.soup-pill--interactive {
+  height: 24px;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-enter),
+    background-color var(--dur-fast) var(--ease-enter),
+    color var(--dur-fast) var(--ease-enter);
+}
+
+button.soup-pill--sm,
+.soup-pill--sm.soup-pill--interactive {
+  /* Visual height 20px; the pointer target keeps the 24px floor via an invisible
+     expanded hit area (pseudo-element), satisfying the WCAG 2.2 target-size posture
+     without inflating the visual density. */
+  height: 20px;
+  position: relative;
+}
+
+button.soup-pill--sm::before,
+.soup-pill--sm.soup-pill--interactive::before {
+  content: '';
+  position: absolute;
+  inset: calc(-1 * var(--sp-0h)) 0; /* 20px + 2x3px >= 24px vertical target */
+}
+
+button.soup-pill:focus-visible,
+.soup-pill--interactive:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+/* Hover: border -> --border-strong */
+button.soup-pill:not([disabled]):hover,
+.soup-pill--interactive:not([disabled]):hover {
+  border-color: var(--border-strong);
+}
+
+/* Pressed/selected: ink --text-1, border --accent, fill --accent-wash */
+.soup-pill--pressed,
+button.soup-pill[aria-pressed="true"] {
+  color: var(--text-1) !important;
+  border-color: var(--accent) !important;
+  background: var(--accent-wash) !important;
+}
+
+/* Disabled */
+button.soup-pill[disabled],
+button.soup-pill[aria-disabled="true"] {
+  opacity: var(--opacity-disabled);
+  cursor: not-allowed;
+}
+
+/* Reduced motion: remove border transition */
+@media (prefers-reduced-motion: reduce) {
+  button.soup-pill,
+  .soup-pill--interactive {
+    transition: none;
+  }
+}
+
+/* Removable: layout for label + remove button */
+.soup-pill--removable {
+  gap: var(--sp-1h);
+}
+
+.soup-pill__label {
+  flex: 1 1 auto;
+}
+
+.soup-pill__count {
+  font: 600 10px/14px var(--font-sans);
+  min-width: var(--sp-4);
+  text-align: center;
+  border-radius: var(--radius-xs);
+  padding: 0 var(--sp-1);
+}
+
+/* Remove button — override ActionButton to fit within pill */
+.soup-pill__remove.soup-actbtn {
+  min-height: 16px;
+  min-width: 16px;
+  padding: 0;
+  /* Padded to 24px visual hit area via negative margin trick */
+  margin: 0 calc(-1 * var(--sp-1));
+  opacity: 0.7;
+}
+
+.soup-pill__remove.soup-actbtn:hover,
+.soup-pill__remove.soup-actbtn:focus-visible {
+  opacity: 1;
+}
+
+/* ── Tone: neutral ── */
+.soup-pill--neutral {
+  color: var(--text-2);
+  background: var(--btn-neutral-bg);
+  border-color: var(--border-subtle);
+}
+
+.soup-pill__count {
+  background: var(--border-strong);
+  color: var(--text-1);
+}
+
+/* ── Tone: ok ── */
+.soup-pill--ok {
+  color: var(--status-ok-fg);
+  background: var(--status-ok-wash);
+  border-color: var(--status-ok-border);
+}
+
+/* ── Tone: warn ── */
+.soup-pill--warn {
+  color: var(--status-warn-fg);
+  background: var(--status-warn-wash);
+  border-color: var(--status-warn-border);
+}
+
+/* ── Tone: crit ── */
+.soup-pill--crit {
+  color: var(--status-crit-fg);
+  background: var(--status-crit-wash);
+  border-color: var(--status-crit-border);
+}
+
+/* ── Tone: passive ── */
+.soup-pill--passive {
+  color: var(--mode-passive-fg);
+  background: var(--mode-passive-wash);
+  border-color: var(--mode-passive-border);
+}
+
+/* ── Tone: chat ── */
+.soup-pill--chat {
+  color: var(--mode-chat-fg);
+  background: var(--mode-chat-wash);
+  border-color: var(--mode-chat-border);
+}
+
+/* ── Tone: agent ── */
+.soup-pill--agent {
+  color: var(--mode-agent-fg);
+  background: var(--mode-agent-wash);
+  border-color: var(--mode-agent-border);
+}
+
+/* ── Tone: accent ── */
+.soup-pill--accent {
+  color: var(--accent);
+  background: var(--accent-wash);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}

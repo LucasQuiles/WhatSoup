@@ -981,9 +981,9 @@ a:focus-visible {
 }
 .c-msg-bubble:hover { filter: brightness(1.1); }
 
-/* KPI card hover: 0.25s all, includes translateY lift */
+/* KPI card hover: compositor-safe properties only (no transition: all) */
 .c-kpi-hover {
-  transition: all 0.25s var(--ease);
+  transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease);
 }
 .c-kpi-hover:hover {
   transform: translateY(-2px);

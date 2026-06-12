@@ -299,7 +299,7 @@ export function ScheduleComposerModal({
                 value={datetimeLocal}
                 onChange={e => setDatetimeLocal(e.target.value)}
                 className="c-input font-mono text-t2"
-                style={{ colorScheme: 'dark' }}
+                style={{ }}
               />
             </div>
 

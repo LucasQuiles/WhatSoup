@@ -113,15 +113,15 @@ describe('LogsTab', () => {
     expect(active.getAttribute('aria-pressed')).toBe('true')
     expect(inactive.getAttribute('aria-pressed')).toBe('false')
 
-    // Active pill carries the configured activeColor (error → text-s-crit), inactive does not
-    expect(active.className).toContain('text-s-crit')
-    expect(active.className).toContain('bg-d4')
-    expect(inactive.className).not.toContain('text-s-crit')
-    expect(inactive.className).toContain('text-t4')
+    // Active error pill carries the crit channel tone via the Pill primitive
+    // (pill.md: caller color overrides are consolidated into the tone prop).
+    expect(active.className).toContain('soup-pill--crit')
+    expect(active.className).toContain('soup-pill--pressed')
+    expect(inactive.className).not.toContain('soup-pill--crit')
+    expect(inactive.className).not.toContain('soup-pill--pressed')
 
-    // Active border style differs from inactive (var(--b3) vs var(--b1))
-    expect(active.style.border).toContain('var(--b3)')
-    expect(inactive.style.border).toContain('var(--b1)')
+    // Border treatment is owned by the Pill primitive classes now (no inline styles)
+    expect(active.getAttribute('style') ?? '').not.toContain('border')
   })
 
   it('renders nothing in the body when entries=[] but keeps the toolbar', () => {

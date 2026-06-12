@@ -159,7 +159,10 @@ describe('design system compliance — Shannon slice', () => {
     expect(nav).not.toMatch(/text-\[var\(--font-size-/)
     expect(nav).not.toMatch(/text-\[var\(--text-/)
     expect(pill).not.toMatch(/text-\[var\(--font-size-/)
-    expect(pill).toContain('text-sm')
+    // C2 migration: FilterPill no longer styles its own text — the Pill primitive owns
+    // typography via soup-pill classes (pill.md). Pin the delegation instead.
+    expect(pill).toContain("from './primitives'")
+    expect(pill).not.toMatch(/text-\[var\(--text-/)
   })
 
   it('fully dissolves form-styles.ts — no remaining imports in wizard components', () => {

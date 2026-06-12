@@ -40,7 +40,7 @@ export default function App() {
   useKeyboardShortcuts({ onHelp: toggleShortcuts })
 
   return (
-    <div className="flex flex-col h-screen bg-d0 overflow-hidden">
+    <div className="flex flex-col h-dvh bg-d0 overflow-hidden">
       <Nav
         alertCount={alertCount}
         unreadCount={unreadCount}
