@@ -110,6 +110,9 @@ jobs:
       - name: Node pin consistency guard
         run: npm run guard:node-pin-consistency
 
+      - name: Service unit validity guard
+        run: npm run guard:service-units
+
       - name: Agent decision polls guard
         run: npm run guard:agent-decision-polls
 
