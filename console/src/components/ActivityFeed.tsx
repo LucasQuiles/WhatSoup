@@ -7,6 +7,7 @@ import FilterPill from "./FilterPill";
 import FeedCard from "./FeedCard";
 import ConfirmDialog from "./ConfirmDialog";
 import type { FeedEvent } from "../types";
+import { statusNeedsAttention } from "../lib/status-severity";
 
 interface ActivityFeedProps {
   events: FeedEvent[];
@@ -86,7 +87,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
       if (d?.type === "connection" && d.state === "connected") { seen.add(inst); continue; }
       if (d?.type === "health" && d.status === "online") { seen.add(inst); continue; }
       const isConnErr = d?.type === "connection" && event.isError;
-      const isHealthErr = d?.type === "health" && (d.status === "unreachable" || d.status === "degraded");
+      const isHealthErr = d?.type === "health" && statusNeedsAttention(d.status);
       if (isConnErr || isHealthErr) {
         seen.add(inst);
         keys.add(eventKey(event));

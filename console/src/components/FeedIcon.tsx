@@ -9,6 +9,7 @@ import {
   CircleDot,
 } from "lucide-react";
 import type { FeedEvent } from "../types";
+import { statusSeverity } from "../lib/status-severity";
 
 const ICON_SIZE = 14;
 const STROKE = 1.75;
@@ -41,7 +42,8 @@ const FeedIcon: FC<FeedIconProps> = ({ event }) => {
     case "session":
       return <Terminal size={ICON_SIZE} strokeWidth={STROKE} className="text-m-agt" />;
     case "health": {
-      const color = d.status === "online" ? "text-s-ok" : d.status === "unreachable" ? "text-s-crit" : "text-s-warn";
+      const severity = statusSeverity(d.status);
+      const color = severity === "ok" ? "text-s-ok" : severity === "crit" ? "text-s-crit" : "text-s-warn";
       return <HeartPulse size={ICON_SIZE} strokeWidth={STROKE} className={color} />;
     }
     case "import":
