@@ -6,6 +6,7 @@ import { api } from '../../lib/api'
 import { formatRelative } from '../../lib/format-time'
 import { getProvider, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import ConfirmDialog from '../ConfirmDialog'
+import { Button } from '../primitives/Button'
 import { PipelineNode, PipelineArrow } from './PipelineTab'
 import { ProvidersKeysCard } from './ProvidersKeysCard'
 import { buildConfigEntries, TYPE_COLOR } from './config-helpers'
@@ -160,13 +161,13 @@ export function SummaryTab({
           <div className="flex items-center justify-between c-toolbar bg-d3 c-border-b">
             <span className="c-col-header text-t4">{line.mode} Configuration</span>
             {config && (
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={onEditConfig}
-                className="c-btn c-btn-ghost py-[var(--sp-0h)] px-[var(--sp-2)] text-label"
               >
                 Edit
-              </button>
+              </Button>
             )}
           </div>
           {config ? (
@@ -206,37 +207,41 @@ export function SummaryTab({
             <span className="c-col-header text-t4">Actions</span>
           </div>
           <div className="flex flex-col py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-2)]">
-            <button
-              type="button"
+            <Button
+              variant="warning"
+              icon={<RotateCw size={15} strokeWidth={1.75} />}
               onClick={() => setConfirmAction('restart')}
-              className="c-btn w-full justify-center"
+              className="w-full justify-center"
             >
-              <RotateCw size={15} strokeWidth={1.75} /> Restart Instance
-            </button>
+              Restart Instance
+            </Button>
             {line.mode !== 'passive' && (
-              <button
-                type="button"
+              <Button
+                variant="neutral"
+                icon={<SlidersHorizontal size={15} strokeWidth={1.75} />}
                 onClick={onEditConfig}
-                className="c-btn w-full justify-center"
+                className="w-full justify-center"
               >
-                <SlidersHorizontal size={15} strokeWidth={1.75} /> Edit Configuration
-              </button>
+                Edit Configuration
+              </Button>
             )}
-            <button
-              type="button"
+            <Button
+              variant="neutral"
+              icon={<GitBranch size={15} strokeWidth={1.75} />}
               onClick={onChangeMode}
-              className="c-btn w-full justify-center"
+              className="w-full justify-center"
             >
-              <GitBranch size={15} strokeWidth={1.75} /> Change Mode
-            </button>
+              Change Mode
+            </Button>
             <div className="c-border-t pt-[var(--sp-2)] mt-[var(--sp-1)]">
-              <button
-                type="button"
+              <Button
+                variant="danger"
+                icon={<Power size={15} strokeWidth={1.75} />}
                 onClick={() => setConfirmAction('stop')}
-                className="c-btn c-btn-danger w-full justify-center"
+                className="w-full justify-center"
               >
-                <Power size={15} strokeWidth={1.75} /> Stop Instance
-              </button>
+                Stop Instance
+              </Button>
             </div>
           </div>
         </motion.div>
