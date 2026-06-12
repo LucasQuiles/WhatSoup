@@ -2811,6 +2811,9 @@ export class AgentRuntime implements Runtime {
                   chatJid: resumeChatJid,
                   exitCode: info.exitCode ?? undefined,
                   signal: info.signal ?? undefined,
+                  provider: info.provider,
+                  crashClass: info.crashClass,
+                  stderr: info.stderrPreview,
                 }, this.activeControlReportId);
               } catch (err) {
                 log.warn({ err }, 'failed to emit heal report for session crash');
@@ -6354,6 +6357,9 @@ export class AgentRuntime implements Runtime {
           sessionId: info.sessionId ?? null,
           exitCode: info.exitCode ?? null,
           signal: info.signal ?? null,
+          provider: info.provider ?? null,
+          crashClass: info.crashClass ?? null,
+          stderrPreview: info.stderrPreview ?? null,
         }, 'fallback singleton session crashed');
       },
       notifyUser: (msg) => this.handleCrashNotify(msg),
@@ -6795,6 +6801,9 @@ export class AgentRuntime implements Runtime {
                 chatJid,
                 exitCode: info.exitCode ?? undefined,
                 signal: info.signal ?? undefined,
+                provider: info.provider,
+                crashClass: info.crashClass,
+                stderr: info.stderrPreview,
               }, this.activeControlReportId);
             } catch (err) {
               log.warn({ err }, 'failed to emit heal report for session crash');
@@ -6850,6 +6859,9 @@ export class AgentRuntime implements Runtime {
           chatJid,
           exitCode: info?.exitCode ?? undefined,
           signal: info?.signal ?? undefined,
+          provider: info?.provider,
+          crashClass: info?.crashClass,
+          stderr: info?.stderrPreview,
         }, this.activeControlReportId);
       } catch (err) {
         log.warn({ err }, 'failed to emit heal report for session crash');
@@ -6904,7 +6916,13 @@ export class AgentRuntime implements Runtime {
         this.instanceName,
         'agent_respawn_failed',
         `whatsoup@${this.instanceName} agent respawn exhausted (${crashCount} crashes)`,
-        `Chat: ${mapKey}, Last exit: code=${info?.exitCode ?? '?'} signal=${info?.signal ?? 'none'}`,
+        [
+          `Chat: ${mapKey}`,
+          `Last exit: code=${info?.exitCode ?? '?'} signal=${info?.signal ?? 'none'}`,
+          `Provider: ${info?.provider ?? 'unknown'}`,
+          `Crash class: ${info?.crashClass ?? 'unknown'}`,
+          info?.stderrPreview ? `Stderr preview: ${info.stderrPreview.slice(-500)}` : null,
+        ].filter(Boolean).join('\n'),
       );
     }
   }

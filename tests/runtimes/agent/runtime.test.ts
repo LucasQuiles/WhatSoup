@@ -8,6 +8,15 @@ import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.
 // vi.hoisted values are available inside vi.mock factory callbacks.
 
 const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
+  type CapturedCrashInfo = {
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    sessionId: string | null;
+    dbRowId: number | null;
+    provider?: string;
+    crashClass?: string;
+    stderrPreview?: string;
+  };
   const capturedSessionManagerOptsRef: {
     current: {
       allowM365Mutations?: boolean;
@@ -18,7 +27,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   } = { current: null };
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
   const capturedOnResumeFailedRef: { current: (() => void) | null } = { current: null };
-  const capturedOnCrashRef: { current: ((info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void) | null } = { current: null };
+  const capturedOnCrashRef: { current: ((info: CapturedCrashInfo) => void) | null } = { current: null };
   const capturedNotifyUserRef: { current: ((msg: string) => void) | null } = { current: null };
 
   const mockSession = {
@@ -136,7 +145,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
       whatsoupMcpSocket?: string;
       onEvent: (event: AgentEvent) => void;
       onResumeFailed?: () => void;
-      onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
+      onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null; provider?: string; crashClass?: string; stderrPreview?: string }) => void;
       notifyUser?: (msg: string) => void;
     },
   ) {
@@ -570,7 +579,7 @@ describe('AgentRuntime', () => {
         whatsoupMcpSocket?: string;
         onEvent: (event: AgentEvent) => void;
         onResumeFailed?: () => void;
-        onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
+        onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null; provider?: string; crashClass?: string; stderrPreview?: string }) => void;
         notifyUser?: (msg: string) => void;
       }) {
         capturedSessionManagerOptsRef.current = opts;

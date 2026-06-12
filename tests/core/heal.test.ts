@@ -180,6 +180,40 @@ describe('emitHealReport', () => {
     expect(targetJid).toBe('15559998888@s.whatsapp.net');
     expect(message).toMatch(/^\[LOOPS_HEAL\]/);
   });
+
+  it('includes provider crash classification in Q payload and human summary', async () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    const reportId = emitHealReport(db, messenger, null, {
+      type: 'crash',
+      chatJid: '1234@s.whatsapp.net',
+      exitCode: 1,
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+      stderr: 'Please run /login\nBearer [REDACTED]',
+    });
+
+    expect(reportId).not.toBeNull();
+    const row = db.raw.prepare('SELECT error_class, context FROM heal_reports WHERE report_id = ?').get(reportId) as { error_class: string; context: string } | undefined;
+    expect(row?.error_class).toBe('crash__provider_auth_required');
+    expect(JSON.parse(row?.context ?? '{}')).toMatchObject({
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+    });
+
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendTracked)).toHaveBeenCalledOnce();
+    });
+    const [, , message] = vi.mocked(sendTracked).mock.calls[0]!;
+    const payload = JSON.parse(String(message).split('\n')[0]!.replace('[LOOPS_HEAL] ', '')) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+    });
+    expect(message).toContain('Provider: claude-cli');
+    expect(message).toContain('Crash class: provider_auth_required');
+  });
 });
 
 // ---------------------------------------------------------------------------
