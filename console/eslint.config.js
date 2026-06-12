@@ -701,7 +701,7 @@ export default defineConfig([
         ...designSystemRestrictions,
         // Group S: structural (console-wide, excludes primitives/**):
         ...structuralSelectors,
-        // Group F: focus suppression (console-wide, excludes Inbox + HistoryTab):
+        // Group F: focus suppression (console-wide, excludes HistoryTab only — Inbox carve-out retired at B4 close):
         ...focusSuppressionSelectors,
       ],
     },
