@@ -3,12 +3,17 @@
 // converts MCP tool definitions to API function-calling formats for API providers.
 
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type { ToolRegistry } from '../../../mcp/registry.ts';
 import type { SessionContext, ToolCallResult } from '../../../mcp/types.ts';
-import { buildMcpLaunchCommand } from '../../../core/mcp-launcher.ts';
 import { writePrivateFileSync } from '../../../core/workspace.ts';
 import { createChildLogger } from '../../../logger.ts';
+import {
+  generateMcpConfigFile,
+  mergeOpencodeConfig,
+  writeProviderMcpConfigTarget,
+  type AdditionalMcpServerConfig,
+  type OpencodeProviderConfig,
+} from '../../../core/provider-mcp-config.ts';
 import type {
   McpMode,
   ProviderMcpBridge,
@@ -18,17 +23,8 @@ import type {
 
 const log = createChildLogger('mcp-bridge');
 
-/**
- * Subset of `agentOptions.providerConfig` consumed when writing an opencode
- * config file. `baseUrl` selects a custom OpenAI-compatible cloud endpoint;
- * `model` is the model id opencode should target on that endpoint.
- */
-export interface OpencodeProviderConfig {
-  baseUrl?: string;
-  /** Provider id under opencode's top-level `provider` map. Defaults to `whatsoup-cloud`. */
-  providerId?: string;
-  model?: string;
-}
+export { generateMcpConfigFile, mergeOpencodeConfig, writeProviderMcpConfigTarget };
+export type { AdditionalMcpServerConfig, OpencodeProviderConfig };
 
 // ---------------------------------------------------------------------------
 // API tool definition types
@@ -71,136 +67,9 @@ function normalizeToolResult(result: ToolCallResult): ProviderMcpToolResult {
 // CLI config file generation
 // ---------------------------------------------------------------------------
 
-/**
- * Generate .mcp.json content for a CLI provider.
- * Different providers may need slightly different formats.
- *
- * Returns null for API providers that do not use config files.
- */
-export function generateMcpConfigFile(
-  providerId: string,
-  socketPath: string,
-  proxyScriptPath: string,
-): Record<string, unknown> | null {
-  switch (providerId) {
-    case 'claude-cli':
-    case 'gemini-cli':
-    case 'codex-cli':
-      // Claude, Gemini, and Codex all share the same .mcp.json format
-      return {
-        mcpServers: {
-          whatsoup: {
-            ...buildMcpLaunchCommand(proxyScriptPath),
-            env: { WHATSOUP_SOCKET: socketPath },
-          },
-        },
-      };
-
-    case 'opencode-cli': {
-      // opencode (1.16.x) uses a different schema than Claude/Gemini/Codex:
-      // a top-level `mcp` object whose entries are
-      //   { type: 'local', command: [argv...], environment: {...}, enabled: true }
-      // The single `command` array is the flattened launch argv (command + args),
-      // and env vars live under `environment` (NOT claude's `env`). Verified
-      // against the installed opencode global config (~/.config/opencode/opencode.json).
-      const { command, args } = buildMcpLaunchCommand(proxyScriptPath);
-      return {
-        mcp: {
-          whatsoup: {
-            type: 'local',
-            command: [command, ...args],
-            environment: { WHATSOUP_SOCKET: socketPath },
-            enabled: true,
-          },
-        },
-      };
-    }
-
-    default:
-      // API providers don't need config files
-      return null;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // opencode.json merge + per-provider config-file writer
 // ---------------------------------------------------------------------------
-
-const DEFAULT_OPENCODE_PROVIDER_ID = 'whatsoup-cloud';
-
-export function writeProviderMcpConfigTarget(providerId: string, agentCwd: string): string | null {
-  switch (providerId) {
-    case 'claude-cli':
-    case 'gemini-cli':
-    case 'codex-cli':
-      return join(agentCwd, '.mcp.json');
-    case 'opencode-cli':
-      return join(agentCwd, 'opencode.json');
-    default:
-      return null;
-  }
-}
-
-/**
- * Merge the generated opencode `mcp` block into a possibly-existing
- * opencode.json object. Pure — does no IO. Preserves every unrelated top-level
- * key (model, provider catalog, watcher, …) and every sibling MCP server,
- * overwriting only the `mcp.whatsoup` entry so a stale socket path is refreshed.
- *
- * When `providerConfig.baseUrl` is set, also merges a top-level `provider`
- * block (models.dev-style) pointing at that OpenAI-compatible endpoint and
- * rewrites the top-level `model` to `<providerId>/<model>` so opencode routes
- * the configured model through the custom cloud. Best-effort: opencode's
- * provider schema is broad; we emit the documented `options.baseURL` +
- * `models` shape and leave catalog merging to opencode's own load step.
- */
-export function mergeOpencodeConfig(
-  existing: Record<string, unknown> | null,
-  generated: Record<string, unknown>,
-  providerConfig?: OpencodeProviderConfig,
-): Record<string, unknown> {
-  const base: Record<string, unknown> = existing ? { ...existing } : {};
-
-  const generatedMcp = (generated.mcp ?? {}) as Record<string, unknown>;
-  const existingMcp = (base.mcp && typeof base.mcp === 'object' && !Array.isArray(base.mcp))
-    ? (base.mcp as Record<string, unknown>)
-    : {};
-  base.mcp = { ...existingMcp, ...generatedMcp };
-
-  if (providerConfig?.baseUrl) {
-    const providerId = providerConfig.providerId ?? DEFAULT_OPENCODE_PROVIDER_ID;
-    const model = providerConfig.model;
-    const existingProvider = (base.provider && typeof base.provider === 'object' && !Array.isArray(base.provider))
-      ? (base.provider as Record<string, unknown>)
-      : {};
-    base.provider = {
-      ...existingProvider,
-      [providerId]: {
-        options: { baseURL: providerConfig.baseUrl },
-        models: model ? { [model]: {} } : {},
-      },
-    };
-    if (model) {
-      base.model = `${providerId}/${model}`;
-    }
-  } else {
-    const providerId = providerConfig?.providerId ?? DEFAULT_OPENCODE_PROVIDER_ID;
-    if (base.provider && typeof base.provider === 'object' && !Array.isArray(base.provider)) {
-      const existingProvider = { ...(base.provider as Record<string, unknown>) };
-      delete existingProvider[providerId];
-      if (Object.keys(existingProvider).length > 0) {
-        base.provider = existingProvider;
-      } else {
-        delete base.provider;
-      }
-    }
-    if (typeof base.model === 'string' && base.model.startsWith(`${providerId}/`)) {
-      delete base.model;
-    }
-  }
-
-  return base;
-}
 
 /**
  * Write the whatsoup MCP config to the file the given provider's CLI reads,
@@ -221,8 +90,9 @@ export function writeProviderMcpConfig(
   socketPath: string,
   proxyScriptPath: string,
   providerConfig?: OpencodeProviderConfig,
+  additionalServers: AdditionalMcpServerConfig[] = [],
 ): string | null {
-  const generated = generateMcpConfigFile(providerId, socketPath, proxyScriptPath);
+  const generated = generateMcpConfigFile(providerId, socketPath, proxyScriptPath, additionalServers);
   if (generated === null) return null;
 
   const target = writeProviderMcpConfigTarget(providerId, agentCwd);
@@ -236,10 +106,12 @@ export function writeProviderMcpConfig(
         return null;
       }
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP') {
         log.warn({ err, target }, 'skipping opencode MCP config write after file stat failed');
         return null;
       }
+      if (code !== 'ENOENT') throw err;
     }
 
     let existing: Record<string, unknown> | null = null;

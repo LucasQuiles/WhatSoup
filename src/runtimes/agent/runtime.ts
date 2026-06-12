@@ -5825,6 +5825,7 @@ export class AgentRuntime implements Runtime {
         const socketPath = provisionWorkspace({
           workspacePath,
           instanceCwd: this.cwd ?? homedir(),
+          provider: this.effectiveProvider,
           sandbox: this.sandbox!,
           hookPath,
           pollLintHookPath,

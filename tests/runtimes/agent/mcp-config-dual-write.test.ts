@@ -241,6 +241,7 @@ describe('AgentRuntime startup MCP config dual-write', () => {
   it('writes claude primary and opencode fallback configs with whatsoup MCP entries', async () => {
     const cwd = tmp();
     mockConfig.agentProvider = 'claude-cli';
+    mockConfig.agentProviderConfig = { baseUrl: 'https://primary.example/v1' };
     mockConfig.agentFallbackProvider = 'opencode-cli';
     mockConfig.agentFallbackModel = 'fallback-model';
 
@@ -254,6 +255,14 @@ describe('AgentRuntime startup MCP config dual-write', () => {
     expect(opencodeMcp.whatsoup.environment).toEqual({
       WHATSOUP_SOCKET: join(cwd, '.claude', 'whatsoup.sock'),
     });
+    expect(opencode.provider).toBeUndefined();
+    expect(opencode.model).toBeUndefined();
+    expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mcpConfigPaths: [join(cwd, '.mcp.json'), join(cwd, 'opencode.json')],
+      }),
+      'wrote whatsoup MCP config',
+    );
   });
 
   it('writes .mcp.json for a claude fallback when the primary is openai-api', async () => {
@@ -284,6 +293,12 @@ describe('AgentRuntime startup MCP config dual-write', () => {
         target: join(cwd, '.mcp.json'),
       }),
       expect.stringContaining('primary and fallback providers share an MCP config target'),
+    );
+    expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mcpConfigPaths: [join(cwd, '.mcp.json')],
+      }),
+      'wrote whatsoup MCP config',
     );
   });
 
@@ -322,16 +337,22 @@ describe('opencode MCP config write hardening', () => {
 
   it('warns on corrupt user opencode.json, overwrites from a fresh base, and proceeds', () => {
     const dir = tmp();
-    writeFileSync(join(dir, 'opencode.json'), '{ not json');
+    const target = join(dir, 'opencode.json');
+    writeFileSync(target, '{ not json');
+    let fileAtWarn = '';
+    mockRuntimeLogger.warn.mockImplementationOnce(() => {
+      fileAtWarn = readFileSync(target, 'utf8');
+    });
 
     const written = writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript);
 
-    expect(written).toBe(join(dir, 'opencode.json'));
+    expect(written).toBe(target);
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ target: join(dir, 'opencode.json') }),
+      expect.objectContaining({ target }),
       expect.stringContaining('failed to parse existing opencode.json'),
     );
-    const parsed = readJson(join(dir, 'opencode.json'));
+    expect(fileAtWarn).toBe('{ not json');
+    const parsed = readJson(target);
     expect((parsed.mcp as Record<string, unknown>).whatsoup).toBeDefined();
   });
 
