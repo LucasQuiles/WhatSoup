@@ -55,6 +55,7 @@ vi.mock('../../../src/mcp/register-all.ts', () => ({
 // safe fail-open value (no alert, no version log).
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
   probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
 }));
 
 vi.mock('../../../src/mcp/registry.ts', () => ({
