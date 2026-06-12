@@ -13,6 +13,11 @@
  * its key forwarded too — and warn when the prefix resolves to a service that
  * SERVICE_ENV_MAP does not know about.
  *
+ * Custom endpoints add one more lane: `providerConfig.apiKeyService` names the
+ * service whose key authenticates the endpoint (the opencode.json provider
+ * block references it as `{env:<ENVVAR>}`), so buildChildEnv must inject that
+ * service's key on top of the defaults.
+ *
  * lookupCredential is mocked at the module boundary so the test is
  * deterministic regardless of what the host machine's real keychain holds
  * (the live fleet machine genuinely has deepseek/minimax entries, which would
@@ -96,8 +101,9 @@ describe('buildChildEnv — opencode-cli standard fleet keys', () => {
   });
 });
 
+const ENV_KEYS = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY', 'MINIMAX_API_KEY'] as const;
+
 describe('buildChildEnv — opencode-cli model-derived key', () => {
-  const ENV_KEYS = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY', 'MINIMAX_API_KEY'] as const;
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
@@ -179,5 +185,78 @@ describe('buildChildEnv — opencode-cli model-derived key', () => {
       'minimax',
     ]);
     expect(warnMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildChildEnv — opencode-cli providerConfig.apiKeyService key injection', () => {
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    lookupCredentialMock.mockReset();
+    warnMock.mockReset();
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  it('injects the key for an explicit apiKeyService (custom endpoint auth lane)', () => {
+    lookupCredentialMock.mockImplementation((service: string) =>
+      service === 'openai' ? 'oa-endpoint-key' : null,
+    );
+
+    const env = buildChildEnv('opencode-cli', undefined, 'Bare-Model-Id', {
+      apiKeyService: 'openai',
+    });
+    expect(env.OPENAI_API_KEY).toBe('oa-endpoint-key');
+    expect(lookupCredentialMock).toHaveBeenCalledWith('openai');
+    expect(warnMock).not.toHaveBeenCalled();
+  });
+
+  it('injects the apiKeyService key on top of the model-prefix key (additive, not replacing)', () => {
+    lookupCredentialMock.mockImplementation((service: string) => {
+      if (service === 'openai') return 'oa-endpoint-key';
+      if (service === 'anthropic') return 'an-model-key';
+      return null;
+    });
+
+    const env = buildChildEnv('opencode-cli', undefined, 'anthropic/claude-x', {
+      apiKeyService: 'openai',
+    });
+    expect(env.OPENAI_API_KEY).toBe('oa-endpoint-key');
+    expect(env.ANTHROPIC_API_KEY).toBe('an-model-key');
+  });
+
+  it('warns once and injects nothing for an apiKeyService missing from SERVICE_ENV_MAP', () => {
+    lookupCredentialMock.mockReturnValue(null);
+
+    buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: 'unmapped-endpoint-svc' });
+    expect(lookupCredentialMock).not.toHaveBeenCalledWith('unmapped-endpoint-svc');
+
+    expect(warnMock).toHaveBeenCalledTimes(1);
+    const call = JSON.stringify(warnMock.mock.calls[0]);
+    expect(call).toContain('unmapped-endpoint-svc');
+    expect(call).toContain('SERVICE_ENV_MAP');
+
+    // Warned once per service, not once per spawn.
+    buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: 'unmapped-endpoint-svc' });
+    expect(warnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT inject the apiKeyService key for a non-opencode provider (credential isolation pin)', () => {
+    lookupCredentialMock.mockImplementation((service: string) =>
+      service === 'minimax' ? 'mm-secret-456' : null,
+    );
+
+    const env = buildChildEnv('claude-cli', undefined, undefined, { apiKeyService: 'minimax' });
+    expect(hasKey(env, 'MINIMAX_API_KEY')).toBe(false);
+    expect(lookupCredentialMock).not.toHaveBeenCalledWith('minimax');
   });
 });

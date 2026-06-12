@@ -216,8 +216,8 @@ function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
 }
 
-async function startRuntime(cwd: string): Promise<AgentRuntime> {
-  const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'dual-write-test', { cwd });
+async function startRuntime(cwd: string, model?: string): Promise<AgentRuntime> {
+  const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'dual-write-test', { cwd, model });
   await runtime.start();
   return runtime;
 }
@@ -309,6 +309,26 @@ describe('AgentRuntime startup MCP config dual-write', () => {
       }),
       'wrote whatsoup MCP config',
     );
+  });
+
+  it('threads baseUrl + apiKeyService from the primary providerConfig into the opencode provider block', async () => {
+    const cwd = tmp();
+    mockConfig.agentProvider = 'opencode-cli';
+    mockConfig.agentProviderConfig = {
+      baseUrl: 'https://api.minimax.example/v1',
+      apiKeyService: 'minimax',
+    };
+
+    await startRuntime(cwd, 'MiniMax-M2');
+
+    const opencode = readJson(join(cwd, 'opencode.json'));
+    const provider = opencode.provider as Record<string, Record<string, unknown>>;
+    expect(provider['whatsoup-cloud']).toBeDefined();
+    expect(provider['whatsoup-cloud'].options).toEqual({
+      baseURL: 'https://api.minimax.example/v1',
+      apiKey: '{env:MINIMAX_API_KEY}',
+    });
+    expect(opencode.model).toBe('whatsoup-cloud/MiniMax-M2');
   });
 
   it('keeps current single-write behavior when no fallback is configured', async () => {
@@ -453,7 +473,7 @@ describe('opencode MCP config write hardening', () => {
     );
   });
 
-  it('removes the managed whatsoup-cloud provider and model when baseUrl is no longer configured', () => {
+  it('removes the managed whatsoup-cloud provider (including its apiKey) and model when baseUrl is no longer configured', () => {
     const dir = tmp();
     writeFileSync(
       join(dir, 'opencode.json'),
@@ -462,7 +482,7 @@ describe('opencode MCP config write hardening', () => {
         model: 'whatsoup-cloud/old-model',
         provider: {
           'whatsoup-cloud': {
-            options: { baseURL: 'https://old.example/v1' },
+            options: { baseURL: 'https://old.example/v1', apiKey: '{env:MINIMAX_API_KEY}' },
             models: { 'old-model': {} },
           },
           usercloud: {

@@ -452,7 +452,7 @@ explicit for readability.
 |-------|------|----------|---------|-------------|
 | `sessionScope` | string | no | `single` at runtime (`per_chat` via fleet API) | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). Omitted = the runtime defaults to `single`; the fleet create/update APIs fill `per_chat` when the whole `agentOptions` block is omitted. Invalid values are rejected on every path (create, update, load, discovery). |
 | `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. |
-| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. `providerConfig.baseUrl` selects a custom endpoint — see [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for semantics, validation rules, and the current routing limitation. |
+| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. `providerConfig.baseUrl` selects a custom endpoint and `providerConfig.apiKeyService` names the keyring service that authenticates it — see [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for routing, auth, and validation semantics. |
 | `fallbackProvider` | string | no | — | Legacy single fallback provider. Prefer `fallbacks` when configuring more than one backup. Must be one of the same IDs as `provider` (`claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`); unknown IDs are rejected before startup. When the primary returns a usage-limit `result`, the in-flight session is torn down, the user is notified in-chat, and the auto-respawned next session uses the selected fallback until the limit resets, then automatically reverts to the primary. Omitted = fallback disabled (unless `fallbacks` is set). See [Provider fallback behavior](#provider-fallback-behavior) for the full lifecycle: user notice, window persistence across restarts, turn telemetry, credential pre-flight, and admin override commands. |
 | `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2`). The id must match the provider's model catalog **exactly, including case** — `opencode` treats `minimax/minimax-m2` and `minimax/MiniMax-M2` as different ids, and a wrong-case id fails every session with an opaque provider error. Copy the id verbatim from `opencode models` — the runtime warns at arm time (`fallback_model_unknown`) when the configured model is not found in the provider catalog. Non-empty string when present. When omitted, a CLI fallback provider runs with no `--model`/`-m` override (its own default); **required when `fallbackProvider` is `openai-api` or `anthropic-api`** (see [Cross-field validation rules](#cross-field-validation-rules)). |
 | `fallbacks` | array | no | — | Ordered fallback chain. Each entry is `{ "provider": "<provider-id>", "model": "<model-id>" }`; `model` may be omitted only for CLI providers. Do not combine with `fallbackProvider` / `fallbackModel`. At arm time the runtime selects the first entry whose required key is present, records per-entry eligibility in `/health` and provider-status (`unknown` until the first selection pass), and fails open to entry zero if no keyed entry is eligible so the operator still gets binary/model/key alerts for the first configured target. Maximum 4 entries. |
@@ -492,6 +492,14 @@ config error):
   `models.conversation`) routes to it; without one the endpoint would never be
   used. API providers consume `baseUrl` directly as an endpoint override and
   are exempt from this rule.
+- **`providerConfig.apiKeyService` naming an unknown keyring service.** The
+  value must be one of the services in the service→env-var map
+  (`src/lib/provider-key-service.ts`) — the custom-endpoint provider block
+  references the key as an env interpolation, and an unknown service has no
+  env var to interpolate.
+- **`providerConfig.apiKeyService` without `providerConfig.baseUrl`.** The key
+  service only authenticates a custom endpoint; without one it would be
+  silently inert.
 
 A missing `sessionScope` is **not** an error: the runtime defaults it to
 `single`, so load and discovery accept the omission rather than flagging a
@@ -504,13 +512,27 @@ OpenAI-compatible provider block into the `opencode.json` written at startup;
 for the API providers (`openai-api`, `anthropic-api`) it overrides the HTTP
 endpoint the managed loop calls directly.
 
-**Limitation (opencode-cli):** sessions are currently routed by model prefix —
-the resolved model is passed to the provider CLI as a `-m`/`--model` argument,
-and the custom provider block applies only when `opencode` itself resolves
-that model id to the block. End-to-end routing of sessions through a custom
-endpoint (session argument strategy plus credential wiring for custom provider
-ids) is future work; until then, treat `baseUrl` as effective only for models
-that `opencode` maps to the generated provider block.
+**Routing (opencode-cli):** with a `baseUrl` configured, sessions omit the
+`-m`/`--model` argument and `opencode` resolves the model from
+`opencode.json`'s top-level `model` field, which the startup merge points at
+the custom block (`whatsoup-cloud/<model>`). The instance's resolved model
+(top-level `model`, else `models.conversation`) is therefore the model id on
+the endpoint itself, spelled exactly as the endpoint's catalog spells it —
+model ids are case-sensitive, so copy them verbatim. Without a `baseUrl`,
+sessions keep the `-m <model>` argument unchanged.
+
+**Auth (opencode-cli):** the generated provider block references the endpoint
+key as `options.apiKey: "{env:<ENVVAR>}"` (opencode env interpolation) — the
+key value itself is never written to disk. The env var comes from the
+service→env-var map (`src/lib/provider-key-service.ts`) for the keyring
+service named by `providerConfig.apiKeyService`; when `apiKeyService` is
+omitted, the service is derived from the configured model's prefix (e.g.
+`minimax/MiniMax-M2` → `minimax`), and a bare model id with no known prefix
+gets no `apiKey` entry. The runtime injects that service's key (env var or
+platform keyring, `src/lib/keyring.ts`) into the session child's environment
+so the interpolation resolves at spawn time. `apiKeyService` must name a
+known keyring service and requires `baseUrl` (see
+[Cross-field validation rules](#cross-field-validation-rules)).
 
 #### Provider fallback behavior
 

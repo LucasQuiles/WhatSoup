@@ -809,7 +809,12 @@ async function start(): Promise<void> {
           .then(() => log.info({ chatJid: toPersonalJid(adminPhone) }, 'sent introduction'))
           .catch((err) => log.warn({ err }, 'failed to send introduction'));
       }, 3_000);
-    } else if (instanceType === 'agent' && runtime instanceof AgentRuntime && config.toolUpdateMode !== 'minimal') {
+    } else if (
+      instanceType === 'agent' &&
+      runtime instanceof AgentRuntime &&
+      config.startupNotifications &&
+      config.toolUpdateMode !== 'minimal'
+    ) {
       // Agent restart notification (existing behavior)
       const pending = runtime.popStartupMessage();
       const notifyTarget = pending

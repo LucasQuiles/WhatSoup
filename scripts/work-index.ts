@@ -64,6 +64,15 @@ export interface WorkIndexDriftIssue {
 
 export interface WorkIndexCheckIssue extends WorkIndexCoverageIssue {
   drift: WorkIndexDriftIssue[];
+  /**
+   * Markdown present but gitignored under a canonical doc root (a root that
+   * already holds at least one tracked .md). These are invisible to the
+   * scanner (`git ls-files --exclude-standard` drops them), so without this
+   * they would be silently omitted from the index (#640). Warn-class: the
+   * operator should `git add -f` to track them, or confirm they are
+   * intentionally local. Empty in a clean checkout / CI.
+   */
+  ignoredCanonical: string[];
 }
 
 const SCOPED_ROOTS = ['docs/sdlc', 'docs/superpowers', 'docs/plans'];
@@ -410,6 +419,36 @@ function indexedPaths(rows: WorkIndexRow[]): Set<string> {
   return new Set(rows.map((row) => row.path));
 }
 
+// Doc roots that may legitimately mix tracked canonical docs with local-only
+// scratch. A root is treated as canonical only when it currently holds at
+// least one tracked .md (derived from repo state — no hardcoded policy), so a
+// purely-local root like docs/plans is never flagged.
+const CANONICAL_DOC_ROOT_CANDIDATES = ['docs/specs', 'docs/superpowers/plans', 'docs/superpowers', 'docs/sdlc', 'docs/plans'];
+
+/**
+ * Markdown that is present on disk but gitignored under a canonical doc root.
+ * Returns repo-relative paths, sorted. Empty when git is unavailable or no
+ * such files exist (e.g. a clean checkout). See WorkIndexCheckIssue.ignoredCanonical.
+ */
+export function findIgnoredCanonicalDocs(cwd = process.cwd()): string[] {
+  const root = repoRoot(cwd);
+  const found = new Set<string>();
+  for (const docRoot of CANONICAL_DOC_ROOT_CANDIDATES) {
+    let tracked: string[];
+    let ignored: string[];
+    try {
+      tracked = gitList(root, ['ls-files', '--', docRoot]).filter((p) => p.endsWith('.md'));
+      if (tracked.length === 0) continue; // not a canonical root — skip (local-only)
+      ignored = gitList(root, ['ls-files', '--others', '--ignored', '--exclude-standard', '--', docRoot])
+        .filter((p) => p.endsWith('.md'));
+    } catch {
+      continue;
+    }
+    for (const p of ignored) found.add(p);
+  }
+  return [...found].sort();
+}
+
 function parseRows(cwd: string, files: string[]): WorkIndexRow[] {
   const stateInfoByEpic = sdlcEpicsFromFiles(cwd, files);
   const rows: WorkIndexRow[] = [];
@@ -672,6 +711,7 @@ export function findWorkIndexCheckIssues(cwd = process.cwd()): WorkIndexCheckIss
   return {
     ...compareWorkIndexCoverage(root, indexedPaths(actual.rows)),
     drift,
+    ignoredCanonical: findIgnoredCanonicalDocs(root),
   };
 }
 
@@ -685,6 +725,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const result = run(process.argv.slice(2));
     if ('missing' in result && 'stale' in result && 'drift' in result) {
+      // Warn-class (#640): ignored markdown under a canonical doc root is
+      // surfaced but never fails the gate — a clean checkout/CI has none, and
+      // a local-only draft must not block the operator's push.
+      for (const filePath of result.ignoredCanonical) {
+        console.warn(`warning: ignored markdown under canonical doc root (not indexed — \`git add -f\` to track, or confirm it is intentionally local): ${filePath}`);
+      }
       if (result.missing.length === 0 && result.stale.length === 0 && result.drift.length === 0) {
         console.log('work-index clean');
       } else {
