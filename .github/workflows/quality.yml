@@ -135,6 +135,9 @@ jobs:
       - name: Test suite
         run: npm test -- --pool=forks
 
+      - name: Failure-scenario drills
+        run: npm run test:drills
+
       - name: Install console dependencies
         run: npm --prefix console ci
 
