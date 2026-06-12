@@ -2,6 +2,7 @@
 // AgentRuntime implements the Runtime interface, tying all agent components together.
 
 import type { AgentCommandRequest, AgentCommandResult, Runtime } from '../types.ts';
+import { spawnSync } from 'node:child_process';
 import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
@@ -143,6 +144,30 @@ const DEFAULT_FALLBACK_WINDOW_MS = 5 * 60 * 60 * 1000; // 18_000_000 ms (5h)
 // revert almost immediately nor pin the fallback for an unreasonable span.
 const MIN_FALLBACK_WINDOW_MS = 60 * 1000; // 1 minute
 const MAX_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const PROVIDER_FALLBACK_NOTICE_DEDUP_MS = (() => {
+  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS']);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60 * 1000;
+})();
+const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
+  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS']);
+  if (!Number.isFinite(raw) || raw <= 0) return 5 * 60 * 1000;
+  return Math.min(Math.max(raw, 30 * 1000), 30 * 60 * 1000);
+})();
+const PROVIDER_FALLBACK_PRIMARY_PROBE_TIMEOUT_MS = 5_000;
+
+type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required';
+
+interface ProviderFallbackActivation {
+  primaryProvider: string;
+  fallbackProvider: string;
+  fallbackModel: string | undefined;
+  reason: ProviderFallbackReason;
+  resetAt: Date | null;
+  activeUntil: number;
+  extended: boolean;
+  keyPresent: boolean | null;
+  recoveryProbeRequired: boolean;
+}
 // Time to wait for an auto-triggered /compact to complete before giving up.
 // A /compact must summarize the whole conversation, so on large contexts it can
 // legitimately take a few minutes; 2 min was too short and produced false
@@ -1067,6 +1092,87 @@ export function isUsageLimitMessage(text: string): boolean {
   );
 }
 
+export function isProviderAuthRequiredMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('not logged in') ||
+    lower.includes('please run /login') ||
+    lower.includes('please login') ||
+    lower.includes('authentication required') ||
+    lower.includes('auth required') ||
+    lower.includes('invalid api key') ||
+    lower.includes('missing api key') ||
+    lower.includes('no api key') ||
+    (lower.includes('oauth') && lower.includes('expired'))
+  );
+}
+
+export function isRateLimitResultMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('rate limited') ||
+    lower.includes('rate limit exceeded') ||
+    lower.includes('too many requests') ||
+    lower.includes('429')
+  ) && !isUsageLimitMessage(text);
+}
+
+export function isProviderPolicyBlockMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('usage policy') ||
+    lower.includes('policy violation') ||
+    lower.includes('violates our policy') ||
+    lower.includes('violative') ||
+    lower.includes('blocked by policy')
+  );
+}
+
+function providerDisplayName(provider: string): string {
+  switch (provider) {
+    case 'claude-cli': return 'Claude';
+    case 'codex-cli': return 'Codex';
+    case 'gemini-cli': return 'Gemini';
+    case 'opencode-cli': return 'OpenCode';
+    case 'openai-api': return 'OpenAI';
+    case 'anthropic-api': return 'Anthropic';
+    default: return provider;
+  }
+}
+
+function modelCardLabel(provider: string, model: string | undefined): string {
+  const providerName = providerDisplayName(provider);
+  return model && model.trim() ? `${providerName} / ${model.trim()}` : providerName;
+}
+
+function formatClockForUser(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function fallbackReasonForUser(reason: ProviderFallbackReason, activeUntil: number): string {
+  if (reason === 'usage-limit') {
+    return `hit a token/quota limit; switching until about ${formatClockForUser(activeUntil)}`;
+  }
+  if (reason === 'rate-limit') {
+    return 'is rate limited; switching temporarily';
+  }
+  return 'needs re-auth; switching while the primary connection is repaired';
+}
+
+function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
+  return reason === 'auth-required';
+}
+
+function fallbackReasonForResultText(text: string): ProviderFallbackReason | null {
+  if (isUsageLimitMessage(text)) return 'usage-limit';
+  if (isProviderAuthRequiredMessage(text)) return 'auth-required';
+  if (isRateLimitResultMessage(text)) return 'rate-limit';
+  return null;
+}
+
 /**
  * Extract the usage-limit reset time from a provider usage-limit message.
  *
@@ -1288,6 +1394,8 @@ export class AgentRuntime implements Runtime {
   // is never overwritten by a later extension or restart. Cleared alongside
   // fallbackActivatedAt on deactivation and shutdown.
   private fallbackArmReason: string | null = null;
+  private fallbackResetAt: number | null = null;
+  private fallbackRecoveryProbeRequired = false;
   // Process-local fallback telemetry — deliberately NOT persisted (reset on
   // restart); the durable artifact is the window itself (agent_fallback_state).
   private fallbackTurnsServed = 0;
@@ -1296,6 +1404,7 @@ export class AgentRuntime implements Runtime {
   private activeFallbackEntry: AgentFallbackEntry | null = null;
   private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
+  private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -1341,6 +1450,7 @@ export class AgentRuntime implements Runtime {
   /** Maps toolScopeKey → (toolId → toolName) so tool_result errors stay isolated per session scope. */
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
+  private recentProviderFallbackNotices = new Map<string, number>();
 
   /**
    * Tracks toolScopeKeys where at least one non-phantom tool_use event was
@@ -1773,6 +1883,9 @@ export class AgentRuntime implements Runtime {
   // Tracks the most recent turn text per chat (keyed by workspaceKey or chatJid).
   // Used to replay a message when session resume fails and the turn was lost.
   private pendingTurnText: Map<string, string> = new Map();
+  private pendingTurnActorJid: Map<string, string | undefined> = new Map();
+  private currentTurnReplayText: string | null = null;
+  private currentTurnReplayActorJid: string | undefined;
 
   // ---------------------------------------------------------------------------
   // Image coalescing — batch rapid image sends into a single turn
@@ -1850,6 +1963,7 @@ export class AgentRuntime implements Runtime {
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
     this.pendingTurnText.delete(mapKey);
+    this.pendingTurnActorJid.delete(mapKey);
     this.resumeFailedHandling.delete(mapKey);
     this.postTurnGate.delete(mapKey);
     this.compactBoundaryScopes.delete(mapKey);
@@ -1998,6 +2112,7 @@ export class AgentRuntime implements Runtime {
         this.markImageCoalesceSeqFailed(mapKey, representativeSeq);
       }
       this.pendingTurnText.delete(mapKey);
+      this.pendingTurnActorJid.delete(mapKey);
       this.perChatTurnContentType.delete(mapKey);
       this.perChatTurnText.delete(mapKey);
       this.perChatAssistantItemText.delete(mapKey);
@@ -2215,6 +2330,11 @@ export class AgentRuntime implements Runtime {
           if (pending !== undefined) {
             this.pendingTurnText.delete(lidKey);
             this.pendingTurnText.set(canonical, pending);
+          }
+          if (this.pendingTurnActorJid.has(lidKey)) {
+            const pendingActor = this.pendingTurnActorJid.get(lidKey);
+            this.pendingTurnActorJid.delete(lidKey);
+            this.pendingTurnActorJid.set(canonical, pendingActor);
           }
           const crashCount = this.perChatCrashCount.get(lidKey);
           if (crashCount !== undefined) {
@@ -3289,6 +3409,8 @@ export class AgentRuntime implements Runtime {
     this.currentTurnChatJid = chatJid;
     this.currentInboundSeq = turn.inboundSeq;
     this.turnHadVisibleOutput = false;
+    this.currentTurnReplayText = prefixedText;
+    this.currentTurnReplayActorJid = senderJid;
     this.replyGuarantee?.arm({ inboundSeq: turn.inboundSeq, chatJid });
 
     // Thread inbound seq into the outbound queue so ops can link back
@@ -3411,6 +3533,8 @@ export class AgentRuntime implements Runtime {
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
     this.currentTurnChatJid = chatJid;
     this.turnHadVisibleOutput = false;
+    this.currentTurnReplayText = text;
+    this.currentTurnReplayActorJid = actorJid;
     await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid);
   }
 
@@ -3495,6 +3619,7 @@ export class AgentRuntime implements Runtime {
     // Store the turn text so it can be replayed if a session resume fails
     // before the agent can process it.
     this.pendingTurnText.set(mapKey, text);
+    this.pendingTurnActorJid.set(mapKey, actorJid);
 
     const session = this.chatSessions.get(mapKey);
     if (!session) {
@@ -3509,6 +3634,7 @@ export class AgentRuntime implements Runtime {
       if (!retrySession) {
         log.error({ chatJid, mapKey }, 'failed to create session for chat — message dropped');
         this.pendingTurnText.delete(mapKey);
+        this.pendingTurnActorJid.delete(mapKey);
         if (this.durability && this.perChatInboundSeqQueue.get(mapKey)?.[0] !== undefined) {
           const failedSeq = this.perChatInboundSeqQueue.get(mapKey)![0];
           this.replyGuarantee?.disarm(failedSeq);
@@ -3555,8 +3681,14 @@ export class AgentRuntime implements Runtime {
       } else {
         // Consume the seq for this completed user turn
         seqQueue.shift();
-        // Turn completed successfully — clear pending replay text
-        this.pendingTurnText.delete(mapKey);
+        const fallbackReason = event.text ? fallbackReasonForResultText(event.text) : null;
+        // Turn completed successfully — clear pending replay text. Provider
+        // limit/auth/rate failures keep it so the fallback replay can continue
+        // the interrupted request.
+        if (fallbackReason === null) {
+          this.pendingTurnText.delete(mapKey);
+          this.pendingTurnActorJid.delete(mapKey);
+        }
       }
     }
     this.handleEventWithContext(event, queue, session, conversationKey, inboundSeq, mapKey, toolScopeKey, isSystemResult);
@@ -4566,14 +4698,75 @@ export class AgentRuntime implements Runtime {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
-            this.activateProviderFallback(extractUsageLimitResetTime(event.text));
-            queue.enqueueText(this.usageLimitNotice());
+            const activation = this.activateProviderFallback(extractUsageLimitResetTime(event.text), 'usage-limit');
+            if (activation) this.notifyProviderFallbackActivated(queue, activation);
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  mapKey,
+                  oldSession: session,
+                })
+              : false;
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq,
+              conversationKey,
+              mapKey,
+            });
+            if (!replayScheduled) {
+              if (!activation) queue.enqueueText(this.usageLimitNotice());
+              session?.shutdown();
+            }
+            break;
+          }
+          if (isProviderPolicyBlockMessage(event.text)) {
+            log.error({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
               mapKey,
             });
             session?.shutdown();
+            break;
+          }
+          if (isProviderAuthRequiredMessage(event.text)) {
+            log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
+            const activation = this.activateProviderFallback(null, 'auth-required');
+            if (activation) this.notifyProviderFallbackActivated(queue, activation);
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  mapKey,
+                  oldSession: session,
+                })
+              : false;
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq,
+              conversationKey,
+              mapKey,
+            });
+            if (!replayScheduled) session?.shutdown();
+            break;
+          }
+          if (isRateLimitResultMessage(event.text)) {
+            log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
+            const activation = this.activateProviderFallback(null, 'rate-limit');
+            if (activation) this.notifyProviderFallbackActivated(queue, activation);
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  mapKey,
+                  oldSession: session,
+                })
+              : false;
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq,
+              conversationKey,
+              mapKey,
+            });
+            if (!replayScheduled) session?.shutdown();
             break;
           }
           // Context overflow — session is unsalvageable, kill and let next message respawn
@@ -4753,6 +4946,7 @@ export class AgentRuntime implements Runtime {
   }
 
   getHealthSnapshot(): RuntimeHealth {
+    const fallbackState = this.getFallbackState();
     if (this.sessionScope === 'per_chat') {
       const sessions = [...this.chatSessions.values()];
       let activeSessions = 0;
@@ -4795,6 +4989,7 @@ export class AgentRuntime implements Runtime {
           autoCompactIneffective: this.autoCompactIneffective,
           autoCompactConsecutiveRapidRearmsMax: this.autoCompactConsecutiveRapidRearmsMax,
           autoCompactNextTurnOverThreshold: this.autoCompactNextTurnOverThreshold,
+          ...fallbackState,
         },
       };
     }
@@ -4813,6 +5008,7 @@ export class AgentRuntime implements Runtime {
         autoCompactIneffective: this.autoCompactIneffective,
         autoCompactConsecutiveRapidRearmsMax: this.autoCompactConsecutiveRapidRearmsMax,
         autoCompactNextTurnOverThreshold: this.autoCompactNextTurnOverThreshold,
+        ...fallbackState,
       },
     };
   }
@@ -5097,9 +5293,15 @@ export class AgentRuntime implements Runtime {
       clearTimeout(this.revertTimer);
       this.revertTimer = null;
     }
+    if (this.fallbackPrimaryProbeTimer) {
+      clearTimeout(this.fallbackPrimaryProbeTimer);
+      this.fallbackPrimaryProbeTimer = null;
+    }
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
+    this.fallbackResetAt = null;
+    this.fallbackRecoveryProbeRequired = false;
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
     }
@@ -5246,6 +5448,9 @@ export class AgentRuntime implements Runtime {
     this.perChatTurnText.clear();
     this.perChatAssistantItemText.clear();
     this.pendingTurnText.clear();
+    this.pendingTurnActorJid.clear();
+    this.currentTurnReplayText = null;
+    this.currentTurnReplayActorJid = undefined;
     this.resumeFailedHandling.clear();
     this.imageCoalesceBuffers.clear();
 
@@ -5451,6 +5656,10 @@ export class AgentRuntime implements Runtime {
   getFallbackState(): {
     effectiveProvider: string;
     fallbackActiveUntil: number | null;
+    fallbackReason: string | null;
+    fallbackModel: string | null;
+    fallbackResetAt: number | null;
+    fallbackRecoveryProbeRequired: boolean;
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
@@ -5458,13 +5667,18 @@ export class AgentRuntime implements Runtime {
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   } {
     const active = this.isFallbackWindowActive;
+    const fallbackEntry = active ? this.effectiveFallbackEntry : null;
     return {
       effectiveProvider: this.effectiveProvider,
       fallbackActiveUntil: active ? this.fallbackActiveUntil : null,
+      fallbackReason: active ? this.fallbackArmReason : null,
+      fallbackModel: fallbackEntry?.model ?? null,
+      fallbackResetAt: active ? this.fallbackResetAt : null,
+      fallbackRecoveryProbeRequired: active ? this.fallbackRecoveryProbeRequired : false,
       fallbackTurnsServed: this.fallbackTurnsServed,
       fallbackTurnsEmpty: this.fallbackTurnsEmpty,
       lastFallbackTurnAt: this.lastFallbackTurnAt,
-      activeFallbackEntry: this.effectiveFallbackEntry ? { ...this.effectiveFallbackEntry } : null,
+      activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
     };
   }
@@ -5509,6 +5723,14 @@ export class AgentRuntime implements Runtime {
       : this.model;
   }
 
+  /** Provider config paired with {@link effectiveProvider}. */
+  private get effectiveProviderConfig(): Record<string, unknown> | undefined {
+    const fallbackEntry = this.effectiveFallbackEntry;
+    return fallbackEntry
+      ? this.fallbackProviderConfigFor(fallbackEntry.provider)
+      : this.agentProviderConfig;
+  }
+
   /**
    * Whether the keyring holds an API key for the configured fallback target.
    *
@@ -5536,12 +5758,11 @@ export class AgentRuntime implements Runtime {
       : undefined;
   }
 
-  /** User-facing notice for a usage-limit teardown. Asks the user to resend
-   *  rather than auto-replaying the triggering message (double-execution risk). */
+  /** User-facing notice for a usage-limit teardown when no fallback replay can run. */
   private usageLimitNotice(): string {
     return this.agentFallbacks.length > 0
-      ? '_Hit my usage limit — switching to a backup model. Please resend your last message._'
-      : '_Hit my usage limit — please try again after the limit resets._';
+      ? '_Primary model hit a token/quota limit, but the backup could not continue this turn. An operator has been notified._'
+      : '_Primary model hit a token/quota limit. Please try again after the limit resets._';
   }
 
   /**
@@ -5595,7 +5816,7 @@ export class AgentRuntime implements Runtime {
       this.revertTimer = null;
     }
     this.revertTimer = setTimeout(() => {
-      this.deactivateProviderFallback('window-elapsed');
+      this.handleFallbackRevertTimer();
     }, Math.max(0, until - Date.now()));
     // Do not let the revert timer keep the process alive at shutdown.
     this.revertTimer.unref?.();
@@ -5603,6 +5824,8 @@ export class AgentRuntime implements Runtime {
     // after the set-when-null guard above) so the DB can never diverge from the
     // in-memory value even if a caller passes an incorrect reason directly.
     const persistReason = this.fallbackArmReason ?? reason;
+    this.fallbackRecoveryProbeRequired = fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
+    this.scheduleFallbackPrimaryProbe();
     try {
       saveFallbackState(this.db, { activeUntil: until, activatedAt, reason: persistReason });
     } catch (err) {
@@ -5744,7 +5967,7 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Activate provider fallback after the primary provider hit a usage limit.
+   * Activate provider fallback after the primary provider cannot serve a turn.
    *
    * No-op unless a fallback provider is configured. The window ends at the
    * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
@@ -5753,8 +5976,11 @@ export class AgentRuntime implements Runtime {
    * the two. Schedules an auto-revert timer (unref'd so it never keeps the
    * process alive).
    */
-  private activateProviderFallback(resetAt: Date | null): void {
-    if (this.agentFallbacks.length === 0) return;
+  private activateProviderFallback(
+    resetAt: Date | null,
+    reason: ProviderFallbackReason = 'usage-limit',
+  ): ProviderFallbackActivation | null {
+    if (this.agentFallbacks.length === 0) return null;
 
     const now = Date.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
@@ -5777,18 +6003,38 @@ export class AgentRuntime implements Runtime {
     // Pass the original cause on extension so the root cause is preserved;
     // on first activation fallbackArmReason is null so armFallbackWindow
     // stores 'usage-limit' as the original cause.
-    const reason = wasActive && this.fallbackArmReason !== null ? this.fallbackArmReason : 'usage-limit';
-    this.armFallbackWindow(until, reason, activatedAt);
+    const persistedReason = wasActive && this.fallbackArmReason !== null ? this.fallbackArmReason : reason;
+    this.fallbackResetAt = resetAt?.getTime() ?? null;
+    this.armFallbackWindow(until, persistedReason, activatedAt);
+    const fallbackEntry = this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
+    if (!fallbackEntry) return null;
+    const keyPresent = this.fallbackKeyPresent(fallbackEntry.provider, fallbackEntry.model);
 
     log.info({
       instanceName: this.instanceName,
-      fallbackProvider: this.activeFallbackEntry?.provider,
-      fallbackModel: this.activeFallbackEntry?.model,
+      primaryProvider: this.agentProvider,
+      fallbackProvider: fallbackEntry.provider,
+      fallbackModel: fallbackEntry.model,
       fallbackChain: this.fallbackChainSnapshot(),
       resetAt: resetAt ? resetAt.toISOString() : null,
       activeUntil: new Date(until).toISOString(),
       extended: wasActive,
-    }, 'activating provider fallback after usage limit');
+      keyPresent,
+      recoveryProbeRequired: this.fallbackRecoveryProbeRequired,
+      reason,
+    }, 'activating provider fallback after primary provider failure');
+
+    return {
+      primaryProvider: this.agentProvider,
+      fallbackProvider: fallbackEntry.provider,
+      fallbackModel: fallbackEntry.model,
+      reason,
+      resetAt,
+      activeUntil: until,
+      extended: wasActive,
+      keyPresent,
+      recoveryProbeRequired: this.fallbackRecoveryProbeRequired,
+    };
   }
 
   /** Clear the fallback window + timer, reverting new sessions to the primary provider. */
@@ -5797,11 +6043,17 @@ export class AgentRuntime implements Runtime {
       clearTimeout(this.revertTimer);
       this.revertTimer = null;
     }
+    if (this.fallbackPrimaryProbeTimer) {
+      clearTimeout(this.fallbackPrimaryProbeTimer);
+      this.fallbackPrimaryProbeTimer = null;
+    }
     if (this.fallbackActiveUntil === null) return;
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
     this.activeFallbackEntry = null;
+    this.fallbackResetAt = null;
+    this.fallbackRecoveryProbeRequired = false;
     try {
       clearFallbackState(this.db);
     } catch (err) {
@@ -5812,6 +6064,241 @@ export class AgentRuntime implements Runtime {
       primaryProvider: this.agentProvider,
       reason,
     }, 'reverting to primary provider');
+  }
+
+  private handleFallbackRevertTimer(): void {
+    if (this.fallbackActiveUntil === null) return;
+    if (!this.fallbackRecoveryProbeRequired) {
+      this.deactivateProviderFallback('window-elapsed');
+      return;
+    }
+    if (this.probePrimaryProviderRecovered()) {
+      this.deactivateProviderFallback('primary-probe-ok');
+      return;
+    }
+    const now = Date.now();
+    const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
+    this.fallbackActiveUntil = until;
+    this.revertTimer = setTimeout(() => {
+      this.handleFallbackRevertTimer();
+    }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
+    this.revertTimer.unref?.();
+    try {
+      saveFallbackState(this.db, {
+        activeUntil: until,
+        activatedAt: this.fallbackActivatedAt ?? now,
+        reason: this.fallbackArmReason ?? 'auth-required',
+      });
+    } catch (err) {
+      log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
+    }
+    this.scheduleFallbackPrimaryProbe();
+    log.warn({
+      instanceName: this.instanceName,
+      primaryProvider: this.agentProvider,
+      fallbackProvider: this.activeFallbackEntry?.provider,
+      reason: this.fallbackArmReason,
+    }, 'primary provider recovery probe still failing; keeping fallback armed');
+  }
+
+  private scheduleFallbackPrimaryProbe(): void {
+    if (this.fallbackPrimaryProbeTimer) {
+      clearTimeout(this.fallbackPrimaryProbeTimer);
+      this.fallbackPrimaryProbeTimer = null;
+    }
+    if (!this.fallbackRecoveryProbeRequired) return;
+    this.fallbackPrimaryProbeTimer = setTimeout(() => {
+      this.fallbackPrimaryProbeTimer = null;
+      if (this.fallbackActiveUntil === null || !this.fallbackRecoveryProbeRequired) return;
+      if (this.probePrimaryProviderRecovered()) {
+        this.deactivateProviderFallback('primary-probe-ok');
+        return;
+      }
+      this.scheduleFallbackPrimaryProbe();
+    }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
+    this.fallbackPrimaryProbeTimer.unref?.();
+  }
+
+  private probePrimaryProviderRecovered(): boolean {
+    const service = resolveProviderKeyService(this.agentProvider, this.model, this.agentProviderConfig);
+    if (service) return lookupCredential(service) !== null;
+    const binary = getProviderBinary(this.agentProvider);
+    if (!binary) return false;
+    try {
+      const result = spawnSync(binary, ['auth', 'status', '--json'], {
+        encoding: 'utf8',
+        timeout: PROVIDER_FALLBACK_PRIMARY_PROBE_TIMEOUT_MS,
+        windowsHide: true,
+        env: {
+          HOME: process.env.HOME,
+          PATH: process.env.PATH,
+          USER: process.env.USER,
+          NO_COLOR: '1',
+        },
+      });
+      const combined = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+      if (result.error || result.status !== 0) return false;
+      return !isProviderAuthRequiredMessage(combined);
+    } catch {
+      return false;
+    }
+  }
+
+  private notifyProviderFallbackActivated(queue: IOutboundQueue, activation: ProviderFallbackActivation): void {
+    const now = Date.now();
+    for (const [key, recordedAt] of this.recentProviderFallbackNotices) {
+      if (now - recordedAt > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) {
+        this.recentProviderFallbackNotices.delete(key);
+      }
+    }
+    const noticeKey = [
+      queue.targetChatJid,
+      activation.reason,
+      activation.fallbackProvider,
+      activation.fallbackModel ?? 'default',
+    ].join(':');
+    if (this.recentProviderFallbackNotices.has(noticeKey)) return;
+    this.recentProviderFallbackNotices.set(noticeKey, now);
+
+    const card = modelCardLabel(activation.fallbackProvider, activation.fallbackModel);
+    const suffix = activation.keyPresent === false
+      ? ' Backup credentials look missing; an operator has been notified.'
+      : ' I will continue here.';
+    queue.enqueueText(`Primary model ${fallbackReasonForUser(activation.reason, activation.activeUntil)}. Backup: ${card}.${suffix}`);
+  }
+
+  private recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void {
+    this.operationTrackers.get(mapKey)?.shutdown();
+    this.operationTrackers.delete(mapKey);
+
+    const workspace = this.sandboxPerChat
+      ? this.workspaceResources.get(mapKey) ?? {
+          workspacePath: chatJidToWorkspace(this.cwd ?? homedir(), chatJid).workspacePath,
+          socketPath: undefined,
+        }
+      : null;
+    const toolScopeKey = this.createToolScopeKey(mapKey);
+    let session!: SessionManager;
+    const resolveSessionMapKey = () => this.findMapKeyForSession(session, mapKey);
+    session = this.createSessionManager({
+      chatJid,
+      cwd: workspace?.workspacePath ?? this.cwd,
+      actorJid,
+      mcpSocketPath: workspace?.socketPath,
+      onEvent: (event) => {
+        const currentMapKey = resolveSessionMapKey();
+        if (!currentMapKey) {
+          log.debug({ mapKey, chatJid, eventType: event.type }, 'event dropped — fallback session key missing');
+          return;
+        }
+        this.handleEventPerChat(currentMapKey, event, toolScopeKey);
+      },
+      onCrash: (info) => {
+        const currentMapKey = resolveSessionMapKey() ?? mapKey;
+        this.handlePerChatCrash(currentMapKey, chatJid, info);
+      },
+      notifyUser: (msg) => this.handleCrashNotify(msg, chatJid),
+      onResumeFailed: () => this.handleResumeFailed(chatJid),
+    });
+    this.chatSessions.set(mapKey, session);
+    if (!this.chatQueues.has(mapKey)) {
+      this.chatQueues.set(mapKey, this.createOutboundQueue(chatJid, 'fallback per-chat session replacement'));
+    }
+    const tracker = this.createOperationTracker(session, () => this.chatQueues.get(mapKey));
+    if (tracker) this.operationTrackers.set(mapKey, tracker);
+  }
+
+  private recreateSingletonSessionForFallback(chatJid: string, actorJid?: string): void {
+    this.operationTracker?.shutdown();
+    this.operationTracker = null;
+    this.session = this.createSessionManager({
+      chatJid,
+      cwd: this.cwd,
+      actorJid,
+      onEvent: (event) => this.handleEvent(event),
+      onCrash: (info) => {
+        this.recordCrash(GLOBAL_CRASH_SCOPE_KEY);
+        this.getActiveQueue()?.abortTurn();
+        this.cleanupSharedCrashTurnState();
+        log.error({
+          chatJid,
+          sessionId: info.sessionId ?? null,
+          exitCode: info.exitCode ?? null,
+          signal: info.signal ?? null,
+        }, 'fallback singleton session crashed');
+      },
+      notifyUser: (msg) => this.handleCrashNotify(msg),
+      onResumeFailed: () => this.handleResumeFailed(chatJid),
+    });
+    this.activeChatJid = chatJid;
+    if (this.shared) {
+      this.ensureOutboundQueue(chatJid);
+    } else if (!this.queue) {
+      this.queue = this.createOutboundQueue(chatJid, 'fallback single session replacement');
+    }
+    this.operationTracker = this.createOperationTracker(this.session, () => this.getActiveQueue());
+  }
+
+  private scheduleFallbackReplay(args: {
+    activation: ProviderFallbackActivation;
+    chatJid: string;
+    mapKey?: string;
+    oldSession: SessionManager | null;
+  }): boolean {
+    if (args.activation.extended || args.activation.keyPresent === false) return false;
+    const replayText = args.mapKey !== undefined
+      ? this.pendingTurnText.get(args.mapKey)
+      : this.currentTurnReplayText;
+    if (!replayText) return false;
+    const actorJid = args.mapKey !== undefined
+      ? this.pendingTurnActorJid.get(args.mapKey)
+      : this.currentTurnReplayActorJid;
+
+    void this.replayTurnOnFallback({
+      chatJid: args.chatJid,
+      mapKey: args.mapKey,
+      replayText,
+      actorJid,
+      oldSession: args.oldSession,
+    }).catch((err) => {
+      log.error({
+        err,
+        chatJid: args.chatJid,
+        mapKey: args.mapKey,
+        fallbackProvider: args.activation.fallbackProvider,
+      }, 'failed to replay turn on fallback provider');
+      emitAlert(
+        this.instanceName,
+        'runtime_provider_fallback_replay_failed',
+        'Provider fallback replay failed',
+        `provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'} reason=${args.activation.reason}`,
+      );
+    });
+    return true;
+  }
+
+  private async replayTurnOnFallback(args: {
+    chatJid: string;
+    mapKey?: string;
+    replayText: string;
+    actorJid?: string;
+    oldSession: SessionManager | null;
+  }): Promise<void> {
+    if (args.oldSession) {
+      await args.oldSession.shutdown(false);
+    }
+    if (args.mapKey !== undefined) {
+      this.chatSessions.delete(args.mapKey);
+      this.recreatePerChatSessionForFallback(args.mapKey, args.chatJid, args.actorJid);
+      await this.sendTurnPerChat(args.chatJid, args.replayText, args.mapKey, args.actorJid);
+      return;
+    }
+    this.recreateSingletonSessionForFallback(args.chatJid, args.actorJid);
+    this.currentTurnChatJid = args.chatJid;
+    this.turnHadVisibleOutput = false;
+    this.currentTurnReplayText = args.replayText;
+    this.currentTurnReplayActorJid = args.actorJid;
+    await this.sendTurnToSession(this.session!, args.chatJid, args.replayText, undefined, args.actorJid);
   }
 
   /**
@@ -5828,11 +6315,12 @@ export class AgentRuntime implements Runtime {
    * honors the primary's endpoint and apiKeyService).
    */
   private sessionProviderConfig(): Record<string, unknown> | undefined {
-    if (!this.agentProviderConfig) return undefined;
+    const selected = this.effectiveProviderConfig;
+    if (!selected) return undefined;
     if (this.effectiveFallbackEntry === null || this.effectiveProvider !== 'opencode-cli') {
-      return this.agentProviderConfig;
+      return selected;
     }
-    const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = this.agentProviderConfig;
+    const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = selected;
     return rest;
   }
 
@@ -6280,6 +6768,8 @@ export class AgentRuntime implements Runtime {
     this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
+    this.currentTurnReplayText = null;
+    this.currentTurnReplayActorJid = undefined;
     this.currentTurnInboundContentType = null;
     this.currentTurnAssistantText = '';
     this.currentTurnAssistantItemText.clear();
@@ -6486,6 +6976,7 @@ export class AgentRuntime implements Runtime {
             } catch (err) {
               log.warn({ err, chatJid }, 'pending turn replay failed');
               this.pendingTurnText.delete(mapKey);
+              this.pendingTurnActorJid.delete(mapKey);
             }
           }
         }).catch((err) => {
@@ -6686,14 +7177,72 @@ export class AgentRuntime implements Runtime {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
-            this.activateProviderFallback(extractUsageLimitResetTime(event.text));
-            queue.enqueueText(this.usageLimitNotice());
+            const activation = this.activateProviderFallback(extractUsageLimitResetTime(event.text), 'usage-limit');
+            if (activation) this.notifyProviderFallbackActivated(queue, activation);
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  oldSession: this.session,
+                })
+              : false;
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq: this.currentInboundSeq,
+              conversationKey: toConversationKey(queue.targetChatJid),
+              clearCurrentInboundSeq: true,
+            });
+            if (!replayScheduled) {
+              if (!activation) queue.enqueueText(this.usageLimitNotice());
+              this.session?.shutdown();
+            }
+            break;
+          }
+          if (isProviderPolicyBlockMessage(event.text)) {
+            log.error({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),
               clearCurrentInboundSeq: true,
             });
             this.session?.shutdown();
+            break;
+          }
+          if (isProviderAuthRequiredMessage(event.text)) {
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
+            const activation = this.activateProviderFallback(null, 'auth-required');
+            if (activation) this.notifyProviderFallbackActivated(queue, activation);
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  oldSession: this.session,
+                })
+              : false;
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq: this.currentInboundSeq,
+              conversationKey: toConversationKey(queue.targetChatJid),
+              clearCurrentInboundSeq: true,
+            });
+            if (!replayScheduled) this.session?.shutdown();
+            break;
+          }
+          if (isRateLimitResultMessage(event.text)) {
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
+            const activation = this.activateProviderFallback(null, 'rate-limit');
+            if (activation) this.notifyProviderFallbackActivated(queue, activation);
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  oldSession: this.session,
+                })
+              : false;
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq: this.currentInboundSeq,
+              conversationKey: toConversationKey(queue.targetChatJid),
+              clearCurrentInboundSeq: true,
+            });
+            if (!replayScheduled) this.session?.shutdown();
             break;
           }
           // Context overflow — session is unsalvageable, kill and let next message respawn
@@ -6728,6 +7277,8 @@ export class AgentRuntime implements Runtime {
         }
         this.turnHadVisibleOutput = false;
         this.currentTurnChatJid = null;
+        this.currentTurnReplayText = null;
+        this.currentTurnReplayActorJid = undefined;
         if (this.durability) {
           this.durability.completeTurn({
             ...((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null
@@ -6864,6 +7415,8 @@ export class AgentRuntime implements Runtime {
     this.singleTurnHadToolActivity = false
     this.currentTurnChatJid = null
     this.turnHadVisibleOutput = false
+    this.currentTurnReplayText = null
+    this.currentTurnReplayActorJid = undefined
 
     this.currentTurnInboundContentType = null
     this.currentTurnAssistantText = ''

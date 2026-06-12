@@ -542,9 +542,13 @@ export async function handleGetLineProviderStatus(
   const activeUntil = typeof fallbackActiveUntilRaw === 'number' ? fallbackActiveUntilRaw : null;
   const active = activeUntil !== null && Date.now() < activeUntil;
   const effectiveProviderRaw = dig(health, 'instance', 'effectiveProvider');
+  const fallbackReasonRaw = dig(health, 'instance', 'fallbackReason');
+  const fallbackResetAtRaw = dig(health, 'instance', 'fallbackResetAt');
+  const fallbackRecoveryProbeRequiredRaw = dig(health, 'instance', 'fallbackRecoveryProbeRequired');
   const turnsServedRaw = dig(health, 'instance', 'fallbackTurnsServed');
   const turnsEmptyRaw = dig(health, 'instance', 'fallbackTurnsEmpty');
   const lastFallbackTurnAtRaw = dig(health, 'instance', 'lastFallbackTurnAt');
+  const fallbackResetAt = typeof fallbackResetAtRaw === 'number' ? fallbackResetAtRaw : null;
   const activeEntry = fallbackEntryFromHealth(dig(health, 'instance', 'activeFallbackEntry'));
   const chainFromHealth = fallbackChainFromHealth(dig(health, 'instance', 'fallbackChain'));
   const fallbackChain = chainFromHealth ?? fallbackEntries.map((entry) => ({
@@ -566,6 +570,9 @@ export async function handleGetLineProviderStatus(
       active,
       activeUntil,
       effectiveProvider: typeof effectiveProviderRaw === 'string' ? effectiveProviderRaw : null,
+      reason: typeof fallbackReasonRaw === 'string' ? fallbackReasonRaw : null,
+      resetAt: fallbackResetAt,
+      recoveryProbeRequired: fallbackRecoveryProbeRequiredRaw === true,
       turnsServed: typeof turnsServedRaw === 'number' ? turnsServedRaw : null,
       turnsEmpty: typeof turnsEmptyRaw === 'number' ? turnsEmptyRaw : null,
       lastFallbackTurnAt: typeof lastFallbackTurnAtRaw === 'number' ? lastFallbackTurnAtRaw : null,
