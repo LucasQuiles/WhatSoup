@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health"
 REPO_ROOT = Path(__file__).resolve().parents[2]
+TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 
 
 def positive_env_int(name: str, default: int) -> int:
@@ -662,6 +663,10 @@ def compact_health_field(value: Any) -> str:
     return str(value).replace("\n", " ")[:200]
 
 
+def is_terminal_auth_failure_class(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in TERMINAL_AUTH_FAILURE_CLASSES
+
+
 def local_instance_health_problems() -> dict[str, str]:
     profile = health_profile_path()
     problems: dict[str, str] = {}
@@ -711,6 +716,8 @@ def local_instance_health_problems() -> dict[str, str]:
             reasons.append(f"connected={str(connected).lower()}")
         if auth_failure not in (None, "", "none"):
             reasons.append(f"auth_failure_class={auth_failure}")
+            if is_terminal_auth_failure_class(auth_failure):
+                reasons.append("physical_intervention_required=terminal_auth_failure_class")
         if bond_status not in (None, "", "present"):
             reasons.append(f"auth_bond_status={bond_status}")
         if isinstance(bond_issues, list) and bond_issues:

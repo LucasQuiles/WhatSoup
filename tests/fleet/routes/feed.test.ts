@@ -455,9 +455,15 @@ describe('health transition events via handleGetFeed', () => {
     handleGetFeed(mockReq(), mockRes(), deps);
     (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
       status: 'logged_out',
-      statusConfidence: 'inferred',
-      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
-      statusEvidence: ['account_jid_status=not_connected', 'connection_state=disconnected'],
+      statusConfidence: 'confirmed',
+      statusReason: 'whatsapp_auth_loss_with_disconnect_corroboration',
+      statusEvidence: [
+        'account_jid_status=not_connected',
+        'connection_state=disconnected',
+        'last_disconnect_reason=loggedOut',
+        'last_status_code=401',
+        'auth_failure_class=serverside_logout_irreversible',
+      ],
       error: null,
     });
 
@@ -477,9 +483,15 @@ describe('health transition events via handleGetFeed', () => {
         type: 'health',
         status: 'logged_out',
         previousStatus: 'online',
-        confidence: 'inferred',
-        reason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
-        evidence: ['account_jid_status=not_connected', 'connection_state=disconnected'],
+        confidence: 'confirmed',
+        reason: 'whatsapp_auth_loss_with_disconnect_corroboration',
+        evidence: [
+          'account_jid_status=not_connected',
+          'connection_state=disconnected',
+          'last_disconnect_reason=loggedOut',
+          'last_status_code=401',
+          'auth_failure_class=serverside_logout_irreversible',
+        ],
       },
     });
   });

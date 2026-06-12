@@ -458,7 +458,7 @@ explicit for readability.
 | `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. `providerConfig.baseUrl` selects a custom endpoint and `providerConfig.apiKeyService` names the keyring service that authenticates it — see [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for routing, auth, and validation semantics. |
 | `fallbackProvider` | string | no | — | Legacy single fallback provider. Prefer `fallbacks` when configuring more than one backup. Must be one of the same IDs as `provider` (`claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`); unknown IDs are rejected before startup. When the primary returns a usage-limit, rate-limit, or auth-required terminal result and the selected fallback is usable, the runtime sends a short in-chat handoff notice and replays the interrupted turn on the fallback provider when no tool side effects have started. Usage-limit and rate-limit fallbacks automatically revert when the window ends; auth-required fallbacks stay armed until the primary passes a background recovery probe. Omitted = fallback disabled (unless `fallbacks` is set). See [Provider fallback behavior](#provider-fallback-behavior) for the full lifecycle: user notice, window persistence across restarts, turn telemetry, credential pre-flight, and admin override commands. |
 | `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2`). The id must match the provider's model catalog **exactly, including case** — `opencode` treats `minimax/minimax-m2` and `minimax/MiniMax-M2` as different ids, and a wrong-case id fails every session with an opaque provider error. Copy the id verbatim from `opencode models` — the runtime warns at arm time (`fallback_model_unknown`) when the configured model is not found in the provider catalog. Non-empty string when present. When omitted, a CLI fallback provider runs with no `--model`/`-m` override (its own default); **required when `fallbackProvider` is `openai-api` or `anthropic-api`** (see [Cross-field validation rules](#cross-field-validation-rules)). |
-| `fallbacks` | array | no | — | Ordered fallback chain. Each entry is `{ "provider": "<provider-id>", "model": "<model-id>" }`; `model` may be omitted only for CLI providers. Do not combine with `fallbackProvider` / `fallbackModel`. At arm time the runtime selects the first entry whose required key is present, records per-entry eligibility in `/health` and provider-status (`unknown` until the first selection pass), and fails open to entry zero if no keyed entry is eligible so the operator still gets binary/model/key alerts for the first configured target. Maximum 4 entries. |
+| `fallbacks` | array | no | — | Ordered fallback chain. Each entry is `{ "provider": "<provider-id>", "model": "<model-id>" }`; `model` may be omitted only for CLI providers. Do not combine with `fallbackProvider` / `fallbackModel`. At arm time the runtime selects the first entry whose required key is present, records per-entry eligibility in `/health` and provider-status (`unknown` until the first selection pass), and fails open to entry zero if no keyed entry is eligible so the operator still gets binary/model/key alerts for the first configured target. Auth-required failures skip same-provider entries because they share the failed auth surface and require an independent provider. Maximum 8 entries. |
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
@@ -482,7 +482,7 @@ config error):
   operator never chose. CLI fallback providers (`claude-cli`, `codex-cli`,
   `gemini-cli`, `opencode-cli`) may omit it and use their own default.
 - **Malformed `fallbacks`.** `agentOptions.fallbacks` must be an array of at
-  most 4 entries, cannot be combined with the legacy `fallbackProvider` /
+  most 8 entries, cannot be combined with the legacy `fallbackProvider` /
   `fallbackModel` pair, cannot contain duplicate provider/model pairs, and
   cannot point an entry at the primary provider/model pair.
 - **API-type `fallbacks[]` entry without `model`.** `openai-api` and
@@ -625,7 +625,10 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    ```json
    "agentOptions": {
      "fallbacks": [
+       { "provider": "claude-cli", "model": "claude-opus-4-8" },
+       { "provider": "claude-cli", "model": "claude-sonnet-4-6" },
        { "provider": "opencode-cli", "model": "minimax/MiniMax-M2" },
+       { "provider": "opencode-cli", "model": "deepseek/deepseek-chat" },
        { "provider": "openai-api", "model": "gpt-4o-mini" }
      ]
    }
