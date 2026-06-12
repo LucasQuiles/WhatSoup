@@ -18,7 +18,8 @@
     "prepare": "husky",
     "design:theme-parity": "node scripts/check-theme-parity.mjs",
     "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs",
-    "design:metrics": "node scripts/design-metrics.mjs"
+    "design:metrics": "node scripts/design-metrics.mjs",
+    "coverage:check": "node scripts/check-coverage-thresholds.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "5.96.0",
