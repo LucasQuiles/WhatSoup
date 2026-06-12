@@ -184,6 +184,25 @@ function writeWorkspaceMcpConfig(
   if (target === null) return;
 
   if (provider === 'opencode-cli') {
+    // Symlink preflight BEFORE reading existing config — mirrors
+    // writeProviderMcpConfig in providers/mcp-bridge.ts. Without it the
+    // merge path reads through a symlinked opencode.json (and the later
+    // ELOOP from writePrivateFileSync would fail the whole provisioning).
+    try {
+      const stat = lstatSync(target);
+      if (stat.isSymbolicLink()) {
+        log.warn({ target }, 'skipping opencode MCP config write because opencode.json is a symlink');
+        return;
+      }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP') {
+        log.warn({ err, target }, 'skipping opencode MCP config write after file stat failed');
+        return;
+      }
+      if (code !== 'ENOENT') throw err;
+    }
+
     let existing: Record<string, unknown> | null = null;
     if (existsSync(target)) {
       try {
@@ -195,7 +214,15 @@ function writeWorkspaceMcpConfig(
         log.warn({ err, target }, 'failed to parse existing opencode.json during workspace provisioning; overwriting managed entries');
       }
     }
-    writePrivateFileSync(target, JSON.stringify(mergeOpencodeConfig(existing, generated), null, 2));
+    try {
+      writePrivateFileSync(target, JSON.stringify(mergeOpencodeConfig(existing, generated), null, 2));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+        log.warn({ err, target }, 'skipping opencode MCP config write because opencode.json is a symlink');
+        return;
+      }
+      throw err;
+    }
     return;
   }
 

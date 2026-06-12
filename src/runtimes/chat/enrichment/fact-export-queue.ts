@@ -236,14 +236,16 @@ export function enqueueFacts(
 }
 
 /**
- * Read up to `limit` rows in `pending` status, oldest-first. This is a
- * read-only operation — it does NOT mutate row state. A deployment-provided
- * bridge is responsible for calling `markFactsExported` after Pinecone
- * confirms the upsert.
+ * Read up to `limit` rows in `pending` status, oldest-first. Valid rows are
+ * NOT mutated — a deployment-provided bridge is responsible for calling
+ * `markFactsExported` after Pinecone confirms the upsert.
  *
  * T1 hardening: corrupted payload_json rows are surfaced at log.error
- * (not silently hidden) and omitted from the returned array so the
- * exporter can observe and triage them.
+ * (not silently hidden), omitted from the returned array, AND flipped to
+ * status='quarantined'. Without the status write, skipped rows stay at the
+ * head of the `ORDER BY id` pending queue and permanently occupy batch
+ * slots — once `limit` corrupt rows accumulate, export silently stops.
+ * Quarantined rows remain in the table for operator triage.
  */
 export function claimPendingFacts(db: Database, limit: number): ClaimedFact[] {
   const runId = process.env.MW_MIND_RUN_ID;
@@ -266,6 +268,10 @@ export function claimPendingFacts(db: Database, limit: number): ClaimedFact[] {
       created_at: string;
     }>;
 
+  const quarantineRow = db.raw.prepare(
+    `UPDATE fact_export_queue SET status = 'quarantined' WHERE id = ? AND status = 'pending'`,
+  );
+
   const claimed: ClaimedFact[] = [];
   for (const row of rows) {
     let parsed: unknown;
@@ -281,6 +287,7 @@ export function claimPendingFacts(db: Database, limit: number): ClaimedFact[] {
         },
         'claimPendingFacts: payload_json not valid JSON -- quarantining row',
       );
+      quarantineRow.run(row.id);
       continue;
     }
 
@@ -295,6 +302,7 @@ export function claimPendingFacts(db: Database, limit: number): ClaimedFact[] {
         },
         'claimPendingFacts: payload_json failed schema validation -- quarantining row',
       );
+      quarantineRow.run(row.id);
       continue;
     }
 

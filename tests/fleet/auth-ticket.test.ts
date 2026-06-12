@@ -11,6 +11,7 @@
 //    if the key remains in the caller-supplied validKeys list
 
 import { describe, it, expect, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   createTicketStore,
   TICKET_TTL_MS,
@@ -155,5 +156,26 @@ describe('auth-ticket -- malformed input', () => {
     expect(s.redeem('nonce.api.notanumber.hmac', 'api', [KEY])).toBe(false);
     // unknown audience segment
     expect(s.redeem('nonce.admin.123.hmac', 'api' as TicketAudience, [KEY])).toBe(false);
+  });
+});
+
+describe('auth-ticket -- constant-time compare SSOT', () => {
+  // test-integrity: source-string-ok — static-policy check (banned local
+  // reimplementation), not behavior: the naive/hardened delta is not
+  // reachable through the public API because computeHmac only ever emits
+  // well-formed base64url, so a behavioral test cannot pin the SSOT.
+  //
+  // safe-compare.ts is the hardened canonical (well-formed-UTF-16 gate,
+  // byteLength check, never throws, empty strings never verify) and its own
+  // header cites auth-ticket's compare as the precedent it superseded. The
+  // HMAC verification path must use it rather than keep a weaker local copy
+  // (same anti-duplication pattern as parser-utils/no-duplicates).
+  it('uses safeStringEqual from safe-compare.ts, not a local naive compare', () => {
+    const src = readFileSync(
+      new URL('../../src/fleet/auth-ticket.ts', import.meta.url),
+      'utf8',
+    );
+    expect(src).toContain("from './safe-compare.ts'");
+    expect(src).not.toMatch(/function safeEqual\(/);
   });
 });

@@ -29,6 +29,7 @@
 // audience is part of the signed payload.
 
 import * as crypto from 'node:crypto';
+import { safeStringEqual } from './safe-compare.ts';
 
 /** Default ticket TTL -- 60 seconds. */
 export const TICKET_TTL_MS = 60_000;
@@ -74,13 +75,6 @@ export interface TicketStore {
 
 function base64urlEncode(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const aBuf = Buffer.from(a);
-  const bBuf = Buffer.from(b);
-  if (aBuf.length !== bBuf.length) return false;
-  return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
 function computeHmac(key: string, payload: string): string {
@@ -169,7 +163,7 @@ export function createTicketStore(opts: {
       for (const key of validKeys) {
         if (typeof key !== 'string' || key.length === 0) continue;
         const expected = computeHmac(key, parsed.signedPayload);
-        if (safeEqual(expected, parsed.hmac)) signatureOk = true;
+        if (safeStringEqual(expected, parsed.hmac)) signatureOk = true;
       }
       if (!signatureOk) return false;
 
