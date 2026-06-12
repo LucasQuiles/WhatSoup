@@ -194,7 +194,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC2-fts-injection.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC3-ssrf-dns.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | closed | state-md-status | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | closed | state-md-status | agent-layer-hardening | 2026-05-31 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | closed | state-md-status | agent-layer-hardening | 2026-06-11 |  |
 
 ### docs/sdlc/completed/audit-remediation-20260330  _(1 entries)_
 
@@ -358,4 +358,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-12T02:05:44Z from commit `cca57b1ddc22a18cc2955c475e784e4acf8c990d`
+- Generated at 2026-06-12T02:31:58Z from commit `24619e821aa9358f7ba259ada6122d9b5f087a58`

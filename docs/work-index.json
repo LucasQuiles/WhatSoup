@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-06-12T02:05:44Z",
+  "generated_at": "2026-06-12T02:31:58Z",
   "repo": "WhatSoup",
-  "git_head": "cca57b1ddc22a18cc2955c475e784e4acf8c990d",
+  "git_head": "24619e821aa9358f7ba259ada6122d9b5f087a58",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 180,
   "schema_version": 5,
@@ -915,7 +915,7 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/completed/agent-layer-hardening-20260405",
       "supersedes_hint": null,
-      "last_modified": "2026-05-31",
+      "last_modified": "2026-06-11",
       "size_bytes": 5355
     },
     {
