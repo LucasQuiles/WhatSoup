@@ -46,6 +46,7 @@
   --input-btn: 28px;         /* square icon button — optically corrected */
   --input-number-w: 120px;   /* number input width */
   --feed-min-w: 240px;       /* activity feed min width */
+  --fleet-pane-min-h: 480px; /* stacked/short-window min height for Fleet panes (DD-18) */
   --feed-col-icon: 16px;     /* feed card icon column width */
   --feed-inst-max: 80px;     /* feed instance tag max width */
   --feed-preview-max: 120px; /* feed preview max-height before scroll */
