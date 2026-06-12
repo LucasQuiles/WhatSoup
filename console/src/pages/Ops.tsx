@@ -20,6 +20,7 @@ import { api } from '../lib/api'
 import { useToast } from '../hooks/toast-context'
 import { useQueryClient } from '@tanstack/react-query'
 import { displayInstanceName } from '../lib/text-utils'
+import { statusWashClass } from '../lib/status-severity'
 import ConfirmDialog from '../components/ConfirmDialog'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
 
@@ -123,10 +124,7 @@ export default function Ops() {
                 key={line.name}
                 className={`c-card c-hover cursor-pointer py-[var(--sp-3)] px-[var(--sp-4)] ${
                   line.name === activeLine ? 'ring-1 ring-m-cht/30' : ''
-                } ${
-                  line.status === 'unreachable' ? 'bg-[var(--s-crit-wash)]' :
-                  line.status === 'degraded' ? 'bg-[var(--s-warn-wash)]' : 'bg-d2'
-                }`}
+                } ${statusWashClass(line.status) || 'bg-d2'}`}
                 onClick={() => setSelectedLine(line.name)}
               >
                 {/* Row 1: Name + mode + phone */}
