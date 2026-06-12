@@ -463,8 +463,8 @@ function validateAgentOptions(
       return err('agentOptions.fallbacks', 'agentOptions.fallbacks must be an array when provided');
     }
     const fallbacks = opts['fallbacks'] as unknown[];
-    if (fallbacks.length > 4) {
-      return err('agentOptions.fallbacks', 'agentOptions.fallbacks may contain at most 4 entries');
+    if (fallbacks.length > 8) {
+      return err('agentOptions.fallbacks', 'agentOptions.fallbacks may contain at most 8 entries');
     }
     const seen = new Set<string>();
     for (let i = 0; i < fallbacks.length; i++) {

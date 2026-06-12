@@ -3,14 +3,11 @@ import { emitAlert } from '../lib/emit-alert.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 import type { BotErrorsSeverity } from '../lib/bot-errors-outbox.ts';
+import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
 const MIN_ALERT_INTERVAL_MS = ALERT_THROTTLE_INTERVAL_MS;
-const TERMINAL_AUTH_FAILURE_CLASSES = new Set([
-  'pairing_required',
-  'serverside_logout_irreversible',
-]);
 
 export interface InstanceHealth {
   name: string;
@@ -128,9 +125,7 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
     connectionState === 'disconnected' ||
     healthStatus === 'unhealthy';
   const explicitAuthLossSignal =
-    lastStatusCode === 401 ||
-    lastDisconnectReason === 'loggedOut' ||
-    (authFailureClass !== null && TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass));
+    hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason, authFailureClass });
 
   if (loggedOutHeuristic && disconnectedCorroboration && explicitAuthLossSignal) {
     return {
@@ -268,9 +263,17 @@ export class HealthPoller {
 
     const promises = Array.from(instances.entries()).map(async ([name, inst]) => {
       if (name === this.selfName) {
-        // Self-instance: use callback, no HTTP
+        // Self-instance: use callback, no HTTP. The snapshot is classified
+        // with the SAME semantics as a remote payload — forcing 'online'
+        // here hid degraded/logged-out states the instance reported about
+        // itself.
         try {
           const health = this.getSelfHealth();
+          const classification = classifyHealthSnapshot(health);
+          if (isNonOnlineClassification(classification)) {
+            this.updateFromHealthSnapshot(name, health, classification);
+            return;
+          }
           const existing = this.statuses.get(name);
           this.statuses.set(name, {
             name,
@@ -509,6 +512,10 @@ export class HealthPoller {
       }
     }
 
+    // Capture before the save below may clear it: THIS alert's suppression
+    // decision ran against the failed load, so it still carries the flag.
+    const throttleLoadErrorCode = this.alertThrottleLoadErrorCode;
+
     // Set lastAlertAt BEFORE emitting to prevent races
     if (existing) {
       const now = new Date().toISOString();
@@ -516,13 +523,17 @@ export class HealthPoller {
       this.persistedAlertThrottle.set(name, now);
       try {
         recordAlertThrottle(name, now);
+        // First successful save rewrites the throttle file (self-heal); the
+        // construction-time load error no longer describes on-disk state, so
+        // stop appending it to every future alert for the process lifetime.
+        this.alertThrottleLoadErrorCode = null;
       } catch (err) {
         log.warn({ err, name, source }, 'failed to persist alert throttle');
       }
     }
 
-    const throttleEvidence = this.alertThrottleLoadErrorCode
-      ? `${evidence} alert_throttle_load_error=true alert_throttle_load_error_code=${this.alertThrottleLoadErrorCode}`
+    const throttleEvidence = throttleLoadErrorCode
+      ? `${evidence} alert_throttle_load_error=true alert_throttle_load_error_code=${throttleLoadErrorCode}`
       : evidence;
     emitAlert(name, source, summary, throttleEvidence, severity);
   }

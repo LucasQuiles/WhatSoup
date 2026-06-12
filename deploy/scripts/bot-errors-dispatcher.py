@@ -36,6 +36,24 @@ EMAIL_FALLBACK = os.environ.get(
     str(Path.home() / ".claude/scripts/email-alert-fallback.sh"),
 )
 MAX_MESSAGE_CHARS = int(os.environ.get("BOT_ERRORS_MAX_MESSAGE_CHARS", "5500"))
+TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+LOGGED_OUT_REASON_KEY = "loggedout"
+
+
+def normalized_signal_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.strip().lower())
+
+
+def evidence_has_terminal_auth_failure_class(evidence: str) -> bool:
+    lower = evidence.lower()
+    return any(f"auth_failure_class={auth_class}" in lower for auth_class in TERMINAL_AUTH_FAILURE_CLASSES)
+
+
+def evidence_has_logged_out_reason(evidence: str) -> bool:
+    for match in re.finditer(r"\blast_disconnect_reason=([^\s]+)", evidence, re.IGNORECASE):
+        if normalized_signal_key(match.group(1)) == LOGGED_OUT_REASON_KEY:
+            return True
+    return "loggedout" in normalized_signal_key(evidence)
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -702,7 +720,11 @@ def is_logged_out_physical_signal(event: dict[str, Any]) -> bool:
         return True
     source = str(event.get("source") or "")
     evidence = str(event.get("evidence") or "").lower()
-    return source == "instance_logged_out" and "last_status_code=401" in evidence and "loggedout" in evidence
+    return source == "instance_logged_out" and (
+        evidence_has_terminal_auth_failure_class(evidence) or (
+            "last_status_code=401" in evidence and evidence_has_logged_out_reason(evidence)
+        )
+    )
 
 
 def is_verified_device_bond_lost_signal(event: dict[str, Any]) -> bool:

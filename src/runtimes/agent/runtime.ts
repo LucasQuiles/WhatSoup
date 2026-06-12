@@ -1430,6 +1430,11 @@ export class AgentRuntime implements Runtime {
   // restart); the durable artifact is the window itself (agent_fallback_state).
   private fallbackTurnsServed = 0;
   private fallbackTurnsEmpty = 0;
+  // Arm-time snapshots of the lifetime turn counters. The lifetime counters
+  // accrue across windows (getFallbackState contract), so the revert alert
+  // subtracts these to report THIS window's turns instead of cumulative totals.
+  private fallbackTurnsServedAtArm = 0;
+  private fallbackTurnsEmptyAtArm = 0;
   private lastFallbackTurnAt: number | null = null;
   private activeFallbackEntry: AgentFallbackEntry | null = null;
   private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
@@ -5773,16 +5778,25 @@ export class AgentRuntime implements Runtime {
     return this.agentFallbacks.map((entry) => ({ ...entry, eligible: null }));
   }
 
-  private selectFallbackEntryForWindow(): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
+  private selectFallbackEntryForWindow(reason?: string): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
     if (this.agentFallbacks.length === 0) {
       this.fallbackChainState = [];
       return null;
     }
 
+    const requireIndependentProvider = reason === 'auth-required';
     let firstEligibleIndex = -1;
+    let firstIndependentIndex = -1;
     const state: Array<AgentFallbackEntry & { eligible: boolean }> = [];
     for (let i = 0; i < this.agentFallbacks.length; i++) {
       const entry = this.agentFallbacks[i]!;
+      if (requireIndependentProvider && entry.provider === this.agentProvider) {
+        state.push({ ...entry, eligible: false });
+        continue;
+      }
+      if (entry.provider !== this.agentProvider && firstIndependentIndex === -1) {
+        firstIndependentIndex = i;
+      }
       const service = resolveProviderKeyService(
         entry.provider,
         entry.model,
@@ -5803,7 +5817,18 @@ export class AgentRuntime implements Runtime {
       }
     }
     this.fallbackChainState = state;
-    const selectedIndex = firstEligibleIndex === -1 ? 0 : firstEligibleIndex;
+    if (requireIndependentProvider && firstEligibleIndex === -1 && firstIndependentIndex === -1) {
+      emitAlert(
+        this.instanceName,
+        'fallback_no_independent_provider',
+        'Auth-required fallback has no independent provider target',
+        `primaryProvider=${this.agentProvider} reason=${reason}`,
+      );
+      return null;
+    }
+    const selectedIndex = firstEligibleIndex === -1
+      ? (requireIndependentProvider ? firstIndependentIndex : 0)
+      : firstEligibleIndex;
     return {
       entry: this.agentFallbacks[selectedIndex]!,
       selectedHadMissingCredential: state[selectedIndex]?.eligible === false,
@@ -6005,9 +6030,9 @@ export class AgentRuntime implements Runtime {
    *  and persist best-effort so a restart mid-window resumes on fallback.
    *  Pass `activatedAt` explicitly when restoring to preserve the original
    *  time, and `opts.restored` so a resumed window is not re-counted. */
-  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): void {
-    const selection = this.selectFallbackEntryForWindow();
-    if (!selection) return;
+  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): boolean {
+    const selection = this.selectFallbackEntryForWindow(reason);
+    if (!selection) return false;
     const fallbackEntry = selection.entry;
     this.activeFallbackEntry = fallbackEntry;
     this.fallbackActiveUntil = until;
@@ -6029,6 +6054,12 @@ export class AgentRuntime implements Runtime {
     // fired before the restart.
     if (firstArm) {
       this.fallbackArmReason = reason;
+      // Snapshot the lifetime turn counters at the first arm of every window
+      // (the null-guard skips extensions; restores hit it too because the
+      // guard is per-process, which is correct — the counters are also
+      // per-process, so a restored window counts from this process's zero).
+      this.fallbackTurnsServedAtArm = this.fallbackTurnsServed;
+      this.fallbackTurnsEmptyAtArm = this.fallbackTurnsEmpty;
       if (opts?.restored) {
         // A restored window is the SAME window resuming after a restart, so
         // it never re-counts as an activation — but the resume itself is an
@@ -6088,7 +6119,7 @@ export class AgentRuntime implements Runtime {
     // environment, and per-turn usage-limit extensions would otherwise
     // re-spawn every probe and re-fire every pre-flight alert — an
     // unthrottled storm under sustained load.
-    if (!firstArm) return;
+    if (!firstArm) return true;
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
     const service = resolveProviderKeyService(
@@ -6180,6 +6211,7 @@ export class AgentRuntime implements Runtime {
         }
       });
     }
+    return true;
   }
 
   /**
@@ -6214,7 +6246,11 @@ export class AgentRuntime implements Runtime {
       // restored:true so the resumed window is not re-counted as an
       // activation — provider_fallback_activated already fired when the
       // window first armed; the resume emits provider_fallback_restored.
-      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
+      const restored = this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
+      if (!restored) {
+        clearFallbackState(this.db);
+        return;
+      }
       const wasClamped = clampedUntil < persisted.activeUntil;
       log.info({
         activeUntil: new Date(clampedUntil).toISOString(),
@@ -6265,8 +6301,9 @@ export class AgentRuntime implements Runtime {
     // stores 'usage-limit' as the original cause.
     const persistedReason = wasActive && this.fallbackArmReason !== null ? this.fallbackArmReason : reason;
     this.fallbackResetAt = resetAt?.getTime() ?? null;
-    this.armFallbackWindow(until, persistedReason, activatedAt);
-    const fallbackEntry = this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
+    const armed = this.armFallbackWindow(until, persistedReason, activatedAt);
+    if (!armed) return null;
+    const fallbackEntry = this.activeFallbackEntry;
     if (!fallbackEntry) return null;
     const keyPresent = this.fallbackKeyPresent(fallbackEntry.provider, fallbackEntry.model);
 
@@ -6311,6 +6348,10 @@ export class AgentRuntime implements Runtime {
     // Capture before clearing: the revert alert reports how long the window
     // ran. The idempotency guard above means this fires once per window.
     const windowMs = this.fallbackActivatedAt !== null ? Date.now() - this.fallbackActivatedAt : null;
+    // Per-window deltas against the arm-time snapshots — the lifetime counters
+    // are NOT reset here (getFallbackState keeps reporting process totals).
+    const windowTurnsServed = this.fallbackTurnsServed - this.fallbackTurnsServedAtArm;
+    const windowTurnsEmpty = this.fallbackTurnsEmpty - this.fallbackTurnsEmptyAtArm;
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
@@ -6337,7 +6378,7 @@ export class AgentRuntime implements Runtime {
       this.instanceName,
       'provider_fallback_reverted',
       'Provider fallback window ended — reverted to primary provider',
-      `reason=${reason} turnsServed=${this.fallbackTurnsServed} turnsEmpty=${this.fallbackTurnsEmpty}`
+      `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty}`
         + ` windowMs=${windowMs ?? 'unknown'}`,
     );
   }

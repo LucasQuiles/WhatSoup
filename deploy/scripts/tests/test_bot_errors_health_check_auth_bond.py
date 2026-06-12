@@ -224,3 +224,24 @@ def test_wrong_root_type_json_fails(tmp_path, monkeypatch):
     # Field-name consistency: plural marker, matching all other auth_bond branches.
     assert "credential_paths_redacted=true" in line, f"Must use plural marker: {line}"
     assert "credential_path_redacted=true" not in line, f"Singular marker is inconsistent: {line}"
+
+
+def test_auth_failure_log_inventory_flags_terminal_auth_class(tmp_path, monkeypatch):
+    """Log-only terminal auth classes still require physical intervention."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    name = "line-gamma"
+    log_dir = tmp_path / ".local" / "share" / "whatsoup" / "instances" / name / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "whatsoup.log").write_text(
+        "connection closed auth_failure_class=pairing_required\n",
+        encoding="utf-8",
+    )
+
+    result = _mod.auth_failure_log_inventory(name, "always_on", "FAIL health line-gamma")
+
+    assert result == [
+        (
+            f"FAIL auth_bond {name}: physical_intervention_required "
+            f"recent_log_pattern=terminal_auth_failure_class log={log_dir / 'whatsoup.log'}"
+        )
+    ]

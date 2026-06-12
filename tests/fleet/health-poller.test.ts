@@ -66,7 +66,9 @@ describe('HealthPoller', () => {
     alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
     alertThrottleStore.loadAlertThrottleDetailed.mockReset();
     alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({ entries: new Map(), loadError: null });
-    alertThrottleStore.recordAlertThrottle.mockClear();
+    // mockReset (not mockClear) so a per-test throwing implementation cannot
+    // leak into later tests.
+    alertThrottleStore.recordAlertThrottle.mockReset();
     silenceManager.isInstanceSilenced.mockReset();
     silenceManager.isInstanceSilenced.mockReturnValue(false);
     vi.stubGlobal('fetch', mockFetch);
@@ -98,6 +100,39 @@ describe('HealthPoller', () => {
     expect(status!.consecutiveFailures).toBe(0);
     expect(status!.error).toBeNull();
     expect(getSelfHealth).toHaveBeenCalledOnce();
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  // Self-instance health must be CLASSIFIED with the same semantics as a
+  // remote payload — a degraded/logged-out self snapshot was previously
+  // forced to status 'online' with confirmed confidence.
+  it('self-instance with a non-online health snapshot is classified, not forced online', async () => {
+    const loggedOutSelf = {
+      status: 'unhealthy',
+      whatsapp: {
+        connected: false,
+        account_jid: 'not connected',
+        connection: {
+          state: 'logged_out',
+          auth_failure_class: 'logged_out',
+          last_disconnect_reason: 'loggedOut',
+          last_status_code: 401,
+        },
+      },
+    };
+    const getSelfHealth = vi.fn().mockReturnValue(loggedOutSelf);
+    const instances = makeInstances(['self', makeInstance({ name: 'self' })]);
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const status = poller.getStatus('self');
+    expect(status).toBeDefined();
+    expect(status!.status).not.toBe('online');
+    expect(status!.health).toEqual(loggedOutSelf);
     expect(mockFetch).not.toHaveBeenCalled();
 
     poller.stop();
@@ -827,6 +862,85 @@ describe('HealthPoller', () => {
     );
     expect(emitAlert.mock.calls[0]?.[3]).not.toContain('/redacted');
     expect(emitAlert.mock.calls[0]?.[3]).not.toContain('permission denied');
+
+    poller.stop();
+  });
+
+  it('stops marking alert evidence after the throttle file self-heals on the first successful save', async () => {
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map(),
+      loadError: { file: '/redacted/fleet-alert-throttle.json', code: 'EACCES', error: 'permission denied' },
+    });
+    // 3 failures -> unreachable alert #1, recover once, 3 failures -> alert #2.
+    mockFetch
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ status: 'healthy' }) })
+      .mockRejectedValue(new Error('connection refused'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    // 10-minute interval so the second alert lands outside the 15-minute
+    // rate-limit window of the first.
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 10 * 60 * 1000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0); // fail 1
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000); // fail 2
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000); // fail 3 -> alert #1
+
+    // Alert #1 still carries the flag: throttle suppression up to this point
+    // ran without persisted state. The successful recordAlertThrottle during
+    // this emission rewrites the file (self-heal).
+    expect(emitAlert).toHaveBeenCalledTimes(1);
+    expect(emitAlert.mock.calls[0]?.[3]).toContain('alert_throttle_load_error=true alert_throttle_load_error_code=EACCES');
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000); // recovers -> online
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000); // fail 1
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000); // fail 2
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000); // fail 3 -> alert #2
+
+    // Alert #2 must be clean: the load error no longer describes on-disk state.
+    expect(emitAlert).toHaveBeenCalledTimes(2);
+    expect(emitAlert.mock.calls[1]?.[3]).not.toContain('alert_throttle_load_error');
+
+    poller.stop();
+  });
+
+  it('keeps marking alert evidence while throttle saves continue to fail', async () => {
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map(),
+      loadError: { file: '/redacted/fleet-alert-throttle.json', code: 'EACCES', error: 'permission denied' },
+    });
+    alertThrottleStore.recordAlertThrottle.mockImplementation(() => {
+      throw new Error('still unwritable');
+    });
+    mockFetch
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ status: 'healthy' }) })
+      .mockRejectedValue(new Error('connection refused'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 10 * 60 * 1000);
+    poller.start();
+    for (let i = 0; i < 7; i += 1) {
+      await vi.advanceTimersByTimeAsync(i === 0 ? 0 : 10 * 60 * 1000);
+    }
+
+    // No successful save happened, so the flag must persist on every alert.
+    expect(emitAlert).toHaveBeenCalledTimes(2);
+    expect(emitAlert.mock.calls[0]?.[3]).toContain('alert_throttle_load_error=true alert_throttle_load_error_code=EACCES');
+    expect(emitAlert.mock.calls[1]?.[3]).toContain('alert_throttle_load_error=true alert_throttle_load_error_code=EACCES');
 
     poller.stop();
   });
