@@ -2,7 +2,7 @@
  * primitives/index.ts — barrel export for SOUP v3 primitive components.
  *
  * Badge (StatusCell + ModeBadge), Button, ActionButton, Modal, Pill,
- * Table, Toolbar.
+ * Table, Toolbar, LogStream, Drawer.
  * All consumers import from this barrel; never import from individual files.
  */
 export { StatusCell, ModeBadge } from './Badge';
@@ -75,3 +75,21 @@ export type {
   ToolbarSearchProps,
   TimeRangeOption,
 } from './Toolbar';
+
+export { LogStream } from './LogStream';
+export type { LogStreamProps, LogDensity } from './LogStream';
+
+export {
+  Drawer,
+  DrawerLayout,
+  DrawerHeader,
+  DrawerBody,
+  DrawerFooter,
+} from './Drawer';
+export type {
+  DrawerProps,
+  DrawerLayoutProps,
+  DrawerHeaderProps,
+  DrawerBodyProps,
+  DrawerFooterProps,
+} from './Drawer';

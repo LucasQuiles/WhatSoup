@@ -87,4 +87,10 @@
   --row-compressed:   28px;   /* compressed row height (Fleet, Ops, logs) */
   /* === Toolbar search component token (toolbar.md Anatomy) === */
   --toolbar-search-w: 200px;  /* search input width in the toolbar */
+  /* === LogStream lane widths (log-stream.md spec-normative geometry) === */
+  --log-time-w:   72px;       /* time lane width */
+  --log-level-w:  24px;       /* level chip lane width */
+  --log-source-w: 96px;       /* source lane width */
+  /* === Drawer component token (drawer.md spec-normative) === */
+  --drawer-w: min(360px, 86%); /* drawer width */
 }

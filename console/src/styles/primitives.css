@@ -980,3 +980,337 @@ button.soup-pill[aria-disabled="true"] {
     transition: none;
   }
 }
+
+/* --------------------------------------------------------------------------
+   LOG STREAM PRIMITIVE — soup-log* (log-stream.md)
+   Four-lane grid: time --log-time-w · level --log-level-w · source --log-source-w · msg 1fr.
+   Lane widths are component tokens (tokens.component.css).
+   Container: --surface-inset, 1px --border-hairline, max-height + overflow auto, role="list".
+   Rows: 24px min-height, hairline rules, role="listitem", tabindex 0, snap expand (no slide).
+   Level tags: 18×16px chip, 600 9px mono, per-level fg + border + wash (triple channel).
+   -------------------------------------------------------------------------- */
+
+/* Log container */
+.soup-log {
+  background: var(--surface-inset);
+  border: var(--bw) solid var(--border-hairline);
+  overflow-y: auto;
+}
+
+/* Compressed density — 28px rows */
+.soup-log--compressed .soup-log__row {
+  min-height: var(--row-compressed, 28px);
+}
+
+/* Row base */
+.soup-log__row {
+  min-height: var(--row-default, 36px);
+  border-bottom: var(--bw) solid var(--border-hairline);
+  cursor: pointer;
+}
+
+.soup-log__row:last-child {
+  border-bottom: none;
+}
+
+.soup-log__row:hover {
+  background: var(--row-hover);
+}
+
+.soup-log__row.is-open {
+  background: var(--row-hover);
+}
+
+/* Focus ring — inset so it stays inside the row */
+.soup-log__row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Severity row tints — message ink (warn fg / crit fg) applied to the msg span */
+.soup-log__row--warn .soup-log__msg {
+  color: var(--status-warn-fg);
+}
+
+.soup-log__row--error .soup-log__msg {
+  color: var(--status-crit-fg);
+}
+
+/* Four-lane grid — spec-normative widths via component tokens */
+.soup-log__grid {
+  display: grid;
+  grid-template-columns:
+    var(--log-time-w, 72px)
+    var(--log-level-w, 24px)
+    var(--log-source-w, 96px)
+    1fr;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  min-height: inherit;
+}
+
+/* Time lane — --type-data-sm, --text-3, monospaced tabular figures */
+.soup-log__time {
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Level tag — 18×16px chip, 600 9px mono, per-level color+border+wash (triple channel) */
+.soup-log__lvl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 16px;
+  font: 600 9px/1 var(--font-mono);
+  border: var(--bw) solid;
+  border-radius: var(--radius-xs);
+  flex: none;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+/* info — neutral: --text-2 fg, --border-strong border, no wash fill */
+.soup-log__lvl--info {
+  color: var(--text-2);
+  border-color: var(--border-strong);
+  background: transparent;
+}
+
+/* debug — text-3 + dashed border */
+.soup-log__lvl--debug {
+  color: var(--text-3);
+  border-color: var(--text-3);
+  border-style: dashed;
+  background: transparent;
+}
+
+/* warn — warn channel: warn fg + warn border + warn wash */
+.soup-log__lvl--warn {
+  color: var(--status-warn-fg);
+  border-color: var(--status-warn-border);
+  background: var(--status-warn-wash);
+}
+
+/* error — crit channel: crit fg + crit border + crit wash */
+.soup-log__lvl--error {
+  color: var(--status-crit-fg);
+  border-color: var(--status-crit-border);
+  background: var(--status-crit-wash);
+}
+
+/* Source lane — --type-data-sm, --text-2, ellipsis (title attr carries full value) */
+.soup-log__source {
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Message lane — wraps multi-word; breaks long tokens (overflow-wrap: anywhere).
+   Note: class-level assertion in tests confirms the wrap policy is applied;
+   visual proof that wrapping actually occurs requires a layout engine. */
+.soup-log__msg {
+  font: var(--type-data-sm, 400 11px/16px var(--font-sans));
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+  min-width: 0;
+}
+
+/* Detail bed — expanded context; snaps (no slide per motion.md §5, table inline-expand rule) */
+.soup-log__detail {
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) calc(var(--log-time-w, 72px) + var(--log-level-w, 24px) + var(--log-source-w, 96px) + var(--sp-6));
+  background: var(--surface-inset);
+  border-top: var(--bw) solid var(--border-hairline);
+}
+
+.soup-log__detail-component {
+  display: block;
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  color: var(--text-3);
+  margin-bottom: var(--sp-1);
+}
+
+.soup-log__detail-pre {
+  margin: 0;
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* State rows — empty / error / loading */
+.soup-log__state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-3);
+  text-align: center;
+}
+
+.soup-log__state-msg {
+  display: block;
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+  color: var(--text-2);
+}
+
+.soup-log__state--error .soup-log__state-msg {
+  color: var(--status-crit-fg);
+}
+
+.soup-log__state-retry {
+  margin-top: var(--sp-1);
+}
+
+/* Reduced motion: hover wash already instant (no transition on rows) */
+
+/* --------------------------------------------------------------------------
+   DRAWER PRIMITIVE — soup-drawer* (drawer.md)
+   Width: --drawer-w = min(360px, 86%) (component token).
+   Anatomy: head (status shape + title + mode badge + spring + close X) · body (scrolls) · footer.
+   Enter: translateX(100%→0) at --dur-slow --ease-enter.
+   Exit: effectively instant (unmount-on-close; DD-19 covers paired exit motion).
+   Squeeze mode (≥1080px container): flex sibling, no scrim, role="complementary".
+   Overlay mode (<1080px container): absolute right-0, scrim covers content.
+   Squeeze proof is INCONCLUSIVE in jsdom — manual QA + D7 viewport tests cover it.
+   -------------------------------------------------------------------------- */
+
+/* DrawerLayout — container query root */
+.soup-drawer-layout {
+  position: relative;
+  display: flex;
+  container-type: inline-size;
+  overflow: hidden;
+}
+
+/* Content region — shrinks to give drawer room in squeeze mode */
+.soup-drawer-layout__content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Scrim — visible in overlay mode only; hidden in squeeze mode via container query */
+.soup-drawer-scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+  z-index: calc(var(--z-overlay) - 1);
+}
+
+/* Drawer shell — overlay mode default (absolute, slides in from the right) */
+.soup-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--drawer-w, min(360px, 86%));
+  background: var(--surface-overlay);
+  border-left: var(--bw) solid var(--border-subtle);
+  box-shadow: var(--shadow-overlay);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: var(--z-overlay);
+  /* Enter animation: translateX(100%→0) */
+  animation: soup-drawer-in var(--dur-slow) var(--ease-enter) forwards;
+  outline: none;
+}
+
+.soup-drawer:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+/* Squeeze mode: at ≥1080px container width the drawer is a flex sibling.
+   No scrim. Drawer becomes position:static so it participates in layout flow. */
+@container (min-width: 1080px) {
+  .soup-drawer-scrim {
+    display: none;
+  }
+
+  .soup-drawer {
+    position: static;
+    flex: 0 0 var(--drawer-w, min(360px, 86%));
+    box-shadow: none;
+    z-index: auto;
+    border-left: var(--bw) solid var(--border-subtle);
+  }
+}
+
+/* Enter keyframe — translateX 100%→0 (motion.md §5 Drawer) */
+@keyframes soup-drawer-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+/* Reduced motion: appear instantly (off-and-instant, motion.md §9) */
+@media (prefers-reduced-motion: reduce) {
+  .soup-drawer {
+    animation: none;
+  }
+}
+
+/* Head — status shape + title + mode badge + spring + close X */
+.soup-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: var(--bw) solid var(--border-hairline);
+  flex: none;
+}
+
+.soup-drawer-head__shape {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.soup-drawer-head__title {
+  font: var(--type-heading, 600 13px/20px var(--font-sans));
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.soup-drawer-head__badge {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.soup-drawer-head__spring {
+  flex: 1 1 auto;
+}
+
+/* Body — scrollable */
+.soup-drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+/* Footer — pinned at bottom */
+.soup-drawer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: var(--bw) solid var(--border-hairline);
+  flex: none;
+}
