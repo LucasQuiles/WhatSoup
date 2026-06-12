@@ -1,4 +1,5 @@
 import { type FC, useState } from 'react'
+import { Tabs, Tab } from '../primitives/Tabs'
 import { Check, Eye, EyeOff } from 'lucide-react'
 import { SelectInput } from './form-primitives'
 import WizardStep from './WizardStep'
@@ -64,22 +65,16 @@ const ModelAndKeyTabs: FC<{
 
   return (
     <div className="flex flex-col gap-[var(--sp-4)]">
-      {/* Tab bar */}
-      <div className="flex c-border-b" role="tablist">
-        <button type="button" className={`c-tab ${activeTab === 'anthropic' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'anthropic'} onClick={() => setActiveTab('anthropic')}>
-          Anthropic
-        </button>
-        <button type="button" className={`c-tab ${activeTab === 'openai' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'openai'} onClick={() => setActiveTab('openai')}>
-          OpenAI
-        </button>
-        <button type="button" className="c-tab" title="Coming soon" disabled>
-          Local
-        </button>
-      </div>
+      {/* Tab bar — Tabs primitive: roving tabindex, Arrow/Home/End, MANUAL activation. */}
+      <Tabs label="Model provider" value={activeTab} onChange={(id) => setActiveTab(id as 'anthropic' | 'openai' | 'local')}>
+        <Tab id="anthropic">Anthropic</Tab>
+        <Tab id="openai">OpenAI</Tab>
+        <Tab id="local" disabled disabledReason="Coming soon">Local</Tab>
+      </Tabs>
 
       {/* Anthropic tab */}
       {activeTab === 'anthropic' && (
-        <div className="flex flex-col gap-[var(--sp-3)]">
+        <div role="tabpanel" id="tabpanel-anthropic" aria-labelledby="tab-anthropic" className="flex flex-col gap-[var(--sp-3)]">
           {ANTHROPIC_ROLES.map(({ key, label }) => (
             <div key={key} className="flex flex-col gap-[var(--sp-1)]">
               <label className="c-label c-field-label">{label}</label>
@@ -113,7 +108,7 @@ const ModelAndKeyTabs: FC<{
 
       {/* OpenAI tab */}
       {activeTab === 'openai' && (
-        <div className="flex flex-col gap-[var(--sp-3)]">
+        <div role="tabpanel" id="tabpanel-openai" aria-labelledby="tab-openai" className="flex flex-col gap-[var(--sp-3)]">
           {OPENAI_ROLES.map(({ key, label }) => (
             <div key={key} className="flex flex-col gap-[var(--sp-1)]">
               <label className="c-label c-field-label">{label}</label>

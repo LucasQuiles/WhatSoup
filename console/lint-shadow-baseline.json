@@ -1,6 +1,6 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 509,
+  "total": 501,
   "rules": {
     "no-restricted-syntax :: src/components/AddLineWizard.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/HistoryTab.tsx": 1,
@@ -102,9 +102,9 @@
     "soup/no-raw-button :: src/components/shared/ChatPicker.tsx": 1,
     "soup/no-raw-button :: src/components/Toast.tsx": 1,
     "soup/no-raw-button :: src/components/UnlockScreen.tsx": 1,
-    "soup/no-raw-button :: src/components/wizard/ConfigStep.tsx": 10,
+    "soup/no-raw-button :: src/components/wizard/ConfigStep.tsx": 5,
     "soup/no-raw-button :: src/components/wizard/LinkStep.tsx": 2,
-    "soup/no-raw-button :: src/components/wizard/ModelAuthStep.tsx": 4,
+    "soup/no-raw-button :: src/components/wizard/ModelAuthStep.tsx": 1,
     "soup/no-raw-button :: src/components/wizard/ReviewStep.tsx": 2,
     "soup/no-raw-button :: src/pages/Inbox.tsx": 8,
     "soup/no-raw-button :: src/pages/Ops.tsx": 3,

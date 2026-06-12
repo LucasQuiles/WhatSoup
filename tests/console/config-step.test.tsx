@@ -343,3 +343,76 @@ describe('ConfigStep — real React handler wiring', () => {
     })
   })
 })
+
+describe('ConfigStep — tablist keyboard contract (DD-21r)', () => {
+  it('Access tab is in the tab order (tabIndex 0) by default; other tabs are not', () => {
+    const { } = renderConfigStep()
+
+    expect(screen.getByRole('tab', { name: 'Access' }).tabIndex).toBe(0)
+    expect(screen.getByRole('tab', { name: 'Behavior' }).tabIndex).toBe(-1)
+    expect(screen.getByRole('tab', { name: 'Limits' }).tabIndex).toBe(-1)
+  })
+
+  it('ArrowRight moves focus without selecting (manual activation); Enter selects', () => {
+    renderConfigStep()
+
+    const access = screen.getByRole('tab', { name: 'Access' })
+    access.focus()
+    fireEvent.keyDown(access, { key: 'ArrowRight' })
+    const behavior = screen.getByRole('tab', { name: 'Behavior' })
+    expect(document.activeElement).toBe(behavior)
+    // no panel switch yet
+    expect(screen.queryByPlaceholderText('You are a helpful assistant...')).toBeNull()
+    // Enter selects
+    fireEvent.keyDown(behavior, { key: 'Enter' })
+    expect(screen.getByRole('tabpanel')).toBeDefined()
+    expect(screen.getByRole('tab', { name: 'Behavior' }).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('Space key selects the focused tab (manual activation)', () => {
+    renderConfigStep()
+
+    const access = screen.getByRole('tab', { name: 'Access' })
+    access.focus()
+    fireEvent.keyDown(access, { key: 'ArrowRight' })
+    const behavior = screen.getByRole('tab', { name: 'Behavior' })
+    fireEvent.keyDown(behavior, { key: ' ' })
+    expect(screen.getByRole('tab', { name: 'Behavior' }).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('Home moves focus to Access (first tab); End moves to the last tab', () => {
+    renderConfigStep()
+
+    const access = screen.getByRole('tab', { name: 'Access' })
+    const behavior = screen.getByRole('tab', { name: 'Behavior' })
+    behavior.focus()
+    fireEvent.keyDown(behavior, { key: 'Home' })
+    expect(document.activeElement).toBe(access)
+    fireEvent.keyDown(access, { key: 'End' })
+    // last tab in agent mode is RAG
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /RAG/ }))
+  })
+
+  it('ArrowLeft from Access wraps to the last tab', () => {
+    renderConfigStep()
+
+    const access = screen.getByRole('tab', { name: 'Access' })
+    access.focus()
+    fireEvent.keyDown(access, { key: 'ArrowLeft' })
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /RAG/ }))
+  })
+
+  it('tablist has accessible label', () => {
+    renderConfigStep()
+    expect(screen.getByRole('tablist', { name: 'Config sections' })).toBeDefined()
+  })
+
+  it('Permissions tab present for agent type; absent for chat type', () => {
+    const { } = renderConfigStep({ initialData: { type: 'agent', name: 'a' } })
+    expect(screen.getByRole('tab', { name: /Permissions/i })).toBeDefined()
+
+    cleanup()
+    renderConfigStep({ initialData: { type: 'chat', name: 'b' } })
+    expect(screen.queryByRole('tab', { name: /Permissions/i })).toBeNull()
+  })
+})

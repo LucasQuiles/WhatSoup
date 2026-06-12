@@ -8,6 +8,7 @@ import { validatePhone } from '../../lib/validation'
 import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_DETAILS, ACCESS_MODE_VALUES, type AccessModeValue } from '../../lib/access-modes'
+import { Tabs, Tab } from '../primitives/Tabs'
 
 interface ConfigStepProps {
   data: Record<string, unknown>
@@ -330,22 +331,20 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
   return (
     <div className="flex flex-col gap-[var(--sp-4)]">
-      {/* Tab bar */}
-      <div className="flex c-border-b" role="tablist">
-        <button type="button" className={`c-tab ${activeTab === 'access' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'access'} onClick={() => setActiveTab('access')}>Access</button>
-        <button type="button" className={`c-tab ${activeTab === 'behavior' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'behavior'} onClick={() => setActiveTab('behavior')}>Behavior</button>
+      {/* Tab bar — Tabs primitive: roving tabindex, Arrow/Home/End, MANUAL activation. */}
+      <Tabs label="Config sections" value={activeTab} onChange={setActiveTab}>
+        <Tab id="access">Access</Tab>
+        <Tab id="behavior">Behavior</Tab>
         {type === 'agent' && (
-          <button type="button" className={`c-tab ${activeTab === 'permissions' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'permissions'} onClick={() => setActiveTab('permissions')}>Permissions</button>
+          <Tab id="permissions">Permissions</Tab>
         )}
-        <button type="button" className={`c-tab ${activeTab === 'limits' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'limits'} onClick={() => setActiveTab('limits')}>Limits</button>
-        <button type="button" className={`c-tab ${activeTab === 'rag' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'rag'} onClick={() => setActiveTab('rag')}>
-          RAG <span className="text-t5 text-xs">(optional)</span>
-        </button>
-      </div>
+        <Tab id="limits">Limits</Tab>
+        <Tab id="rag">RAG <span className="text-t5 text-xs">(optional)</span></Tab>
+      </Tabs>
 
-      {/* 1. Access */}
+      {/* 1. Access — conditional-mount panel (Tabs.tsx header §11-13 sanctions this). */}
       {activeTab === 'access' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-access" aria-labelledby="tab-access" className="flex flex-col gap-[var(--sp-4)]">
           <div>
             <label className="c-label c-field-label">
               <span className="inline-flex items-center gap-[var(--sp-1)]">
@@ -404,7 +403,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 2. Behavior */}
       {activeTab === 'behavior' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-behavior" aria-labelledby="tab-behavior" className="flex flex-col gap-[var(--sp-4)]">
           {/* System Prompt — hidden for passive lines */}
           {type !== 'passive' && (
             <Field label="System Prompt" error={errors.systemPrompt} confirmed={!errors.systemPrompt && systemPrompt.trim().length > 0}>
@@ -453,7 +452,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 3. Permissions — only for agent type */}
       {activeTab === 'permissions' && type === 'agent' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-permissions" aria-labelledby="tab-permissions" className="flex flex-col gap-[var(--sp-4)]">
           <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist" confirmed={!errors.cwd && (agentOptions.cwd ?? defaultWorkspace).trim().length > 0}>
             {(id) => (
               <TextInput
@@ -807,7 +806,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 4. Limits */}
       {activeTab === 'limits' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-limits" aria-labelledby="tab-limits" className="flex flex-col gap-[var(--sp-4)]">
           <Field label="Messages per hour" confirmed>
             {(id) => (
               <NumberInput
@@ -861,7 +860,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 5. RAG */}
       {activeTab === 'rag' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-rag" aria-labelledby="tab-rag" className="flex flex-col gap-[var(--sp-4)]">
           <Field label="Pinecone Index Name" confirmed={pineconeIndex.trim().length > 0}>
             {(id) => (
               <TextInput

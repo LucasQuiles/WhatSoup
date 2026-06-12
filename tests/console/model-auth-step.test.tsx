@@ -85,12 +85,16 @@ describe('ModelAuthStep — chat view: Anthropic tab is active by default', () =
     expect(screen.getByRole('tab', { name: 'OpenAI' }).getAttribute('aria-selected')).toBe('false')
   })
 
-  it('disables the Local tab as "coming soon"', () => {
+  it('disables the Local tab as "coming soon" using aria-disabled and disabledReason', () => {
     renderStep({ data: { type: 'chat' } })
 
-    const local = screen.getByRole('button', { name: 'Local' }) as HTMLButtonElement
-    expect(local.disabled).toBe(true)
-    expect(local.getAttribute('title')).toBe('Coming soon')
+    const local = screen.getByRole('tab', { name: /Local/ }) as HTMLButtonElement
+    // Tabs primitive uses aria-disabled (not HTML disabled) — arrow-reachable but not selectable
+    expect(local.getAttribute('aria-disabled')).toBe('true')
+    // Reason exposed via aria-describedby -> hidden span
+    const describedBy = local.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy ?? '')?.textContent).toBe('Coming soon')
   })
 })
 
@@ -259,5 +263,79 @@ describe('ModelAuthStep — committed data is reflected (controlled inputs)', ()
     expect(openaiSelects[1].value).toBe('gpt-4.1-mini')
     expect(openaiSelects[2].value).toBe('gpt-4.1-nano')
     expect((screen.getByPlaceholderText('sk-...') as HTMLInputElement).value).toBe('OPENAI_FAKE_COMMITTED')
+  })
+})
+
+describe('ModelAndKeyTabs — tablist keyboard contract (DD-21r)', () => {
+  it('Anthropic tab is in the tab order (tabIndex 0); OpenAI is not (tabIndex -1)', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    const anthropic = screen.getByRole('tab', { name: 'Anthropic' })
+    const openai = screen.getByRole('tab', { name: 'OpenAI' })
+    expect(anthropic.tabIndex).toBe(0)
+    expect(openai.tabIndex).toBe(-1)
+  })
+
+  it('ArrowRight moves focus to OpenAI WITHOUT selecting; Enter selects', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    const anthropic = screen.getByRole('tab', { name: 'Anthropic' })
+    anthropic.focus()
+    fireEvent.keyDown(anthropic, { key: 'ArrowRight' })
+    const openai = screen.getByRole('tab', { name: 'OpenAI' })
+    expect(document.activeElement).toBe(openai)
+    // focus alone must not switch the panel (manual activation)
+    expect(screen.getByPlaceholderText('sk-ant-...')).toBeDefined()
+    // now confirm with Enter
+    fireEvent.keyDown(openai, { key: 'Enter' })
+    expect(screen.queryByPlaceholderText('sk-ant-...')).toBeNull()
+    expect(screen.getByPlaceholderText('sk-...')).toBeDefined()
+  })
+
+  it('ArrowLeft from Anthropic wraps to Local (last tab)', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    const anthropic = screen.getByRole('tab', { name: 'Anthropic' })
+    anthropic.focus()
+    fireEvent.keyDown(anthropic, { key: 'ArrowLeft' })
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /Local/ }))
+  })
+
+  it('Home jumps to Anthropic (first tab); End jumps to Local (last tab)', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    const anthropic = screen.getByRole('tab', { name: 'Anthropic' })
+    const openai = screen.getByRole('tab', { name: 'OpenAI' })
+    openai.focus()
+    fireEvent.keyDown(openai, { key: 'Home' })
+    expect(document.activeElement).toBe(anthropic)
+    fireEvent.keyDown(anthropic, { key: 'End' })
+    expect(document.activeElement).toBe(screen.getByRole('tab', { name: /Local/ }))
+  })
+
+  it('disabled Local tab is arrow-reachable but click and Enter do not switch panels', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    const local = screen.getByRole('tab', { name: /Local/ })
+    fireEvent.click(local)
+    // Panel should still show Anthropic content
+    expect(screen.getByPlaceholderText('sk-ant-...')).toBeDefined()
+
+    local.focus()
+    fireEvent.keyDown(local, { key: 'Enter' })
+    expect(screen.getByPlaceholderText('sk-ant-...')).toBeDefined()
+  })
+
+  it('Space key selects the focused OpenAI tab (manual activation)', () => {
+    renderStep({ data: { type: 'chat' } })
+
+    const anthropic = screen.getByRole('tab', { name: 'Anthropic' })
+    anthropic.focus()
+    fireEvent.keyDown(anthropic, { key: 'ArrowRight' })
+    const openai = screen.getByRole('tab', { name: 'OpenAI' })
+    expect(document.activeElement).toBe(openai)
+    fireEvent.keyDown(openai, { key: ' ' })
+    expect(screen.queryByPlaceholderText('sk-ant-...')).toBeNull()
+    expect(screen.getByPlaceholderText('sk-...')).toBeDefined()
   })
 })
