@@ -5769,16 +5769,25 @@ export class AgentRuntime implements Runtime {
     return this.agentFallbacks.map((entry) => ({ ...entry, eligible: null }));
   }
 
-  private selectFallbackEntryForWindow(): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
+  private selectFallbackEntryForWindow(reason?: string): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
     if (this.agentFallbacks.length === 0) {
       this.fallbackChainState = [];
       return null;
     }
 
+    const requireIndependentProvider = reason === 'auth-required';
     let firstEligibleIndex = -1;
+    let firstIndependentIndex = -1;
     const state: Array<AgentFallbackEntry & { eligible: boolean }> = [];
     for (let i = 0; i < this.agentFallbacks.length; i++) {
       const entry = this.agentFallbacks[i]!;
+      if (requireIndependentProvider && entry.provider === this.agentProvider) {
+        state.push({ ...entry, eligible: false });
+        continue;
+      }
+      if (entry.provider !== this.agentProvider && firstIndependentIndex === -1) {
+        firstIndependentIndex = i;
+      }
       const service = resolveProviderKeyService(
         entry.provider,
         entry.model,
@@ -5799,7 +5808,18 @@ export class AgentRuntime implements Runtime {
       }
     }
     this.fallbackChainState = state;
-    const selectedIndex = firstEligibleIndex === -1 ? 0 : firstEligibleIndex;
+    if (requireIndependentProvider && firstEligibleIndex === -1 && firstIndependentIndex === -1) {
+      emitAlertChecked(
+        this.instanceName,
+        'fallback_no_independent_provider',
+        'Auth-required fallback has no independent provider target',
+        `primaryProvider=${this.agentProvider} reason=${reason}`,
+      );
+      return null;
+    }
+    const selectedIndex = firstEligibleIndex === -1
+      ? (requireIndependentProvider ? firstIndependentIndex : 0)
+      : firstEligibleIndex;
     return {
       entry: this.agentFallbacks[selectedIndex]!,
       selectedHadMissingCredential: state[selectedIndex]?.eligible === false,
@@ -6001,9 +6021,9 @@ export class AgentRuntime implements Runtime {
    *  and persist best-effort so a restart mid-window resumes on fallback.
    *  Pass `activatedAt` explicitly when restoring to preserve the original
    *  time, and `opts.restored` so a resumed window is not re-counted. */
-  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): void {
-    const selection = this.selectFallbackEntryForWindow();
-    if (!selection) return;
+  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): boolean {
+    const selection = this.selectFallbackEntryForWindow(reason);
+    if (!selection) return false;
     const fallbackEntry = selection.entry;
     this.activeFallbackEntry = fallbackEntry;
     this.fallbackActiveUntil = until;
@@ -6084,7 +6104,7 @@ export class AgentRuntime implements Runtime {
     // environment, and per-turn usage-limit extensions would otherwise
     // re-spawn every probe and re-fire every pre-flight alert — an
     // unthrottled storm under sustained load.
-    if (!firstArm) return;
+    if (!firstArm) return true;
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
     const service = resolveProviderKeyService(
@@ -6176,6 +6196,7 @@ export class AgentRuntime implements Runtime {
         }
       });
     }
+    return true;
   }
 
   /**
@@ -6210,7 +6231,11 @@ export class AgentRuntime implements Runtime {
       // restored:true so the resumed window is not re-counted as an
       // activation — provider_fallback_activated already fired when the
       // window first armed; the resume emits provider_fallback_restored.
-      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
+      const restored = this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
+      if (!restored) {
+        clearFallbackState(this.db);
+        return;
+      }
       const wasClamped = clampedUntil < persisted.activeUntil;
       log.info({
         activeUntil: new Date(clampedUntil).toISOString(),
@@ -6261,8 +6286,9 @@ export class AgentRuntime implements Runtime {
     // stores 'usage-limit' as the original cause.
     const persistedReason = wasActive && this.fallbackArmReason !== null ? this.fallbackArmReason : reason;
     this.fallbackResetAt = resetAt?.getTime() ?? null;
-    this.armFallbackWindow(until, persistedReason, activatedAt);
-    const fallbackEntry = this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
+    const armed = this.armFallbackWindow(until, persistedReason, activatedAt);
+    if (!armed) return null;
+    const fallbackEntry = this.activeFallbackEntry;
     if (!fallbackEntry) return null;
     const keyPresent = this.fallbackKeyPresent(fallbackEntry.provider, fallbackEntry.model);
 

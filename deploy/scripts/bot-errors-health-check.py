@@ -54,6 +54,12 @@ DEFAULT_HEALTH_PROFILE = {
     "expectRuntimeManifest": False,
 }
 ROOT_CREDENTIAL_FILES = {"bot-errors.env", "fleet-token", "fleet.env", "fleet-tokens.json", "secrets.env"}
+# auth_bond_inventory TOCTOU-guard constants.
+# The WhatsApp creds writer can produce a momentarily empty or invalid creds.json
+# while mid-write. We re-inspect before declaring the auth bond broken.
+AUTH_BOND_REINSPECT_ATTEMPTS: int = 3
+AUTH_BOND_REINSPECT_DELAY_S: float = 1.0
+AUTH_BOND_STUCK_MTIME_S: int = 60
 GROUP_JID_RE = re.compile(r"^\d+@g\.us$")
 WHATSAPP_JID_RE = re.compile(r"\b\d{5,}(?:-\d+)?@(s\.whatsapp\.net|g\.us|lid)\b", re.IGNORECASE)
 KEYED_PHONE_RE = re.compile(
@@ -105,6 +111,39 @@ SERVICE_ENV_MAP = {
     "pinecone": "PINECONE_API_KEY",
     "elevenlabs": "ELEVENLABS_API_KEY",
 }
+TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+LOGGED_OUT_STATUS_CODE = 401
+LOGGED_OUT_REASON_KEY = "loggedout"
+
+
+def normalized_signal_key(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if not text:
+        return None
+    return re.sub(r"[^a-z0-9]", "", text)
+
+
+def is_terminal_auth_failure_class(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in TERMINAL_AUTH_FAILURE_CLASSES
+
+
+def is_logged_out_status_code(value: Any) -> bool:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value == LOGGED_OUT_STATUS_CODE
+    if isinstance(value, str) and re.fullmatch(r"\d+", value.strip()):
+        return int(value.strip()) == LOGGED_OUT_STATUS_CODE
+    return False
+
+
+def is_logged_out_disconnect_reason(value: Any) -> bool:
+    return normalized_signal_key(value) == LOGGED_OUT_REASON_KEY
+
+
+def text_has_terminal_auth_failure_class(value: str) -> bool:
+    lower = value.lower()
+    return any(auth_class in lower for auth_class in TERMINAL_AUTH_FAILURE_CLASSES)
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -1378,7 +1417,7 @@ def critical_asset_from_health_evidence(evidence: str) -> dict[str, Any] | None:
         else:
             code = "AGENT_PROVIDER_PROBE_FAILED"
             operator_action = "Inspect provider probe output, provider credentials, network reachability, and model availability before clearing."
-    elif "serverside_logout_irreversible" in lower or "physical_intervention_required" in lower:
+    elif text_has_terminal_auth_failure_class(lower) or "physical_intervention_required" in lower:
         code = "WA_AUTH_BOND_SERVER_REVOKED"
         recoverability = "manual_relink_required"
         confidence = "confirmed"
@@ -2215,7 +2254,7 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     auth_failure_class = connection.get("auth_failure_class")
     if isinstance(auth_failure_class, str) and auth_failure_class:
         append_evidence_field(details, "auth_failure_class", auth_failure_class)
-        if auth_failure_class in {"serverside_logout_irreversible", "pairing_required"}:
+        if is_terminal_auth_failure_class(auth_failure_class):
             add_marker("physical_intervention_required")
         elif auth_failure_class != "none":
             add_marker("auth_bond_at_risk")
@@ -2282,8 +2321,8 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             append_evidence_field(details, "credential_lifecycle_last_event_status_code", latest_event.get("statusCode"))
             append_evidence_field(details, "credential_lifecycle_last_event_reason", latest_event.get("reason"))
     if (
-        connection.get("last_status_code") == 401
-        or connection.get("last_disconnect_reason") == "loggedOut"
+        is_logged_out_status_code(connection.get("last_status_code"))
+        or is_logged_out_disconnect_reason(connection.get("last_disconnect_reason"))
     ):
         add_marker("physical_intervention_required")
     instance_meta = data.get("instance") if isinstance(data.get("instance"), dict) else {}
@@ -4126,13 +4165,50 @@ def auth_bond_inventory(name: str, instance_root: Path, expectation: str) -> lis
             f"{prefix}auth_bond {name}: auth_dir_exists={auth_exists} creds_exists={creds_exists} "
             "credential_paths_redacted=true"
         ]
-    try:
-        raw = creds.read_bytes()
-        parsed = json.loads(raw.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        return [f"FAIL auth_bond {name}: invalid creds_json=true credential_path_redacted=true error={redact_evidence_string(str(exc), 160)}"]
-    if not isinstance(parsed, dict):
-        return [f"FAIL auth_bond {name}: invalid creds_json=true credential_path_redacted=true root_type={type(parsed).__name__}"]
+
+    raw: bytes = b""
+    parsed: object = None
+    last_exc: Exception | None = None
+    parse_ok = False
+    for attempt in range(AUTH_BOND_REINSPECT_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(AUTH_BOND_REINSPECT_DELAY_S)
+        try:
+            raw = creds.read_bytes()
+            if not raw:
+                raise ValueError("creds.json is empty")
+            parsed = json.loads(raw.decode("utf-8"))
+            if isinstance(parsed, dict):
+                parse_ok = True
+                break
+            return [
+                f"FAIL auth_bond {name}: invalid creds_json=true credential_paths_redacted=true"
+                f" root_type={type(parsed).__name__}"
+            ]
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            raw = b""
+
+    if not parse_ok:
+        try:
+            creds_mtime = creds.stat().st_mtime
+        except OSError:
+            return [
+                f"FAIL auth_bond {name}: creds_deleted_during_retry=true"
+                " credential_paths_redacted=true"
+            ]
+        creds_age = int(time.time() - creds_mtime)
+        if creds_age > AUTH_BOND_STUCK_MTIME_S:
+            err = redact_evidence_string(str(last_exc), 160) if last_exc else "unknown"
+            return [
+                f"FAIL auth_bond {name}: creds_json_empty_or_invalid_for_seconds={creds_age}"
+                f" credential_paths_redacted=true error={err}"
+            ]
+        return [
+            f"auth_bond {name}: creds_write_in_flight=true"
+            f" creds_age_seconds={creds_age} credential_paths_redacted=true"
+        ]
+
     me = parsed.get("me")
     me_payload = json.dumps(me, sort_keys=True, separators=(",", ":")) if isinstance(me, dict) else ""
     auth_mode = stat.S_IMODE(auth_dir.stat().st_mode)
@@ -4299,6 +4375,8 @@ def auth_failure_log_inventory(name: str, expectation: str, health_probe: str | 
             continue
         if "device_removed" in text:
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=device_removed log={path}"]
+        if text_has_terminal_auth_failure_class(text):
+            return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=terminal_auth_failure_class log={path}"]
         if '"statusCode":401' in text or '"reason":"loggedOut"' in text:
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=loggedOut log={path}"]
     return []

@@ -98,6 +98,62 @@ describe('bot-errors-health-check daily event classification', () => {
     });
   });
 
+  it('treats pairing-required auth failure class as linked-device bond loss without 401/loggedOut evidence', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    writeInstance('line-beta', 9091);
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_DRY_HEALTH_STATUS: '200',
+        BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_disconnect_reason: 'connectionReplaced',
+              last_status_code: 440,
+              auth_failure_class: 'pairing_required',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'bot-host',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectConfigInventory: true,
+          expectPluginInventory: false,
+          expectRuntimeManifest: false,
+          instances: [{ name: 'line-beta', expected: 'always_on', healthPort: 9091 }],
+        }),
+      },
+    });
+
+    const event = readSingleOutboxEvent();
+    expect(event.instance).toBe('line-beta');
+    expect(event.alertSource).toBe('whatsapp_device_bond_lost');
+    expect(event.evidence).toContain('auth_failure_class=pairing_required');
+    expect(event.evidence).toContain('physical_intervention_required');
+    expect(event.criticalAsset).toMatchObject({
+      asset: { kind: 'whatsapp_linked_device', instance: 'line-beta' },
+      failure: {
+        code: 'WA_AUTH_BOND_SERVER_REVOKED',
+        recoverability: 'manual_relink_required',
+      },
+    });
+  });
+
   it('allows daily-health clears to recover source-qualified linked-device incidents', () => {
     const output = execFileSync('python3', ['-c', `
 import importlib.util

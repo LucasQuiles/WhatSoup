@@ -3,6 +3,7 @@ import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts'
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
+import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
@@ -159,9 +160,7 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
     connectionState === 'disconnected' ||
     healthStatus === 'unhealthy';
   const explicitAuthLossSignal =
-    lastStatusCode === 401 ||
-    lastDisconnectReason === 'loggedOut' ||
-    (authFailureClass !== null && TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass));
+    hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason, authFailureClass });
 
   if (loggedOutHeuristic && disconnectedCorroboration && explicitAuthLossSignal) {
     return {
