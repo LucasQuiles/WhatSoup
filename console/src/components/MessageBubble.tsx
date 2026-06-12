@@ -16,24 +16,34 @@ interface MessageBubbleProps {
   onRetry?: (msg: Message) => void
 }
 
+/** Card placement resolved by edge measurement. */
+type CardPlacement = 'above' | 'below'
+
 const isRawJid = (name: string) => /^\d{5,}$/.test(name)
 
-/** Styled hover detail card — shown on hover. */
-const DetailCard: FC<{ msg: Message }> = ({ msg }) => {
+/** Styled hover/focus detail card — shown on hover or focus. */
+const DetailCard: FC<{ msg: Message; placement: CardPlacement; rightAnchored: boolean }> = ({
+  msg,
+  placement,
+  rightAnchored,
+}) => {
   const fullTime = formatFullTime(msg.timestamp)
+
+  const style: React.CSSProperties =
+    placement === 'below'
+      ? { top: '100%', left: rightAnchored ? undefined : 0, right: rightAnchored ? 0 : undefined }
+      : { bottom: '100%', left: rightAnchored ? undefined : 0, right: rightAnchored ? 0 : undefined }
 
   return (
     <div
+      data-placement={placement}
       className="absolute z-50 pointer-events-none c-card c-card--detail mb-[var(--sp-2)]"
-      style={{
-        bottom: '100%',
-        left: 0,
-      }}
+      style={style}
     >
       <div className="flex flex-col gap-[var(--sp-2)]">
         {[
           { label: 'Time', value: fullTime },
-          { label: 'Sender', value: resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '\u2014') },
+          { label: 'Sender', value: resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '—') },
           ...(msg.senderJid ? [{ label: 'JID', value: msg.senderJid, muted: true }] : []),
           { label: 'Type', value: msg.type },
           { label: 'Direction', value: msg.fromMe ? 'Outbound' : 'Inbound' },
@@ -93,17 +103,76 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
 
 const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-soft)', onCreateContact, highlightQuery, animate, onRetry }) => {
   const isMedia = msg.type !== 'text'
-  const [showDetail, setShowDetail] = useState(false)
+  const [showByHover, setShowByHover] = useState(false)
+  const [showByFocus, setShowByFocus] = useState(false)
+  const [placement, setPlacement] = useState<CardPlacement>('above')
+  const [rightAnchored, setRightAnchored] = useState(false)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const wrapperRef = useRef<HTMLDivElement>(null)
 
-  const onEnter = useCallback(() => {
-    hoverTimer.current = setTimeout(() => setShowDetail(true), 500)
+  const showDetail = showByHover || showByFocus
+
+  /**
+   * Measure the wrapper position and resolve card placement + right-anchor.
+   * Card is absolutely positioned relative to the wrapper. We estimate card
+   * height (160px) and width (220px) to detect viewport clipping.
+   *
+   * Zero-rect guard: when width, height, and all coordinates are zero (jsdom
+   * default), the measurement is uninformative — keep the default 'above'/
+   * left-anchored placement so tests that do not stub rects run unchanged.
+   */
+  const measureAndSetPlacement = useCallback(() => {
+    if (!wrapperRef.current) return
+    const rect = wrapperRef.current.getBoundingClientRect()
+    // Uninformative zero-rect (jsdom default) — keep defaults
+    if (rect.width === 0 && rect.height === 0 && rect.top === 0 && rect.left === 0) return
+    const estimatedCardHeight = 160
+    const estimatedCardWidth = 220
+    const wouldClipTop = rect.top - estimatedCardHeight < 0
+    const wouldClipRight = rect.left + estimatedCardWidth > window.innerWidth
+    setPlacement(wouldClipTop ? 'below' : 'above')
+    setRightAnchored(wouldClipRight)
   }, [])
+
+  // ── Hover path (500ms delay — byte-identical to original semantics) ────────
+  const onEnter = useCallback(() => {
+    hoverTimer.current = setTimeout(() => {
+      measureAndSetPlacement()
+      setShowByHover(true)
+    }, 500)
+  }, [measureAndSetPlacement])
+
   const onLeave = useCallback(() => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
     hoverTimer.current = null
-    setShowDetail(false)
+    setShowByHover(false)
   }, [])
+
+  // ── Focus path (instant reveal per motion law §7) ─────────────────────────
+  const onFocus = useCallback(() => {
+    measureAndSetPlacement()
+    setShowByFocus(true)
+  }, [measureAndSetPlacement])
+
+  const onBlur = useCallback(() => {
+    setShowByFocus(false)
+  }, [])
+
+  // ── Escape dismiss (one-layer law §2 — stopPropagation) ───────────────────
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.key === 'Escape' && showDetail) {
+        e.stopPropagation()
+        setShowByHover(false)
+        setShowByFocus(false)
+        if (hoverTimer.current) {
+          clearTimeout(hoverTimer.current)
+          hoverTimer.current = null
+        }
+      }
+    },
+    [showDetail],
+  )
 
   return (
     <div
@@ -127,13 +196,19 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
         </div>
       )}
 
-      {/* Message bubble — with hover detail card */}
+      {/* Message bubble — with hover/focus detail card */}
       <div
+        ref={wrapperRef}
         className="relative"
+        tabIndex={0}
+        aria-label="Message detail"
         onMouseEnter={onEnter}
         onMouseLeave={onLeave}
+        onFocus={onFocus}
+        onBlur={onBlur}
+        onKeyDown={onKeyDown}
       >
-        {showDetail && <DetailCard msg={msg} />}
+        {showDetail && <DetailCard msg={msg} placement={placement} rightAnchored={rightAnchored} />}
         <div
           className={`text-body c-msg-bubble rounded-lg${msg.fromMe ? '' : ' bg-d3'}`}
           style={{
