@@ -1,6 +1,7 @@
 // src/runtimes/types.ts
 import type { IncomingMessage, RuntimeHealth } from '../core/types.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
+import type { AgentFallbackEntry } from '../core/fallback-chain.ts';
 
 export interface AgentCommandRequest {
   command: 'compact';
@@ -41,6 +42,8 @@ export interface Runtime {
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
+    activeFallbackEntry?: AgentFallbackEntry | null;
+    fallbackChain?: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   };
   /** Admin override: force a fallback window of the given duration (or the default). */
   forceFallback?(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string };

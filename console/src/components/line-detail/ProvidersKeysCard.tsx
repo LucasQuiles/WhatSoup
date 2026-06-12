@@ -4,7 +4,7 @@ import { KeyRound, ShieldOff, ShieldCheck, Zap } from 'lucide-react'
 import { useProviders, useProviderStatus } from '../../hooks/use-fleet'
 import { formatRelative } from '../../lib/format-time'
 import { getProvider } from '../../lib/providers'
-import type { ProviderCatalogEntry, ProviderSlotStatus } from '../../types'
+import type { ProviderCatalogEntry, ProviderSlotStatus, ProviderStatus } from '../../types'
 
 /**
  * Human "in Xs / Xm / Xh" string for a future epoch-ms revert time.
@@ -86,6 +86,25 @@ const SlotRow: FC<{
   </div>
 )
 
+type FallbackChainEntry = ProviderStatus['fallback']['chain'][number]
+
+const ChainEntry: FC<{
+  entry: FallbackChainEntry
+  catalog: ProviderCatalogEntry[] | undefined
+}> = ({ entry, catalog }) => {
+  const status =
+    entry.eligible === true ? 'ready' :
+    entry.eligible === false ? 'unavailable' :
+    'unknown'
+  return (
+    <span className="inline-flex items-center gap-[var(--sp-0h)] text-xs font-mono text-t4">
+      <span className="text-data">{displayName(entry.provider, catalog)}</span>
+      {entry.model && <span>{entry.model}</span>}
+      <span>{status}</span>
+    </span>
+  )
+}
+
 export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
   const { data: status, isLoading, error } = useProviderStatus(lineName)
   const { data: catalog } = useProviders()
@@ -116,6 +135,7 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
         formatLastFallbackTurnAt(status.fallback.lastFallbackTurnAt),
       ].filter((value): value is string => value !== null)
     : []
+  const fallbackChain = status?.fallback.chain ?? []
 
   return (
     <motion.div
@@ -152,6 +172,18 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
               <div className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-t4 text-xs font-mono">
                 {fallbackMetrics.map((metric) => (
                   <span key={metric}>{metric}</span>
+                ))}
+              </div>
+            )}
+            {fallbackChain.length > 1 && (
+              <div className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-t4 text-xs">
+                <span className="c-label">chain</span>
+                {fallbackChain.map((entry, index) => (
+                  <ChainEntry
+                    key={`${entry.provider}:${entry.model ?? ''}:${index}`}
+                    entry={entry}
+                    catalog={catalog}
+                  />
                 ))}
               </div>
             )}

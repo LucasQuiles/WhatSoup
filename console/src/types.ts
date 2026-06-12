@@ -272,6 +272,10 @@ export interface ProviderStatus {
     turnsEmpty: number | null;
     /** Epoch ms of the most recent fallback-served turn, or null when absent. */
     lastFallbackTurnAt: number | null;
+    /** Selected fallback entry while a runtime window is active. */
+    activeEntry: { provider: string; model: string | null } | null;
+    /** Ordered fallback chain; eligible is null when only static config is available. */
+    chain: Array<{ provider: string; model: string | null; eligible: boolean | null }>;
   };
   /** True only when the latest poll reached the line's health endpoint. */
   lineReachable: boolean;
