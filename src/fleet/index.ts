@@ -53,6 +53,7 @@ const log = createChildLogger('fleet');
 export const HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE = '2026-06-30';
 
 export { DEFAULT_FLEET_PORT } from './constants.ts';
+import { assertSafeFleetBind } from './bind-guard.ts';
 
 export interface FleetDeps {
   db: DatabaseSync;
@@ -915,11 +916,12 @@ export function createFleetServer(deps: FleetDeps) {
     wsServer,
     realtimePoller,
     start(port: number): void {
+      const host = process.env.FLEET_BIND_ADDRESS ?? '127.0.0.1';
+      assertSafeFleetBind(host); // fail fast — before any pollers/timers start
       discovery.startAutoRefresh();
       healthPoller.start();
       updateChecker.start();
       realtimePoller.start();
-      const host = process.env.FLEET_BIND_ADDRESS ?? '127.0.0.1';
       server.listen(port, host, () => {
         log.info({ port, host, ws: true }, 'fleet server listening');
       });
