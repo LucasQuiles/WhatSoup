@@ -25,8 +25,8 @@ scoped markdown files currently on disk.
 | Dimension | Breakdown |
 |---|---|
 | Kind | bead=113, doc=14, handoff=4, plan=16, review=1, spec=13, state=19 |
-| Status | active=2, closed=7, completed=115, deferred=8, pending=38, unknown=10 |
-| Status source | bead-manifest=3, body-marker=102, directory=7, fallback=5, phase-log=7, state-md-status=56 |
+| Status | closed=9, completed=117, deferred=8, pending=38, unknown=8 |
+| Status source | bead-manifest=3, body-marker=104, directory=7, fallback=3, phase-log=7, state-md-status=56 |
 
 ## Inconsistencies
 
@@ -34,14 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (2)
-
-| Path | Kind | Topic | Status source |
-|------|------|-------|---------------|
-| `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | agent-layer-hardening | state-md-status |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | agent-layer-hardening | state-md-status |
-
-### Unknown-status — triage needed (10)
+### Unknown-status — triage needed (8)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -50,8 +43,6 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-05-12 |
 | `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
-| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | twilio-sms-transport | 2026-06-11 |
-| `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | twilio-voice-webhook | 2026-06-11 |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | colony-orchestration-design | 2026-04-04 |
 | `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | scheduled-groups-tabs-design | 2026-04-06 |
 | `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md` | spec | console-test-jsx-runtime-fix | 2026-04-25 |
@@ -202,8 +193,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC1-path-traversal.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC2-fts-injection.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC3-ssrf-dns.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | active | state-md-status | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | active | state-md-status | agent-layer-hardening | 2026-05-31 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | closed | state-md-status | agent-layer-hardening | 2026-05-31 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | closed | state-md-status | agent-layer-hardening | 2026-05-31 |  |
 
 ### docs/sdlc/completed/audit-remediation-20260330  _(1 entries)_
 
@@ -337,8 +328,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | completed | body-marker | operation-tracker | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-04-25-pr-0a-transport-contract-foundation.md` | plan | completed | body-marker | pr-0a-transport-contract-foundation | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-05-29-harness-maintenance.md` | plan | completed | body-marker | harness-maintenance | 2026-05-29 |  |
-| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | unknown | fallback | twilio-sms-transport | 2026-06-11 |  |
-| `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | unknown | fallback | twilio-voice-webhook | 2026-06-11 |  |
+| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | completed | body-marker | twilio-sms-transport | 2026-06-11 |  |
+| `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | completed | body-marker | twilio-voice-webhook | 2026-06-11 |  |
 
 ### docs/superpowers/reviews  _(1 entries)_
 
@@ -367,4 +358,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-12T00:47:16Z from commit `9f3290d7d254a3a01f52b982c8ff04a71e4befdb`
+- Generated at 2026-06-12T02:05:44Z from commit `cca57b1ddc22a18cc2955c475e784e4acf8c990d`

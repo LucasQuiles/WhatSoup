@@ -101,6 +101,15 @@ jobs:
       - name: Claude settings drift guard
         run: npm run guard:claude-settings
 
+      - name: Publication guard
+        run: npm run guard:publication:all
+
+      - name: Node pin consistency guard
+        run: npm run guard:node-pin-consistency
+
+      - name: Agent decision polls guard
+        run: npm run guard:agent-decision-polls
+
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
 

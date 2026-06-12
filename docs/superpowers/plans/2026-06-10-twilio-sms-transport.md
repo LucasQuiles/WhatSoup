@@ -1,5 +1,7 @@
 # Twilio SMS Transport (Stage 1) — Implementation Plan
 
+**Status:** completed — shipped as PR #731 (squash `5001c5c4`, merged 2026-06-11).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 > **Execution prerequisite:** a CLEAN dedicated branch/worktree off latest main. Do NOT execute against a dirty shared checkout.
 > **Design spec:** [`docs/specs/2026-06-10-twilio-transport-design.md`](../../specs/2026-06-10-twilio-transport-design.md) — read it (especially §0 grounding corrections) before implementing any task.
