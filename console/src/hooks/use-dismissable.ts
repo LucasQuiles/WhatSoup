@@ -83,6 +83,14 @@ export interface UseDismissableOptions {
    * When omitted the first focusable child (or the container itself) gets focus.
    */
   initialFocus?: RefObject<HTMLElement | null>;
+  /**
+   * Optional ref that overrides the focus-restoration target. When set and the
+   * element is still in the document at close time, focus restores HERE instead
+   * of the element captured at open. Needed by retargeting overlays (Drawer):
+   * after the inspected entity changes while open, the correct restore target
+   * is the CURRENT originating row, not the one that first opened the overlay.
+   */
+  restoreFocus?: RefObject<HTMLElement | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +101,7 @@ export function useDismissable(
   containerRef: RefObject<HTMLElement | null>,
   options: UseDismissableOptions,
 ): void {
-  const { onClose, open, dismissable = false, initialFocus } = options;
+  const { onClose, open, dismissable = false, initialFocus, restoreFocus } = options;
 
   // Stable ref to onClose so effects don't re-run on every render closure change.
   const onCloseRef = useRef(onClose);
@@ -174,16 +182,21 @@ export function useDismissable(
     };
   }, [open, stableClose]);
 
-  // Focus restoration on close
+  // Focus restoration on close. The restoreFocus override (when provided and
+  // still connected) wins over the element captured at open — see the option doc.
   useEffect(() => {
     if (open) return;
-    const target = returnFocusRef.current;
+    const override = restoreFocus?.current ?? null;
+    const target =
+      override && typeof document !== 'undefined' && document.contains(override)
+        ? override
+        : returnFocusRef.current;
     if (!target || typeof (target as HTMLElement).focus !== 'function') return;
     if (typeof document !== 'undefined' && document.contains(target)) {
       (target as HTMLElement).focus({ preventScroll: true });
     }
     returnFocusRef.current = null;
-  }, [open]);
+  }, [open, restoreFocus]);
 
   // Outside-click handler (optional)
   useEffect(() => {

@@ -1046,3 +1046,29 @@ describe('SoupKitchen long-value fixture', () => {
     expect(screen.getByText(displayInstanceName(longName))).toBeDefined();
   });
 });
+
+describe('SoupKitchen drawer focus restore after retarget (QA finding D3)', () => {
+  it('Escape after retarget restores focus to the retargeted row, not the first opener', async () => {
+    const la = makeLine({ name: 'focus-a', phone: '+15550003333' });
+    const lb = makeLine({ name: 'focus-b', phone: '+15550004444' });
+    renderPage({ lines: [la, lb] });
+
+    const rowA = screen.getByText(displayInstanceName('focus-a')).closest('tr')!;
+    const rowB = screen.getByText(displayInstanceName('focus-b')).closest('tr')!;
+
+    act(() => { rowA.focus(); });
+    fireEvent.click(rowA);
+    expect(screen.getByRole('complementary')).toBeDefined();
+
+    // Retarget to row B while open
+    fireEvent.click(rowB);
+    expect(screen.getByRole('complementary')).toBeDefined();
+
+    fireEvent.keyDown(document, { key: 'Escape', bubbles: true });
+    await act(async () => {});
+    expect(screen.queryByRole('complementary')).toBeNull();
+
+    // Focus restores to the CURRENT originating row (B), not the first opener (A).
+    expect(document.activeElement).toBe(rowB);
+  });
+});

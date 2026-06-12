@@ -5,12 +5,15 @@
  * The hook is used unmodified per the slice contract (investigation §6.8).
  *
  * Squeeze-layout production rule is implemented via a CSS container query on
- * DrawerLayout (sets container-type: inline-size). At container ≥1080px the
- * drawer is a flex sibling (no scrim, role="complementary"). Below 1080px it
+ * DrawerLayout (sets container-type: inline-size). At container ≥900px the
+ * drawer is a flex sibling (no scrim, role="complementary"). Below 900px it
  * becomes absolute overlay + scrim (reuses --scrim token from Modal's CSS).
- * The 1080px threshold is spec-normative (drawer.md §The squeeze-layout
- * production rule). The mode flip is CSS-only; jsdom cannot prove the squeeze
- * flip — marked INCONCLUSIVE in tests, manual QA covers D7.
+ * Threshold: drawer.md authored 1080px assuming a full-width container; the
+ * Fleet container shares the viewport with the activity feed (~1044px at a
+ * 1440px window), so 1080px produced overlay on desktop — contradicting the
+ * rule's own intent. Amended to 900px (C2.3 live-QA finding D2; squeezed
+ * content keeps ≥~540px). The mode flip is CSS-only; jsdom cannot prove the
+ * squeeze flip — marked INCONCLUSIVE in tests, manual QA covers D7.
  *
  * Motion: enter translateX(100%→0) at --dur-slow --ease-enter; exit at
  * --dur-base --ease-exit. The global prefers-reduced-motion block neutralizes
@@ -58,8 +61,8 @@ const DrawerCloseRefContext = createContext<CloseRefValue | null>(null);
 
 export interface DrawerLayoutProps {
   /**
-   * The content region (table / main body). At container ≥1080px rendered as
-   * a flex sibling of the drawer (squeeze mode). At <1080px the drawer overlays.
+   * The content region (table / main body). At container ≥900px rendered as
+   * a flex sibling of the drawer (squeeze mode). At <900px the drawer overlays.
    * The content div receives soup-drawer-layout__content (flex: 1 1 auto; min-width: 0).
    */
   children: ReactNode;
@@ -104,6 +107,13 @@ export interface DrawerProps {
   /** Drawer content. Compose DrawerHeader + DrawerBody + optional DrawerFooter. */
   children: ReactNode;
   className?: string;
+  /**
+   * Focus-restoration override (forwarded to useDismissable). Retargeting
+   * callers point this at the CURRENT originating row so that closing after a
+   * retarget restores focus to the row whose data is shown, not the row that
+   * first opened the drawer (C2.3 live-QA finding D3).
+   */
+  restoreFocus?: RefObject<HTMLElement | null>;
 }
 
 export const Drawer: FC<DrawerProps> = ({
@@ -113,6 +123,7 @@ export const Drawer: FC<DrawerProps> = ({
   'aria-labelledby': ariaLabelledBy,
   children,
   className,
+  restoreFocus,
 }) => {
   const shellRef = useRef<HTMLDivElement>(null);
 
@@ -128,6 +139,7 @@ export const Drawer: FC<DrawerProps> = ({
     // the table live and users interact with both surfaces freely.
     dismissable: false,
     initialFocus: closeButtonRef as RefObject<HTMLElement | null>,
+    restoreFocus,
   });
 
   if (!open) return null;
@@ -136,8 +148,8 @@ export const Drawer: FC<DrawerProps> = ({
 
   return (
     <>
-      {/* Scrim — only rendered in overlay mode (<1080px container).
-          The container query in soup-drawer-layout hides it at ≥1080px. */}
+      {/* Scrim — only rendered in overlay mode (<900px container).
+          The container query in soup-drawer-layout hides it at ≥900px. */}
       <div className="soup-drawer-scrim" aria-hidden="true" />
 
       <div

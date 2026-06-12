@@ -1,9 +1,11 @@
 import {
   type FC,
+  type RefObject,
   useState,
   useMemo,
   useCallback,
   useId,
+  useRef,
   lazy,
   Suspense,
 } from "react";
@@ -125,6 +127,8 @@ interface FleetDrawerProps {
   lines: LineInstance[];
   onClose: () => void;
   onOpenLine: (name: string) => void;
+  /** Current originating row — Drawer focus-restore target across retargets. */
+  restoreFocus: RefObject<HTMLElement | null>;
 }
 
 /** Maximum log entries shown in the drawer scoped log (last-N). */
@@ -135,6 +139,7 @@ const FleetDrawer: FC<FleetDrawerProps> = ({
   lines,
   onClose,
   onOpenLine,
+  restoreFocus,
 }) => {
   const titleId = useId();
   const logsResult = useLogs(selectedName ?? "");
@@ -152,6 +157,7 @@ const FleetDrawer: FC<FleetDrawerProps> = ({
       open={isOpen}
       onClose={onClose}
       aria-labelledby={titleId}
+      restoreFocus={restoreFocus}
     >
       {isMissing ? (
         <>
@@ -340,6 +346,9 @@ const SoupKitchen: FC = () => {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   // Drawer: name of the inspected line, null = drawer closed.
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  // Element of the currently-selected row. Updated by the current row's ref
+  // callback (never nulled — restoreFocus checks document.contains at close).
+  const selectedRowRef = useRef<HTMLElement | null>(null);
 
   // handleSort adapts the primitive's three-way cycle (none/asc/desc) onto
   // our two-way sortDir; 'none' clears the sort key.
@@ -537,6 +546,7 @@ const SoupKitchen: FC = () => {
       lines={lines}
       onClose={closeDrawer}
       onOpenLine={openLine}
+      restoreFocus={selectedRowRef}
     />
   );
 
@@ -889,6 +899,13 @@ const SoupKitchen: FC = () => {
                           interactive
                           severity={severity}
                           current={isCurrent}
+                          ref={
+                            isCurrent
+                              ? (el) => {
+                                  if (el) selectedRowRef.current = el;
+                                }
+                              : undefined
+                          }
                           onActivate={() => openDrawer(line.name)}
                         >
                           {/* Col 0: StatusCell shape + name label (C-1 resolution) */}

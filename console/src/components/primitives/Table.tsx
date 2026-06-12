@@ -28,6 +28,7 @@ import {
   type ThHTMLAttributes,
   type HTMLAttributes,
   type KeyboardEvent,
+  type Ref,
 } from 'react';
 import { ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
 
@@ -189,6 +190,11 @@ export interface TableRowProps extends HTMLAttributes<HTMLTableRowElement> {
   severity?: RowSeverity;
   /** When true: aria-current="true" + accent edge class (selected/open row). */
   current?: boolean;
+  /**
+   * Ref to the underlying <tr> (React 19 ref-as-prop). Used by callers that
+   * need the row element, e.g. as a Drawer restoreFocus target.
+   */
+  ref?: Ref<HTMLTableRowElement>;
   children: ReactNode;
 }
 

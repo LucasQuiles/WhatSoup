@@ -1179,8 +1179,8 @@ button.soup-pill[aria-disabled="true"] {
    Anatomy: head (status shape + title + mode badge + spring + close X) · body (scrolls) · footer.
    Enter: translateX(100%→0) at --dur-slow --ease-enter.
    Exit: effectively instant (unmount-on-close; DD-19 covers paired exit motion).
-   Squeeze mode (≥1080px container): flex sibling, no scrim, role="complementary".
-   Overlay mode (<1080px container): absolute right-0, scrim covers content.
+   Squeeze mode (≥900px container): flex sibling, no scrim, role="complementary".
+   Overlay mode (<900px container): absolute right-0, scrim covers content.
    Squeeze proof is INCONCLUSIVE in jsdom — manual QA + D7 viewport tests cover it.
    -------------------------------------------------------------------------- */
 
@@ -1230,9 +1230,9 @@ button.soup-pill[aria-disabled="true"] {
   outline-offset: var(--bw-accent);
 }
 
-/* Squeeze mode: at ≥1080px container width the drawer is a flex sibling.
+/* Squeeze mode: at ≥900px container width the drawer is a flex sibling.
    No scrim. Drawer becomes position:static so it participates in layout flow. */
-@container (min-width: 1080px) {
+@container (min-width: 900px) {
   .soup-drawer-scrim {
     display: none;
   }

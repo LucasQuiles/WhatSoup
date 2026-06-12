@@ -15,7 +15,7 @@
  *   - DrawerLayout renders content + drawer as siblings
  *
  * jsdom limits:
- *   - Container-query squeeze flip (≥1080px → flex sibling, <1080px → overlay) is NOT
+ *   - Container-query squeeze flip (≥900px → flex sibling, <900px → overlay) is NOT
  *     provable in jsdom — jsdom does not implement CSS container queries. Tests assert
  *     class/structure contracts only. INCONCLUSIVE — manual QA + D7 viewport tests.
  *   - Computed CSS (animation, transforms) not verifiable in jsdom.
@@ -377,7 +377,7 @@ describe('DrawerLayout — structure', () => {
     expect(screen.getByTestId('drawer-inner')).toBeDefined();
   });
 
-  // Container-query squeeze flip (≥1080px → no scrim, flex sibling) is NOT
+  // Container-query squeeze flip (≥900px → no scrim, flex sibling) is NOT
   // provable in jsdom — jsdom does not implement CSS container queries.
   // INCONCLUSIVE — manual QA + D7 viewport tests cover the squeeze behaviour.
   it('INCONCLUSIVE: container-query squeeze flip cannot be tested in jsdom (manual QA required)', () => {
@@ -447,5 +447,46 @@ describe('Drawer — sub-components', () => {
     );
     const footer = screen.getByText('Action').closest('.soup-drawer-footer');
     expect(footer).not.toBeNull();
+  });
+});
+
+describe('Drawer — restoreFocus override (retarget contract, QA finding D3)', () => {
+  it('restores focus to the override target instead of the captured opener', async () => {
+    const Fixture: FC = () => {
+      const [open, setOpen] = useState(false);
+      const overrideRef = useRef<HTMLButtonElement | null>(null);
+      return (
+        <div>
+          <button type="button" data-testid="opener" onClick={() => setOpen(true)}>
+            open
+          </button>
+          <button type="button" data-testid="override-target" ref={overrideRef}>
+            current row stand-in
+          </button>
+          <Drawer
+            open={open}
+            onClose={() => setOpen(false)}
+            aria-label="inspector"
+            restoreFocus={overrideRef}
+          >
+            <DrawerBody><span>content</span></DrawerBody>
+          </Drawer>
+        </div>
+      );
+    };
+    render(<Fixture />);
+    const opener = screen.getByTestId('opener');
+    const override = screen.getByTestId('override-target');
+
+    act(() => { opener.focus(); });
+    fireEvent.click(opener);
+    await act(async () => {});
+
+    fireEvent.keyDown(document, { key: 'Escape', bubbles: true });
+    await act(async () => {});
+
+    // Focus restores to the override target, NOT the opener captured at open.
+    expect(document.activeElement).toBe(override);
+    expect(document.activeElement).not.toBe(opener);
   });
 });
