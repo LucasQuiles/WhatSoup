@@ -25,6 +25,20 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
   whatsoup_health: 'WHATSOUP_HEALTH_TOKEN',
 };
 
+export function resolveProviderKeyService(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): string | null {
+  if (provider === 'opencode-cli') {
+    const prefix = model?.split('/')[0]?.trim();
+    return prefix ? prefix.toLowerCase() : null;
+  }
+  if (provider === 'openai-api') {
+    return 'openai';
+  }
+  return null;
+}
+
 const SERVICE_MIGRATION_FALLBACKS: Record<string, string[]> = {
   'whatsoup-health-token': ['whatsoup_health'],
 };

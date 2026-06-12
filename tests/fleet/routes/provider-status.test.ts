@@ -7,9 +7,13 @@
  */
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 
-vi.mock('../../../src/lib/keyring.ts', () => ({
-  lookupCredential: vi.fn(),
-}));
+vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/lib/keyring.ts')>();
+  return {
+    ...actual,
+    lookupCredential: vi.fn(),
+  };
+});
 
 vi.mock('node:fs', () => {
   const readFile = vi.fn();

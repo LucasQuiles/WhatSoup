@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
-import { lookupCredential } from '../../lib/keyring.ts';
+import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { extractLocal } from '../../core/access-list.ts';
 import { bareNumber } from '../../core/jid-constants.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
@@ -426,35 +426,12 @@ export async function handleGetLine(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the keyring service name used to look up an API key for a given
- * provider/model, or `null` when the provider uses native/subscription auth
- * (no key needed). Mirrors the runtime's API-key resolution:
- *   - opencode-cli → the model's provider prefix (e.g. `minimax/x` → `minimax`)
- *   - openai-api   → `openai`
- *   - claude-cli / codex-cli / gemini-cli / anthropic-api → null (N/A)
- */
-function keyringServiceFor(provider: string | null | undefined, model: string | null | undefined): string | null {
-  if (!provider) return null;
-  switch (provider) {
-    case 'opencode-cli': {
-      const prefix = typeof model === 'string' ? model.split('/')[0]?.trim() : '';
-      return prefix ? prefix : null;
-    }
-    case 'openai-api':
-      return 'openai';
-    default:
-      // claude-cli, codex-cli, gemini-cli, anthropic-api: native auth, no key.
-      return null;
-  }
-}
-
-/**
  * Boolean presence of the API key for a provider/model, or `null` when no key
  * is required (native-auth providers). Never returns or logs the key value —
  * only whether one is resolvable via env or keyring.
  */
 function keyPresentFor(provider: string | null | undefined, model: string | null | undefined): boolean | null {
-  const service = keyringServiceFor(provider, model);
+  const service = resolveProviderKeyService(provider, model);
   if (service === null) return null;
   return lookupCredential(service) !== null;
 }

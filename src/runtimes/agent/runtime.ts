@@ -15,7 +15,7 @@ import {
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
 import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
-import { lookupCredential } from '../../lib/keyring.ts';
+import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   ensureAgentSchema,
@@ -5437,26 +5437,6 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
-   * Map a fallback provider/model to its keyring service (shared by the
-   * presence guard and the validity pre-flight).
-   *
-   * Returns null when the provider authenticates via subscription/login
-   * (claude-cli, codex-cli, gemini-cli, anthropic-api) — no keyring key applies.
-   */
-  private resolveFallbackService(provider: string | undefined, model: string | undefined): string | null {
-    if (provider === 'opencode-cli') {
-      const prefix = model?.split('/')[0]?.trim();
-      return prefix ? prefix.toLowerCase() : null;
-    }
-    if (provider === 'openai-api') {
-      return 'openai';
-    }
-    // CLI/native-auth providers (claude-cli/codex-cli/gemini-cli/anthropic-api)
-    // and an opencode model with no provider prefix → not applicable.
-    return null;
-  }
-
-  /**
    * Whether the keyring holds an API key for the configured fallback target.
    *
    * Returns:
@@ -5470,7 +5450,7 @@ export class AgentRuntime implements Runtime {
    * (`minimax/...` → `minimax`); openai-api → `openai`. Never logs the value.
    */
   private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
-    const service = this.resolveFallbackService(provider, model);
+    const service = resolveProviderKeyService(provider, model);
     if (!service) return null;
     return lookupCredential(service) !== null;
   }
@@ -5550,7 +5530,7 @@ export class AgentRuntime implements Runtime {
     }
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
-    const service = this.resolveFallbackService(this.agentFallbackProvider, this.agentFallbackModel);
+    const service = resolveProviderKeyService(this.agentFallbackProvider, this.agentFallbackModel);
     if (service) {
       const key = lookupCredential(service);
       if (!key) {
