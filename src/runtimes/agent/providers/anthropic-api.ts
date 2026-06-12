@@ -64,6 +64,10 @@ interface ToolUseAccum {
   inputJson: string;
 }
 
+type ParsedToolInput =
+  | { ok: true; input: Record<string, unknown> }
+  | { ok: false; content: string };
+
 interface CallApiResult {
   text: string;
   toolUses?: ToolUseAccum[];
@@ -175,12 +179,12 @@ export class AnthropicApiProvider implements ProviderSession {
 
       for (const tu of result.toolUses) {
         if (!this.active) break;
-        let toolInput: Record<string, unknown>;
-        try {
-          toolInput = JSON.parse(tu.inputJson || '{}') as Record<string, unknown>;
-        } catch {
-          toolInput = {};
-        }
+        // Parity with openai-api parseToolInput: malformed or non-object
+        // provider input must NOT execute the tool — it feeds back to the
+        // model as an error tool_result instead. Substituting {} executed
+        // real side-effecting tools with empty arguments.
+        const parsedToolInput = this.parseToolInput(tu, turnModel);
+        const toolInput = parsedToolInput.ok ? parsedToolInput.input : {};
 
         this.opts.onEvent({
           type: 'tool_use',
@@ -189,7 +193,9 @@ export class AnthropicApiProvider implements ProviderSession {
           toolInput,
         });
 
-        const toolResult = await this.executeTool(tu.name, toolInput);
+        const toolResult = parsedToolInput.ok
+          ? await this.executeTool(tu.name, toolInput)
+          : { content: parsedToolInput.content, isError: true };
 
         toolResultBlocks.push({
           type: 'tool_result',
@@ -498,6 +504,41 @@ export class AnthropicApiProvider implements ProviderSession {
       inputTokens,
       outputTokens,
     };
+  }
+
+  private parseToolInput(toolUse: ToolUseAccum, model: string): ParsedToolInput {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(toolUse.inputJson || '{}');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn({
+        err: message,
+        model,
+        toolId: toolUse.id,
+        toolName: toolUse.name,
+        argumentLength: toolUse.inputJson.length,
+      }, 'malformed Anthropic tool input; tool call blocked');
+      return {
+        ok: false,
+        content: `Tool "${toolUse.name}" failed: malformed provider tool arguments; the tool was not executed.`,
+      };
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      log.warn({
+        model,
+        toolId: toolUse.id,
+        toolName: toolUse.name,
+        argumentType: Array.isArray(parsed) ? 'array' : typeof parsed,
+      }, 'non-object Anthropic tool input; tool call blocked');
+      return {
+        ok: false,
+        content: `Tool "${toolUse.name}" failed: provider tool arguments must be a JSON object; the tool was not executed.`,
+      };
+    }
+
+    return { ok: true, input: parsed as Record<string, unknown> };
   }
 
   private async executeTool(
