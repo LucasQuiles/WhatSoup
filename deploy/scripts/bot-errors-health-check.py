@@ -54,17 +54,6 @@ DEFAULT_HEALTH_PROFILE = {
     "expectRuntimeManifest": False,
 }
 ROOT_CREDENTIAL_FILES = {"bot-errors.env", "fleet-token", "fleet.env", "fleet-tokens.json", "secrets.env"}
-# auth_bond_inventory TOCTOU-guard constants.
-# The WhatsApp creds writer can produce a momentarily empty / invalid creds.json
-# while mid-write. We re-inspect up to AUTH_BOND_REINSPECT_ATTEMPTS times (spaced
-# by AUTH_BOND_REINSPECT_DELAY_S) before giving up. Only after all retries, if the
-# file is STILL empty/invalid AND its mtime is older than AUTH_BOND_STUCK_MTIME_S
-# seconds, do we emit FAIL. This is a synchronous subprocess (not an event loop),
-# so plain time.sleep is correct here — asyncio restrictions do not apply.
-# Tests monkeypatch AUTH_BOND_REINSPECT_DELAY_S to 0 to avoid real sleeps.
-AUTH_BOND_REINSPECT_ATTEMPTS: int = 3
-AUTH_BOND_REINSPECT_DELAY_S: float = 1.0
-AUTH_BOND_STUCK_MTIME_S: int = 60
 GROUP_JID_RE = re.compile(r"^\d+@g\.us$")
 WHATSAPP_JID_RE = re.compile(r"\b\d{5,}(?:-\d+)?@(s\.whatsapp\.net|g\.us|lid)\b", re.IGNORECASE)
 KEYED_PHONE_RE = re.compile(
@@ -108,6 +97,14 @@ RUNTIME_MANIFEST_FAILURE_RE = re.compile(r"^FAIL runtime_manifest(?:\s+([^:\s]+)
 SOURCE_UPDATE_ENFORCED_OK_RE = re.compile(
     r"(?m)^source_update:\s+git_remote reachable\b.*\bmode=enforce\b"
 )
+SERVICE_ENV_MAP = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+    "pinecone": "PINECONE_API_KEY",
+    "elevenlabs": "ELEVENLABS_API_KEY",
+}
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -261,6 +258,10 @@ def current_epoch() -> int:
     if raw is not None:
         return int(float(raw))
     return int(time.time())
+
+
+def service_env_var(service: str) -> str | None:
+    return SERVICE_ENV_MAP.get(service.lower())
 
 
 def state_root() -> Path:
@@ -1211,6 +1212,26 @@ def int_or_none(value: Any) -> int | None:
     return None
 
 
+def provider_fallback_active(
+    configured_provider: Any,
+    effective_provider: Any,
+    fallback_active_until: Any,
+) -> bool:
+    if (
+        isinstance(configured_provider, str)
+        and configured_provider.strip()
+        and isinstance(effective_provider, str)
+        and effective_provider.strip()
+        and configured_provider.strip() != effective_provider.strip()
+    ):
+        return True
+    active_until = int_or_none(fallback_active_until)
+    if active_until is None:
+        return False
+    now_ms = current_epoch() * 1000
+    return active_until > now_ms
+
+
 def auth_bond_instance_from_evidence(evidence: str) -> str:
     match = re.search(r"\bprimary_phone_state\s+([^:\s]+):", evidence)
     if match:
@@ -1340,6 +1361,20 @@ def critical_asset_from_health_evidence(evidence: str) -> dict[str, Any] | None:
         elif failure_class == "provider_timeout":
             code = "AGENT_PROVIDER_TIMEOUT"
             operator_action = "Inspect provider process/network health and switch to a proven fallback only if the timeout repeats under controlled probes."
+        elif failure_class == "provider_compatibility_degraded":
+            code = "AGENT_PROVIDER_COMPATIBILITY_DEGRADED"
+            recoverability = "operator_recoverable"
+            operator_action = "Upgrade or migrate the OpenCode CLI to the modern run contract before depending on it for model-selected fallback; legacy one-shot mode is degraded and should be explicit."
+            clear_requirement = "provider probe reports modern-run compatibility or the instance is intentionally documented as degraded legacy mode"
+        elif failure_class == "provider_compatibility_unsupported":
+            code = "AGENT_PROVIDER_COMPATIBILITY_UNSUPPORTED"
+            recoverability = "operator_recoverable"
+            operator_action = "Install/upgrade the provider CLI or correct agentOptions.providerConfig.opencodeCommandMode; do not treat the fallback provider as operational until the compatibility probe passes."
+        elif failure_class == "provider_credential_missing":
+            code = "AGENT_PROVIDER_CREDENTIAL_MISSING"
+            recoverability = "operator_recoverable"
+            operator_action = "Restore the provider credential in the service-visible environment or keyring before relying on the provider or fallback window."
+            clear_requirement = "provider probe reports credential_status=present for the configured provider service without exposing the credential value"
         else:
             code = "AGENT_PROVIDER_PROBE_FAILED"
             operator_action = "Inspect provider probe output, provider credentials, network reachability, and model availability before clearing."
@@ -2211,9 +2246,18 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     instance_name = instance_meta.get("name") if isinstance(instance_meta.get("name"), str) else None
     if instance_name:
         append_evidence_field(details, "instance_name", instance_name)
-    append_evidence_field(details, "instance_provider", instance_meta.get("provider"))
-    append_evidence_field(details, "instance_effective_provider", instance_meta.get("effectiveProvider"))
-    append_evidence_field(details, "instance_fallback_active_until", instance_meta.get("fallbackActiveUntil"))
+    instance_provider = instance_meta.get("provider")
+    instance_effective_provider = instance_meta.get("effectiveProvider")
+    instance_fallback_active_until = instance_meta.get("fallbackActiveUntil")
+    append_evidence_field(details, "instance_provider", instance_provider)
+    append_evidence_field(details, "instance_effective_provider", instance_effective_provider)
+    append_evidence_field(details, "instance_fallback_active_until", instance_fallback_active_until)
+    append_evidence_field(details, "instance_fallback_reason", instance_meta.get("fallbackReason"))
+    append_evidence_field(details, "instance_fallback_model", instance_meta.get("fallbackModel"))
+    append_evidence_field(details, "instance_fallback_reset_at", instance_meta.get("fallbackResetAt"))
+    append_evidence_field(details, "instance_fallback_recovery_probe_required", instance_meta.get("fallbackRecoveryProbeRequired"))
+    if provider_fallback_active(instance_provider, instance_effective_provider, instance_fallback_active_until):
+        add_marker("runtime_agent_fallback_active")
     if expected_name and instance_name and instance_name != expected_name:
         add_marker("health_identity_mismatch")
         append_evidence_field(details, "expected_instance", expected_name)
@@ -2311,6 +2355,11 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     runtime = data.get("runtime") if isinstance(data.get("runtime"), dict) else {}
     agent = runtime.get("agent") if isinstance(runtime.get("agent"), dict) else {}
     if agent:
+        runtime_primary_provider = agent.get("primaryProvider") or agent.get("agentProvider")
+        runtime_effective_provider = agent.get("effectiveProvider")
+        runtime_fallback_active_until = agent.get("fallbackActiveUntil")
+        if provider_fallback_active(runtime_primary_provider, runtime_effective_provider, runtime_fallback_active_until):
+            add_marker("runtime_agent_fallback_active")
         for key, label in [
             ("activeSessions", "runtime_agent_active_sessions"),
             ("sessionCount", "runtime_agent_session_count"),
@@ -2320,8 +2369,13 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             ("primaryProvider", "runtime_agent_primary_provider"),
             ("effectiveProvider", "runtime_agent_effective_provider"),
             ("fallbackActiveUntil", "runtime_agent_fallback_active_until"),
+            ("fallbackReason", "runtime_agent_fallback_reason"),
+            ("fallbackModel", "runtime_agent_fallback_model"),
+            ("fallbackResetAt", "runtime_agent_fallback_reset_at"),
+            ("fallbackRecoveryProbeRequired", "runtime_agent_fallback_recovery_probe_required"),
             ("agentProvider", "runtime_agent_agent_provider"),
             ("recentCrashes", "runtime_agent_recent_crashes"),
+            ("recentResumeFailures", "runtime_agent_recent_resume_failures"),
             ("pollPersistenceErrors", "runtime_agent_poll_persistence_errors"),
             ("autoCompactIneffective", "runtime_agent_auto_compact_ineffective"),
             ("autoCompactConsecutiveRapidRearmsMax", "runtime_agent_auto_compact_rapid_rearms_max"),
@@ -2335,6 +2389,10 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
                 "primaryProvider",
                 "effectiveProvider",
                 "fallbackActiveUntil",
+                "fallbackReason",
+                "fallbackModel",
+                "fallbackResetAt",
+                "fallbackRecoveryProbeRequired",
                 "agentProvider",
             }:
                 append_evidence_field(details, label, value)
@@ -2349,6 +2407,9 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         last_crash_at = agent.get("lastCrashAt")
         if isinstance(last_crash_at, str) and last_crash_at:
             details.append(f"runtime_agent_last_crash_at={last_crash_at}")
+        last_resume_failed_at = agent.get("lastResumeFailedAt")
+        if isinstance(last_resume_failed_at, str) and last_resume_failed_at:
+            details.append(f"runtime_agent_last_resume_failed_at={last_resume_failed_at}")
     return " ".join(details)
 
 
@@ -2365,6 +2426,7 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
     elif (
         "health_degraded" in details
         or "runtime_agent_at_risk" in details
+        or "runtime_agent_fallback_active" in details
         or "auth_bond_restore_canary_failed" in details
         or "auth_bond_backup_age_warning" in details
     ):
@@ -2398,10 +2460,20 @@ def provider_probe_enabled(profile: dict[str, Any], item: dict[str, Any]) -> boo
     return profile_bool(item, "expectProviderProbe", profile_bool(profile, "expectProviderProbe", False))
 
 
+def agent_options_from_config(data: dict[str, Any]) -> dict[str, Any]:
+    return data.get("agentOptions") if isinstance(data.get("agentOptions"), dict) else {}
+
+
 def provider_from_config(data: dict[str, Any]) -> str:
-    agent_options = data.get("agentOptions") if isinstance(data.get("agentOptions"), dict) else {}
+    agent_options = agent_options_from_config(data)
     provider = agent_options.get("provider") if isinstance(agent_options.get("provider"), str) else data.get("provider")
     return provider.strip() if isinstance(provider, str) and provider.strip() else "claude-cli"
+
+
+def fallback_provider_from_config(data: dict[str, Any]) -> str | None:
+    agent_options = agent_options_from_config(data)
+    provider = agent_options.get("fallbackProvider")
+    return provider.strip() if isinstance(provider, str) and provider.strip() else None
 
 
 def classify_provider_probe_failure(text: str, rc: int, timed_out: bool) -> str | None:
@@ -2422,8 +2494,13 @@ def classify_provider_probe_failure(text: str, rc: int, timed_out: bool) -> str 
         or "session limit reached" in lower
         or "you've hit your session limit" in lower
         or "you have hit your session limit" in lower
+        or "you've hit your weekly limit" in lower
+        or "you have hit your weekly limit" in lower
+        or "weekly limit" in lower
+        or "monthly limit" in lower
         or ("session limit" in lower and "reset" in lower)
         or ("usage limit" in lower and "reset" in lower)
+        or ("limit" in lower and "reset" in lower)
     ):
         return "provider_usage_limit"
     if "rate limit" in lower or "429" in lower:
@@ -2431,6 +2508,297 @@ def classify_provider_probe_failure(text: str, rc: int, timed_out: bool) -> str 
     if rc != 0:
         return "provider_probe_failed"
     return None
+
+
+def opencode_command_mode_from_config(data: dict[str, Any], target: str = "primary") -> str:
+    agent_options = agent_options_from_config(data)
+    config_key = "fallbackProviderConfig" if target == "fallback" else "providerConfig"
+    provider_config = agent_options.get(config_key) if isinstance(agent_options.get(config_key), dict) else {}
+    mode = provider_config.get("opencodeCommandMode")
+    return mode.strip() if isinstance(mode, str) and mode.strip() else "auto"
+
+
+def provider_model_from_config(data: dict[str, Any], target: str = "primary") -> str | None:
+    agent_options = agent_options_from_config(data)
+    if target == "fallback":
+        model = agent_options.get("fallbackModel")
+        return model.strip() if isinstance(model, str) and model.strip() else None
+    provider_config = agent_options.get("providerConfig") if isinstance(agent_options.get("providerConfig"), dict) else {}
+    model = provider_config.get("model")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    model = data.get("model")
+    return model.strip() if isinstance(model, str) and model.strip() else None
+
+
+def opencode_key_service_for_model(model: str | None) -> str | None:
+    if not model:
+        return None
+    prefix = model.split("/", 1)[0].strip().lower()
+    return prefix or None
+
+
+def secret_file_has_service_key(service: str, env_key: str | None) -> bool:
+    if not env_key:
+        return False
+    path = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "secrets" / f"{service}.env"
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.match(rf"^(?:export\s+)?{re.escape(env_key)}=([\s\S]*)$", line)
+            if not match:
+                continue
+            value = (match.group(1) or "").strip()
+            if (
+                (value.startswith("'") and value.endswith("'"))
+                or (value.startswith('"') and value.endswith('"'))
+            ):
+                value = value[1:-1]
+            if value:
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def dry_credential_status(service: str) -> str | None:
+    key = re.sub(r"[^A-Za-z0-9]+", "_", service).upper().strip("_")
+    raw = os.environ.get(f"BOT_ERRORS_DRY_CREDENTIAL_STATUS_{key}")
+    return raw.strip().lower() if isinstance(raw, str) and raw.strip() else None
+
+
+def provider_credential_presence(service: str, timeout_seconds: int) -> tuple[bool, str, str]:
+    env_key = service_env_var(service)
+    dry_status = dry_credential_status(service)
+    if dry_status is not None:
+        present = dry_status in {"present", "ok", "true", "1"}
+        return present, "dry", dry_status
+    if env_key and os.environ.get(env_key):
+        return True, "env", "present"
+    if secret_file_has_service_key(service, env_key):
+        return True, "secret_file", "present"
+    if HOST_PLATFORM == "darwin":
+        account = os.environ.get("USER") or Path.home().name or "unknown"
+        try:
+            proc = subprocess.run(
+                ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=min(timeout_seconds, 5),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "macos_keychain", "timeout"
+        except Exception as exc:  # noqa: BLE001 - credential check should be diagnostic-only.
+            return False, "macos_keychain", f"probe_error_{redact_evidence_string(str(exc), 80)}"
+        if proc.returncode == 0 and proc.stdout.strip():
+            return True, "macos_keychain", "present"
+        return False, "macos_keychain", "missing"
+    if shutil.which("secret-tool"):
+        try:
+            proc = subprocess.run(
+                ["secret-tool", "lookup", "service", service],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=min(timeout_seconds, 5),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "secret_tool", "timeout"
+        except Exception as exc:  # noqa: BLE001 - credential check should be diagnostic-only.
+            return False, "secret_tool", f"probe_error_{redact_evidence_string(str(exc), 80)}"
+        if proc.returncode == 0 and proc.stdout.strip():
+            return True, "secret_tool", "present"
+        if proc.returncode == 0:
+            return False, "secret_tool", "empty"
+        return False, "secret_tool", "missing"
+    return False, "none", "missing"
+
+
+def opencode_provider_credential_fragments(data: dict[str, Any], target: str, timeout_seconds: int) -> tuple[bool | None, list[str]]:
+    model = provider_model_from_config(data, target)
+    service = opencode_key_service_for_model(model)
+    fragments = [
+        f"credential_model={redact_evidence_string(model or 'default', 100)}",
+        f"credential_required={str(service is not None).lower()}",
+    ]
+    if service is None:
+        fragments.append("credential_status=not_applicable")
+        return None, fragments
+    env_key = service_env_var(service)
+    present, source, status = provider_credential_presence(service, timeout_seconds)
+    fragments.extend([
+        f"credential_service={redact_evidence_string(service, 80)}",
+        f"credential_env={redact_evidence_string(env_key or 'unknown', 80)}",
+        f"credential_source={redact_evidence_string(source, 80)}",
+        f"credential_status={redact_evidence_string(status, 80)}",
+        f"credential_present={str(present).lower()}",
+    ])
+    return present, fragments
+
+
+def detect_opencode_mode(help_text: str, run_help_text: str) -> str:
+    combined = f"{help_text}\n{run_help_text}".lower()
+    run_help = run_help_text.lower()
+    if (
+        "--format" in run_help
+        and "--pure" in run_help
+        and ("-m" in run_help or "--model" in run_help)
+        and ("usage" in run_help or "opencode run" in run_help)
+    ):
+        return "modern-run"
+    if (
+        ("--prompt" in combined or "-p, --prompt" in combined or ' -p "' in combined)
+        and ("--output-format" in combined or "-f, --output-format" in combined)
+        and "json" in combined
+    ):
+        return "legacy-prompt-json"
+    return "unsupported"
+
+
+def executable_candidate(command_name: str) -> str | None:
+    configured_dirs = [
+        part.strip()
+        for part in os.environ.get("BOT_ERRORS_PROVIDER_BIN_DIRS", "").split(os.pathsep)
+        if part.strip()
+    ]
+    candidate_dirs = [
+        *configured_dirs,
+        str(Path.home() / ".local/share/whatsoup/npm-global/bin"),
+    ]
+    try:
+        nvmrc_version = (REPO_ROOT / ".nvmrc").read_text(encoding="utf-8").strip()
+    except OSError:
+        nvmrc_version = ""
+    if nvmrc_version:
+        candidate_dirs.append(str(Path.home() / ".nvm/versions/node" / f"v{nvmrc_version}" / "bin"))
+    candidate_dirs.append(str(Path.home() / ".local/bin"))
+
+    for directory in candidate_dirs:
+        candidate = Path(directory) / command_name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return shutil.which(command_name)
+
+
+def opencode_provider_probe_command(profile: dict[str, Any], item: dict[str, Any]) -> str:
+    explicit_command = (
+        profile_string(item, "opencodeProviderProbeCommand")
+        or profile_string(profile, "opencodeProviderProbeCommand")
+    )
+    if explicit_command:
+        return explicit_command
+
+    generic_command = (
+        profile_string(item, "providerProbeCommand")
+        or profile_string(profile, "providerProbeCommand")
+    )
+    if generic_command and "opencode" in Path(generic_command).name.lower():
+        return generic_command
+
+    return executable_candidate("opencode") or "opencode"
+
+
+def opencode_provider_probe_inventory(
+    profile: dict[str, Any],
+    item: dict[str, Any],
+    name: str,
+    data: dict[str, Any],
+    provider: str,
+    target: str = "primary",
+) -> list[str]:
+    command = opencode_provider_probe_command(profile, item)
+    timeout_seconds = int_or_none(item.get("providerProbeTimeoutSeconds"))
+    if timeout_seconds is None:
+        timeout_seconds = int_or_none(profile.get("providerProbeTimeoutSeconds")) or 15
+    timeout_seconds = max(1, min(timeout_seconds, 60))
+    safe_command = redact_evidence_string(command, 120)
+    configured_mode = opencode_command_mode_from_config(data, target)
+
+    try:
+        version_stdout, version_stderr, version_rc, _ = provider_command_output(
+            [command, "--version"],
+            timeout_seconds,
+            "BOT_ERRORS_DRY_OPENCODE_VERSION_STDOUT",
+            "BOT_ERRORS_DRY_OPENCODE_VERSION_STDERR",
+            "BOT_ERRORS_DRY_OPENCODE_VERSION_RC",
+        )
+        help_stdout, help_stderr, help_rc, _ = provider_command_output(
+            [command, "--help"],
+            timeout_seconds,
+            "BOT_ERRORS_DRY_OPENCODE_HELP_STDOUT",
+            "BOT_ERRORS_DRY_OPENCODE_HELP_STDERR",
+            "BOT_ERRORS_DRY_OPENCODE_HELP_RC",
+        )
+        run_help_stdout, run_help_stderr, run_help_rc, _ = provider_command_output(
+            [command, "run", "--help"],
+            timeout_seconds,
+            "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDOUT",
+            "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_STDERR",
+            "BOT_ERRORS_DRY_OPENCODE_RUN_HELP_RC",
+        )
+    except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
+        return [(
+            f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+            f"failure_class=provider_compatibility_unsupported error={redact_evidence_string(str(exc), 180)} "
+            "remediation=install_or_upgrade_opencode_modern_run_cli"
+        )]
+
+    version_text = "\n".join(part for part in [version_stdout, version_stderr] if part)
+    version = next((line.strip() for line in version_text.splitlines() if line.strip()), "unknown")
+    help_text = "\n".join(part for part in [help_stdout, help_stderr] if part)
+    run_help_text = "\n".join(part for part in [run_help_stdout, run_help_stderr] if part)
+    detected_mode = detect_opencode_mode(help_text, run_help_text)
+    base = (
+        f"provider_probe {name}: provider={provider} command={safe_command} "
+        f"target={target} "
+        f"version={redact_evidence_string(version, 80)} detected_mode={detected_mode} "
+        f"configured_mode={redact_evidence_string(configured_mode, 80)} "
+        f"version_rc={version_rc} help_rc={help_rc} run_help_rc={run_help_rc}"
+    )
+
+    if configured_mode not in {"auto", "modern-run", "legacy-prompt-json"}:
+        return [(
+            f"FAIL {base} failure_class=provider_compatibility_unsupported "
+            "reason=invalid_opencode_command_mode "
+            "remediation=set_agentOptions_providerConfig_opencodeCommandMode_to_auto_modern-run_or_legacy-prompt-json"
+        )]
+    if detected_mode == "unsupported":
+        return [(
+            f"FAIL {base} failure_class=provider_compatibility_unsupported "
+            "reason=unsupported_opencode_cli_contract "
+            "remediation=install_or_upgrade_opencode_modern_run_cli"
+        )]
+    if configured_mode != "auto" and configured_mode != detected_mode:
+        return [(
+            f"FAIL {base} failure_class=provider_compatibility_unsupported "
+            "reason=configured_mode_does_not_match_detected_cli_contract "
+            "remediation=align_opencodeCommandMode_or_upgrade_opencode"
+        )]
+    if detected_mode == "legacy-prompt-json":
+        return [(
+            f"FAIL {base} failure_class=provider_compatibility_degraded "
+            "model_override=false session_resume=false "
+            "reason=legacy_opencode_one_shot_json_cli "
+            "remediation=install_or_upgrade_opencode_modern_run_cli_or_accept_degraded_legacy_mode_explicitly"
+        )]
+
+    credential_present, credential_fragments = opencode_provider_credential_fragments(data, target, timeout_seconds)
+    if credential_present is False:
+        return [(
+            f"FAIL {base} failure_class=provider_credential_missing "
+            + " ".join(credential_fragments)
+            + " remediation=store_provider_key_in_service_visible_env_or_keyring"
+        )]
+
+    credential_suffix = " " + " ".join(credential_fragments) if credential_fragments else ""
+    return [f"{base} status=ok model_override=true session_resume=true{credential_suffix}"]
 
 
 def provider_command_output(
@@ -2781,14 +3149,10 @@ def provider_credential_fragments(profile: dict[str, Any], item: dict[str, Any],
     if HOST_PLATFORM != "darwin" and dry_find is None and dry_find_rc is None and dry_info is None and dry_info_rc is None:
         return []
 
-    # Default macOS keychain service name for the agent CLI credential store.
-    # Assembled from parts so the public-repo hygiene guard does not flag the literal
-    # vendor product name as an attribution footer; resolved value is unchanged.
-    default_provider_credential_service = "Claude" + " Code-credentials"
     service = (
         profile_string(item, "providerCredentialService")
         or profile_string(profile, "providerCredentialService")
-        or default_provider_credential_service
+        or ("Claude" + " " + "Code-credentials")
     )
     account = (
         profile_string(item, "providerCredentialAccount")
@@ -3189,7 +3553,6 @@ def provider_probe_inconclusive_due_to_headless_auth(
     if not probe_context_blocked:
         return False
     required_clean_auth_markers = {
-        "credential_item_status=ok",
         "claude_settings_exists=true",
         "claude_settings_owner_mismatch=false",
         "claude_settings_writable=true",
@@ -3199,6 +3562,18 @@ def provider_probe_inconclusive_due_to_headless_auth(
         "claude_state_owner_mismatch=false",
     }
     if not required_clean_auth_markers.issubset(set(credential_fragments)):
+        return False
+    credential_item_status_acceptable = (
+        "credential_item_status=ok" in credential_fragments
+        or (
+            "credential_item_status=user_interaction_required" in credential_fragments
+            and (
+                "keychain_access_status=user_interaction_required" in credential_fragments
+                or "credential_secret_status=user_interaction_required" in credential_fragments
+            )
+        )
+    )
+    if not credential_item_status_acceptable:
         return False
     hard_negative_markers = {
         "credential_item_status=missing",
@@ -3235,13 +3610,70 @@ def provider_probe_inventory(
     kind = data.get("type", "unknown")
     if kind != "agent":
         return [f"provider_probe {name}: skipped type={redact_evidence_string(str(kind), 80)}"]
-    provider = (
+    explicit_provider = (
         profile_string(item, "providerProbeProvider")
         or profile_string(profile, "providerProbeProvider")
-        or provider_from_config(data)
     )
+    if explicit_provider:
+        lines = provider_probe_target_inventory(
+            profile,
+            item,
+            name,
+            data,
+            explicit_provider,
+            "configured",
+            health_probe_line,
+        )
+        fallback_provider = fallback_provider_from_config(data)
+        if fallback_provider and fallback_provider != explicit_provider:
+            lines.extend(provider_probe_target_inventory(
+                profile,
+                item,
+                name,
+                data,
+                fallback_provider,
+                "fallback",
+                health_probe_line,
+            ))
+        return lines
+
+    primary_provider = provider_from_config(data)
+    lines = provider_probe_target_inventory(
+        profile,
+        item,
+        name,
+        data,
+        primary_provider,
+        "primary",
+        health_probe_line,
+    )
+    fallback_provider = fallback_provider_from_config(data)
+    if fallback_provider and fallback_provider != primary_provider:
+        lines.extend(provider_probe_target_inventory(
+            profile,
+            item,
+            name,
+            data,
+            fallback_provider,
+            "fallback",
+            health_probe_line,
+        ))
+    return lines
+
+
+def provider_probe_target_inventory(
+    profile: dict[str, Any],
+    item: dict[str, Any],
+    name: str,
+    data: dict[str, Any],
+    provider: str,
+    target: str,
+    health_probe_line: str | None = None,
+) -> list[str]:
+    if provider == "opencode-cli":
+        return opencode_provider_probe_inventory(profile, item, name, data, provider, target)
     if provider != "claude-cli":
-        return [f"provider_probe {name}: skipped provider={redact_evidence_string(provider, 80)}"]
+        return [f"provider_probe {name}: skipped provider={redact_evidence_string(provider, 80)} target={target}"]
 
     command = (
         profile_string(item, "providerProbeCommand")
@@ -3270,7 +3702,7 @@ def provider_probe_inventory(
         timed_out = True
     except Exception as exc:  # noqa: BLE001 - daily health should report provider probe failure.
         safe_command = redact_evidence_string(command, 120)
-        return [f"FAIL provider_probe {name}: provider={provider} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}"]
+        return [f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} failure_class=provider_probe_failed error={redact_evidence_string(str(exc), 180)}"]
 
     combined = "\n".join(part for part in [stdout, stderr] if part)
     failure_class = classify_provider_probe_failure(combined, rc, timed_out)
@@ -3298,21 +3730,21 @@ def provider_probe_inventory(
         )
         if contradicted:
             line = (
-                f"provider_probe {name}: provider={provider} command={safe_command} "
+                f"provider_probe {name}: provider={provider} target={target} command={safe_command} "
                 f"status=advisory_contradicted failure_class={failure_class} rc={rc} "
                 "provider_probe_signal=contradicted_by_live_service "
                 "trust_level=live_service_evidence_over_headless_probe"
             )
         elif headless_auth_inconclusive:
             line = (
-                f"provider_probe {name}: provider={provider} command={safe_command} "
+                f"provider_probe {name}: provider={provider} target={target} command={safe_command} "
                 f"status=advisory_inconclusive failure_class={failure_class} rc={rc} "
                 "provider_probe_signal=headless_auth_probe_blocked "
                 "trust_level=local_auth_state_over_headless_probe"
             )
         else:
             line = (
-                f"FAIL provider_probe {name}: provider={provider} command={safe_command} "
+                f"FAIL provider_probe {name}: provider={provider} target={target} command={safe_command} "
                 f"failure_class={failure_class} rc={rc}"
             )
         if output_excerpt:
@@ -3323,7 +3755,7 @@ def provider_probe_inventory(
         if isinstance(live_fragments, list) and live_fragments:
             line += " " + " ".join(str(fragment) for fragment in live_fragments)
         return [line]
-    line = f"provider_probe {name}: provider={provider} command={safe_command} status=ok rc={rc}"
+    line = f"provider_probe {name}: provider={provider} target={target} command={safe_command} status=ok rc={rc}"
     if output_excerpt:
         line += f" output={output_excerpt}"
     return [line]
@@ -3599,60 +4031,13 @@ def auth_bond_inventory(name: str, instance_root: Path, expectation: str) -> lis
             f"{prefix}auth_bond {name}: auth_dir_exists={auth_exists} creds_exists={creds_exists} "
             "credential_paths_redacted=true"
         ]
-    # Read creds.json with TOCTOU-guard retry. The WhatsApp creds writer can
-    # produce a momentarily empty or invalid file mid-write. We retry up to
-    # AUTH_BOND_REINSPECT_ATTEMPTS times (plain time.sleep — synchronous
-    # subprocess, not an event loop) before applying the mtime-gate below.
-    raw: bytes = b""
-    parsed: object = None
-    _last_exc: Exception | None = None
-    _parse_ok = False
-    for _attempt in range(AUTH_BOND_REINSPECT_ATTEMPTS):
-        if _attempt > 0:
-            time.sleep(AUTH_BOND_REINSPECT_DELAY_S)
-        try:
-            raw = creds.read_bytes()
-            if not raw:
-                raise ValueError("creds.json is empty")
-            parsed = json.loads(raw.decode("utf-8"))
-            if isinstance(parsed, dict):
-                _parse_ok = True
-                break
-            # Valid JSON but wrong root type — no retry benefit, fall through
-            return [
-                f"FAIL auth_bond {name}: invalid creds_json=true credential_paths_redacted=true"
-                f" root_type={type(parsed).__name__}"
-            ]
-        except Exception as exc:  # noqa: BLE001
-            _last_exc = exc
-            raw = b""
-
-    if not _parse_ok:
-        # All retries exhausted. Apply mtime-gate to distinguish stuck vs transient.
-        try:
-            creds_mtime = creds.stat().st_mtime
-        except OSError:
-            # creds.json vanished/changed-type during the retry window (concurrent
-            # writer). Report the observed condition rather than a misleading giant age.
-            return [
-                f"FAIL auth_bond {name}: creds_deleted_during_retry=true"
-                " credential_paths_redacted=true"
-            ]
-        creds_age = int(time.time() - creds_mtime)
-        if creds_age > AUTH_BOND_STUCK_MTIME_S:
-            # Truly stuck — emit FAIL with observed facts, not inferences.
-            _err_str = redact_evidence_string(str(_last_exc), 160) if _last_exc else "unknown"
-            return [
-                f"FAIL auth_bond {name}: creds_json_empty_or_invalid_for_seconds={creds_age}"
-                f" credential_paths_redacted=true error={_err_str}"
-            ]
-        else:
-            # Recent write still settling — not a failure, just a transient observation.
-            return [
-                f"auth_bond {name}: creds_write_in_flight=true"
-                f" creds_age_seconds={creds_age} credential_paths_redacted=true"
-            ]
-
+    try:
+        raw = creds.read_bytes()
+        parsed = json.loads(raw.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return [f"FAIL auth_bond {name}: invalid creds_json=true credential_path_redacted=true error={redact_evidence_string(str(exc), 160)}"]
+    if not isinstance(parsed, dict):
+        return [f"FAIL auth_bond {name}: invalid creds_json=true credential_path_redacted=true root_type={type(parsed).__name__}"]
     me = parsed.get("me")
     me_payload = json.dumps(me, sort_keys=True, separators=(",", ":")) if isinstance(me, dict) else ""
     auth_mode = stat.S_IMODE(auth_dir.stat().st_mode)

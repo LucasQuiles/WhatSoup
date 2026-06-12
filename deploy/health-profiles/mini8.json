@@ -5,8 +5,19 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
-  "requiredCredentialFiles": ["fleet-tokens.json", "instances/ml-bot/tokens.env"],
+  "requiredCredentialFiles": [
+    "fleet-tokens.json",
+    "instances/ml-bot/tokens.env"
+  ],
   "instances": [
-    { "name": "ml-bot", "expected": "always_on", "service": "com.whatsoup.ml-bot" }
-  ]
+    {
+      "name": "ml-bot",
+      "expected": "always_on",
+      "service": "com.whatsoup.ml-bot",
+      "primaryPhoneVerificationRequired": true,
+      "primaryPhoneOwner": "Lucas"
+    }
+  ],
+  "expectPrimaryPhoneVerification": true,
+  "requiredConfigMaxMode": "600"
 }

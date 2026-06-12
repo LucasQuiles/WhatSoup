@@ -12,6 +12,11 @@ export interface NpmVersionAge {
   eligible: boolean;
 }
 
+export interface LatestEligibleVersion {
+  version: string | null;
+  cooldownMinutes: number;
+}
+
 export interface FloatingReference {
   path: string;
   value: string;
@@ -256,13 +261,29 @@ export function npmVersionAge(
   };
 }
 
+export function latestEligibleVersion(
+  versionTimes: Record<string, string>,
+  now: Date = new Date(),
+  cooldownMinutes = DEFAULT_COOLDOWN_MINUTES,
+): LatestEligibleVersion {
+  const versions = Object.entries(versionTimes)
+    .filter(([version]) => /^\d+\.\d+\.\d+$/.test(version))
+    .map(([version, publishedAt]) => npmVersionAge(versionTimes, version, now, cooldownMinutes))
+    .filter((entry) => entry.eligible)
+    .sort((left, right) => compareVersion(left.version, right.version));
+  return {
+    version: versions.at(-1)?.version ?? null,
+    cooldownMinutes,
+  };
+}
+
 function parseArgs(argv: string[]): Record<string, string | boolean> {
   const parsed: Record<string, string | boolean> = {};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!arg.startsWith('--')) throw new Error(`unexpected argument: ${arg}`);
     const key = arg.slice(2);
-    if (key === 'json' || key === 'npm-cooldown-config') {
+    if (key === 'json' || key === 'npm-cooldown-config' || key === 'latest-eligible-version') {
       parsed[key] = true;
       continue;
     }
@@ -320,6 +341,23 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
     if (args.json) console.log(JSON.stringify(result, null, 2));
     else console.log(`${version} eligible=${result.eligible}`);
     if (!result.eligible) process.exitCode = 2;
+    return result;
+  }
+
+  if (args['latest-eligible-version']) {
+    const timeJsonPath = asString(args['time-json'], '--time-json');
+    const cooldownMinutes = args['cooldown-minutes']
+      ? Number(args['cooldown-minutes'])
+      : DEFAULT_COOLDOWN_MINUTES;
+    const now = args.now ? new Date(String(args.now)) : new Date();
+    const result = latestEligibleVersion(
+      JSON.parse(readFileSync(timeJsonPath, 'utf8')) as Record<string, string>,
+      now,
+      cooldownMinutes,
+    );
+    if (args.json) console.log(JSON.stringify(result, null, 2));
+    else console.log(result.version ?? '');
+    if (!result.version) process.exitCode = 2;
     return result;
   }
 

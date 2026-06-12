@@ -5,5 +5,8 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": false,
-  "requiredCredentialFiles": ["fleet-token"]
+  "requiredCredentialFiles": [
+    "fleet-token"
+  ],
+  "expectPrimaryPhoneVerification": false
 }

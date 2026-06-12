@@ -184,7 +184,7 @@ SECRET_ASSIGNMENT_RE = re.compile(
     re.I,
 )
 CREDENTIAL_PATH_RE = re.compile(
-    r"(?:~/|/(?:[^/\s\"',;}]+/)*)?(?:"
+    r"(?:~|/[^\s\"',;}]+)*(?:"
     r"\.config/secrets/[^\s\"',;}]+|"
     r"\.config/whatsoup/[^\s\"',;}]+|"
     r"\.local/share/whatsoup/instances/[^\s\"',;}]*/auth(?:/[^\s\"',;}]+)?|"
@@ -326,11 +326,21 @@ def json_updated_age(path: Path, key: str = "updated_at") -> tuple[int | None, s
     problem = critical_file_problem(path)
     if problem is not None:
         return None, problem
-    data = load_json(path, require_private=True)
-    if data and isinstance(data.get(key), (int, float)):
-        updated = int(data[key])
-        return max(0, current - updated), f"{path} {key}={updated}"
-    return max(0, current - int(path.stat().st_mtime)), f"{path} mtime={int(path.stat().st_mtime)}"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return None, f"failed to read {path}: {type(exc).__name__}: {exc}"
+    try:
+        data = json.loads(text)
+    except Exception as exc:
+        return None, f"invalid JSON in {path}: {type(exc).__name__}: {exc}"
+    if not isinstance(data, dict):
+        return None, f"invalid JSON object in {path}: {type(data).__name__}"
+    value = data.get(key)
+    if not isinstance(value, (int, float)):
+        return None, f"missing numeric {key} in {path}"
+    updated = int(value)
+    return max(0, current - updated), f"{path} {key}={updated}"
 
 
 def file_age(path: Path) -> tuple[int | None, str]:

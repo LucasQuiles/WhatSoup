@@ -5,8 +5,20 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
-  "requiredCredentialFiles": ["fleet-token", "fleet-tokens.json", "instances/ana-bot/tokens.env"],
+  "requiredCredentialFiles": [
+    "fleet-token",
+    "fleet-tokens.json",
+    "instances/ana-bot/tokens.env"
+  ],
   "instances": [
-    { "name": "ana-bot", "expected": "always_on", "service": "com.whatsoup.ana-bot" }
-  ]
+    {
+      "name": "ana-bot",
+      "expected": "always_on",
+      "service": "com.whatsoup.ana-bot",
+      "primaryPhoneVerificationRequired": true,
+      "primaryPhoneOwner": "Lucas"
+    }
+  ],
+  "expectPrimaryPhoneVerification": true,
+  "requiredConfigMaxMode": "600"
 }

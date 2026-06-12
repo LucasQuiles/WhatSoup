@@ -5,7 +5,9 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
-  "requiredCredentialFiles": ["fleet-token"],
+  "requiredCredentialFiles": [
+    "fleet-token"
+  ],
   "instances": [
     {
       "name": "agent",
@@ -14,5 +16,7 @@
       "service": "com.whatsoup.agent",
       "reason": "MACLAB agent launchd label is loaded but RunAtLoad=false; down is healthy until invoked"
     }
-  ]
+  ],
+  "expectPrimaryPhoneVerification": false,
+  "requiredConfigMaxMode": "600"
 }

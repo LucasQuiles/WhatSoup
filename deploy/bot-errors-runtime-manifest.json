@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-12T18:26:50Z",
+  "scope": "bot-errors-runtime-scripts",
+  "files": [
+    {
+      "path": "deploy/scripts/bot-errors-dispatcher.py",
+      "sha256": "c15b8a7e2957992ec0ff2f22f31172faf5ce73044025ad178a9df52d35f0a924",
+      "mustContain": [
+        "append_private_jsonl",
+        "refusing to use private directory through symlink",
+        "whatsapp_auth_bond_local_failure",
+        "sourceSpecificRecoveredIncidents",
+        "event_line(\"incident_key\", incident_key(event))",
+        "redacted_state_text"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-health-check.py",
+      "sha256": "06872e87c34149115069ea3edb3c649bd540be20918dce887dcf46bb40cd2127",
+      "mustContain": [
+        "critical_file_problem",
+        "mustContain",
+        "q_loop_state_inventory",
+        "RUNTIME_MANIFEST_FAILURE_RE",
+        "provider_probe_inventory",
+        "provider_usage_limit",
+        "credential_item_status",
+        "credential_item_status_acceptable",
+        "credential_secret_status",
+        "gui_session_status",
+        "provider_claude_state_fragments",
+        "provider_auth_context=headless_login_keychain_blocked",
+        "provider_probe_signal=contradicted_by_live_service",
+        "live_provider_corroboration_fresh",
+        "primary_phone:multiple",
+        "unattended_update_reboot_risk",
+        "activation_guard_missing",
+        "active_process_fallback",
+        "auth_bond_restore_canary=failed reason=auth_tree_contains_symlink",
+        "primary_phone_verifications_path",
+        "primary_phone_unknown_severity",
+        "verification_proof=missing",
+        "record-primary-phone-verification",
+        "runtime_agent_recent_resume_failures",
+        "expectSourceUpdateAccess",
+        "sourceUpdateAccessMode",
+        "source_update_blocked",
+        "BOT ERRORS source update reachable",
+        "source_update: shadow",
+        "git_remote_auth_failed",
+        "SOURCE_UPDATE_BLOCKED",
+        "AUTHORIZATION_SECRET_RE",
+        "detect_opencode_mode",
+        "provider_compatibility_degraded",
+        "provider_compatibility_unsupported",
+        "provider_credential_missing",
+        "opencodeCommandMode",
+        "credential_present",
+        "runtime_agent_fallback_active",
+        "instance_fallback_reason",
+        "runtime_agent_fallback_recovery_probe_required"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
+      "sha256": "952f699394595938a7ca6ed2631b706d9e925486f7843c9d9613ba2d5f9301ca",
+      "mustContain": [
+        "BOT_ERRORS_Q_LOOP_STATE_DIR",
+        "critical_file_problem",
+        "q_loop:supervisor",
+        "refusing to trust critical file",
+        "redact_watchdog_text"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-q-loop.py",
+      "sha256": "b443bc294cbdb286f6fc8a6fd2a426cbd149d8907bbf0f2ad6f96c6b48e3ae38",
+      "mustContain": [
+        "q_unavailable_reason",
+        "session_limit",
+        "q_unavailable_",
+        "assert_private_regular_for_read",
+        "state_integrity_failed",
+        "redact_json_value(state)",
+        "BOT_ERRORS_Q_LOOP_STATE_DIR"
+      ]
+    },
+    {
+      "path": "src/lib/bot-errors-outbox.ts",
+      "sha256": "119be79bcfd6eedd63d73befd14a52caad5065ce3dac6d76f5a13b67f4059910",
+      "mustContain": [
+        "recordBotErrorsWritefail"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-collector.py",
+      "sha256": "d6e6737015fa497181ab76b5df6581117b891752d3ad5264b2fad12062c6e923",
+      "mustContain": [
+        "append_private_jsonl",
+        "refusing to use private directory through symlink",
+        "configuredRemoteHosts",
+        "meta_alert_recovery_deferred",
+        "recovery_successes_required",
+        "tailscale_online_ssh_timeout",
+        "best-effort-remote",
+        "redact_collector_text"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-emit.py",
+      "sha256": "2705c873dd2af8e022bf9b2a8a29b57a8493a005625cde98abc799614c4831a9",
+      "mustContain": [
+        "O_NOFOLLOW",
+        "refusing to use private directory through symlink",
+        "outbox_write_failure"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-runner.py",
+      "sha256": "f557f0f66ee32ac6c7c66b8a3c18386eaeb3ba2824cce089c4d1ea5effdc08dc",
+      "mustContain": [
+        "O_NOFOLLOW",
+        "refusing to use private directory through symlink",
+        "outbox_write_failure"
+      ]
+    }
+  ]
+}

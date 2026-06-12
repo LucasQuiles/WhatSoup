@@ -5,8 +5,19 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
-  "requiredCredentialFiles": ["fleet-token", "instances/rb-bot/tokens.env"],
+  "requiredCredentialFiles": [
+    "fleet-token",
+    "instances/rb-bot/tokens.env"
+  ],
   "instances": [
-    { "name": "rb-bot", "expected": "always_on", "service": "com.whatsoup.rb-bot" }
-  ]
+    {
+      "name": "rb-bot",
+      "expected": "always_on",
+      "service": "com.whatsoup.rb-bot",
+      "primaryPhoneVerificationRequired": true,
+      "primaryPhoneOwner": "Lucas"
+    }
+  ],
+  "expectPrimaryPhoneVerification": true,
+  "requiredConfigMaxMode": "600"
 }
