@@ -462,3 +462,25 @@ DD-18r/DD-21r closed; remainders re-scoped to B2/B3. SummaryTab ACTIONS sidebar 
 already ratchet-tracked, burns down with its surface slice.
 Packet: `06-implementation/b1-evidence.md`. Pre-staged for next slices: `b2-survey.md`,
 `b3-survey.md`, `conformance-manifest.md` (12 PASS / 9 INCONCLUSIVE / 3 PENDING).
+
+---
+
+## B2 (pickers/inputs) + B3 wave 1 (dialogs) — 2026-06-12
+
+**B2 verdict: Pass with deferred proof. B3 wave 1 verdict: Pass.** B2: Popover primitive (capture-phase
+Escape stack fixes the picker-in-dialog double-close BY CONSTRUCTION; additive useDismissable
+trapFocus/autoFocus opt-outs proven 152/152 regression-free) → LinePicker/ChatPicker/
+ContactSearchPicker rebuilt as comboboxes, orphan ContactSearch deleted (grep-proven), TagInput→
+removable Pill (labeled removes; accent-tone chip change accepted at the C-B2-3 screenshot
+checkpoint, both themes), CardSelector→WAI radiogroup, ToolbarTimeRange adopted at both time
+segs (DD-15 narrows to B3 dialog toggles). DD-12/13/14/16 CLOSED. B3 wave 1: Modal --modal-w-* tokens
++ initialFocus (sizing-SSOT leg started), SaveContact extracted (dismissable=false ends
+backdrop-destroys-typed-name), Relink (dismissable=true), CreateGroup (dismissable=false,
+assertion deliberately inverted) — all dialog contracts live-verified PASS. Checkpoint honesty:
+five browser sessions, three context-deaths; the CDP harness proved unreliable for keyboard QA
+(global dispatch without focus discipline) — the two reported picker defects investigated to mechanism
+(the dialog-collapse report exonerated by captured DOM; the Enter-commit report jsdom-pinned); trusted-event keyboard proof FORMALLY
+DEFERRED TO D7 (packet staged, GO). verify:push:branch currently red on main-side fitness-ring
+findings in files byte-identical to origin/main — push-gate dependency, server lane owns it.
+2,073/2,073; first merge conflict of the program resolved as union (Lock control). Packets:
+b2-evidence.md, b3-wave1-evidence.md.
