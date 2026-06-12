@@ -402,4 +402,155 @@ The migrated group was 1203631234567890@g.us.
     });
     expect(() => parseArgs(['--bogus'])).toThrow(/Unknown argument/);
   });
+
+  it('parses scan-history mode with optional depth and rejects bad depth', () => {
+    expect(parseArgs(['--scan-history'])).toEqual({ mode: 'scan-history', help: false });
+    expect(parseArgs(['--scan-history', '25'])).toEqual({
+      mode: 'scan-history',
+      historyDepth: 25,
+      help: false,
+    });
+    expect(() => parseArgs(['--scan-history', '0'])).toThrow(/positive integer/);
+    expect(() => parseArgs(['--scan-history', '-3'])).toThrow(/positive integer/);
+    expect(() => parseArgs(['--scan-history', 'abc'])).toThrow(/positive integer/);
+  });
+
+  describe('secret-shape detection (hardened patterns)', () => {
+    it('blocks real-format provider keys outside fixture markers', () => {
+      const issues = scanAddedLines([
+        { filePath: 'src/x.ts', line: 1, text: `const k = '${['sk-ant-api03', 'AbCdEf1234567890XyZqWeRtY'].join('-')}';` },
+        { filePath: 'src/x.ts', line: 2, text: `const p = '${['pcsk', '4xY2AbCdEfGhIjKlMnOpQrStUvWxYz12'].join('_')}';` },
+        { filePath: 'src/x.ts', line: 3, text: `const o = '${['sk', 'AbCdEf1234567890GhIjKlMnOp'].join('-')}';` },
+        { filePath: 'src/x.ts', line: 4, text: `const t = '${'AC' + 'deadbeef0123456789abcdef01234567'}';` },
+        { filePath: 'src/x.ts', line: 5, text: `const g = '${['ghp', 'AbCdEfGhIjKlMnOpQrStUvWxYz1234567'].join('_')}';` },
+      ]);
+
+      expect(issues.map((issue) => issue.code).sort()).toEqual([
+        'anthropic-key',
+        'github-token',
+        'openai-key',
+        'pinecone-key',
+        'twilio-account-sid',
+      ]);
+    });
+
+    it('allows synthetic provider-key and Twilio SID fixtures', () => {
+      const issues = scanAddedLines([
+        { filePath: 'tests/x.test.ts', line: 1, text: "apiKey: 'sk-test-elevenlabs-key'" },
+        { filePath: 'tests/x.test.ts', line: 2, text: "apiKey: 'pcsk_test_fixture_value_here'" },
+        { filePath: 'tests/x.test.ts', line: 3, text: "accountSid: 'AC00000000000000000000000000000000'" },
+        { filePath: 'tests/x.test.ts', line: 4, text: "key: 'sk-ant-mock-not-a-real-secret'" },
+      ]);
+
+      expect(issues).toEqual([]);
+    });
+
+    it('blocks Twilio Account SID shapes without flagging the word ACCOUNT', () => {
+      const issues = scanAddedLines([
+        { filePath: 'docs/x.md', line: 1, text: 'See your ACCOUNT settings to find the SID.' },
+        { filePath: 'src/x.ts', line: 2, text: `sid = '${'AC' + 'fedcba9876543210fedcba9876543210'}';` },
+      ]);
+
+      expect(issues.map((issue) => issue.code)).toEqual(['twilio-account-sid']);
+    });
+
+    it('blocks full-block and embedded single-line PEM private keys', () => {
+      const issues = scanAddedLines([
+        { filePath: 'src/x.ts', line: 1, text: 'const pem = "-----BEGIN PRIVATE KEY-----MIIabc...";' },
+        { filePath: 'src/x.ts', line: 2, text: '-----BEGIN OPENSSH PRIVATE KEY-----' },
+        { filePath: 'src/x.ts', line: 3, text: '-----BEGIN ENCRYPTED PRIVATE KEY-----' },
+      ]);
+
+      expect(issues.map((issue) => issue.code)).toEqual([
+        'private-key',
+        'private-key',
+        'private-key',
+      ]);
+    });
+
+    it('blocks real-shaped +E.164 operator phones while allowing reserved fixtures', () => {
+      const issues = scanAddedLines([
+        { filePath: 'src/x.ts', line: 1, text: "const real = '+447123456789';" },
+        { filePath: 'tests/x.test.ts', line: 2, text: "const fake = '+14155550100';" },
+        { filePath: 'tests/x.test.ts', line: 3, text: "const fixture = '+15184194479';" },
+        { filePath: 'tests/x.test.ts', line: 4, text: "const placeholder = '+1234567890';" },
+      ]);
+
+      expect(issues.map((issue) => issue.code)).toEqual(['operator-phone']);
+      expect(issues.map((issue) => issue.line)).toEqual([1]);
+    });
+  });
+
+  describe('secret-assignment word-boundary false-negative regression', () => {
+    // Proves the historical \b-anchored keyword form silently missed the most
+    // common real key formats (underscore-prefixed env vars, JSON keys), and that
+    // the hardened end-anchored pattern now catches them.
+    const oldBrokenKeywordRegex = /\b(?:api_key|apikey|secret|access_token|password)\b\s*[:=]\s*["']?[A-Za-z0-9_\-./+]{16,}/i;
+
+    const leakLines = [
+      "ANTHROPIC_API_KEY='Ab12Cd34Ef56Gh78Ij90KlMn'",
+      'PINECONE_API_KEY=Xq7Lm2Pn9Rt4Vw1Zb6Yc3Df8Ee',
+      'const cfg = {"apiKey":"Hk83JdL92mFpQ7rTz4XyAb12"};',
+      "client_secret: 'Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss2'",
+      // All-lowercase-hex secret (no case signal) — must not slip the entropy floor.
+      'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f',
+    ];
+
+    it('proves the old \\b-anchored regex misses underscore-prefixed and JSON keys', () => {
+      // \b never fires between two word chars: ANTHROPIC_ + API_KEY is invisible.
+      expect(oldBrokenKeywordRegex.test("ANTHROPIC_API_KEY='Ab12Cd34Ef56Gh78Ij90KlMn'")).toBe(false);
+      expect(oldBrokenKeywordRegex.test('PINECONE_API_KEY=Xq7Lm2Pn9Rt4Vw1Zb6Yc3Df8Ee')).toBe(false);
+      // JSON "apiKey": — the quote between keyword and ':' breaks \s*[:=].
+      expect(oldBrokenKeywordRegex.test('const cfg = {"apiKey":"Hk83JdL92mFpQ7rTz4XyAb12"};')).toBe(false);
+    });
+
+    it('hardened guard catches every leak the old regex missed', () => {
+      const issues = scanAddedLines(
+        leakLines.map((text, index) => ({ filePath: 'src/leak.ts', line: index + 1, text })),
+      );
+
+      expect(issues.map((issue) => issue.code)).toEqual([
+        'secret-assignment',
+        'secret-assignment',
+        'secret-assignment',
+        'secret-assignment',
+        'secret-assignment',
+      ]);
+    });
+
+    it('does not let a placeholder word in the key NAME suppress a real value', () => {
+      // The value allowlist must see only the RHS — not EXAMPLE_/SAMPLE_ in the
+      // key name — so EXAMPLE_API_KEY=<real secret> is still blocked.
+      const issues = scanAddedLines([
+        { filePath: 'src/x.ts', line: 1, text: "EXAMPLE_API_KEY='RealSecret1234AbcDefGhiJkl'" },
+        { filePath: 'src/x.ts', line: 2, text: "SAMPLE_SECRET_KEY=Zx9Wv8Ut7Sr6Qp5On4Ml3Kj2" },
+      ]);
+
+      expect(issues.map((issue) => issue.code)).toEqual([
+        'secret-assignment',
+        'secret-assignment',
+      ]);
+    });
+
+    it('blocks GitHub fine-grained PAT shapes', () => {
+      const issues = scanAddedLines([
+        { filePath: 'src/x.ts', line: 1, text: "const t = 'github_pat_11ABCDEFG0abcdefghij1234567890';" },
+      ]);
+
+      expect(issues.map((issue) => issue.code)).toEqual(['github-token']);
+    });
+
+    it('allows env indirection, redaction markers, and low-entropy dummy fixtures', () => {
+      const issues = scanAddedLines([
+        { filePath: 'src/x.ts', line: 1, text: 'apiKey: process.env.ANTHROPIC_API_KEY' },
+        { filePath: 'src/x.ts', line: 2, text: "apiKey: config.apiKey" },
+        { filePath: 'docs/x.md', line: 3, text: 'API_KEY=<your-api-key-here>' },
+        { filePath: 'docs/x.md', line: 4, text: "apiKey: 'redacted-for-publication-xxxx'" },
+        { filePath: 'tests/x.test.ts', line: 5, text: "process.env.OPENAI_API_KEY = 'env-key-should-be-overridden';" },
+        { filePath: 'tests/x.test.ts', line: 6, text: "apiKey: 'sk-ant-secret'" },
+      ]);
+
+      expect(issues).toEqual([]);
+    });
+  });
 });

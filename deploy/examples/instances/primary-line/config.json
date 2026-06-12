@@ -1,0 +1,7 @@
+{
+  "name": "primary-line",
+  "type": "passive",
+  "accessMode": "self_only",
+  "adminPhones": ["15555550100"],
+  "healthPort": 9094
+}

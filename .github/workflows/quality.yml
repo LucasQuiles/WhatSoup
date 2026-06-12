@@ -45,6 +45,9 @@ jobs:
       - name: Typecheck (all)
         run: npm run typecheck:all
 
+      - name: Import boundary guard
+        run: npm run guard:boundaries
+
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
 
@@ -107,6 +110,15 @@ jobs:
       - name: Node pin consistency guard
         run: npm run guard:node-pin-consistency
 
+      - name: Fail-closed gate guard
+        run: npm run guard:fail-closed-gate
+
+      - name: Service unit validity guard
+        run: npm run guard:service-units
+
+      - name: Instance config integrity guard
+        run: npm run guard:instance-config
+
       - name: Agent decision polls guard
         run: npm run guard:agent-decision-polls
 
@@ -115,6 +127,10 @@ jobs:
 
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
+
+      - name: Secret-leak history scan (advisory)
+        continue-on-error: true
+        run: npm run guard:repo:scan-history -- 100
 
       - name: Test suite
         run: npm test -- --pool=forks

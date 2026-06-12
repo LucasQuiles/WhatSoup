@@ -199,7 +199,7 @@ if [ "$PLATFORM" = "Darwin" ]; then
     local src="$REPO_ROOT/deploy/$label.plist"
     local dest="$LAUNCH_AGENTS_DIR/$label.plist"
     local rendered backup
-    rendered="$(sed -e "s|\${WHATSOUP_REPO_ROOT}|$REPO_ROOT|g" -e "s|\${HOME}|$HOME|g" "$src")"
+    rendered="$(sed -e "s|__WHATSOUP_REPO_ROOT__|$REPO_ROOT|g" -e "s|__HOME__|$HOME|g" -e "s|\${WHATSOUP_REPO_ROOT}|$REPO_ROOT|g" -e "s|\${HOME}|$HOME|g" "$src")"
     # Duplicate-scheduler guard: an equivalent cron entry means this job is
     # already scheduled by another mechanism — warn and skip, don't double-run.
     if crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -q "$cron_marker"; then
