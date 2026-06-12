@@ -125,6 +125,19 @@ export function generateMcpConfigFile(
 
 const DEFAULT_OPENCODE_PROVIDER_ID = 'whatsoup-cloud';
 
+export function writeProviderMcpConfigTarget(providerId: string, agentCwd: string): string | null {
+  switch (providerId) {
+    case 'claude-cli':
+    case 'gemini-cli':
+    case 'codex-cli':
+      return join(agentCwd, '.mcp.json');
+    case 'opencode-cli':
+      return join(agentCwd, 'opencode.json');
+    default:
+      return null;
+  }
+}
+
 /**
  * Merge the generated opencode `mcp` block into a possibly-existing
  * opencode.json object. Pure — does no IO. Preserves every unrelated top-level
@@ -195,8 +208,10 @@ export function writeProviderMcpConfig(
   const generated = generateMcpConfigFile(providerId, socketPath, proxyScriptPath);
   if (generated === null) return null;
 
+  const target = writeProviderMcpConfigTarget(providerId, agentCwd);
+  if (target === null) return null;
+
   if (providerId === 'opencode-cli') {
-    const target = join(agentCwd, 'opencode.json');
     let existing: Record<string, unknown> | null = null;
     if (existsSync(target)) {
       try {
@@ -216,7 +231,6 @@ export function writeProviderMcpConfig(
   }
 
   // claude / gemini / codex: overwrite .mcp.json with the mcpServers shape.
-  const target = join(agentCwd, '.mcp.json');
   writePrivateFileSync(target, JSON.stringify(generated, null, 2));
   return target;
 }

@@ -1,0 +1,298 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Database } from '../../../src/core/database.ts';
+import type { Messenger } from '../../../src/core/types.ts';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
+  mockConfig: {
+    agentProvider: 'claude-cli',
+    agentProviderConfig: undefined as Record<string, unknown> | undefined,
+    agentFallbackProvider: undefined as string | undefined,
+    agentFallbackModel: undefined as string | undefined,
+    agentMaxQueueDepth: 100,
+    controlPeers: new Map<string, string>(),
+    adminPhones: new Set<string>(),
+    toolUpdateMode: 'full' as const,
+    toolUpdateRedirectJid: null as string | null,
+    textAggregateDelayMs: 0,
+    mediaDir: '/tmp/whatsoup-test-media',
+    pineconeAllowedIndexes: [] as string[],
+    voiceReply: 'never' as const,
+  },
+  mockRuntimeLogger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+
+const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => {
+  const mockSocketServerInstance = {
+    start: vi.fn(),
+    stop: vi.fn(),
+    updateDeliveryJid: vi.fn(),
+    updateActorJid: vi.fn(),
+  };
+  const MockWhatSoupSocketServer = vi.fn().mockImplementation(() => mockSocketServerInstance);
+  return { mockSocketServerInstance, MockWhatSoupSocketServer };
+});
+
+vi.mock('../../../src/config.ts', () => ({ config: mockConfig }));
+vi.mock('../../../src/logger.ts', () => ({ createChildLogger: () => mockRuntimeLogger }));
+vi.mock('../../../src/core/messages.ts', () => ({
+  getRecentMessages: vi.fn(() => []),
+  getMessagesSince: vi.fn(() => []),
+  updateMediaPath: vi.fn(),
+  updateTranscription: vi.fn(),
+}));
+vi.mock('../../../src/core/heal.ts', () => ({
+  dequeueNextReport: vi.fn(() => null),
+  emitHealReport: vi.fn(),
+}));
+vi.mock('../../../src/core/durability.ts', () => ({
+  sendTracked: vi.fn(),
+}));
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlert: vi.fn(),
+  clearAlertSource: vi.fn(),
+}));
+vi.mock('../../../src/lib/keyring.ts', () => ({
+  lookupCredential: vi.fn(() => null),
+}));
+vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
+  ensureAgentSchema: vi.fn(),
+  createSession: vi.fn(() => 1),
+  accumulateSessionTokens: vi.fn(),
+  incrementMessageCount: vi.fn(),
+  updateSessionId: vi.fn(),
+  updateSessionStatus: vi.fn(),
+  getActiveSession: vi.fn(() => null),
+  backfillWorkspaceKeys: vi.fn(),
+  markOrphaned: vi.fn(),
+  getResumableSessionForChat: vi.fn(() => null),
+  backfillSessionProvider: vi.fn(),
+  insertTokenEvent: vi.fn(),
+  accumulateTokensWithEvent: vi.fn(),
+  getSessionTokenSnapshot: vi.fn(() => null),
+  markSessionCompacted: vi.fn(),
+}));
+vi.mock('../../../src/runtimes/agent/fallback-state-db.ts', () => ({
+  ensureFallbackStateSchema: vi.fn(),
+  saveFallbackState: vi.fn(),
+  loadFallbackState: vi.fn(() => null),
+  clearFallbackState: vi.fn(),
+}));
+vi.mock('../../../src/runtimes/agent/session-classifier.ts', () => ({
+  classifyActiveSessions: vi.fn(() => []),
+}));
+vi.mock('../../../src/runtimes/agent/session.ts', () => ({
+  SessionManager: vi.fn().mockImplementation(() => ({
+    spawnSession: vi.fn(async () => {}),
+    sendTurn: vi.fn(async () => {}),
+    handleNew: vi.fn(async () => {}),
+    getStatus: vi.fn(() => ({
+      active: false,
+      pid: null,
+      sessionId: null,
+      startedAt: null,
+      messageCount: 0,
+      lastMessageAt: null,
+    })),
+    shutdown: vi.fn(async () => {}),
+    clearTurnWatchdog: vi.fn(),
+    tickWatchdog: vi.fn(),
+    trackToolStart: vi.fn(),
+    trackToolEnd: vi.fn(),
+    getDbRowId: vi.fn(() => null),
+    setDurability: vi.fn(),
+  })),
+  formatAge: vi.fn(() => '0s ago'),
+  getProviderBinary: vi.fn(() => 'provider-bin'),
+}));
+vi.mock('../../../src/runtimes/agent/outbound-queue.ts', () => ({
+  OutboundQueue: vi.fn().mockImplementation(() => ({
+    enqueueText: vi.fn(),
+    enqueueStreamingText: vi.fn(),
+    enqueueResultText: vi.fn(),
+    enqueueToolUpdate: vi.fn(),
+    enqueueProgressUpdate: vi.fn(),
+    indicateTyping: vi.fn(),
+    flush: vi.fn(async () => {}),
+    shutdown: vi.fn(async () => {}),
+    abortTurn: vi.fn(),
+    updateDeliveryJid: vi.fn(),
+    setInboundSeq: vi.fn(),
+    markLastTerminal: vi.fn(),
+    clearLastOpId: vi.fn(),
+    setToolUpdateMode: vi.fn(),
+    setToolUpdateRedirectJid: vi.fn(),
+    setTextAggregateDelayMs: vi.fn(),
+    enqueuePoll: vi.fn(async (fn: () => Promise<void>) => { await fn(); }),
+    hasPendingPoll: vi.fn(() => false),
+    setPollPending: vi.fn(),
+    targetChatJid: 'test@s.whatsapp.net',
+    getLastOpId: vi.fn(() => undefined),
+    setDurability: vi.fn(),
+  })),
+}));
+vi.mock('../../../src/runtimes/agent/control-queue.ts', () => ({
+  ControlQueue: vi.fn().mockImplementation(() => ({
+    enqueue: vi.fn(),
+    shutdown: vi.fn(async () => {}),
+  })),
+}));
+vi.mock('../../../src/runtimes/agent/turn-queue.ts', () => ({
+  TurnQueue: vi.fn().mockImplementation(() => ({
+    setProcessor: vi.fn(),
+    enqueue: vi.fn(),
+    shutdown: vi.fn(async () => {}),
+    getStatus: vi.fn(() => ({ depth: 0, maxDepth: 100 })),
+  })),
+}));
+vi.mock('../../../src/mcp/registry.ts', () => ({
+  ToolRegistry: class {
+    register = vi.fn();
+    listTools = vi.fn(() => []);
+    call = vi.fn();
+    getChatScopedToolNames = vi.fn(() => []);
+    setDurability = vi.fn();
+  },
+}));
+vi.mock('../../../src/mcp/register-all.ts', () => ({
+  registerAllTools: vi.fn(),
+}));
+vi.mock('../../../src/mcp/socket-server.ts', () => ({
+  WhatSoupSocketServer: MockWhatSoupSocketServer,
+}));
+vi.mock('../../../src/runtimes/agent/media-bridge.ts', () => ({
+  startMediaBridge: vi.fn(),
+  setMediaBridgeChat: vi.fn(),
+}));
+vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
+  verifyFallbackCredential: vi.fn(async () => ({ ok: true })),
+}));
+vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
+  probeFallbackBinary: vi.fn(() => ({ ok: true, version: 'test' })),
+}));
+vi.mock('../../../src/runtimes/chat/providers/elevenlabs.ts', () => ({
+  synthesizeSpeech: vi.fn(),
+}));
+vi.mock('../../../src/core/media-download.ts', () => ({
+  writeTempFile: vi.fn(() => '/tmp/test.mp3'),
+  downloadMedia: vi.fn(),
+}));
+
+import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+
+function makeDb(): Database {
+  return {
+    raw: {
+      prepare: vi.fn(() => ({ run: vi.fn(), get: vi.fn() })),
+      exec: vi.fn(),
+    },
+  } as unknown as Database;
+}
+
+function makeMessenger(): Messenger {
+  return {
+    sendMessage: vi.fn(async () => ({ waMessageId: null })),
+    sendMedia: vi.fn(async () => ({ waMessageId: null })),
+  };
+}
+
+function readJson(path: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+}
+
+async function startRuntime(cwd: string): Promise<AgentRuntime> {
+  const runtime = new AgentRuntime(makeDb(), makeMessenger(), 'dual-write-test', { cwd });
+  await runtime.start();
+  return runtime;
+}
+
+describe('AgentRuntime startup MCP config dual-write', () => {
+  let tmpDirs: string[] = [];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig.agentProvider = 'claude-cli';
+    mockConfig.agentProviderConfig = undefined;
+    mockConfig.agentFallbackProvider = undefined;
+    mockConfig.agentFallbackModel = undefined;
+    tmpDirs = [];
+  });
+
+  afterEach(() => {
+    for (const dir of tmpDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function tmp(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ws-dual-mcp-'));
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  it('writes claude primary and opencode fallback configs with whatsoup MCP entries', async () => {
+    const cwd = tmp();
+    mockConfig.agentProvider = 'claude-cli';
+    mockConfig.agentFallbackProvider = 'opencode-cli';
+    mockConfig.agentFallbackModel = 'fallback-model';
+
+    await startRuntime(cwd);
+
+    const claude = readJson(join(cwd, '.mcp.json'));
+    const opencode = readJson(join(cwd, 'opencode.json'));
+    expect((claude.mcpServers as Record<string, unknown>).whatsoup).toBeDefined();
+    const opencodeMcp = opencode.mcp as Record<string, Record<string, unknown>>;
+    expect(opencodeMcp.whatsoup).toMatchObject({ type: 'local', enabled: true });
+    expect(opencodeMcp.whatsoup.environment).toEqual({
+      WHATSOUP_SOCKET: join(cwd, '.claude', 'whatsoup.sock'),
+    });
+  });
+
+  it('writes .mcp.json for a claude fallback when the primary is openai-api', async () => {
+    const cwd = tmp();
+    mockConfig.agentProvider = 'openai-api';
+    mockConfig.agentFallbackProvider = 'claude-cli';
+
+    await startRuntime(cwd);
+
+    const claude = readJson(join(cwd, '.mcp.json'));
+    expect((claude.mcpServers as Record<string, unknown>).whatsoup).toBeDefined();
+  });
+
+  it('keeps the primary shape and warns when primary and fallback share a target', async () => {
+    const cwd = tmp();
+    mockConfig.agentProvider = 'claude-cli';
+    mockConfig.agentFallbackProvider = 'gemini-cli';
+
+    await startRuntime(cwd);
+
+    const claude = readJson(join(cwd, '.mcp.json'));
+    expect(claude).toHaveProperty('mcpServers');
+    expect(claude).not.toHaveProperty('mcp');
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        primary: 'claude-cli',
+        fallback: 'gemini-cli',
+        target: join(cwd, '.mcp.json'),
+      }),
+      expect.stringContaining('primary and fallback providers share an MCP config target'),
+    );
+  });
+
+  it('keeps current single-write behavior when no fallback is configured', async () => {
+    const cwd = tmp();
+    mockConfig.agentProvider = 'claude-cli';
+
+    await startRuntime(cwd);
+
+    expect(existsSync(join(cwd, '.mcp.json'))).toBe(true);
+    expect(existsSync(join(cwd, 'opencode.json'))).toBe(false);
+  });
+});
