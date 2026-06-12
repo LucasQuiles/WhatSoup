@@ -2,7 +2,6 @@
 // AgentRuntime implements the Runtime interface, tying all agent components together.
 
 import type { AgentCommandRequest, AgentCommandResult, Runtime } from '../types.ts';
-import { spawnSync } from 'node:child_process';
 import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
@@ -76,7 +75,7 @@ import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { createProviderMcpBridge, writeProviderMcpConfig, writeProviderMcpConfigTarget } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
-import { probeFallbackBinary, probeModelCatalog } from './providers/binary-preflight.ts';
+import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus } from './providers/binary-preflight.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -153,7 +152,8 @@ const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 5 * 60 * 1000;
   return Math.min(Math.max(raw, 30 * 1000), 30 * 60 * 1000);
 })();
-const PROVIDER_FALLBACK_PRIMARY_PROBE_TIMEOUT_MS = 5_000;
+// The 5 s primary-probe timeout lives with the probe implementation
+// (PROBE_TIMEOUT_MS in providers/binary-preflight.ts), shared by all probes.
 // Consecutive failed recovery probes (revert-timer extension path) before a
 // single fallback_recovery_stalled alert is emitted. The cap only surfaces the
 // stall — the window keeps extending so the instance is never stranded on a
@@ -6203,54 +6203,74 @@ export class AgentRuntime implements Runtime {
       return;
     }
     this.fallbackLastProbeAt = Date.now();
-    if (this.probePrimaryProviderRecovered()) {
-      this.deactivateProviderFallback('primary-probe-ok');
-      return;
-    }
-    this.fallbackProbeAttempts += 1;
-    const now = Date.now();
-    const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
-    this.fallbackActiveUntil = until;
-    this.revertTimer = setTimeout(() => {
-      this.handleFallbackRevertTimer();
-    }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
-    this.revertTimer.unref?.();
-    try {
-      saveFallbackState(this.db, {
-        activeUntil: until,
-        activatedAt: this.fallbackActivatedAt ?? now,
-        reason: this.fallbackArmReason ?? 'auth-required',
-        // Persist the stall clock with the window so a restart mid-stall
-        // resumes the count instead of resetting it.
-        probeAttempts: this.fallbackProbeAttempts,
+    // The probe spawns a child process; fire-and-forget with the result
+    // driving deactivate-or-extend in the resolution. While the probe is in
+    // flight (≤5 s) the window shows expired — acceptable: the previous
+    // spawnSync froze the WHOLE event loop for the same duration, forever on
+    // a dead auth primary.
+    const windowAtProbe = this.fallbackActiveUntil;
+    void Promise.resolve()
+      .then(() => this.probePrimaryProviderRecovered())
+      .catch((err) => {
+        // probePrimaryProviderRecovered never throws by contract; this guards
+        // test stubs and future edits — a throwing probe is a failed probe.
+        log.warn({ err }, 'primary provider recovery probe threw — treating as failed');
+        return false;
+      })
+      .then((recovered) => {
+        // Stale-result guards: drop the probe outcome if the window was
+        // deactivated or re-armed while the probe was in flight (a stale
+        // extend would shorten a fresh window; the next cadence re-probes).
+        if (this.fallbackActiveUntil === null || this.fallbackActiveUntil !== windowAtProbe) return;
+        if (recovered) {
+          this.deactivateProviderFallback('primary-probe-ok');
+          return;
+        }
+        this.fallbackProbeAttempts += 1;
+        const now = Date.now();
+        const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
+        this.fallbackActiveUntil = until;
+        this.revertTimer = setTimeout(() => {
+          this.handleFallbackRevertTimer();
+        }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
+        this.revertTimer.unref?.();
+        try {
+          saveFallbackState(this.db, {
+            activeUntil: until,
+            activatedAt: this.fallbackActivatedAt ?? now,
+            reason: this.fallbackArmReason ?? 'auth-required',
+            // Persist the stall clock with the window so a restart mid-stall
+            // resumes the count instead of resetting it.
+            probeAttempts: this.fallbackProbeAttempts,
+          });
+        } catch (err) {
+          log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
+        }
+        // Exactly-once-at-threshold stall alert. The counter only resets on
+        // deactivation, so attempts > threshold never re-alerts within the same
+        // stall episode. Extension continues regardless — surfacing must never
+        // strand the instance on a dead primary.
+        if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
+          emitAlert(
+            this.instanceName,
+            'fallback_recovery_stalled',
+            'Primary provider recovery probe is stalled — fallback window extending indefinitely',
+            `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${this.fallbackProbeAttempts} `
+              + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
+          );
+        }
+        // No scheduleFallbackPrimaryProbe() here: the extension window equals the
+        // recheck cadence, so this timer IS the probe cadence. Re-arming the
+        // standing probe alongside it produced a double-probe (two probes per
+        // cadence); the standing probe's guard makes it a no-op in this state.
+        log.warn({
+          instanceName: this.instanceName,
+          primaryProvider: this.agentProvider,
+          fallbackProvider: this.activeFallbackEntry?.provider,
+          reason: this.fallbackArmReason,
+          probeAttempts: this.fallbackProbeAttempts,
+        }, 'primary provider recovery probe still failing; keeping fallback armed');
       });
-    } catch (err) {
-      log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
-    }
-    // Exactly-once-at-threshold stall alert. The counter only resets on
-    // deactivation, so attempts > threshold never re-alerts within the same
-    // stall episode. Extension continues regardless — surfacing must never
-    // strand the instance on a dead primary.
-    if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
-      emitAlert(
-        this.instanceName,
-        'fallback_recovery_stalled',
-        'Primary provider recovery probe is stalled — fallback window extending indefinitely',
-        `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${this.fallbackProbeAttempts} `
-          + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
-      );
-    }
-    // No scheduleFallbackPrimaryProbe() here: the extension window equals the
-    // recheck cadence, so this timer IS the probe cadence. Re-arming the
-    // standing probe alongside it produced a double-probe (two probes per
-    // cadence); the standing probe's guard makes it a no-op in this state.
-    log.warn({
-      instanceName: this.instanceName,
-      primaryProvider: this.agentProvider,
-      fallbackProvider: this.activeFallbackEntry?.provider,
-      reason: this.fallbackArmReason,
-      probeAttempts: this.fallbackProbeAttempts,
-    }, 'primary provider recovery probe still failing; keeping fallback armed');
   }
 
   /**
@@ -6276,38 +6296,46 @@ export class AgentRuntime implements Runtime {
       this.fallbackPrimaryProbeTimer = null;
       if (this.fallbackActiveUntil === null || !this.fallbackRecoveryProbeRequired) return;
       this.fallbackLastProbeAt = Date.now();
-      if (this.probePrimaryProviderRecovered()) {
-        this.deactivateProviderFallback('primary-probe-ok');
-        return;
-      }
-      this.scheduleFallbackPrimaryProbe();
+      void Promise.resolve()
+        .then(() => this.probePrimaryProviderRecovered())
+        .catch((err) => {
+          log.warn({ err }, 'primary provider recovery probe threw — treating as failed');
+          return false;
+        })
+        .then((recovered) => {
+          // The window may have been deactivated while the probe ran.
+          if (this.fallbackActiveUntil === null || !this.fallbackRecoveryProbeRequired) return;
+          if (recovered) {
+            this.deactivateProviderFallback('primary-probe-ok');
+            return;
+          }
+          this.scheduleFallbackPrimaryProbe();
+        });
     }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
     this.fallbackPrimaryProbeTimer.unref?.();
   }
 
-  private probePrimaryProviderRecovered(): boolean {
+  /**
+   * Probe whether the primary provider can serve again. Key-service primaries
+   * are a synchronous key-presence check; binary primaries spawn
+   * `<binary> auth status --json` asynchronously (5 s timeout + SIGKILL
+   * escalation in probeBinaryAuthStatus) so a slow or wedged binary can never
+   * freeze the event loop — the previous spawnSync blocked the whole process
+   * for up to 5 s per recheck, forever on a dead auth primary. Never rejects.
+   */
+  private async probePrimaryProviderRecovered(): Promise<boolean> {
     const service = resolveProviderKeyService(this.agentProvider, this.model, this.agentProviderConfig);
     if (service) return lookupCredential(service) !== null;
     const binary = getProviderBinary(this.agentProvider);
     if (!binary) return false;
-    try {
-      const result = spawnSync(binary, ['auth', 'status', '--json'], {
-        encoding: 'utf8',
-        timeout: PROVIDER_FALLBACK_PRIMARY_PROBE_TIMEOUT_MS,
-        windowsHide: true,
-        env: {
-          HOME: process.env.HOME,
-          PATH: process.env.PATH,
-          USER: process.env.USER,
-          NO_COLOR: '1',
-        },
-      });
-      const combined = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
-      if (result.error || result.status !== 0) return false;
-      return !isProviderAuthRequiredMessage(combined);
-    } catch {
-      return false;
-    }
+    const result = await probeBinaryAuthStatus(binary, ['auth', 'status', '--json'], {
+      HOME: process.env.HOME,
+      PATH: process.env.PATH,
+      USER: process.env.USER,
+      NO_COLOR: '1',
+    });
+    if (result.status !== 'ok') return false;
+    return !isProviderAuthRequiredMessage(result.output);
   }
 
   private notifyProviderFallbackActivated(

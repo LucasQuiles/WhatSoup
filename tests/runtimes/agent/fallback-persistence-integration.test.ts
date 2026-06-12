@@ -180,7 +180,7 @@ describe('fallback persistence — real-DB integration', () => {
     expect(rowCount).toBe(0);
   });
 
-  it('probe attempts survive a restart mid-stall — the stall clock resumes instead of resetting', () => {
+  it('probe attempts survive a restart mid-stall — the stall clock resumes instead of resetting', async () => {
     const RECHECK_MS = 5 * 60 * 1000; // WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS default
 
     // Runtime A: auth-required window at the MIN clamp (1 min) with a dead
@@ -189,8 +189,8 @@ describe('fallback persistence — real-DB integration', () => {
     const vA = fbView(runtimeA);
     vA.probePrimaryProviderRecovered = vi.fn(() => false);
     vA.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required');
-    vi.advanceTimersByTime(60 * 1000 + 1); // attempt 1
-    vi.advanceTimersByTime(RECHECK_MS); // attempt 2
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1); // attempt 1
+    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 2
     expect(vA.fallbackProbeAttempts).toBe(2);
 
     // The attempts must be IN THE ROW — a process-local counter dies with
@@ -209,7 +209,7 @@ describe('fallback persistence — real-DB integration', () => {
     expect(vB.effectiveProvider).toBe('opencode-cli');
 
     // The next failed extension probe continues the SAME stall episode.
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(vB.fallbackProbeAttempts).toBe(3);
   });
 });
