@@ -19,10 +19,13 @@ EIGHT sites — the register's seven named dialogs plus an inline Inbox SaveCont
 | AddLineWizard | `components/AddLineWizard.tsx` | 393 | NONE; role="dialog" sits on the BACKDROP (non-standard) | --panel-wizard + min/max-h | 5-step stepper + framer-motion transitions + creation side-effect at step 0→1 + exit-confirm-deletes-instance | yes | hardest — needs a Stepper primitive decision first |
 
 Common shape: every one hand-rolls its backdrop + (sometimes) Escape, none has a focus
-trap or restoration — exactly what Modal/useDismissable replaces. Three have NO Escape
-at all (SaveContact, ConfigEditDialog, AddLineWizard) — real UX gaps the migration fixes
-for free. All eight sizing tokens already exist (--panel-*) — the modal-sizing SSOT leg
-of DD-18r is mostly "pass the token through Modal's size mechanism" once shells migrate.
+trap or restoration — exactly what Modal/useDismissable replaces.
+**CORRECTED by b3-wave1-investigation.md (verified):** SaveContact DOES have a
+document-level Escape handler (Inbox.tsx ~203–208) — the no-Escape gaps are
+ConfigEditDialog and AddLineWizard (later waves). And Modal's size classes never consume
+the --panel-* tokens (sm/md are literals; tokens-v3 §6.12 supersedes all five dialog
+panel tokens with --modal-w-sm/-md/-lg) — the DD-18r SSOT leg STARTS by tokenizing the
+Modal size classes, then dialogs adopt `size` and the --panel-* consumption dies.
 
 ## Recommended wave order (for the A0 packet to confirm)
 
