@@ -185,6 +185,8 @@ describe('C-D7-1: browser-mode smoke gate', () => {
     // The click event was trusted — driven by the real browser engine.
     // jsdom cannot produce this: its synthetic events are always isTrusted: false.
     expect(capturedEvent).not.toBeNull();
-    expect((capturedEvent as MouseEvent).isTrusted).toBe(true);
+    // TS narrows capturedEvent to null here (assignment happens in a React
+    // handler it cannot see into); widen back to the declared union.
+    expect((capturedEvent as MouseEvent | null)?.isTrusted).toBe(true);
   });
 });
