@@ -39,6 +39,10 @@ export interface Runtime {
   getFallbackState?(): {
     effectiveProvider: string;
     fallbackActiveUntil: number | null;
+    fallbackReason?: string | null;
+    fallbackModel?: string | null;
+    fallbackResetAt?: number | null;
+    fallbackRecoveryProbeRequired?: boolean;
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;

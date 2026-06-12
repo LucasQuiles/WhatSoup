@@ -106,6 +106,11 @@ vi.mock('../../../src/config.ts', () => ({
     toolUpdateMode: 'full',
     toolUpdateRedirectJid: null,
     textAggregateDelayMs: 2_000,
+    agentProvider: 'claude-cli',
+    agentProviderConfig: undefined,
+    agentFallbacks: [],
+    agentFallbackProvider: undefined,
+    agentFallbackModel: undefined,
   },
 }));
 
@@ -213,6 +218,22 @@ function makeMessenger(): Messenger {
   return { sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }), sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }) };
 }
 
+function expectedFallbackDetails(): Record<string, unknown> {
+  return {
+    effectiveProvider: 'claude-cli',
+    fallbackActiveUntil: null,
+    fallbackReason: null,
+    fallbackModel: null,
+    fallbackResetAt: null,
+    fallbackRecoveryProbeRequired: false,
+    fallbackTurnsServed: 0,
+    fallbackTurnsEmpty: 0,
+    lastFallbackTurnAt: null,
+    activeFallbackEntry: null,
+    fallbackChain: [],
+  };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
@@ -265,6 +286,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
+        ...expectedFallbackDetails(),
       },
     });
   });
@@ -284,6 +306,7 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
+        ...expectedFallbackDetails(),
       },
     });
   });
@@ -322,6 +345,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         autoCompactIneffective: 0,
         autoCompactConsecutiveRapidRearmsMax: 0,
         autoCompactNextTurnOverThreshold: 0,
+        ...expectedFallbackDetails(),
       },
     });
   });

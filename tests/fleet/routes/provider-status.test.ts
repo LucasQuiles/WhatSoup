@@ -114,6 +114,9 @@ describe('handleGetLineProviderStatus', () => {
         active: false,
         activeUntil: null,
         effectiveProvider: null,
+        reason: null,
+        resetAt: null,
+        recoveryProbeRequired: false,
         turnsServed: null,
         turnsEmpty: null,
         lastFallbackTurnAt: null,
@@ -241,6 +244,9 @@ describe('handleGetLineProviderStatus', () => {
       active: true,
       activeUntil,
       effectiveProvider: 'openai-api',
+      reason: null,
+      resetAt: null,
+      recoveryProbeRequired: false,
       turnsServed: 7,
       turnsEmpty: 2,
       lastFallbackTurnAt: 1_781_087_200_000,
@@ -355,6 +361,9 @@ describe('handleGetLineProviderStatus', () => {
       active: false,
       activeUntil: elapsed,
       effectiveProvider: 'claude-cli',
+      reason: null,
+      resetAt: null,
+      recoveryProbeRequired: false,
       turnsServed: null,
       turnsEmpty: null,
       lastFallbackTurnAt: null,
@@ -487,6 +496,9 @@ describe('handleGetLineProviderStatus', () => {
         instance: {
           effectiveProvider: 'opencode-cli',
           fallbackActiveUntil: activeUntil,
+          fallbackReason: 'auth-required',
+          fallbackResetAt: activeUntil,
+          fallbackRecoveryProbeRequired: true,
           fallbackTurnsServed: 3,
           fallbackTurnsEmpty: 1,
           lastFallbackTurnAt: 1_781_087_200_000,
@@ -503,7 +515,18 @@ describe('handleGetLineProviderStatus', () => {
       model: 'gpt-4o',
       keyPresent: true,
     });
-    const { effectiveProvider, turnsServed, turnsEmpty, lastFallbackTurnAt, activeEntry, chain, ...existingFallback } = body.fallback;
+    const {
+      effectiveProvider,
+      reason,
+      resetAt,
+      recoveryProbeRequired,
+      turnsServed,
+      turnsEmpty,
+      lastFallbackTurnAt,
+      activeEntry,
+      chain,
+      ...existingFallback
+    } = body.fallback;
     expect(existingFallback).toEqual({
       provider: 'opencode-cli',
       model: 'minimax/minimax-m2',
@@ -511,8 +534,11 @@ describe('handleGetLineProviderStatus', () => {
       active: true,
       activeUntil,
     });
-    expect({ effectiveProvider, turnsServed, turnsEmpty, lastFallbackTurnAt }).toEqual({
+    expect({ effectiveProvider, reason, resetAt, recoveryProbeRequired, turnsServed, turnsEmpty, lastFallbackTurnAt }).toEqual({
       effectiveProvider: 'opencode-cli',
+      reason: 'auth-required',
+      resetAt: activeUntil,
+      recoveryProbeRequired: true,
       turnsServed: 3,
       turnsEmpty: 1,
       lastFallbackTurnAt: 1_781_087_200_000,

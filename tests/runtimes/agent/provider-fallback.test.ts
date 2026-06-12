@@ -144,12 +144,42 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
 /** Bracket-access view of the private fallback state machine. */
 type FallbackView = {
   fallbackActiveUntil: number | null;
+  fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null;
   revertTimer: ReturnType<typeof setTimeout> | null;
   effectiveProvider: string;
   effectiveModel: string | undefined;
-  activateProviderFallback(resetAt: Date | null): void;
+  pendingTurnText: Map<string, string>;
+  pendingTurnActorJid: Map<string, string | undefined>;
+  activateProviderFallback(resetAt: Date | null, reason?: 'usage-limit' | 'rate-limit' | 'auth-required'): {
+    primaryProvider: string;
+    fallbackProvider: string;
+    fallbackModel: string | undefined;
+    reason: 'usage-limit' | 'rate-limit' | 'auth-required';
+    resetAt: Date | null;
+    activeUntil: number;
+    extended: boolean;
+    keyPresent: boolean | null;
+    recoveryProbeRequired: boolean;
+  } | null;
   deactivateProviderFallback(reason: string): void;
   fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null;
+  probePrimaryProviderRecovered(): boolean;
+  scheduleFallbackReplay(args: {
+    activation: NonNullable<ReturnType<FallbackView['activateProviderFallback']>>;
+    chatJid: string;
+    mapKey?: string;
+    oldSession: unknown;
+    hadToolActivity?: boolean;
+  }): boolean;
+  replayTurnOnFallback(args: unknown): Promise<void>;
+  getFallbackState(): {
+    effectiveProvider: string;
+    fallbackActiveUntil: number | null;
+    fallbackReason: string | null;
+    fallbackModel: string | null;
+    fallbackResetAt: number | null;
+    fallbackRecoveryProbeRequired: boolean;
+  };
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -283,6 +313,78 @@ describe('AgentRuntime — provider fallback state machine', () => {
     vi.advanceTimersByTime(5 * 60 * 60 * 1000 + 1);
     expect(view(runtime).fallbackActiveUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
+  });
+
+  it('keeps auth-required fallback armed until a primary recovery probe succeeds', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    const v = view(runtime);
+    v.probePrimaryProviderRecovered = vi.fn(() => false);
+
+    v.activateProviderFallback(null, 'auth-required');
+    expect(v.effectiveProvider).toBe('opencode-cli');
+    expect(v.getFallbackState().fallbackRecoveryProbeRequired).toBe(true);
+
+    vi.advanceTimersByTime(5 * 60 * 60 * 1000 + 1);
+    expect(v.effectiveProvider).toBe('opencode-cli');
+    expect(v.fallbackActiveUntil).not.toBeNull();
+
+    v.probePrimaryProviderRecovered = vi.fn(() => true);
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    expect(v.fallbackActiveUntil).toBeNull();
+    expect(v.effectiveProvider).toBe('claude-cli');
+  });
+
+  it('schedules replay of the interrupted turn only when fallback is newly armed and usable', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    const v = view(runtime);
+    lookupCredentialMock.mockImplementation((svc) => (svc === 'minimax' ? 'mm-key' : null));
+    const activation = v.activateProviderFallback(null, 'usage-limit')!;
+    v.pendingTurnText.set('chat-key', 'please continue the task');
+    v.pendingTurnActorJid.set('chat-key', 'sender@s.whatsapp.net');
+    v.replayTurnOnFallback = vi.fn(async () => {});
+
+    expect(v.scheduleFallbackReplay({
+      activation,
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+    })).toBe(true);
+    expect(v.replayTurnOnFallback).toHaveBeenCalledWith({
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      replayText: 'please continue the task',
+      actorJid: 'sender@s.whatsapp.net',
+      oldSession: null,
+    });
+
+    const extended = v.activateProviderFallback(null, 'usage-limit')!;
+    expect(extended.extended).toBe(true);
+    expect(v.scheduleFallbackReplay({
+      activation: extended,
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+    })).toBe(false);
+    expect(v.scheduleFallbackReplay({
+      activation: { ...activation, keyPresent: false },
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+    })).toBe(false);
+
+    expect(v.scheduleFallbackReplay({
+      activation,
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+      hadToolActivity: true,
+    })).toBe(false);
   });
 
   it('clamps an immediate reset time to the minimum window', () => {
@@ -532,6 +634,43 @@ describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
     expect(view(runtime).effectiveModel).toBe('minimax/MiniMax-M2.7');
   });
 
+  it('does not silently replay a turn after tool activity started', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    const v = view(runtime);
+    v.pendingTurnText.set('chat-key', 'change the customer record');
+    v.replayTurnOnFallback = vi.fn(async () => {});
+    const queue = makeFakeQueue();
+
+    fullView(runtime).handleEventWithContext(
+      { type: 'tool_use', toolId: 'tool-1', toolName: 'whatsoup_add_or_edit_contact', toolInput: {} },
+      queue,
+      null,
+      'conversation',
+      123,
+      'chat-key',
+      'tool-scope',
+      false,
+    );
+    fullView(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+      'conversation',
+      123,
+      'chat-key',
+      'tool-scope',
+      false,
+    );
+
+    expect(v.replayTurnOnFallback).not.toHaveBeenCalled();
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('already started an action'),
+    );
+  });
+
   it('assistant_text then result: fallback stays null until the result fires', () => {
     const runtime = makeRuntime({
       agentFallbackProvider: 'opencode-cli',
@@ -574,14 +713,26 @@ describe('usage-limit user notice', () => {
       agentFallbackProvider: 'opencode-cli',
       agentFallbackModel: 'minimax/minimax-m2',
     });
+    const v = view(runtime);
+    v.pendingTurnText.set('notice-key', 'continue this request');
+    v.replayTurnOnFallback = vi.fn(async () => {});
     const queue = makeFakeQueue();
     driveView(runtime).handleEventWithContext(
       { type: 'result', text: USAGE_LIMIT_TEXT },
       queue,
       null,
+      undefined,
+      undefined,
+      'notice-key',
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('switching to a backup model'),
+      expect.stringContaining('Primary model hit a token/quota limit'),
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('Backup: OpenCode / minimax/minimax-m2'),
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('I will continue here.'),
     );
   });
 
@@ -609,7 +760,10 @@ describe('usage-limit user notice', () => {
       { type: 'result', text: USAGE_LIMIT_TEXT },
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('switching to a backup model'),
+      expect.stringContaining('Primary model hit a token/quota limit'),
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('Backup: OpenCode / minimax/minimax-m2'),
     );
   });
 });
