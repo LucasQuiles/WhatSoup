@@ -100,6 +100,46 @@ def _make_dirs(tmp_path: Path) -> dict[str, Path]:
 
 
 # ===========================================================================
+# UNIT TESTS: physical intervention signal classification
+# ===========================================================================
+
+class TestPhysicalInterventionSignals:
+    """Pure-function tests for logged-out alert evidence gates."""
+
+    def test_instance_logged_out_accepts_terminal_auth_failure_class(self):
+        event = _make_event(
+            source="instance_logged_out",
+            evidence=(
+                "confidence=confirmed reason=whatsapp_auth_loss_with_disconnect_corroboration "
+                "last_status_code=unknown last_disconnect_reason=unknown "
+                "auth_failure_class=pairing_required"
+            ),
+        )
+        assert _mod.is_logged_out_physical_signal(event)
+        assert _mod.is_physical_intervention_signal(event)
+
+    def test_instance_logged_out_accepts_normalized_logged_out_reason(self):
+        event = _make_event(
+            source="instance_logged_out",
+            evidence="last_status_code=401 last_disconnect_reason=logged_out auth_failure_class=none",
+        )
+        assert _mod.is_logged_out_physical_signal(event)
+
+    def test_instance_logged_out_rejects_ambiguous_disconnect(self):
+        event = _make_event(
+            source="instance_logged_out",
+            evidence="last_status_code=440 last_disconnect_reason=connectionReplaced auth_failure_class=none",
+        )
+        assert not _mod.is_logged_out_physical_signal(event)
+
+    def test_terminal_auth_failure_class_inventory(self):
+        assert _mod.TERMINAL_AUTH_FAILURE_CLASSES == {
+            "pairing_required",
+            "serverside_logout_irreversible",
+        }
+
+
+# ===========================================================================
 # UNIT TESTS: event_is_test_leak
 # ===========================================================================
 

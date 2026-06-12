@@ -108,6 +108,39 @@ RUNTIME_MANIFEST_FAILURE_RE = re.compile(r"^FAIL runtime_manifest(?:\s+([^:\s]+)
 SOURCE_UPDATE_ENFORCED_OK_RE = re.compile(
     r"(?m)^source_update:\s+git_remote reachable\b.*\bmode=enforce\b"
 )
+TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+LOGGED_OUT_STATUS_CODE = 401
+LOGGED_OUT_REASON_KEY = "loggedout"
+
+
+def normalized_signal_key(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if not text:
+        return None
+    return re.sub(r"[^a-z0-9]", "", text)
+
+
+def is_terminal_auth_failure_class(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in TERMINAL_AUTH_FAILURE_CLASSES
+
+
+def is_logged_out_status_code(value: Any) -> bool:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value == LOGGED_OUT_STATUS_CODE
+    if isinstance(value, str) and re.fullmatch(r"\d+", value.strip()):
+        return int(value.strip()) == LOGGED_OUT_STATUS_CODE
+    return False
+
+
+def is_logged_out_disconnect_reason(value: Any) -> bool:
+    return normalized_signal_key(value) == LOGGED_OUT_REASON_KEY
+
+
+def text_has_terminal_auth_failure_class(value: str) -> bool:
+    lower = value.lower()
+    return any(auth_class in lower for auth_class in TERMINAL_AUTH_FAILURE_CLASSES)
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -1160,7 +1193,7 @@ def critical_asset_from_health_evidence(evidence: str) -> dict[str, Any] | None:
         else:
             code = "AGENT_PROVIDER_PROBE_FAILED"
             operator_action = "Inspect provider probe output, provider credentials, network reachability, and model availability before clearing."
-    elif "serverside_logout_irreversible" in lower or "physical_intervention_required" in lower:
+    elif text_has_terminal_auth_failure_class(lower) or "physical_intervention_required" in lower:
         code = "WA_AUTH_BOND_SERVER_REVOKED"
         recoverability = "manual_relink_required"
         confidence = "confirmed"
@@ -1993,7 +2026,7 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
     auth_failure_class = connection.get("auth_failure_class")
     if isinstance(auth_failure_class, str) and auth_failure_class:
         append_evidence_field(details, "auth_failure_class", auth_failure_class)
-        if auth_failure_class in {"serverside_logout_irreversible", "pairing_required"}:
+        if is_terminal_auth_failure_class(auth_failure_class):
             add_marker("physical_intervention_required")
         elif auth_failure_class != "none":
             add_marker("auth_bond_at_risk")
@@ -2060,8 +2093,8 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             append_evidence_field(details, "credential_lifecycle_last_event_status_code", latest_event.get("statusCode"))
             append_evidence_field(details, "credential_lifecycle_last_event_reason", latest_event.get("reason"))
     if (
-        connection.get("last_status_code") == 401
-        or connection.get("last_disconnect_reason") == "loggedOut"
+        is_logged_out_status_code(connection.get("last_status_code"))
+        or is_logged_out_disconnect_reason(connection.get("last_disconnect_reason"))
     ):
         add_marker("physical_intervention_required")
     instance_meta = data.get("instance") if isinstance(data.get("instance"), dict) else {}

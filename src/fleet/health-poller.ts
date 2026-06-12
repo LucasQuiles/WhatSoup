@@ -2,14 +2,11 @@ import { createChildLogger } from '../logger.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
+import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
 const MIN_ALERT_INTERVAL_MS = ALERT_THROTTLE_INTERVAL_MS;
-const TERMINAL_AUTH_FAILURE_CLASSES = new Set([
-  'pairing_required',
-  'serverside_logout_irreversible',
-]);
 
 export interface InstanceHealth {
   name: string;
@@ -117,9 +114,7 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
     connectionState === 'disconnected' ||
     healthStatus === 'unhealthy';
   const explicitAuthLossSignal =
-    lastStatusCode === 401 ||
-    lastDisconnectReason === 'loggedOut' ||
-    (authFailureClass !== null && TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass));
+    hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason, authFailureClass });
 
   if (loggedOutHeuristic && disconnectedCorroboration && explicitAuthLossSignal) {
     return {
