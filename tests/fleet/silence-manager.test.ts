@@ -76,11 +76,14 @@ describe('silence-manager corrupt-file handling', () => {
     expect(isInstanceSilenced('primary-line')).toBe(false);
   });
 
-  it('returns empty array from listActiveSilences on corrupt file', async () => {
+  it('returns empty array and warns when the file is valid JSON but not an array', async () => {
     mkdirSync(configDir(), { recursive: true });
     writeFileSync(silencesFile(), '{"not": "an array"}');
     const { listActiveSilences } = await importManager();
 
     expect(listActiveSilences()).toEqual([]);
+    expect(logWarn).toHaveBeenCalledOnce();
+    const [fields] = logWarn.mock.calls[0] as [Record<string, unknown>, string];
+    expect(fields).toHaveProperty('file');
   });
 });
