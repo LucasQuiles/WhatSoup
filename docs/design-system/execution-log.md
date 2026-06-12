@@ -387,3 +387,18 @@ Pre+post frontend-design checkpoints both themes (Fleet/LineDetail/Ops/LinePicke
 rule x file ratchet 153 buckets, shadow superset run, map SSOT, px tokenization, mojibake, weak
 assertions; evidence-vs-baseline reconciled; DD-11 opened). Full packet:
 `06-implementation/c2-1-evidence.md`. Stale agent worktree removal pending operator approval.
+
+---
+
+## C2.2 — Pill + Modal/useDismissable + Oversight Waves 5-7 — 2026-06-11
+
+**Verdict: Pass.** Commit `59ceeb4f` (impl). DD-7 CLOSED: useDismissable (stack-aware Escape AND
+outside-click, focus trap, restoration), Modal composite (title-id context — aria-labelledby
+verified resolving live), Pill (tone x size x static/interactive/removable, aria-describedby count
+pattern, 24px hit floor via pseudo-element). Migrations: ConfirmDialog, KeyboardShortcutsHelp
+(fixed its real no-Escape bug), FilterPill (legacy activeColor->tone mapping preserves semantics at
+all callers). Invariant correction: Escape/X always cancel (WAI); dismissable = outside-click only.
+Wave-7 quick fixes: wizard min-w bug, h-dvh, transition:all removal. Responsive backlog = DD-18
+(per-surface, status INCONCLUSIVE until landed). 1,736/1,736 tests; baseline 635->614.
+DD-12..18 opened. Stale agent worktrees removed (operator-approved, zero unique commits verified).
+Packet: `06-implementation/c2-2-evidence.md`.
