@@ -397,7 +397,7 @@ describe('GroupDetailModal — settings seg pairs', () => {
   it('Messaging seg group has aria-label', async () => {
     await openSettingsAsAdmin()
     const group = screen.getByRole('group', { name: 'Messaging' })
-    expect(group).toBeDefined()
+    expect(group.getAttribute('aria-label')).toBe('Messaging')
   })
 
   it('exactly one button per seg pair has aria-pressed=true', async () => {

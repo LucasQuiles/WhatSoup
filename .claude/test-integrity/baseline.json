@@ -1,42 +1,6 @@
 {
-  "captured_at": "2026-05-13T02:37:01+00:00",
-  "captured_at_sha": "7a9331c43d0bb32dbfc37eed57390528da528fe5",
-  "findings": [
-    {
-      "content_signature": "365bc48f6ee9057199cca442a2b84e022b40dd1649012a1106ca058ae1922561",
-      "file": "tools/whatsoup_guard/tests/runner.test.ts",
-      "line": 1243,
-      "rule_id": "js-terminal-weak-assertion",
-      "signature": "11abb449a8661642b3a08d76c6c2795d454a4a47e72c84857f5e132cf123df54"
-    },
-    {
-      "content_signature": "8ea19d5da1c675e7826ffec9b3741fa761b19bd82a04dc2347b2a218a7485efc",
-      "file": "tests/console/nav-status.test.ts",
-      "line": 55,
-      "rule_id": "js-terminal-weak-assertion",
-      "signature": "22341164f5e5d533e09baa8037724d79a02cfb85bead9781d7ad366d7345c15b"
-    },
-    {
-      "content_signature": "663d6bb13b87731991bc4ddea8f40be2f96f0c9bccf03cef31b1423303f82661",
-      "file": "tests/fleet/spawn-absolute-paths.test.ts",
-      "line": 1,
-      "rule_id": "test-file-tree-sitter-parse-error",
-      "signature": "436b4ae651dec2a4786eb84d6f19866107c2104b50d76e7ae170245669c10a45"
-    },
-    {
-      "content_signature": "61b61994bb7da80424da7b92af0cbcbb4d5fce5e8779dd6dff266ebec6029796",
-      "file": "tests/fleet/paths.test.ts",
-      "line": 1,
-      "rule_id": "test-file-tree-sitter-parse-error",
-      "signature": "97b47799deb5f3ac347f629880032ce29ee3ff549b7310cb0926d72741a2436f"
-    },
-    {
-      "content_signature": "673becea5140d515c88913784533cdeb05bf823b569e3195599e32894e143ac5",
-      "file": "tests/console/soup-kitchen.test.tsx",
-      "line": 1,
-      "rule_id": "test-file-tree-sitter-parse-error",
-      "signature": "d45e85d31ec0e22ac3fa0a613461dc6c65bee3018958e2904a14b012d5660038"
-    }
-  ],
+  "captured_at": "2026-06-12T17:58:53+00:00",
+  "captured_at_sha": "ca799b4fc00ef7ffd1eced4aabfe997029b35430",
+  "findings": [],
   "schema_version": "1"
 }
