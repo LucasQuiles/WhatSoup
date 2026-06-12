@@ -51,30 +51,33 @@ Demotion: two confirmed false positives in a week demote one state and open a fi
 
 This table is the registry. P6 updates the State column in place; every change is a one-line diff.
 
-| Rule id | Entry state (at P6 start) | Target | Owning phase | Notes |
+| Rule id | State (current — see changelog) | Target | Owning phase | Notes |
 |---|---|---|---|---|
 | soup/no-brand-regression | shadow | global-error | P4 | flips to error the same PR as the P4 copy flip |
 | soup/protected-identifiers | scoped-error | global-error | P1 | cheap, zero current violations — start strict |
-| soup/no-raw-button | shadow | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
+| soup/no-raw-button | scoped-error (M list) | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
 | soup/no-raw-form-control | shadow | scoped-error per dir | P2 | 27 raw inputs, 3 selects, 5+ textareas (control-catalogue §2-3) |
-| soup/no-adhoc-modal | shadow | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
-| soup/no-legacy-tokens | proposed | global-error | P2+ complete | enabled only after alias layer + primitives land |
+| soup/no-adhoc-modal | scoped-error (M list) | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
+| soup/no-legacy-tokens | scoped-error (primitives tier) | global-error | P2+ complete | enabled only after alias layer + primitives land |
 | soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap |
 | soup/no-untokenized-values | scoped-error (already live) | global-error | P1 | exists `console/eslint.config.js:157-191,227-229`; close 3 evasion shapes (DUP-08) |
 | soup/no-transition-all | global-error (already live) | keep | P5 | `console/eslint.config.js:126-128` |
 | soup/no-infinite-animation | shadow | global-error | P5 | 4 current infinite animations to disposition |
-| soup/no-focus-suppression | shadow | global-error | P2 | 2 TSX + 3 CSS occurrences today |
+| soup/no-focus-suppression | scoped-error (console-wide, HistoryTab carve-out) | global-error | P2 | 2 TSX + 3 CSS occurrences today |
 | soup/focus-visible-required | shadow | scoped-error (primitives) | P2 | primitives-first; screens inherit |
 | soup/modal-must-restore-focus | proposed | scoped-error (Modal) | P2 | enforceable once Modal primitive exists |
 | soup/motion-needs-reduced-variant | shadow | global-error | P5 | 1 of ~6 animation families has a reduced variant today |
 | soup/no-literal-status-colors | shadow | global-error | P2 | 8 TS maps to collapse first (DUP-06/07) |
 | soup/tabular-nums-required | proposed | scoped-error (Table/metric) | P4 | zero current usage — needs spec landing first |
 | soup/no-duplicate-shell | shadow (advisory) | warn-on-changed-files | P2 | heuristic; routes to duplication-register, never error |
-| soup/theme-parity (script) | shadow | CI-blocking script | P1 | not an ESLint rule; section 5 |
+| soup/theme-parity (script) | CI-blocking script | CI-blocking script | P1 | not an ESLint rule; section 5 |
 | soup/icon-family | scoped-error | global-error | P1 | zero current violations (lucide-react only) |
-| soup/no-utility-smell | shadow | warn-on-changed-files | P2 | G2 mandatory item 3 tripwire |
+| soup/no-utility-smell | scoped-error (primitives tier) | warn-on-changed-files | P2 | G2 mandatory item 3 tripwire |
 | soup/no-format-bypass | shadow | warn-on-changed-files | P3 | DUP-13/14 helpers must exist first |
 | soup/no-inline-dismiss-handler | shadow | global-error | P2 | lands with useDismissable |
+| soup/no-raw-table | global-error (outside primitives) | keep | C2.3/D6 | added post-T7 (C2.3 tripwire → D6 flip); Group S, design-selectors.mjs |
+| soup/no-raw-sortable-header | global-error (outside primitives) | keep | C2.3/D6 | added post-T7 (C2.3 tripwire → D6 flip); Group S, design-selectors.mjs |
+| soup/no-legacy-log-lanes | global-error (outside primitives) | keep | C2.3/D6 | added post-T7 (C2.3 tripwire → D6 flip); Group S, design-selectors.mjs |
 
 ## 3. Rule catalog
 
@@ -630,3 +633,43 @@ bar for the enforcement phase.
 
 Changelog: 2026-06-11 — initial plan (T7). Contradictions found during evidence collection are
 recorded in the T7 report and in `docs/design-system/05-cutover/branding-touchpoints.md` §5.
+
+Changelog: 2026-06-12 — lifecycle table brought to post-flip truth (the D6 evidence packet
+found the table never recorded the flips; this entry closes that finding). States verified
+against the live impl tree (`console/eslint.config.js`, `console/eslint.config.shadow.mjs`,
+`console/eslint-rules/design-selectors.mjs` — the shared selector SSOT both configs import,
+landed `ba4ed643`):
+- **Group S** (soup/no-raw-table, no-raw-sortable-header, no-legacy-log-lanes — three rules
+  added post-T7 as C2.3 shadow tripwires; rows added to the table above): global-error
+  outside `components/primitives/**` (the canonical-renderer exemption), re-carried through
+  every later-match config block.
+- **Group F** (soup/no-focus-suppression): scoped-error console-wide with a single remaining
+  carve-out — `components/line-detail/HistoryTab.tsx` (C-B4-6). The original second carve-out
+  (pages/Inbox.tsx) was retired at B4 close (`9bfde5c3`); a stale "Inbox + HistoryTab" comment
+  survives at eslint.config.js:704 (code truth is the HistoryTab-only block 2).
+- **Group M** (soup/no-raw-button, soup/no-adhoc-modal): scoped-error across the current
+  10-file M list — AddLineWizard.tsx (joined at B3 wave 4 `061986ee`), pages/LineDetail.tsx,
+  pages/SoupKitchen.tsx, TagInput.tsx, CardSelector.tsx, ConfirmDialog.tsx, RelinkModal.tsx,
+  SaveContactDialog.tsx, UpdateModal.tsx (joined at B3 wave 3 `d73bef54`), plus
+  line-detail/CreateGroupModal.tsx in the full-union block 4b. The ad-hoc-modal shadow set is
+  EMPTY console-wide since wave 4. Both rules remain shadow-tracked outside the M list.
+- **Group P** (soup/no-legacy-tokens, soup/no-utility-smell): scoped-error inside
+  `components/primitives/**` (born-clean tier); both remain shadow outside primitives.
+- **theme-parity script**: CI-blocking — `design:theme-parity` runs in `verify:push:branch`,
+  `verify:release`, and quality.yml CI (wired `44897b16`, parity completed `f09f5dc3`).
+- **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
+  (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
+  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 13 14 16)` — eight
+  checks fail the run; checks 17–20 are report-only per the §2 lifecycle, and the remaining
+  immature checks each sit behind a named landing gate in the script's justification block.
+All other rule rows are unchanged: states verified still accurate against the live configs
+(brand-regression, raw-form-control, infinite-animation, literal-status-colors,
+inline-dismiss-handler, format-bypass, duplicate-shell remain in the shadow config;
+raw-color/untokenized-values/transition-all verified still live in the base config).
+Rows NOT re-verified by this pass and left untouched: protected-identifiers and icon-family
+(the shadow config's header comment carries both as "scoped-error already", and icon-family's
+strokeWidth companion is live at eslint.config.js, but no dedicated denylist/contract selector
+was located in either config by this audit — their cells keep the T7-recorded state and the
+discrepancy is flagged here rather than papered over), plus modal-must-restore-focus,
+focus-visible-required, motion-needs-reduced-variant, tabular-nums-required (proposed/shadow,
+no flip on record). Evidence: `06-implementation/d6-evidence.md`.
