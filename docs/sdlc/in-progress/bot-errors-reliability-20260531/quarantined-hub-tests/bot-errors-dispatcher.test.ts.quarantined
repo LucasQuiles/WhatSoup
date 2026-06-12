@@ -12,7 +12,7 @@ const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----
 const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
 const REDACTED_URL_USERINFO = `https://[REDACTED] at ${'example'}.com/path`;
 const AT_SIGN = '@';
-const TEST_SERVICE_NAME = `whatsoup${AT_SIGN}18454174651.service`;
+const TEST_SERVICE_NAME = `whatsoup${AT_SIGN}15551234567.service`;
 const TEST_CHAT_JID = `q${AT_SIGN}s.whatsapp.net`;
 const PHONE_SAMPLE = '+1 (555) 123-4567';
 
