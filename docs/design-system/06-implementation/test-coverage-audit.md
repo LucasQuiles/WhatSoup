@@ -217,3 +217,123 @@ ride the slice commit that justifies them).
   audit). Run the thresholded config as a separate report-only CI/battery lane now;
   flip it to blocking in the D6 promotion wave alongside the lint ratchet, so the
   program has one enforcement-activation story instead of two.
+
+## Refresh — 2026-06-12 late
+
+Read-only refresh of the audit above; the original sections stand as the baseline
+record. Evidence anchor: implementation HEAD `25629451` (B5 modal exit motion), tree
+dirty with two implementation lanes in flight — the wizard lane (modified
+`AddLineWizard.tsx`, untracked `tests/console/add-line-wizard.test.tsx`) and the
+browser-proof lane (untracked `tests/browser/{b5-inert-toast,keyboard-proofs,viewport-matrix}.test.tsx`,
+modified `vitest.browser.config.ts`) — plus modified `SoupKitchen.tsx`, three style
+token files, and three console design-system test files. Numbers touching those
+surfaces are mid-slice snapshots, not settled baselines.
+
+Command: `npx vitest run --pool=forks --root . tests/console --coverage.enabled
+--coverage.provider=v8 --coverage.include='console/src/**' --coverage.reportOnFailure`.
+Suite result: 139 files, 2,306 passed / 13 failed — all 13 failures isolated to the
+untracked in-flight `add-line-wizard.test.tsx` (the wizard lane's own work product;
+its defect to close before its evidence packet, same disposition as the B3w3 failure
+in the baseline run). Coverage summary preserved at
+`/tmp/soup-coverage-summary-refresh.json`; raw log `/tmp/soup-coverage-refresh.log`.
+
+### Per-area movement (statements / branches, v8; baseline → refresh)
+
+| Area | Files | Statements | Branches | Functions |
+|---|---|---|---|---|
+| components/primitives | 12 → 12 | 99.1 → 99.1 | 95.6 → 96.0 | 100 → 100 |
+| hooks | 12 → 14 | 99.0 → 91.8 | 95.5 → 94.6 | 100 → 93.2 |
+| components/shared | 3 → 3 | 100 → 100 | 95.9 → 95.9 | 94.1 → 94.1 |
+| components/line-detail | 22 → 22 | 92.1 → 92.1 | 89.9 → 89.9 | 72.1 → 72.1 |
+| components (top-level) | 36 → 36 | 88.7 → 93.4 | 78.9 → 82.2 | 81.3 → 88.8 |
+| components/wizard | 8 → 8 | 82.9 → 83.0 | 86.1 → 86.9 | 63.9 → 65.9 |
+| lib | 23 → 23 | 85.5 → 85.9 | 90.4 → 90.7 | 71.9 → 72.7 |
+| pages | 4 → 4 | 61.5 → 74.0 | 66.1 → 74.4 | 36.2 → 43.9 |
+| root | 4 → 4 | 82.6 → 82.6 | 87.8 → 87.8 | 39.5 → 39.5 |
+| **Total console/src** | **124 → 126** | **85.8 → 88.2** | **86.0 → 87.2** | **73.3 → 75.1** |
+
+The hooks drop is not a regression in existing hooks: the original 12 remain
+near-complete (every one ≥98% statements). Two NEW B5 hooks landed undertested with
+HEAD `25629451` — `use-exit-presence.ts` (32.1% statements, 70% branches) and
+`use-background-inert.ts` (80.6% statements, 78.6% branches). That deficit is the
+single cause of the hooks threshold failure below and belongs to the B5 lane's
+evidence obligations.
+
+### Cover-now gap verification (the five flagged items — all moved)
+
+| Gap (baseline §) | Baseline | Refresh | Verdict |
+|---|---|---|---|
+| UnlockScreen.tsx | 4.3% st | 100% st / 100% br | CLOSED |
+| pages/Ops.tsx | 7.7% st, 0% fn | 90.7% st / 85.7% br / 50% fn | CLOSED (render+flows proven; residual fn% is inline handlers) |
+| FeedCard.tsx mappers | 52.9% br | 69.9% br / 86.7% fn | MOVED (mappers now invoked; branch remainder is per-tone arms) |
+| pages/SoupKitchen.tsx retry | 73.8% br | 81.7% br | MOVED (note: file is dirty in-tree this snapshot) |
+| use-dismissable.ts dark branches | 88.9% br | 92.8% br | MOVED (remainder is the accepted SSR/defensive arms) |
+
+Companions: `use-console-session.tsx` probe-failure catch now covered (100% st);
+`status-severity.ts` `statusWashClass` now exercised (100% fn); `ActivityFeed.tsx`
+28.3% → 68.0% branches. `AddLineWizard.tsx` reads 78.9% st / 41.3% br — BELOW the
+baseline's 46.9% br, but the file and its new shell test are the in-flight wizard
+lane's mid-slice state (13 failing tests); re-audit at that lane's evidence
+acceptance, do not treat this number as settled.
+
+### Coverage-ratchet evaluation (report-only, `check-coverage-thresholds.mjs`)
+
+| Area | Threshold (st/br) | Actual (st/br) | Verdict |
+|---|---|---|---|
+| primitives | 98 / 94 | 99.12 / 95.97 | PASS |
+| shared | 98 / 93 | 100 / 95.94 | PASS |
+| lib | 84 / 88 | 85.93 / 90.73 | PASS |
+| hooks | 97 / 93 | 91.79 / 94.61 | FAIL (statements) |
+
+Overall: 3/4 areas pass. The hooks failure is wholly attributable to the two new
+B5 hook files named above; the ratchet is doing exactly its job (catching new
+untested exports on a contract surface). Disposition: B5 lane owes
+`use-exit-presence`/`use-background-inert` tests before the D6 strict promotion.
+
+### DD-15 toggle-pair survey
+
+Both known migrations verified in source: `GroupDetailModal.tsx` renders four
+`ToolbarTimeRange` segs (lines 611/630/649/668) and `ScheduleComposerModal.tsx`
+two (lines 231/314). Sweeps run: `aria-pressed` outside the Toolbar primitive;
+`c-btn` classNames with state-driven active arms; `setX(true)/setX(false)`
+paired-button onClick patterns; `aria-selected` outside primitives.
+
+**One candidate remains: `console/src/components/line-detail/MetricsTab.tsx:97–113`**
+— two `c-btn` buttons ("Tokens"/"Sessions") with active-state classNames driven by
+one two-value state (`detailTab: 'tokens' | 'sessions'`). Nuances for the register
+call: each button renders conditionally (`hasTokenData`/`hasSessionData`, so the
+control can degrade to a single button), and the pair switches content panels —
+tab semantics, arguably DD-21r/Tabs-primitive territory rather than a seg. Either
+way it is a binary toggle pair off the canonical control, so **DD-15's acceptance
+condition ("all segmented sites on the canonical seg") is NOT yet met**; the
+register needs either a MetricsTab migration leg (seg or Tabs — classification
+decision) or an explicit exclusion ruling.
+
+Reviewed and excluded with reasons: `ScheduleComposerModal.tsx:331` (n-ary cron
+preset chips over `RECURRENCE_PRESETS` feeding a free-text input — value picker,
+not a toggle pair); `ChatListItem.tsx:27–28` (listbox selection state, DD-17's
+surface); `KpiCard.tsx:31` / `ActivityFeed.tsx:157` / `FilterPill.tsx` (single
+`aria-pressed` toggle buttons, not pairs); `ConfigEditDialog.tsx:341` (variant
+ternary on one button, not a pair).
+
+### Skip-categorization sweep
+
+`it.skip`/`describe.skip`/`it.todo`/`test.skip`/`test.todo` across `tests/`:
+**zero occurrences** in `tests/console/` and `tests/browser/`. Five live
+`it.skipIf` sites exist repo-wide, every one categorized inline with `@skip-env`
+per the skip law: `tests/deploy/setup-platform.test.ts:214` (plutil is
+macOS-only), `tests/runtimes/chat/providers/transcription-integration.test.ts:19`
+(local ffmpeg/whisper + fixture), `tests/scripts/migrate-memory-config.test.ts:295/315/362`
+(Windows lacks POSIX chmod semantics). All five are env-dependent; no behavioral
+skips, **no uncategorized skips**. Remaining matches are rule fixtures inside
+`tests/eslint-rules/categorized-skips.test.ts` and a rule-name string in
+`tests/scripts/eslint-fitness-check.test.ts` — not skips. The `fitness/categorized-skips`
+rule is wired warn-level in `eslint.config.fitness.mjs:47`.
+
+### Snapshot caveats (binding on every number above)
+
+- HEAD `25629451`, behind origin/main by 1; dirty tree as itemized in the header.
+- Wizard-lane numbers (`AddLineWizard.tsx`, wizard area) and `SoupKitchen.tsx` are
+  mid-mutation snapshots; re-measure at those lanes' evidence acceptance.
+- The 13 suite failures are the wizard lane's untracked test file, not landed work.
+- `tests/browser/` additions are outside this jsdom coverage run by design (D7 lane).
