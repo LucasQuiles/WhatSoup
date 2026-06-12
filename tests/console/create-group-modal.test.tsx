@@ -101,7 +101,8 @@ afterEach(() => {
 })
 
 function searchInput(): HTMLInputElement {
-  return screen.getByRole('textbox', { name: 'Search contacts...' }) as HTMLInputElement
+  // ContactSearchPicker: input has role="combobox" (combobox aria contract, B2 rebuild)
+  return screen.getByRole('combobox', { name: 'Search contacts...' }) as HTMLInputElement
 }
 
 async function searchFor(query: string, contacts: ContactResult[] = [alice, bob]) {
@@ -115,7 +116,11 @@ async function searchFor(query: string, contacts: ContactResult[] = [alice, bob]
 
 async function chooseContact(contact: ContactResult, query = contact.name?.slice(0, 2) ?? contact.jid.slice(0, 2)) {
   await searchFor(query, [contact])
-  fireEvent.click(screen.getByText(contact.name ?? contact.notify ?? contact.jid).closest('button')!)
+  // Options are now <li role="option"> (Popover listbox), not <button>.
+  // Use mouseDown (prevents focus loss) to trigger onSelect in the Popover.
+  const label = contact.name ?? contact.notify ?? contact.jid
+  const option = await waitFor(() => screen.getByRole('option', { name: new RegExp(label) }))
+  fireEvent.mouseDown(option)
   await waitFor(() => {
     expect(screen.getByRole('button', { name: `Remove ${contact.name ?? contact.jid}` })).toBeDefined()
   })
@@ -197,7 +202,9 @@ describe('CreateGroupModal participant list', () => {
 
     await searchFor('Ali', [alice])
     expect(searchContactsMock).toHaveBeenLastCalledWith('alpha-line', 'Ali')
-    fireEvent.click(screen.getByText('Alice Johnson').closest('button')!)
+    // Option is <li role="option"> (Popover listbox) — use mouseDown
+  const opt = await waitFor(() => screen.getByRole('option', { name: /Alice Johnson/ }))
+  fireEvent.mouseDown(opt)
 
     expect(screen.getByRole('button', { name: 'Remove Alice Johnson' })).toBeDefined()
     expect(screen.getByText('(1 selected)')).toBeDefined()

@@ -17,7 +17,6 @@
   --heatmap-cell: 18px;      /* active hours heatmap cell height */
   --heatmap-h: 64px;         /* active hours 24h bar chart height */
   --chart-min-h: 220px;      /* metrics chart minimum height */
-  --contact-search-max-h: 200px; /* contact search results list max height */
   --config-key-col: 140px;   /* config key-value grid key column width */
   --badge-unread: 20px;      /* chat unread count badge */
   /* ═══ Panel widths ═══ */

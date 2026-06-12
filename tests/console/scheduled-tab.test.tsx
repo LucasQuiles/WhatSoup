@@ -385,7 +385,8 @@ describe('ScheduledTab — composer open / close / edit / duplicate / new', () =
 
     fireEvent.click(screen.getByRole('button', { name: 'New Scheduled Message' }))
     fireEvent.focus(screen.getByLabelText('Search chats...'))
-    fireEvent.click(screen.getByRole('button', { name: 'Group Alpha' }))
+    // ChatPicker options are now <li role="option"> (Popover listbox, B2 rebuild)
+    fireEvent.mouseDown(await waitFor(() => screen.getByRole('option', { name: /Group Alpha/ })))
     fireEvent.change(screen.getByLabelText('Message text'), { target: { value: 'Ship update' } })
     fireEvent.change(screen.getByLabelText('Scheduled time (local)'), { target: { value: scheduledAtValue } })
 
