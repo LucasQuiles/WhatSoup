@@ -258,7 +258,7 @@ export const BOT_ERRORS_SIMULATION_MATRIX: BotErrorsSimulationRequirement[] = [
         file: 'tests/fleet/health-poller.test.ts',
         anchors: [
           'ignores stale backoff-zero reconnect metadata when connection is healthy',
-          'keeps weak backoff-zero disconnected evidence degraded and quiet until it persists',
+          'keeps disconnected backoff-zero ambiguous without explicit auth-loss proof',
           'emits logged-out immediately for explicit 401 logout evidence',
           'weak_signal_polls=3',
           'instance_logged_out',

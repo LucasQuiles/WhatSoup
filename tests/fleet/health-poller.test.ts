@@ -1254,6 +1254,7 @@ describe('HealthPoller', () => {
       'health_status=degraded',
       'whatsapp_connected=true',
       'connection_state=connected',
+      'auth_failure_class=unknown',
       'recent_disconnect_count=4',
       'recent_disconnect_threshold=3',
       'recent_disconnect_window_ms=600000',
@@ -1263,7 +1264,7 @@ describe('HealthPoller', () => {
     ]));
   });
 
-  it('keeps weak backoff-zero disconnected evidence degraded and quiet until it persists', async () => {
+  it('keeps disconnected backoff-zero ambiguous without explicit auth-loss proof', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({
@@ -1275,6 +1276,9 @@ describe('HealthPoller', () => {
             state: 'reconnecting',
             reconnect_phase: 'backoff',
             reconnect_attempts: 0,
+            last_disconnect_reason: 'connectionReplaced',
+            last_status_code: 440,
+            auth_failure_class: 'none',
           },
         },
       }),
@@ -1290,12 +1294,69 @@ describe('HealthPoller', () => {
     const status = poller.getStatus('remote-1');
     expect(status).toMatchObject({
       status: 'degraded',
-      statusConfidence: 'inferred',
-      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_without_auth_loss_signal',
       error: null,
     });
+    expect(status!.statusEvidence).toEqual(expect.arrayContaining([
+      'whatsapp_connected=false',
+      'account_jid_status=not_connected',
+      'connection_state=reconnecting',
+      'last_disconnect_reason=connectionReplaced',
+      'last_status_code=440',
+      'auth_failure_class=none',
+    ]));
     expectEmitAlertSourceNotCalled('remote-1', 'instance_degraded');
     expectEmitAlertSourceNotCalled('remote-1', 'instance_logged_out');
+  });
+
+  it('classifies disconnected backoff-zero as logged_out when auth-loss proof is explicit', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          account_jid: 'not connected',
+          connection: {
+            state: 'disconnected',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+            last_disconnect_reason: 'loggedOut',
+            last_status_code: 401,
+            auth_failure_class: 'serverside_logout_irreversible',
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('remote-1');
+    expect(status).toMatchObject({
+      status: 'logged_out',
+      statusConfidence: 'confirmed',
+      statusReason: 'instance_logged_out',
+      error: null,
+    });
+    expect(status!.statusEvidence).toEqual(expect.arrayContaining([
+      'last_disconnect_reason=loggedOut',
+      'last_status_code=401',
+      'auth_failure_class=serverside_logout_irreversible',
+    ]));
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('last_disconnect_reason=loggedOut'),
+      'critical',
+      serverRevokedAssetMatcher(),
+    );
   });
 
   it('parses non-ok health JSON before falling back to generic HTTP failure', async () => {
@@ -1311,6 +1372,9 @@ describe('HealthPoller', () => {
             state: 'disconnected',
             reconnect_phase: 'backoff',
             reconnect_attempts: 0,
+            last_disconnect_reason: 'connectionReplaced',
+            last_status_code: 440,
+            auth_failure_class: 'none',
           },
         },
       }),
@@ -1327,7 +1391,7 @@ describe('HealthPoller', () => {
       status: 'degraded',
       consecutiveFailures: 0,
       error: null,
-      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_without_auth_loss_signal',
     });
     expectEmitAlertSourceNotCalled('remote-1', 'instance_logged_out');
   });

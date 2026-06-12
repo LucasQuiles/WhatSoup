@@ -7,6 +7,10 @@ import { isInstanceSilenced } from './silence-manager.ts';
 const log = createChildLogger('fleet:health-poller');
 
 const MIN_ALERT_INTERVAL_MS = ALERT_THROTTLE_INTERVAL_MS;
+const TERMINAL_AUTH_FAILURE_CLASSES = new Set([
+  'pairing_required',
+  'serverside_logout_irreversible',
+]);
 const WEAK_LOGGED_OUT_POLLS = 3;
 const LOGGED_OUT_SETTLE_GRACE_SECONDS = 60;
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
@@ -115,6 +119,7 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
   const reconnectAttempts = numberValue(connection?.reconnect_attempts);
   const lastDisconnectReason = stringValue(connection?.last_disconnect_reason);
   const lastStatusCode = numberValue(connection?.last_status_code);
+  const authFailureClass = stringValue(connection?.auth_failure_class);
   const recentDisconnects = recordValue(connection?.recent_disconnects);
   const recentDisconnectCount = numberValue(recentDisconnects?.count);
   const recentDisconnectThreshold = numberValue(recentDisconnects?.degraded_threshold);
@@ -137,6 +142,7 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
     evidenceField('reconnect_attempts', reconnectAttempts),
     evidenceField('last_disconnect_reason', lastDisconnectReason),
     evidenceField('last_status_code', lastStatusCode),
+    evidenceField('auth_failure_class', authFailureClass),
     evidenceField('recent_disconnect_count', recentDisconnectCount),
     evidenceField('recent_disconnect_threshold', recentDisconnectThreshold),
     evidenceField('recent_disconnect_window_ms', recentDisconnectWindowMs),
@@ -150,13 +156,27 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
   const disconnectedCorroboration =
     connected === false ||
     accountJid === 'not connected' ||
-    connectionState === 'disconnected';
+    connectionState === 'disconnected' ||
+    healthStatus === 'unhealthy';
+  const explicitAuthLossSignal =
+    lastStatusCode === 401 ||
+    lastDisconnectReason === 'loggedOut' ||
+    (authFailureClass !== null && TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass));
+
+  if (loggedOutHeuristic && disconnectedCorroboration && explicitAuthLossSignal) {
+    return {
+      status: 'logged_out',
+      confidence: 'confirmed',
+      reason: 'whatsapp_auth_loss_with_disconnect_corroboration',
+      evidence: baseEvidence,
+    };
+  }
 
   if (loggedOutHeuristic && disconnectedCorroboration) {
     return {
       status: 'degraded',
-      confidence: 'inferred',
-      reason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+      confidence: 'ambiguous',
+      reason: 'whatsapp_backoff_zero_attempts_with_disconnect_without_auth_loss_signal',
       evidence: baseEvidence,
     };
   }
@@ -498,8 +518,7 @@ export class HealthPoller {
     const uptimeSeconds = this.readNumber(health['uptime_seconds']);
 
     const explicit =
-      authFailureClass === 'serverside_logout_irreversible' ||
-      authFailureClass === 'pairing_required' ||
+      TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass) ||
       lastStatusCode === 401 ||
       lastStatusCode === '401' ||
       lastReason === 'loggedOut' ||
