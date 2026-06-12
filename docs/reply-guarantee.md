@@ -18,6 +18,9 @@ pure transcript parser in `deploy/hooks/lib/transcript-walk.mjs`; hook
 execution, queue state, daemons, and runtime watchdogs are intentionally split
 into later PRs.
 
+
+> **Rate-limit layering note:** two independent throttles guard the fallback message, both keyed per chat — the in-process watchdog (1 per 15 min, in-memory, resets on restart) and the hook-tier drain (3 per hour, persisted per instance in `fallback-rate-limit.json`). They differ in window, threshold, and persistence; a fallback is sent only when the layer handling that path admits it. Tune them together.
+
 ## Current Surface
 
 The existing durability layer remains the source of truth:
