@@ -1410,6 +1410,11 @@ export class AgentRuntime implements Runtime {
   // restart); the durable artifact is the window itself (agent_fallback_state).
   private fallbackTurnsServed = 0;
   private fallbackTurnsEmpty = 0;
+  // Arm-time snapshots of the lifetime turn counters. The lifetime counters
+  // accrue across windows (getFallbackState contract), so the revert alert
+  // subtracts these to report THIS window's turns instead of cumulative totals.
+  private fallbackTurnsServedAtArm = 0;
+  private fallbackTurnsEmptyAtArm = 0;
   private lastFallbackTurnAt: number | null = null;
   private activeFallbackEntry: AgentFallbackEntry | null = null;
   private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
@@ -5875,6 +5880,12 @@ export class AgentRuntime implements Runtime {
     // and re-alert the activation that already fired before the restart.
     if (this.fallbackArmReason === null) {
       this.fallbackArmReason = reason;
+      // Snapshot the lifetime turn counters at the first arm of every window
+      // (the null-guard skips extensions; restores hit it too because the
+      // guard is per-process, which is correct — the counters are also
+      // per-process, so a restored window counts from this process's zero).
+      this.fallbackTurnsServedAtArm = this.fallbackTurnsServed;
+      this.fallbackTurnsEmptyAtArm = this.fallbackTurnsEmpty;
       if (!opts?.restored) {
         this.fallbackActivations += 1;
         emitAlert(
@@ -6126,6 +6137,10 @@ export class AgentRuntime implements Runtime {
     // Capture before clearing: the revert alert reports how long the window
     // ran. The idempotency guard above means this fires once per window.
     const windowMs = this.fallbackActivatedAt !== null ? Date.now() - this.fallbackActivatedAt : null;
+    // Per-window deltas against the arm-time snapshots — the lifetime counters
+    // are NOT reset here (getFallbackState keeps reporting process totals).
+    const windowTurnsServed = this.fallbackTurnsServed - this.fallbackTurnsServedAtArm;
+    const windowTurnsEmpty = this.fallbackTurnsEmpty - this.fallbackTurnsEmptyAtArm;
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
@@ -6152,7 +6167,7 @@ export class AgentRuntime implements Runtime {
       this.instanceName,
       'provider_fallback_reverted',
       'Provider fallback window ended — reverted to primary provider',
-      `reason=${reason} turnsServed=${this.fallbackTurnsServed} turnsEmpty=${this.fallbackTurnsEmpty}`
+      `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty}`
         + ` windowMs=${windowMs ?? 'unknown'}`,
     );
   }
