@@ -1,14 +1,9 @@
+import { asRecord } from '../lib/type-guards.ts';
 import { resolveAgentModel } from './agent-model.ts';
 
 export interface AgentFallbackEntry {
   provider: string;
   model?: string;
-}
-
-function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
 }
 
 function stringOrUndefined(value: unknown): string | undefined {
@@ -23,7 +18,7 @@ export function normalizeFallbackEntriesFromAgentOptions(
   if (Array.isArray(rawChain)) {
     const out: AgentFallbackEntry[] = [];
     for (const raw of rawChain) {
-      const item = record(raw);
+      const item = asRecord(raw);
       if (!item) continue;
       const provider = stringOrUndefined(item['provider']);
       if (!provider) continue;
@@ -42,7 +37,7 @@ export function normalizeFallbackEntriesFromAgentOptions(
 export function normalizeFallbackEntriesFromInstanceConfig(
   cfg: Record<string, unknown> | null | undefined,
 ): AgentFallbackEntry[] {
-  return normalizeFallbackEntriesFromAgentOptions(record(cfg?.['agentOptions']));
+  return normalizeFallbackEntriesFromAgentOptions(asRecord(cfg?.['agentOptions']));
 }
 
 export function fallbackEntryKey(entry: AgentFallbackEntry): string {
@@ -53,7 +48,7 @@ export function isSameAsPrimaryFallbackEntry(
   entry: AgentFallbackEntry,
   rawConfig: Record<string, unknown>,
 ): boolean {
-  const opts = record(rawConfig['agentOptions']) ?? {};
+  const opts = asRecord(rawConfig['agentOptions']) ?? {};
   const primaryProvider = stringOrUndefined(opts['provider']) ?? 'claude-cli';
   if (entry.provider !== primaryProvider) return false;
   const primaryModel = resolveAgentModel(rawConfig);
