@@ -591,6 +591,18 @@ describe('AgentRuntime', () => {
     mockRuntimeLogger.warn.mockClear();
     mockRuntimeLogger.error.mockClear();
     mockRuntimeLogger.debug.mockClear();
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentProviderConfig?: Record<string, unknown>;
+      agentFallbackProvider?: string;
+      agentFallbackModel?: string;
+      model?: string;
+    };
+    delete agentConfig.agentProvider;
+    delete agentConfig.agentProviderConfig;
+    delete agentConfig.agentFallbackProvider;
+    delete agentConfig.agentFallbackModel;
+    delete agentConfig.model;
     // Ensure mockQueue.flush always returns a resolved Promise (clearAllMocks wipes this)
     mockQueue.flush.mockResolvedValue(undefined);
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
@@ -4433,6 +4445,39 @@ describe('AgentRuntime', () => {
   });
 
   // ─── sandboxPerChat workspace isolation ────────────────────────────────────
+
+  it('sandboxPerChat provisions workspace MCP config for the effective fallback provider', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentFallbackProvider?: string;
+      agentFallbackModel?: string;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    agentConfig.agentFallbackProvider = 'opencode-cli';
+    agentConfig.agentFallbackModel = 'minimax/minimax-m2';
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    (runtime as unknown as { fallbackActiveUntil: number | null }).fallbackActiveUntil = Date.now() + 60_000;
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello fallback' }));
+
+    expect(mockProvisionWorkspace).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'opencode-cli',
+    }));
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      provider: 'opencode-cli',
+      model: 'minimax/minimax-m2',
+    });
+  });
 
   it('sandboxPerChat: two DMs from different JIDs produce different sessions', async () => {
     const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
