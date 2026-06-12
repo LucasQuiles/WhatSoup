@@ -59,6 +59,9 @@
   --stepper-line-w: 32px;    /* wizard stepper connector width */
   --stepper-dot: 8px;        /* wizard stepper dot size */
   --qr-size: 256px;          /* QR code display size */
+  --modal-w-sm: 480px;        /* modal width — sm size (tokens-v3 §6.12, DD-18r SSOT leg) */
+  --modal-w-md: 560px;        /* modal width — md size (tokens-v3 §6.12, DD-18r SSOT leg) */
+  --modal-w-lg: 720px;        /* modal width — lg/wizard size (tokens-v3 §6.12, DD-18r SSOT leg) */
   --modal-min-h: min(500px, 85dvh);      /* wizard minimum height */
   --modal-max-h: 85vh;       /* modal maximum height */
   --modal-max-h-sm: 80vh;    /* compact modal maximum height */

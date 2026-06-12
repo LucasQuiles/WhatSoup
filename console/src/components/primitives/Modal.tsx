@@ -21,6 +21,7 @@
 import {
   type FC,
   type ReactNode,
+  type RefObject,
   createContext,
   useContext,
   useId,
@@ -56,6 +57,13 @@ export interface ModalProps {
   /** Modal content. Compose ModalHeader + ModalBody + ModalFooter inside. */
   children: ReactNode;
   /**
+   * Optional ref to the element that should receive initial focus when the modal opens.
+   * When omitted the first focusable child (or the shell itself) gets focus — matching
+   * the default useDismissable behaviour. Needed by form dialogs that want to land
+   * focus on their primary input rather than the header close X (C-B3W1-1).
+   */
+  initialFocus?: RefObject<HTMLElement | null>;
+  /**
    * Optional id for the modal shell (for aria-labelledby wiring when you control
    * the title element externally). Normally, use ModalHeader which wires this automatically.
    */
@@ -76,13 +84,14 @@ export const Modal: FC<ModalProps> = ({
   size = 'md',
   dismissable = false,
   children,
+  initialFocus,
   labelledById,
 }) => {
   const shellRef = useRef<HTMLDivElement>(null);
   const autoId = useId();
   const titleId = labelledById ?? `soup-modal-title-${autoId}`;
 
-  useDismissable(shellRef, { onClose, open, dismissable });
+  useDismissable(shellRef, { onClose, open, dismissable, initialFocus });
 
   if (!open) return null;
 

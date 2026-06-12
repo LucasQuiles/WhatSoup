@@ -349,17 +349,17 @@
 /* Exit animation — applied via class when closing (future enhancement);
    for now exits are instant (open=false returns null). */
 
-/* Size modifiers (modal.md: sm/md/lg) */
+/* Size modifiers (modal.md: sm/md/lg) — width consumed from --modal-w-* (DD-18r SSOT) */
 .soup-modal-shell--sm {
-  width: min(480px, calc(100% - var(--sp-8)));
+  width: min(var(--modal-w-sm), calc(100% - var(--sp-8)));
 }
 
 .soup-modal-shell--md {
-  width: min(560px, calc(100% - var(--sp-8)));
+  width: min(var(--modal-w-md), calc(100% - var(--sp-8)));
 }
 
 .soup-modal-shell--lg {
-  width: min(var(--panel-wizard), calc(100% - var(--sp-8)));
+  width: min(var(--modal-w-lg), calc(100% - var(--sp-8)));
 }
 
 /* Header — title + optional close X */

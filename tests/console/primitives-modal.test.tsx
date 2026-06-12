@@ -452,3 +452,54 @@ describe('Modal outside-dismissal single-owner contract', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 })
+
+
+// ---------------------------------------------------------------------------
+// initialFocus prop — C-B3W1-1 pass-through
+// ---------------------------------------------------------------------------
+
+describe('Modal — initialFocus prop', () => {
+  it('provided initialFocus ref receives focus on open instead of first focusable', () => {
+    const onClose = vi.fn()
+
+    const Fixture: FC = () => {
+      const inputRef = useRef<HTMLInputElement>(null)
+      const [open, setOpen] = useState(false)
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>Open</button>
+          <Modal open={open} onClose={() => setOpen(false)} initialFocus={inputRef}>
+            <ModalHeader title="Focus test" onClose={() => setOpen(false)} />
+            <ModalBody>
+              <input ref={inputRef} type="text" placeholder="Target input" />
+              <button type="button">Another button</button>
+            </ModalBody>
+          </Modal>
+        </>
+      )
+    }
+
+    render(<Fixture />)
+    act(() => { screen.getByRole('button', { name: 'Open' }).focus() })
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+
+    // The input (initialFocus target) should hold focus, not the header close X
+    const input = screen.getByPlaceholderText('Target input')
+    expect(document.activeElement).toBe(input)
+  })
+
+  it('omitted initialFocus: first focusable element (close X) receives focus', () => {
+    render(
+      <Modal open onClose={() => {}}>
+        <ModalHeader title="Default focus" onClose={() => {}} />
+        <ModalBody>
+          <input type="text" placeholder="Secondary input" />
+        </ModalBody>
+      </Modal>
+    )
+
+    // First focusable is the header close X (before the body input in DOM order)
+    const closeBtn = screen.getByRole('button', { name: 'Close dialog' })
+    expect(document.activeElement).toBe(closeBtn)
+  })
+})
