@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
 
@@ -107,6 +108,7 @@ type FallbackView = {
   effectiveProvider: string;
   effectiveModel: string | undefined;
   activateProviderFallback(resetAt: Date | null): void;
+  restorePersistedFallbackWindow(): void;
   getFallbackState(): {
     effectiveProvider: string;
     activeFallbackEntry?: FallbackEntry | null;
@@ -204,5 +206,91 @@ describe('fallback chain selection', () => {
       { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', eligible: false },
       { provider: 'openai-api', model: 'gpt-4o-mini', eligible: false },
     ]);
+  });
+});
+
+describe('fallback chain selection — restore path', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-12T10:00:00Z'));
+    lookupCredentialMock.mockReset();
+    vi.mocked(emitAlert).mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('re-runs selection against the current chain on restore — a later eligible entry wins when entry zero lost its key', () => {
+    // The persisted row stores only the window, never the selected entry.
+    // After a restart with entry[0]'s key gone, restore must pick entry[1].
+    lookupCredentialMock.mockImplementation((svc) => svc === 'openai' ? 'oa-key' : null);
+    const now = Date.now();
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil: now + 60 * 60_000,
+      activatedAt: now - 1000,
+      reason: 'usage-limit',
+    });
+    vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      agentFallbacks: [
+        { provider: 'opencode-cli', model: 'minimax/MiniMax-M2' },
+        { provider: 'openai-api', model: 'gpt-4o-mini' },
+      ],
+    });
+
+    view(runtime).restorePersistedFallbackWindow();
+
+    expect(view(runtime).effectiveProvider).toBe('openai-api');
+    expect(view(runtime).effectiveModel).toBe('gpt-4o-mini');
+    expect(view(runtime).getFallbackState().activeFallbackEntry).toEqual({
+      provider: 'openai-api',
+      model: 'gpt-4o-mini',
+    });
+    expect(view(runtime).getFallbackState().fallbackChain).toEqual([
+      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', eligible: false },
+      { provider: 'openai-api', model: 'gpt-4o-mini', eligible: true },
+    ]);
+    expect(clearSpy).not.toHaveBeenCalled();
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
+      'test',
+      'fallback_credential_missing',
+      expect.any(String),
+      expect.stringContaining('entry=0'),
+    );
+  });
+
+  it('clears the persisted row and stays on the primary when the chain was emptied from config since persist', () => {
+    lookupCredentialMock.mockReturnValue('present-key');
+    const now = Date.now();
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil: now + 60 * 60_000,
+      activatedAt: now - 1000,
+      reason: 'usage-limit',
+    });
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    const runtime = makeRuntime({ agentFallbacks: [] });
+
+    view(runtime).restorePersistedFallbackWindow();
+
+    expect(clearSpy).toHaveBeenCalled();
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(view(runtime).effectiveProvider).toBe('claude-cli');
+    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).getFallbackState().activeFallbackEntry).toBeNull();
+    expect(view(runtime).getFallbackState().fallbackChain).toEqual([]);
   });
 });

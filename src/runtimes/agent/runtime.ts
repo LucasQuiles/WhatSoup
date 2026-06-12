@@ -5479,7 +5479,7 @@ export class AgentRuntime implements Runtime {
    */
   forceFallback(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string } {
     if (this.agentFallbacks.length === 0) {
-      return { ok: false, reason: 'no fallbackProvider configured for this instance' };
+      return { ok: false, reason: 'no fallback provider or chain configured for this instance' };
     }
     const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
     const dur = Math.min(MAX_FALLBACK_WINDOW_MS, Math.max(MIN_FALLBACK_WINDOW_MS, requested));

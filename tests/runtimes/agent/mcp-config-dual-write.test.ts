@@ -11,6 +11,7 @@ const { mockConfig, mockRuntimeLogger } = vi.hoisted(() => ({
     agentProviderConfig: undefined as Record<string, unknown> | undefined,
     agentFallbackProvider: undefined as string | undefined,
     agentFallbackModel: undefined as string | undefined,
+    agentFallbacks: undefined as Array<{ provider: string; model?: string }> | undefined,
     agentMaxQueueDepth: 100,
     controlPeers: new Map<string, string>(),
     adminPhones: new Set<string>(),
@@ -230,6 +231,7 @@ describe('AgentRuntime startup MCP config dual-write', () => {
     mockConfig.agentProviderConfig = undefined;
     mockConfig.agentFallbackProvider = undefined;
     mockConfig.agentFallbackModel = undefined;
+    mockConfig.agentFallbacks = undefined;
     tmpDirs = [];
   });
 
@@ -317,6 +319,78 @@ describe('AgentRuntime startup MCP config dual-write', () => {
 
     expect(existsSync(join(cwd, '.mcp.json'))).toBe(true);
     expect(existsSync(join(cwd, 'opencode.json'))).toBe(false);
+  });
+
+  it('attempts every chain target, writes each distinct file once, and warns on the shared-target entry', async () => {
+    // Chain: primary claude-cli + [opencode-cli, gemini-cli]. Three targets are
+    // attempted; .mcp.json is written once (primary shape — gemini-cli shares it
+    // and is skipped with a warn), opencode.json is written for the opencode entry.
+    const cwd = tmp();
+    mockConfig.agentProvider = 'claude-cli';
+    mockConfig.agentFallbacks = [
+      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2' },
+      { provider: 'gemini-cli' },
+    ];
+
+    await startRuntime(cwd);
+
+    const claude = readJson(join(cwd, '.mcp.json'));
+    expect(claude).toHaveProperty('mcpServers');
+    expect(claude).not.toHaveProperty('mcp');
+    expect((claude.mcpServers as Record<string, unknown>).whatsoup).toBeDefined();
+
+    const opencode = readJson(join(cwd, 'opencode.json'));
+    const opencodeMcp = opencode.mcp as Record<string, Record<string, unknown>>;
+    expect(opencodeMcp.whatsoup).toMatchObject({ type: 'local', enabled: true });
+
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledTimes(1);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        primary: 'claude-cli',
+        fallback: 'gemini-cli',
+        target: join(cwd, '.mcp.json'),
+      }),
+      expect.stringContaining('primary and fallback providers share an MCP config target'),
+    );
+    expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mcpConfigPaths: [join(cwd, '.mcp.json'), join(cwd, 'opencode.json')],
+      }),
+      'wrote whatsoup MCP config',
+    );
+  });
+
+  it('writes opencode.json once for two opencode chain entries and skips the second via the written-targets set', async () => {
+    const cwd = tmp();
+    mockConfig.agentProvider = 'claude-cli';
+    mockConfig.agentFallbacks = [
+      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2' },
+      { provider: 'opencode-cli', model: 'deepseek/deepseek-chat' },
+    ];
+
+    await startRuntime(cwd);
+
+    // The first opencode entry wins the write; the second is skipped because
+    // opencode.json is already in the written-targets set.
+    const opencode = readJson(join(cwd, 'opencode.json'));
+    const opencodeMcp = opencode.mcp as Record<string, Record<string, unknown>>;
+    expect(opencodeMcp.whatsoup).toMatchObject({ type: 'local', enabled: true });
+
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledTimes(1);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        primary: 'claude-cli',
+        fallback: 'opencode-cli',
+        target: join(cwd, 'opencode.json'),
+      }),
+      expect.stringContaining('primary and fallback providers share an MCP config target'),
+    );
+    expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mcpConfigPaths: [join(cwd, '.mcp.json'), join(cwd, 'opencode.json')],
+      }),
+      'wrote whatsoup MCP config',
+    );
   });
 });
 
