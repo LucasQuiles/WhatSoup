@@ -346,6 +346,25 @@ describe('MediaRetentionTimer', () => {
     expect(result.deleted).toBe(1);
   });
 
+  it('start() is a no-op when already started — no second interval is created', async () => {
+    const db = makeDb();
+    const timer = new MediaRetentionTimer(baseDir, db);
+    const runSpy = vi.spyOn(timer, 'runCleanup');
+
+    timer.start(1000);
+    expect(runSpy).toHaveBeenCalledTimes(1); // immediate run
+
+    timer.start(1000); // second start must be a no-op
+    expect(runSpy).toHaveBeenCalledTimes(1); // no second immediate run
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runSpy).toHaveBeenCalledTimes(2); // one interval tick, not two
+
+    timer.stop();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(runSpy).toHaveBeenCalledTimes(2); // stop() cleared the only interval
+  });
+
   it('stop() is idempotent — calling twice does not throw', () => {
     const db = makeDb();
     const timer = new MediaRetentionTimer(baseDir, db);

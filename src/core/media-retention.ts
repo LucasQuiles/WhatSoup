@@ -168,8 +168,11 @@ export class MediaRetentionTimer {
   /**
    * Start the timer. Runs cleanup immediately, then every `intervalMs`.
    * The interval is unref()'d so it does not prevent process exit.
+   * No-op when already started, so a repeated start() cannot leak an interval.
    */
   start(intervalMs: number = this.retention.intervalMs): void {
+    if (this.timer) return;
+
     // Run immediately on start
     this.runCleanup().catch((err) => log.error({ err }, 'media retention: immediate cleanup failed'));
 
