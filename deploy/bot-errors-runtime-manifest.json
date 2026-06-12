@@ -101,7 +101,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "16d9b10ddf4f6c1b779ebf4cb4a4b3e9acfcc0fcd3ea07115078d033e6b4ef44",
+      "sha256": "c0289cdc959d0af9d67784b777bed73673e4812e73940fe97ddc6c7b7d4c92e8",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -109,8 +109,11 @@
         "meta_alert_recovery_deferred",
         "recovery_successes_required",
         "tailscale_online_ssh_timeout",
+        "tailscale_online_ssh_remote_error",
         "preflight_remote_unreachable",
         "remote_writefail_claim_skipped_unreachable",
+        "reset_tailscale_cache",
+        "_is_ssh_transport_failure",
         "best-effort-remote",
         "redact_collector_text"
       ]
