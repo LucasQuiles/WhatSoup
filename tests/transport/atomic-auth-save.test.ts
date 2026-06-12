@@ -38,12 +38,12 @@ describe('writeAtomicBaileysJson', () => {
     const credsPath = join(authDir, 'creds.json');
 
     await writeAtomicBaileysJson(credsPath, {
-      me: { id: '18455943112:1@s.whatsapp.net' },
+      me: { id: '15551230004:1@s.whatsapp.net' },
       registrationId: 42,
     });
 
     expect(JSON.parse(readFileSync(credsPath, 'utf8'))).toMatchObject({
-      me: { id: '18455943112:1@s.whatsapp.net' },
+      me: { id: '15551230004:1@s.whatsapp.net' },
       registrationId: 42,
     });
     expect(statSync(authDir).mode & 0o777).toBe(0o700);

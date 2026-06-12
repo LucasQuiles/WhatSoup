@@ -414,7 +414,7 @@ const rawAdminPhones: string[] = instance
       ? (instance.adminPhones as string[])
       : [])
   : (process.env.ADMIN_PHONES ?? '').split(',').map(p => p.trim()).filter(Boolean);
-// Normalize to E.164 digits — "845-978-0919" → "18459780919", "+1 845 978 0919" → "18459780919"
+// Normalize to E.164 digits — "555-123-0006" → "15551230006", "+1 555 123 0006" → "15551230006"
 const resolvedAdminPhones = rawAdminPhones.map(normalizePhoneE164);
 
 // ---------------------------------------------------------------------------
@@ -937,7 +937,7 @@ export const config = {
   },
 
   // Paused chats — messages are stored but never dispatched to runtime.
-  // Toggle groups on/off without losing messages. Add JIDs like "120363406944965248@g.us".
+  // Toggle groups on/off without losing messages. Add JIDs like "120363555555555002@g.us".
   pausedChats: new Set<string>(
     (Array.isArray(instance?.pausedChats) ? instance.pausedChats : [])
       .filter((j: unknown) => typeof j === 'string' && (j as string).trim() !== ''),

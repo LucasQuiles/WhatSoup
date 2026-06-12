@@ -67,7 +67,7 @@ function makeMockSocket() {
     sendPresenceUpdate: vi.fn().mockResolvedValue(undefined),
     ws: { isOpen: true },
     user: {
-      id: '18455943112:1@s.whatsapp.net',
+      id: '15551230004:1@s.whatsapp.net',
       lid: '81536414179557:2@lid',
       name: 'WhatSoup',
     },
@@ -153,11 +153,11 @@ describe('ConnectionManager — self-mention stripping', () => {
     await manager.connect();
     emit(openEvent());
 
-    await manager.sendMessage('15551234567@s.whatsapp.net', 'hi @18455943112 there');
+    await manager.sendMessage('15551234567@s.whatsapp.net', 'hi @15551230004 there');
 
     expect(mockSock.sendMessage).toHaveBeenCalledTimes(1);
     const [, payload] = mockSock.sendMessage.mock.calls[0] as [string, Record<string, unknown>];
-    expect(payload['text']).toBe('hi 18455943112 there');
+    expect(payload['text']).toBe('hi 15551230004 there');
   });
 
   it('strips @<botLid bare> from sendMessage text payloads in LID-addressed groups', async () => {

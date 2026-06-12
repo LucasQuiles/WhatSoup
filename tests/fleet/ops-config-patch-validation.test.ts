@@ -104,7 +104,7 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     const dir = path.join(tmpDir, 'whatsoup', 'instances', name);
     fs.mkdirSync(dir, { recursive: true });
     const cfg = path.join(dir, 'config.json');
-    fs.writeFileSync(cfg, JSON.stringify({ name, type: 'chat', healthPort: 9095, accessMode: 'self_only', adminPhones: ['18459780919'], ...data }));
+    fs.writeFileSync(cfg, JSON.stringify({ name, type: 'chat', healthPort: 9095, accessMode: 'self_only', adminPhones: ['15551230006'], ...data }));
     return cfg;
   }
 
@@ -234,7 +234,7 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
       name,
       type: 'agent',
       accessMode: 'self_only',
-      adminPhones: ['18459780919'],
+      adminPhones: ['15551230006'],
       healthPort: 9095,
       agentOptions: {
         sessionScope: 'per_chat',
@@ -317,7 +317,7 @@ describe('handleConfigUpdate PATCH agentOptions validation (#249)', () => {
       name: 'test-passive',
       type: 'passive',
       accessMode: 'self_only',
-      adminPhones: ['18459780919'],
+      adminPhones: ['15551230006'],
       healthPort: 9095,
     }));
     const inst = fakeInstance(cfg, { name: 'test-passive', type: 'passive' });
@@ -355,7 +355,7 @@ describe('handleConfigUpdate PATCH Pinecone project guard validation', () => {
       name,
       type: 'chat',
       accessMode: 'self_only',
-      adminPhones: ['18459780919'],
+      adminPhones: ['15551230006'],
       healthPort: 9095,
     }));
     return cfg;
@@ -413,7 +413,7 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
       name: 'roundtrip',
       type: 'agent',
       accessMode: 'self_only',
-      adminPhones: ['18459780919'],
+      adminPhones: ['15551230006'],
       healthPort: 9095,
       agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
     }));
@@ -448,7 +448,7 @@ describe('handleConfigUpdate PATCH round-trip invariant (#244 #249)', () => {
       name: 'roundtrip-neg',
       type: 'agent',
       accessMode: 'self_only',
-      adminPhones: ['18459780919'],
+      adminPhones: ['15551230006'],
       healthPort: 9095,
       agentOptions: { sessionScope: 'per_chat', cwd: agentCwd },
     };

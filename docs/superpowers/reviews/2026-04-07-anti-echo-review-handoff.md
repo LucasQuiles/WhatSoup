@@ -42,8 +42,8 @@ Every restart of the agent fleet (besbot, shandroid, loops) was costing tokens a
 
 **Review focus:**
 - Is the guard in the right position? It must be AFTER the `session_id` null check (L1135) and BEFORE the 60-minute staleness check (L1146).
-- Does `_at_g.us` correctly identify group conversation keys? (Yes — `toConversationKey('120363406689931730@g.us')` produces `120363406689931730_at_g.us`, per `conversation-key.ts:16-18`.)
-- Could this accidentally skip DM resume? (No — DM keys are bare numbers like `18459780919` or `49079279169655`, never containing `_at_g.us`.)
+- Does `_at_g.us` correctly identify group conversation keys? (Yes — `toConversationKey('120363555555555001@g.us')` produces `120363555555555001_at_g.us`, per `conversation-key.ts:16-18`.)
+- Could this accidentally skip DM resume? (No — DM keys are bare numbers like `15551230006` or `11111110000008`, never containing `_at_g.us`.)
 - Does marking `ended` prevent future resume attempts? (Yes — `getResumableCheckpoints()` filters for `IN ('active', 'suspended')`, so `ended` drops out.)
 
 ### 4. `622bc0f` — Shared/single mode staleness + group guard (AE2)

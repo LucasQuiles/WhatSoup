@@ -96,11 +96,11 @@ describe('self-mention stripping', () => {
 
   it('leaves @otherNumber unchanged', () => {
     const result = stripSelfMentions(
-      'ping @18455943112 are you there',
+      'ping @15551230004 are you there',
       botJid,
       botLid,
     );
-    expect(result).toBe('ping @18455943112 are you there');
+    expect(result).toBe('ping @15551230004 are you there');
   });
 
   it('leaves @name mentions unchanged', () => {

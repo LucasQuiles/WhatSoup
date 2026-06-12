@@ -472,7 +472,7 @@ The migrated group was 1203631234567890@g.us.
       const issues = scanAddedLines([
         { filePath: 'src/x.ts', line: 1, text: "const real = '+447123456789';" },
         { filePath: 'tests/x.test.ts', line: 2, text: "const fake = '+14155550100';" },
-        { filePath: 'tests/x.test.ts', line: 3, text: "const fixture = '+15184194479';" },
+        { filePath: 'tests/x.test.ts', line: 3, text: "const fixture = '+15551230008';" },
         { filePath: 'tests/x.test.ts', line: 4, text: "const placeholder = '+1234567890';" },
       ]);
 

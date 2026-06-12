@@ -49,7 +49,7 @@ function makeStoredMsg(overrides?: Partial<StoredMessage>): StoredMessage {
     conversationKey: 'chat1@g.us',
     contentText: null,
     mediaPath: null,
-    senderJid: '15184194479@s.whatsapp.net',
+    senderJid: '15551230008@s.whatsapp.net',
     senderName: 'TestUser',
     messageId: 'msg-1',
     content: 'I just moved to London',
@@ -68,7 +68,7 @@ function makeFact(overrides?: Partial<ExtractedFact>): ExtractedFact {
   return {
     text: 'Lives in London',
     chatJid: 'chat1@g.us',
-    senderJid: '15184194479@s.whatsapp.net',
+    senderJid: '15551230008@s.whatsapp.net',
     senderName: 'TestUser',
     memoryType: 'user_fact',
     confidence: 0.85,

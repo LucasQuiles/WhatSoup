@@ -110,7 +110,7 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
   return {
     db,
     connectionManager: {
-      botJid: '18455943112@s.whatsapp.net',
+      botJid: '15551230004@s.whatsapp.net',
       botLid: null,
       getSocket: vi.fn().mockReturnValue(null),
       sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
@@ -168,7 +168,7 @@ function getUnreadCount(db: Database, conversationKey: string): number {
 
 const AUTH_TOKEN = 'test-token';
 const AUTH_HEADER = { authorization: `Bearer ${AUTH_TOKEN}` };
-const BOT_JID = '18455943112@s.whatsapp.net';
+const BOT_JID = '15551230004@s.whatsapp.net';
 const CHAT_JID = '15550100001@s.whatsapp.net';
 const CONV_KEY = '15550100001';
 

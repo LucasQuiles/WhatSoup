@@ -90,9 +90,9 @@ const trackedSensitiveAllowlist = new Set(['.env.example', '.claude/settings.jso
 //   - Repo synthetic fixtures: 1555*, 1111111*, 1000000000* (console/test fixtures)
 //   - Obvious placeholders: +1234567890, +0...
 //   - UK Ofcom drama range +447700 9xxxxx
-//   - 15184194479 / 18459780919: repo-wide canonical synthetic test fixtures
+//   - 15551230008 / 15551230006: repo-wide canonical synthetic test fixtures
 //     (used as conversationKey/JID fixtures across tests/core/*; not a real line).
-const allowedPhoneFixture = /^\+(?:1?(?:\d{3})?555\d{4}|1555\d+|1111111\d*|1?0{6,}\d*|1234567890|0+|44770[09]\d{6}|99990{0,4}\d+|1415555\d+|1999900\d+|1?5184194479|1?8459780919)$/;
+const allowedPhoneFixture = /^\+(?:1?(?:\d{3})?555\d{4}|1555\d+|1111111\d*|1?0{6,}\d*|1234567890|0+|44770[09]\d{6}|99990{0,4}\d+|1415555\d+|1999900\d+|1?5551230008|1?5551230006)$/;
 // Twilio Account SID fixtures: all-zero / repeated-char placeholder bodies.
 const allowedTwilioSidFixture = /^AC(?:0{32}|x{32}|X{32}|(?:0123456789abcdef){2})$/;
 // Provider-key fixtures: explicit test/mock/fake/example markers within the token.
@@ -196,7 +196,7 @@ const addedLinePatterns: GuardPattern[] = [
   {
     code: 'whatsapp-group-jid',
     message: 'Public repo text must not include real-shaped WhatsApp group JIDs.',
-    regex: /\b(?!120363555555555000@g\.us\b)120363\d{6,}@g\.us\b/,
+    regex: /\b(?!12036355555555[0-9]{4}@g\.us\b)120363\d{6,}@g\.us\b/,
   },
   {
     code: 'whatsapp-user-jid',

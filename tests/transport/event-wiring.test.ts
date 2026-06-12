@@ -64,7 +64,7 @@ function makeMockSocket() {
     sendMessage: vi.fn(),
     end: vi.fn(),
     user: {
-      id: '18455943112:1@s.whatsapp.net',
+      id: '15551230004:1@s.whatsapp.net',
       lid: '81536414179557:2@lid',
       name: 'WhatSoup',
     },
@@ -176,13 +176,13 @@ describe('event wiring', () => {
       emit({
         'lid-mapping.update': {
           lid: '81536414179557:2@lid',
-          pn: '18455943112@s.whatsapp.net',
+          pn: '15551230004@s.whatsapp.net',
         },
       });
 
       expect(handler).toHaveBeenCalledWith(
         '81536414179557', // conversationKey from LID
-        '18455943112@s.whatsapp.net', // phone number JID
+        '15551230004@s.whatsapp.net', // phone number JID
       );
     });
 
@@ -191,7 +191,7 @@ describe('event wiring', () => {
       cm.on('jidAliasChanged', handler);
 
       emit({ 'lid-mapping.update': { lid: '81536414179557:2@lid' } });
-      emit({ 'lid-mapping.update': { pn: '18455943112@s.whatsapp.net' } });
+      emit({ 'lid-mapping.update': { pn: '15551230004@s.whatsapp.net' } });
       emit({ 'lid-mapping.update': {} });
 
       expect(handler).not.toHaveBeenCalled();

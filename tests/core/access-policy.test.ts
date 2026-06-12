@@ -12,13 +12,13 @@ import type { IncomingMessage } from '../../src/core/types.ts';
 // Test constants
 // ---------------------------------------------------------------------------
 
-const BOT_JID = '18455943112@s.whatsapp.net';
+const BOT_JID = '15551230004@s.whatsapp.net';
 const BOT_LID = '81536414179557@lid';
-const BOT_PHONE = '18455943112';
+const BOT_PHONE = '15551230004';
 const BOT_LID_NUM = '81536414179557';
 
 const ALLOWED_ADMIN = '15550100001';
-const ALLOWED_USER = '15184194479';
+const ALLOWED_USER = '15551230008';
 const BLOCKED_USER = '19999999999';
 const PENDING_USER = '18888888888';
 const UNKNOWN_USER = '17777777777';
@@ -123,7 +123,7 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
 
 describe('extractLocal', () => {
   it('strips @s.whatsapp.net suffix', () => {
-    expect(extractLocal('15184194479@s.whatsapp.net')).toBe('15184194479');
+    expect(extractLocal('15551230008@s.whatsapp.net')).toBe('15551230008');
   });
 
   it('strips @lid suffix', () => {
@@ -131,7 +131,7 @@ describe('extractLocal', () => {
   });
 
   it('returns plain phone unchanged when no @ present', () => {
-    expect(extractLocal('15184194479')).toBe('15184194479');
+    expect(extractLocal('15551230008')).toBe('15551230008');
   });
 
   it('handles colon-device suffix in LID format', () => {
@@ -703,7 +703,7 @@ describe('sibling bot filter', () => {
 // ---------------------------------------------------------------------------
 
 describe('LID resolver', () => {
-  const ADMIN_PHONE = '18455880337';
+  const ADMIN_PHONE = '15551230007';
   const ADMIN_LID_NUM = '31478083756155';
   const NON_ADMIN_LID_NUM = '99999999999999';
 

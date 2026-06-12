@@ -160,29 +160,29 @@ Data-only fix. No code changes, no tests — just DELETE a row from two SQLite d
 
 ```bash
 sqlite3 ~/.local/share/whatsoup/instances/besbot/bot.db \
-  "SELECT * FROM access_list WHERE subject_type='group' AND subject_id='120363406689931730@g.us';"
+  "SELECT * FROM access_list WHERE subject_type='group' AND subject_id='120363555555555001@g.us';"
 sqlite3 ~/.local/share/whatsoup/instances/shandroid/bot.db \
-  "SELECT * FROM access_list WHERE subject_type='group' AND subject_id='120363406689931730@g.us';"
+  "SELECT * FROM access_list WHERE subject_type='group' AND subject_id='120363555555555001@g.us';"
 ```
 
-Expected: Both return `group|120363406689931730@g.us|allowed|WHATSOUP|...`
+Expected: Both return `group|120363555555555001@g.us|allowed|WHATSOUP|...`
 
 - [ ] **Step 2: Delete the rows**
 
 ```bash
 sqlite3 ~/.local/share/whatsoup/instances/besbot/bot.db \
-  "DELETE FROM access_list WHERE subject_type='group' AND subject_id='120363406689931730@g.us';"
+  "DELETE FROM access_list WHERE subject_type='group' AND subject_id='120363555555555001@g.us';"
 sqlite3 ~/.local/share/whatsoup/instances/shandroid/bot.db \
-  "DELETE FROM access_list WHERE subject_type='group' AND subject_id='120363406689931730@g.us';"
+  "DELETE FROM access_list WHERE subject_type='group' AND subject_id='120363555555555001@g.us';"
 ```
 
 - [ ] **Step 3: Verify deletion**
 
 ```bash
 sqlite3 ~/.local/share/whatsoup/instances/besbot/bot.db \
-  "SELECT COUNT(*) FROM access_list WHERE subject_type='group' AND subject_id='120363406689931730@g.us';"
+  "SELECT COUNT(*) FROM access_list WHERE subject_type='group' AND subject_id='120363555555555001@g.us';"
 sqlite3 ~/.local/share/whatsoup/instances/shandroid/bot.db \
-  "SELECT COUNT(*) FROM access_list WHERE subject_type='group' AND subject_id='120363406689931730@g.us';"
+  "SELECT COUNT(*) FROM access_list WHERE subject_type='group' AND subject_id='120363555555555001@g.us';"
 ```
 
 Expected: Both return `0`.
@@ -236,8 +236,8 @@ describe('per_chat proactive resume — group suppression (AE1)', () => {
 
     const mockDurability = {
       getResumableCheckpoints: vi.fn(() => [
-        { conversation_key: '120363406689931730_at_g.us', claude_pid: null, session_status: 'active' },
-        { conversation_key: '18459780919', claude_pid: null, session_status: 'active' },
+        { conversation_key: '120363555555555001_at_g.us', claude_pid: null, session_status: 'active' },
+        { conversation_key: '15551230006', claude_pid: null, session_status: 'active' },
       ]),
       getSessionCheckpoint: vi.fn((key: string) => ({
         session_id: 'sess-' + key.slice(0, 8),
@@ -254,7 +254,7 @@ describe('per_chat proactive resume — group suppression (AE1)', () => {
 
     // Group checkpoint should be marked ended, NOT resumed
     expect(mockDurability.upsertSessionCheckpoint).toHaveBeenCalledWith(
-      '120363406689931730_at_g.us',
+      '120363555555555001_at_g.us',
       { sessionStatus: 'ended' },
     );
 
@@ -268,7 +268,7 @@ describe('per_chat proactive resume — group suppression (AE1)', () => {
 
     const mockDurability = {
       getResumableCheckpoints: vi.fn(() => [
-        { conversation_key: '49079279169655', claude_pid: null, session_status: 'active' },
+        { conversation_key: '11111110000008', claude_pid: null, session_status: 'active' },
       ]),
       getSessionCheckpoint: vi.fn(() => ({
         session_id: 'sess-dm-lid',
@@ -283,7 +283,7 @@ describe('per_chat proactive resume — group suppression (AE1)', () => {
 
     // DM checkpoint should NOT be marked ended
     expect(mockDurability.upsertSessionCheckpoint).not.toHaveBeenCalledWith(
-      '49079279169655',
+      '11111110000008',
       expect.objectContaining({ sessionStatus: 'ended' }),
     );
     // Session should be spawned
@@ -369,7 +369,7 @@ describe('shared/single mode resume — staleness + group guard (AE2)', () => {
     // Mock getActiveSession to return a stale session
     const mockGetActiveSession = vi.fn(() => ({
       id: 1, session_id: 'stale-sess', claude_pid: 999, status: 'active',
-      chat_jid: '18459780919@s.whatsapp.net', started_at: staleTime,
+      chat_jid: '15551230006@s.whatsapp.net', started_at: staleTime,
       last_message_at: staleTime, message_count: 5,
     }));
     vi.mocked(await import('../../../src/runtimes/agent/session-db.ts')).getActiveSession = mockGetActiveSession;
@@ -394,7 +394,7 @@ describe('shared/single mode resume — staleness + group guard (AE2)', () => {
 
     const mockGetActiveSession = vi.fn(() => ({
       id: 1, session_id: 'shared-sess', claude_pid: 999, status: 'active',
-      chat_jid: '120363406689931730@g.us', started_at: freshTime,
+      chat_jid: '120363555555555001@g.us', started_at: freshTime,
       last_message_at: freshTime, message_count: 3,
     }));
     vi.mocked(await import('../../../src/runtimes/agent/session-db.ts')).getActiveSession = mockGetActiveSession;
@@ -528,17 +528,17 @@ describe('echo-guard', () => {
   });
 
   it('allows first send to a group', () => {
-    expect(canSendToGroup('120363406689931730@g.us', DEFAULT_CFG)).toBe(true);
+    expect(canSendToGroup('120363555555555001@g.us', DEFAULT_CFG)).toBe(true);
   });
 
   it('blocks second send within cooldown window', () => {
-    const jid = '120363406689931730@g.us';
+    const jid = '120363555555555001@g.us';
     recordGroupOutbound(jid);
     expect(canSendToGroup(jid, DEFAULT_CFG)).toBe(false);
   });
 
   it('allows send after cooldown expires', () => {
-    const jid = '120363406689931730@g.us';
+    const jid = '120363555555555001@g.us';
     const cfg: EchoGuardConfig = { enabled: true, groupCooldownMs: 10 }; // 10ms for test
     recordGroupOutbound(jid);
 
@@ -552,19 +552,19 @@ describe('echo-guard', () => {
   });
 
   it('always allows DM sends regardless of cooldown', () => {
-    const dmJid = '18459780919@s.whatsapp.net';
+    const dmJid = '15551230006@s.whatsapp.net';
     recordGroupOutbound(dmJid); // shouldn't matter
     expect(canSendToGroup(dmJid, DEFAULT_CFG)).toBe(true);
   });
 
   it('always allows LID DM sends', () => {
-    const lidJid = '49079279169655@lid';
+    const lidJid = '11111110000008@lid';
     recordGroupOutbound(lidJid);
     expect(canSendToGroup(lidJid, DEFAULT_CFG)).toBe(true);
   });
 
   it('allows all sends when disabled', () => {
-    const jid = '120363406689931730@g.us';
+    const jid = '120363555555555001@g.us';
     const cfg: EchoGuardConfig = { enabled: false, groupCooldownMs: 60_000 };
     recordGroupOutbound(jid);
     expect(canSendToGroup(jid, cfg)).toBe(true);
@@ -580,7 +580,7 @@ describe('echo-guard', () => {
   });
 
   it('__resetForTests clears all cooldown state', () => {
-    const jid = '120363406689931730@g.us';
+    const jid = '120363555555555001@g.us';
     recordGroupOutbound(jid);
     expect(canSendToGroup(jid, DEFAULT_CFG)).toBe(false);
     __resetForTests();
