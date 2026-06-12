@@ -92,8 +92,8 @@ const ChatList: FC<ChatListProps> = ({ chats, selectedChat, onSelect, typingKeys
         aria-multiselectable="false"
         className="flex-1 overflow-auto scrollbar-hide"
       >
-        <div className="text-center text-t4 py-[var(--sp-8)] px-[var(--sp-4)]">
-          <span className="text-body">No chats found</span>
+        <div className="text-center py-[var(--sp-8)] px-[var(--sp-4)]">
+          <span className="c-body">No chats found</span>
         </div>
       </div>
     )
