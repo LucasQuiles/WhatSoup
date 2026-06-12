@@ -104,3 +104,16 @@ Test-integrity: 5 weak terminal assertions found by `verify:push:branch` were st
 | DD-22 | **NEW** — LogStream virtualization/live-tail deferred until a streaming log source exists (P3, non-blocking) |
 
 ## Verdict: **PASS.** Next slice: B1 (LineDetail — raw buttons, tabs keyboard DD-21r, header overflow DD-18r leg, SummaryTab health map DD-11).
+
+## Final state at acceptance
+
+`feat/soup-v3-foundation` clean, ahead of origin/main with behind 0 after FIVE mid-slice
+origin merges (last: #747–#749). Final battery at acceptance: **1,888/1,888 tests**
+(+10 from main-side console work), lint, both typechecks, build, parity 101, ratchet
+602 ceiling with the ProvidersKeysCard bucket falling 8→7 (`cbd72a64` converted the
+merge-introduced legacy refs to semantic tokens at the style-value sites; the className
+site keeps the file-local idiom because no semantic ink utility is registered yet —
+that registration belongs to the legacy-token migration, not this slice),
+`verify:push:branch` PASS. Live QA evidence: three browser rounds recorded above
+(session caches under the superpowers browser session dirs; observations are the
+durable record per qa-hardening fallback rule).
