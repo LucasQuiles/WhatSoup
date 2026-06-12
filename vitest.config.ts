@@ -30,6 +30,9 @@ export default defineConfig({
   },
   test: {
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
+    // Exclude the browser-mode subtree so jsdom/node runs do not pick it up.
+    // tests/browser/** runs only via vitest.browser.config.ts (npm run test:browser).
+    exclude: ['tests/browser/**'],
     testTimeout: 10_000,
     coverage: {
       provider: 'v8',
