@@ -2,3 +2,16 @@
 set -e
 
 node --experimental-strip-types scripts/pre-push-guard.ts
+
+# design:metrics — report-only metrics emitter.
+# Blocking only for expired waivers (deterministic, zero FP surface) and malformed
+# input files (fail-closed scanner policy). Drift and regression counts are informational.
+# d6-investigation.md §C: design:metrics in pre-push as report-only except past-expiry check.
+if [ -f console/node_modules/.bin/eslint ]; then
+  npm --prefix console run design:metrics || {
+    echo "design:metrics exited nonzero (expired waivers or parse error -- see output above)" >&2
+    exit 1
+  }
+else
+  echo "console/node_modules not installed; skipping design:metrics (run: cd console && npm ci)" >&2
+fi

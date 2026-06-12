@@ -17,7 +17,8 @@
     "preview": "vite preview",
     "prepare": "husky",
     "design:theme-parity": "node scripts/check-theme-parity.mjs",
-    "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs"
+    "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs",
+    "design:metrics": "node scripts/design-metrics.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "5.96.0",

@@ -25,8 +25,24 @@ CONSOLE_DIR="$REPO_ROOT/console"
 
 # Checks marked EXIT_ON_FAIL will cause a non-zero exit if they find unexpected results.
 # At shadow stage: empty array (all report-only).
-# Add check numbers here as rules promote to CI-blocking (e.g. 9 10 14 15).
-EXIT_ON_FAIL=()
+# Promoted checks (D6 packet §10 rollback table, commit 3):
+#   - Check 1: tightened hex pattern correct (no false-positive decimal IDs); zero real hex
+#               colors verified live; promotes FAIL on any real color leak.
+#   - Check 2: live PASS (zero rgb()/hsl() in components/pages/lib); fail path real.
+#   - Check 6: live PASS (split wordmark ">What<...>Soup<" absent); fail path real.
+#   - Check 8: fixed to assert exact title content (was vacuous); FAIL on title drift.
+#   - Check 10: live PASS (all three protected contracts present); FAIL on deletion.
+#   - Check 13: live PASS (exactly 5 infinite occurrences, all sanctioned/waivered); FAIL on new.
+#   - Check 14: live PASS (no expired waivers); deterministic date check, zero FP surface.
+#   - Check 16: live PASS (zero legacy lane vars); FAIL on reintroduction.
+# Immature checks remaining report-only (d6-investigation.md §5):
+#   - Checks 3,4: post-P2 gate (alias-layer not complete).
+#   - Checks 5,7: post-P4 gate (copy flip not landed).
+#   - Check 9: theme-parity promoted via design:theme-parity path.
+#   - Check 11: utility-smell; warn-on-changed-files ceiling only.
+#   - Check 12: focus-suppression carve-out (B4 wave composers).
+#   - Check 15: waiver-tag hygiene; WARN non-blocking.
+EXIT_ON_FAIL=(1 2 6 8 10 13 14 16)
 
 FAILED_CHECKS=()
 PASS=0
@@ -329,7 +345,7 @@ C13_UNSANCTIONED=$((C13_COUNT - 5))
 if [ "$C13_UNSANCTIONED" -le 0 ]; then
   check_result "13" "$C13_COUNT" "all $C13_COUNT occurrences are waivered/sanctioned" "OK"
 else
-  check_result "13" "$C13_COUNT" "$C13_UNSANCTIONED unsanctioned infinite animations" "WARN"
+  check_result "13" "$C13_COUNT" "$C13_UNSANCTIONED unsanctioned infinite animations" "FAIL"
 fi
 
 # ---------------------------------------------------------------------------
@@ -395,7 +411,7 @@ echo "    Expectation: zero (Table squeeze + LogStream lane tokens own geometry)
 if [ "$C16_COUNT" -eq 0 ]; then
   check_result "16" "0" "no legacy lane vars" "OK"
 else
-  check_result "16" "$C16_COUNT" "legacy lane vars reintroduced (shadow: non-blocking)" "WARN"
+  check_result "16" "$C16_COUNT" "legacy lane vars reintroduced" "FAIL"
 fi
 
 # ---------------------------------------------------------------------------
@@ -406,14 +422,13 @@ echo "  SUMMARY"
 echo "----------------------------------------"
 echo "  Checks passed:  $PASS"
 echo "  Checks warned:  $WARN"
-echo "  Shadow stage:   all REPORT-ONLY (exit 0)"
 echo ""
 
 if [ "${#FAILED_CHECKS[@]}" -gt 0 ] 2>/dev/null; then
   echo "  BLOCKING checks failed: ${FAILED_CHECKS[*]}"
-  echo "  (These are promoted to CI-blocking; fix before pushing.)"
+  echo "  (Fix before pushing.)"
   exit 1
 else
-  echo "  Report-only baseline: no checks are promoted to blocking yet (EXIT_ON_FAIL is empty)."
+  echo "  Blocking checks: ${EXIT_ON_FAIL[*]} (all PASS)"
   exit 0
 fi
