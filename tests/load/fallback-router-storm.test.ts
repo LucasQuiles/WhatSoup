@@ -172,7 +172,7 @@ describe('fallback router storm harness', () => {
     vi.useRealTimers();
   });
 
-  it('collapses a replay storm to one automatic replay for the fallback episode', () => {
+  it('collapses a replay storm to one automatic replay for the fallback episode', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     v.replayTurnOnFallback = vi.fn(async () => {});
@@ -195,9 +195,18 @@ describe('fallback router storm harness', () => {
     expect(results.filter(Boolean)).toHaveLength(1);
     expect(v.replayTurnOnFallback).toHaveBeenCalledTimes(1);
     expect(alertsFor('provider_fallback_activated')).toHaveLength(1);
-    expect(alertsFor('provider_fallback_replayed')).toHaveLength(1);
+    // Completion semantics: the replayed alert reports a COMPLETED replay,
+    // so nothing is emitted at dispatch time...
+    expect(alertsFor('provider_fallback_replayed')).toHaveLength(0);
+    expect(v.getFallbackState().fallbackReplays).toBe(0);
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(0);
     expect(alertsFor('runtime_provider_fallback_replay_failed')).toHaveLength(0);
+
+    // ...and the single collapsed replay yields exactly one alert once it
+    // resolves — still one per episode under storm load. Flush microtasks
+    // only (runAllTimers would fire the revert timer early).
+    await vi.advanceTimersByTimeAsync(0);
+    expect(alertsFor('provider_fallback_replayed')).toHaveLength(1);
 
     const active = v.getFallbackState();
     expect(active.fallbackActivations).toBe(1);

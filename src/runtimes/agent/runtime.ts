@@ -1426,8 +1426,9 @@ export class AgentRuntime implements Runtime {
   private fallbackLastProbeAt: number | null = null;
   // Lifetime-of-process transition totals (countable report fields for the
   // expensive fallback paths — never just logs). Activations count first arms
-  // only (extensions excluded), reverts count deactivations of an active
-  // window, replays count successful continue-on-fallback replay dispatches.
+  // only (extensions and post-restart restores excluded), reverts count
+  // deactivations of an active window, replays count COMPLETED
+  // continue-on-fallback replays (failed replays count nothing here).
   private fallbackActivations = 0;
   private fallbackReverts = 0;
   private fallbackReplays = 0;
@@ -5853,8 +5854,9 @@ export class AgentRuntime implements Runtime {
 
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,
    *  and persist best-effort so a restart mid-window resumes on fallback.
-   *  Pass `activatedAt` explicitly when restoring to preserve the original time. */
-  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now()): void {
+   *  Pass `activatedAt` explicitly when restoring to preserve the original
+   *  time, and `opts.restored` so a resumed window is not re-counted. */
+  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): void {
     const selection = this.selectFallbackEntryForWindow();
     if (!selection) return;
     const fallbackEntry = selection.entry;
@@ -5864,16 +5866,21 @@ export class AgentRuntime implements Runtime {
     // Preserve original cause: only set on first arm; extensions and restores
     // must pass the original reason so it is not overwritten. The null-guard
     // doubles as the first-arm discriminator: the activation alert + counter
-    // fire exactly once per window, never on extensions.
+    // fire exactly once per window, never on extensions. A restored window
+    // is the SAME window resuming after a restart — the null-guard is
+    // per-process, so without the restored flag every restart would re-count
+    // and re-alert the activation that already fired before the restart.
     if (this.fallbackArmReason === null) {
       this.fallbackArmReason = reason;
-      this.fallbackActivations += 1;
-      emitAlert(
-        this.instanceName,
-        'provider_fallback_activated',
-        'Provider fallback window activated',
-        `reason=${reason} provider=${fallbackEntry.provider} model=${fallbackEntry.model ?? 'default'} until=${new Date(until).toISOString()}`,
-      );
+      if (!opts?.restored) {
+        this.fallbackActivations += 1;
+        emitAlert(
+          this.instanceName,
+          'provider_fallback_activated',
+          'Provider fallback window activated',
+          `reason=${reason} provider=${fallbackEntry.provider} model=${fallbackEntry.model ?? 'default'} until=${new Date(until).toISOString()}`,
+        );
+      }
     }
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -6016,9 +6023,10 @@ export class AgentRuntime implements Runtime {
       // Clamp the restored window so a clock-skew or tampered row cannot pin
       // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
       const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
-      // Pass persisted.reason so the original cause survives the restart.
-      // 'restored' is already captured in the log line below.
-      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt);
+      // Pass persisted.reason so the original cause survives the restart, and
+      // restored:true so the resumed window is not re-counted/re-alerted —
+      // provider_fallback_activated already fired when the window first armed.
+      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
       const wasClamped = clampedUntil < persisted.activeUntil;
       log.info({
         activeUntil: new Date(clampedUntil).toISOString(),
@@ -6377,20 +6385,28 @@ export class AgentRuntime implements Runtime {
       : this.currentTurnReplayActorJid;
 
     // Past every gate: the replay dispatches. Once-per-activation by the
-    // extended-guard above (extensions never reach this point).
-    this.fallbackReplays += 1;
-    emitAlert(
-      this.instanceName,
-      'provider_fallback_replayed',
-      'Interrupted turn replayed on fallback provider',
-      `reason=${args.activation.reason} provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'}`,
-    );
+    // extended-guard above (extensions never reach this point). The replayed
+    // counter + alert report a COMPLETED replay, so they fire only after the
+    // dispatch resolves — emitting before the await meant a rejected replay
+    // produced success AND failure telemetry for the same turn.
+    // Known limitation: sendTurnToSession swallows STDIN_WRITE_TIMEOUT
+    // (notifies the user, resolves normally), so that delivery failure still
+    // lands in the success branch here — fixing it means changing
+    // sendTurnToSession's contract for ALL callers, tracked separately.
     void this.replayTurnOnFallback({
       chatJid: args.chatJid,
       mapKey: args.mapKey,
       replayText,
       actorJid,
       oldSession: args.oldSession,
+    }).then(() => {
+      this.fallbackReplays += 1;
+      emitAlert(
+        this.instanceName,
+        'provider_fallback_replayed',
+        'Interrupted turn replayed on fallback provider',
+        `reason=${args.activation.reason} provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'}`,
+      );
     }).catch((err) => {
       log.error({
         err,
