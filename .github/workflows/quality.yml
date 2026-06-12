@@ -110,6 +110,9 @@ jobs:
       - name: Agent decision polls guard
         run: npm run guard:agent-decision-polls
 
+      - name: Safeguard diagnostics
+        run: npm run guard:safeguard-diagnostics
+
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks
 

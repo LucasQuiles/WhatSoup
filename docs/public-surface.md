@@ -270,6 +270,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
 | `cli:npm.guard-agent-decision-polls` | `npm run guard:agent-decision-polls` | `package.json` | stable | active | Verify AskUser poll protocol wiring across prompts, MCP schema, sandbox diagnostics, docs, and release gates |
+| `cli:npm.guard-safeguard-diagnostics` | `npm run guard:safeguard-diagnostics` | `package.json` | stable | active | Deterministic diagnostic map for guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers |
 | `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when the plugin is absent only outside CI |
 | `cli:npm.guard-lint-src` | `npm run guard:lint:src` | `package.json` | stable | active | ESLint architectural-fitness ring over src/scripts/tests; warns (non-blocking), fails only on errors/config faults |
 | `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |
