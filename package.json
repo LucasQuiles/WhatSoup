@@ -38,6 +38,8 @@
     "guard:source-runtime-drift": "node --experimental-strip-types scripts/source-runtime-drift-check.ts",
     "guard:node-pin-consistency": "node --experimental-strip-types scripts/check-node-pin-consistency.ts",
     "guard:instance-config": "node --experimental-strip-types scripts/check-instance-config.ts",
+    "guard:fail-closed-gate": "node --experimental-strip-types scripts/fail-closed-gate-guard.ts",
+    "guard:service-units": "node --experimental-strip-types scripts/check-service-units.ts",
     "guard:claude-settings": "node --experimental-strip-types scripts/claude-settings-guard.ts --check",
     "guard:agent-decision-polls": "node --experimental-strip-types scripts/agent-decision-polls-guard.ts",
     "guard:safeguard-diagnostics": "node --experimental-strip-types scripts/safeguard-diagnostics.ts",
