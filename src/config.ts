@@ -8,6 +8,7 @@ import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
 import { DEFAULT_FLEET_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
+import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -804,6 +805,9 @@ const resolvedTwilioConfig: TwilioSmsConfig | undefined =
     ? resolveTwilioSmsConfig(instance?.twilioConfig as Record<string, unknown>)
     : undefined;
 
+const resolvedAgentOptions = (instance?.agentOptions as Record<string, unknown> | undefined) ?? {};
+const resolvedFallbacks = normalizeFallbackEntriesFromAgentOptions(resolvedAgentOptions);
+
 export const config = {
   // Identity
   botName: (instance?.name as string | undefined) ?? 'Loops',
@@ -966,15 +970,16 @@ export const config = {
 
   // Agent provider selection — read from agentOptions.provider / agentOptions.providerConfig
   // Defaults to 'claude-cli' for backward compatibility when not specified.
-  agentProvider: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['provider'] as string | undefined) ?? 'claude-cli',
-  agentProviderConfig: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
+  agentProvider: (resolvedAgentOptions['provider'] as string | undefined) ?? 'claude-cli',
+  agentProviderConfig: (resolvedAgentOptions['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
 
-  // Automatic provider fallback — read from agentOptions.fallbackProvider /
-  // agentOptions.fallbackModel. When the primary provider hits a usage limit,
-  // new sessions are routed to the fallback provider until the limit resets.
-  // Undefined disables fallback (the default).
-  agentFallbackProvider: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['fallbackProvider'] as string | undefined) ?? undefined,
-  agentFallbackModel: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['fallbackModel'] as string | undefined) ?? undefined,
+  // Automatic provider fallback — read from agentOptions.fallbacks[] or the
+  // legacy agentOptions.fallbackProvider / fallbackModel pair. When the primary
+  // provider hits a usage limit, new sessions are routed to the selected
+  // fallback until the limit resets. An empty chain disables fallback.
+  agentFallbacks: resolvedFallbacks,
+  agentFallbackProvider: resolvedFallbacks[0]?.provider,
+  agentFallbackModel: resolvedFallbacks[0]?.model,
 
   // Voice (ElevenLabs TTS)
   elevenlabs: {

@@ -68,6 +68,7 @@ interface AgentRuntimeOpts {
   fallbackActiveUntil?: number | null;
   fallbackTurnsServed?: number;
   fallbackTurnsEmpty?: number;
+  fallbackChain?: Array<{ provider: string; model?: string; eligible: boolean }>;
 }
 
 function makeAgentRuntime(opts: AgentRuntimeOpts = {}): Runtime {
@@ -81,6 +82,7 @@ function makeAgentRuntime(opts: AgentRuntimeOpts = {}): Runtime {
     fallbackTurnsServed: opts.fallbackTurnsServed ?? 3,
     fallbackTurnsEmpty: opts.fallbackTurnsEmpty ?? 1,
     lastFallbackTurnAt: null as number | null,
+    ...(opts.fallbackChain ? { fallbackChain: opts.fallbackChain } : {}),
   };
 
   return {
@@ -238,5 +240,21 @@ describe('handleFallbackCommand -- FALLBACK STATUS window readability', () => {
     const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
     // At or above 90m → hours format
     expect(reply).toMatch(/≈\d+(\.\d+)?h/);
+  });
+
+  it('includes ordered fallback chain readiness when available', async () => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    const runtime = makeAgentRuntime({
+      effectiveProvider: 'openai-api',
+      fallbackChain: [
+        { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', eligible: false },
+        { provider: 'openai-api', model: 'gpt-4o-mini', eligible: true },
+      ],
+    });
+
+    await handleFallbackCommand(runtime, messenger, statusCmd, ADMIN_CHAT_JID);
+
+    const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
+    expect(reply).toContain('chain: opencode-cli minimax/MiniMax-M2 (unavailable) -> openai-api gpt-4o-mini (ready)');
   });
 });

@@ -18,6 +18,7 @@
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { resolveAgentModel } from './agent-model.ts';
+import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
@@ -447,6 +448,61 @@ function validateAgentOptions(
         'agentOptions.provider',
         `agentOptions.provider must be one of: ${PROVIDER_IDS.join(', ')}`,
       );
+    }
+  }
+
+  if (opts['fallbacks'] !== undefined) {
+    if (opts['fallbackProvider'] !== undefined || opts['fallbackModel'] !== undefined) {
+      return err(
+        'agentOptions.fallbacks',
+        'agentOptions.fallbacks cannot be combined with agentOptions.fallbackProvider or agentOptions.fallbackModel',
+      );
+    }
+    if (!Array.isArray(opts['fallbacks'])) {
+      return err('agentOptions.fallbacks', 'agentOptions.fallbacks must be an array when provided');
+    }
+    const fallbacks = opts['fallbacks'] as unknown[];
+    if (fallbacks.length > 4) {
+      return err('agentOptions.fallbacks', 'agentOptions.fallbacks may contain at most 4 entries');
+    }
+    const seen = new Set<string>();
+    for (let i = 0; i < fallbacks.length; i++) {
+      const rawEntry = fallbacks[i];
+      const field = `agentOptions.fallbacks[${i}]`;
+      if (!isRecord(rawEntry)) {
+        return err(field, `${field} must be an object`);
+      }
+      const provider = rawEntry['provider'];
+      if (
+        typeof provider !== 'string' ||
+        !(PROVIDER_IDS as readonly string[]).includes(provider)
+      ) {
+        return err(
+          `${field}.provider`,
+          `${field}.provider must be one of: ${PROVIDER_IDS.join(', ')}`,
+        );
+      }
+      const model = rawEntry['model'];
+      if (model !== undefined && (typeof model !== 'string' || model.trim() === '')) {
+        return err(`${field}.model`, `${field}.model must be a non-empty string when provided`);
+      }
+      if (API_PROVIDER_IDS.has(provider) && model === undefined) {
+        return err(
+          `${field}.model`,
+          `${field}.provider "${provider}" is an API provider and requires model to be set`,
+        );
+      }
+      const entry: AgentFallbackEntry = typeof model === 'string'
+        ? { provider, model: model.trim() }
+        : { provider };
+      const key = fallbackEntryKey(entry);
+      if (seen.has(key)) {
+        return err(field, `${field} duplicates an earlier fallback entry`);
+      }
+      seen.add(key);
+      if (isSameAsPrimaryFallbackEntry(entry, raw)) {
+        return err(field, `${field} matches the primary provider/model pair`);
+      }
     }
   }
 
