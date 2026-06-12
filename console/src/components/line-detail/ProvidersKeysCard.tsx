@@ -1,7 +1,8 @@
-import { type FC } from 'react'
+import { type FC, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { KeyRound, ShieldOff, ShieldCheck, Zap } from 'lucide-react'
 import { useProviders, useProviderStatus } from '../../hooks/use-fleet'
+import { formatRelative } from '../../lib/format-time'
 import { getProvider } from '../../lib/providers'
 import type { ProviderCatalogEntry, ProviderSlotStatus } from '../../types'
 
@@ -10,9 +11,9 @@ import type { ProviderCatalogEntry, ProviderSlotStatus } from '../../types'
  * format-time.ts only models past timestamps ("Xm ago"), so the fallback
  * countdown is formatted locally here.
  */
-function formatRevertIn(activeUntil: number | null): string {
+function formatRevertIn(activeUntil: number | null, now: number): string {
   if (activeUntil === null) return 'soon'
-  const remainingMs = activeUntil - Date.now()
+  const remainingMs = activeUntil - now
   if (remainingMs <= 0) return 'now'
   const s = Math.floor(remainingMs / 1000)
   if (s < 60) return `in ${s}s`
@@ -20,6 +21,11 @@ function formatRevertIn(activeUntil: number | null): string {
   if (m < 60) return `in ${m}m`
   const h = Math.floor(m / 60)
   return `in ${h}h`
+}
+
+function formatLastFallbackTurnAt(lastFallbackTurnAt: number | null): string | null {
+  if (lastFallbackTurnAt === null || !Number.isFinite(lastFallbackTurnAt)) return null
+  return `last turn ${formatRelative(new Date(lastFallbackTurnAt).toISOString())}`
 }
 
 /**
@@ -83,6 +89,33 @@ const SlotRow: FC<{
 export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
   const { data: status, isLoading, error } = useProviderStatus(lineName)
   const { data: catalog } = useProviders()
+  const [now, setNow] = useState(() => Date.now())
+
+  const fallbackServerActive = !!status && status.lineReachable && status.fallback.active
+  const fallbackActiveUntil = status?.fallback.activeUntil ?? null
+  const fallbackActive = fallbackServerActive && (fallbackActiveUntil === null || now < fallbackActiveUntil)
+
+  useEffect(() => {
+    if (!fallbackActive) return
+    const refresh = setTimeout(() => setNow(Date.now()), 0)
+    const expiry = fallbackActiveUntil === null
+      ? null
+      : setTimeout(() => setNow(Date.now()), Math.max(0, fallbackActiveUntil - Date.now()))
+    const timer = setInterval(() => setNow(Date.now()), 30_000)
+    return () => {
+      clearTimeout(refresh)
+      if (expiry !== null) clearTimeout(expiry)
+      clearInterval(timer)
+    }
+  }, [fallbackActive, fallbackActiveUntil])
+
+  const fallbackMetrics = status?.fallback.provider
+    ? [
+        typeof status.fallback.turnsServed === 'number' ? `${status.fallback.turnsServed} served` : null,
+        typeof status.fallback.turnsEmpty === 'number' ? `${status.fallback.turnsEmpty} empty` : null,
+        formatLastFallbackTurnAt(status.fallback.lastFallbackTurnAt),
+      ].filter((value): value is string => value !== null)
+    : []
 
   return (
     <motion.div
@@ -102,18 +135,25 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
         ) : (
           <>
             <SlotRow label="primary" slot={status.primary} catalog={catalog} border />
-            <SlotRow label="fallback" slot={status.fallback} catalog={catalog} border={status.fallback.active} />
+            <SlotRow label="fallback" slot={status.fallback} catalog={catalog} border={fallbackActive} />
             {status.fallback.provider ? (
-              status.fallback.active ? (
+              fallbackActive ? (
                 <div className="flex items-center gap-[var(--sp-1h)] pt-[var(--sp-2)] text-s-warn text-sm">
                   <Zap size={13} strokeWidth={1.75} />
-                  <span>Fallback active — reverts {formatRevertIn(status.fallback.activeUntil)}</span>
+                  <span>Fallback active — reverts {formatRevertIn(status.fallback.activeUntil, now)}</span>
                 </div>
               ) : (
                 <div className="text-t4 pt-[var(--sp-2)] text-sm">fallback configured</div>
               )
             ) : (
               <div className="text-t4 pt-[var(--sp-2)] text-sm">no fallback</div>
+            )}
+            {fallbackMetrics.length > 0 && (
+              <div className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-t4 text-xs font-mono">
+                {fallbackMetrics.map((metric) => (
+                  <span key={metric}>{metric}</span>
+                ))}
+              </div>
             )}
           </>
         )}

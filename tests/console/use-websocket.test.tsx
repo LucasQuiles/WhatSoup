@@ -423,7 +423,7 @@ describe('RealtimeProvider — message handling', () => {
     expect(qc.setQueryData).toHaveBeenCalledWith(['typing'], expect.any(Function));
   });
 
-  it('invalidates lines and lines/instance on instance_status events', async () => {
+  it('invalidates lines, lines/instance, and provider-status on instance_status events', async () => {
     const qc = buildQueryClient();
     const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
 
@@ -439,6 +439,7 @@ describe('RealtimeProvider — message handling', () => {
       .map((c) => (c[0] as { queryKey: unknown[] }).queryKey);
     expect(keys).toContainEqual(['lines']);
     expect(keys).toContainEqual(['lines', 'alpha']);
+    expect(keys).toContainEqual(['provider-status', 'alpha']);
   });
 
   it('invalidates messages/chats/search on message_received events', async () => {
