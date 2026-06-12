@@ -1,9 +1,20 @@
 /**
  * RelinkModal — open/close, ARIA, Escape, backdrop, listener cleanup.
+ * Updated for B3 wave-1 Modal migration (was: ad-hoc backdrop; now: Modal dismissable=true).
+ *
+ * Changes from pre-migration version:
+ *   - .c-dialog-backdrop → .soup-modal-backdrop (Modal portal class)
+ *   - Close button label Close → Close dialog (ModalHeader ActionButton)
+ *   - aria-labelledby: literal id check → resolution check (Modal auto-generates id)
+ *   - Backdrop dismissal: fireEvent.click → fireEvent.pointerDown (useDismissable contract)
+ *   - container.querySelector / container.childElementCount → screen / document queries (portal)
+ *   - NEW: focus restoration to opener; initial focus lands inside dialog
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { useState } from 'react'
+import type { FC } from 'react'
 
 vi.mock('../../console/src/components/wizard/LinkStep', () => ({
   __esModule: true,
@@ -22,15 +33,41 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+// ---------------------------------------------------------------------------
+// Fixture with trigger for focus-restoration tests
+// ---------------------------------------------------------------------------
+
+const RelinkFixture: FC<{ onClose?: () => void; onLinked?: () => void }> = ({
+  onClose,
+  onLinked = vi.fn(),
+}) => {
+  const [open, setOpen] = useState(false)
+  const close = () => {
+    setOpen(false)
+    onClose?.()
+  }
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        Re-link
+      </button>
+      <RelinkModal lineName="alpha" open={open} onClose={close} onLinked={onLinked} />
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Open/close gate
+// ---------------------------------------------------------------------------
+
 describe('RelinkModal open/close state', () => {
   it('renders nothing when open=false', () => {
-    const { container, queryByRole } = render(
+    render(
       <RelinkModal lineName="alpha" open={false} onClose={vi.fn()} onLinked={vi.fn()} />,
     )
 
-    expect(queryByRole('dialog')).toBeNull()
-    expect(container.querySelector('.c-dialog-backdrop')).toBeNull()
-    expect(container.childElementCount).toBe(0)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.querySelector('.soup-modal-backdrop')).toBeNull()
   })
 
   it('renders the dialog title and pairing content when open=true', () => {
@@ -40,19 +77,22 @@ describe('RelinkModal open/close state', () => {
 
     const dialog = screen.getByRole('dialog')
     expect(dialog.getAttribute('aria-modal')).toBe('true')
-    expect(dialog.getAttribute('aria-labelledby')).toBe('relink-dialog-title')
 
-    const title = screen.getByText('Re-link alpha')
-    expect(title.id).toBe('relink-dialog-title')
-    expect(dialog.contains(title)).toBe(true)
+    // aria-labelledby resolves to the element whose text is "Re-link alpha"
+    const labelledById = dialog.getAttribute('aria-labelledby')
+    expect(labelledById).toBeTruthy()
+    const titleEl = document.getElementById(labelledById!)
+    expect(titleEl).not.toBeNull()
+    expect(titleEl!.textContent).toBe('Re-link alpha')
 
-    const close = screen.getByLabelText('Close')
-    expect(close.tagName).toBe('BUTTON')
-    expect(dialog.contains(close)).toBe(true)
     expect(screen.getByRole('region', { name: 'Pairing instructions' })).toBeDefined()
     expect(screen.getByText('Scan the QR code to reconnect this WhatsApp line.')).toBeDefined()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Close affordances
+// ---------------------------------------------------------------------------
 
 describe('RelinkModal close affordances', () => {
   it('invokes onClose when the header close button is clicked', () => {
@@ -61,23 +101,26 @@ describe('RelinkModal close affordances', () => {
       <RelinkModal lineName="alpha" open={true} onClose={onClose} onLinked={vi.fn()} />,
     )
 
-    fireEvent.click(screen.getByLabelText('Close'))
+    // ModalHeader ActionButton label is "Close dialog" (not "Close")
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
-  it('invokes onClose when the backdrop is clicked as a cancel action', () => {
+  it('invokes onClose when the backdrop receives pointerdown (dismissable=true cancel action)', () => {
     const onClose = vi.fn()
-    const { container } = render(
+    render(
       <RelinkModal lineName="alpha" open={true} onClose={onClose} onLinked={vi.fn()} />,
     )
 
-    const backdrop = container.querySelector('.c-dialog-backdrop')
+    // Modal portals to document.body — use document.querySelector, not container
+    const backdrop = document.querySelector('.soup-modal-backdrop')
     expect(backdrop).not.toBeNull()
-    fireEvent.click(backdrop as Element)
+    // useDismissable listens on pointerdown (not click); fire the full sequence
+    fireEvent.pointerDown(backdrop as Element)
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
-  it('does not invoke onClose when the dialog body is clicked (stopPropagation)', () => {
+  it('does not invoke onClose when the dialog body is clicked', () => {
     const onClose = vi.fn()
     render(
       <RelinkModal lineName="alpha" open={true} onClose={onClose} onLinked={vi.fn()} />,
@@ -97,6 +140,10 @@ describe('RelinkModal close affordances', () => {
     expect(onLinked).toHaveBeenCalledTimes(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Keyboard handling
+// ---------------------------------------------------------------------------
 
 describe('RelinkModal keyboard handling', () => {
   it('calls onClose when Escape is pressed while open', () => {
@@ -148,5 +195,32 @@ describe('RelinkModal keyboard handling', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledTimes(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Focus behavior (NEW — Modal gains trap + restoration)
+// ---------------------------------------------------------------------------
+
+describe('RelinkModal focus behavior', () => {
+  it('restores focus to the opener element after closing', async () => {
+    render(<RelinkFixture />)
+    const opener = screen.getByRole('button', { name: 'Re-link' })
+    act(() => { opener.focus() })
+    fireEvent.click(opener)
+
+    // Close via Escape
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await act(async () => {})
+
+    expect(document.activeElement).toBe(opener)
+  })
+
+  it('initial focus lands inside the dialog on open (not the opener)', () => {
+    render(
+      <RelinkModal lineName="alpha" open={true} onClose={vi.fn()} onLinked={vi.fn()} />,
+    )
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.contains(document.activeElement)).toBe(true)
   })
 })

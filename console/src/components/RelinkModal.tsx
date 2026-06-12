@@ -1,5 +1,17 @@
-import { type FC, useEffect } from 'react'
-import { X, Link2 } from 'lucide-react'
+/**
+ * RelinkModal — migrated to Modal primitive (B3 wave-1).
+ *
+ * Migration:
+ *   - Removes ad-hoc backdrop div, stopPropagation, and document-level Escape effect.
+ *   - dismissable=true: backdrop click closes (preserved behaviour — no form state to lose;
+ *     existing test names it "a cancel action").
+ *   - Icon drop: Link2 header icon removed per modal.md anatomy (ConfirmDialog precedent).
+ *   - Width: --panel-confirm 420px → size="sm" 480px (tokens-v3 §6.12).
+ *   - Gains: stacking-aware Escape, focus trap, focus restoration.
+ *   - Public prop interface unchanged — zero consumer breakage.
+ */
+import { type FC } from 'react'
+import { Modal, ModalHeader, ModalBody } from './primitives'
 import LinkStep from './wizard/LinkStep'
 
 interface RelinkModalProps {
@@ -10,48 +22,18 @@ interface RelinkModalProps {
 }
 
 const RelinkModal: FC<RelinkModalProps> = ({ lineName, open, onClose, onLinked }) => {
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open, onClose])
-
-  if (!open) return null
-
   return (
-    <div
-      className="c-dialog-backdrop"
-      onClick={onClose}
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="sm"
+      dismissable={true}
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="relink-dialog-title"
-        onClick={(e) => e.stopPropagation()}
-        className="bg-d2 rounded-lg shadow-[var(--shadow-lg)] overflow-hidden c-border w-[var(--panel-confirm)] max-w-[90%]"
-      >
-        {/* Header */}
-        <div
-          className="flex items-center justify-between py-[var(--sp-4)] px-[var(--sp-5)] c-border-b"
-        >
-          <div className="flex items-center gap-[var(--sp-2)]">
-            <Link2 size={16} strokeWidth={1.75} className="text-t3" />
-            <span id="relink-dialog-title" className="text-lg font-sans font-semibold">
-              Re-link {lineName}
-            </span>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="c-btn c-btn-ghost">
-            <X size={16} strokeWidth={1.75} />
-          </button>
-        </div>
-
-        {/* LinkStep content */}
-        <div className="py-[var(--sp-4)] px-[var(--sp-5)]">
-          <LinkStep lineName={lineName} onComplete={onLinked} />
-        </div>
-      </div>
-    </div>
+      <ModalHeader title={`Re-link ${lineName}`} onClose={onClose} />
+      <ModalBody>
+        <LinkStep lineName={lineName} onComplete={onLinked} />
+      </ModalBody>
+    </Modal>
   )
 }
 
