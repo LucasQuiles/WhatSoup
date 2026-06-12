@@ -2290,6 +2290,22 @@ def provider_secret_status(text: str, rc: int, stdout: str) -> str:
     return f"rc_{rc}"
 
 
+def provider_keychain_unlock_status(keychain_path: Path, timeout_seconds: int) -> str:
+    try:
+        stdout, stderr, rc, _ = provider_command_output(
+            ["security", "unlock-keychain", "-p", "", str(keychain_path)],
+            min(timeout_seconds, 8),
+            "BOT_ERRORS_DRY_PROVIDER_KEYCHAIN_UNLOCK_STDOUT",
+            "BOT_ERRORS_DRY_PROVIDER_KEYCHAIN_UNLOCK_STDERR",
+            "BOT_ERRORS_DRY_PROVIDER_KEYCHAIN_UNLOCK_RC",
+        )
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never hide the provider failure.
+        return f"probe_error_{redact_evidence_string(str(exc), 80)}"
+    return provider_keychain_status("\n".join(part for part in [stdout, stderr] if part), rc)
+
+
 def provider_host_uptime_seconds() -> int | None:
     dry_uptime = os.environ.get("BOT_ERRORS_DRY_UPTIME_SECONDS")
     if dry_uptime is not None:
@@ -2615,10 +2631,12 @@ def provider_credential_fragments(profile: dict[str, Any], item: dict[str, Any],
         f"credential_service={redact_evidence_string(service, 80)}",
         f"credential_account={redact_evidence_string(account, 80)}",
     ]
+    keychain_path = Path.home() / "Library" / "Keychains" / "login.keychain-db"
+    fragments.append(f"keychain_unlock_status={provider_keychain_unlock_status(keychain_path, timeout_seconds)}")
 
     try:
         stdout, stderr, rc, _ = provider_command_output(
-            ["security", "find-generic-password", "-s", service, "-a", account],
+            ["security", "find-generic-password", "-s", service, "-a", account, str(keychain_path)],
             min(timeout_seconds, 8),
             "BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT",
             "BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDERR",
@@ -2633,7 +2651,7 @@ def provider_credential_fragments(profile: dict[str, Any], item: dict[str, Any],
 
     try:
         stdout, stderr, rc, _ = provider_command_output(
-            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w", str(keychain_path)],
             min(timeout_seconds, 8),
             "BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_SECRET_STDOUT",
             "BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_SECRET_STDERR",
@@ -2646,7 +2664,6 @@ def provider_credential_fragments(profile: dict[str, Any], item: dict[str, Any],
     except Exception as exc:  # noqa: BLE001 - diagnostics must never hide the provider failure.
         fragments.append(f"credential_secret_status=probe_error_{redact_evidence_string(str(exc), 80)}")
 
-    keychain_path = Path.home() / "Library" / "Keychains" / "login.keychain-db"
     try:
         stdout, stderr, rc, _ = provider_command_output(
             ["security", "show-keychain-info", str(keychain_path)],

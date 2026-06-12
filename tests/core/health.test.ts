@@ -203,6 +203,59 @@ describe('GET /health', () => {
     });
   });
 
+  it('marks a connected instance degraded when recent disconnect churn crosses the threshold', async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      connectionManager: {
+        botJid: '15555550123@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'connected',
+          connected: true,
+          reconnectAttempts: 0,
+          reconnectPhase: null,
+          stateChangedAt: '2026-04-05T12:00:00.000Z',
+          firstFailureAt: null,
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: null,
+          lastStatusCode: null,
+          recentDisconnects: {
+            windowMs: 600_000,
+            count: 3,
+            lastAt: '2026-04-05T12:09:00.000Z',
+            lastReason: 'connectionReplaced',
+            lastStatusCode: 440,
+            byReason: { connectionReplaced: 3 },
+          },
+        }),
+      } as unknown as ConnectionManager,
+    })));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.whatsapp.connection).toMatchObject({
+      state: 'connected',
+      last_disconnect_reason: null,
+      last_status_code: null,
+      recent_disconnects: {
+        window_ms: 600_000,
+        degraded_threshold: 3,
+        count: 3,
+        last_at: '2026-04-05T12:09:00.000Z',
+        last_reason: 'connectionReplaced',
+        last_status_code: 440,
+        by_reason: { connectionReplaced: 3 },
+      },
+    });
+  });
+
   it('reports pending_polls_total reflecting live rows in the pending_polls table', async () => {
     // Empty table → 0
     const empty = await httpReq(port, '/health', 'GET');

@@ -379,6 +379,59 @@ describe('HealthPoller', () => {
     );
   });
 
+  it('includes recent disconnect churn evidence for degraded connected instances', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        whatsapp: {
+          connected: true,
+          account_jid: '15550001111@s.whatsapp.net',
+          connection: {
+            state: 'connected',
+            reconnect_phase: null,
+            reconnect_attempts: 0,
+            last_disconnect_reason: null,
+            last_status_code: null,
+            recent_disconnects: {
+              window_ms: 600_000,
+              degraded_threshold: 3,
+              count: 4,
+              last_at: '2026-05-20T11:59:30.000Z',
+              last_reason: 'connectionReplaced',
+              last_status_code: 440,
+            },
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('remote-1');
+    expect(status).toMatchObject({
+      status: 'degraded',
+      statusConfidence: 'confirmed',
+      statusReason: 'health_body_degraded',
+    });
+    expect(status!.statusEvidence).toEqual(expect.arrayContaining([
+      'health_status=degraded',
+      'whatsapp_connected=true',
+      'connection_state=connected',
+      'recent_disconnect_count=4',
+      'recent_disconnect_threshold=3',
+      'recent_disconnect_window_ms=600000',
+      'recent_disconnect_last_at=2026-05-20T11:59:30.000Z',
+      'recent_disconnect_last_reason=connectionReplaced',
+      'recent_disconnect_last_status_code=440',
+    ]));
+  });
+
   it('classifies backoff-zero as logged_out only when disconnected evidence corroborates it', async () => {
     mockFetch.mockResolvedValue({
       ok: true,

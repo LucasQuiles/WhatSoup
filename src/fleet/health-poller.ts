@@ -74,6 +74,13 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
   const reconnectAttempts = numberValue(connection?.reconnect_attempts);
   const lastDisconnectReason = stringValue(connection?.last_disconnect_reason);
   const lastStatusCode = numberValue(connection?.last_status_code);
+  const recentDisconnects = recordValue(connection?.recent_disconnects);
+  const recentDisconnectCount = numberValue(recentDisconnects?.count);
+  const recentDisconnectThreshold = numberValue(recentDisconnects?.degraded_threshold);
+  const recentDisconnectWindowMs = numberValue(recentDisconnects?.window_ms);
+  const recentDisconnectLastAt = stringValue(recentDisconnects?.last_at);
+  const recentDisconnectLastReason = stringValue(recentDisconnects?.last_reason);
+  const recentDisconnectLastStatusCode = numberValue(recentDisconnects?.last_status_code);
   const accountJidStatus = accountJid === null
     ? 'missing'
     : accountJid === 'not connected'
@@ -89,6 +96,12 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
     evidenceField('reconnect_attempts', reconnectAttempts),
     evidenceField('last_disconnect_reason', lastDisconnectReason),
     evidenceField('last_status_code', lastStatusCode),
+    evidenceField('recent_disconnect_count', recentDisconnectCount),
+    evidenceField('recent_disconnect_threshold', recentDisconnectThreshold),
+    evidenceField('recent_disconnect_window_ms', recentDisconnectWindowMs),
+    evidenceField('recent_disconnect_last_at', recentDisconnectLastAt),
+    evidenceField('recent_disconnect_last_reason', recentDisconnectLastReason),
+    evidenceField('recent_disconnect_last_status_code', recentDisconnectLastStatusCode),
   ];
 
   const loggedOutHeuristic = reconnectPhase === 'backoff' && reconnectAttempts === 0;
