@@ -126,7 +126,15 @@ describe('spawnMcpProcess', () => {
       const result = await waitForExit(child);
 
       expect(result.code).toBe(0);
-      expect(JSON.parse(result.stderr)).toEqual({
+      // The child writes one compact JSON object to stderr, but newer Node
+      // runtimes append deprecation warnings (e.g. DEP0205 from tsx) to the
+      // same stream — extract the JSON payload instead of parsing the raw
+      // stream so the assertion is runtime-version independent.
+      const payload = result.stderr.slice(
+        result.stderr.indexOf('{'),
+        result.stderr.indexOf('}') + 1,
+      );
+      expect(JSON.parse(payload)).toEqual({
         inherited: null,
         override: 'from-caller',
         tmpdir: join(tempDir, 'owned-tmp'),
