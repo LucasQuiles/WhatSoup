@@ -68,3 +68,31 @@ def test_headless_provider_auth_failure_stays_actionable_when_local_auth_state_i
         "provider_auth_required",
         ["provider_auth_context=headless_login_keychain_blocked"],
     )
+
+
+def test_provider_credential_probe_unlocks_and_pins_login_keychain(monkeypatch):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setattr(_mod, "provider_settings_fragments", lambda: [])
+    monkeypatch.setattr(_mod, "provider_claude_state_fragments", lambda: [])
+    monkeypatch.setattr(_mod, "provider_macos_session_fragments", lambda _account, _timeout: [])
+    commands: list[list[str]] = []
+
+    def fake_provider_command_output(command, *_args):
+        commands.append(command)
+        if command[:2] == ["security", "find-generic-password"] and "-w" in command:
+            return "secret-value", "", 0, False
+        return "", "", 0, False
+
+    monkeypatch.setattr(_mod, "provider_command_output", fake_provider_command_output)
+
+    fragments = _mod.provider_credential_fragments({}, {}, "claude-cli", 15)
+
+    keychain_path = str(Path.home() / "Library" / "Keychains" / "login.keychain-db")
+    account = _mod.os.environ.get("USER") or Path.home().name
+    service = "Claude" + " Code-credentials"
+    assert "keychain_unlock_status=ok" in fragments
+    assert "credential_item_status=ok" in fragments
+    assert "credential_secret_status=ok" in fragments
+    assert ["security", "unlock-keychain", "-p", "", keychain_path] in commands
+    assert ["security", "find-generic-password", "-s", service, "-a", account, keychain_path] in commands
+    assert ["security", "find-generic-password", "-s", service, "-a", account, "-w", keychain_path] in commands
