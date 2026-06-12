@@ -251,16 +251,18 @@ export const BOT_ERRORS_SIMULATION_MATRIX: BotErrorsSimulationRequirement[] = [
     id: 'fleet-linked-device-logged-out-detection',
     domain: 'fleet-recovery',
     risk: 'critical',
-    signal: 'fleet health poll logged-out body, reconnect hints, and disconnected corroboration',
-    expectedOutcome: 'Fleet polling does not infer linked-device loss from weak reconnect hints alone, but does emit logged-out state when disconnected evidence corroborates it.',
+    signal: 'fleet health poll logged-out body, stale reconnect hints, weak backoff persistence, and explicit logout evidence',
+    expectedOutcome: 'Fleet polling ignores stale reconnect metadata when current connection evidence is healthy, keeps weak disconnected hints quiet until persistence, and emits logged-out state only on explicit or persistent corroborated evidence.',
     evidence: [
       {
         file: 'tests/fleet/health-poller.test.ts',
         anchors: [
-          'does not classify a backoff-zero reconnect hint as logged_out without disconnected corroboration',
-          'classifies backoff-zero as logged_out only when disconnected evidence corroborates it',
+          'ignores stale backoff-zero reconnect metadata when connection is healthy',
+          'keeps weak backoff-zero disconnected evidence degraded and quiet until it persists',
+          'emits logged-out immediately for explicit 401 logout evidence',
+          'weak_signal_polls=3',
           'instance_logged_out',
-          "status: 'logged_out'",
+          "toBe('logged_out')",
         ],
       },
     ],
