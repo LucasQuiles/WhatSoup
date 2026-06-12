@@ -1,7 +1,7 @@
 {
   "name": "whatsoup",
   "version": "0.1.0",
-  "description": "WhatSoup — consolidated WhatsApp platform with embedded MCP tools",
+  "description": "WhatSoup \u2014 consolidated WhatsApp platform with embedded MCP tools",
   "type": "module",
   "engines": {
     "node": ">=24.0.0 <26"
@@ -117,6 +117,9 @@
     "vitest": "3.2.6"
   },
   "overrides": {
-    "protobufjs": "^7.5.8"
+    "protobufjs": "^7.5.8",
+    "vite": {
+      "esbuild": "^0.28.1"
+    }
   }
 }
