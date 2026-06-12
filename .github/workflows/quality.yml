@@ -45,6 +45,9 @@ jobs:
       - name: Typecheck (all)
         run: npm run typecheck:all
 
+      - name: Import boundary guard
+        run: npm run guard:boundaries
+
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
 

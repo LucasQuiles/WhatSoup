@@ -25,6 +25,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `arch.god-class` | ast | warn | eslint | Warn when a class owns too many unrelated runtime responsibilities. |
 | `arch.test-colocation-churn` | mechanical | advisory | guard | Surface test files whose churn suggests an unstable production boundary. |
 | `arch.defense-both-layers` | semantic | advisory | sdlc | Ensure service-layer protections are also threaded through route or caller boundaries. |
+| `arch.import-boundaries` | mechanical | block | guard, ci | Ratchet import direction between src/ layers so known violations can shrink but new cross-layer reach is blocked. |
 
 ## Invariant
 
@@ -70,13 +71,17 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 
 ## Ratchet Baseline
 
-Ratcheted rules are grandfathered through `.claude/fitness/baseline.json`.
+Ratcheted rules are grandfathered through `.claude/fitness/baseline.json` (measurements-based)
+or `.claude/fitness/boundary-baseline.json` (import violations).
 Current baseline measurements:
 
 | rule | path | lines |
 |------|------|-------|
 | `arch.file-size` | `src/runtimes/agent/runtime.ts` | 6745 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 7504 |
+
+`arch.import-boundaries` grandfathered violations are tracked in `.claude/fitness/boundary-baseline.json`.
+Run `npm run guard:boundaries -- --report` to see the full edge list and `npm run guard:boundaries -- --baseline-save` to ratchet down after fixing violations.
 
 ## ESLint Ring (live)
 
