@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState, useCallback } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
+import { MotionConfig } from 'framer-motion'
 import ErrorBoundary from './components/ErrorBoundary'
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'
 import Nav from './components/Nav'
@@ -40,35 +41,37 @@ export default function App() {
   useKeyboardShortcuts({ onHelp: toggleShortcuts })
 
   return (
-    <div className="flex flex-col h-dvh bg-d0 overflow-hidden">
-      <Nav
-        alertCount={alertCount}
-        unreadCount={unreadCount}
-        version={version}
-        updateAvailable={update.data?.updateAvailable}
-        remoteSha={update.data?.remoteSha}
-        onUpdateClick={update.openUpdateModal}
-      />
-      <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        <Suspense fallback={<PageLoader />}>
-          <Routes>
-            <Route path="/" element={<ErrorBoundary><SoupKitchen /></ErrorBoundary>} />
-            <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
-            <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
-            <Route path="/ops" element={<ErrorBoundary><Ops /></ErrorBoundary>} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </Suspense>
-      </main>
-      <Suspense fallback={null}>
-        <UpdateModal
-          open={update.showUpdateModal}
-          onClose={update.closeUpdateModal}
-          currentSha={version}
-          lines={lines ?? []}
+    <MotionConfig reducedMotion="user">
+      <div className="flex flex-col h-dvh bg-d0 overflow-hidden">
+        <Nav
+          alertCount={alertCount}
+          unreadCount={unreadCount}
+          version={version}
+          updateAvailable={update.data?.updateAvailable}
+          remoteSha={update.data?.remoteSha}
+          onUpdateClick={update.openUpdateModal}
         />
-      </Suspense>
-      <KeyboardShortcutsHelp open={showShortcuts} onClose={() => setShowShortcuts(false)} />
-    </div>
+        <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              <Route path="/" element={<ErrorBoundary><SoupKitchen /></ErrorBoundary>} />
+              <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
+              <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
+              <Route path="/ops" element={<ErrorBoundary><Ops /></ErrorBoundary>} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
+        </main>
+        <Suspense fallback={null}>
+          <UpdateModal
+            open={update.showUpdateModal}
+            onClose={update.closeUpdateModal}
+            currentSha={version}
+            lines={lines ?? []}
+          />
+        </Suspense>
+        <KeyboardShortcutsHelp open={showShortcuts} onClose={() => setShowShortcuts(false)} />
+      </div>
+    </MotionConfig>
   )
 }
