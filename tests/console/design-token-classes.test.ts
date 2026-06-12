@@ -14,18 +14,19 @@ const readTokenCss = () => [
 ].map(read).join('\n')
 
 describe('design token component classes', () => {
-  it('defines reusable input, dialog, and card classes in index.css', () => {
+  it('defines reusable input and card classes in index.css', () => {
     const css = readTokenCss()
 
     for (const selector of [
       '.c-input',
       '.c-input-search',
-      '.c-dialog-backdrop',
       '.c-card',
       '.c-card--detail',
     ]) {
       expect(css).toContain(selector)
     }
+    // B3W4: .c-dialog-backdrop deleted — last consumer (AddLineWizard) migrated to Modal
+    expect(css).not.toContain('.c-dialog-backdrop')
   })
 
   it('uses shared search input classes in SoupKitchen and Inbox', () => {

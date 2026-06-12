@@ -54,13 +54,14 @@ describe('design system compliance — Shannon slice', () => {
     expect(source).toContain('aria-label="Type a reply"')
   })
 
-  it('adds dialog ARIA to AddLineWizard', () => {
+  it('AddLineWizard uses Modal primitive (role-on-backdrop defect dead)', () => {
     const source = read('console/src/components/AddLineWizard.tsx')
 
-    expect(source).toContain('role="dialog"')
-    expect(source).toContain('aria-modal="true"')
-    expect(source).toContain('aria-labelledby="wizard-title"')
-    expect(source).toContain('id="wizard-title"')
+    // Modal primitive — dialog role is on the shell, not the backdrop
+    expect(source).toContain('<Modal')
+    expect(source).not.toContain('c-dialog-backdrop')
+    // No raw role="dialog" in source — Modal owns it
+    expect(source).not.toContain('role="dialog"')
   })
 
   it('associates Field labels with their controls in wizard form primitives', () => {

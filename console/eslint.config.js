@@ -768,6 +768,7 @@ export default defineConfig([
   // ─────────────────────────────────────────────────────────────────────────
   {
     files: [
+      'src/components/AddLineWizard.tsx',
       'src/pages/LineDetail.tsx',
       'src/pages/SoupKitchen.tsx',
       'src/components/TagInput.tsx',

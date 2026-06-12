@@ -34,7 +34,6 @@
   --media-thumb-h: 200px;    /* max height for image/video thumbnails */
   --media-thumb-w: 180px;    /* min width for image/video placeholder */
   --panel-shortcuts: 340px;  /* keyboard shortcuts modal */
-  --panel-wizard: 720px;     /* wizard dialog width */
   --tooltip-min-w: 220px;    /* message tooltip min width */
   --tooltip-val-max: 160px;  /* tooltip value truncation */
   --toast-max-w: 360px;      /* toast notification max width */
@@ -50,13 +49,12 @@
   --feed-preview-max: 120px; /* feed preview max-height before scroll */
   --feed-actions-reserve: 96px; /* keep hover actions off the main text */
   /* ═══ Wizard tokens ═══ */
-  --stepper-line-w: 32px;    /* wizard stepper connector width */
-  --stepper-dot: 8px;        /* wizard stepper dot size */
+  --wiz-step-circle: 18px;   /* wizard step circle diameter (locked v2 anatomy, B3W4) */
+  --wiz-step-sep: 16px;      /* wizard step separator width (locked v2 anatomy, B3W4) */
   --qr-size: 256px;          /* QR code display size */
   --modal-w-sm: 480px;        /* modal width — sm size (tokens-v3 §6.12, DD-18r SSOT leg) */
   --modal-w-md: 560px;        /* modal width — md size (tokens-v3 §6.12, DD-18r SSOT leg) */
   --modal-w-lg: 720px;        /* modal width — lg/wizard size (tokens-v3 §6.12, DD-18r SSOT leg) */
-  --modal-min-h: min(500px, 85dvh);      /* wizard minimum height */
   --modal-max-h: 85vh;       /* modal maximum height */
   /* ═══ Z-index scale ═══ */
   --z-float: 10;             /* floating buttons, scroll indicators */

@@ -693,16 +693,7 @@ body::before {
   gap: var(--sp-2);
 }
 
-.c-dialog-backdrop {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--sp-5);
-  background: var(--overlay);
-  z-index: var(--z-overlay);
-}
+
 
 /* Canonical panel container border: use --b1 for c-card and c-section so all primary panels share the same boundary token. */
 .c-card {
@@ -886,16 +877,15 @@ body::before {
 .c-border-t-b2   { border-top: var(--bw) solid var(--b2); }
 .c-border-r      { border-right: var(--bw) solid var(--b1); }
 
-/* Wizard accent-scoped focus ring — matches the selected line type color */
-.wizard-accent-scope input:focus-visible,
-.wizard-accent-scope select:focus-visible,
-.wizard-accent-scope textarea:focus-visible {
-  border-color: var(--wizard-accent, var(--color-m-cht));
-  box-shadow: 0 0 0 var(--bw-focus) color-mix(in srgb, var(--wizard-accent, var(--color-m-cht)) 20%, transparent),
-              0 0 0 var(--bw-focus-outer) color-mix(in srgb, var(--wizard-accent, var(--color-m-cht)) 10%, transparent);
-}
+/* Wizard accent scope — static data-line-type tokenization (WVR-014 retired; B3W4).
+   Replaces the legacy runtime --wizard-accent inline injection from AddLineWizard.tsx.
+   design-regression check 19 now resolves these statically. */
+.wizard-accent-scope                           { --wizard-accent: var(--color-s-ok); }  /* pre-selection default (exact parity with legacy runtime fallback) */
+.wizard-accent-scope[data-line-type="passive"] { --wizard-accent: var(--color-m-pas); }
+.wizard-accent-scope[data-line-type="chat"]    { --wizard-accent: var(--color-m-cht); }
+.wizard-accent-scope[data-line-type="agent"]   { --wizard-accent: var(--color-m-agt); }
 
-/* Wizard confirmation check animation — fade + scale in */
+/* Wizard confirmation check animation — fade + scale in (retokened from literal 0.3s ease; C-B3W4-5 ride-along) */
 @keyframes wizard-check-in {
   0% { opacity: 0; transform: scale(0.5); }
   100% { opacity: 1; transform: scale(1); }
@@ -904,7 +894,92 @@ body::before {
 .wizard-accent-scope svg.wizard-check {
   color: var(--wizard-accent, var(--color-m-cht));
   flex-shrink: 0;
-  animation: wizard-check-in 0.3s ease both;
+  animation: wizard-check-in var(--dur-base) var(--ease-enter) both;
+}
+
+/* ═══ Wizard progress strip — soup-wiz-steps (B3W4 option c) ═══
+ *
+ * Wizard-local composite fulfilling modal.md's "[optional step strip — wizard only]" slot.
+ * Rebuilds the locked v2 .wiz-steps anatomy: numbered 18px mono circles, accent active
+ * ring, ok-colored done state, 16×1px hairline separators. Non-interactive (spans only).
+ * A11y: aria-label on container (WizardStepper.tsx), aria-current=step on active step,
+ * aria-hidden on separators.
+ *
+ * Tokens: uses --wiz-step-circle (18px), --wiz-step-sep (16px) defined below.
+ * Extraction to Stepper.tsx primitive (option a) stays cheap: markup is one component,
+ * CSS is centralized here, spec section lives in the packet.
+ */
+.soup-wiz-steps {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-5);
+  gap: var(--sp-1);
+  border-bottom: var(--bw) solid var(--b1);
+}
+
+.soup-wiz-steps__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.soup-wiz-steps__sep {
+  width: var(--wiz-step-sep);
+  height: var(--bw);
+  background: var(--border-subtle, var(--b2));
+  flex-shrink: 0;
+}
+
+.soup-wiz-steps__step {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1h);
+}
+
+.soup-wiz-steps__circle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--wiz-step-circle);
+  height: var(--wiz-step-circle);
+  border-radius: 50%;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  font-weight: var(--fw-medium);
+  border: var(--bw) solid var(--color-t5);
+  color: var(--color-t4);
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.soup-wiz-steps__label {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-label);
+  color: var(--color-t5);
+}
+
+/* Active step */
+.soup-wiz-steps__step--active .soup-wiz-steps__circle {
+  border-color: var(--wizard-accent, var(--color-s-ok));
+  color: var(--wizard-accent, var(--color-s-ok));
+}
+
+.soup-wiz-steps__step--active .soup-wiz-steps__label {
+  color: var(--wizard-accent, var(--color-s-ok));
+}
+
+/* Completed step */
+.soup-wiz-steps__step--done .soup-wiz-steps__circle {
+  border-color: var(--color-s-ok);
+  color: var(--color-s-ok);
+  background: transparent;
+}
+
+.soup-wiz-steps__step--done .soup-wiz-steps__label {
+  color: var(--color-t3);
 }
 
 /* ═══ Toggle switch — c-toggle from design system ═══ */

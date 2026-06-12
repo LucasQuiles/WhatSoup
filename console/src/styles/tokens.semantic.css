@@ -286,7 +286,6 @@
   --s-crit-glow: var(--status-crit-wash);
 
   /* Overlay / scrim */
-  --overlay:       var(--scrim);
   --overlay-badge: rgba(0,0,0,0.6);
 
   /* Shadows */

@@ -1,8 +1,7 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 501,
+  "total": 486,
   "rules": {
-    "no-restricted-syntax :: src/components/AddLineWizard.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/HistoryTab.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/ModeTab.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/PipelineTab.tsx": 1,
@@ -12,14 +11,12 @@
     "no-restricted-syntax :: src/hooks/use-toast.tsx": 1,
     "no-restricted-syntax :: src/mock-data.ts": 5,
     "no-restricted-syntax :: src/pages/Inbox.tsx": 1,
-    "soup/no-adhoc-modal :: src/components/AddLineWizard.tsx": 2,
     "soup/no-brand-regression :: src/components/Nav.tsx": 1,
     "soup/no-brand-regression :: src/components/UpdateModal.tsx": 1,
     "soup/no-focus-suppression :: src/components/line-detail/HistoryTab.tsx": 1,
     "soup/no-legacy-tokens :: src/App.tsx": 2,
     "soup/no-legacy-tokens :: src/components/ActiveHoursHeatmap.tsx": 19,
     "soup/no-legacy-tokens :: src/components/ActivityFeed.tsx": 2,
-    "soup/no-legacy-tokens :: src/components/AddLineWizard.tsx": 8,
     "soup/no-legacy-tokens :: src/components/AlertBanner.tsx": 2,
     "soup/no-legacy-tokens :: src/components/CardSelector.tsx": 4,
     "soup/no-legacy-tokens :: src/components/ChartPanel.tsx": 3,
@@ -79,7 +76,6 @@
     "soup/no-legacy-tokens :: src/pages/Ops.tsx": 8,
     "soup/no-legacy-tokens :: src/pages/SoupKitchen.tsx": 8,
     "soup/no-raw-button :: src/components/ActivityFeed.tsx": 1,
-    "soup/no-raw-button :: src/components/AddLineWizard.tsx": 3,
     "soup/no-raw-button :: src/components/AlertBanner.tsx": 1,
     "soup/no-raw-button :: src/components/ChartPanel.tsx": 1,
     "soup/no-raw-button :: src/components/FeedCard.tsx": 4,
@@ -123,7 +119,6 @@
     "soup/no-raw-form-control :: src/components/wizard/IdentityStep.tsx": 2,
     "soup/no-raw-form-control :: src/components/wizard/ModelAuthStep.tsx": 3,
     "soup/no-raw-form-control :: src/pages/Inbox.tsx": 1,
-    "soup/no-utility-smell :: src/components/AddLineWizard.tsx": 1,
     "soup/no-utility-smell :: src/components/line-detail/GroupCard.tsx": 1
   }
 }

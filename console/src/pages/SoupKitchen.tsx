@@ -349,6 +349,9 @@ const SoupKitchen: FC = () => {
   const [modeFilter, setModeFilter] = useState<Mode | "all">("all");
   const [search, setSearch] = useState("");
   const [showAddWizard, setShowAddWizard] = useState(false);
+  // C-B3W4-3: latched mount — keep wizard mounted after first open
+  // so useDismissable can restore focus and exit motion can complete.
+  const [wizardEverOpened, setWizardEverOpened] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   // Drawer: name of the inspected line, null = drawer closed.
@@ -767,7 +770,7 @@ const SoupKitchen: FC = () => {
               size="sm"
               icon={<Plus size={16} strokeWidth={1.75} />}
               className="flex-shrink-0"
-              onClick={() => setShowAddWizard(true)}
+              onClick={() => { setShowAddWizard(true); setWizardEverOpened(true); }}
             >
               Add Line
             </Button>
@@ -1019,8 +1022,14 @@ const SoupKitchen: FC = () => {
       </motion.div>
 
       <Suspense fallback={null}>
-        {showAddWizard && (
-          <AddLineWizard onClose={() => setShowAddWizard(false)} />
+        {/* C-B3W4-3: latched mount — wizard stays mounted after first open so
+            useDismissable can restore focus and Modal's exit motion can play.
+            The open prop controls visibility; reset-on-open restores step 0. */}
+        {wizardEverOpened && (
+          <AddLineWizard
+            open={showAddWizard}
+            onClose={() => setShowAddWizard(false)}
+          />
         )}
       </Suspense>
     </div>
