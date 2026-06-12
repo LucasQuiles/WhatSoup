@@ -77,10 +77,20 @@ const { mockRuntimeLogger, mockReaddirSync } = vi.hoisted(() => ({
   mockReaddirSync: vi.fn(() => ['0', '1', '2']),
 }));
 
+const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
+  mockEmitAlert: vi.fn(),
+  mockClearAlertSource: vi.fn(),
+}));
+
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
 vi.mock('../../../src/logger.ts', () => ({
   createChildLogger: () => mockRuntimeLogger,
+}));
+
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlert: mockEmitAlert,
+  clearAlertSource: mockClearAlertSource,
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
@@ -175,6 +185,8 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     textAggregateDelayMs: 2_000,
     mediaDir: '/tmp/whatsoup-test-media/tmp',
     pineconeAllowedIndexes: [] as string[],
+    agentProvider: 'claude-cli',
+    agentProviderConfig: undefined as Record<string, unknown> | undefined,
     voiceReply: 'never' as 'always' | 'when_received' | 'never',
     elevenlabs: {
       defaultVoiceId: 'test-voice-id',
@@ -603,6 +615,8 @@ describe('AgentRuntime', () => {
     delete agentConfig.agentFallbackProvider;
     delete agentConfig.agentFallbackModel;
     delete agentConfig.model;
+    mockEmitAlert.mockClear();
+    mockClearAlertSource.mockClear();
     // Ensure mockQueue.flush always returns a resolved Promise (clearAllMocks wipes this)
     mockQueue.flush.mockResolvedValue(undefined);
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
@@ -3131,6 +3145,80 @@ describe('AgentRuntime', () => {
     expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith({ category: 'error', detail: 'error msg' });
   });
 
+  it('tool_result with isError emits a provider-wide BOT ERRORS alert', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger, 'ana-bot');
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({
+      type: 'tool_use',
+      toolId: 'tool-1',
+      toolName: 'Bash',
+      toolInput: { command: 'npm test' },
+    });
+    capturedOnEventRef.current!({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'tool-1',
+      content: 'Exit code 1\ntoken=plain-secret',
+    });
+
+    expect(mockEmitAlert).toHaveBeenCalledOnce();
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      'ana-bot',
+      'runtime-tool-error:claude-cli:Bash',
+      'Agent tool failure: Bash',
+      expect.stringContaining('runtime_source=src/runtimes/agent/runtime.ts:tool_result'),
+    );
+    const evidence = mockEmitAlert.mock.calls[0]?.[3] as string;
+    expect(evidence).toContain('provider=claude-cli');
+    expect(evidence).toContain('chat_jid=test at s.whatsapp.net');
+    expect(evidence).toContain('tool_id=tool-1');
+    expect(evidence).toContain('tool_name=Bash');
+    expect(evidence).toContain('classification=error');
+    expect(evidence).toContain('error_excerpt:');
+  });
+
+  it('deduplicates repeated tool_result BOT ERRORS alerts in one runtime', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger, 'ana-bot');
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({
+      type: 'tool_use',
+      toolId: 'tool-1',
+      toolName: 'Bash',
+      toolInput: { command: 'npm test' },
+    });
+    capturedOnEventRef.current!({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'tool-1',
+      content: 'Exit code 1',
+    });
+    capturedOnEventRef.current!({
+      type: 'tool_use',
+      toolId: 'tool-2',
+      toolName: 'Bash',
+      toolInput: { command: 'npm test' },
+    });
+    capturedOnEventRef.current!({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'tool-2',
+      content: 'Exit code 1',
+    });
+
+    expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledTimes(4);
+    expect(mockEmitAlert).toHaveBeenCalledOnce();
+  });
+
   it('tool_result with isError=false does not enqueue anything', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -3142,6 +3230,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'tool_result', isError: false, toolId: 'test', content: '' });
 
     expect(mockQueue.enqueueToolUpdate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
   });
 
   // ─── Health snapshot ───────────────────────────────────────────────────────

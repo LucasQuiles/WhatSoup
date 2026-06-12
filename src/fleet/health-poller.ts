@@ -2,6 +2,7 @@ import { createChildLogger } from '../logger.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottle, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
+import type { BotErrorsSeverity } from '../lib/bot-errors-outbox.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
@@ -24,6 +25,16 @@ export interface InstanceStatus {
   error: string | null;
   lastAlertAt: string | null;
   silencedUntil: string | null;
+  /**
+   * True once this instance has produced ANY HTTP response (healthy, degraded,
+   * logged-out, or even a non-2xx status) — i.e. a server has answered on its
+   * port at least once. An instance that has never responded cannot have an
+   * "outage": failures against it are a misconfiguration / stale-config phantom
+   * (e.g. a leftover phone-number instance superseded by a named one), not a
+   * page-worthy down event. Used to downgrade never-reachable failures from a
+   * critical outage page to a non-paging warning.
+   */
+  everReachable: boolean;
 }
 
 export type StatusChangeCallback = (instance: string, newStatus: InstanceStatus['status'], oldStatus: InstanceStatus['status']) => void;
@@ -115,6 +126,7 @@ export class HealthPoller {
             error: null,
             lastAlertAt: this.lastAlertAtFor(name, existing),
             silencedUntil: existing?.silencedUntil ?? null,
+            everReachable: true,
           });
         } catch (err) {
           this.updateFailure(name, (err as Error).message);
@@ -140,7 +152,9 @@ export class HealthPoller {
           });
 
           if (!res.ok) {
-            this.updateFailure(name, `HTTP ${res.status}`);
+            // A non-2xx status still proves a server answered on this port, so
+            // the instance is genuinely reachable — a later loss is a real outage.
+            this.updateFailure(name, `HTTP ${res.status}`, true);
             return;
           }
 
@@ -172,6 +186,7 @@ export class HealthPoller {
           error: null,
           lastAlertAt: this.lastAlertAtFor(name, existing),
           silencedUntil: existing?.silencedUntil ?? null,
+          everReachable: true,
         });
         if (prevStatus !== 'online') {
           this.emitStatusChange(name, 'online', prevStatus);
@@ -191,11 +206,12 @@ export class HealthPoller {
     }
   }
 
-  private updateFailure(name: string, error: string): void {
+  private updateFailure(name: string, error: string, reachableNow = false): void {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
     const newStatus: InstanceStatus['status'] = failures >= 3 ? 'unreachable' : 'degraded';
+    const everReachable = (existing?.everReachable ?? false) || reachableNow;
 
     log.warn({ name, failures, error }, 'instance health poll failed');
     this.statuses.set(name, {
@@ -207,6 +223,7 @@ export class HealthPoller {
       error,
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
+      everReachable,
     });
 
     // Notify listeners on any status transition
@@ -214,12 +231,25 @@ export class HealthPoller {
       this.emitStatusChange(name, newStatus, prevStatus);
     }
 
-    // Emit alert on transition into unreachable (exactly when failures crosses 2→3)
+    // Emit alert on transition into unreachable (exactly when failures crosses 2→3).
     if (newStatus === 'unreachable' && prevStatus !== 'unreachable') {
-      this.maybeEmitAlert(name, 'instance_unreachable',
-        `whatsoup@${name} unreachable (${failures} consecutive poll failures)`,
-        `Last error: ${error}`,
-      );
+      if (everReachable) {
+        // The instance was up at some point and is now gone — a real outage.
+        this.maybeEmitAlert(name, 'instance_unreachable',
+          `whatsoup@${name} unreachable (${failures} consecutive poll failures)`,
+          `Last error: ${error}`,
+        );
+      } else {
+        // Never once answered — a stale/misconfigured phantom, not an outage.
+        // Warn (do not page critical) so a leftover config can't masquerade as
+        // a down instance. Fires once per transition; will not flap.
+        this.maybeEmitAlert(name, 'instance_never_reachable',
+          `whatsoup@${name} configured but never came online (${failures} consecutive poll failures)`,
+          `Last error: ${error}. No server has ever answered on its health port — `
+          + `verify the deploy or remove the stale config for this instance.`,
+          'warning',
+        );
+      }
     }
   }
 
@@ -240,6 +270,9 @@ export class HealthPoller {
       error: null,
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
+      // A degraded/logged-out verdict requires a parsed health body, so the
+      // server answered — the instance is genuinely reachable.
+      everReachable: true,
     });
 
     if (newStatus !== prevStatus) {
@@ -259,7 +292,7 @@ export class HealthPoller {
     }
   }
 
-  private maybeEmitAlert(name: string, source: string, summary: string, evidence: string): void {
+  private maybeEmitAlert(name: string, source: string, summary: string, evidence: string, severity: BotErrorsSeverity = 'critical'): void {
     if (isInstanceSilenced(name)) {
       log.info({ name, source }, 'alert suppressed — instance is silenced');
       return;
@@ -287,6 +320,6 @@ export class HealthPoller {
       }
     }
 
-    emitAlert(name, source, summary, evidence);
+    emitAlert(name, source, summary, evidence, severity);
   }
 }

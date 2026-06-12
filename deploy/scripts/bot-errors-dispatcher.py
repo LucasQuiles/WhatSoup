@@ -9,7 +9,9 @@ retry metadata, poison quarantine, and state reporting.
 from __future__ import annotations
 
 import argparse
+import calendar
 import fcntl
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -46,6 +48,13 @@ def env_flag(name: str, default: bool = False) -> bool:
 BOT_ERRORS_REQUIRE_EXPECTED = env_flag("BOT_ERRORS_REQUIRE_EXPECTED", True)
 
 
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
 def positive_env_int(name: str, default: int) -> int:
     value = int(os.environ.get(name, str(default)))
     if value <= 0:
@@ -66,7 +75,7 @@ AWAITING_PHYSICAL_RENOTIFY_SECONDS = positive_env_int(
     "BOT_ERRORS_AWAITING_PHYSICAL_RENOTIFY_SECONDS",
     24 * 60 * 60,
 )
-INTERNAL_FORCE_NOTIFY_SOURCES = {"heartbeat-watchdog"}
+INTERNAL_FORCE_NOTIFY_SOURCES = {"heartbeat-watchdog", "daily-health-fail"}
 DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES = {
     "whatsapp_device_bond_lost",
     "whatsapp_auth_bond_local_failure",
@@ -123,6 +132,12 @@ PEM_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END 
 URL_USERINFO = re.compile(r"\b(https?://)[^\s/@:]+:[^\s/@]+@", re.I)
 PHONE_LIKE = re.compile(r"(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])")
 TEST_FIXTURE_AUTH_BOND = re.compile(r"(?:^|\s)(?:authDir|auth|creds):\s*/tmp/wa-test-auth(?:/|\s|$)", re.I)
+COMMA_TOKEN_LIST = re.compile(r"\b[A-Za-z0-9_.:-]+(?:\s*,\s*[A-Za-z0-9_.:-]+)+\b")
+RECOVERY_DUPLICATE_SUPPRESSION_REASON = (
+    "duplicate recovery/info event retained as audit-only; "
+    "earliest matching event in the dedupe window remains dispatchable"
+)
+TEST_PROVENANCE_SUPPRESSION_REASON = "test-provenance event refused by dispatcher"
 
 # ---------------------------------------------------------------------------
 # Test-leak defense-in-depth (B2)
@@ -244,12 +259,15 @@ def state_paths() -> dict[str, Path]:
         "suppressed": root / "suppressed",
         "quarantine": root / "quarantine",
         "testleak": root / "testleak",
+        "storm_collapsed": root / "storm-collapsed",
+        "storm_manifests": root / "storm-manifests",
         "writefail_recovered": root / "writefail-recovered",
         "writefail_quarantine": root / "writefail-quarantine",
         "locks": root / "locks",
         "logs": root / "logs",
         "state": root / "dispatcher-state.json",
         "incident_state": root / "incident-state.json",
+        "meta_state": root / "dispatcher-meta-state.json",
     }
 
 
@@ -280,6 +298,18 @@ def fsync_parent(path: Path) -> None:
         os.close(fd)
 
 
+def _fsync_dir(path: Path) -> None:
+    """Fsync a directory itself (not its parent). Used after bulk directory mutations."""
+    try:
+        fd = os.open(path, os.O_DIRECTORY | os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def setup_dirs() -> dict[str, Path]:
     paths = state_paths()
     for key in (
@@ -290,6 +320,8 @@ def setup_dirs() -> dict[str, Path]:
         "suppressed",
         "quarantine",
         "testleak",
+        "storm_collapsed",
+        "storm_manifests",
         "writefail_recovered",
         "writefail_quarantine",
         "locks",
@@ -405,7 +437,7 @@ def save_incident_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
 def incident_source(event: dict[str, Any]) -> str:
     source = str(event.get("source") or "unknown")
     alert_source = str(event.get("alertSource") or "").strip()
-    if source in {"heartbeat-watchdog", "daily-health"} and alert_source:
+    if source in {"heartbeat-watchdog", "daily-health", "daily-health-fail"} and alert_source:
         return f"{source}:{alert_source}"
     diagnostics = event.get("diagnostics")
     remote = diagnostics.get("remote") if isinstance(diagnostics, dict) else None
@@ -828,6 +860,35 @@ def safe_segment(value: str) -> str:
     return (cleaned or "unknown")[:80]
 
 
+def safe_filename(value: str, max_length: int = 180) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    cleaned = cleaned or "unknown"
+    if len(cleaned) <= max_length:
+        return cleaned
+    for suffix in (".writefail", ".processing", ".suppressed", ".collapsed", ".recovered", ".duplicate", ".poison", ".sent", ".json"):
+        if cleaned.endswith(suffix) and len(suffix) < max_length:
+            stem = cleaned[: max_length - len(suffix)].rstrip("._-:")
+            return f"{stem or 'unknown'}{suffix}"
+    return cleaned[:max_length]
+
+
+def safe_child_path(directory: Path, name: str, max_length: int = 180) -> Path:
+    ensure_private_dir(directory)
+    directory_resolved = directory.resolve()
+    first = directory / safe_filename(name, max_length)
+    candidates = [first]
+    if first.exists():
+        stem = safe_filename(name, min(140, max_length))
+        prefix = f"{int(time.time())}.{os.getpid()}"
+        candidates = [directory / f"{prefix}.{counter}.{stem}" for counter in range(1000)]
+    for target in candidates:
+        if target.resolve().parent != directory_resolved:
+            raise RuntimeError(f"unsafe child path escaped {directory}: {name}")
+        if not target.exists():
+            return target
+    raise RuntimeError(f"no available child path in {directory}: {name}")
+
+
 def redact(value: Any) -> str:
     text = "" if value is None else str(value)
     text = PEM_PRIVATE_KEY.sub("[REDACTED PEM PRIVATE KEY]", text)
@@ -851,6 +912,652 @@ def redacted_state_text(value: Any, limit: int, *, tail: bool = False) -> str:
     if tail:
         return text[-limit:]
     return truncate(text, limit)
+
+
+# ---------------------------------------------------------------------------
+# Storm collapse helpers (hub 7bf1e8cf + 34bfa9f6)
+# ---------------------------------------------------------------------------
+
+def normalize_token_lists(text: str) -> str:
+    def sort_match(match: re.Match[str]) -> str:
+        items = [item.strip() for item in match.group(0).split(",") if item.strip()]
+        return ",".join(sorted(items, key=lambda value: value.lower()))
+
+    return COMMA_TOKEN_LIST.sub(sort_match, text)
+
+
+def normalized_summary(event: dict[str, Any]) -> str:
+    text = redact(event.get("summary") or "unspecified bot error").lower()
+    host_tokens = set()
+    for key in ("machine", "machineName", "host", "hostname", "instance"):
+        raw = str(event.get(key) or "").strip().lower()
+        if not raw:
+            continue
+        host_tokens.add(raw)
+        host_tokens.add(raw.split(".", 1)[0])
+    for token in sorted(host_tokens, key=len, reverse=True):
+        if token:
+            text = re.sub(rf"\b{re.escape(token)}\b", "{host}", text)
+    text = re.sub(r"\b(?:maclab|mwlab|mini\d{1,2})\b", "{host}", text)
+    text = normalize_token_lists(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def storm_fingerprint(event: dict[str, Any]) -> str:
+    parts = [
+        str(event.get("source") or "unknown").strip().lower(),
+        str(event.get("severity") or "critical").strip().lower(),
+        normalized_summary(event),
+    ]
+    return "\n".join(parts)
+
+
+def storm_fingerprint_hash(fingerprint: str) -> str:
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+
+
+def created_epoch(event: dict[str, Any]) -> int:
+    created = str(event.get("createdAt") or "").strip()
+    if created:
+        if "." in created and created.endswith("Z"):
+            created = created.split(".", 1)[0] + "Z"
+        try:
+            return int(calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ")))
+        except ValueError:
+            pass
+    return int(time.time())
+
+
+def iso_from_epoch(epoch: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def event_host(event: dict[str, Any]) -> str:
+    for key in ("machine", "machineName", "host", "hostname", "instance"):
+        value = str(event.get(key) or "").strip()
+        if value:
+            return value
+    return "unknown"
+
+
+def sorted_unique_hosts(events: list[dict[str, Any]]) -> list[str]:
+    hosts = {event_host(event) for event in events}
+    return sorted(hosts, key=lambda value: value.lower())
+
+
+def find_event_path_by_id(event_id: str, paths: dict[str, Path], keys: tuple[str, ...]) -> Path | None:
+    if not event_id:
+        return None
+    for key in keys:
+        directory = paths[key]
+        if not directory.exists():
+            continue
+        for path in directory.glob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if read_json(path).get("id") == event_id:
+                    return path
+            except Exception:
+                continue
+    return None
+
+
+def is_storm_candidate(event: dict[str, Any]) -> bool:
+    if isinstance(event.get("storm"), dict):
+        return False
+    event_type = str(event.get("eventType") or "alert")
+    severity = str(event.get("severity") or "").lower()
+    return event_type == "alert" and severity in {"critical", "warning"}
+
+
+def manifest_entry(path: Path, event: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    log_hints = diagnostics.get("logHints") if isinstance(diagnostics.get("logHints"), list) else []
+    return {
+        "eventId": event.get("id"),
+        "machine": event_host(event),
+        "instance": event.get("instance"),
+        "source": event.get("source"),
+        "severity": event.get("severity"),
+        "createdAt": event.get("createdAt"),
+        "summary": truncate(redact(event.get("summary")), 700),
+        "evidence": truncate(redact(event.get("evidence")), 1800),
+        "outboxPath": str(path),
+        "logHints": [truncate(redact(hint), 900) for hint in log_hints[:10]],
+    }
+
+
+def mark_collapsed(event: dict[str, Any], digest_id: str, manifest_path: Path) -> dict[str, Any]:
+    delivery = event.setdefault("delivery", {})
+    if isinstance(delivery, dict):
+        delivery["status"] = "storm-collapsed"
+        delivery["collapsedAt"] = now_iso()
+        delivery["collapsedInto"] = digest_id
+        delivery["lastError"] = None
+    diagnostics = event.setdefault("diagnostics", {})
+    if isinstance(diagnostics, dict):
+        diagnostics["stormCollapse"] = {
+            "digestId": digest_id,
+            "manifest": str(manifest_path),
+            "collapsedAt": now_iso(),
+        }
+    return event
+
+
+def storm_digest_event(
+    paths: dict[str, Path],
+    fingerprint: str,
+    fingerprint_hash: str,
+    bucket_start: int,
+    bucket_end: int,
+    events: list[dict[str, Any]],
+    manifest_path: Path,
+) -> dict[str, Any]:
+    first = events[0]
+    hosts = sorted_unique_hosts(events)
+    severity = str(first.get("severity") or "critical").lower()
+    source = str(first.get("source") or "unknown")
+    summary = normalized_summary(first) or "same fingerprint alert storm"
+    digest_id = f"storm-{fingerprint_hash}-{bucket_start}"
+    evidence_lines = [
+        f"affected_hosts:{len(hosts)}",
+        f"hosts:{', '.join(hosts)}",
+        f"fingerprint:{fingerprint_hash}",
+        f"source:{source}",
+        f"severity:{severity}",
+        f"window_start_epoch:{bucket_start}",
+        f"window_end_epoch:{bucket_end}",
+        f"collapsed_events:{len(events)}",
+        f"manifest:{manifest_path}",
+        f"fingerprint_basis:{fingerprint.replace(chr(10), ' | ')}",
+    ]
+    return {
+        "schemaVersion": 1,
+        "eventType": "alert",
+        "severity": severity,
+        "id": digest_id,
+        "createdAt": now_iso(),
+        "machine": "fleet",
+        "platform": "mixed",
+        "instance": "storm-collapse",
+        "source": source,
+        "summary": f"BOT ERRORS storm collapse: {len(hosts)} hosts - {summary}",
+        "evidence": "\n".join(evidence_lines),
+        "diagnostics": {
+            "logHints": [str(manifest_path)],
+            "queue": str(paths["outbox"]),
+        },
+        "storm": {
+            "fingerprint": fingerprint_hash,
+            "affectedHosts": len(hosts),
+            "hosts": hosts,
+            "windowStartEpoch": bucket_start,
+            "windowEndEpoch": bucket_end,
+            "manifest": str(manifest_path),
+            "collapsedEvents": len(events),
+        },
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def storm_digest_outbox_path(paths: dict[str, Path], digest_id: str, source: str, window_start: int) -> Path:
+    created = iso_from_epoch(window_start).replace("-", "").replace(":", "")
+    instance = safe_segment("storm-collapse")
+    source_segment = safe_segment(source or "unknown")
+    event_id = safe_segment(digest_id)
+    return safe_child_path(paths["outbox"], f"{created}.{instance}.{source_segment}.{event_id}.json")
+
+
+def merge_manifest_entries(existing: list[Any], additions: list[dict[str, Any]]) -> list[Any]:
+    seen: set[tuple[str, str]] = set()
+    merged: list[Any] = []
+    for entry in existing:
+        if isinstance(entry, dict):
+            key = (str(entry.get("eventId") or ""), str(entry.get("outboxPath") or ""))
+            seen.add(key)
+        merged.append(entry)
+    for entry in additions:
+        key = (str(entry.get("eventId") or ""), str(entry.get("outboxPath") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(entry)
+    return merged
+
+
+def existing_storm_window(
+    paths: dict[str, Path],
+    fingerprint_hash: str,
+    start_epoch: int,
+) -> tuple[dict[str, Any], Path] | None:
+    for path in sorted(paths["storm_manifests"].glob(f"*.{fingerprint_hash}.json")):
+        try:
+            manifest = read_json(path)
+            if manifest.get("fingerprint") != fingerprint_hash:
+                continue
+            window_start = int(manifest.get("windowStartEpoch") or 0)
+            window_end = int(manifest.get("windowEndEpoch") or 0)
+        except Exception:
+            continue
+        if window_start <= start_epoch < window_end:
+            return manifest, path
+    return None
+
+
+def collapse_storm_group(
+    paths: dict[str, Path],
+    key: tuple[str, int],
+    events_and_paths: list[tuple[Path, dict[str, Any]]],
+) -> int:
+    if not events_and_paths:
+        return 0
+    fingerprint, bucket_start = key
+    fingerprint_hash = storm_fingerprint_hash(fingerprint)
+    window = storm_window_seconds()
+    bucket_end = bucket_start + window
+
+    events = [event for _, event in events_and_paths]
+    existing = existing_storm_window(paths, fingerprint_hash, bucket_start)
+    if existing is not None:
+        manifest, manifest_path = existing
+        existing_entries = manifest.get("events", [])
+        new_entries = [manifest_entry(path, event) for path, event in events_and_paths]
+        merged = merge_manifest_entries(existing_entries, new_entries)
+        manifest["events"] = merged
+        manifest["collapsedEvents"] = len(merged)
+        manifest["updatedAt"] = now_iso()
+        atomic_write_json(manifest_path, manifest)
+        digest_id = str(manifest.get("digestId") or f"storm-{fingerprint_hash}-{bucket_start}")
+    else:
+        new_entries = [manifest_entry(path, event) for path, event in events_and_paths]
+        ts = int(time.time())
+        manifest_name = f"{bucket_start}.{fingerprint_hash}.{ts}.json"
+        manifest_path = safe_child_path(paths["storm_manifests"], manifest_name)
+        manifest = {
+            "schemaVersion": 1,
+            "fingerprint": fingerprint_hash,
+            "fingerprintBasis": fingerprint,
+            "windowStartEpoch": bucket_start,
+            "windowEndEpoch": bucket_end,
+            "digestId": f"storm-{fingerprint_hash}-{bucket_start}",
+            "createdAt": now_iso(),
+            "updatedAt": now_iso(),
+            "collapsedEvents": len(new_entries),
+            "events": new_entries,
+        }
+        atomic_write_json(manifest_path, manifest)
+        digest_id = str(manifest["digestId"])
+
+    digest_outbox_path = storm_digest_outbox_path(paths, digest_id, events[0].get("source") or "unknown", bucket_start)
+    existing_digest_path = find_event_path_by_id(digest_id, paths, ("outbox",))
+
+    digest_event = storm_digest_event(
+        paths,
+        fingerprint,
+        fingerprint_hash,
+        bucket_start,
+        bucket_end,
+        events,
+        manifest_path,
+    )
+    atomic_write_json(digest_outbox_path, digest_event)
+    if existing_digest_path and existing_digest_path != digest_outbox_path:
+        try:
+            existing_digest_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    collapsed = 0
+    for path, event in events_and_paths:
+        if not path.exists():
+            continue
+        event = mark_collapsed(event, str(digest_event.get("id") or digest_id), manifest_path)
+        atomic_write_json(path, event)
+        target = safe_child_path(
+            paths["storm_collapsed"],
+            f"{path.name}.{safe_segment(digest_id)}.{int(time.time())}.collapsed",
+        )
+        os.replace(path, target)
+        fsync_parent(target)
+        collapsed += 1
+
+    return collapsed
+
+
+def storm_threshold() -> int:
+    return max(0, env_int("BOT_ERRORS_STORM_THRESHOLD", 3))
+
+
+def storm_window_seconds() -> int:
+    return max(1, env_int("BOT_ERRORS_STORM_WINDOW_SECONDS", 120))
+
+
+def collapse_ready_storms(paths: dict[str, Path]) -> int:
+    threshold = storm_threshold()
+    if threshold <= 0:
+        return 0
+    window = storm_window_seconds()
+    groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
+    for path in sorted(paths["outbox"].glob("*.json")):
+        if not ready(path, paths["quarantine"]):
+            continue
+        try:
+            event = read_json(path)
+        except Exception:
+            continue
+        if not is_storm_candidate(event):
+            continue
+        fingerprint = storm_fingerprint(event)
+        epoch = created_epoch(event)
+        groups.setdefault(fingerprint, []).append((path, event, epoch))
+
+    collapsed = 0
+    for fingerprint, records in groups.items():
+        remaining = sorted(records, key=lambda record: (record[2], str(record[0])))
+        while remaining:
+            collapsed_window = False
+            for index, (_, _, start_epoch) in enumerate(remaining):
+                cluster = [
+                    (path, event, epoch)
+                    for path, event, epoch in remaining[index:]
+                    if start_epoch <= epoch < start_epoch + window
+                ]
+                events = [event for _, event, _ in cluster]
+                if len(sorted_unique_hosts(events)) < threshold:
+                    continue
+                collapsed += collapse_storm_group(
+                    paths,
+                    (fingerprint, start_epoch),
+                    [(path, event) for path, event, _ in cluster],
+                )
+                clustered_paths = {path for path, _, _ in cluster}
+                remaining = [record for record in remaining if record[0] not in clustered_paths]
+                collapsed_window = True
+                break
+            if not collapsed_window:
+                break
+    return collapsed
+
+
+# ---------------------------------------------------------------------------
+# Recovery duplicate dedupe (hub a793d31a)
+# ---------------------------------------------------------------------------
+
+def recovery_dedupe_window_seconds() -> int:
+    return max(1, env_int("BOT_ERRORS_RECOVERY_DEDUPE_WINDOW_SECONDS", storm_window_seconds()))
+
+
+def suppressed_max_files() -> int:
+    return max(1, env_int("BOT_ERRORS_SUPPRESSED_MAX_FILES", 2000))
+
+
+def recovery_normalized_summary(event: dict[str, Any]) -> str:
+    text = str(event.get("summary") or "unspecified bot error").strip().lower()
+    return re.sub(r"\s+", " ", text)
+
+
+def recovery_identity(event: dict[str, Any]) -> tuple[str, str]:
+    host = ""
+    for key in ("machine", "machineName", "host", "hostname"):
+        host = str(event.get(key) or "").strip().lower()
+        if host:
+            break
+    instance = str(event.get("instance") or "").strip().lower()
+    return host, instance
+
+
+def recovery_episode_fingerprint(event: dict[str, Any]) -> str:
+    host, instance = recovery_identity(event)
+    parts = [
+        str(event.get("source") or "unknown").strip().lower(),
+        recovery_normalized_summary(event),
+        host,
+        instance,
+    ]
+    return "\n".join(parts)
+
+
+def recovery_duplicate_fingerprint(event: dict[str, Any]) -> str:
+    host, instance = recovery_identity(event)
+    parts = [
+        str(event.get("eventType") or "alert").strip().lower(),
+        str(event.get("severity") or "").strip().lower(),
+        str(event.get("source") or "unknown").strip().lower(),
+        recovery_normalized_summary(event),
+        host,
+        instance,
+    ]
+    return "\n".join(parts)
+
+
+def is_recovery_dedupe_candidate(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("eventType") or "alert").strip().lower()
+    severity = str(event.get("severity") or "").strip().lower()
+    source = str(event.get("source") or "").strip().lower()
+    if source == "daily-health" and severity == "info":
+        return False
+    return event_type == "clear" or severity == "info"
+
+
+def is_recovery_episode_barrier(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("eventType") or "alert").strip().lower()
+    severity = str(event.get("severity") or "").strip().lower()
+    return event_type == "alert" and severity in {"critical", "warning"}
+
+
+def move_suppressed_event(
+    path: Path,
+    paths: dict[str, Path],
+    event: dict[str, Any],
+    reason: str,
+    log_type: str = "suppressed",
+    source_name: str | None = None,
+) -> Path:
+    event = mark_suppressed(event, reason)
+    atomic_write_json(path, event)
+    suppressed_path = archive_path(paths["suppressed"], source_name or path.name, "suppressed", event)
+    os.replace(path, suppressed_path)
+    fsync_parent(suppressed_path)
+    append_dispatch_log(paths, {
+        "type": log_type,
+        "eventId": event.get("id"),
+        "path": str(suppressed_path),
+        "reason": reason,
+        "source": event.get("source"),
+        "severity": event.get("severity"),
+        "eventType": event.get("eventType"),
+        "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
+    })
+    return suppressed_path
+
+
+def suppress_ready_recovery_duplicates(paths: dict[str, Path]) -> int:
+    window = recovery_dedupe_window_seconds()
+    groups: dict[str, list[tuple[Path, dict[str, Any], int]]] = {}
+    for path in sorted(paths["outbox"].glob("*.json")):
+        if not ready(path, paths["quarantine"]):
+            continue
+        try:
+            event = read_json(path)
+        except Exception:
+            continue
+        if not is_recovery_dedupe_candidate(event) and not is_recovery_episode_barrier(event):
+            continue
+        groups.setdefault(recovery_episode_fingerprint(event), []).append((path, event, created_epoch(event)))
+
+    suppressed = 0
+    for records in groups.values():
+        kept_by_duplicate_fingerprint: dict[str, int] = {}
+        for path, event, epoch in sorted(records, key=lambda record: (record[2], str(record[0]))):
+            if is_recovery_episode_barrier(event):
+                kept_by_duplicate_fingerprint.clear()
+                append_dispatch_log(paths, {
+                    "type": "recovery_dedupe_barrier",
+                    "eventId": event.get("id"),
+                    "source": event.get("source"),
+                    "severity": event.get("severity"),
+                    "eventType": event.get("eventType"),
+                    "episodeFingerprint": storm_fingerprint_hash(recovery_episode_fingerprint(event)),
+                    "createdAtEpoch": epoch,
+                })
+                continue
+            if not is_recovery_dedupe_candidate(event):
+                continue
+            duplicate_fingerprint = recovery_duplicate_fingerprint(event)
+            first_epoch = kept_by_duplicate_fingerprint.get(duplicate_fingerprint)
+            if first_epoch is not None and first_epoch <= epoch < first_epoch + window:
+                if not path.exists():
+                    continue
+                move_suppressed_event(
+                    path,
+                    paths,
+                    event,
+                    RECOVERY_DUPLICATE_SUPPRESSION_REASON,
+                    "recovery_duplicate_suppressed",
+                )
+                suppressed += 1
+                continue
+            kept_by_duplicate_fingerprint[duplicate_fingerprint] = epoch
+    return suppressed
+
+
+def prune_suppressed(paths: dict[str, Path]) -> int:
+    cap = suppressed_max_files()
+    files = [path for path in paths["suppressed"].glob("*") if path.is_file()]
+    if len(files) <= cap:
+        return 0
+
+    def sort_key(path: Path) -> tuple[int, str]:
+        try:
+            return path.stat().st_mtime_ns, str(path)
+        except OSError:
+            return 0, str(path)
+
+    pruned = 0
+    for path in sorted(files, key=sort_key)[: len(files) - cap]:
+        try:
+            path.unlink()
+            pruned += 1
+        except FileNotFoundError:
+            continue
+    if pruned:
+        _fsync_dir(paths["suppressed"])
+        append_dispatch_log(paths, {
+            "type": "suppressed_pruned",
+            "path": str(paths["suppressed"]),
+            "maxFiles": cap,
+            "pruned": pruned,
+        })
+    return pruned
+
+
+# ---------------------------------------------------------------------------
+# Test-provenance blocking (hub 78cc4cb9)
+# ---------------------------------------------------------------------------
+
+def is_test_provenance_event(event: dict[str, Any]) -> bool:
+    runtime = event.get("runtime") if isinstance(event.get("runtime"), dict) else {}
+    provenance = runtime.get("provenance") if isinstance(runtime.get("provenance"), dict) else {}
+    return provenance.get("test") is True
+
+
+def omit_dispatch_log_in_message(event: dict[str, Any]) -> bool:
+    diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    return diagnostics.get("omitDispatchLogInMessage") is True
+
+
+def test_provenance_meta_window_seconds() -> int:
+    return max(1, env_int("BOT_ERRORS_TEST_PROVENANCE_META_WINDOW_SECONDS", 900))
+
+
+def read_meta_state(paths: dict[str, Path]) -> dict[str, Any]:
+    try:
+        return read_json(paths["meta_state"])
+    except Exception:
+        return {}
+
+
+def write_meta_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
+    atomic_write_json(paths["meta_state"], state)
+
+
+def test_provenance_meta_event(paths: dict[str, Path], refused: int, window: int) -> dict[str, Any]:
+    now = int(time.time())
+    return {
+        "schemaVersion": 1,
+        "eventType": "alert",
+        "severity": "warning",
+        "id": f"dispatcher-test-provenance-refused-{now}",
+        "createdAt": now_iso(),
+        "machine": socket.gethostname(),
+        "platform": sys.platform,
+        "instance": "bot-errors-dispatcher",
+        "source": "test-provenance-refused",
+        "summary": "BOT ERRORS dispatcher refused test-provenance events",
+        "evidence": "\n".join([
+            f"refused_events:{refused}",
+            f"debounce_window_seconds:{window}",
+            "disposition: originals retained in suppressed audit state",
+            "reason: producer test-provenance event reached dispatcher backstop",
+        ]),
+        "process": {"pid": os.getpid()},
+        "diagnostics": {"omitDispatchLogInMessage": True},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def queue_test_provenance_meta_alert(paths: dict[str, Path], refused: int) -> int:
+    if refused <= 0:
+        return 0
+    now = int(time.time())
+    window = test_provenance_meta_window_seconds()
+    state = read_meta_state(paths)
+    last = int(state.get("testProvenanceMetaAlertAtEpoch") or 0)
+    if last and now - last < window:
+        append_dispatch_log(paths, {
+            "type": "test_provenance_meta_debounced",
+            "refused": refused,
+            "windowSeconds": window,
+        })
+        return 0
+
+    event = test_provenance_meta_event(paths, refused, window)
+    path = outbox_path_for_event(event, paths)
+    atomic_write_json(path, event)
+    state["testProvenanceMetaAlertAtEpoch"] = now
+    state["testProvenanceMetaAlertEventId"] = event["id"]
+    write_meta_state(paths, state)
+    append_dispatch_log(paths, {
+        "type": "test_provenance_meta_queued",
+        "eventId": event["id"],
+        "refused": refused,
+        "windowSeconds": window,
+    })
+    return 1
+
+
+def suppress_test_provenance_events(paths: dict[str, Path]) -> tuple[int, int]:
+    suppressed = 0
+    for path in sorted(paths["outbox"].glob("*.json")):
+        if not ready(path, paths["quarantine"]):
+            continue
+        try:
+            event = read_json(path)
+        except Exception:
+            continue
+        if not is_test_provenance_event(event):
+            continue
+        move_suppressed_event(
+            path,
+            paths,
+            event,
+            TEST_PROVENANCE_SUPPRESSION_REASON,
+            "test_provenance_suppressed",
+        )
+        suppressed += 1
+    alerted = queue_test_provenance_meta_alert(paths, suppressed)
+    return suppressed, alerted
 
 
 def json_rpc_call(socket_path: str, method: str, params: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
@@ -976,6 +1683,7 @@ def format_event(event: dict[str, Any]) -> str:
     process_info = event.get("process") if isinstance(event.get("process"), dict) else {}
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+    storm = event.get("storm") if isinstance(event.get("storm"), dict) else {}
     failure = critical_asset_failure(event)
     asset = critical_asset_asset(event)
     log_hints = diagnostics.get("logHints") if isinstance(diagnostics.get("logHints"), list) else []
@@ -1022,6 +1730,15 @@ def format_event(event: dict[str, Any]) -> str:
         event_line("platform", event.get("platform")),
         event_line("pid", process_info.get("pid")),
         event_line("cwd", process_info.get("cwd")),
+        event_line("affected_hosts", storm.get("affectedHosts")),
+        event_line(
+            "affected_host_list",
+            ", ".join(str(host) for host in storm.get("hosts", []))
+            if isinstance(storm.get("hosts"), list)
+            else None,
+            1800,
+        ),
+        event_line("storm_manifest", storm.get("manifest"), 900),
     ]
     for idx, hint in enumerate(log_hints[:5], start=1):
         lines.append(event_line(f"log_{idx}", hint, 900))
@@ -1821,8 +2538,11 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     counts = {
         "outbox": len(list(paths["outbox"].glob("*.json"))),
         "processing": len(list(paths["processing"].glob("*"))),
+        "sent": len(list(paths["sent"].glob("*"))),
         "suppressed": len(list(paths["suppressed"].glob("*"))),
         "quarantine": len(list(paths["quarantine"].glob("*"))),
+        "stormCollapsed": len(list(paths["storm_collapsed"].glob("*"))),
+        "stormManifests": len(list(paths["storm_manifests"].glob("*"))),
         "writefail": sum(len(list(path.glob("*.writefail"))) for path in writefail_dirs() if path.exists()),
         "writefailRecovered": len(list(paths["writefail_recovered"].glob("*"))),
         "writefailQuarantine": len(list(paths["writefail_quarantine"].glob("*"))),
@@ -1944,9 +2664,12 @@ def run_once(max_events: int) -> dict[str, Any]:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         writefail_recovered = recover_writefail_breadcrumbs(paths)
         reclaimed = reclaim_processing(paths)
+        test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
+        recovery_deduped = suppress_ready_recovery_duplicates(paths)
+        storm_collapsed = collapse_ready_storms(paths)
         processed = 0
         sent = 0
-        suppressed = 0
+        suppressed = test_provenance_suppressed + recovery_deduped
         failed = 0
         test_leak_dropped = 0
         last_error = None
@@ -1979,6 +2702,8 @@ def run_once(max_events: int) -> dict[str, Any]:
             failed += stale_failed
             last_error = stale_error
 
+        suppressed_pruned = prune_suppressed(paths)
+
         # Daily test-leak summary marker (at most once per UTC date per day).
         if test_leak_dropped > 0:
             incident_state = load_incident_state(paths)
@@ -2006,6 +2731,11 @@ def run_once(max_events: int) -> dict[str, Any]:
             testLeakDropped=test_leak_dropped,
             reclaimed=reclaimed,
             writefailRecovered=writefail_recovered,
+            testProvenanceSuppressed=test_provenance_suppressed,
+            testProvenanceMetaAlerted=test_provenance_meta_alerted,
+            recoveryDeduped=recovery_deduped,
+            stormCollapsed=storm_collapsed,
+            suppressedPruned=suppressed_pruned,
             lastError=last_error,
         )
         return {
@@ -2018,6 +2748,11 @@ def run_once(max_events: int) -> dict[str, Any]:
             "testLeakDropped": test_leak_dropped,
             "reclaimed": reclaimed,
             "writefailRecovered": writefail_recovered,
+            "testProvenanceSuppressed": test_provenance_suppressed,
+            "testProvenanceMetaAlerted": test_provenance_meta_alerted,
+            "recoveryDeduped": recovery_deduped,
+            "stormCollapsed": storm_collapsed,
+            "suppressedPruned": suppressed_pruned,
             "lastError": last_error,
         }
 
