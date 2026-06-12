@@ -5,6 +5,10 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
+  "requiredConfigMaxMode": "600",
+  "expectAlertTarget": true,
+  "expectRuntimeManifest": true,
+  "expectPrimaryPhoneVerification": true,
   "requiredCredentialFiles": [
     "fleet-tokens.json",
     "instances/ew-bot/tokens.env"
@@ -14,10 +18,8 @@
       "name": "ew-bot",
       "expected": "always_on",
       "service": "com.whatsoup.ew-bot",
-      "primaryPhoneVerificationRequired": true,
-      "primaryPhoneOwner": "Lucas"
+      "healthPort": 9099,
+      "primaryPhoneOwner": "instance:ew-bot"
     }
-  ],
-  "expectPrimaryPhoneVerification": true,
-  "requiredConfigMaxMode": "600"
+  ]
 }
