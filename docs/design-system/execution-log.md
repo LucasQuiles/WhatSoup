@@ -484,3 +484,205 @@ DEFERRED TO D7 (packet staged, GO). verify:push:branch currently red on main-sid
 findings in files byte-identical to origin/main — push-gate dependency, server lane owns it.
 2,073/2,073; first merge conflict of the program resolved as union (Lock control). Packets:
 b2-evidence.md, b3-wave1-evidence.md.
+
+---
+
+## B3 wave 2 — ConfigEditDialog + ScheduleComposerModal — 2026-06-12
+
+**Verdict: Inconclusive — committed; acceptance evidence packet outstanding.**
+
+Commit `71d77108` after packet `b3-wave2-investigation.md` (`7145769d`, Ready with Constraints —
+the composer 95vw claim falsified and the ConfigEditDialog open-prop requirement found in
+investigation, not implementation). ConfigEditDialog gains an open prop with reset-on-open,
+dismissable=false, and ModalHeader/Footer replacing the ad-hoc shell; ScheduleComposerModal drops
+its own Escape handling and null-gate for Modal at size=md; both binary toggle pairs move to the
+segmented-control pattern (role=group, exactly-one aria-pressed — a DD-15 leg). Five orphaned
+per-dialog sizing tokens deleted at zero functional references. The wave-level live
+dialog-contract verification that closed wave 1 has not been produced for this wave.
+
+---
+
+## B3 wave 3 — ToolbarTimeRange prep + UpdateModal/GroupDetailModal — 2026-06-12
+
+**Verdict: Inconclusive — committed; acceptance evidence packet outstanding.**
+
+After packet `b3-wave3-investigation.md` (`fab8a11c`, Ready with Constraints). Prep `6500b7f3`:
+ToolbarTimeRange gains an additive disabled prop (disabled segments render the attribute and
+never fire onChange; three new pins; default behavior byte-stable) so the dialog seg migrations
+can keep their saving-key double-fire guard. Migration `d73bef54`: UpdateModal onto Modal at
+size=sm, dismissable=false with the single abort-and-cleanup close path — Escape and X stay live
+at every update phase while the dangerous scrim-close path is removed; six action sites move to
+Button. GroupDetailModal onto Modal at size=lg via the labelledById hatch, the tab strip adopts
+the Tabs primitive, all four settings toggle pairs move to ToolbarTimeRange with the disabled
+guard, and the dialog gains its first-ever rendering suite (21 tests: backdrop inversion, Escape
+stack incl. confirm double-fire, tablist roving, seg contracts, admin gating). The console's last
+two hand-rolled document-Escape handlers are gone; zero-consumer dialog CSS blocks and two
+orphaned panel tokens deleted grep-gated. Ratchet 533→511 at packet-expected bucket values;
+2,193 tests green; typecheck clean (per the commit record).
+
+---
+
+## B4 commits 1–3 — Inbox: ChatList listbox, pane collapse, MessageBubble — 2026-06-12
+
+**Verdict: Inconclusive — lane in flight; acceptance evidence packet outstanding (DD-17 and the
+Inbox DD-18r legs close on acceptance, not on these commits).**
+
+After packet `b4-investigation.md` (`7d01d729`, Ready with Constraints). ChatList (`bb9ba869` +
+`099caaa4` + `517e4485`): listbox with roving tabindex — arrow navigation moves focus without
+selecting (no fetch per keystroke), Enter/Space select, focus survives reorder and removal
+(the DD-17 code leg); two assertions strengthened on the integrity flag (label attribute and
+no-op contract replace bare presence); the legacy text-t4 token in the empty state replaced,
+clearing the shadow-ratchet exceedance the new file introduced (new file, ceiling 0). Pane
+collapse (`68a7beda`): the Inbox flex root becomes a container-query root and the contact pane
+collapses below the 1080px container threshold — the Fleet squeeze idiom, container not
+viewport; legacy pane tokens reconciled onto spec names and values (288→264px chats, 256→248px
+contact — deliberate visible change recorded for the live design checkpoint); new Inbox page
+harness pins layout class, tokens, collapse target, and listbox wiring; 2,131 green, ratchet
+flat at 533. MessageBubble (`d5627923`): the hover-card gains a keyboard path — focus reveals
+the detail card instantly, blur hides it, Escape closes one layer only, hover and focus hold the
+card independently — and placement is now measured via getBoundingClientRect with a
+data-placement attribute and a zero-rect jsdom guard; 14 new tests, the 10 existing hover tests
+unchanged as the regression proof; 2,145 green, ratchet flat.
+
+---
+
+## Origin merge — health-confidence conflict set — 2026-06-12
+
+**Verdict: Pass.**
+
+`23710d64` absorbed origin/main's safeguard-diagnostics / health-confidence work (`f617e708`,
+`aef8ccd2`, plus `5c70acd7` keyring) through the program's first multi-file conflict set: six
+console files (StatusDot, SummaryTab, LineDetail, SoupKitchen, and two test files). Resolved per
+the standing rule (our structure, their data): StatusDot resolved wholly to the branch side —
+zero diff against our parent, status-map stays the single rendering driver — while SoupKitchen
+(+26 lines), SummaryTab, and LineDetail absorb main's health-signal data through the migrated
+rendering paths, and main's test additions came through (+4 badge-components, +46 soup-kitchen).
+
+---
+
+## DD-8 — ghost-tier decision (Option B) + execution — 2026-06-12
+
+**Verdict: Pass.**
+
+Decision package `22de54e7` (`dd8-decision-package.md`): the color.md incidental-ink law vs
+log-stream.md time-lane spec conflict stated with contrast recomputed from live token values
+(text-3 fails AA on every bed in both themes), all 69 ghost-tier hits classified (six essential),
+three user-gated options presented. Operator approved Option B (`34f040f3`): the log time lane
+promotes to AA ink; log-stream.md amended. Executed `ae46d5b3`: LogStream time lane and
+expanded-detail component name move text-3→text-2 — 7.60:1 dark / 6.03:1 light on the log bed,
+AA pass both themes; recession preserved via the 11px data-sm size and mono weight, not sub-AA
+color. The DD-8 register row narrows to the per-screen essential-text corrections owned by C3
+(still blocking).
+
+---
+
+## D6 — enforcement promotion wave — 2026-06-12
+
+**Verdict: Inconclusive — committed per packet; acceptance evidence packet outstanding.**
+
+Four commits after packet `d6-investigation.md` (`db02d0a2`, Ready with Constraints).
+`db165001`: design-regression checks 1 and 8 made meaningful — the raw-hex pattern now requires
+a color context so decimal issue numbers stop false-positiving, the comment filter is anchored
+so it actually excludes commented-out hex, and check 8 pins the expected title against a
+missing/match/drift branch instead of an unconditional OK. `ba4ed643`: four rule groups flip per
+the lint-plan lifecycle — structural rules global-error outside primitives, focus suppression
+scoped-error console-wide with two surveyed carve-outs, raw-button and ad-hoc-modal scoped-error
+across the eight migrated files, legacy tokens and utility smells scoped-error inside primitives
+— each with negative fixtures proving the promoted severity fires (suite 46→68) and a live
+tree-clean proof; promoted selectors move to a shared module so base and shadow configs flow
+from one source; WVR-003/004 retired; ratchet keys continuous at 533. `44897b16`: eight matured
+regression checks promote to blocking via EXIT_ON_FAIL; verify:push:branch gains the four design
+gates — theme parity and the shadow ratchet had been asserted wired but were not (discrepancy
+found and closed here); new deterministic design-metrics emitter (per-rule buckets,
+live-vs-baseline drift, waiver expiries, register state; fail-closed parsing; 24 fixture tests).
+`64332ce8`: four CSS tier-boundary checks from the token layer law; the dangling-var() check
+found the spec'd type ramp has zero CSS definitions — eight names, 24 consumers — DD-26 filed
+(`2eb066d2`) and every bare reference now carries an explicit fallback.
+
+---
+
+## D7 commit 1 — browser harness + trusted-event smoke gate — 2026-06-12
+
+**Verdict: Inconclusive — lane in flight (the computed-box and deterministic-viewport batteries
+this lane owns are not yet built).**
+
+`c3b1ac52` after packet `d7-investigation.md` (`ebc6f29c`, Ready with Constraints): vitest
+browser mode on the playwright/chromium provider with exact dep pins and a separate browser
+config; a setup sentinel blocks accidental backend fetches and sockets; the smoke gate proves
+what jsdom cannot — Tab moves real focus, :focus-visible activates from keyboard-origin events,
+Enter fires with isTrusted true, and mock interception works under the provider. The jsdom suite
+is excluded and untouched (2,131 green); test:browser stays out of verify chains until the
+promotion commit. This is the lane the B2 trusted-event deferral and the DD-10/DD-18r proofs
+wait on.
+
+---
+
+## Test-integrity baseline driven to zero — 2026-06-12
+
+**Verdict: Pass.**
+
+`2d829a64`: full-tree scan classified all five grandfathered baseline findings as stale — each
+site already strengthened or the scanner grammar gap closed — and surfaced one true weak
+assertion in the new GroupDetailModal suite (bare toBeDefined after a throwing getByRole), now
+asserting the aria-label value the test name promises. The baseline carries zero findings; any
+new weak assertion blocks at the guard.
+
+---
+
+## Coverage audit cover-now closure (+72 tests) — 2026-06-12
+
+**Verdict: Pass.**
+
+`168f63b2` after the coverage audit (`771575ca`, `test-coverage-audit.md`): UnlockScreen from
+effectively untested to full coverage incl. the probe-failure catch branch; first Ops page
+harness (25 tests: LogStream adoption contract, level filters, empty and error states); FeedCard
+degraded-state mappers each driven to rendered severity; SoupKitchen error-panel retry lane with
+spy-proven refetch; use-dismissable dark branches pinned (empty-container Tab trap, Shift+Tab
+escape recovery, stacked outside-click single-fire). Suite 2,193→2,265; integrity baseline stays
+at zero; remaining gaps named honestly — jsdom-impossible SSR guards accepted, clipboard action
+deferred by name.
+
+---
+
+## Gate-placement parity — 2026-06-12
+
+**Verdict: Pass.**
+
+`f09f5dc3`: the four design gates (theme parity, shadow ratchet, design regression, design
+metrics) now run in CI and in verify:release — previously they fired only on the local pre-push
+path, so a no-verify push or web merge landed with zero design enforcement and a release push
+enforced less design law than a branch push. The two fitness drift tests join the branch-push
+subset so registry/config skew surfaces at branch pushes. Pre-commit gains three sub-second
+deterministic guards plus theme parity conditioned on the semantic tokens file being staged. The
+fitness taxonomy stops claiming a blocking file-size ratchet guard that does not exist;
+implement-or-demote recorded as an open operator decision.
+
+---
+
+## Per-directory coverage ratchet (report-only) — 2026-06-12
+
+**Verdict: Pass.**
+
+`b4140452`: a threshold checker evaluates vitest v8 coverage against the audit's glob-keyed area
+floors (primitives 98/94, hooks 97/93, shared 98/93, lib 84/88 — deliberately no global gate
+that would freeze incidental coverage). Deterministic sorted output; fail-closed exit taxonomy
+distinguishing coverage-not-run and schema errors from threshold violations; strict mode tested
+but unwired pending the gate-placement decision. All four areas pass their floors today; 37
+fixture tests; integrity baseline stays empty.
+
+---
+
+## Stale-ceiling metric + pre-push fail-open closure — 2026-06-12
+
+**Verdict: Pass.**
+
+`d761d01d`: design metrics now surface stale-high ratchet ceilings as a first-class field —
+baseline buckets whose live count fell below the ceiling are silent slack where new violations
+can hide — reported sorted with a per-bucket warning, report-only, stdout determinism preserved;
+seven new fixture tests pin the null-vs-empty contract (24→31). The pre-push hook no longer
+gates the whole metrics call on eslint presence: the file-based blocking checks (expired
+waivers, malformed inputs) run regardless — the old gate was fail-open on exactly the
+deterministic path that is supposed to block. Integrator probe: a synthetically inflated ceiling
+yields the stale-ceiling count and warning at exit 0; tree restored clean. Harvested from a
+context-limit-terminated hardening lane and independently verified by the integrator before
+commit.
