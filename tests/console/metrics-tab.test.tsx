@@ -83,7 +83,7 @@ afterEach(() => {
 });
 
 describe('MetricsTab — range selector', () => {
-  it('renders the three supported ranges and highlights the active one', () => {
+  it('renders the three supported ranges and marks the active one via aria-pressed', () => {
     const setRange = vi.fn();
     render(
       <MetricsTab
@@ -95,14 +95,51 @@ describe('MetricsTab — range selector', () => {
       />,
     );
 
+    // ToolbarTimeRange renders role="group" with aria-label
+    const seg = screen.getByRole('group', { name: 'Time range' });
+    expect(seg).toBeTruthy();
+
     const button24h = screen.getByRole('button', { name: '24h' });
     const button7d = screen.getByRole('button', { name: '7d' });
     const button30d = screen.getByRole('button', { name: '30d' });
 
-    expect(button24h.className).toContain('c-btn-ghost');
-    expect(button7d.className).toContain('c-btn-primary');
-    expect(button30d.className).toContain('c-btn-ghost');
-    expect(screen.getByText('Range')).toBeTruthy();
+    // Exactly one button pressed (the active range)
+    expect(button24h.getAttribute('aria-pressed')).toBe('false');
+    expect(button7d.getAttribute('aria-pressed')).toBe('true');
+    expect(button30d.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('maintains exactly-one aria-pressed after a click', () => {
+    const setRange = vi.fn();
+    const { rerender } = render(
+      <MetricsTab
+        metrics={buildMetrics()}
+        metricsLoading={false}
+        metricsError={null}
+        metricsRange="24h"
+        setMetricsRange={setRange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '30d' }));
+    expect(setRange).toHaveBeenCalledWith('30d');
+
+    // Simulate controlled re-render with new value
+    rerender(
+      <MetricsTab
+        metrics={buildMetrics()}
+        metricsLoading={false}
+        metricsError={null}
+        metricsRange="30d"
+        setMetricsRange={setRange}
+      />,
+    );
+
+    const pressedButtons = screen
+      .getAllByRole('button')
+      .filter((b) => b.closest('[aria-label="Time range"]') && b.getAttribute('aria-pressed') === 'true');
+    expect(pressedButtons).toHaveLength(1);
+    expect(pressedButtons[0].textContent).toBe('30d');
   });
 
   it('invokes setMetricsRange with the clicked range token', () => {

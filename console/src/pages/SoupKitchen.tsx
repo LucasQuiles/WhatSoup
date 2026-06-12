@@ -52,6 +52,7 @@ import {
   ToolbarFilters,
   ToolbarSearch,
   ToolbarSpring,
+  ToolbarTimeRange,
   StatusCell,
   ModeBadge,
   Button,
@@ -62,6 +63,7 @@ import {
   LogStream,
   type SortState,
   type RowSeverity,
+  type TimeRangeOption,
 } from "../components/primitives";
 
 const ease = [0.22, 1, 0.36, 1] as const;
@@ -101,7 +103,11 @@ const modeTextClass: Record<Mode, string> = {
   agent: "text-m-agt",
 };
 
-const RANGE_OPTIONS: MetricsRange[] = ["24h", "7d", "30d"];
+const RANGE_OPTIONS: TimeRangeOption[] = [
+  { label: "24h", value: "24h" },
+  { label: "7d", value: "7d" },
+  { label: "30d", value: "30d" },
+];
 const EMPTY_LINES: LineInstance[] = [];
 const EMPTY_FEED: FeedEvent[] = [];
 
@@ -618,16 +624,12 @@ const SoupKitchen: FC = () => {
       <div className="c-card flex-shrink-0 p-[var(--sp-2)] flex flex-col gap-[var(--sp-2)]">
         <div className="flex items-center justify-between">
           <h2 className="c-heading-lg">Metrics</h2>
-          <div className="flex items-center gap-[var(--sp-2)]">
-            {RANGE_OPTIONS.map((r) => (
-              <FilterPill
-                key={r}
-                label={r}
-                isActive={chartRange === r}
-                onClick={() => setChartRange(r)}
-              />
-            ))}
-          </div>
+          <ToolbarTimeRange
+            label="Chart range"
+            options={RANGE_OPTIONS}
+            value={chartRange}
+            onChange={setChartRange}
+          />
         </div>
 
         {/* Chart Row — 3-up with expansion; transitions removed for snap (DD-18) */}

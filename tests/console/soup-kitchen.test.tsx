@@ -1072,3 +1072,28 @@ describe('SoupKitchen drawer focus restore after retarget (QA finding D3)', () =
     expect(document.activeElement).toBe(rowB);
   });
 });
+
+// ---------------------------------------------------------------------------
+// DD-15: ToolbarTimeRange adoption — chart-range seg contract
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen chart-range ToolbarTimeRange contract', () => {
+  it('renders the chart-range seg as role=group with accessible label "Chart range"', () => {
+    renderPage({ lines: [] });
+    const seg = screen.getByRole('group', { name: 'Chart range' });
+    expect(seg).toBeDefined();
+  });
+
+  it('marks exactly one range button aria-pressed=true after a range change', () => {
+    renderPage({ lines: [] });
+
+    const seg = screen.getByRole('group', { name: 'Chart range' });
+    fireEvent.click(within(seg).getByRole('button', { name: '7d' }));
+
+    const pressedButtons = Array.from(seg.querySelectorAll('button')).filter(
+      (b) => b.getAttribute('aria-pressed') === 'true',
+    );
+    expect(pressedButtons).toHaveLength(1);
+    expect(pressedButtons[0].textContent).toBe('7d');
+  });
+});

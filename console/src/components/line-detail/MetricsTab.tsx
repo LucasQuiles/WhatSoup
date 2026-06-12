@@ -6,6 +6,7 @@ import { FleetSessionChart } from '../FleetSessionChart'
 import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
+import { ToolbarTimeRange } from '../primitives'
 import type { MetricsRange, LineMetrics, LineInstance } from './types'
 
 type DetailTab = 'tokens' | 'sessions';
@@ -37,17 +38,16 @@ export function MetricsTab({
     <div className="flex-1 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
       {/* Range selector */}
       <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-4)]">
-        <span className="c-section-label">Range</span>
-        {(['24h', '7d', '30d'] as const).map((r) => (
-          <button
-            type="button"
-            key={r}
-            className={`c-btn c-btn-sm ${metricsRange === r ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            onClick={() => setMetricsRange(r)}
-          >
-            {r}
-          </button>
-        ))}
+        <ToolbarTimeRange
+          label="Time range"
+          options={[
+            { label: '24h', value: '24h' },
+            { label: '7d', value: '7d' },
+            { label: '30d', value: '30d' },
+          ]}
+          value={metricsRange}
+          onChange={setMetricsRange}
+        />
         {metrics?.messageVolume && metrics.messageVolume.length > 0 && (
           <button
             type="button"
