@@ -11,6 +11,8 @@ import { assertNeverTransport } from './registry.ts';
 import type { RuntimeConnection } from './runtime-connection.ts';
 import type { TransportId } from './registry.ts';
 import type { TwilioSmsConfig } from './twilio/types.ts';
+import { TwilioWebhookServer } from './twilio/webhook-server.ts';
+import { lookupCredential } from '../lib/keyring.ts';
 
 export type { RuntimeConnection };
 
@@ -52,7 +54,22 @@ export function createConnection(config: FactoryConfig): RuntimeConnection {
       }
       const port = new SdkTwilioSmsPort(config.twilioConfig);
       const adapter = new TwilioSmsAdapter(config.twilioConfig, port);
-      return new TwilioConnection(adapter);
+
+      let webhookServer: TwilioWebhookServer | undefined;
+      if (config.twilioConfig.inboundMode === 'webhook' && config.twilioConfig.webhook !== undefined) {
+        const { webhook } = config.twilioConfig;
+        webhookServer = new TwilioWebhookServer({
+          getAuthToken: () => lookupCredential(config.twilioConfig!.authTokenService),
+          publicBaseUrl: webhook.publicBaseUrl,
+          listenPort: webhook.listenPort,
+          listenAddress: webhook.listenAddress,
+          voice: config.twilioConfig.voice ?? { enabled: false, voicemailMaxLengthSec: 120 },
+          onSms: (r) => adapter.handleInboundRecord(r),
+          onTranscript: (t) => adapter.handleTranscript(t),
+        });
+      }
+
+      return new TwilioConnection(adapter, webhookServer);
     }
 
     default:

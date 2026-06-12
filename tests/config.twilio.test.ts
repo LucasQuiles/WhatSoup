@@ -281,3 +281,65 @@ describe('resolveTwilioSmsConfig', () => {
     expect(result!.rateLimit.smsPerMinute).toBe(10);
   });
 });
+
+// ---------------------------------------------------------------------------
+// resolveTwilioSmsConfig — webhook and voice field resolution
+// ---------------------------------------------------------------------------
+
+describe('resolveTwilioSmsConfig — webhook and voice fields', () => {
+  it('normalizes trailing slash from publicBaseUrl', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'my-bot',
+      accountSid: 'AC00000000000000000000000000000000',
+      authTokenService: 'svc',
+      phoneNumber: '+15550000001',
+      inboundMode: 'webhook',
+      webhook: { publicBaseUrl: 'https://relay.example.test/', listenPort: 8443 },
+    });
+    expect(result?.webhook?.publicBaseUrl).toBe('https://relay.example.test');
+  });
+
+  it('passes through webhook block without trailing slash unchanged', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'my-bot',
+      accountSid: 'AC00000000000000000000000000000000',
+      authTokenService: 'svc',
+      phoneNumber: '+15550000001',
+      inboundMode: 'webhook',
+      webhook: { publicBaseUrl: 'https://relay.example.test', listenPort: 8443 },
+    });
+    expect(result?.webhook?.publicBaseUrl).toBe('https://relay.example.test');
+    expect(result?.webhook?.listenPort).toBe(8443);
+  });
+
+  it('merges voice defaults when voice block is absent', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'my-bot',
+      accountSid: 'AC00000000000000000000000000000000',
+      authTokenService: 'svc',
+      phoneNumber: '+15550000001',
+    });
+    expect(result?.voice).toBeUndefined();
+    expect(result?.webhook).toBeUndefined();
+    expect(result?.phoneNumber).toBe('+15550000001');
+  });
+
+  it('passes through voice block with defaults applied', async () => {
+    const { resolveTwilioSmsConfig } = await import('../src/config.ts');
+    const result = resolveTwilioSmsConfig({
+      account: 'my-bot',
+      accountSid: 'AC00000000000000000000000000000000',
+      authTokenService: 'svc',
+      phoneNumber: '+15550000001',
+      inboundMode: 'webhook',
+      webhook: { publicBaseUrl: 'https://relay.example.test', listenPort: 8443 },
+      voice: { enabled: true, voicemailMaxLengthSec: 90, voicemailGreeting: 'Leave a message.' },
+    });
+    expect(result?.voice?.enabled).toBe(true);
+    expect(result?.voice?.voicemailMaxLengthSec).toBe(90);
+    expect(result?.voice?.voicemailGreeting).toBe('Leave a message.');
+  });
+});

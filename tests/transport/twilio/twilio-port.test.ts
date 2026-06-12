@@ -43,6 +43,9 @@ function makeMockClient(overrides: Partial<{
       create: messagesCreate as TwilioClientLike['messages']['create'],
       list: messagesList as TwilioClientLike['messages']['list'],
     },
+    calls: {
+      create: vi.fn().mockResolvedValue({ sid: 'CA000001', status: 'queued' }) as TwilioClientLike['calls']['create'],
+    },
   };
 }
 

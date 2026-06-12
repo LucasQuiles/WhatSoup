@@ -6,12 +6,12 @@ Messages API, inbound text via REST polling. It is **off by default** — an
 instance uses it only when its `config.json` sets `transport: "twilio"` with a
 `twilioConfig` block.
 
-**Scope honesty up front:** stage 1 ships *outbound text + poll-mode inbound
-text only*. Webhook inbound and voice are later stages. Several surfaces that
-exist for WhatsApp (media, polls, scheduled sends, typing, read receipts) are
-rejected or no-oped on SMS — the full list is in
-[Current limitations](#current-limitations). Automated tests are mock-based
-and do not prove live deliverability.
+**Scope (stage 2):** outbound text, poll-mode inbound text, webhook-mode inbound
+text with signature validation, and recorded voicemail with transcription. Live
+conversational voice remains deferred. Several surfaces that exist for WhatsApp
+(media, polls, scheduled sends, typing, read receipts) are rejected or no-oped
+on SMS — the full list is in [Current limitations](#current-limitations).
+Automated tests are mock-based and do not prove live deliverability.
 
 ## How it works
 
@@ -77,7 +77,13 @@ Per-field notes (validation rules are exact — see
 | `twilioConfig.authTokenService` | yes | — | Keyring **service name**, not the token itself. Non-empty, no whitespace, max 128 chars. See [Credentials](#credentials-keyring). |
 | `twilioConfig.phoneNumber` | XOR | — | E.164 sender (`^\+[1-9]\d{6,14}$`). Exactly **one** of `phoneNumber` or `messagingServiceSid` must be set — both or neither is rejected. |
 | `twilioConfig.messagingServiceSid` | XOR | — | Must match `^MG[0-9a-f]{32}$` (lowercase hex). Used as the sender instead of `phoneNumber`. Caveat: with no `phoneNumber`, inbound polling uses a single unfiltered SDK call — it lists all messages on the Twilio account in both directions (`twilio-port.ts` makes two targeted calls only when `phoneNumber` is configured). |
-| `twilioConfig.inboundMode` | no | `poll` | Only `'poll'` is accepted. `'webhook'` is rejected with `webhook inbound is not yet supported; use inboundMode:'poll'`. Any other value is also rejected. |
+| `twilioConfig.inboundMode` | no | `poll` | `'poll'` (REST polling) or `'webhook'` (signature-validated HTTP listener). Unknown values are rejected. |
+| `twilioConfig.webhook.publicBaseUrl` | webhook-mode | — | Public HTTPS base URL Twilio posts to (`https://` required, no trailing slash; the validator strips one if present). Twilio computes signatures over the full public URL; this **must match exactly**. |
+| `twilioConfig.webhook.listenPort` | webhook-mode | — | Port the local listener binds (integer `[1, 65535]`; must not equal `healthPort` when both are set). Bind address defaults to `127.0.0.1` — you MUST front it with an HTTPS-terminating proxy or tunnel. |
+| `twilioConfig.webhook.listenAddress` | no | `127.0.0.1` | Override the local bind address. Default keeps the listener off public interfaces; the HTTPS proxy handles public TLS. |
+| `twilioConfig.voice.enabled` | no | `false` | Enable voicemail flow (`true` requires `inboundMode:'webhook'` and a `phoneNumber`). |
+| `twilioConfig.voice.voicemailMaxLengthSec` | no | `120` | Max recording length in seconds (`[5, 600]`). |
+| `twilioConfig.voice.voicemailGreeting` | no | built-in | Custom `<Say>` greeting text (≤ 500 chars). |
 | `twilioConfig.pollIntervalMs` | no | `15000` | Integer in `[5000, 86400000]`. Floor protects against rate-limit storms; the 24h ceiling catches typos that would silently disable inbound. Also the inbound *lookback window* at connect (see below). |
 | `twilioConfig.rateLimit.smsPerMinute` | no | `30` | Integer in `[1, 600]`. **Config-only today** — see [Current limitations](#current-limitations). |
 
@@ -154,8 +160,10 @@ mentions, `contentType: 'text'`.
   the chat runtime lost bot replies, and prevents durability from
   indefinitely parking ops as `submitted → maybe_sent → quarantined`.
 
-Latency note: inbound latency is bounded by `pollIntervalMs` (default 15s).
-This is a polling transport; there is no push path in stage 1.
+Latency note: inbound latency is bounded by `pollIntervalMs` (default 15s) in
+poll mode. In webhook mode, delivery is near-real-time (Twilio posts within
+seconds). Both modes share one deduplication set; a SID seen via one path will
+not be re-emitted by the other.
 
 ## Auth failure behaviour
 
@@ -186,10 +194,31 @@ This is a polling transport; there is no push path in stage 1.
 
 Each item below is verified against the code on this branch.
 
-- **Text only, poll only.** Outbound is `sendText` (max 1600 chars, empty
-  rejected); inbound is poll-mode text with no attachments. Webhook inbound
-  and voice are **later stages** — the validator rejects
-  `inboundMode: 'webhook'` today.
+- **Voicemail audio download is not implemented.** Inbound voice delivers
+  transcript text only. The recording SID is available as
+  `attachments[0].id` (type `'voice'`) and in the `inboundEventKey`, but
+  fetching the audio file from `RecordingUrl` is out of stage-2 scope.
+- **Live conversational voice remains deferred.** `ConversationRelay`/WebSocket
+  voice AI is not built; only asynchronous voicemail transcription is wired.
+- **The enforcement envelope from the design spec is absent (stage 3).**
+  No fitness rules (`transport.twilio-credential-gate`,
+  `transport.webhook-signature-required`,
+  `invariant.no-outbound-without-consent`, `transport.destructive-op-gate`),
+  no consent guard, and no per-iteration self-review artifact/guard exist on
+  this branch. Do not assume an invariant layer is active when working under
+  `src/transport/twilio/`.
+- **`rateLimit.smsPerMinute` is validated config with no enforcement.** No
+  code consumes it on the send path yet. Do not rely on it to cap outbound
+  volume; it exists so configs written today stay valid when the limiter
+  lands.
+- **The webhook listener binds `127.0.0.1` by default.** Operators MUST
+  front it with an HTTPS-terminating reverse proxy or tunnel whose public URL
+  exactly matches `webhook.publicBaseUrl`. Twilio signature validation is
+  computed over the full public URL — any mismatch causes 403 rejections.
+- **Webhook auth-token lookup shells the OS keyring on every request.** The
+  `getAuthToken` thunk calls `lookupCredential` per-signature-validation.
+  At Twilio SMS/voice rates this is fine; it would be a bottleneck at
+  high-frequency webhook traffic.
 - **`sendMedia`, `sendRaw`, and `sendPollMessage` reject** with
   `UnsupportedTransportOperationError` (`connection-bridge.ts`). This means
   MCP `send_media`, voice-note synthesis, and `send_poll` fail at runtime on
@@ -200,21 +229,10 @@ Each item below is verified against the code on this branch.
   per-row: the scheduler retries it up to `maxRetries` and then marks it
   `failed`. There is no special terminal-failure routing for
   unsupported-transport errors yet — they burn the normal retry budget first.
-- **The enforcement envelope from the design spec is not yet wired.** No
-  fitness rules (`transport.twilio-credential-gate`,
-  `transport.webhook-signature-required`,
-  `invariant.no-outbound-without-consent`, `transport.destructive-op-gate`),
-  no consent guard, and no per-iteration self-review artifact/guard exist on
-  this branch — they are a later enforcement stage. Do not assume an
-  invariant layer is active when working under `src/transport/twilio/`.
 - **No outbound-status events.** The adapter's `extensions` set is empty;
   delivery confirmation uses the inbound echo path instead (the bot's own
   sends arrive as `fromMe: true` records via polling and settle durability
   through `matchEcho`).
-- **`rateLimit.smsPerMinute` is validated config with no enforcement.** No
-  code consumes it on the send path yet. Do not rely on it to cap outbound
-  volume; it exists so configs written today stay valid when the limiter
-  lands.
 - **No instance-type gate.** The validator does not restrict
   `transport: "twilio"` by instance type, so a `type: "agent"` SMS instance
   starts normally — but its MCP media/poll tools reject at runtime (above).
@@ -227,8 +245,83 @@ Each item below is verified against the code on this branch.
   these.
 - **At-least-once inbound** with bounded dedupe (see
   [Inbound delivery semantics](#inbound-delivery-semantics)) — downstream
-  consumers should treat the message SID (`inboundEventKey`) as the
-  idempotency key.
+  consumers should treat the message SID or recording SID (`inboundEventKey`)
+  as the idempotency key.
+
+## Webhook mode
+
+When `inboundMode: 'webhook'`, `TwilioWebhookServer` binds a local `node:http`
+listener and forwards valid Twilio POSTs into the adapter's shared inbound
+pipeline. The signature gate runs before any routing or business logic.
+
+### 403 / 503 fail-closed table
+
+| Condition | Response | Forwarded? |
+|-----------|----------|------------|
+| Valid signature | 204 / 200 (TwiML) | Yes |
+| Missing `X-Twilio-Signature` header | 403 | No |
+| Bad signature | 403 | No |
+| Auth token unavailable (keyring null) | 503 | No |
+| Parse error (missing required field) | 400 with field name | No |
+| Unknown path | 404 | — |
+| Non-POST on known path | 405 | — |
+
+### Port-collision rule
+
+`webhook.listenPort` must differ from `healthPort` when both are set. The
+validator enforces this at config load time (`twilioConfig.webhook.listenPort`
+field error).
+
+### Config example (webhook mode)
+
+```json
+"transport": "twilio",
+"twilioConfig": {
+  "account": "sms-agent",
+  "accountSid": "AC00000000000000000000000000000000",
+  "authTokenService": "twilio-sms-agent",
+  "phoneNumber": "+15550001111",
+  "inboundMode": "webhook",
+  "webhook": {
+    "publicBaseUrl": "https://sms-relay.example.test",
+    "listenPort": 8443
+  },
+  "voice": {
+    "enabled": true,
+    "voicemailMaxLengthSec": 120,
+    "voicemailGreeting": "You have reached the SMS agent. Please leave a message after the beep."
+  }
+}
+```
+
+Point your HTTPS proxy/tunnel at `127.0.0.1:<listenPort>`. Register
+`https://sms-relay.example.test/twilio/sms` as the webhook URL in the Twilio
+console (messaging → phone number → webhook field). For voice, register
+`https://sms-relay.example.test/twilio/voice`.
+
+## Voicemail (recorded voice)
+
+When `voice.enabled: true` and `inboundMode: 'webhook'`:
+
+1. Twilio routes an inbound call to `/twilio/voice`.
+2. The server responds with TwiML: `<Say>` the configured greeting, then
+   `<Record transcribe="true" transcribeCallback="…/twilio/voice/transcription" …>`.
+3. When Twilio finishes transcribing, it POSTs to `/twilio/voice/transcription`.
+4. A successful transcription is emitted as an `InboundMessage`:
+   - `text`: the transcript text.
+   - `attachments[0]`: `{ id: recordingSid, kind: 'voice', mime: 'audio/mpeg' }`.
+   - `inboundEventKey`: the recording SID (dedupe key).
+   - `contentType`: `'audio'` (the bridge maps the voice attachment).
+5. The agent receives the transcript as text; the recording SID is available
+   for reference but audio download is not implemented (stage-2 scope).
+
+Dedupe uses the recording SID (shared with the SMS SID set) — a transcription
+callback retried by Twilio will not re-emit.
+
+`placeCall(target, opts?)` is also available via the `VoiceCapableTransport`
+contract: it calls `calls.create` and requires `phoneNumber` to be set (a
+`messagingServiceSid`-only config cannot originate calls). The validator
+enforces this as a coherence rule.
 
 ## Compliance (US sending)
 

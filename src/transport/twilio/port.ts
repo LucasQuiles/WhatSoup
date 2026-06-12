@@ -36,6 +36,15 @@ export interface TwilioPortError {
   readonly status?: number; // HTTP status (e.g. 401, 429)
 }
 
+/** Arguments for placing an outbound voice call. */
+export interface PlaceCallArgs {
+  readonly to: string;
+  readonly from?: string;
+  /** TwiML to execute when the call is answered. */
+  readonly twiml: string;
+  readonly statusCallback?: string;
+}
+
 /**
  * Narrow provider seam for Twilio SMS operations.
  * All methods are async and may throw errors matching TwilioPortError shape.
@@ -66,4 +75,10 @@ export interface TwilioSmsPort {
    *   result count; implementations throw `RangeError` otherwise.
    */
   listInboundSince(since: Date, pageSize?: number): Promise<readonly InboundSms[]>;
+
+  /**
+   * Place an outbound voice call. Returns the provider call SID and initial status.
+   * The `twiml` parameter is executed when the call is answered.
+   */
+  placeCall(args: PlaceCallArgs): Promise<{ sid: string; status: string }>;
 }
