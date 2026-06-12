@@ -9,7 +9,7 @@ import { getPreference, setPreference } from '../lib/preferences'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
-import { StatusCell } from '../components/primitives'
+import { StatusCell, Tabs, Tab } from '../components/primitives'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -205,41 +205,23 @@ export default function LineDetail() {
       <div
         className="flex-1 flex flex-col min-h-0 bg-d1 c-border rounded-lg overflow-hidden"
       >
-      <div
-        className="flex gap-0 flex-shrink-0 py-0 px-[var(--sp-4)] c-border-b bg-d2"
-        role="tablist"
-        aria-label="Line detail tabs"
+      <Tabs
+        label="Line detail tabs"
+        value={activeTab}
+        onChange={(id) => setActiveTab(id as TabId)}
+        inset
+        className="flex-shrink-0 bg-d2"
       >
         {tabs.map(tab => {
           const Icon = tab.icon
-          const isActive = activeTab === tab.id
           return (
-            <button
-              type="button"
-              key={tab.id}
-              role="tab"
-              aria-selected={isActive}
-              aria-controls={`tabpanel-${tab.id}`}
-              id={`tab-${tab.id}`}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 font-sans font-medium c-hover relative py-[var(--sp-2h)] px-[var(--sp-4)] text-data ${
-                isActive
-                  ? 'text-t1 cursor-pointer'
-                  : 'text-t4 hover:text-t3 cursor-pointer'
-              }`}
-            >
+            <Tab key={tab.id} id={tab.id}>
               <Icon size={15} strokeWidth={1.75} />
               {tab.label}
-              {isActive && (
-                <div
-                  className="absolute bottom-0 left-2 right-2 h-[var(--bw-accent)] rounded-t"
-                  style={{ background: `var(--color-m-${modeColor})` }}
-                />
-              )}
-            </button>
+            </Tab>
           )
         })}
-      </div>
+      </Tabs>
 
       {/* ═══ Tab content ═══ */}
       <div
