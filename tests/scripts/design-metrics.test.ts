@@ -183,6 +183,19 @@ describe('design-metrics.mjs', () => {
       expect(output).toHaveProperty('debt_register');
     });
 
+    it('shadow_ratchet contains stale_ceiling_keys and stale_ceiling_count', () => {
+      const fixture = makeFixture();
+      const result = runScript(fixture);
+
+      expect(result.status).toBe(0);
+      const output = JSON.parse(result.stdout) as {
+        shadow_ratchet: Record<string, unknown>;
+      };
+      // Both keys must be present in the schema even when live run fails
+      expect(output.shadow_ratchet).toHaveProperty('stale_ceiling_keys');
+      expect(output.shadow_ratchet).toHaveProperty('stale_ceiling_count');
+    });
+
     it('shadow_ratchet reflects the fixture baseline totals', () => {
       const fixture = makeFixture({
         baseline: {
@@ -553,6 +566,80 @@ describe('design-metrics.mjs', () => {
       };
       expect(output.debt_register.open_count).toBe(3);
       expect(output.debt_register.closed_count).toBe(0);
+    });
+  });
+
+  describe('stale ceiling detection', () => {
+    // When the live eslint run fails (no node_modules in fixture), stale_ceiling_keys
+    // and stale_ceiling_count must be null — the script must not fabricate stale-ceiling
+    // findings without real live data.
+    it('stale ceiling fields are null (not zero, not {}) when live run fails', () => {
+      const fixture = makeFixture();
+      const result = runScript(fixture);
+
+      expect(result.status).toBe(0);
+      const sr = (JSON.parse(result.stdout) as { shadow_ratchet: Record<string, unknown> }).shadow_ratchet;
+      // Must be exactly null, not 0, not an empty object — null signals "no live data"
+      expect(sr.stale_ceiling_keys).toStrictEqual(null);
+      expect(sr.stale_ceiling_count).toStrictEqual(null);
+    });
+
+    it('stale ceiling fields are present in JSON schema even when null', () => {
+      const fixture = makeFixture();
+      const result = runScript(fixture);
+
+      expect(result.status).toBe(0);
+      const output = JSON.parse(result.stdout) as Record<string, unknown>;
+      const sr = output.shadow_ratchet as Record<string, unknown>;
+      // Keys must be present in the emitted object regardless of value
+      expect(Object.keys(sr)).toContain('stale_ceiling_keys');
+      expect(Object.keys(sr)).toContain('stale_ceiling_count');
+    });
+
+    it('does not block a push on its own: exits 0 and emits no ERROR token to stderr', () => {
+      // The stale ceiling is WARN-level only. Even when stale ceiling keys exist,
+      // the script must exit 0 and must not write ERROR(...) to stderr.
+      const fixture = makeFixture();
+      const result = runScript(fixture);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).not.toMatch(/^ERROR\(/m);
+    });
+
+    it('stale ceiling WARN goes to stderr only; stdout remains valid parseable JSON', () => {
+      // Any WARN output must land on stderr so callers can separate structured data
+      // from advisory messages. stdout must be machine-readable JSON end-to-end.
+      const fixture = makeFixture();
+      const result = runScript(fixture);
+
+      const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+      expect(parsed).toHaveProperty('shadow_ratchet');
+    });
+
+    it('stale_ceiling_keys is null (not an empty array) when live run is unavailable', () => {
+      // The contract distinguishes "no live data" (null) from "live data, zero stale
+      // keys" (empty object {}). Fixture has no eslint, so live run fails → null.
+      const fixture = makeFixture();
+      const result = runScript(fixture);
+
+      expect(result.status).toBe(0);
+      const sr = (JSON.parse(result.stdout) as { shadow_ratchet: Record<string, unknown> }).shadow_ratchet;
+      expect(sr.stale_ceiling_keys).toStrictEqual(null);
+    });
+
+    it('determinism: stale_ceiling fields are stable across two runs', () => {
+      const fixture = makeFixture();
+      const r1 = runScript(fixture);
+      const r2 = runScript(fixture);
+
+      expect(r1.status).toBe(0);
+      expect(r2.status).toBe(0);
+      const o1 = JSON.parse(r1.stdout) as { shadow_ratchet: Record<string, unknown> };
+      const o2 = JSON.parse(r2.stdout) as { shadow_ratchet: Record<string, unknown> };
+      expect(JSON.stringify(o1.shadow_ratchet.stale_ceiling_keys)).toBe(
+        JSON.stringify(o2.shadow_ratchet.stale_ceiling_keys)
+      );
+      expect(o1.shadow_ratchet.stale_ceiling_count).toBe(o2.shadow_ratchet.stale_ceiling_count);
     });
   });
 });

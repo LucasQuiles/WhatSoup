@@ -8,6 +8,9 @@
 // Emitted metrics:
 //   shadow_ratchet   - total ceiling + per-rule×file bucket counts from baseline
 //                      + live eslint shadow run so drift (live - baseline) is first-class
+//                      + stale_ceiling_keys: baseline keys where live < ceiling (WARN-level
+//                        signal that the ratchet ceiling can tighten; stale-high ceilings
+//                        give silent slack that masks new violations)
 //   design_regression - PASS/WARN/FAIL counts from design-regression.sh output
 //   waivers          - active count, expired count (past-expiry causes nonzero exit)
 //   debt_register    - open/closed row counts from design-debt-register.md
@@ -165,6 +168,11 @@ try {
 
 // Compute drift: live - baseline per key
 const drift = {};
+// Stale ceiling: baseline keys where live count is lower than the ceiling.
+// A stale-high ceiling gives silent slack — new violations up to the old ceiling
+// are invisible until the next regression. Surfaced as WARN-level so operators
+// know to ratchet the baseline down.
+const staleCeilingKeys = {};
 if (!liveRunError) {
   const allKeys = new Set([...Object.keys(baseline.rules), ...Object.keys(liveCounts)]);
   for (const key of allKeys) {
@@ -172,6 +180,11 @@ if (!liveRunError) {
     const live = liveCounts[key] ?? 0;
     const d = live - base;
     if (d !== 0) drift[key] = d;
+    // Stale ceiling: ceiling exists and is higher than the live count.
+    // (Keys only in liveCounts with no baseline entry are new violations, not stale.)
+    if (key in baseline.rules && live < base) {
+      staleCeilingKeys[key] = { ceiling: base, live };
+    }
   }
 }
 
@@ -339,6 +352,8 @@ if (debtParseErrors > 0) {
 // ---------------------------------------------------------------------------
 // Assemble output
 // ---------------------------------------------------------------------------
+const staleCeilingCount = Object.keys(staleCeilingKeys).length;
+
 const output = sortedKeys({
   schema_version: 1,
   shadow_ratchet: {
@@ -352,6 +367,12 @@ const output = sortedKeys({
       keys_improved: Object.values(drift).filter(v => v < 0).length,
       net_delta: Object.values(drift).reduce((a, b) => a + b, 0),
     },
+    // Stale ceiling report: keys where the live violation count fell below the baseline
+    // ceiling. A stale-high ceiling gives silent slack — violations can accumulate up to
+    // the old ceiling without triggering the ratchet. These should be ratcheted down.
+    // Null when the live run failed (no data to compare).
+    stale_ceiling_keys: liveRunError ? null : sortedKeys(staleCeilingKeys),
+    stale_ceiling_count: liveRunError ? null : staleCeilingCount,
     bucket_count: Object.keys(baseline.rules).length,
   },
   design_regression: {
@@ -383,6 +404,19 @@ if (outFile) {
   } catch (e) {
     process.stderr.write(`ERROR(write:${outFile}): ${e.message}\n`);
     process.exit(1);
+  }
+}
+
+// Emit WARN-level staleness report to stderr when stale ceiling keys exist.
+// This is informational (does not cause nonzero exit) — operators should ratchet
+// the baseline down but this does not block a push on its own.
+if (!liveRunError && staleCeilingCount > 0) {
+  process.stderr.write(
+    `WARN(stale-ceiling): ${staleCeilingCount} baseline bucket(s) have live counts below their ceiling — ` +
+    `run check-shadow-baseline.mjs --update to tighten the ratchet:\n`
+  );
+  for (const [key, { ceiling, live }] of Object.entries(staleCeilingKeys).sort(([a], [b]) => a.localeCompare(b))) {
+    process.stderr.write(`  ${key}: ceiling=${ceiling} live=${live} (slack=${ceiling - live})\n`);
   }
 }
 

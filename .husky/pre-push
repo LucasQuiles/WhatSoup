@@ -7,11 +7,14 @@ node --experimental-strip-types scripts/pre-push-guard.ts
 # Blocking only for expired waivers (deterministic, zero FP surface) and malformed
 # input files (fail-closed scanner policy). Drift and regression counts are informational.
 # d6-investigation.md §C: design:metrics in pre-push as report-only except past-expiry check.
-if [ -f console/node_modules/.bin/eslint ]; then
-  npm --prefix console run design:metrics || {
-    echo "design:metrics exited nonzero (expired waivers or parse error -- see output above)" >&2
-    exit 1
-  }
-else
-  echo "console/node_modules not installed; skipping design:metrics (run: cd console && npm ci)" >&2
-fi
+#
+# NOTE: the blocking conditions (expired waivers, malformed YAML/JSON) are purely
+# file-based and do NOT require eslint to be installed. design:metrics.mjs gracefully
+# degrades the live shadow run to liveRunError=informational when eslint is absent.
+# Gating the entire invocation on eslint presence is fail-open for the deterministic
+# blocking path — the guard must run regardless. Missing eslint only silences the drift
+# column, never the expired-waiver or malformed-input checks.
+npm --prefix console run design:metrics || {
+  echo "design:metrics exited nonzero (expired waivers or parse error -- see output above)" >&2
+  exit 1
+}
