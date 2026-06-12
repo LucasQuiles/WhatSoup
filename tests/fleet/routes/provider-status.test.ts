@@ -107,7 +107,18 @@ describe('handleGetLineProviderStatus', () => {
     const body = JSON.parse(res._body);
     expect(body).toEqual({
       primary: { provider: 'openai-api', model: 'gpt-4o', keyPresent: true },
-      fallback: { provider: null, model: null, keyPresent: null, active: false, activeUntil: null },
+      fallback: {
+        provider: null,
+        model: null,
+        keyPresent: null,
+        active: false,
+        activeUntil: null,
+        effectiveProvider: null,
+        turnsServed: null,
+        turnsEmpty: null,
+        lastFallbackTurnAt: null,
+      },
+      lineReachable: false,
     });
   });
 
@@ -153,7 +164,15 @@ describe('handleGetLineProviderStatus', () => {
     mockedLookup.mockReturnValue('sk-fallback');
 
     const status = fakeStatus({
-      health: { instance: { effectiveProvider: 'openai-api', fallbackActiveUntil: activeUntil } },
+      health: {
+        instance: {
+          effectiveProvider: 'openai-api',
+          fallbackActiveUntil: activeUntil,
+          fallbackTurnsServed: 7,
+          fallbackTurnsEmpty: 2,
+          lastFallbackTurnAt: 1_781_087_200_000,
+        },
+      },
     });
 
     const res = mockRes();
@@ -166,7 +185,12 @@ describe('handleGetLineProviderStatus', () => {
       keyPresent: true,
       active: true,
       activeUntil,
+      effectiveProvider: 'openai-api',
+      turnsServed: 7,
+      turnsEmpty: 2,
+      lastFallbackTurnAt: 1_781_087_200_000,
     });
+    expect(body.lineReachable).toBe(true);
   });
 
   it('reports an inactive fallback window when fallbackActiveUntil has elapsed', async () => {
@@ -196,6 +220,109 @@ describe('handleGetLineProviderStatus', () => {
       keyPresent: true,
       active: false,
       activeUntil: elapsed,
+      effectiveProvider: 'claude-cli',
+      turnsServed: null,
+      turnsEmpty: null,
+      lastFallbackTurnAt: null,
+    });
+  });
+
+  it.each([
+    ['online', true],
+    ['unreachable', false],
+    ['stopped', false],
+  ] as const)('sets lineReachable from poller status %s', async (statusName, reachable) => {
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({ agentOptions: { provider: 'claude-cli' } }),
+    );
+
+    const status = fakeStatus({ status: statusName as InstanceStatus['status'] });
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), status), { name: 'agent-line' });
+
+    const body = JSON.parse(res._body);
+    expect(body.lineReachable).toBe(reachable);
+  });
+
+  it.each([
+    [
+      'top-level model',
+      { model: 'claude-opus-4-8', agentOptions: { provider: 'claude-cli', model: 'agent-options-model' } },
+      'claude-opus-4-8',
+    ],
+    [
+      'models.conversation',
+      { models: { conversation: 'claude-sonnet-4-6' }, agentOptions: { provider: 'claude-cli' } },
+      'claude-sonnet-4-6',
+    ],
+    [
+      'agentOptions.model fallback',
+      { agentOptions: { provider: 'claude-cli', model: 'agent-options-model' } },
+      'agent-options-model',
+    ],
+  ] as const)('resolves primary.model from %s', async (_name, config, expectedModel) => {
+    mockedReadFile.mockResolvedValue(JSON.stringify(config));
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), fakeStatus()), { name: 'agent-line' });
+
+    const body = JSON.parse(res._body);
+    expect(body.primary).toEqual({
+      provider: 'claude-cli',
+      model: expectedModel,
+      keyPresent: null,
+    });
+  });
+
+  it('keeps existing provider-status fields and values additive-only', async () => {
+    const activeUntil = Date.now() + 120_000;
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({
+        agentOptions: {
+          provider: 'openai-api',
+          model: 'gpt-4o',
+          fallbackProvider: 'opencode-cli',
+          fallbackModel: 'minimax/minimax-m2',
+        },
+      }),
+    );
+    mockedLookup.mockImplementation((service) => service === 'openai' ? 'openai-key' : null);
+
+    const status = fakeStatus({
+      health: {
+        instance: {
+          effectiveProvider: 'opencode-cli',
+          fallbackActiveUntil: activeUntil,
+          fallbackTurnsServed: 3,
+          fallbackTurnsEmpty: 1,
+          lastFallbackTurnAt: 1_781_087_200_000,
+        },
+      },
+    });
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), status), { name: 'agent-line' });
+
+    const body = JSON.parse(res._body);
+    expect(body.primary).toEqual({
+      provider: 'openai-api',
+      model: 'gpt-4o',
+      keyPresent: true,
+    });
+    const { effectiveProvider, turnsServed, turnsEmpty, lastFallbackTurnAt, ...existingFallback } = body.fallback;
+    expect(existingFallback).toEqual({
+      provider: 'opencode-cli',
+      model: 'minimax/minimax-m2',
+      keyPresent: false,
+      active: true,
+      activeUntil,
+    });
+    expect({ effectiveProvider, turnsServed, turnsEmpty, lastFallbackTurnAt }).toEqual({
+      effectiveProvider: 'opencode-cli',
+      turnsServed: 3,
+      turnsEmpty: 1,
+      lastFallbackTurnAt: 1_781_087_200_000,
     });
   });
 });

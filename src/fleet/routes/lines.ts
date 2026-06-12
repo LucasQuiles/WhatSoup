@@ -5,6 +5,7 @@ import { jsonResponse, requireInstance } from '../../lib/http.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { extractLocal } from '../../core/access-list.ts';
 import { bareNumber } from '../../core/jid-constants.ts';
+import { resolveAgentModel } from '../../instance-loader.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -436,6 +437,10 @@ function keyPresentFor(provider: string | null | undefined, model: string | null
   return lookupCredential(service) !== null;
 }
 
+function lineReachableFromPoll(poll: InstanceStatus | undefined): boolean {
+  return poll?.status === 'online' || poll?.status === 'degraded' || poll?.status === 'logged_out';
+}
+
 /**
  * GET /api/lines/:name/provider-status — per-instance provider / key / fallback
  * status. Read-only: surfaces the configured primary + fallback providers, the
@@ -451,27 +456,36 @@ export async function handleGetLineProviderStatus(
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
 
+  let parsedConfig: Record<string, unknown> = {};
   let agentOptions: Record<string, unknown> = {};
   try {
     const raw = await fs.promises.readFile(instance.configPath, 'utf-8');
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const opts = parsed.agentOptions;
-    if (opts && typeof opts === 'object' && !Array.isArray(opts)) {
-      agentOptions = opts as Record<string, unknown>;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      parsedConfig = parsed as Record<string, unknown>;
+      const opts = parsedConfig.agentOptions;
+      if (opts && typeof opts === 'object' && !Array.isArray(opts)) {
+        agentOptions = opts as Record<string, unknown>;
+      }
     }
   } catch { /* config unreadable — treat as empty (provider defaults to null) */ }
 
   const primaryProvider = (agentOptions.provider as string | undefined) ?? null;
-  const primaryModel = (agentOptions.model as string | undefined) ?? null;
+  const primaryModel = resolveAgentModel(parsedConfig) ?? (agentOptions.model as string | undefined) ?? null;
   const fallbackProvider = (agentOptions.fallbackProvider as string | undefined) ?? null;
   const fallbackModel = (agentOptions.fallbackModel as string | undefined) ?? null;
 
   // Fallback window state from the instance health snapshot (surface C emits
   // instance.fallbackActiveUntil as epoch ms or null).
   const poll = deps.healthPoller.getStatus(params.name);
-  const fallbackActiveUntilRaw = dig(poll?.health as Record<string, unknown> | null | undefined, 'instance', 'fallbackActiveUntil');
+  const health = poll?.health as Record<string, unknown> | null | undefined;
+  const fallbackActiveUntilRaw = dig(health, 'instance', 'fallbackActiveUntil');
   const activeUntil = typeof fallbackActiveUntilRaw === 'number' ? fallbackActiveUntilRaw : null;
   const active = activeUntil !== null && Date.now() < activeUntil;
+  const effectiveProviderRaw = dig(health, 'instance', 'effectiveProvider');
+  const turnsServedRaw = dig(health, 'instance', 'fallbackTurnsServed');
+  const turnsEmptyRaw = dig(health, 'instance', 'fallbackTurnsEmpty');
+  const lastFallbackTurnAtRaw = dig(health, 'instance', 'lastFallbackTurnAt');
 
   jsonResponse(res, 200, {
     primary: {
@@ -485,6 +499,11 @@ export async function handleGetLineProviderStatus(
       keyPresent: fallbackProvider ? keyPresentFor(fallbackProvider, fallbackModel) : null,
       active,
       activeUntil,
+      effectiveProvider: typeof effectiveProviderRaw === 'string' ? effectiveProviderRaw : null,
+      turnsServed: typeof turnsServedRaw === 'number' ? turnsServedRaw : null,
+      turnsEmpty: typeof turnsEmptyRaw === 'number' ? turnsEmptyRaw : null,
+      lastFallbackTurnAt: typeof lastFallbackTurnAtRaw === 'number' ? lastFallbackTurnAtRaw : null,
     },
+    lineReachable: lineReachableFromPoll(poll),
   });
 }
