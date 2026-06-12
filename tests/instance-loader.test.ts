@@ -411,8 +411,11 @@ describe('loadInstance — agentOptions: sessionScope "single" accepts any acces
   });
 });
 
-describe('loadInstance — agentOptions: sessionScope is required', () => {
-  it('rejects agent with agentOptions missing sessionScope', () => {
+describe('loadInstance — agentOptions: sessionScope is optional', () => {
+  it('accepts agent with agentOptions missing sessionScope (runtime defaults to "single")', () => {
+    // Inverted from the original required-on-load rule: AgentRuntime defaults
+    // a missing sessionScope to 'single' (src/runtimes/agent/runtime.ts), so
+    // the loader must not brick a config the runtime would boot.
     writeInstance(path.join(tmpDir, 'config'), 'no-scope-agent', {
       name: 'no-scope-agent',
       type: 'agent',
@@ -422,7 +425,23 @@ describe('loadInstance — agentOptions: sessionScope is required', () => {
         cwd: '/tmp',
       },
     });
-    expect(() => loadInstance('no-scope-agent')).toThrow(/sessionScope/i);
+    loadInstance('no-scope-agent');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.agentOptions).toEqual({ cwd: '/tmp' });
+  });
+
+  it('still rejects agent with an invalid sessionScope value', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'bad-scope-agent', {
+      name: 'bad-scope-agent',
+      type: 'agent',
+      adminPhones: ['15551234567'],
+      accessMode: 'self_only',
+      agentOptions: {
+        sessionScope: 'global',
+        cwd: '/tmp',
+      },
+    });
+    expect(() => loadInstance('bad-scope-agent')).toThrow(/sessionScope/i);
   });
 });
 
