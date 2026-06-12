@@ -542,14 +542,24 @@ button.soup-pill[aria-disabled="true"] {
   padding: 0 var(--sp-1);
 }
 
-/* Remove button — override ActionButton to fit within pill */
+/* Remove button — override ActionButton to fit within pill.
+   Visual glyph stays 16px; the pointer target is expanded to the 24px floor by
+   the pseudo-element below (same mechanism as the sm interactive pill).
+   jsdom cannot prove the computed box — D7 measures it (DD-10). */
 .soup-pill__remove.soup-actbtn {
   min-height: 16px;
   min-width: 16px;
   padding: 0;
-  /* Padded to 24px visual hit area via negative margin trick */
   margin: 0 calc(-1 * var(--sp-1));
   opacity: 0.7;
+  position: relative;
+}
+
+.soup-pill__remove.soup-actbtn::before {
+  content: '';
+  position: absolute;
+  /* 16px glyph + 2x4px reach = 24px in both axes */
+  inset: calc(-1 * var(--sp-1));
 }
 
 .soup-pill__remove.soup-actbtn:hover,

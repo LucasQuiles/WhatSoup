@@ -233,3 +233,12 @@ describe('Pill — type contract', () => {
     expect(document.querySelector('.soup-pill')).not.toBeNull();
   });
 });
+
+describe('Pill removable — remove-button hit-area class contract (DD-10, D7 finding C-D7-2)', () => {
+  it('remove button carries the soup-pill__remove class whose ::before expands the target to 24px (class contract — computed-box proof is D7)', () => {
+    render(<Pill variant="removable" onRemove={() => {}}>env:prod</Pill>);
+    const removeBtn = screen.getByRole('button', { name: 'Remove env:prod' });
+    expect(removeBtn.className).toContain('soup-pill__remove');
+    expect(removeBtn.className).toContain('soup-actbtn');
+  });
+});
