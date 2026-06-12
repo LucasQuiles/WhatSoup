@@ -113,6 +113,9 @@ jobs:
       - name: Service unit validity guard
         run: npm run guard:service-units
 
+      - name: Instance config integrity guard
+        run: npm run guard:instance-config
+
       - name: Agent decision polls guard
         run: npm run guard:agent-decision-polls
 
