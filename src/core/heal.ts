@@ -30,6 +30,8 @@ export interface HealReportData {
   chatJid?: string;
   exitCode?: number;
   signal?: string | null;
+  provider?: string;
+  crashClass?: string;
   stderr?: string;
   recentLogs?: string;
 }
@@ -64,7 +66,7 @@ export function emitHealReport(
   data: HealReportData,
   activeControlReportId?: string | null,
 ): string | null {
-  const errorClass = normalizeErrorClass(data.type, data.stderr ?? data.recentLogs ?? 'unknown');
+  const errorClass = normalizeErrorClass(data.type, data.crashClass ?? data.stderr ?? data.recentLogs ?? 'unknown');
 
   // Check for active report with same error class (single-flight)
   const active = getActiveReportForClass(db, errorClass);
@@ -90,6 +92,8 @@ export function emitHealReport(
         data.chatJid ? `chat_jid=${data.chatJid}` : null,
         data.exitCode !== undefined ? `exit_code=${data.exitCode}` : null,
         data.signal ? `signal=${data.signal}` : null,
+        data.provider ? `provider=${data.provider}` : null,
+        data.crashClass ? `crash_class=${data.crashClass}` : null,
         data.stderr ? `stderr=${data.stderr}` : null,
         data.recentLogs ? `recent_logs=${data.recentLogs}` : null,
       ].filter(Boolean).join('\n'),
@@ -131,6 +135,8 @@ export function emitHealReport(
     chatJid: data.chatJid,
     exitCode: data.exitCode,
     signal: data.signal,
+    provider: data.provider,
+    crashClass: data.crashClass,
     stderr: data.stderr,
     recentLogs: data.recentLogs,
   };
@@ -302,6 +308,8 @@ function formatHealReport(payload: {
   chatJid?: string;
   exitCode?: number;
   signal?: string | null;
+  provider?: string;
+  crashClass?: string;
   stderr?: string;
   recentLogs?: string;
   attempt: number;
@@ -310,6 +318,8 @@ function formatHealReport(payload: {
   const lines = [`Session ${payload.type} in ${payload.chatJid ?? 'unknown chat'}`];
   if (payload.exitCode !== undefined) lines.push(`Exit code: ${payload.exitCode}`);
   if (payload.signal) lines.push(`Signal: ${payload.signal}`);
+  if (payload.provider) lines.push(`Provider: ${payload.provider}`);
+  if (payload.crashClass) lines.push(`Crash class: ${payload.crashClass}`);
   if (payload.stderr) lines.push(`Stderr (last lines):\n  ${payload.stderr.split('\n').slice(-5).join('\n  ')}`);
   if (payload.recentLogs) lines.push(`Recent logs:\n  ${payload.recentLogs.split('\n').slice(-5).join('\n  ')}`);
   lines.push(`\nRepair attempt ${payload.attempt} of ${payload.maxAttempts}. Next attempt available after 5m cooldown if this fails.`);

@@ -67,6 +67,8 @@ describe('heal protocol contracts', () => {
       chatJid: '111111100000000003@g.us',
       exitCode: 1,
       signal: null,
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
       stderr: 'TypeError: boom',
       recentLogs: 'recent logs',
     });

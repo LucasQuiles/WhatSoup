@@ -40,6 +40,8 @@ export const LoopsHealPayloadSchema = z.object({
   chatJid: z.string().optional(),
   exitCode: z.number().optional(),
   signal: z.string().nullable().optional(),
+  provider: z.string().optional(),
+  crashClass: z.string().optional(),
   stderr: z.string().optional(),
   recentLogs: z.string().optional(),
 });

@@ -29,6 +29,10 @@ import {
   type ProviderId,
 } from './providers/index.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
+import {
+  appendProviderCrashPreview,
+  buildProviderCrashMetadata,
+} from './provider-crash-diagnostics.ts';
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 
 const log = createChildLogger('session-manager');
@@ -72,6 +76,12 @@ export interface SessionCrashInfo {
   sessionId: string | null;
   /** The agent_sessions DB row ID — useful for resume with existing row. */
   dbRowId: number | null;
+  /** Provider that crashed, when known. */
+  provider?: string;
+  /** Coarse, non-secret crash class derived from provider output. */
+  crashClass?: string;
+  /** Redacted, bounded stderr preview from the provider process. */
+  stderrPreview?: string;
 }
 
 export interface SessionManagerOptions {
@@ -456,6 +466,7 @@ export class SessionManager {
   private lastCrashNotifiedAt: number | null = null;
   private static readonly CRASH_NOTIFY_COOLDOWN_MS = 60_000;
   private shutdownKillTimer: ReturnType<typeof setTimeout> | null = null;
+  private crashStderrPreview = '';
 
   private durability: DurabilityEngine | null = null;
 
@@ -870,6 +881,7 @@ export class SessionManager {
       this.managedProviderSession = providerSession;
       this.active = true;
       this.resetStdoutBuffers();
+      this.crashStderrPreview = '';
       this.startedAt = new Date().toISOString();
       this.messageCount = 0;
       this.lastMessageAt = null;
@@ -905,7 +917,7 @@ export class SessionManager {
           allowM365Mutations: this.allowM365Mutations,
           instanceName: this.instanceName,
           onEvent: (event) => this.handleProviderEvent(event),
-          onCrash: ({ exitCode, signal }) => {
+          onCrash: ({ exitCode, signal, provider, crashClass, stderrPreview }) => {
             const crashedSessionId = this.sessionId;
             const crashedDbRowId = this.dbRowId;
             if (this.dbRowId !== null) {
@@ -920,6 +932,7 @@ export class SessionManager {
               signal: signal as NodeJS.Signals | null,
               sessionId: crashedSessionId,
               dbRowId: crashedDbRowId,
+              ...this.buildCrashMetadata(crashClass, stderrPreview, provider ?? this.provider),
             });
           },
           mcpBridge: this.mcpBridge,
@@ -965,6 +978,7 @@ export class SessionManager {
       this.startedAt = new Date().toISOString();
       this.systemPrompt = systemPrompt;
       this.configuredCwd = cwd;
+      this.crashStderrPreview = '';
       // Record in DB with pid=0 (no process yet)
       if (existingRowId !== undefined) {
         this.dbRowId = existingRowId;
@@ -1009,6 +1023,7 @@ export class SessionManager {
     this.child = child;
     this.active = true;
     this.resetStdoutBuffers();
+    this.crashStderrPreview = '';
     this.startedAt = new Date().toISOString();
     this.messageCount = 0;
     this.lastMessageAt = null;
@@ -1126,7 +1141,13 @@ export class SessionManager {
       this.sessionId = null;
       // Notify user — without this, spawn failures are silent and the chat goes dead
       this.notifyUser?.('_Agent failed to start — will retry on your next message._');
-      this.onCrash?.({ exitCode: null, signal: null, sessionId: null, dbRowId: null });
+      this.onCrash?.({
+        exitCode: null,
+        signal: null,
+        sessionId: null,
+        dbRowId: null,
+        ...this.buildCrashMetadata('spawn_error', err.message),
+      });
     });
 
     // Pipe stdout through line parser — use provider-specific parser
@@ -1197,13 +1218,15 @@ export class SessionManager {
 
     // Log stderr but don't act on it
     child.stderr.on('data', (chunk: Buffer) => {
-      const stderr = chunk.toString('utf8').trim();
-      if (!stderr) return;
+      const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
+      if (nextPreview === this.crashStderrPreview) return;
+      this.crashStderrPreview = nextPreview;
+      if (!this.crashStderrPreview) return;
       log.warn({
         provider: this.provider,
         chatJid: this.chatJid,
         pid: child.pid ?? null,
-        stderrPreview: stderr.slice(0, 500),
+        stderrPreview: this.crashStderrPreview.slice(-500),
       }, 'claude stderr');
     });
 
@@ -1278,7 +1301,13 @@ export class SessionManager {
         // Allow the runtime to clean up the outbound queue (clears typing heartbeat).
         // onCrash does NOT send 'paused' — the composing indicator times out naturally,
         // acting as a soft signal to the user that the session is in trouble.
-        this.onCrash?.({ exitCode: code, signal, sessionId: crashedSessionId, dbRowId: crashedDbRowId });
+        this.onCrash?.({
+          exitCode: code,
+          signal,
+          sessionId: crashedSessionId,
+          dbRowId: crashedDbRowId,
+          ...this.buildCrashMetadata(),
+        });
         this.notifyUnexpectedExit(code, signal);
       }
     });
@@ -1450,11 +1479,28 @@ export class SessionManager {
     }
 
     log.warn({ err, provider: this.provider, chatJid: this.chatJid, sessionId: crashedSessionId, dbRowId: crashedDbRowId, reason }, 'managed provider session crashed');
+    const errText = err instanceof Error ? `${err.name}: ${err.message}` : err === undefined ? undefined : String(err);
+    const extraText = [reason, errText].filter(Boolean).join('\n');
+    const fallbackClass = reason.includes('watchdog') ? 'provider_turn_watchdog' : 'managed_provider_error';
     this.onCrash?.({
       exitCode: null,
       signal: null,
       sessionId: crashedSessionId,
       dbRowId: crashedDbRowId,
+      ...this.buildCrashMetadata(fallbackClass, extraText),
+    });
+  }
+
+  private buildCrashMetadata(
+    fallbackClass?: string,
+    extraText?: string,
+    provider = this.provider,
+  ): Pick<SessionCrashInfo, 'provider' | 'crashClass' | 'stderrPreview'> {
+    return buildProviderCrashMetadata({
+      provider,
+      existingPreview: this.crashStderrPreview,
+      extraText,
+      fallbackClass,
     });
   }
 
@@ -1514,6 +1560,7 @@ export class SessionManager {
       // Clear any partial JSON from the previous turn before spawning a new process.
       // Without this, leftover bytes in the buffer can corrupt the next turn's output.
       this.resetStdoutBuffers();
+      this.crashStderrPreview = '';
 
       // Reset provider-specific parser state so the next turn's first step_start
       // is correctly recognized as an init event.
@@ -1574,7 +1621,13 @@ export class SessionManager {
         this.active = false;
         this.child = null;
         this.notifyUser?.('_Agent failed to start — will retry on your next message._');
-        this.onCrash?.({ exitCode: null, signal: null, sessionId: null, dbRowId: null });
+        this.onCrash?.({
+          exitCode: null,
+          signal: null,
+          sessionId: null,
+          dbRowId: null,
+          ...this.buildCrashMetadata('spawn_error', err.message),
+        });
       });
 
       child.stdout.on('data', (chunk: Buffer) => {
@@ -1587,13 +1640,15 @@ export class SessionManager {
       });
 
       child.stderr.on('data', (chunk: Buffer) => {
-        const stderr = chunk.toString('utf8').trim();
-        if (!stderr) return;
+        const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
+        if (nextPreview === this.crashStderrPreview) return;
+        this.crashStderrPreview = nextPreview;
+        if (!this.crashStderrPreview) return;
         log.warn({
           provider: this.provider,
           chatJid: this.chatJid,
           pid: child.pid ?? null,
-          stderrPreview: stderr.slice(0, 500),
+          stderrPreview: this.crashStderrPreview.slice(-500),
         }, 'provider stderr');
       });
 
@@ -1635,6 +1690,7 @@ export class SessionManager {
             signal,
             sessionId: this.sessionId,
             dbRowId: this.dbRowId,
+            ...this.buildCrashMetadata(),
           });
           this.notifyUnexpectedExit(code, signal);
         }

@@ -13,6 +13,10 @@ import type {
   ProviderTurnRequest,
 } from './types.ts';
 import { parseEvent } from '../stream-parser.ts';
+import {
+  appendProviderCrashPreview,
+  buildProviderCrashMetadata,
+} from '../provider-crash-diagnostics.ts';
 import { buildChildEnv } from '../session.ts';
 import { buildMcpLaunchCommand } from '../../../core/mcp-launcher.ts';
 import { createChildLogger } from '../../../logger.ts';
@@ -51,6 +55,7 @@ export class ClaudeProvider implements ProviderSession {
   private opts: ProviderSessionOptions | null = null;
   private sessionId: string | null = null;
   private stdoutBuffer = '';
+  private stderrPreview = '';
   private active = false;
 
   // ── ProviderSession interface ─────────────────────────────────────────────
@@ -90,14 +95,23 @@ export class ClaudeProvider implements ProviderSession {
     this.child = child;
     this.active = true;
     this.stdoutBuffer = '';
+    this.stderrPreview = '';
     this.sessionId = null;
 
     // Handle spawn errors (e.g. claude binary not in PATH)
-    child.on('error', (_err) => {
+    child.on('error', (err) => {
       this.active = false;
       this.child = null;
       this.sessionId = null;
-      opts.onCrash({ exitCode: null, signal: null });
+      opts.onCrash({
+        exitCode: null,
+        signal: null,
+        ...buildProviderCrashMetadata({
+          provider: this.descriptor.id,
+          fallbackClass: 'spawn_error',
+          extraText: err.message,
+        }),
+      });
     });
 
     // Pipe stdout through line parser
@@ -117,6 +131,17 @@ export class ClaudeProvider implements ProviderSession {
 
         opts.onEvent(event);
       }
+    });
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      const nextPreview = appendProviderCrashPreview(this.stderrPreview, chunk);
+      if (nextPreview === this.stderrPreview) return;
+      this.stderrPreview = nextPreview;
+      log.warn({
+        provider: this.descriptor.id,
+        pid: child.pid ?? null,
+        stderrPreview: this.stderrPreview.slice(-500),
+      }, 'claude stderr');
     });
 
     // Handle unexpected exit
@@ -144,7 +169,14 @@ export class ClaudeProvider implements ProviderSession {
       this.active = false;
       this.child = null;
 
-      opts.onCrash({ exitCode: code, signal: signal as string | null });
+      opts.onCrash({
+        exitCode: code,
+        signal: signal as string | null,
+        ...buildProviderCrashMetadata({
+          provider: this.descriptor.id,
+          existingPreview: this.stderrPreview,
+        }),
+      });
     });
   }
 
