@@ -3,7 +3,7 @@ import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts'
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 // Aliased to keep this module's call sites unchanged (asRecord returns
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
-import { asRecord as recordValue } from '../lib/type-guards.ts';
+import { asRecord } from '../lib/type-guards.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
@@ -108,17 +108,17 @@ function evidenceField(name: string, value: unknown): string {
 
 function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshotClassification {
   const healthStatus = stringValue(health.status);
-  const whatsapp = recordValue(health.whatsapp);
+  const whatsapp = asRecord(health.whatsapp);
   const connected = booleanValue(whatsapp?.connected);
   const accountJid = stringValue(whatsapp?.account_jid);
-  const connection = recordValue(whatsapp?.connection);
+  const connection = asRecord(whatsapp?.connection);
   const connectionState = stringValue(connection?.state);
   const reconnectPhase = stringValue(connection?.reconnect_phase);
   const reconnectAttempts = numberValue(connection?.reconnect_attempts);
   const lastDisconnectReason = stringValue(connection?.last_disconnect_reason);
   const lastStatusCode = numberValue(connection?.last_status_code);
   const authFailureClass = stringValue(connection?.auth_failure_class);
-  const recentDisconnects = recordValue(connection?.recent_disconnects);
+  const recentDisconnects = asRecord(connection?.recent_disconnects);
   const recentDisconnectCount = numberValue(recentDisconnects?.count);
   const recentDisconnectThreshold = numberValue(recentDisconnects?.degraded_threshold);
   const recentDisconnectWindowMs = numberValue(recentDisconnects?.window_ms);
@@ -493,7 +493,7 @@ export class HealthPoller {
   private async readHealthBody(res: Response): Promise<Record<string, unknown> | null> {
     try {
       const parsed = await res.json();
-      return recordValue(parsed) ?? null;
+      return asRecord(parsed) ?? null;
     } catch {
       return null;
     }

@@ -177,12 +177,11 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
   // Paths matching ^tier1\[\d+\]\.(update|rollback) are intentional update/rollback
   // channels (e.g. "claude install latest") and are expected to contain floating refs.
   const allowedFloatingPattern = /^tier1\[\d+\]\.(update|rollback)(?:[.\[]|$)/;
-  const allowedFloatingReferences = floatingReferences.filter((ref) =>
-    allowedFloatingPattern.test(ref.path),
-  );
-  const unexpectedFloatingReferences = floatingReferences.filter(
-    (ref) => !allowedFloatingPattern.test(ref.path),
-  );
+  const allowedFloatingReferences: typeof floatingReferences = [];
+  const unexpectedFloatingReferences: typeof floatingReferences = [];
+  for (const ref of floatingReferences) {
+    (allowedFloatingPattern.test(ref.path) ? allowedFloatingReferences : unexpectedFloatingReferences).push(ref);
+  }
 
   const warnings: string[] = [];
   if (allowedFloatingReferences.length > 0) {
