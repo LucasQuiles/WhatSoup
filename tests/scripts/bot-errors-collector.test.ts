@@ -304,6 +304,48 @@ describe('bot-errors-collector', () => {
     expect(state.openAlerts?.['mini5:remote-claim-failed']).toBeUndefined();
   });
 
+  it('persists best-effort remote hosts for watchdog daily-health classification', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });
+    const fakeSsh = writeFakeSsh(tmpRoot);
+
+    const result = spawnSync('python3', [
+      'deploy/scripts/bot-errors-collector.py',
+      '--remote',
+      'mini5',
+      '--remote',
+      'gupta:/tmp/bot-errors',
+      '--best-effort-remote',
+      'gupta:/tmp/bot-errors',
+      '--max-events',
+      '1',
+      '--timeout',
+      '2',
+      '--alert-cooldown',
+      '900',
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+        BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
+        FAKE_SSH_MODE: 'success',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(0);
+    const state = JSON.parse(readFileSync(join(tmpRoot, 'collector-state.json'), 'utf8')) as {
+      configuredBestEffortRemoteHosts?: string[];
+      configuredBestEffortRemotes?: string[];
+      configuredRemoteHosts?: string[];
+    };
+    expect(state.configuredRemoteHosts).toEqual(['mini5', 'gupta']);
+    expect(state.configuredBestEffortRemotes).toEqual(['gupta:/tmp/bot-errors']);
+    expect(state.configuredBestEffortRemoteHosts).toEqual(['gupta']);
+  });
+
   it('prunes stale remotes and alert bookkeeping that are no longer configured', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     mkdirSync(join(tmpRoot, 'outbox'), { recursive: true, mode: 0o700 });

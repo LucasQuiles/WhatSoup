@@ -64,7 +64,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "952f699394595938a7ca6ed2631b706d9e925486f7843c9d9613ba2d5f9301ca",
+      "sha256": "740fc5f3977465b114e113d8cf28a3663b7bc7f975ed09ce4d912d4f33833390",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "critical_file_problem",
@@ -88,14 +88,18 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "119be79bcfd6eedd63d73befd14a52caad5065ce3dac6d76f5a13b67f4059910",
+      "sha256": "e5bc63fe390c279877528d0f9738b3b1185fa6acfd1f0bca29dae918d20a0de3",
       "mustContain": [
+        "AUTHORIZATION_BEARER",
+        "Authorization: Bearer [REDACTED]",
+        "constants.O_NOFOLLOW",
+        "redactDiagnosticValue(event)",
         "recordBotErrorsWritefail"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "d6e6737015fa497181ab76b5df6581117b891752d3ad5264b2fad12062c6e923",
+      "sha256": "03ab712c2fde6650df1951d863ce7b06c96c45b6831916182c5d057f8ed1799f",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",

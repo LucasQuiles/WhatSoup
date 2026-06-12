@@ -1672,6 +1672,8 @@ def run_once(
     state = load_state()
     state["configuredRemotes"] = list(remotes)
     state["configuredRemoteHosts"] = configured_remote_hosts(remotes)
+    state["configuredBestEffortRemotes"] = sorted(best_effort_remotes)
+    state["configuredBestEffortRemoteHosts"] = configured_remote_hosts(sorted(best_effort_remotes))
     state["updatedAt"] = now_iso()
     prune_state_to_configured_remotes(state, remotes)
     remote_state = state.setdefault("remotes", {})

@@ -520,6 +520,33 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
     expect(events[0]!.evidence).toContain('daily-health cadence stale for mini2');
   });
 
+  it('excludes collector best-effort remotes from required daily-health cadence', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
+    writePrivateJson(join(tmpRoot, 'collector-state.json'), {
+      configuredRemoteHosts: ['mini1', 'gupta'],
+      configuredBestEffortRemoteHosts: ['gupta'],
+    });
+    const sent = join(tmpRoot, 'sent');
+    mkdirSync(sent, { recursive: true });
+    const mini1Event = join(sent, '20260531T000000Z.relay-mini1.bot-errors-health.daily-health.health-mini1.json.1000.sent');
+    writeFileSync(mini1Event, JSON.stringify({
+      source: 'daily-health',
+      diagnostics: { relay: { remoteHost: 'mini1' } },
+    }));
+    const fresh = new Date(Date.now() - 5_000);
+    utimesSync(mini1Event, fresh, fresh);
+
+    const output = runWatchdog({
+      BOT_ERRORS_STATE_DIR: tmpRoot,
+      BOT_ERRORS_WATCHDOG_CHECKS: 'daily_health',
+      BOT_ERRORS_LOCAL_DAILY_HEALTH_HOSTS: '',
+      BOT_ERRORS_MAX_DAILY_HEALTH_AGE: String(25 * 60 * 60),
+    });
+
+    expect(output).toContain('"problems": []');
+    expect(() => readdirSync(join(tmpRoot, 'outbox'))).toThrow();
+  });
+
   it('uses file mtimes for dispatcher and collector state freshness', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
     const dispatcher = join(tmpRoot, 'dispatcher-state.json');

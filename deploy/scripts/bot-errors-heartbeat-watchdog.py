@@ -446,14 +446,22 @@ def queue_backlog_problems() -> dict[str, str]:
     return problems
 
 
+def env_host_list(name: str) -> list[str]:
+    raw = os.environ.get(name, "")
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def daily_health_hosts() -> list[str]:
     raw = os.environ.get("BOT_ERRORS_DAILY_HEALTH_HOSTS", "")
     if raw:
-        return [part.strip() for part in raw.split(",") if part.strip()]
-    collector_hosts = collector_configured_hosts()
-    if not collector_hosts:
-        return []
-    return unique_hosts([*local_daily_health_hosts(), *collector_hosts])
+        required = env_host_list("BOT_ERRORS_DAILY_HEALTH_HOSTS")
+    else:
+        collector_hosts = collector_configured_hosts()
+        if not collector_hosts:
+            return []
+        required = unique_hosts([*local_daily_health_hosts(), *collector_hosts])
+    optional = set(optional_daily_health_hosts())
+    return [host for host in required if host not in optional]
 
 
 def unique_hosts(hosts: list[str]) -> list[str]:
@@ -761,6 +769,23 @@ def collector_configured_hosts() -> list[str]:
     if isinstance(remotes, dict):
         return unique_hosts([host for host in (parse_remote_host(value) for value in remotes.keys()) if host])
     return []
+
+
+def collector_best_effort_hosts() -> list[str]:
+    data = load_json(state_root() / "collector-state.json", require_private=True)
+    if not data:
+        return []
+    raw_hosts = data.get("configuredBestEffortRemoteHosts")
+    if isinstance(raw_hosts, list):
+        return unique_hosts([host for host in (parse_remote_host(value) for value in raw_hosts) if host])
+    raw_remotes = data.get("configuredBestEffortRemotes")
+    if isinstance(raw_remotes, list):
+        return unique_hosts([host for host in (parse_remote_host(value) for value in raw_remotes) if host])
+    return []
+
+
+def optional_daily_health_hosts() -> list[str]:
+    return unique_hosts([*env_host_list("BOT_ERRORS_DAILY_HEALTH_OPTIONAL_HOSTS"), *collector_best_effort_hosts()])
 
 
 def daily_health_event_host(path: Path, data: dict[str, Any] | None) -> str | None:
