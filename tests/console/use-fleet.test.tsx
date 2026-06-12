@@ -1,10 +1,11 @@
 /**
  * Behavior tests for console/src/hooks/use-fleet.ts
  *
- * Tests all exported query-option factories and hooks (14 describe blocks):
+ * Tests all exported query-option factories and hooks:
  *   getLinesQueryOptions, getLineQueryOptions, getChatsQueryOptions,
  *   getMessagesQueryOptions, useLines, useLine, useChats, useMessages,
- *   useAccess, useLogs, useTyping, useFeed, computeKpis, query-key-isolation
+ *   useAccess, useLogs, useTyping, useFeed, useProviderStatus, computeKpis,
+ *   query-key-isolation
  *
  * Source surprises:
  *   - useRealtime().connected gates polling: connected=true → refetchInterval=false
@@ -56,6 +57,7 @@ const apiMocks = vi.hoisted(() => ({
   getLogs: vi.fn(),
   getTyping: vi.fn(),
   getFeed: vi.fn(),
+  getProviderStatus: vi.fn(),
 }));
 
 vi.mock('../../console/src/lib/api', () => ({
@@ -79,6 +81,7 @@ import {
   useLogs,
   useTyping,
   useFeed,
+  useProviderStatus,
   computeKpis,
 } from '../../console/src/hooks/use-fleet';
 
@@ -89,6 +92,7 @@ import type {
   AccessEntry,
   LogEntry,
   FeedEvent,
+  ProviderStatus,
 } from '../../console/src/types';
 
 // ---------------------------------------------------------------------------
@@ -185,6 +189,22 @@ const FEED_1: FeedEvent = {
   time: '2026-05-12T00:00:00Z',
   mode: 'agent',
   text: 'agent started',
+};
+
+const PROVIDER_STATUS_1: ProviderStatus = {
+  primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+  fallback: {
+    provider: 'openai-api',
+    model: 'gpt-4o',
+    keyPresent: true,
+    active: false,
+    activeUntil: null,
+    effectiveProvider: null,
+    turnsServed: 0,
+    turnsEmpty: 0,
+    lastFallbackTurnAt: null,
+  },
+  lineReachable: true,
 };
 
 beforeEach(() => {
@@ -771,6 +791,40 @@ describe('useFeed', () => {
     expect(apiMocks.getFeed).toHaveBeenCalledTimes(1);
     await advanceQueryTimers(5_000);
     expect(apiMocks.getFeed).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hook: useProviderStatus
+// ---------------------------------------------------------------------------
+
+describe('useProviderStatus', () => {
+  it('does not fetch when name is empty', async () => {
+    const client = makeClient();
+    const { result } = renderHook(() => useProviderStatus(''), { wrapper: wrapper(client) });
+    expect(result.current.fetchStatus).toBe('idle');
+    expect(apiMocks.getProviderStatus).not.toHaveBeenCalled();
+  });
+
+  it('returns provider status on success', async () => {
+    apiMocks.getProviderStatus.mockResolvedValue(PROVIDER_STATUS_1);
+    const client = makeClient();
+    const { result } = renderHook(() => useProviderStatus('alpha'), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.fallback.provider).toBe('openai-api');
+    expect(apiMocks.getProviderStatus).toHaveBeenCalledWith('alpha');
+  });
+
+  it('keeps polling while WS is connected because fallback health changes do not always emit instance_status', async () => {
+    vi.useFakeTimers();
+    wsConnected = true;
+    apiMocks.getProviderStatus.mockResolvedValue(PROVIDER_STATUS_1);
+    const client = makeClient();
+    const { result } = renderHook(() => useProviderStatus('alpha'), { wrapper: wrapper(client) });
+    await vi.waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiMocks.getProviderStatus).toHaveBeenCalledTimes(1);
+    await advanceQueryTimers(5_000);
+    expect(apiMocks.getProviderStatus).toHaveBeenCalledTimes(2);
   });
 });
 

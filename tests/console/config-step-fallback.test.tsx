@@ -8,6 +8,7 @@
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { type ReactElement, useState } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ConfigStep from '../../console/src/components/wizard/ConfigStep'
 import { PROVIDERS } from '../../console/src/lib/providers'
@@ -20,17 +21,31 @@ interface RenderOpts {
 
 function renderConfigStep(opts: RenderOpts = {}) {
   const onChange = vi.fn()
-  let data: Record<string, unknown> = {
+  const initialData: Record<string, unknown> = {
     type: 'agent',
     name: 'test-agent',
     ...opts.initialData,
   }
-  const utils = render(<ConfigStep data={data} onChange={onChange} errors={{}} />)
-  const rerenderWith = (next: Record<string, unknown>) => {
-    data = next
-    utils.rerender(<ConfigStep data={data} onChange={onChange} errors={{}} />)
+  let latestData = initialData
+
+  function Harness(): ReactElement {
+    const [data, setData] = useState(initialData)
+    latestData = data
+
+    const handleChange = (patch: Record<string, unknown>) => {
+      onChange(patch)
+      setData((current) => ({ ...current, ...patch }))
+    }
+
+    return <ConfigStep data={data} onChange={handleChange} errors={{}} />
   }
-  return { onChange, rerenderWith, ...utils }
+
+  const utils = render(<Harness />)
+  return { onChange, getData: () => latestData, ...utils }
+}
+
+function getAgentOptions(data: Record<string, unknown>): Record<string, unknown> {
+  return data.agentOptions as Record<string, unknown>
 }
 
 function openPermissionsTab() {
@@ -47,17 +62,19 @@ describe('ConfigStep — fallback provider section', () => {
     expect(screen.queryByText('Fallback Model')).toBeNull()
   })
 
-  it('enabling the checkbox defaults fallbackProvider to the primary provider id', () => {
-    const { onChange } = renderConfigStep({
+  it('enabling the checkbox keeps an empty provider placeholder instead of defaulting to the primary provider', () => {
+    const { getData } = renderConfigStep({
       initialData: { agentOptions: { provider: 'codex-cli' } },
     })
     openPermissionsTab()
-    onChange.mockClear()
 
     fireEvent.click(screen.getByText('Configure a fallback provider'))
 
-    const patch = onChange.mock.calls[0][0] as { agentOptions: { fallbackProvider?: string } }
-    expect(patch.agentOptions.fallbackProvider).toBe('codex-cli')
+    expect(getAgentOptions(getData())).not.toHaveProperty('fallbackProvider')
+    const fallbackSelect = screen.getByLabelText('Fallback Provider') as HTMLSelectElement
+    expect(fallbackSelect.value).toBe('')
+    expect(fallbackSelect.options[0]?.value).toBe('')
+    expect(fallbackSelect.options[0]?.textContent).toMatch(/select fallback provider/i)
   })
 
   it('renders provider <select> + model field when a fallbackProvider is set, and the select lists every catalog provider', () => {
@@ -75,7 +92,7 @@ describe('ConfigStep — fallback provider section', () => {
     // and offers every provider id from the single console catalog.
     const fallbackSelect = screen.getByDisplayValue('OpenAI') as HTMLSelectElement
     const optionValues = Array.from(fallbackSelect.options).map((o) => o.value)
-    expect(optionValues).toEqual(PROVIDERS.map((p) => p.id))
+    expect(optionValues).toEqual(['', ...PROVIDERS.map((p) => p.id)])
 
     // Model text field reflects the configured fallback model.
     expect((screen.getByDisplayValue('gpt-4o') as HTMLInputElement).tagName).toBe('INPUT')
@@ -97,22 +114,35 @@ describe('ConfigStep — fallback provider section', () => {
     expect(patch.agentOptions.fallbackModel).toBe('gpt-4o-mini')
   })
 
+  it('keeps the fallback model disabled until a fallback provider is selected', () => {
+    renderConfigStep({
+      initialData: { agentOptions: { provider: 'claude-cli' } },
+    })
+    openPermissionsTab()
+
+    fireEvent.click(screen.getByText('Configure a fallback provider'))
+
+    const modelInput = screen.getByPlaceholderText('Select a fallback provider first') as HTMLInputElement
+    expect(modelInput.disabled).toBe(true)
+
+    fireEvent.change(screen.getByLabelText('Fallback Provider'), { target: { value: 'openai-api' } })
+
+    const enabledModelInput = screen.getByPlaceholderText('claude-sonnet-4-6') as HTMLInputElement
+    expect(enabledModelInput.disabled).toBe(false)
+  })
+
   it('disabling the checkbox clears both fallbackProvider and fallbackModel', () => {
-    const { onChange } = renderConfigStep({
+    const { getData } = renderConfigStep({
       initialData: {
         agentOptions: { provider: 'claude-cli', fallbackProvider: 'openai-api', fallbackModel: 'gpt-4o' },
       },
     })
     openPermissionsTab()
-    onChange.mockClear()
 
     fireEvent.click(screen.getByText('Configure a fallback provider'))
 
-    // The uncheck path removes fallbackProvider (and clears the model).
-    const providerCleared = onChange.mock.calls.some(([p]) => {
-      const opts = (p as { agentOptions?: { fallbackProvider?: unknown } }).agentOptions
-      return opts !== undefined && !('fallbackProvider' in opts)
-    })
-    expect(providerCleared).toBe(true)
+    const finalAgentOptions = getAgentOptions(getData())
+    expect(finalAgentOptions).not.toHaveProperty('fallbackProvider')
+    expect(finalAgentOptions).not.toHaveProperty('fallbackModel')
   })
 })

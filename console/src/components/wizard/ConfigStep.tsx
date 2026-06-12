@@ -301,7 +301,28 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
     [agentOptions, onChange],
   )
 
-  const fallbackEnabled = (agentOptions.fallbackProvider ?? '') !== ''
+  const clearFallbackOptions = useCallback(() => {
+    const next = { ...agentOptions }
+    delete next.fallbackProvider
+    delete next.fallbackModel
+    onChange({ agentOptions: next })
+  }, [agentOptions, onChange])
+
+  const handleFallbackProvider = useCallback(
+    (value: string) => {
+      if (value === '') {
+        clearFallbackOptions()
+        return
+      }
+      handleFallbackOption('fallbackProvider', value)
+    },
+    [clearFallbackOptions, handleFallbackOption],
+  )
+
+  const fallbackConfigured = (agentOptions.fallbackProvider ?? '') !== '' || (agentOptions.fallbackModel ?? '') !== ''
+  const [fallbackSectionEnabled, setFallbackSectionEnabled] = useState<boolean>(fallbackConfigured)
+  const fallbackEnabled = fallbackSectionEnabled || fallbackConfigured
+  const fallbackProviderSelected = (agentOptions.fallbackProvider ?? '') !== ''
 
   const [activeTab, setActiveTab] = useState<string>('access')
 
@@ -514,13 +535,8 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             label="Configure a fallback provider"
             checked={fallbackEnabled}
             onChange={(v) => {
-              if (v) {
-                // Default to the primary provider id so the select has a value.
-                handleFallbackOption('fallbackProvider', agentOptions.provider ?? DEFAULT_PROVIDER_ID)
-              } else {
-                handleFallbackOption('fallbackProvider', '')
-                handleFallbackOption('fallbackModel', '')
-              }
+              setFallbackSectionEnabled(v)
+              if (!v) clearFallbackOptions()
             }}
             helper="Switch to a backup provider when the primary hits a usage limit"
           />
@@ -530,24 +546,28 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 {(id) => (
                   <SelectInput
                     id={id}
-                    value={agentOptions.fallbackProvider ?? DEFAULT_PROVIDER_ID}
-                    onChange={(e) => handleFallbackOption('fallbackProvider', e.target.value)}
+                    value={agentOptions.fallbackProvider ?? ''}
+                    onChange={(e) => handleFallbackProvider(e.target.value)}
                     confirmed={(agentOptions.fallbackProvider ?? '').length > 0}
                   >
+                    <option value="">Select fallback provider</option>
                     {PROVIDERS.map(p => (
                       <option key={p.id} value={p.id}>{p.displayName}</option>
                     ))}
                   </SelectInput>
                 )}
               </Field>
-              <Field label="Fallback Model" confirmed={(agentOptions.fallbackModel ?? '').length > 0}>
+              <Field label="Fallback Model" confirmed={fallbackProviderSelected && (agentOptions.fallbackModel ?? '').length > 0}>
                 {(id) => (
                   <TextInput
                     id={id}
-                    value={agentOptions.fallbackModel ?? ''}
-                    onChange={(e) => handleFallbackOption('fallbackModel', e.target.value)}
-                    placeholder="claude-sonnet-4-6"
-                    confirmed={(agentOptions.fallbackModel ?? '').length > 0}
+                    value={fallbackProviderSelected ? (agentOptions.fallbackModel ?? '') : ''}
+                    onChange={(e) => {
+                      if (fallbackProviderSelected) handleFallbackOption('fallbackModel', e.target.value)
+                    }}
+                    placeholder={fallbackProviderSelected ? 'claude-sonnet-4-6' : 'Select a fallback provider first'}
+                    disabled={!fallbackProviderSelected}
+                    confirmed={fallbackProviderSelected && (agentOptions.fallbackModel ?? '').length > 0}
                   />
                 )}
               </Field>
