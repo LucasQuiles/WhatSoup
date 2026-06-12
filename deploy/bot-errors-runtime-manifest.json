@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-12T22:26:50Z",
+  "scope": "bot-errors-runtime-scripts",
+  "files": [
+    {
+      "path": "deploy/scripts/bot-errors-dispatcher.py",
+      "sha256": "0507fb3411a9e836e934b4cbd0904e5971e6cf99fb6ccc6465e76c0bd75db829",
+      "mustContain": [
+        "append_private_jsonl",
+        "refusing to use private directory through symlink",
+        "whatsapp_auth_bond_local_failure",
+        "sourceSpecificRecoveredIncidents",
+        "event_line(\"incident_key\", incident_key(event))",
+        "redacted_state_text"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-health-check.py",
+      "sha256": "7e26bcee23e9cccfc112b824def5893a09727aa180823808afb817eaf11c6ca5",
+      "mustContain": [
+        "critical_file_problem",
+        "mustContain",
+        "q_loop_state_inventory",
+        "RUNTIME_MANIFEST_FAILURE_RE",
+        "provider_probe_inventory",
+        "provider_usage_limit",
+        "credential_item_status",
+        "credential_item_status_acceptable",
+        "credential_secret_status",
+        "gui_session_status",
+        "provider_claude_state_fragments",
+        "provider_auth_context=headless_login_keychain_blocked",
+        "provider_probe_signal=contradicted_by_live_service",
+        "live_provider_corroboration_fresh",
+        "primary_phone:multiple",
+        "unattended_update_reboot_risk",
+        "activation_guard_missing",
+        "active_process_fallback",
+        "auth_bond_restore_canary=failed reason=auth_tree_contains_symlink",
+        "primary_phone_verifications_path",
+        "primary_phone_unknown_severity",
+        "verification_proof=missing",
+        "record-primary-phone-verification",
+        "runtime_agent_recent_resume_failures",
+        "expectSourceUpdateAccess",
+        "sourceUpdateAccessMode",
+        "source_update_blocked",
+        "BOT ERRORS source update reachable",
+        "source_update: shadow",
+        "git_remote_auth_failed",
+        "SOURCE_UPDATE_BLOCKED",
+        "AUTHORIZATION_SECRET_RE",
+        "detect_opencode_mode",
+        "provider_compatibility_degraded",
+        "provider_compatibility_unsupported",
+        "provider_credential_missing",
+        "opencodeCommandMode",
+        "credential_present",
+        "runtime_agent_fallback_active",
+        "instance_fallback_reason",
+        "runtime_agent_fallback_recovery_probe_required",
+        "auth_bond_credential_write_inflight",
+        "BOT_ERRORS_AUTH_BOND_WRITE_INFLIGHT_GRACE_SECONDS"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
+      "sha256": "e328e9105dfdf4611540c27654a40a67a330e79b2475697f73a5358eb31777d8",
+      "mustContain": [
+        "BOT_ERRORS_Q_LOOP_STATE_DIR",
+        "critical_file_problem",
+        "q_loop:supervisor",
+        "refusing to trust critical file",
+        "redact_watchdog_text"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-q-loop.py",
+      "sha256": "b443bc294cbdb286f6fc8a6fd2a426cbd149d8907bbf0f2ad6f96c6b48e3ae38",
+      "mustContain": [
+        "q_unavailable_reason",
+        "session_limit",
+        "q_unavailable_",
+        "assert_private_regular_for_read",
+        "state_integrity_failed",
+        "redact_json_value(state)",
+        "BOT_ERRORS_Q_LOOP_STATE_DIR"
+      ]
+    },
+    {
+      "path": "src/lib/bot-errors-outbox.ts",
+      "sha256": "e5bc63fe390c279877528d0f9738b3b1185fa6acfd1f0bca29dae918d20a0de3",
+      "mustContain": [
+        "AUTHORIZATION_BEARER",
+        "Authorization: Bearer [REDACTED]",
+        "constants.O_NOFOLLOW",
+        "redactDiagnosticValue(event)",
+        "recordBotErrorsWritefail"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-collector.py",
+      "sha256": "f3ce989cd6967c852b034c1bd34cc964d5e49db8aadda3602d13b01afde3f397",
+      "mustContain": [
+        "append_private_jsonl",
+        "refusing to use private directory through symlink",
+        "configuredRemoteHosts",
+        "meta_alert_recovery_deferred",
+        "recovery_successes_required",
+        "tailscale_online_ssh_timeout",
+        "best-effort-remote",
+        "redact_collector_text"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-emit.py",
+      "sha256": "2705c873dd2af8e022bf9b2a8a29b57a8493a005625cde98abc799614c4831a9",
+      "mustContain": [
+        "O_NOFOLLOW",
+        "refusing to use private directory through symlink",
+        "outbox_write_failure"
+      ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-runner.py",
+      "sha256": "f557f0f66ee32ac6c7c66b8a3c18386eaeb3ba2824cce089c4d1ea5effdc08dc",
+      "mustContain": [
+        "O_NOFOLLOW",
+        "refusing to use private directory through symlink",
+        "outbox_write_failure"
+      ]
+    }
+  ]
+}

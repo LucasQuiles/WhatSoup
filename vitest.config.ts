@@ -31,6 +31,7 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
     testTimeout: 10_000,
+    setupFiles: ['./tests/setup/bot-errors-vitest-isolation.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'json', 'json-summary'],

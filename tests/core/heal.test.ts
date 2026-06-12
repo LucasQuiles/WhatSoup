@@ -37,10 +37,16 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-vi.mock('../../src/lib/emit-alert.ts', () => ({
-  emitAlert: vi.fn(),
-  clearAlertSource: vi.fn(),
-}));
+vi.mock('../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 // Mock sendTracked so tests don't attempt real sends
 vi.mock('../../src/core/durability.ts', async (importOriginal) => {

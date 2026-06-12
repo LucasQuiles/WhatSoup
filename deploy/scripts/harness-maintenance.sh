@@ -47,6 +47,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
 RUN_LOG="$STATE_DIR/run.log"
 TMP_DIR="$(mktemp -d)"
 EVENTS_FILE="$TMP_DIR/events.ndjson"
@@ -64,12 +65,14 @@ if [ -z "$REPO_NODE_BIN" ]; then
   exit 1
 fi
 
-CODX_NODE_BIN_DIR="${WHATSOUP_CODEX_NODE_BIN_DIR:-$HOME/.nvm/versions/node/v24.13.0/bin}"
+CODX_NODE_BIN_DIR="${WHATSOUP_CODEX_NODE_BIN_DIR:-$HOME/.nvm/versions/node/v$NVMRC_NODE_VERSION/bin}"
+NPM_GLOBAL_PREFIX="${WHATSOUP_HARNESS_NPM_GLOBAL_PREFIX:-$HOME/.local/share/whatsoup/npm-global}"
+NPM_GLOBAL_BIN_DIR="$NPM_GLOBAL_PREFIX/bin"
 ALERT_BIN="${WHATSOUP_ALERT_BIN:-$HOME/.local/bin/whatsapp-alert}"
 PROBE_TIMEOUT_SECS="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_TIMEOUT_SECS:-10}"
 PROBE_OUTPUT_LINES="${WHATSOUP_HARNESS_MAINTENANCE_PROBE_OUTPUT_LINES:-200}"
 REPO_NODE_BIN_DIR="$(dirname "$REPO_NODE_BIN")"
-export PATH="$HOME/.local/bin:$REPO_NODE_BIN_DIR:$PATH"
+export PATH="$NPM_GLOBAL_BIN_DIR:$HOME/.local/bin:$REPO_NODE_BIN_DIR:$PATH"
 
 log() {
   echo "[harness-maintenance] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" | tee -a "$RUN_LOG" >&2
@@ -111,9 +114,19 @@ const state = {
   event_count: events.length,
   events,
 };
-fs.writeFileSync(outPath, `${JSON.stringify(state, null, 2)}\n`);
+fs.writeFileSync(outPath, `${JSON.stringify(state, null, 2)}\n`, {
+  encoding: 'utf8',
+  flag: 'wx',
+  mode: 0o600,
+});
 NODE
+  if [ -L "$STATE_FILE" ]; then
+    echo "harness maintenance state target is a symlink; refusing to overwrite: $STATE_FILE" >&2
+    rm -f "$STATE_TMP"
+    exit 1
+  fi
   mv "$STATE_TMP" "$STATE_FILE"
+  chmod 600 "$STATE_FILE"
   if [ "$JSON_OUT" -eq 1 ]; then
     cat "$STATE_FILE"
   fi
@@ -190,8 +203,21 @@ codex_current() {
   CODEX_NO_DEFAULTS=1 "$bin" --version 2>/dev/null | parse_version
 }
 
+opencode_bin() {
+  if [ -x "$NPM_GLOBAL_BIN_DIR/opencode" ]; then
+    echo "$NPM_GLOBAL_BIN_DIR/opencode"
+  else
+    command -v opencode || true
+  fi
+}
+
 opencode_current() {
-  command_version opencode --version || true
+  local bin
+  bin="$(opencode_bin)"
+  if [ -z "$bin" ]; then
+    return 0
+  fi
+  "$bin" --version 2>/dev/null | parse_version
 }
 
 smoke_claude() {
@@ -205,7 +231,9 @@ smoke_codex() {
 }
 
 smoke_opencode() {
-  command -v opencode >/dev/null 2>&1 && opencode --version >/dev/null 2>&1
+  local bin
+  bin="$(opencode_bin)"
+  [ -n "$bin" ] && "$bin" --version >/dev/null 2>&1
 }
 
 apply_npmrc() {
@@ -367,6 +395,45 @@ ensure_npm_version_eligible() {
   return "$rc"
 }
 
+npm_latest_eligible_version() {
+  local pkg="$1"
+  local npm
+  npm="$(npm_bin)"
+  if [ -z "$npm" ]; then
+    return 1
+  fi
+  local time_json cooldown_minutes
+  time_json="$TMP_DIR/npm-time-${pkg//[^A-Za-z0-9_.-]/_}.json"
+  cooldown_minutes="$(manifest_npm_cooldown_minutes)"
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" view "$pkg" time --json > "$time_json"
+  "$REPO_NODE_BIN" --experimental-strip-types "$REPO_ROOT/scripts/harness-maintenance-guard.ts" \
+    --latest-eligible-version \
+    --time-json "$time_json" \
+    --cooldown-minutes "$cooldown_minutes" 2>/dev/null | tail -n 1
+}
+
+install_opencode_npm() {
+  local target="$1"
+  local npm
+  npm="$(npm_bin)"
+  if [ -z "$npm" ]; then
+    record_event "opencode" "failed" "npm not found for opencode-ai install" "" "" "$target"
+    send_alert "warn" "OpenCode harness install failed" "npm was not found; opencode-ai@$target could not be installed."
+    return 1
+  fi
+  mkdir -p "$NPM_GLOBAL_PREFIX"
+  chmod 700 "$NPM_GLOBAL_PREFIX"
+  PATH="$CODX_NODE_BIN_DIR:$PATH" "$npm" install -g "opencode-ai@$target" \
+    --ignore-scripts \
+    --prefix "$NPM_GLOBAL_PREFIX"
+  if ! smoke_opencode; then
+    record_event "opencode" "failed" "opencode-ai install failed smoke check" "" "" "$target"
+    send_alert "critical" "OpenCode harness install failed" "opencode-ai@$target installed but opencode --version did not pass."
+    return 1
+  fi
+  return 0
+}
+
 audit_npm_global() {
   local npm
   npm="$(npm_bin)"
@@ -450,11 +517,23 @@ update_codex() {
 }
 
 update_opencode() {
-  local before after
+  local before after target
   before="$(opencode_current)"
   if [ -z "$before" ]; then
-    record_event "opencode" "missing" "opencode binary not found"
-    send_alert "warn" "OpenCode harness missing" "The maintenance job could not find the opencode binary on PATH."
+    target="$(npm_latest_eligible_version opencode-ai || true)"
+    if [ -z "$target" ]; then
+      record_event "opencode" "held" "opencode missing and no opencode-ai version is past the npm cooldown window"
+      send_alert "warn" "OpenCode harness install held" "OpenCode is missing, and no opencode-ai version is old enough under the configured npm cooldown."
+      return 0
+    fi
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+      record_event "opencode" "missing" "opencode binary not found; opencode-ai install available" "" "" "$target"
+      return 0
+    fi
+    install_opencode_npm "$target"
+    after="$(opencode_current)"
+    record_event "opencode" "installed" "installed and smoke checked via opencode-ai npm package" "" "$after" "$target"
+    send_alert "info" "OpenCode harness installed" "OpenCode fallback harness installed as opencode-ai@$target and passed opencode --version."
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then

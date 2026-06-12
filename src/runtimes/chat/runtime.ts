@@ -23,7 +23,7 @@ import { ENRICHMENT_STALE_MS } from '../../core/health.ts';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { jitteredDelay } from '../../core/retry.ts';
 import { WhatSoupError } from '../../errors.ts';
-import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
+import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 
 const log = createChildLogger('conversation');
 
@@ -295,7 +295,7 @@ export class ChatRuntime implements Runtime {
         { traceId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens },
         'primary provider response',
       );
-      clearAlertSource(this.botName, 'llm_total_failure');
+      clearAlertSourceChecked(this.botName, 'llm_total_failure');
     } catch (primaryErr) {
       log.warn({ step: 'primary', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 1, error: (primaryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
 
@@ -306,7 +306,7 @@ export class ChatRuntime implements Runtime {
         log.error({ traceId, err: primaryErr, code: primaryErr.code }, 'non-retryable LLM error — skipping retry and fallback');
         llmDurationMs = Date.now() - llmStart;
         responseText = null;
-        emitAlert(
+        emitAlertChecked(
           this.botName,
           'llm_total_failure',
           `LLM ${primaryErr.code} for ${this.botName} (${this.primaryProvider.name})`,
@@ -326,12 +326,12 @@ export class ChatRuntime implements Runtime {
           inputTokens = result.inputTokens;
           outputTokens = result.outputTokens;
           llmDurationMs = Date.now() - llmStart;
-          clearAlertSource(this.botName, 'llm_total_failure');
+          clearAlertSourceChecked(this.botName, 'llm_total_failure');
         } catch (fallbackErr) {
           log.error({ traceId, err: fallbackErr }, 'fallback also failed after primary 400');
           llmDurationMs = Date.now() - llmStart;
           responseText = null;
-          emitAlert(
+          emitAlertChecked(
             this.botName,
             'llm_total_failure',
             `LLM bad request + fallback failed for ${this.botName}`,
@@ -354,7 +354,7 @@ export class ChatRuntime implements Runtime {
           { traceId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens },
           'primary provider response (retry)',
         );
-        clearAlertSource(this.botName, 'llm_total_failure');
+        clearAlertSourceChecked(this.botName, 'llm_total_failure');
       } catch (retryErr) {
         log.warn({ step: 'retry', provider: this.primaryProvider.name, model: config.models.conversation, attempt: 2, error: (retryErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
         log.error({ traceId, err: retryErr }, 'primary provider retry failed — trying fallback');
@@ -372,13 +372,13 @@ export class ChatRuntime implements Runtime {
             { traceId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens },
             'fallback provider response',
           );
-          clearAlertSource(this.botName, 'llm_total_failure');
+          clearAlertSourceChecked(this.botName, 'llm_total_failure');
         } catch (fallbackErr) {
           log.warn({ step: 'fallback', provider: this.fallbackProvider.name, model: config.models.fallback, attempt: 3, error: (fallbackErr as Error)?.message ?? 'unknown', elapsed_ms: Date.now() - llmStart, traceId }, 'llm_attempt_failed');
           log.error({ traceId, err: fallbackErr }, 'fallback provider also failed');
           llmDurationMs = Date.now() - llmStart;
           responseText = null;
-          emitAlert(
+          emitAlertChecked(
             this.botName,
             'llm_total_failure',
             `All LLM providers failed for ${this.botName} (primary: ${this.primaryProvider.name}, fallback: ${this.fallbackProvider.name})`,

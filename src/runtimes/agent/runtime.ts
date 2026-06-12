@@ -2,7 +2,6 @@
 // AgentRuntime implements the Runtime interface, tying all agent components together.
 
 import type { AgentCommandRequest, AgentCommandResult, Runtime } from '../types.ts';
-import { spawnSync } from 'node:child_process';
 import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
@@ -19,7 +18,7 @@ import {
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
-import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
+import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -76,7 +75,7 @@ import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { createProviderMcpBridge, writeProviderMcpConfig, writeProviderMcpConfigTarget } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
-import { probeFallbackBinary, probeModelCatalog } from './providers/binary-preflight.ts';
+import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus } from './providers/binary-preflight.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -136,6 +135,9 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
+const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
+const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
+const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
 // Default provider-fallback window when the usage-limit message names no reset
 // time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
 // upper-bound estimate for when the primary provider becomes available again.
@@ -153,7 +155,8 @@ const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 5 * 60 * 1000;
   return Math.min(Math.max(raw, 30 * 1000), 30 * 60 * 1000);
 })();
-const PROVIDER_FALLBACK_PRIMARY_PROBE_TIMEOUT_MS = 5_000;
+// The 5 s primary-probe timeout lives with the probe implementation
+// (PROBE_TIMEOUT_MS in providers/binary-preflight.ts), shared by all probes.
 // Consecutive failed recovery probes (revert-timer extension path) before a
 // single fallback_recovery_stalled alert is emitted. The cap only surfaces the
 // stall — the window keeps extending so the instance is never stranded on a
@@ -1328,6 +1331,23 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
   return { category, detail };
 }
 
+function safeAlertSegment(value: string): string {
+  const cleaned = value.trim().replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '');
+  return cleaned.length > 0 ? cleaned.slice(0, 80) : 'unknown';
+}
+
+function alertEvidenceValue(value: string | null | undefined): string {
+  const text = value == null || value.trim() === '' ? 'unknown' : value.trim();
+  return text.replace(/@/g, ' at ');
+}
+
+function alertExcerpt(value: string): string {
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  return cleaned.length > TOOL_FAILURE_ALERT_EXCERPT_CHARS
+    ? `${cleaned.slice(0, TOOL_FAILURE_ALERT_EXCERPT_CHARS - 1)}…`
+    : cleaned;
+}
+
 export class AgentRuntime implements Runtime {
   private static readonly WORKSPACE_IDLE_MS = 30 * 60 * 1000;
   private static readonly WORKSPACE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -1410,6 +1430,11 @@ export class AgentRuntime implements Runtime {
   // restart); the durable artifact is the window itself (agent_fallback_state).
   private fallbackTurnsServed = 0;
   private fallbackTurnsEmpty = 0;
+  // Arm-time snapshots of the lifetime turn counters. The lifetime counters
+  // accrue across windows (getFallbackState contract), so the revert alert
+  // subtracts these to report THIS window's turns instead of cumulative totals.
+  private fallbackTurnsServedAtArm = 0;
+  private fallbackTurnsEmptyAtArm = 0;
   private lastFallbackTurnAt: number | null = null;
   private activeFallbackEntry: AgentFallbackEntry | null = null;
   private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
@@ -1432,6 +1457,13 @@ export class AgentRuntime implements Runtime {
   private fallbackActivations = 0;
   private fallbackReverts = 0;
   private fallbackReplays = 0;
+  // Lifetime-of-process USD cost of turns served while a fallback window was
+  // active (provider-reported costUsd on result events; opencode-only today).
+  // Mirrors fallbackTurnsServed semantics: accumulates only during windows,
+  // never resets on deactivation, resets on restart. The expensive fallback
+  // path must be countable — a silent expensive fallback is a billing
+  // surprise waiting to be found on the invoice instead of in /health.
+  private fallbackWindowCostUsd = 0;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -1478,6 +1510,7 @@ export class AgentRuntime implements Runtime {
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
   private recentProviderFallbackNotices = new Map<string, number>();
+  private recentToolFailureAlerts = new Map<string, number>();
 
   /**
    * Tracks toolScopeKeys where at least one non-phantom tool_use event was
@@ -1554,6 +1587,77 @@ export class AgentRuntime implements Runtime {
     this.activeToolNames.delete(toolScopeKey);
     // Note: turnHadToolActivity is NOT cleared here — the result handler captures
     // it for the empty-turn check and clears it explicitly after the check.
+  }
+
+  private maybeEmitToolFailureAlert(args: {
+    chatJid: string | null | undefined;
+    toolId: string;
+    toolName: string;
+    content: string;
+    classification: ToolUpdate;
+    toolScopeKey: string;
+    mapKey?: string;
+  }): void {
+    if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
+
+    const now = Date.now();
+    for (const [key, recordedAt] of this.recentToolFailureAlerts) {
+      if (now - recordedAt > TOOL_FAILURE_ALERT_DEDUP_MS) {
+        this.recentToolFailureAlerts.delete(key);
+      }
+    }
+
+    const provider = this.effectiveProvider || this.agentProvider || 'unknown-provider';
+    const source = `runtime-tool-error:${safeAlertSegment(provider)}:${safeAlertSegment(args.toolName)}`;
+    const fingerprint = [
+      this.instanceName,
+      provider,
+      args.toolName,
+      args.classification.category,
+      args.content.replace(/\s+/g, ' ').trim().slice(0, 500),
+    ].join('\n');
+
+    if (this.recentToolFailureAlerts.has(fingerprint)) return;
+    this.recentToolFailureAlerts.set(fingerprint, now);
+    while (this.recentToolFailureAlerts.size > MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS) {
+      const oldest = this.recentToolFailureAlerts.keys().next().value;
+      if (oldest === undefined) break;
+      this.recentToolFailureAlerts.delete(oldest);
+    }
+
+    const evidence = [
+      'runtime_source=src/runtimes/agent/runtime.ts:tool_result',
+      `instance=${alertEvidenceValue(this.instanceName)}`,
+      `provider=${alertEvidenceValue(provider)}`,
+      `session_scope=${this.sessionScope}`,
+      `chat_jid=${alertEvidenceValue(args.chatJid ?? null)}`,
+      `tool_scope_key=${alertEvidenceValue(args.toolScopeKey)}`,
+      `map_key=${alertEvidenceValue(args.mapKey ?? null)}`,
+      `tool_id=${alertEvidenceValue(args.toolId)}`,
+      `tool_name=${alertEvidenceValue(args.toolName)}`,
+      `classification=${args.classification.category}`,
+      `detail=${alertEvidenceValue(args.classification.detail)}`,
+      `cwd=${alertEvidenceValue(this.cwd ?? process.cwd())}`,
+      'error_excerpt:',
+      alertExcerpt(args.content) || 'unknown',
+    ].join('\n');
+
+    try {
+      emitAlertChecked(
+        this.instanceName,
+        source,
+        `Agent tool failure: ${args.toolName}`,
+        evidence,
+      );
+    } catch (err) {
+      log.warn({
+        instance: this.instanceName,
+        provider,
+        toolId: args.toolId,
+        toolName: args.toolName,
+        err: err instanceof Error ? err.message : String(err),
+      }, 'failed to emit BOT ERRORS tool failure alert');
+    }
   }
 
   private beginSilentCompact(scopeKey: string): void {
@@ -2469,8 +2573,12 @@ export class AgentRuntime implements Runtime {
           new URL('.', import.meta.url).pathname,
           '../../../deploy/hooks/poll-interaction-lint.mjs',
         );
-        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath, pollLintHookPath);
-        log.info({ cwd, hookPath, pollLintHookPath }, 'wrote sandbox-policy.json and settings.json');
+        const postToolUseLogHookPath = resolve(
+          new URL('.', import.meta.url).pathname,
+          '../../../deploy/hooks/post-tool-use-log.sh',
+        );
+        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath, pollLintHookPath, postToolUseLogHookPath);
+        log.info({ cwd, hookPath, pollLintHookPath, postToolUseLogHookPath }, 'wrote sandbox-policy.json and settings.json');
       } catch (err) {
         log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
         throw err;
@@ -3075,7 +3183,7 @@ export class AgentRuntime implements Runtime {
           { err, messageId: msg.messageId, code: codeStr || 'unknown' },
           'inline extractor hook hit unrecoverable DB error — surfacing to operator',
         );
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'substrate-inline-hook',
           `Unrecoverable DB error in inline extractor: ${msgText}`,
@@ -4686,7 +4794,17 @@ export class AgentRuntime implements Runtime {
           const toolName = toolNames?.get(event.toolId) ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
-          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
+          const classification = classifyToolError(toolName, event.content);
+          queue.enqueueToolUpdate(classification);
+          this.maybeEmitToolFailureAlert({
+            chatJid: queue.targetChatJid,
+            toolId: event.toolId,
+            toolName,
+            content: event.content,
+            classification,
+            toolScopeKey,
+            mapKey,
+          });
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {
@@ -4700,6 +4818,9 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(compactScopeKey);
         session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        // Provider-reported turn cost: log it beside the token counts and
+        // accumulate it while a fallback window is active.
+        this.recordTurnCostUsd(event);
         // Capture before clearToolNames so the empty-turn check can read it.
         const turnHadToolWork = this.turnHadToolActivity.has(toolScopeKey);
         this.turnHadToolActivity.delete(toolScopeKey);
@@ -5653,16 +5774,25 @@ export class AgentRuntime implements Runtime {
     return this.agentFallbacks.map((entry) => ({ ...entry, eligible: null }));
   }
 
-  private selectFallbackEntryForWindow(): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
+  private selectFallbackEntryForWindow(reason?: string): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
     if (this.agentFallbacks.length === 0) {
       this.fallbackChainState = [];
       return null;
     }
 
+    const requireIndependentProvider = reason === 'auth-required';
     let firstEligibleIndex = -1;
+    let firstIndependentIndex = -1;
     const state: Array<AgentFallbackEntry & { eligible: boolean }> = [];
     for (let i = 0; i < this.agentFallbacks.length; i++) {
       const entry = this.agentFallbacks[i]!;
+      if (requireIndependentProvider && entry.provider === this.agentProvider) {
+        state.push({ ...entry, eligible: false });
+        continue;
+      }
+      if (entry.provider !== this.agentProvider && firstIndependentIndex === -1) {
+        firstIndependentIndex = i;
+      }
       const service = resolveProviderKeyService(
         entry.provider,
         entry.model,
@@ -5674,7 +5804,7 @@ export class AgentRuntime implements Runtime {
         firstEligibleIndex = i;
       }
       if (!eligible) {
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'fallback_credential_missing',
           'Fallback provider key not found in keyring',
@@ -5683,7 +5813,18 @@ export class AgentRuntime implements Runtime {
       }
     }
     this.fallbackChainState = state;
-    const selectedIndex = firstEligibleIndex === -1 ? 0 : firstEligibleIndex;
+    if (requireIndependentProvider && firstEligibleIndex === -1 && firstIndependentIndex === -1) {
+      emitAlertChecked(
+        this.instanceName,
+        'fallback_no_independent_provider',
+        'Auth-required fallback has no independent provider target',
+        `primaryProvider=${this.agentProvider} reason=${reason}`,
+      );
+      return null;
+    }
+    const selectedIndex = firstEligibleIndex === -1
+      ? (requireIndependentProvider ? firstIndependentIndex : 0)
+      : firstEligibleIndex;
     return {
       entry: this.agentFallbacks[selectedIndex]!,
       selectedHadMissingCredential: state[selectedIndex]?.eligible === false,
@@ -5716,6 +5857,7 @@ export class AgentRuntime implements Runtime {
     fallbackActivations: number;
     fallbackReverts: number;
     fallbackReplays: number;
+    fallbackWindowCostUsd: number;
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   } {
@@ -5736,9 +5878,34 @@ export class AgentRuntime implements Runtime {
       fallbackActivations: this.fallbackActivations,
       fallbackReverts: this.fallbackReverts,
       fallbackReplays: this.fallbackReplays,
+      fallbackWindowCostUsd: this.fallbackWindowCostUsd,
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
     };
+  }
+
+  /**
+   * Record a provider-reported turn cost from a result event. Always logged
+   * alongside the token counts; accumulated into {@link fallbackWindowCostUsd}
+   * only while a fallback window is active (the field answers "what has
+   * fallback serving cost this process"). Non-finite values are ignored —
+   * the opencode parser validates finite ≥ 0, but the handler stays defensive
+   * for other providers that may grow a cost field.
+   */
+  private recordTurnCostUsd(event: { costUsd?: number; inputTokens?: number; outputTokens?: number }): void {
+    if (typeof event.costUsd !== 'number' || !Number.isFinite(event.costUsd)) return;
+    const onFallback = this.isFallbackWindowActive;
+    log.info({
+      instanceName: this.instanceName,
+      costUsd: event.costUsd,
+      inputTokens: event.inputTokens,
+      outputTokens: event.outputTokens,
+      provider: this.effectiveProvider,
+      onFallback,
+    }, 'provider reported turn cost');
+    if (onFallback) {
+      this.fallbackWindowCostUsd += event.costUsd;
+    }
   }
 
   /**
@@ -5847,7 +6014,7 @@ export class AgentRuntime implements Runtime {
       served: this.fallbackTurnsServed,
       empty: this.fallbackTurnsEmpty,
     }, 'fallback turn completed with zero visible output');
-    emitAlert(
+    emitAlertChecked(
       this.instanceName,
       'fallback_empty_turn',
       'Fallback turn produced no visible output',
@@ -5859,25 +6026,52 @@ export class AgentRuntime implements Runtime {
    *  and persist best-effort so a restart mid-window resumes on fallback.
    *  Pass `activatedAt` explicitly when restoring to preserve the original
    *  time, and `opts.restored` so a resumed window is not re-counted. */
-  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): void {
-    const selection = this.selectFallbackEntryForWindow();
-    if (!selection) return;
+  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): boolean {
+    const selection = this.selectFallbackEntryForWindow(reason);
+    if (!selection) return false;
     const fallbackEntry = selection.entry;
     this.activeFallbackEntry = fallbackEntry;
     this.fallbackActiveUntil = until;
     this.fallbackActivatedAt = activatedAt;
+    // First-arm discriminator, captured before the guard below consumes it:
+    // null means this call is the window's first arm in this process (a fresh
+    // activation or a post-restart restore), non-null means an extension of
+    // the already-armed window. Pre-flight runs only on first arms — an
+    // extension re-arm re-spawning the credential/binary/catalog probes and
+    // re-firing their alerts on every per-turn usage-limit is an unthrottled
+    // storm, and nothing about the target entry's environment changed.
+    const firstArm = this.fallbackArmReason === null;
     // Preserve original cause: only set on first arm; extensions and restores
-    // must pass the original reason so it is not overwritten. The null-guard
-    // doubles as the first-arm discriminator: the activation alert + counter
-    // fire exactly once per window, never on extensions. A restored window
-    // is the SAME window resuming after a restart — the null-guard is
-    // per-process, so without the restored flag every restart would re-count
-    // and re-alert the activation that already fired before the restart.
-    if (this.fallbackArmReason === null) {
+    // must pass the original reason so it is not overwritten. The activation
+    // alert + counter fire exactly once per window, never on extensions. A
+    // restored window is the SAME window resuming after a restart — the
+    // first-arm discriminator is per-process, so without the restored flag
+    // every restart would re-count and re-alert the activation that already
+    // fired before the restart.
+    if (firstArm) {
       this.fallbackArmReason = reason;
-      if (!opts?.restored) {
+      // Snapshot the lifetime turn counters at the first arm of every window
+      // (the null-guard skips extensions; restores hit it too because the
+      // guard is per-process, which is correct — the counters are also
+      // per-process, so a restored window counts from this process's zero).
+      this.fallbackTurnsServedAtArm = this.fallbackTurnsServed;
+      this.fallbackTurnsEmptyAtArm = this.fallbackTurnsEmpty;
+      if (opts?.restored) {
+        // A restored window is the SAME window resuming after a restart, so
+        // it never re-counts as an activation — but the resume itself is an
+        // operator-visible transition (a restart mid-window; repeated
+        // restores are the crash-loop signature), so it gets its own
+        // additive source instead of silence.
+        emitAlertChecked(
+          this.instanceName,
+          'provider_fallback_restored',
+          'Provider fallback window restored after restart',
+          `reason=${reason} provider=${fallbackEntry.provider} model=${fallbackEntry.model ?? 'default'}`
+            + ` until=${new Date(until).toISOString()} probeAttempts=${this.fallbackProbeAttempts}`,
+        );
+      } else {
         this.fallbackActivations += 1;
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'provider_fallback_activated',
           'Provider fallback window activated',
@@ -5901,16 +6095,27 @@ export class AgentRuntime implements Runtime {
     this.fallbackRecoveryProbeRequired = fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
     this.scheduleFallbackPrimaryProbe();
     try {
-      saveFallbackState(this.db, { activeUntil: until, activatedAt, reason: persistReason });
+      saveFallbackState(this.db, {
+        activeUntil: until,
+        activatedAt,
+        reason: persistReason,
+        probeAttempts: this.fallbackProbeAttempts,
+      });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'fallback_persist_failed',
         'Failed to persist fallback window — will not survive restart',
         `until=${new Date(until).toISOString()} reason=${persistReason}`,
       );
     }
+    // Pre-flight is gated to first arms (fresh activation or post-restart
+    // restore). An extension re-arm changes nothing about the target entry's
+    // environment, and per-turn usage-limit extensions would otherwise
+    // re-spawn every probe and re-fire every pre-flight alert — an
+    // unthrottled storm under sustained load.
+    if (!firstArm) return true;
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
     const service = resolveProviderKeyService(
@@ -5927,7 +6132,7 @@ export class AgentRuntime implements Runtime {
           fallbackModel: fallbackEntry.model,
         }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
         if (!selection.selectedHadMissingCredential) {
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_credential_missing',
             'Fallback provider key not found in keyring',
@@ -5938,7 +6143,7 @@ export class AgentRuntime implements Runtime {
         void verifyFallbackCredential(service, key).then((result) => {
           if (result !== 'invalid') return;
           log.error({ service, fallbackProvider: fallbackEntry.provider }, 'fallback credential rejected by provider (401/403)');
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_credential_invalid',
             'Fallback API key rejected by provider',
@@ -5958,7 +6163,7 @@ export class AgentRuntime implements Runtime {
             { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
             'fallback provider binary not found on this host',
           );
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_binary_missing',
             'Fallback provider binary not found on this host',
@@ -5989,7 +6194,7 @@ export class AgentRuntime implements Runtime {
                 },
                 'fallback model not found in provider catalog — sessions will fail until corrected',
               );
-              emitAlert(
+              emitAlertChecked(
                 this.instanceName,
                 'fallback_model_unknown',
                 'Fallback model not found in provider catalog',
@@ -6002,6 +6207,7 @@ export class AgentRuntime implements Runtime {
         }
       });
     }
+    return true;
   }
 
   /**
@@ -6026,10 +6232,21 @@ export class AgentRuntime implements Runtime {
       // Clamp the restored window so a clock-skew or tampered row cannot pin
       // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
       const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
+      // Resume the stall clock BEFORE re-arming: the persisted attempts feed
+      // both the re-persist inside armFallbackWindow and the restore alert's
+      // evidence. Without this, every restart reset the count to zero and a
+      // dead primary could extend forever without ever reaching the stall
+      // threshold (restarts happen more often than 12 recheck cadences).
+      this.fallbackProbeAttempts = Number.isFinite(persisted.probeAttempts) ? persisted.probeAttempts : 0;
       // Pass persisted.reason so the original cause survives the restart, and
-      // restored:true so the resumed window is not re-counted/re-alerted —
-      // provider_fallback_activated already fired when the window first armed.
-      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
+      // restored:true so the resumed window is not re-counted as an
+      // activation — provider_fallback_activated already fired when the
+      // window first armed; the resume emits provider_fallback_restored.
+      const restored = this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
+      if (!restored) {
+        clearFallbackState(this.db);
+        return;
+      }
       const wasClamped = clampedUntil < persisted.activeUntil;
       log.info({
         activeUntil: new Date(clampedUntil).toISOString(),
@@ -6080,8 +6297,9 @@ export class AgentRuntime implements Runtime {
     // stores 'usage-limit' as the original cause.
     const persistedReason = wasActive && this.fallbackArmReason !== null ? this.fallbackArmReason : reason;
     this.fallbackResetAt = resetAt?.getTime() ?? null;
-    this.armFallbackWindow(until, persistedReason, activatedAt);
-    const fallbackEntry = this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
+    const armed = this.armFallbackWindow(until, persistedReason, activatedAt);
+    if (!armed) return null;
+    const fallbackEntry = this.activeFallbackEntry;
     if (!fallbackEntry) return null;
     const keyPresent = this.fallbackKeyPresent(fallbackEntry.provider, fallbackEntry.model);
 
@@ -6126,6 +6344,10 @@ export class AgentRuntime implements Runtime {
     // Capture before clearing: the revert alert reports how long the window
     // ran. The idempotency guard above means this fires once per window.
     const windowMs = this.fallbackActivatedAt !== null ? Date.now() - this.fallbackActivatedAt : null;
+    // Per-window deltas against the arm-time snapshots — the lifetime counters
+    // are NOT reset here (getFallbackState keeps reporting process totals).
+    const windowTurnsServed = this.fallbackTurnsServed - this.fallbackTurnsServedAtArm;
+    const windowTurnsEmpty = this.fallbackTurnsEmpty - this.fallbackTurnsEmptyAtArm;
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
@@ -6148,11 +6370,11 @@ export class AgentRuntime implements Runtime {
       reason,
     }, 'reverting to primary provider');
     this.fallbackReverts += 1;
-    emitAlert(
+    emitAlertChecked(
       this.instanceName,
       'provider_fallback_reverted',
       'Provider fallback window ended — reverted to primary provider',
-      `reason=${reason} turnsServed=${this.fallbackTurnsServed} turnsEmpty=${this.fallbackTurnsEmpty}`
+      `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty}`
         + ` windowMs=${windowMs ?? 'unknown'}`,
     );
   }
@@ -6164,51 +6386,74 @@ export class AgentRuntime implements Runtime {
       return;
     }
     this.fallbackLastProbeAt = Date.now();
-    if (this.probePrimaryProviderRecovered()) {
-      this.deactivateProviderFallback('primary-probe-ok');
-      return;
-    }
-    this.fallbackProbeAttempts += 1;
-    const now = Date.now();
-    const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
-    this.fallbackActiveUntil = until;
-    this.revertTimer = setTimeout(() => {
-      this.handleFallbackRevertTimer();
-    }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
-    this.revertTimer.unref?.();
-    try {
-      saveFallbackState(this.db, {
-        activeUntil: until,
-        activatedAt: this.fallbackActivatedAt ?? now,
-        reason: this.fallbackArmReason ?? 'auth-required',
+    // The probe spawns a child process; fire-and-forget with the result
+    // driving deactivate-or-extend in the resolution. While the probe is in
+    // flight (≤5 s) the window shows expired — acceptable: the previous
+    // spawnSync froze the WHOLE event loop for the same duration, forever on
+    // a dead auth primary.
+    const windowAtProbe = this.fallbackActiveUntil;
+    void Promise.resolve()
+      .then(() => this.probePrimaryProviderRecovered())
+      .catch((err) => {
+        // probePrimaryProviderRecovered never throws by contract; this guards
+        // test stubs and future edits — a throwing probe is a failed probe.
+        log.warn({ err }, 'primary provider recovery probe threw — treating as failed');
+        return false;
+      })
+      .then((recovered) => {
+        // Stale-result guards: drop the probe outcome if the window was
+        // deactivated or re-armed while the probe was in flight (a stale
+        // extend would shorten a fresh window; the next cadence re-probes).
+        if (this.fallbackActiveUntil === null || this.fallbackActiveUntil !== windowAtProbe) return;
+        if (recovered) {
+          this.deactivateProviderFallback('primary-probe-ok');
+          return;
+        }
+        this.fallbackProbeAttempts += 1;
+        const now = Date.now();
+        const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
+        this.fallbackActiveUntil = until;
+        this.revertTimer = setTimeout(() => {
+          this.handleFallbackRevertTimer();
+        }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
+        this.revertTimer.unref?.();
+        try {
+          saveFallbackState(this.db, {
+            activeUntil: until,
+            activatedAt: this.fallbackActivatedAt ?? now,
+            reason: this.fallbackArmReason ?? 'auth-required',
+            // Persist the stall clock with the window so a restart mid-stall
+            // resumes the count instead of resetting it.
+            probeAttempts: this.fallbackProbeAttempts,
+          });
+        } catch (err) {
+          log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
+        }
+        // Exactly-once-at-threshold stall alert. The counter only resets on
+        // deactivation, so attempts > threshold never re-alerts within the same
+        // stall episode. Extension continues regardless — surfacing must never
+        // strand the instance on a dead primary.
+        if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
+          emitAlertChecked(
+            this.instanceName,
+            'fallback_recovery_stalled',
+            'Primary provider recovery probe is stalled — fallback window extending indefinitely',
+            `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${this.fallbackProbeAttempts} `
+              + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
+          );
+        }
+        // No scheduleFallbackPrimaryProbe() here: the extension window equals the
+        // recheck cadence, so this timer IS the probe cadence. Re-arming the
+        // standing probe alongside it produced a double-probe (two probes per
+        // cadence); the standing probe's guard makes it a no-op in this state.
+        log.warn({
+          instanceName: this.instanceName,
+          primaryProvider: this.agentProvider,
+          fallbackProvider: this.activeFallbackEntry?.provider,
+          reason: this.fallbackArmReason,
+          probeAttempts: this.fallbackProbeAttempts,
+        }, 'primary provider recovery probe still failing; keeping fallback armed');
       });
-    } catch (err) {
-      log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
-    }
-    // Exactly-once-at-threshold stall alert. The counter only resets on
-    // deactivation, so attempts > threshold never re-alerts within the same
-    // stall episode. Extension continues regardless — surfacing must never
-    // strand the instance on a dead primary.
-    if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
-      emitAlert(
-        this.instanceName,
-        'fallback_recovery_stalled',
-        'Primary provider recovery probe is stalled — fallback window extending indefinitely',
-        `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${this.fallbackProbeAttempts} `
-          + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
-      );
-    }
-    // No scheduleFallbackPrimaryProbe() here: the extension window equals the
-    // recheck cadence, so this timer IS the probe cadence. Re-arming the
-    // standing probe alongside it produced a double-probe (two probes per
-    // cadence); the standing probe's guard makes it a no-op in this state.
-    log.warn({
-      instanceName: this.instanceName,
-      primaryProvider: this.agentProvider,
-      fallbackProvider: this.activeFallbackEntry?.provider,
-      reason: this.fallbackArmReason,
-      probeAttempts: this.fallbackProbeAttempts,
-    }, 'primary provider recovery probe still failing; keeping fallback armed');
   }
 
   /**
@@ -6234,38 +6479,46 @@ export class AgentRuntime implements Runtime {
       this.fallbackPrimaryProbeTimer = null;
       if (this.fallbackActiveUntil === null || !this.fallbackRecoveryProbeRequired) return;
       this.fallbackLastProbeAt = Date.now();
-      if (this.probePrimaryProviderRecovered()) {
-        this.deactivateProviderFallback('primary-probe-ok');
-        return;
-      }
-      this.scheduleFallbackPrimaryProbe();
+      void Promise.resolve()
+        .then(() => this.probePrimaryProviderRecovered())
+        .catch((err) => {
+          log.warn({ err }, 'primary provider recovery probe threw — treating as failed');
+          return false;
+        })
+        .then((recovered) => {
+          // The window may have been deactivated while the probe ran.
+          if (this.fallbackActiveUntil === null || !this.fallbackRecoveryProbeRequired) return;
+          if (recovered) {
+            this.deactivateProviderFallback('primary-probe-ok');
+            return;
+          }
+          this.scheduleFallbackPrimaryProbe();
+        });
     }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
     this.fallbackPrimaryProbeTimer.unref?.();
   }
 
-  private probePrimaryProviderRecovered(): boolean {
+  /**
+   * Probe whether the primary provider can serve again. Key-service primaries
+   * are a synchronous key-presence check; binary primaries spawn
+   * `<binary> auth status --json` asynchronously (5 s timeout + SIGKILL
+   * escalation in probeBinaryAuthStatus) so a slow or wedged binary can never
+   * freeze the event loop — the previous spawnSync blocked the whole process
+   * for up to 5 s per recheck, forever on a dead auth primary. Never rejects.
+   */
+  private async probePrimaryProviderRecovered(): Promise<boolean> {
     const service = resolveProviderKeyService(this.agentProvider, this.model, this.agentProviderConfig);
     if (service) return lookupCredential(service) !== null;
     const binary = getProviderBinary(this.agentProvider);
     if (!binary) return false;
-    try {
-      const result = spawnSync(binary, ['auth', 'status', '--json'], {
-        encoding: 'utf8',
-        timeout: PROVIDER_FALLBACK_PRIMARY_PROBE_TIMEOUT_MS,
-        windowsHide: true,
-        env: {
-          HOME: process.env.HOME,
-          PATH: process.env.PATH,
-          USER: process.env.USER,
-          NO_COLOR: '1',
-        },
-      });
-      const combined = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
-      if (result.error || result.status !== 0) return false;
-      return !isProviderAuthRequiredMessage(combined);
-    } catch {
-      return false;
-    }
+    const result = await probeBinaryAuthStatus(binary, ['auth', 'status', '--json'], {
+      HOME: process.env.HOME,
+      PATH: process.env.PATH,
+      USER: process.env.USER,
+      NO_COLOR: '1',
+    });
+    if (result.status !== 'ok') return false;
+    return !isProviderAuthRequiredMessage(result.output);
   }
 
   private notifyProviderFallbackActivated(
@@ -6407,7 +6660,7 @@ export class AgentRuntime implements Runtime {
       oldSession: args.oldSession,
     }).then(() => {
       this.fallbackReplays += 1;
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'provider_fallback_replayed',
         'Interrupted turn replayed on fallback provider',
@@ -6420,7 +6673,7 @@ export class AgentRuntime implements Runtime {
         mapKey: args.mapKey,
         fallbackProvider: args.activation.fallbackProvider,
       }, 'failed to replay turn on fallback provider');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'runtime_provider_fallback_replay_failed',
         'Provider fallback replay failed',
@@ -6584,6 +6837,7 @@ export class AgentRuntime implements Runtime {
         // Provision workspace (deterministic rewrite of control files)
         const hookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
         const pollLintHookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/poll-interaction-lint.mjs');
+        const postToolUseLogHookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/post-tool-use-log.sh');
         const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
         const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
         const chatScopedToolNames = this.registry.getChatScopedToolNames();
@@ -6594,6 +6848,7 @@ export class AgentRuntime implements Runtime {
           sandbox: this.sandbox!,
           hookPath,
           pollLintHookPath,
+          postToolUseLogHookPath,
           mcpServerPath,
           sendMediaServerPath,
           chatScopedToolNames,
@@ -6889,7 +7144,7 @@ export class AgentRuntime implements Runtime {
           session.spawnSession(sessionId, dbRowId ?? undefined).then(async () => {
             await new Promise(r => setTimeout(r, 1_000));
             if (!session.getStatus().active) return;
-            clearAlertSource(this.instanceName, 'agent_respawn_failed');
+            clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
             try {
               // Inject messages that arrived during the crash window
               if (chatJid) {
@@ -6912,7 +7167,7 @@ export class AgentRuntime implements Runtime {
       }
     } else if (crashCount > AUTO_RESPAWN_MAX_CRASHES) {
       log.error({ mapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'agent_respawn_failed',
         `whatsoup@${this.instanceName} agent respawn exhausted (${crashCount} crashes)`,
@@ -7300,7 +7555,16 @@ export class AgentRuntime implements Runtime {
             toolName,
             error: errorPreview,
           }, 'tool error reported by agent');
-          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
+          const classification = classifyToolError(toolName, event.content);
+          queue.enqueueToolUpdate(classification);
+          this.maybeEmitToolFailureAlert({
+            chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
+            toolId: event.toolId,
+            toolName,
+            content: event.content,
+            classification,
+            toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
+          });
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {
@@ -7313,6 +7577,9 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        // Provider-reported turn cost: log it beside the token counts and
+        // accumulate it while a fallback window is active.
+        this.recordTurnCostUsd(event);
         const turnHadToolWork = this.singleTurnHadToolActivity;
         this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
 

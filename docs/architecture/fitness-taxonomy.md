@@ -25,6 +25,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `arch.god-class` | ast | warn | eslint | Warn when a class owns too many unrelated runtime responsibilities. |
 | `arch.test-colocation-churn` | mechanical | advisory | guard | Surface test files whose churn suggests an unstable production boundary. |
 | `arch.defense-both-layers` | semantic | advisory | sdlc | Ensure service-layer protections are also threaded through route or caller boundaries. |
+| `arch.import-boundaries` | mechanical | block | guard, ci | Ratchet import direction between src/ layers so known violations can shrink but new cross-layer reach is blocked. |
 
 ## Invariant
 
@@ -32,6 +33,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 |----|--------|----------|-------|---------|
 | `invariant.seq-locality` | mechanical | warn | guard | Keep user inbound sequence and system-result state mutation in one owner module. |
 | `invariant.fail-closed-scanner` | ast | warn | eslint, sdlc | Ensure scanner parse failures raise findings instead of returning clean results. |
+| `invariant.outbox-env-gated` | ast | warn | eslint | Bot-errors outbox writes must derive their path from `resolveBotErrorsOutbox()` so the test-redirect applies; a hardcoded outbox path literal lands in the PROD outbox even under VITEST. |
 | `invariant.fail-closed-gate` | mechanical | block | guard, hook | Prevent shell gates from masking command failures as successful readiness checks. |
 
 ## Process
@@ -70,13 +72,17 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 
 ## Ratchet Baseline
 
-Ratcheted rules are grandfathered through `.claude/fitness/baseline.json`.
+Ratcheted rules are grandfathered through `.claude/fitness/baseline.json` (measurements-based)
+or `.claude/fitness/boundary-baseline.json` (import violations).
 Current baseline measurements:
 
 | rule | path | lines |
 |------|------|-------|
 | `arch.file-size` | `src/runtimes/agent/runtime.ts` | 6745 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 7504 |
+
+`arch.import-boundaries` grandfathered violations are tracked in `.claude/fitness/boundary-baseline.json`.
+Run `npm run guard:boundaries -- --report` to see the full edge list and `npm run guard:boundaries -- --baseline-save` to ratchet down after fixing violations.
 
 ## ESLint Ring (live)
 
@@ -92,6 +98,7 @@ rules whose `rings` include `eslint`.
 | `arch.file-size` | built-in `max-lines` (max 2000) | advisory mirror only |
 | `arch.god-class` | `fitness/god-class` (maxClassLines 1200 **and** maxMethods 80) | composite — both thresholds must trip |
 | `invariant.fail-closed-scanner` | `fitness/fail-closed-scanner` | catch returning empty without rethrow/exitCode/emit |
+| `invariant.outbox-env-gated` | `fitness/outbox-direct-write` | fs write whose path literal names the bot-errors outbox/state dir without referencing the resolver |
 | `test.skip-categorization` | `fitness/categorized-skips` | skip/`skipIf` must carry `@skip-env` or `@skip-timing` |
 
 **Every eslint-ring rule reports at `warn` severity, so `guard:lint:src` exits 0

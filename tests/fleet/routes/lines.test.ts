@@ -38,6 +38,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     health: { uptime: 1234 },
     lastPollAt: '2026-04-01T00:00:00.000Z',
     consecutiveFailures: 0,
+    everReachable: true,
     status: 'online',
     statusConfidence: 'confirmed',
     statusReason: 'health_body_ok',
@@ -45,6 +46,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     error: null,
     lastAlertAt: null,
     silencedUntil: null,
+    activeAlertSources: [],
     ...overrides,
   };
 }
@@ -315,7 +317,12 @@ describe('handleGetLines', () => {
           whatsapp: {
             connected: false,
             account_jid: 'not connected',
-            connection: { state: 'disconnected' },
+            connection: {
+              state: 'disconnected',
+              last_disconnect_reason: 'loggedOut',
+              last_status_code: 401,
+              auth_failure_class: 'serverside_logout_irreversible',
+            },
           },
         },
       });
@@ -344,6 +351,65 @@ describe('handleGetLines', () => {
         'whatsapp_connected=false',
         'account_jid_status=not_connected',
         'connection_state=disconnected',
+        'last_disconnect_reason=loggedOut',
+        'last_status_code=401',
+        'auth_failure_class=serverside_logout_irreversible',
+      ]));
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('does not report unlinked from disconnected health without explicit auth-loss proof', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-link-state-'));
+    try {
+      fs.mkdirSync(path.join(tmp, 'auth'));
+      fs.writeFileSync(path.join(tmp, 'auth', 'creds.json'), '{}');
+      const inst = fakeInstance({ name: 'mini4', configPath: path.join(tmp, 'config.json') });
+      const status = fakeStatus({
+        name: 'mini4',
+        health: {
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            account_jid: 'not connected',
+            connection: {
+              state: 'disconnected',
+              last_disconnect_reason: 'connectionReplaced',
+              last_status_code: 440,
+              auth_failure_class: 'none',
+            },
+          },
+        },
+      });
+      const deps = makeDeps({
+        discovery: {
+          getInstances: vi.fn(() => new Map([['mini4', inst]])),
+          getInstance: vi.fn(),
+        } as any,
+        healthPoller: {
+          getStatuses: vi.fn(() => new Map([['mini4', status]])),
+          getStatus: vi.fn(),
+        } as any,
+      });
+
+      const res = mockRes();
+      handleGetLines(mockReq(), res, deps);
+
+      const body = JSON.parse(res._body);
+      expect(body[0]).toMatchObject({
+        linkedStatus: 'unknown',
+        linkedStatusConfidence: 'ambiguous',
+        linkedStatusReason: 'whatsapp_health_disconnected_without_auth_loss_signal',
+      });
+      expect(body[0].linkedStatusEvidence).toEqual(expect.arrayContaining([
+        'link_source=health',
+        'whatsapp_connected=false',
+        'account_jid_status=not_connected',
+        'connection_state=disconnected',
+        'last_disconnect_reason=connectionReplaced',
+        'last_status_code=440',
+        'auth_failure_class=none',
       ]));
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });

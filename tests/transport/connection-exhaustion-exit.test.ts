@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const { tempDataRoot } = vi.hoisted(() => {
@@ -101,7 +101,27 @@ describe('ConnectionManager — exhaustion limit reached', () => {
     expect(typeof marker['timestamp']).toBe('string');
     expect(marker['cycles']).toBe(1);
     expect(marker['instanceName']).toBe('WhatSoup');
+    expect(statSync(markerPath).mode & 0o777).toBe(0o600);
 
+  });
+
+  it('does not write exhausted.marker through a symlink', async () => {
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as any);
+    const outside = join(tempDataRoot, 'outside-marker.json');
+    rmSync(outside, { force: true });
+    writeFileSync(outside, 'unchanged\n', { mode: 0o600 });
+    symlinkSync(outside, markerPath);
+
+    const manager = new ConnectionManager();
+    manager.emit('exhausted');
+
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(lstatSync(markerPath).isSymbolicLink()).toBe(true);
+    expect(readFileSync(outside, 'utf-8')).toBe('unchanged\n');
   });
 
   it('does not call process.exit when a shutdown is already in flight', async () => {

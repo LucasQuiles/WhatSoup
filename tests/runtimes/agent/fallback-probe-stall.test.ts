@@ -20,7 +20,16 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 // ─── Mocks (declared before importing the runtime) ────────────────────────────
 
@@ -134,7 +143,7 @@ type FallbackView = {
   fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null;
   revertTimer: ReturnType<typeof setTimeout> | null;
   effectiveProvider: string;
-  probePrimaryProviderRecovered(): boolean;
+  probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   activateProviderFallback(
     resetAt: Date | null,
     reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
@@ -158,10 +167,10 @@ function stallAlerts(): unknown[][] {
 /** Activate an auth-required fallback whose window ends at the MIN clamp
  *  (1 min — below the 5 min recheck cadence), then expire it so the
  *  revert-timer extension phase is entered with one failed probe recorded. */
-function enterExtensionPhase(v: FallbackView, probe: ReturnType<typeof vi.fn>): void {
+async function enterExtensionPhase(v: FallbackView, probe: ReturnType<typeof vi.fn>): Promise<void> {
   v.probePrimaryProviderRecovered = probe as unknown as () => boolean;
   v.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required'); // clamps to +1 min
-  vi.advanceTimersByTime(60 * 1000 + 1); // revert timer fires → first probe
+  await vi.advanceTimersByTimeAsync(60 * 1000 + 1); // revert timer fires → first probe
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -177,34 +186,34 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     vi.useRealTimers();
   });
 
-  it('(a) increments fallbackProbeAttempts per failed probe in the revert-timer path', () => {
+  it('(a) increments fallbackProbeAttempts per failed probe in the revert-timer path', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
-    enterExtensionPhase(v, probe);
+    await enterExtensionPhase(v, probe);
     expect(v.fallbackProbeAttempts).toBe(1);
 
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(v.fallbackProbeAttempts).toBe(2);
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(v.fallbackProbeAttempts).toBe(3);
   });
 
-  it('(b) emits fallback_recovery_stalled exactly once at the threshold — not before, not at threshold+1', () => {
+  it('(b) emits fallback_recovery_stalled exactly once at the threshold — not before, not at threshold+1', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
-    enterExtensionPhase(v, probe); // attempt 1
+    await enterExtensionPhase(v, probe); // attempt 1
 
     // Attempts 2..threshold-1: no alert yet.
     for (let attempt = 2; attempt < STALL_THRESHOLD; attempt++) {
-      vi.advanceTimersByTime(RECHECK_MS);
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
       expect(v.fallbackProbeAttempts).toBe(attempt);
     }
     expect(stallAlerts()).toHaveLength(0);
 
     // Attempt = threshold: exactly one alert, with secret-free evidence.
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(v.fallbackProbeAttempts).toBe(STALL_THRESHOLD);
     const alerts = stallAlerts();
     expect(alerts).toHaveLength(1);
@@ -218,33 +227,33 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(evidence).not.toContain('present-key');
 
     // Attempt = threshold+1: no re-alert within the same stall episode.
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(v.fallbackProbeAttempts).toBe(STALL_THRESHOLD + 1);
     expect(stallAlerts()).toHaveLength(1);
   });
 
-  it('(c) a successful probe reverts to primary, resets attempts, and emits no stall alert', () => {
+  it('(c) a successful probe reverts to primary, resets attempts, and emits no stall alert', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
-    enterExtensionPhase(v, probe);
-    vi.advanceTimersByTime(RECHECK_MS); // attempt 2
+    await enterExtensionPhase(v, probe);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 2
     expect(v.fallbackProbeAttempts).toBe(2);
 
     probe.mockReturnValue(true);
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(v.fallbackActiveUntil).toBeNull();
     expect(v.effectiveProvider).toBe('claude-cli');
     expect(v.fallbackProbeAttempts).toBe(0);
     expect(stallAlerts()).toHaveLength(0);
   });
 
-  it('(d) deactivation resets the attempt counter (new episode alerts again)', () => {
+  it('(d) deactivation resets the attempt counter (new episode alerts again)', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
-    enterExtensionPhase(v, probe);
-    vi.advanceTimersByTime(RECHECK_MS);
+    await enterExtensionPhase(v, probe);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(v.fallbackProbeAttempts).toBe(2);
 
     v.deactivateProviderFallback('manual');
@@ -252,21 +261,21 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(v.getFallbackState().probeAttempts).toBe(0);
 
     // A fresh stall episode counts from zero and may alert again at threshold.
-    enterExtensionPhase(v, probe);
+    await enterExtensionPhase(v, probe);
     expect(v.fallbackProbeAttempts).toBe(1);
     for (let attempt = 2; attempt <= STALL_THRESHOLD; attempt++) {
-      vi.advanceTimersByTime(RECHECK_MS);
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
     }
     expect(stallAlerts()).toHaveLength(1);
   });
 
-  it('(e) the window STILL extends past the threshold — the cap surfaces, it never strands', () => {
+  it('(e) the window STILL extends past the threshold — the cap surfaces, it never strands', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
-    enterExtensionPhase(v, probe);
+    await enterExtensionPhase(v, probe);
     for (let attempt = 2; attempt <= STALL_THRESHOLD + 3; attempt++) {
-      vi.advanceTimersByTime(RECHECK_MS);
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
     }
     expect(v.fallbackProbeAttempts).toBe(STALL_THRESHOLD + 3);
     expect(v.fallbackActiveUntil).not.toBeNull();
@@ -274,7 +283,7 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(v.effectiveProvider).toBe('opencode-cli');
   });
 
-  it('(f) getFallbackState carries probeAttempts and lastProbeAt', () => {
+  it('(f) getFallbackState carries probeAttempts and lastProbeAt', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
@@ -284,34 +293,34 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
 
     const probe = vi.fn(() => false);
     const armAt = Date.now();
-    enterExtensionPhase(v, probe);
+    await enterExtensionPhase(v, probe);
     const firstProbeAt = armAt + 60 * 1000; // the revert timer fires AT window end
     let state = v.getFallbackState();
     expect(state.probeAttempts).toBe(1);
     expect(state.lastProbeAt).toBe(firstProbeAt);
 
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     state = v.getFallbackState();
     expect(state.probeAttempts).toBe(2);
     expect(state.lastProbeAt).toBe(firstProbeAt + RECHECK_MS);
   });
 
-  it('(g) collapses the double-probe: exactly one probe per recheck cadence in the extension phase', () => {
+  it('(g) collapses the double-probe: exactly one probe per recheck cadence in the extension phase', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
-    enterExtensionPhase(v, probe);
+    await enterExtensionPhase(v, probe);
     expect(probe).toHaveBeenCalledTimes(1);
 
     // Pre-fix, the revert timer AND the duplicate cadence probe both fire each
     // RECHECK_MS during the extension phase (2 probes per cadence).
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(probe).toHaveBeenCalledTimes(2);
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(probe).toHaveBeenCalledTimes(3);
   });
 
-  it('(g2) preserves early recovery during a long initial window (the duplicate probe’s unique value)', () => {
+  it('(g2) preserves early recovery during a long initial window (the duplicate probe’s unique value)', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => true);
@@ -321,26 +330,53 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
 
     // One recheck cadence in — far before the 5h window end — the standing
     // probe must fire, succeed, and revert to the primary early.
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(probe).toHaveBeenCalledTimes(1);
     expect(v.fallbackActiveUntil).toBeNull();
     expect(v.effectiveProvider).toBe('claude-cli');
     expect(stallAlerts()).toHaveLength(0);
   });
 
-  it('(g3) failed early-window probes do not count toward the stall threshold (window not yet expired)', () => {
+  it('(g3) failed early-window probes do not count toward the stall threshold (window not yet expired)', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
     v.probePrimaryProviderRecovered = probe as unknown as () => boolean;
     v.activateProviderFallback(null, 'auth-required'); // default 5h window
 
-    vi.advanceTimersByTime(3 * RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(3 * RECHECK_MS);
     expect(probe.mock.calls.length).toBeGreaterThanOrEqual(3);
     // The window has not expired — nothing is extending — so this is not a
     // stall episode; the counter measures consecutive extension probes only.
     expect(v.fallbackProbeAttempts).toBe(0);
     // lastProbeAt still tracks the standing probe for observability.
     expect(v.getFallbackState().lastProbeAt).toBe(Date.now());
+  });
+
+  it('(h) tolerates an async probe: Promise<false> extends the window instead of being treated as truthy recovery', async () => {
+    // The real probe is an async child-process spawn; a Promise must never be
+    // mistaken for a truthy sync result (which deactivated the window as if
+    // the primary had recovered — the exact failure mode of the spawnSync
+    // call sites before the async port).
+    const runtime = makeRuntime();
+    const v = view(runtime);
+    const probe = vi.fn(async () => false);
+    v.probePrimaryProviderRecovered = probe as unknown as () => Promise<boolean>;
+    v.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required'); // clamps to +1 min
+
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1); // revert timer fires → async probe fails
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(v.fallbackActiveUntil).not.toBeNull();
+    expect(v.effectiveProvider).toBe('opencode-cli');
+    expect(v.fallbackProbeAttempts).toBe(1);
+
+    // And an async TRUE result still reverts (the recovered branch survives
+    // the port too).
+    probe.mockImplementation(async () => true);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    expect(v.fallbackActiveUntil).toBeNull();
+    expect(v.effectiveProvider).toBe('claude-cli');
+    expect(v.fallbackProbeAttempts).toBe(0);
   });
 });

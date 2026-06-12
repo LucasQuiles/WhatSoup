@@ -119,13 +119,13 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:health.status` | `GET /health` | `src/core/health.ts:535` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
-| `http:health.send` | `POST /send` | `src/core/health.ts:154` | stable | active | Send a text message |
-| `http:health.access` | `POST /access` | `src/core/health.ts:372` | stable | active | Allow / block contact or group |
-| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:455` | stable | active | Zero unread + chatModify |
-| `http:health.typing` | `GET /typing` | `src/core/health.ts:520` | stable | active | Currently-composing JIDs from presence cache |
-| `http:health.heal` | `POST /heal` | `src/core/health.ts:297` | stable | active | Inject Type-3 repair report |
-| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:208` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
+| `http:health.status` | `GET /health` | `src/core/health.ts:810` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
+| `http:health.send` | `POST /send` | `src/core/health.ts:405` | stable | active | Send a text message |
+| `http:health.access` | `POST /access` | `src/core/health.ts:633` | stable | active | Allow / block contact or group |
+| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:725` | stable | active | Zero unread + chatModify |
+| `http:health.typing` | `GET /typing` | `src/core/health.ts:795` | stable | active | Currently-composing JIDs from presence cache |
+| `http:health.heal` | `POST /heal` | `src/core/health.ts:548` | stable | active | Inject Type-3 repair report |
+| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:459` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
 ### WebSocket
 
@@ -259,6 +259,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-pre-push` | `npm run guard:pre-push` | `package.json` | internal | active | Pre-push hook; not part of operator surface but exposed for CI |
 | `cli:npm.guard-doc-drift` | `npm run guard:doc-drift` | `package.json` | stable | active | Verify cross-doc references resolve on disk |
 | `cli:npm.guard-public-surface-drift` | `npm run guard:public-surface-drift` | `package.json` | stable | active | Verify `docs/public-surface.md` and package.json scripts agree |
+| `cli:npm.guard-source-runtime-drift` | `npm run guard:source-runtime-drift` | `package.json` | stable | active | Verify deployed runtime scripts match their checked-in sources against `deploy/source-runtime-manifest.json` |
 | `cli:npm.guard-work-index` | `npm run guard:work-index` | `package.json` | stable | active | Verify `docs/work-index.md` is up to date |
 | `cli:npm.guard-repo` | `npm run guard:repo` | `package.json` | stable | active | Repo hygiene guard (default mode) |
 | `cli:npm.guard-repo-release-hygiene` | `npm run guard:repo:release-hygiene` | `package.json` | stable | active | Repo hygiene guard over the release-hygiene file set |
@@ -268,6 +269,14 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-harness-maintenance` | `npm run guard:harness-maintenance` | `package.json` | internal | active | Validate harness-maintenance manifest and npm cooldown gates |
 | `cli:npm.guard-unit-drift` | `npm run guard:unit-drift` | `package.json` | internal | active | Compare checked-in systemd user units with installed units |
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
+| `cli:npm.guard-service-units` | `npm run guard:service-units` | `package.json` | stable | active | Validate launchd plists / systemd units (label==stem, no bare/env node, no unexpanded ${VAR}, node-pin, absolute paths, plist structure) |
+| `cli:npm.guard-instance-config` | `npm run guard:instance-config` | `package.json` | stable | active | Verify instance config.json files for memory-config integrity and health-port map integrity |
+| `cli:npm.guard-boundaries` | `npm run guard:boundaries` | `package.json` | stable | active | Deterministic ring import-boundary check with grandfathered baseline (new cross-ring violations block) |
+| `cli:npm.guard-ring-boundaries` | `npm run guard:ring-boundaries` | `package.json` | stable | active | Alias for guard:boundaries |
+| `cli:npm.guard-fail-closed-gate` | `npm run guard:fail-closed-gate` | `package.json` | stable | active | Reject fail-open gate shapes (env-gated paths must fail closed when the gate variable is unset) |
+| `cli:npm.guard-restart-preflight` | `npm run guard:restart-preflight` | `package.json` | stable | active | Deploy-time import-closure probe: refuses service start when the on-disk import graph cannot link |
+| `cli:npm.guard-repo-scan-history` | `npm run guard:repo:scan-history` | `package.json` | stable | active | Scan recent git history for secret-pattern leaks using the shared hygiene pattern set |
+| `cli:npm.guard-bot-errors-simulation-matrix` | `npm run guard:bot-errors-simulation-matrix` | `package.json` | internal | active | Verify BOT ERRORS/Q-loop disaster scenarios are backed by executable fixture anchors |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
 | `cli:npm.guard-agent-decision-polls` | `npm run guard:agent-decision-polls` | `package.json` | stable | active | Verify AskUser poll protocol wiring across prompts, MCP schema, sandbox diagnostics, docs, and release gates |
 | `cli:npm.guard-safeguard-diagnostics` | `npm run guard:safeguard-diagnostics` | `package.json` | stable | active | Deterministic diagnostic map for guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers |

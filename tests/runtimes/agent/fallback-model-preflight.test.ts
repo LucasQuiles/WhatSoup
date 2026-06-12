@@ -24,7 +24,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ─── Mocks (declared before importing the runtime, hoisted by vitest) ──────────
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 vi.mock('../../../src/config.ts', () => {
   const config: Record<string, unknown> = {
@@ -408,5 +417,33 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
     expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
     const alertSources = vi.mocked(emitAlert).mock.calls.map((c) => c[1]);
     expect(alertSources).not.toContain('fallback_model_unknown');
+  });
+
+  // ── extension re-arm (window already active) ────────────────────────────────
+
+  it('does NOT re-probe the model catalog when an extension re-arms the active window', async () => {
+    probeModelCatalogMock.mockResolvedValue({ status: 'not_found', suggestion: null });
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    // First arm: the catalog probe spawns once and alerts once.
+    fbView(runtime).activateProviderFallback(null);
+    await vi.waitFor(() => {
+      expect(probeModelCatalogMock).toHaveBeenCalledTimes(1);
+    }, { interval: 0 });
+
+    // Extension: a second usage-limit hit while the window is active must not
+    // re-spawn the catalog probe nor re-fire fallback_model_unknown.
+    fbView(runtime).activateProviderFallback(null);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(probeModelCatalogMock).toHaveBeenCalledTimes(1);
+    const unknownAlerts = vi.mocked(emitAlert).mock.calls.filter(
+      (c) => c[1] === 'fallback_model_unknown',
+    );
+    expect(unknownAlerts).toHaveLength(1);
   });
 });

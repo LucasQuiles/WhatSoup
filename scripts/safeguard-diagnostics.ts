@@ -291,6 +291,45 @@ function gitList(cwd: string, args: string[]): string[] {
     .map(normalizeRepoPath);
 }
 
+function unsafeTrackedInstanceProfiles(cwd: string, tracked: string[]): string[] {
+  const unsafe: string[] = [];
+  const secretLiteralPattern = /(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [^-]+ PRIVATE KEY-----|\bBearer\s+[A-Za-z0-9._~+/=-]{12,})/i;
+  for (const file of tracked.filter((item) => item.startsWith('deploy/health-profiles/') && path.basename(item) !== 'example.json')) {
+    const text = readText(cwd, file);
+    if (text === null) {
+      unsafe.push(`${file}:unreadable`);
+      continue;
+    }
+    if (secretLiteralPattern.test(text)) {
+      unsafe.push(`${file}:secret-literal`);
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch {
+      unsafe.push(`${file}:invalid-json`);
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      unsafe.push(`${file}:not-object`);
+      continue;
+    }
+    const profile = parsed as Record<string, unknown>;
+    const required = profile.requiredCredentialFiles;
+    const credentials = Array.isArray(required) ? required : [];
+    for (const item of credentials) {
+      if (typeof item !== 'string') continue;
+      if (item.startsWith('/') || item.startsWith('~') || item.includes('..')) {
+        unsafe.push(`${file}:unsafe-credential-path`);
+        break;
+      }
+    }
+  }
+  return unsafe;
+}
+
+
 function collectGitContext(cwd: string): GitContext {
   const branch = git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
   const head = git(cwd, ['rev-parse', '--short', 'HEAD']);
@@ -320,10 +359,7 @@ function collectGitContext(cwd: string): GitContext {
       || file.startsWith('coverage-target/')
       || file.startsWith('.codex-backups/')
     )),
-    trackedInstanceProfiles: tracked.filter((file) => (
-      file.startsWith('deploy/health-profiles/')
-      && path.basename(file) !== 'example.json'
-    )),
+    trackedInstanceProfiles: unsafeTrackedInstanceProfiles(cwd, tracked),
   };
 }
 
@@ -426,12 +462,12 @@ function portableArtifactChecks(gitContext: GitContext): DiagnosticCheck[] {
       category: 'portability',
       status: gitContext.trackedInstanceProfiles.length === 0 ? 'pass' : 'fail',
       message: gitContext.trackedInstanceProfiles.length === 0
-        ? 'Instance-specific health profiles are not tracked.'
-        : 'Instance-specific health profiles are tracked in the public repo.',
+        ? 'Tracked instance health profiles are sanitized.'
+        : 'Tracked instance health profiles contain unsafe credential material or paths.',
       evidence: gitContext.trackedInstanceProfiles.length === 0
-        ? ['deploy/health-profiles/example.json is the only allowed tracked profile path.']
+        ? ['deploy/health-profiles/*.json contain only sanitized fleet metadata and relative credential requirements.']
         : gitContext.trackedInstanceProfiles,
-      remediation: 'Move host-specific profiles to private deployment config; track only generic examples.',
+      remediation: 'Remove inline secrets and absolute/private credential paths from tracked health profiles.',
     },
   ];
 }

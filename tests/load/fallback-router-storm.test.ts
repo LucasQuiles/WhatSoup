@@ -8,7 +8,16 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 vi.mock('../../src/config.ts', () => {
   const config: Record<string, unknown> = {
@@ -124,7 +133,7 @@ type FallbackView = {
   effectiveProvider: string;
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
-  probePrimaryProviderRecovered(): boolean;
+  probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   activateProviderFallback(
     resetAt: Date | null,
     reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
@@ -154,10 +163,10 @@ function alertsFor(source: string): unknown[][] {
   return vi.mocked(emitAlert).mock.calls.filter((c) => c[1] === source);
 }
 
-function enterExtensionPhase(v: FallbackView, probe: ReturnType<typeof vi.fn>): void {
+async function enterExtensionPhase(v: FallbackView, probe: ReturnType<typeof vi.fn>): Promise<void> {
   v.probePrimaryProviderRecovered = probe as unknown as () => boolean;
   v.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required');
-  vi.advanceTimersByTime(60 * 1000 + 1);
+  await vi.advanceTimersByTimeAsync(60 * 1000 + 1);
 }
 
 describe('fallback router storm harness', () => {
@@ -221,15 +230,15 @@ describe('fallback router storm harness', () => {
     expect(elapsed.fallbackReverts).toBe(1);
   });
 
-  it('keeps a long failed recovery storm visible without alert spam or primary stranding', () => {
+  it('keeps a long failed recovery storm visible without alert spam or primary stranding', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
 
-    enterExtensionPhase(v, probe);
+    await enterExtensionPhase(v, probe);
     const attempts = STALL_THRESHOLD + 40;
     for (let attempt = 2; attempt <= attempts; attempt += 1) {
-      vi.advanceTimersByTime(RECHECK_MS);
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
     }
 
     expect(probe).toHaveBeenCalledTimes(attempts);
@@ -246,24 +255,24 @@ describe('fallback router storm harness', () => {
     expect(v.fallbackActiveUntil!).toBeGreaterThan(Date.now());
   });
 
-  it('recovers cleanly after a failed-probe storm and leaves no stale cadence running', () => {
+  it('recovers cleanly after a failed-probe storm and leaves no stale cadence running', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
 
-    enterExtensionPhase(v, probe);
+    await enterExtensionPhase(v, probe);
     for (let attempt = 2; attempt <= STALL_THRESHOLD + 3; attempt += 1) {
-      vi.advanceTimersByTime(RECHECK_MS);
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
     }
     expect(alertsFor('fallback_recovery_stalled')).toHaveLength(1);
 
     probe.mockReturnValue(true);
-    vi.advanceTimersByTime(RECHECK_MS);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(v.effectiveProvider).toBe('claude-cli');
     expect(v.getFallbackState().probeAttempts).toBe(0);
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(1);
 
-    vi.advanceTimersByTime(RECHECK_MS * 10);
+    await vi.advanceTimersByTimeAsync(RECHECK_MS * 10);
     expect(probe).toHaveBeenCalledTimes(STALL_THRESHOLD + 4);
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(1);
     expect(alertsFor('fallback_recovery_stalled')).toHaveLength(1);

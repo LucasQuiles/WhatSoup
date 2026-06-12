@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Readable } from 'node:stream';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const emitAlertMock = vi.hoisted(() => vi.fn(() => true));
+const clearAlertSourceMock = vi.hoisted(() => vi.fn(() => true));
+const { testDataRoot } = vi.hoisted(() => ({
+  testDataRoot: `/tmp/wa-test-data-reconnect-${process.pid}`,
+}));
 
 // ---------------------------------------------------------------------------
 // Module mocks — must be hoisted before imports
@@ -13,15 +21,39 @@ vi.mock('@whiskeysockets/baileys', () => ({
   }),
   fetchLatestBaileysVersion: vi.fn().mockResolvedValue({ version: [2, 2413, 1] }),
   makeCacheableSignalKeyStore: vi.fn().mockReturnValue({}),
-  DisconnectReason: { loggedOut: 401, restartRequired: 515, connectionClosed: 428 },
+  DisconnectReason: {
+    loggedOut: 401,
+    restartRequired: 515,
+    connectionClosed: 428,
+    connectionLost: 408,
+    timedOut: 408,
+    connectionReplaced: 440,
+    multideviceMismatch: 411,
+    badSession: 500,
+    unavailableService: 503,
+    401: 'loggedOut',
+    408: 'timedOut',
+    411: 'multideviceMismatch',
+    428: 'connectionClosed',
+    440: 'connectionReplaced',
+    500: 'badSession',
+    503: 'unavailableService',
+    515: 'restartRequired',
+  },
   isJidGroup: vi.fn((jid: string) => jid?.endsWith('@g.us')),
   jidNormalizedUser: vi.fn((jid: string) => jid?.replace(/:.*@/, '@')),
+  BufferJSON: {
+    replacer: (_key: string, value: unknown) => value,
+    reviver: (_key: string, value: unknown) => value,
+  },
 }));
 
 vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
     authDir: '/tmp/wa-test-auth',
+    stateRoot: '/tmp/wa-test-state',
+    dataRoot: testDataRoot,
     dbPath: ':memory:',
     mediaDir: '/tmp',
     botName: 'WhatSoup',
@@ -62,7 +94,14 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-import { makeWASocket } from '@whiskeysockets/baileys';
+vi.mock('../../src/lib/emit-alert.ts', () => ({
+  emitAlert: emitAlertMock,
+  emitAlertChecked: emitAlertMock,
+  clearAlertSource: clearAlertSourceMock,
+  clearAlertSourceChecked: clearAlertSourceMock,
+}));
+
+import { makeWASocket, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import { ConnectionManager } from '../../src/transport/connection.ts';
 
 // ---------------------------------------------------------------------------
@@ -92,7 +131,7 @@ function makeMockSocket() {
 
   function emit(events: Record<string, unknown>) {
     if (!evProcessCallback) throw new Error('ev.process callback not yet registered');
-    evProcessCallback(events);
+    return (evProcessCallback as any)(events);
   }
 
   return { mockSock, emit };
@@ -116,6 +155,30 @@ function openEvent() {
   return { 'connection.update': { connection: 'open' } };
 }
 
+async function flushAsyncReconnect(): Promise<void> {
+  for (let i = 0; i < 6; i++) {
+    await Promise.resolve();
+  }
+}
+
+function writeValidTestAuth(id = '18455943112:1@s.whatsapp.net'): void {
+  mkdirSync('/tmp/wa-test-auth', { recursive: true, mode: 0o700 });
+  chmodSync('/tmp/wa-test-auth', 0o700);
+  writeFileSync(join('/tmp/wa-test-auth', 'creds.json'), JSON.stringify({
+    me: { id, lid: '81536414179557:2@lid' },
+    registrationId: 1,
+  }));
+  writeFileSync(join('/tmp/wa-test-auth', 'app-state-sync-key-test.json'), JSON.stringify({ keyData: 'secret' }));
+}
+
+function readTestCreds(): any {
+  return JSON.parse(readFileSync(join('/tmp/wa-test-auth', 'creds.json'), 'utf8'));
+}
+
+function readLatestAuthBond(): any {
+  return JSON.parse(readFileSync(join('/tmp/wa-test-state', 'auth-bond-backups', 'WhatSoup', 'latest.json'), 'utf8'));
+}
+
 // ---------------------------------------------------------------------------
 // Test setup
 // ---------------------------------------------------------------------------
@@ -127,6 +190,14 @@ beforeEach(() => {
 
 afterEach(async () => {
   vi.useRealTimers();
+  try {
+    chmodSync('/tmp/wa-test-auth', 0o700);
+  } catch {
+    // best-effort cleanup
+  }
+  rmSync('/tmp/wa-test-auth', { recursive: true, force: true });
+  rmSync('/tmp/wa-test-state', { recursive: true, force: true });
+  rmSync(testDataRoot, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -342,7 +413,7 @@ describe('ConnectionManager — phase transitions', () => {
     expect(manager.getConnectionState()).toMatchObject({
       state: 'reconnecting',
       connected: false,
-      lastDisconnectReason: 'Unknown',
+      lastDisconnectReason: 'connectionClosed',
       lastStatusCode: 428,
     });
 
@@ -359,9 +430,9 @@ describe('ConnectionManager — phase transitions', () => {
       recentDisconnects: {
         windowMs: 10 * 60 * 1000,
         count: 1,
-        lastReason: 'Unknown',
+        lastReason: 'connectionClosed',
         lastStatusCode: 428,
-        byReason: { Unknown: 1 },
+        byReason: { connectionClosed: 1 },
       },
     });
 
@@ -380,9 +451,7 @@ describe('ConnectionManager — phase transitions', () => {
     emit(closeEvent(515));
 
     // Should reconnect synchronously (no setTimeout), so no timer advance needed
-    // The reconnect call is async (void this.connect()), so let microtasks flush
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsyncReconnect();
 
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(2);
 
@@ -403,14 +472,12 @@ describe('ConnectionManager — phase transitions', () => {
 
     for (let i = 0; i < 9; i++) {
       sockets[i]!.emit(closeEvent(515));
-      await Promise.resolve();
-      await Promise.resolve();
+      await flushAsyncReconnect();
       expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(i + 2);
     }
 
     sockets[9]!.emit(closeEvent(515));
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsyncReconnect();
 
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(10);
     expect(manager.getConnectionState()).toMatchObject({
@@ -443,9 +510,114 @@ describe('ConnectionManager — terminal conditions', () => {
 
     emit(closeEvent(401)); // loggedOut
 
+    expect(emitAlertMock).toHaveBeenCalledOnce();
+    expect(emitAlertMock).toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_device_bond_lost',
+      expect.stringContaining('PHYSICAL INTERVENTION REQUIRED'),
+      expect.stringContaining('classification: physical_intervention_required'),
+      'critical',
+      expect.objectContaining({
+        asset: expect.objectContaining({ kind: 'whatsapp_linked_device' }),
+        failure: expect.objectContaining({ code: 'WA_AUTH_BOND_SERVER_REVOKED' }),
+      }),
+    );
+
     // Advance well past any backoff
     await vi.advanceTimersByTimeAsync(120_000);
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
+
+    await manager.shutdown();
+  });
+
+  it('retries a logged-out alert when the first enqueue attempt throws', async () => {
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const s = makeMockSocket();
+      sockets.push(s);
+      return s.mockSock as any;
+    });
+    emitAlertMock.mockImplementationOnce(() => { throw new Error('outbox unavailable'); });
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    sockets[0]!.emit(closeEvent(401));
+    expect(emitAlertMock).toHaveBeenCalledTimes(1);
+
+    await manager.connect();
+    sockets[1]!.emit(closeEvent(401));
+    expect(emitAlertMock).toHaveBeenCalledTimes(2);
+
+    await manager.connect();
+    sockets[2]!.emit(closeEvent(401));
+    expect(emitAlertMock).toHaveBeenCalledTimes(2);
+
+    await manager.shutdown();
+  });
+
+  it('reconnects without physical-intervention alert when the connection is replaced by another session', async () => {
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    emit(closeEvent(440));
+
+    expect(emitAlertMock).not.toHaveBeenCalled();
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'reconnecting',
+      connected: false,
+      lastStatusCode: 440,
+      lastDisconnectReason: 'connectionReplaced',
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(2);
+
+    await manager.shutdown();
+  });
+
+  it('reconnects without physical-intervention alert for multidevice mismatch', async () => {
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    emit(closeEvent(411));
+
+    expect(emitAlertMock).not.toHaveBeenCalled();
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'reconnecting',
+      connected: false,
+      lastStatusCode: 411,
+      lastDisconnectReason: 'multideviceMismatch',
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(2);
+
+    await manager.shutdown();
+  });
+
+  it('retries a local auth-bond alert when the first enqueue attempt throws', async () => {
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    emitAlertMock.mockImplementationOnce(() => { throw new Error('outbox unavailable'); });
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    emit({ 'connection.update': { qr: 'pair-me' } });
+    expect(emitAlertMock).toHaveBeenCalledTimes(1);
+
+    emit({ 'connection.update': { qr: 'pair-me-again' } });
+    expect(emitAlertMock).toHaveBeenCalledTimes(2);
+
+    emit({ 'connection.update': { qr: 'pair-me-third' } });
+    expect(emitAlertMock).toHaveBeenCalledTimes(2);
 
     await manager.shutdown();
   });
@@ -548,8 +720,7 @@ describe('ConnectionManager — terminal conditions', () => {
     await vi.advanceTimersByTimeAsync(30 * 60 * 1000 + 1);
     const countBeforeExhausted = vi.mocked(makeWASocket).mock.calls.length;
     sockets[3]?.emit(closeEvent(428));
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsyncReconnect();
 
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(countBeforeExhausted + 1);
 
@@ -800,6 +971,112 @@ describe('ConnectionManager — keepalive', () => {
 });
 
 describe('ConnectionManager — lifecycle edge coverage', () => {
+  it('captures a settled auth-bond snapshot after key-material churn without creds.update', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    const initialLatest = readLatestAuthBond();
+
+    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-test.json'), JSON.stringify({ keyData: 'rotated' }));
+    await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
+
+    let lifecycle = manager.getConnectionState().credentialLifecycle;
+    expect(lifecycle.recentEvents.map(event => event.event)).toContain('auth_snapshot_scheduled');
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(readLatestAuthBond()).toEqual(initialLatest);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const refreshedLatest = readLatestAuthBond();
+    expect(refreshedLatest.backupPath).not.toBe(initialLatest.backupPath);
+    expect(refreshedLatest.reason).toBe('baileys-key-material-settled');
+    expect(refreshedLatest.treeHash).not.toBe(initialLatest.treeHash);
+
+    lifecycle = manager.getConnectionState().credentialLifecycle;
+    expect(lifecycle.recentEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'auth_snapshot_captured',
+        note: expect.stringContaining('/tmp/wa-test-state/auth-bond-backups/WhatSoup/history/'),
+      }),
+    ]));
+
+    await manager.shutdown();
+  });
+
+  it('bounds repeated settled auth-bond snapshots while traffic continues', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+
+    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-a.json'), JSON.stringify({ keyData: 'a' }));
+    await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
+    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-b.json'), JSON.stringify({ keyData: 'b' }));
+    await emit({ 'messages.update': [] });
+
+    let scheduled = manager.getConnectionState().credentialLifecycle.recentEvents
+      .filter(event => event.event === 'auth_snapshot_scheduled');
+    expect(scheduled).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    const firstSettled = readLatestAuthBond();
+    expect(firstSettled.reason).toBe('baileys-key-material-settled');
+
+    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-c.json'), JSON.stringify({ keyData: 'c' }));
+    await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(readLatestAuthBond()).toEqual(firstSettled);
+    expect(manager.getConnectionState().credentialLifecycle.recentEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'auth_snapshot_skipped',
+        note: 'settled-snapshot-min-interval',
+      }),
+    ]));
+
+    scheduled = manager.getConnectionState().credentialLifecycle.recentEvents
+      .filter(event => event.event === 'auth_snapshot_scheduled');
+    expect(scheduled).toHaveLength(2);
+
+    await manager.shutdown();
+  });
+
+  it('cancels pending settled auth-bond snapshots when the device bond is lost', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    const initialLatest = readLatestAuthBond();
+
+    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-after-logout.json'), JSON.stringify({ keyData: 'do-not-capture' }));
+    await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
+    emit(closeEvent(401));
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(readLatestAuthBond()).toEqual(initialLatest);
+    expect(manager.getConnectionState().credentialLifecycle.recentEvents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'auth_snapshot_captured',
+        note: expect.stringContaining('baileys-key-material-settled'),
+      }),
+    ]));
+
+    await manager.shutdown();
+  });
+
   it('getConnectionState returns connection, keepalive, and reconnect metadata', async () => {
     vi.setSystemTime(new Date('2026-05-10T12:00:00.000Z'));
     const { mockSock, emit } = makeMockSocket();
@@ -815,6 +1092,17 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       lastPingAt: null,
       lastPongAt: null,
     });
+    expect(manager.getConnectionState().credentialLifecycle).toMatchObject({
+      version: 1,
+      redaction: { version: 1 },
+      environment: {
+        instance: 'WhatSoup',
+        pid: process.pid,
+        nodeVersion: process.version,
+      },
+      latestBaileysVersion: null,
+      recentEvents: [],
+    });
 
     await manager.connect();
     await vi.advanceTimersByTimeAsync(100);
@@ -827,6 +1115,25 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       reconnectPhase: null,
       stateChangedAt: '2026-05-10T12:00:00.100Z',
       firstFailureAt: null,
+    });
+    let lifecycle = manager.getConnectionState().credentialLifecycle;
+    expect(lifecycle.latestBaileysVersion).toBe('2.2413.1');
+    expect(lifecycle.lastOpenAt).toBe('2026-05-10T12:00:00.100Z');
+    expect(lifecycle.recentEvents.map(event => event.event)).toEqual(expect.arrayContaining([
+      'connect_start',
+      'auth_preflight_invalid',
+      'baileys_version',
+      'socket_created',
+      'auth_snapshot_failed',
+      'connection_open',
+    ]));
+    expect(lifecycle.currentAuthBond).toMatchObject({
+      status: 'missing',
+      creds: {
+        path: '/tmp/wa-test-auth/creds.json',
+        hash: null,
+        identityHash: null,
+      },
     });
 
     await vi.advanceTimersByTimeAsync(30_000);
@@ -846,6 +1153,124 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       stateChangedAt: '2026-05-10T12:00:30.150Z',
       firstFailureAt: '2026-05-10T12:00:30.150Z',
     });
+    lifecycle = manager.getConnectionState().credentialLifecycle;
+    expect(lifecycle.lastCloseAt).toBe('2026-05-10T12:00:30.150Z');
+    expect(lifecycle.lastDisconnectDiagnostic).toMatchObject({
+      error: { output: { statusCode: 428 } },
+    });
+    expect(lifecycle.recentEvents.map(event => event.event)).toContain('connection_close');
+
+    await manager.shutdown();
+  });
+
+  it('persists protected reconnect runtime state with planned retry evidence', async () => {
+    vi.setSystemTime(new Date('2026-05-10T13:00:00.000Z'));
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+
+    emit(closeEvent(428));
+
+    const statePath = join(testDataRoot, 'connection-state.json');
+    const persisted = JSON.parse(readFileSync(statePath, 'utf-8')) as Record<string, any>;
+    const persistedText = JSON.stringify(persisted);
+
+    expect(statSync(statePath).mode & 0o777).toBe(0o600);
+    expect(persisted).toMatchObject({
+      version: 1,
+      event: 'reconnect_scheduled',
+      environment: {
+        instance: 'WhatSoup',
+        healthPort: 9090,
+      },
+      connection: {
+        state: 'reconnecting',
+        connected: false,
+        reconnectAttempts: 1,
+        reconnectPhase: 'backoff',
+        firstFailureAt: '2026-05-10T13:00:00.000Z',
+        lastDisconnectReason: 'connectionClosed',
+        lastStatusCode: 428,
+        backoffMs: 1000,
+        nextReconnectAt: '2026-05-10T13:00:01.000Z',
+      },
+      diagnostics: {
+        stateFile: 'connection-state.json',
+      },
+    });
+    expect(persisted.diagnostics.stateFileFingerprint).toMatch(/^[0-9a-f]{20}$/);
+    expect(persistedText).not.toContain('18455943112');
+    expect(persistedText).not.toContain('/tmp/wa-test-auth');
+    expect(persistedText).not.toContain('/tmp/wa-test-state');
+    expect(persistedText).not.toContain(testDataRoot);
+
+    await manager.shutdown();
+  });
+
+  it('does not write connection runtime state through a symlinked sidecar target', async () => {
+    vi.setSystemTime(new Date('2026-05-10T13:10:00.000Z'));
+    mkdirSync(testDataRoot, { recursive: true, mode: 0o700 });
+    const statePath = join(testDataRoot, 'connection-state.json');
+    const outside = join(testDataRoot, 'outside-connection-state.json');
+    writeFileSync(outside, 'unchanged\n', { mode: 0o600 });
+    symlinkSync(outside, statePath);
+
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(closeEvent(428));
+
+    expect(lstatSync(statePath).isSymbolicLink()).toBe(true);
+    expect(readFileSync(outside, 'utf-8')).toBe('unchanged\n');
+
+    await manager.shutdown();
+  });
+
+  it('redacts identifiers and credential-like fields from disconnect diagnostics and BOT ERRORS evidence', async () => {
+    vi.setSystemTime(new Date('2026-05-10T12:30:00.000Z'));
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+
+    emit({
+      'connection.update': {
+        connection: 'close',
+        lastDisconnect: {
+          error: {
+            message: 'removed 15555550123@s.whatsapp.net after phone 14155551234',
+            output: { statusCode: 401, payload: { reason: 'device_removed' } },
+            creds: { advSecretKey: 'do-not-print', registrationId: 1234 },
+            nested: {
+              remoteJid: '15555550123@s.whatsapp.net',
+              linkedPhone: '14155551234',
+            },
+          },
+        },
+      },
+    });
+
+    const lifecycleText = JSON.stringify(manager.getConnectionState().credentialLifecycle);
+    expect(lifecycleText).toContain('<jid:');
+    expect(lifecycleText).toContain('<number:');
+    expect(lifecycleText).toContain('"creds":"<redacted>"');
+    expect(lifecycleText).not.toContain('15555550123@s.whatsapp.net');
+    expect(lifecycleText).not.toContain('14155551234');
+    expect(lifecycleText).not.toContain('do-not-print');
+
+    const alertCalls = emitAlertMock.mock.calls as unknown as Array<[string, string, string, string, ...unknown[]]>;
+    const evidence = alertCalls[0]![3];
+    expect(evidence).toContain('lastDisconnectSanitized');
+    expect(evidence).toContain('recentCredentialLifecycle');
+    expect(evidence).not.toContain('15555550123@s.whatsapp.net');
+    expect(evidence).not.toContain('14155551234');
+    expect(evidence).not.toContain('do-not-print');
 
     await manager.shutdown();
   });
@@ -891,6 +1316,232 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(1);
+
+    await manager.shutdown();
+  });
+
+  it('clears local auth-bond failure after protected auth and a later successful send', async () => {
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    mockSock.sendMessage.mockResolvedValue({ key: { id: 'auth-clear-proof' } });
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    clearAlertSourceMock.mockClear();
+
+    (manager as any).localAuthAlertEmitted = true;
+
+    (manager as any).captureAuthBondSnapshot('connection-open');
+    expect(clearAlertSourceMock).not.toHaveBeenCalled();
+
+    await manager.sendMessage('15550100001@s.whatsapp.net', 'proof send');
+    expect(clearAlertSourceMock).not.toHaveBeenCalled();
+
+    emit({
+      'message-receipt.update': [
+        {
+          key: { id: 'auth-clear-proof' },
+          receipt: { userJid: '15550100001@s.whatsapp.net', receiptTimestamp: 1780000000 },
+        },
+      ],
+    });
+
+    expect(clearAlertSourceMock).toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.stringContaining('repair_lane:WhatSoup'),
+      expect.any(Object),
+    );
+    expect(clearAlertSourceMock).toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.stringContaining('status=present'),
+      expect.any(Object),
+    );
+    expect(clearAlertSourceMock).toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.stringContaining('confirmed_send_message_id=auth-clear-proof'),
+      expect.any(Object),
+    );
+    expect(clearAlertSourceMock).toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.stringContaining('confirmed_send_proof=receipt_update'),
+      expect.any(Object),
+    );
+    expect(clearAlertSourceMock).toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.stringContaining('creds_size='),
+      expect.any(Object),
+    );
+    expect((manager as any).localAuthAlertEmitted).toBe(false);
+
+    await manager.shutdown();
+  });
+
+  it('does not clear local auth-bond failure for a bogus send id without receipt or echo proof', async () => {
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    mockSock.sendMessage.mockResolvedValue({ key: { id: 'wa-123' } });
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    clearAlertSourceMock.mockClear();
+
+    (manager as any).localAuthAlertEmitted = true;
+
+    await expect(manager.sendMessage('15550100001@s.whatsapp.net', 'proof send'))
+      .resolves.toEqual({ waMessageId: 'wa-123' });
+
+    expect(clearAlertSourceMock).not.toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.any(String),
+    );
+    expect((manager as any).localAuthAlertEmitted).toBe(true);
+
+    await manager.shutdown();
+  });
+
+  it('does not clear local auth-bond failure for a local-only optimistic id without receipt or echo proof', async () => {
+    writeValidTestAuth();
+    const optimisticId = String(-1_700_000_000_000);
+    const { mockSock, emit } = makeMockSocket();
+    mockSock.sendMessage.mockResolvedValue({ key: { id: optimisticId } });
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    clearAlertSourceMock.mockClear();
+
+    (manager as any).localAuthAlertEmitted = true;
+
+    await expect(manager.sendMessage('15550100001@s.whatsapp.net', 'proof send'))
+      .resolves.toEqual({ waMessageId: optimisticId });
+
+    expect(clearAlertSourceMock).not.toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.any(String),
+    );
+    expect((manager as any).localAuthAlertEmitted).toBe(true);
+
+    await manager.shutdown();
+  });
+
+  it('creds.update writes creds.json atomically before auth-bond capture', async () => {
+    writeValidTestAuth('18455940000:1@s.whatsapp.net');
+    const truncatingSaveCreds = vi.fn(async () => {
+      writeFileSync(join('/tmp/wa-test-auth', 'creds.json'), '');
+    });
+    const nextCreds = {
+      me: { id: '18455943112:1@s.whatsapp.net', lid: '81536414179557:2@lid' },
+      registrationId: 42,
+    };
+    vi.mocked(useMultiFileAuthState).mockResolvedValueOnce({
+      state: { creds: nextCreds, keys: {} },
+      saveCreds: truncatingSaveCreds,
+    } as any);
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    await emit({ 'creds.update': {} });
+
+    expect(truncatingSaveCreds).not.toHaveBeenCalled();
+    expect(statSync(join('/tmp/wa-test-auth', 'creds.json')).size).toBeGreaterThan(0);
+    expect(readTestCreds()).toMatchObject({
+      me: { id: '18455943112:1@s.whatsapp.net' },
+      registrationId: 42,
+    });
+    expect(emitAlertMock).not.toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+    );
+
+    await manager.shutdown();
+  });
+
+  it('does not emit a local auth-bond alert for a fresh credential write window', async () => {
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    emitAlertMock.mockClear();
+
+    writeFileSync(join('/tmp/wa-test-auth', 'creds.json'), '');
+    (manager as any).captureAuthBondSnapshot('creds-update');
+
+    expect(emitAlertMock).not.toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      expect.any(Object),
+    );
+    expect((manager as any).authSnapshotFailureCount).toBe(0);
+    expect(manager.getConnectionState().credentialLifecycle.recentEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: 'auth_snapshot_skipped',
+          note: expect.stringContaining('credential write still in flight'),
+        }),
+      ]),
+    );
+
+    await manager.shutdown();
+  });
+
+  it('creds.update preserves previous creds when the protected writer refuses an unsafe target', async () => {
+    writeValidTestAuth('18455940001:1@s.whatsapp.net');
+    const credsPath = join('/tmp/wa-test-auth', 'creds.json');
+    const outside = join('/tmp/wa-test-auth', 'outside-creds.json');
+    const previousCreds = readFileSync(credsPath, 'utf-8');
+    writeFileSync(outside, previousCreds, { mode: 0o600 });
+    rmSync(credsPath, { force: true });
+    symlinkSync(outside, credsPath);
+    const truncatingSaveCreds = vi.fn(async () => {
+      writeFileSync(credsPath, '');
+    });
+    vi.mocked(useMultiFileAuthState).mockResolvedValueOnce({
+      state: {
+        creds: {
+          me: { id: '18455943112:1@s.whatsapp.net', lid: '81536414179557:2@lid' },
+          registrationId: 99,
+        },
+        keys: {},
+      },
+      saveCreds: truncatingSaveCreds,
+    } as any);
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    await emit({ 'creds.update': {} });
+
+    expect(truncatingSaveCreds).not.toHaveBeenCalled();
+    expect(lstatSync(credsPath).isSymbolicLink()).toBe(true);
+    expect(statSync(outside).size).toBeGreaterThan(0);
+    expect(readTestCreds()).toMatchObject({
+      me: { id: '18455940001:1@s.whatsapp.net' },
+      registrationId: 1,
+    });
 
     await manager.shutdown();
   });
@@ -1095,8 +1746,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
 
     await manager.connect();
     sockets[0]!.emit(closeEvent(515));
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsyncReconnect();
 
     sockets[0]!.emit({
       'connection.update': { connection: 'open' },

@@ -42,7 +42,7 @@ describe('validateInstanceConfig — ordered fallback chain', () => {
     expect(err?.field).toBe('agentOptions.fallbacks');
   });
 
-  it('rejects more than four fallback entries', () => {
+  it('rejects more than eight fallback entries', () => {
     const err = validateInstanceConfig(
       agentRaw({
         fallbacks: [
@@ -51,12 +51,16 @@ describe('validateInstanceConfig — ordered fallback chain', () => {
           { provider: 'anthropic-api', model: 'claude-sonnet-4-6' },
           { provider: 'codex-cli' },
           { provider: 'gemini-cli' },
+          { provider: 'claude-cli', model: 'claude-opus-4-8' },
+          { provider: 'claude-cli', model: 'claude-sonnet-4-6' },
+          { provider: 'opencode-cli', model: 'deepseek/deepseek-chat' },
+          { provider: 'openai-api', model: 'gpt-4.1-mini' },
         ],
       }),
       createCtx,
     );
     expect(err?.field).toBe('agentOptions.fallbacks');
-    expect(err?.message).toContain('at most 4');
+    expect(err?.message).toContain('at most 8');
   });
 
   it('rejects duplicate provider/model pairs', () => {
@@ -127,9 +131,13 @@ describe('validateInstanceConfig — ordered fallback chain', () => {
       validateInstanceConfig(
         agentRaw({
           fallbacks: [
+            { provider: 'claude-cli', model: 'claude-opus-4-8' },
+            { provider: 'claude-cli', model: 'claude-sonnet-4-6' },
             { provider: 'opencode-cli', model: 'minimax/MiniMax-M2' },
             { provider: 'openai-api', model: 'gpt-4o-mini' },
           ],
+        }, {
+          models: { conversation: 'claude-fable-5' },
         }),
         createCtx,
       ),

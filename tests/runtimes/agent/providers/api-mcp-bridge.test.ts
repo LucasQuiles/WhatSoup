@@ -888,3 +888,142 @@ describe('managed tool loop kill behavior', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('anthropic malformed tool input blocking', () => {
+  const onCrash = vi.fn();
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  async function runTurnWithInputJson(
+    provider: AnthropicApiProvider,
+    handler: ReturnType<typeof vi.fn>,
+    inputJson: string,
+  ): Promise<void> {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'echo_tool',
+      description: 'Echoes the provided value',
+      schema: z.object({ value: z.string() }),
+      scope: 'chat',
+      targetMode: 'caller-supplied',
+      handler,
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(makeSseResponse([
+        {
+          type: 'message_start',
+          message: { usage: { input_tokens: 5, output_tokens: 0 } },
+        },
+        {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'toolu_bad', name: 'echo_tool' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partial_json: inputJson },
+        },
+        { type: 'message_delta', usage: { output_tokens: 2 } },
+        { type: 'message_stop' },
+      ]))
+      .mockResolvedValueOnce(makeSseResponse([
+        {
+          type: 'message_start',
+          message: { usage: { input_tokens: 7, output_tokens: 0 } },
+        },
+        {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'Recovered from bad tool input.' },
+        },
+        { type: 'message_delta', usage: { output_tokens: 1 } },
+        { type: 'message_stop' },
+      ]));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: () => {},
+      onCrash,
+      mcpBridge: createProviderMcpBridge(registry, {
+        tier: 'chat-scoped',
+        conversationKey: 'chat-key',
+        deliveryJid: '456@s.whatsapp.net',
+      }),
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Use the MCP tool.' }],
+    });
+  }
+
+  it('blocks malformed tool input JSON without executing the tool (openai parity)', async () => {
+    const handler = vi.fn(async () => ({ echoed: 'must not execute' }));
+    const provider = new AnthropicApiProvider();
+
+    await runTurnWithInputJson(provider, handler, '{"value":');
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // The error feeds back to the model as a tool_result, not an execution.
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const toolResultTurn = secondBody.messages.find(
+      (m) => m.role === 'user' && Array.isArray(m.content)
+        && m.content.some((b) => typeof b === 'object' && b !== null && 'type' in b && b.type === 'tool_result'),
+    );
+    expect(toolResultTurn?.content).toEqual([
+      expect.objectContaining({
+        type: 'tool_result',
+        tool_use_id: 'toolu_bad',
+        is_error: true,
+        content: 'Tool "echo_tool" failed: malformed provider tool arguments; the tool was not executed.',
+      }),
+    ]);
+  });
+
+  it('blocks non-object tool input JSON without executing the tool', async () => {
+    const handler = vi.fn(async () => ({ echoed: 'must not execute' }));
+    const provider = new AnthropicApiProvider();
+
+    await runTurnWithInputJson(provider, handler, '[1,2]');
+
+    expect(handler).not.toHaveBeenCalled();
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const toolResultTurn = secondBody.messages.find(
+      (m) => m.role === 'user' && Array.isArray(m.content)
+        && m.content.some((b) => typeof b === 'object' && b !== null && 'type' in b && b.type === 'tool_result'),
+    );
+    expect(toolResultTurn?.content).toEqual([
+      expect.objectContaining({
+        type: 'tool_result',
+        tool_use_id: 'toolu_bad',
+        is_error: true,
+        content: 'Tool "echo_tool" failed: provider tool arguments must be a JSON object; the tool was not executed.',
+      }),
+    ]);
+  });
+});

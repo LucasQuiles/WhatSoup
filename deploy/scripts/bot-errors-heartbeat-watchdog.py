@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health"
 REPO_ROOT = Path(__file__).resolve().parents[2]
+TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 
 
 def positive_env_int(name: str, default: int) -> int:
@@ -184,7 +185,7 @@ SECRET_ASSIGNMENT_RE = re.compile(
     re.I,
 )
 CREDENTIAL_PATH_RE = re.compile(
-    r"(?:~/|/(?:[^/\s\"',;}]+/)*)?(?:"
+    r"(?:~|/[^\s\"',;}]+)*(?:"
     r"\.config/secrets/[^\s\"',;}]+|"
     r"\.config/whatsoup/[^\s\"',;}]+|"
     r"\.local/share/whatsoup/instances/[^\s\"',;}]*/auth(?:/[^\s\"',;}]+)?|"
@@ -326,11 +327,21 @@ def json_updated_age(path: Path, key: str = "updated_at") -> tuple[int | None, s
     problem = critical_file_problem(path)
     if problem is not None:
         return None, problem
-    data = load_json(path, require_private=True)
-    if data and isinstance(data.get(key), (int, float)):
-        updated = int(data[key])
-        return max(0, current - updated), f"{path} {key}={updated}"
-    return max(0, current - int(path.stat().st_mtime)), f"{path} mtime={int(path.stat().st_mtime)}"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return None, f"failed to read {path}: {type(exc).__name__}: {exc}"
+    try:
+        data = json.loads(text)
+    except Exception as exc:
+        return None, f"invalid JSON in {path}: {type(exc).__name__}: {exc}"
+    if not isinstance(data, dict):
+        return None, f"invalid JSON object in {path}: {type(data).__name__}"
+    value = data.get(key)
+    if not isinstance(value, (int, float)):
+        return None, f"missing numeric {key} in {path}"
+    updated = int(value)
+    return max(0, current - updated), f"{path} {key}={updated}"
 
 
 def file_age(path: Path) -> tuple[int | None, str]:
@@ -436,14 +447,22 @@ def queue_backlog_problems() -> dict[str, str]:
     return problems
 
 
+def env_host_list(name: str) -> list[str]:
+    raw = os.environ.get(name, "")
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def daily_health_hosts() -> list[str]:
     raw = os.environ.get("BOT_ERRORS_DAILY_HEALTH_HOSTS", "")
     if raw:
-        return [part.strip() for part in raw.split(",") if part.strip()]
-    collector_hosts = collector_configured_hosts()
-    if not collector_hosts:
-        return []
-    return unique_hosts([*local_daily_health_hosts(), *collector_hosts])
+        required = env_host_list("BOT_ERRORS_DAILY_HEALTH_HOSTS")
+    else:
+        collector_hosts = collector_configured_hosts()
+        if not collector_hosts:
+            return []
+        required = unique_hosts([*local_daily_health_hosts(), *collector_hosts])
+    optional = set(optional_daily_health_hosts())
+    return [host for host in required if host not in optional]
 
 
 def unique_hosts(hosts: list[str]) -> list[str]:
@@ -662,6 +681,10 @@ def compact_health_field(value: Any) -> str:
     return str(value).replace("\n", " ")[:200]
 
 
+def is_terminal_auth_failure_class(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in TERMINAL_AUTH_FAILURE_CLASSES
+
+
 def local_instance_health_problems() -> dict[str, str]:
     profile = health_profile_path()
     problems: dict[str, str] = {}
@@ -711,6 +734,8 @@ def local_instance_health_problems() -> dict[str, str]:
             reasons.append(f"connected={str(connected).lower()}")
         if auth_failure not in (None, "", "none"):
             reasons.append(f"auth_failure_class={auth_failure}")
+            if is_terminal_auth_failure_class(auth_failure):
+                reasons.append("physical_intervention_required=terminal_auth_failure_class")
         if bond_status not in (None, "", "present"):
             reasons.append(f"auth_bond_status={bond_status}")
         if isinstance(bond_issues, list) and bond_issues:
@@ -751,6 +776,23 @@ def collector_configured_hosts() -> list[str]:
     if isinstance(remotes, dict):
         return unique_hosts([host for host in (parse_remote_host(value) for value in remotes.keys()) if host])
     return []
+
+
+def collector_best_effort_hosts() -> list[str]:
+    data = load_json(state_root() / "collector-state.json", require_private=True)
+    if not data:
+        return []
+    raw_hosts = data.get("configuredBestEffortRemoteHosts")
+    if isinstance(raw_hosts, list):
+        return unique_hosts([host for host in (parse_remote_host(value) for value in raw_hosts) if host])
+    raw_remotes = data.get("configuredBestEffortRemotes")
+    if isinstance(raw_remotes, list):
+        return unique_hosts([host for host in (parse_remote_host(value) for value in raw_remotes) if host])
+    return []
+
+
+def optional_daily_health_hosts() -> list[str]:
+    return unique_hosts([*env_host_list("BOT_ERRORS_DAILY_HEALTH_OPTIONAL_HOSTS"), *collector_best_effort_hosts()])
 
 
 def daily_health_event_host(path: Path, data: dict[str, Any] | None) -> str | None:

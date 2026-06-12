@@ -8,7 +8,7 @@
 //  - verifyFleetToken accepts active + any accept entry, rejects unknown/malformed
 //  - refuses corrupt JSON / wrong-shape files instead of silently rewriting
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -51,6 +51,41 @@ describe('loadOrCreateFleetTokens — fresh install', () => {
     expect(fs.existsSync(filePath)).toBe(true);
     const onDisk = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as FleetTokensFile;
     expect(onDisk.active).toBe(tokens.active);
+  });
+
+  it('persists the token file with private file and directory modes', () => {
+    loadOrCreateFleetTokens();
+    const filePath = getFleetTokensPath();
+    const dirPath = path.dirname(filePath);
+    expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(dirPath).mode & 0o777).toBe(0o700);
+  });
+
+  it('removes temporary token files when atomic publish fails on the real filesystem', () => {
+    const filePath = getFleetTokensPath();
+    const dirPath = path.dirname(filePath);
+    fs.mkdirSync(filePath, { recursive: true });
+
+    expect(() => loadOrCreateFleetTokens()).toThrow();
+
+    const leftovers = fs.existsSync(dirPath)
+      ? fs.readdirSync(dirPath).filter((name) => name.includes('fleet-tokens.json.tmp-'))
+      : [];
+    expect(leftovers).toEqual([]);
+  });
+
+  it('refuses to write a token file through a pre-existing temp symlink', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(12_345);
+    const filePath = getFleetTokensPath();
+    const tmpPath = `${filePath}.tmp-${process.pid}-12345`;
+    const outside = path.join(tmpRoot, 'outside-token-target');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(outside, 'outside-original', { mode: 0o600 });
+    fs.symlinkSync(outside, tmpPath);
+
+    expect(() => loadOrCreateFleetTokens()).toThrow();
+    expect(fs.readFileSync(outside, 'utf-8')).toBe('outside-original');
+    expect(fs.existsSync(filePath)).toBe(false);
   });
 
   it('returns the same active token on subsequent calls', () => {
@@ -112,6 +147,31 @@ describe('loadOrCreateFleetTokens — corrupt file', () => {
     fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
     fs.writeFileSync(jsonPath, JSON.stringify({ active: 'short', accept: [] }));
     expect(() => loadOrCreateFleetTokens()).toThrow(/invalid shape/);
+  });
+
+  it('refuses to read fleet-tokens.json through a symlink', () => {
+    const jsonPath = getFleetTokensPath();
+    const outside = path.join(tmpRoot, 'outside-fleet-tokens.json');
+    fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
+    fs.writeFileSync(outside, JSON.stringify({
+      active: 'd'.repeat(64),
+      accept: [],
+      rotatedAt: new Date().toISOString(),
+    }), { mode: 0o600 });
+    fs.symlinkSync(outside, jsonPath);
+
+    expect(() => loadOrCreateFleetTokens()).toThrow(/symlink/);
+  });
+
+  it('refuses to read legacy fleet-token through a symlink during migration', () => {
+    const legacyPath = getLegacyFleetTokenPath();
+    const outside = path.join(tmpRoot, 'outside-legacy-token');
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(outside, `${'e'.repeat(64)}\n`, { mode: 0o600 });
+    fs.symlinkSync(outside, legacyPath);
+
+    expect(() => loadOrCreateFleetTokens()).toThrow(/symlink/);
+    expect(fs.readFileSync(outside, 'utf-8')).toBe(`${'e'.repeat(64)}\n`);
   });
 });
 

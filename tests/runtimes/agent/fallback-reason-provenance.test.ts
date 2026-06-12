@@ -7,7 +7,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 vi.mock('../../../src/config.ts', () => {
   const config: Record<string, unknown> = {
@@ -162,6 +171,7 @@ describe('fallback reason provenance', () => {
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'admin-forced',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const saveSpy = vi

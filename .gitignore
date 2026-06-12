@@ -46,8 +46,8 @@ groups/
 *.log
 logs/
 
-# Media temp files
-media/
+# Media temp files at the repository root
+/media/
 
 # OS
 .DS_Store
@@ -86,3 +86,4 @@ __pycache__/
 output.txt
 bead-output.md
 codex-exec-deep-dive.md
+

@@ -90,6 +90,21 @@ describe('checkBearerAuth', () => {
     const req = mockRequest({ headers: { authorization: 'Basic abc123' } });
     expect(checkBearerAuth(req, 'abc123')).toBe(false);
   });
+
+  it('returns false for malformed or multibyte Bearer tokens without throwing', () => {
+    const multibyte = mockRequest({ headers: { authorization: `Bearer ${'é'.repeat(10)}` } });
+    const loneSurrogate = mockRequest({ headers: { authorization: 'Bearer \uD800' } });
+
+    expect(() => checkBearerAuth(multibyte, 'a'.repeat(10))).not.toThrow();
+    expect(checkBearerAuth(multibyte, 'a'.repeat(10))).toBe(false);
+    expect(() => checkBearerAuth(loneSurrogate, '\uFFFD')).not.toThrow();
+    expect(checkBearerAuth(loneSurrogate, '\uFFFD')).toBe(false);
+  });
+
+  it('does not authenticate empty expected tokens', () => {
+    const req = mockRequest({ headers: { authorization: 'Bearer ' } });
+    expect(checkBearerAuth(req, '')).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 vi.mock('../../../src/config.ts', () => {
   const config: Record<string, unknown> = {
@@ -107,7 +116,20 @@ type FallbackView = {
   fallbackActiveUntil: number | null;
   effectiveProvider: string;
   effectiveModel: string | undefined;
-  activateProviderFallback(resetAt: Date | null): void;
+  activateProviderFallback(
+    resetAt: Date | null,
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
+  ): {
+    primaryProvider: string;
+    fallbackProvider: string;
+    fallbackModel: string | undefined;
+    reason: 'usage-limit' | 'rate-limit' | 'auth-required';
+    resetAt: Date | null;
+    activeUntil: number;
+    extended: boolean;
+    keyPresent: boolean | null;
+    recoveryProbeRequired: boolean;
+  } | null;
   restorePersistedFallbackWindow(): void;
   getFallbackState(): {
     effectiveProvider: string;
@@ -189,6 +211,80 @@ describe('fallback chain selection', () => {
     );
   });
 
+  it('keeps same-provider model tiers eligible for usage-limit windows', () => {
+    const runtime = makeRuntime({
+      model: 'claude-fable-5',
+      agentFallbacks: [
+        { provider: 'claude-cli', model: 'claude-opus-4-8' },
+        { provider: 'claude-cli', model: 'claude-sonnet-4-6' },
+        { provider: 'opencode-cli', model: 'minimax/MiniMax-M2' },
+      ],
+    });
+
+    view(runtime).activateProviderFallback(null, 'usage-limit');
+
+    expect(view(runtime).effectiveProvider).toBe('claude-cli');
+    expect(view(runtime).effectiveModel).toBe('claude-opus-4-8');
+    expect(view(runtime).getFallbackState().fallbackChain).toEqual([
+      { provider: 'claude-cli', model: 'claude-opus-4-8', eligible: true },
+      { provider: 'claude-cli', model: 'claude-sonnet-4-6', eligible: true },
+      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', eligible: false },
+    ]);
+  });
+
+  it('skips same-provider model tiers for auth-required windows and selects an independent provider', () => {
+    lookupCredentialMock.mockImplementation((svc) => svc === 'minimax' ? 'mm-key' : null);
+    const runtime = makeRuntime({
+      model: 'claude-fable-5',
+      agentFallbacks: [
+        { provider: 'claude-cli', model: 'claude-opus-4-8' },
+        { provider: 'claude-cli', model: 'claude-sonnet-4-6' },
+        { provider: 'opencode-cli', model: 'minimax/MiniMax-M2' },
+      ],
+    });
+
+    view(runtime).activateProviderFallback(null, 'auth-required');
+
+    expect(view(runtime).effectiveProvider).toBe('opencode-cli');
+    expect(view(runtime).effectiveModel).toBe('minimax/MiniMax-M2');
+    expect(view(runtime).getFallbackState().activeFallbackEntry).toEqual({
+      provider: 'opencode-cli',
+      model: 'minimax/MiniMax-M2',
+    });
+    expect(view(runtime).getFallbackState().fallbackChain).toEqual([
+      { provider: 'claude-cli', model: 'claude-opus-4-8', eligible: false },
+      { provider: 'claude-cli', model: 'claude-sonnet-4-6', eligible: false },
+      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', eligible: true },
+    ]);
+  });
+
+  it('does not arm auth-required fallback when every configured fallback shares the primary provider', () => {
+    const runtime = makeRuntime({
+      model: 'claude-fable-5',
+      agentFallbacks: [
+        { provider: 'claude-cli', model: 'claude-opus-4-8' },
+        { provider: 'claude-cli', model: 'claude-sonnet-4-6' },
+      ],
+    });
+
+    const activation = view(runtime).activateProviderFallback(null, 'auth-required');
+
+    expect(activation).toBeNull();
+    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).effectiveProvider).toBe('claude-cli');
+    expect(view(runtime).getFallbackState().activeFallbackEntry).toBeNull();
+    expect(view(runtime).getFallbackState().fallbackChain).toEqual([
+      { provider: 'claude-cli', model: 'claude-opus-4-8', eligible: false },
+      { provider: 'claude-cli', model: 'claude-sonnet-4-6', eligible: false },
+    ]);
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
+      'test',
+      'fallback_no_independent_provider',
+      expect.any(String),
+      expect.stringContaining('primaryProvider=claude-cli'),
+    );
+  });
+
   it('fails open to entry zero when every keyed chain entry is missing credentials', () => {
     lookupCredentialMock.mockReturnValue(null);
     const runtime = makeRuntime({
@@ -232,6 +328,7 @@ describe('fallback chain selection — restore path', () => {
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
     const clearSpy = vi
@@ -274,6 +371,7 @@ describe('fallback chain selection — restore path', () => {
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     const saveSpy = vi
       .spyOn(fallbackStateDb, 'saveFallbackState')
@@ -292,5 +390,48 @@ describe('fallback chain selection — restore path', () => {
     expect(view(runtime).fallbackActiveUntil).toBeNull();
     expect(view(runtime).getFallbackState().activeFallbackEntry).toBeNull();
     expect(view(runtime).getFallbackState().fallbackChain).toEqual([]);
+  });
+
+  it('clears a persisted auth-required window when only same-provider fallbacks remain', () => {
+    const now = Date.now();
+    vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'loadFallbackState').mockReturnValue({
+      activeUntil: now + 60 * 60_000,
+      activatedAt: now - 1000,
+      reason: 'auth-required',
+      probeAttempts: 0,
+    });
+    const saveSpy = vi
+      .spyOn(fallbackStateDb, 'saveFallbackState')
+      .mockImplementation(() => {});
+    const clearSpy = vi
+      .spyOn(fallbackStateDb, 'clearFallbackState')
+      .mockImplementation(() => {});
+
+    const runtime = makeRuntime({
+      model: 'claude-fable-5',
+      agentFallbacks: [
+        { provider: 'claude-cli', model: 'claude-opus-4-8' },
+        { provider: 'claude-cli', model: 'claude-sonnet-4-6' },
+      ],
+    });
+
+    view(runtime).restorePersistedFallbackWindow();
+
+    expect(clearSpy).toHaveBeenCalled();
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(view(runtime).effectiveProvider).toBe('claude-cli');
+    expect(view(runtime).fallbackActiveUntil).toBeNull();
+    expect(view(runtime).getFallbackState().activeFallbackEntry).toBeNull();
+    expect(view(runtime).getFallbackState().fallbackChain).toEqual([
+      { provider: 'claude-cli', model: 'claude-opus-4-8', eligible: false },
+      { provider: 'claude-cli', model: 'claude-sonnet-4-6', eligible: false },
+    ]);
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledWith(
+      'test',
+      'fallback_no_independent_provider',
+      expect.any(String),
+      expect.stringContaining('reason=auth-required'),
+    );
   });
 });

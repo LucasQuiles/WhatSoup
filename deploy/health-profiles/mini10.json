@@ -1,0 +1,23 @@
+{
+  "role": "bot-host",
+  "expectDispatcher": false,
+  "expectQLoop": false,
+  "expectPersonalSocket": false,
+  "expectPersonalTools": false,
+  "expectConfigInventory": true,
+  "requiredCredentialFiles": [
+    "fleet-tokens.json",
+    "instances/ad-bot/tokens.env"
+  ],
+  "instances": [
+    {
+      "name": "ad-bot",
+      "expected": "always_on",
+      "service": "com.whatsoup.ad-bot",
+      "primaryPhoneVerificationRequired": true,
+      "primaryPhoneOwner": "Lucas"
+    }
+  ],
+  "expectPrimaryPhoneVerification": true,
+  "requiredConfigMaxMode": "600"
+}

@@ -1,13 +1,24 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const STOP_HOOK = join(process.cwd(), 'deploy/hooks/stop-ensure-reply.mjs');
 const POST_TOOL_HOOK = join(process.cwd(), 'deploy/hooks/post-tool-use-log.mjs');
+const AWS_KEY_SAMPLE = ['AKIA', 'IOSFODNN7EXAMPLE'].join('');
+const GITHUB_TOKEN_SAMPLE = ['ghp', 'abcdefghijklmnopqrstuvwxyz1234567890'].join('_');
+const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart1234567890'].join('.');
+const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----END ', 'PRIVATE KEY-----'].join('');
+const URL_USERINFO_SAMPLE = `https://user:pass@${'service'}.invalid/path`;
+const REDACTED_URL_USERINFO = `https://[REDACTED]@${'service'}.invalid/path`;
 
 const tmpDirs: string[] = [];
+
+function testCwdHash(): string {
+  return createHash('sha256').update(process.cwd()).digest('hex').slice(0, 12);
+}
 
 function makeHome(): string {
   const dir = mkdtempSync(join(tmpdir(), 'rgp-hooks-home-'));
@@ -42,6 +53,10 @@ function errorsPath(home: string, sessionId: string): string {
   return join(home, '.claude', 'session-env', sessionId, 'errors.jsonl');
 }
 
+function botErrorsOutbox(home: string): string {
+  return join(home, '.local', 'state', 'bot-errors', 'outbox');
+}
+
 function markerPath(home: string, sessionId: string): string {
   return join(home, '.claude', 'session-env', sessionId, 'whatsapp-fallback-queued');
 }
@@ -52,6 +67,21 @@ function readJsonl(path: string): unknown[] {
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line));
+}
+
+function readBotErrors(home: string): unknown[] {
+  const outbox = botErrorsOutbox(home);
+  if (!existsSync(outbox)) return [];
+  return readdirSync(outbox)
+    .filter((name) => name.endsWith('.json') && !name.startsWith('.'))
+    .map((name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')));
+}
+
+function readWritefails(dir: string): Record<string, any>[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith('.writefail'))
+    .map((name) => JSON.parse(readFileSync(join(dir, name), 'utf8')));
 }
 
 afterEach(() => {
@@ -74,7 +104,7 @@ describe('PostToolUse RGP error logger', () => {
         is_error: true,
         content: 'sandbox_deny: /private/tmp/whatsoup/private +1 (415) 555-1212 failed',
       },
-    }, { HOME: home });
+    }, { HOME: home, WHATSOUP_INSTANCE: 'ana-bot' });
 
     expect(result.status).toBe(0);
     const entries = readJsonl(errorsPath(home, 'session-a'));
@@ -93,6 +123,7 @@ describe('PostToolUse RGP error logger', () => {
     expect(excerpt).toContain('<redacted-phone>');
     expect(excerpt).not.toContain('/private/tmp');
     expect(excerpt).not.toContain('415');
+    expect(readBotErrors(home)).toHaveLength(0);
   });
 
   it('does not log successful tool responses and truncates oversized error logs', () => {
@@ -131,6 +162,218 @@ describe('PostToolUse RGP error logger', () => {
       sessionId: 'session-b',
       toolName: 'Read',
     });
+    expect(readBotErrors(home)).toHaveLength(0);
+  });
+
+  it('queues BOT ERRORS alerts from PostToolUseFailure payloads', () => {
+    const home = makeHome();
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-fail',
+      hook_event_name: 'PostToolUseFailure',
+      transcript_path: '/tmp/transcript.jsonl',
+      cwd: '/tmp/workspace',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      tool_input: { command: 'python3 -c "raise SystemExit(2)"' },
+      error: [
+        'Command timed out after 120000ms token=plain-secret',
+        AWS_KEY_SAMPLE,
+        GITHUB_TOKEN_SAMPLE,
+        JWT_SAMPLE,
+        PRIVATE_KEY_SAMPLE,
+        URL_USERINFO_SAMPLE,
+      ].join('\n'),
+      duration_ms: 120000,
+    }, {
+      HOME: home,
+      BOT_ERRORS_STATE_DIR: join(home, '.local', 'state', 'bot-errors'),
+      BOT_ERRORS_ALLOW_TEST_LIVE_OUTBOX: '1',
+      WHATSOUP_INSTANCE: 'ana-bot',
+      WHATSOUP_CHAT_JID: 'chat@g.us',
+    });
+
+    expect(result.status).toBe(0);
+    const botErrors = readBotErrors(home);
+    expect(botErrors).toHaveLength(1);
+    expect(botErrors[0]).toMatchObject({
+      eventType: 'alert',
+      severity: 'error',
+      instance: 'ana-bot',
+      source: 'hook-tool-call-failed:Bash',
+      summary: 'Agent tool failure: Bash',
+    });
+    expect(JSON.stringify(botErrors[0])).toContain('duration_ms=120000');
+    expect(JSON.stringify(botErrors[0])).toContain('tool_use_id=tool-123');
+    expect(JSON.stringify(botErrors[0])).toContain('token=[REDACTED]');
+    expect(JSON.stringify(botErrors[0])).toContain('[REDACTED AWS ACCESS KEY]');
+    expect(JSON.stringify(botErrors[0])).toContain('[REDACTED GITHUB TOKEN]');
+    expect(JSON.stringify(botErrors[0])).toContain('[REDACTED JWT]');
+    expect(JSON.stringify(botErrors[0])).toContain('[REDACTED PEM PRIVATE KEY]');
+    expect(JSON.stringify(botErrors[0])).toContain(REDACTED_URL_USERINFO);
+    expect(JSON.stringify(botErrors[0])).not.toContain('plain-secret');
+    expect(JSON.stringify(botErrors[0])).not.toContain(AWS_KEY_SAMPLE);
+    expect(JSON.stringify(botErrors[0])).not.toContain(GITHUB_TOKEN_SAMPLE);
+    expect(JSON.stringify(botErrors[0])).not.toContain('eyJhbGci');
+    expect(JSON.stringify(botErrors[0])).not.toContain('-----BEGIN');
+    expect(JSON.stringify(botErrors[0])).not.toContain(URL_USERINFO_SAMPLE);
+  });
+
+  it('keeps unconfigured Vitest hook alerts out of the real home outbox', () => {
+    const home = makeHome();
+    const temp = mkdtempSync(join(tmpdir(), 'rgp-hooks-vitest-state-'));
+    tmpDirs.push(temp);
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-vitest-default',
+      hook_event_name: 'PostToolUseFailure',
+      transcript_path: '/tmp/transcript.jsonl',
+      cwd: '/tmp/workspace',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      tool_input: { command: 'exit 2' },
+      error: 'Command failed',
+      duration_ms: 1234,
+    }, {
+      HOME: home,
+      TMPDIR: temp,
+      NODE_ENV: 'test',
+      VITEST: 'true',
+      VITEST_WORKER_ID: 'hook-worker',
+      BOT_ERRORS_STATE_DIR: '',
+      BOT_ERRORS_OUTBOX_DIR: '',
+      WHATSOUP_INSTANCE: 'ana-bot',
+      WHATSOUP_CHAT_JID: 'chat@g.us',
+    });
+
+    expect(result.status).toBe(0);
+    expect(readBotErrors(home)).toHaveLength(0);
+    expect(readdirSync(join(temp, 'whatsoup-vitest-bot-errors', `${testCwdHash()}.hook-worker`, 'outbox')).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+  });
+
+  it('redirects an explicit live hook outbox under strong test provenance', () => {
+    const home = makeHome();
+    const temp = mkdtempSync(join(tmpdir(), 'rgp-hooks-vitest-live-'));
+    tmpDirs.push(temp);
+    const liveOutbox = botErrorsOutbox(home);
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-vitest-live',
+      hook_event_name: 'PostToolUseFailure',
+      transcript_path: '/tmp/transcript.jsonl',
+      cwd: '/tmp/workspace',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      tool_input: { command: 'exit 2' },
+      error: 'Command failed',
+      duration_ms: 1234,
+    }, {
+      HOME: home,
+      TMPDIR: temp,
+      NODE_ENV: 'test',
+      VITEST: 'true',
+      VITEST_WORKER_ID: 'hook-live-worker',
+      BOT_ERRORS_OUTBOX_DIR: liveOutbox,
+      WHATSOUP_INSTANCE: 'ana-bot',
+    });
+
+    expect(result.status).toBe(0);
+    expect(readBotErrors(home)).toHaveLength(0);
+    const testOutbox = join(temp, 'whatsoup-vitest-bot-errors', `${testCwdHash()}.hook-live-worker`, 'outbox');
+    const events = readdirSync(testOutbox)
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => JSON.parse(readFileSync(join(testOutbox, file), 'utf8')) as Record<string, any>);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.runtime.provenance).toMatchObject({
+      producer: 'post-tool-use-hook',
+      test: true,
+      outboxPolicy: 'test-redirect',
+      liveOutboxRedirected: true,
+    });
+  });
+
+  it('records a recoverable writefail breadcrumb when the BOT ERRORS outbox is unwritable', () => {
+    const home = makeHome();
+    const writefail = join(home, 'writefail-override');
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-outbox-fail',
+      hook_event_name: 'PostToolUseFailure',
+      transcript_path: '/tmp/transcript.jsonl',
+      cwd: '/tmp/workspace',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      tool_input: { command: ['curl https://user:pass', 'service.invalid token=plain-secret'].join('@') },
+      error: [
+        'Command failed token=plain-secret',
+        AWS_KEY_SAMPLE,
+        GITHUB_TOKEN_SAMPLE,
+      ].join('\n'),
+      duration_ms: 1234,
+    }, {
+      HOME: home,
+      BOT_ERRORS_OUTBOX_DIR: '/dev/null/outbox',
+      BOT_ERRORS_WRITEFAIL_DIR: writefail,
+      WHATSOUP_INSTANCE: 'ana-bot',
+      WHATSOUP_CHAT_JID: 'chat@g.us',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('CRITICAL outbox write FAILED');
+    expect(result.stderr).toContain('lost-alert breadcrumb written');
+    expect(readBotErrors(home)).toHaveLength(0);
+    const crumbs = readWritefails(writefail);
+    expect(crumbs).toHaveLength(1);
+    expect(crumbs[0]).toMatchObject({ kind: 'outbox_write_failure', schemaVersion: 1 });
+    expect(crumbs[0].event).toMatchObject({
+      eventType: 'alert',
+      severity: 'error',
+      instance: 'ana-bot',
+      source: 'hook-tool-call-failed:Bash',
+      summary: 'Agent tool failure: Bash',
+    });
+    expect(JSON.stringify(crumbs[0])).toContain('token=[REDACTED]');
+    expect(JSON.stringify(crumbs[0])).toContain('[REDACTED AWS ACCESS KEY]');
+    expect(JSON.stringify(crumbs[0])).toContain('[REDACTED GITHUB TOKEN]');
+    expect(JSON.stringify(crumbs[0])).not.toContain('plain-secret');
+    expect(JSON.stringify(crumbs[0])).not.toContain(AWS_KEY_SAMPLE);
+    expect(JSON.stringify(crumbs[0])).not.toContain(GITHUB_TOKEN_SAMPLE);
+    expect(readJsonl(errorsPath(home, 'session-outbox-fail')).at(-1)).toMatchObject({
+      event: 'bot-errors-alert-failed',
+    });
+  });
+
+  it('uses HOME writefail fallback before TMPDIR when override and state writefail dirs are blocked', () => {
+    const root = mkdtempSync(join(tmpdir(), 'rgp-hooks-writefail-fallback-'));
+    tmpDirs.push(root);
+    const blockedOverride = join(root, 'blocked-override');
+    const stateRoot = join(root, 'state');
+    const home = join(root, 'home');
+    const writerTmp = join(root, 'writer-tmp');
+    writeFileSync(blockedOverride, 'not a directory');
+    mkdirSync(stateRoot, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    mkdirSync(writerTmp, { recursive: true });
+    writeFileSync(join(stateRoot, 'writefail'), 'not a directory');
+
+    const result = runNodeHook(POST_TOOL_HOOK, {
+      session_id: 'session-home-fallback',
+      hook_event_name: 'PostToolUseFailure',
+      tool_name: 'Bash',
+      tool_use_id: 'tool-123',
+      error: 'Command failed token=plain-secret',
+    }, {
+      HOME: home,
+      TMPDIR: writerTmp,
+      BOT_ERRORS_OUTBOX_DIR: '/dev/null/outbox',
+      BOT_ERRORS_WRITEFAIL_DIR: join(blockedOverride, 'writefail'),
+      BOT_ERRORS_STATE_DIR: stateRoot,
+      WHATSOUP_INSTANCE: 'ana-bot',
+    });
+
+    expect(result.status).toBe(0);
+    expect(readWritefails(join(home, '.bot-errors-writefail'))).toHaveLength(1);
+    expect(readWritefails(join(writerTmp, 'bot-errors-writefail'))).toHaveLength(0);
   });
 });
 

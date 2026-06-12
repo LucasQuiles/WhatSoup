@@ -12,6 +12,7 @@ import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
+import { hasExplicitAuthLossSignal } from '../auth-loss-signals.ts';
 
 export interface LinesDeps {
   discovery: FleetDiscovery;
@@ -172,18 +173,32 @@ function linkedStatusFromHealth(health: Record<string, unknown> | null): LinkedS
   const connectionState =
     dig(health, 'whatsapp', 'connection', 'state') ??
     dig(health, 'connection', 'state');
+  const lastDisconnectReason =
+    dig(health, 'whatsapp', 'connection', 'last_disconnect_reason') ??
+    dig(health, 'connection', 'last_disconnect_reason');
+  const lastStatusCode =
+    dig(health, 'whatsapp', 'connection', 'last_status_code') ??
+    dig(health, 'connection', 'last_status_code');
+  const authFailureClass =
+    dig(health, 'whatsapp', 'connection', 'auth_failure_class') ??
+    dig(health, 'connection', 'auth_failure_class');
   const healthStatus = dig(health, 'status');
   const accountJidStatus = accountJid === 'not connected'
     ? 'not_connected'
     : typeof accountJid === 'string' && accountJid.trim() !== ''
       ? 'present'
       : 'unknown';
+  const explicitAuthLossSignal =
+    hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason, authFailureClass });
   const evidence = [
     linkedEvidenceField('link_source', 'health'),
     linkedEvidenceField('health_status', healthStatus),
     linkedEvidenceField('whatsapp_connected', connected),
     linkedEvidenceField('account_jid_status', accountJidStatus),
     linkedEvidenceField('connection_state', connectionState),
+    linkedEvidenceField('last_disconnect_reason', lastDisconnectReason),
+    linkedEvidenceField('last_status_code', lastStatusCode),
+    linkedEvidenceField('auth_failure_class', authFailureClass),
   ];
 
   if (connected === true && accountJidStatus === 'present') {
@@ -200,6 +215,15 @@ function linkedStatusFromHealth(health: Record<string, unknown> | null): LinkedS
     accountJidStatus === 'not_connected' &&
     (connectionState === 'disconnected' || healthStatus === 'unhealthy')
   ) {
+    if (!explicitAuthLossSignal) {
+      return {
+        status: 'unknown',
+        confidence: 'ambiguous',
+        reason: 'whatsapp_health_disconnected_without_auth_loss_signal',
+        evidence,
+      };
+    }
+
     return {
       status: 'unlinked',
       confidence: 'confirmed',
@@ -681,6 +705,7 @@ export async function handleGetLineProviderStatus(
   const lastFallbackTurnAtRaw = dig(health, 'instance', 'lastFallbackTurnAt');
   const probeAttemptsRaw = dig(health, 'instance', 'probeAttempts');
   const lastProbeAtRaw = dig(health, 'instance', 'lastProbeAt');
+  const windowCostUsdRaw = dig(health, 'instance', 'fallbackWindowCostUsd');
   const activationsRaw = dig(health, 'instance', 'fallbackActivations');
   const revertsRaw = dig(health, 'instance', 'fallbackReverts');
   const replaysRaw = dig(health, 'instance', 'fallbackReplays');
@@ -714,6 +739,7 @@ export async function handleGetLineProviderStatus(
       lastFallbackTurnAt: typeof lastFallbackTurnAtRaw === 'number' ? lastFallbackTurnAtRaw : null,
       probeAttempts: typeof probeAttemptsRaw === 'number' ? probeAttemptsRaw : null,
       lastProbeAt: typeof lastProbeAtRaw === 'number' ? lastProbeAtRaw : null,
+      windowCostUsd: typeof windowCostUsdRaw === 'number' ? windowCostUsdRaw : null,
       activations: typeof activationsRaw === 'number' ? activationsRaw : null,
       reverts: typeof revertsRaw === 'number' ? revertsRaw : null,
       replays: typeof replaysRaw === 'number' ? replaysRaw : null,

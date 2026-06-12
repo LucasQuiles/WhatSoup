@@ -43,6 +43,8 @@ function ruleEntriesFor(id) {
       };
     case 'invariant.fail-closed-scanner':
       return { 'fitness/fail-closed-scanner': 'warn' };
+    case 'invariant.outbox-env-gated':
+      return { 'fitness/outbox-direct-write': 'warn' };
     case 'test.skip-categorization':
       return { 'fitness/categorized-skips': 'warn' };
     default:
@@ -74,7 +76,7 @@ const linterOptions = { reportUnusedDisableDirectives: 'off' };
 
 export default [
   {
-    // src + scripts: file-size, god-class, fail-closed-scanner.
+    // src + scripts: file-size, god-class, fail-closed-scanner, outbox-direct-write.
     files: ['src/**/*.ts', 'scripts/**/*.ts'],
     linterOptions,
     languageOptions: {
@@ -86,6 +88,7 @@ export default [
       ...ruleEntriesFor('arch.file-size'),
       ...ruleEntriesFor('arch.god-class'),
       ...ruleEntriesFor('invariant.fail-closed-scanner'),
+      ...ruleEntriesFor('invariant.outbox-env-gated'),
     },
   },
   {

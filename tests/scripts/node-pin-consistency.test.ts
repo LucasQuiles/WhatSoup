@@ -22,7 +22,7 @@ function makeFixture(opts: {
   enginesNode?: string;
   dockerVersion?: string;
   wrapperVersion?: string | 'reads-nvmrc' | 'none';
-  wrappers?: ('deploy/whatsoup' | 'deploy/whatsoup-auth' | 'deploy/whatsoup-fleet')[];
+  wrappers?: ('deploy/whatsoup' | 'deploy/whatsoup-auth' | 'deploy/whatsoup-fleet' | 'scripts/run-with-pinned-node.sh')[];
 }): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-node-pin-'));
   const nvmrc = opts.nvmrc ?? '24.15.0';
@@ -34,6 +34,7 @@ function makeFixture(opts: {
     'deploy/whatsoup',
     'deploy/whatsoup-auth',
     'deploy/whatsoup-fleet',
+    'scripts/run-with-pinned-node.sh',
   ];
 
   writeFileSync(path.join(dir, '.nvmrc'), `${nvmrc}\n`, 'utf8');
@@ -58,8 +59,8 @@ function makeFixture(opts: {
     'utf8',
   );
 
-  mkdirSync(path.join(dir, 'deploy'), { recursive: true });
   for (const wrapperPath of wrappers) {
+    mkdirSync(path.dirname(path.join(dir, wrapperPath)), { recursive: true });
     let body = '#!/usr/bin/env bash\nset -euo pipefail\n';
     if (wrapperVersion === 'reads-nvmrc') {
       body += 'REPO_ROOT="$(pwd)"\nNODE_VERSION="$(cat "$REPO_ROOT/.nvmrc")"\n';

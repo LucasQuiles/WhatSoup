@@ -6,8 +6,9 @@
  * countable report fields, never just logs):
  *   - provider_fallback_activated fires exactly once per window, on the FIRST
  *     arm only (fallbackArmReason null-guard) — never on extensions
- *   - provider_fallback_reverted fires on deactivation with reason, turn
- *     counters, and window duration in the evidence — never when idle
+ *   - provider_fallback_reverted fires on deactivation with reason, PER-WINDOW
+ *     turn counters (deltas against an arm-time snapshot — never the lifetime
+ *     totals), and window duration in the evidence — never when idle
  *   - provider_fallback_replayed fires only after the replay COMPLETES —
  *     never on gate-rejected replays (extended / key-absent / tool activity)
  *     and never for a replay that fails (the failure alert covers that turn)
@@ -22,7 +23,16 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 // Overridable persisted-window source for the restore-path tests; all other
 // fallback-state-db functions keep their real implementations (they are
@@ -175,6 +185,8 @@ type FallbackView = {
   restorePersistedFallbackWindow(): void;
   getFallbackState(): {
     fallbackActiveUntil: number | null;
+    fallbackTurnsServed: number;
+    fallbackTurnsEmpty: number;
     fallbackActivations: number;
     fallbackReverts: number;
     fallbackReplays: number;
@@ -224,7 +236,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     expect(alertsFor('provider_fallback_activated')).toHaveLength(1);
   });
 
-  it('emits provider_fallback_reverted on window-elapsed with reason, turn counters, and window duration', () => {
+  it('emits provider_fallback_reverted on window-elapsed with reason, per-window turn counters, and window duration', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
@@ -243,6 +255,39 @@ describe('AgentRuntime — fallback transition alerts', () => {
     expect(evidence).toContain('turnsServed=3');
     expect(evidence).toContain('turnsEmpty=1');
     expect(evidence).toContain('windowMs=3600000');
+  });
+
+  it('reports per-window turn DELTAS in revert evidence — window 2 never re-reports window 1 turns', () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+
+    // Window 1: 3 turns served (1 empty), then elapse.
+    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit'); // +1h
+    v.fallbackTurnsServed = 3;
+    v.fallbackTurnsEmpty = 1;
+    vi.advanceTimersByTime(60 * 60 * 1000 + 1);
+    const first = alertsFor('provider_fallback_reverted');
+    expect(first).toHaveLength(1);
+    expect(first[0][3]).toContain('turnsServed=3');
+    expect(first[0][3]).toContain('turnsEmpty=1');
+
+    // Window 2 in the SAME process: 2 more turns (1 empty). The lifetime
+    // counters keep accruing (5/2 — getFallbackState contract), but the
+    // revert evidence must report only THIS window's delta (2/1).
+    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'usage-limit');
+    v.fallbackTurnsServed = 5;
+    v.fallbackTurnsEmpty = 2;
+    runtime.disableFallback();
+
+    const reverted = alertsFor('provider_fallback_reverted');
+    expect(reverted).toHaveLength(2);
+    expect(reverted[1][3]).toContain('turnsServed=2');
+    expect(reverted[1][3]).toContain('turnsEmpty=1');
+
+    // The lifetime getter semantics are unchanged: totals, never deltas.
+    const state = v.getFallbackState();
+    expect(state.fallbackTurnsServed).toBe(5);
+    expect(state.fallbackTurnsEmpty).toBe(2);
   });
 
   it('emits provider_fallback_reverted on admin-disabled deactivation', () => {
@@ -470,6 +515,58 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     expect(v.getFallbackState().fallbackActivations).toBe(0);
   });
 
+  it('emits provider_fallback_restored (additive source) when a persisted window is restored', () => {
+    const until = Date.now() + 60 * 60 * 1000;
+    loadFallbackStateMock.mockReturnValue({
+      activeUntil: until,
+      activatedAt: Date.now() - 30 * 60 * 1000,
+      reason: 'usage-limit',
+    });
+    const runtime = makeRuntime();
+    const v = view(runtime);
+
+    v.restorePersistedFallbackWindow();
+
+    const restored = alertsFor('provider_fallback_restored');
+    expect(restored).toHaveLength(1);
+    const [instance, source, , evidence] = restored[0];
+    expect(instance).toBe('test');
+    expect(source).toBe('provider_fallback_restored');
+    expect(evidence).toContain('reason=usage-limit');
+    expect(evidence).toContain('provider=opencode-cli');
+    expect(evidence).toContain('model=minimax/MiniMax-M2.7');
+    expect(evidence).toContain('until=2026-06-10T11:00:00.000Z');
+    expect(evidence).not.toContain('present-key');
+    // The restore alert is a RESTORE, never an activation.
+    expect(alertsFor('provider_fallback_activated')).toHaveLength(0);
+    expect(v.getFallbackState().fallbackActivations).toBe(0);
+  });
+
+  it('three restarts of one window: exactly one activated + two restored (the crash-loop repro)', () => {
+    // Process 1: the window first arms — the one true activation.
+    const first = makeRuntime();
+    view(first).activateProviderFallback(new Date(Date.now() + 2 * 60 * 60 * 1000), 'usage-limit');
+    expect(alertsFor('provider_fallback_activated')).toHaveLength(1);
+
+    // The window persists; two subsequent process restarts restore it.
+    const persisted = {
+      activeUntil: Date.now() + 2 * 60 * 60 * 1000,
+      activatedAt: Date.now(),
+      reason: 'usage-limit',
+    };
+    loadFallbackStateMock.mockReturnValue(persisted);
+    for (let restart = 0; restart < 2; restart++) {
+      const restartedRuntime = makeRuntime();
+      view(restartedRuntime).restorePersistedFallbackWindow();
+      expect(view(restartedRuntime).getFallbackState().fallbackActivations).toBe(0);
+    }
+
+    // Pre-fix this repro produced 3 activation alerts; the contract is
+    // 1 activated + 2 restored across the three processes.
+    expect(alertsFor('provider_fallback_activated')).toHaveLength(1);
+    expect(alertsFor('provider_fallback_restored')).toHaveLength(2);
+  });
+
   it('a fresh window after the restored one reverts still counts and emits once', () => {
     const until = Date.now() + 60 * 60 * 1000;
     loadFallbackStateMock.mockReturnValue({
@@ -481,9 +578,18 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     const v = view(runtime);
     v.restorePersistedFallbackWindow();
 
+    // The restore arm snapshots the (fresh-process, zero) turn counters too,
+    // so the restored window's revert reports the turns served since restart.
+    v.fallbackTurnsServed = 2;
+    v.fallbackTurnsEmpty = 1;
+
     // Restored window expires → reverts (and clears fallbackArmReason).
     vi.advanceTimersByTime(60 * 60 * 1000 + 1);
     expect(v.fallbackActiveUntil).toBeNull();
+    const reverted = alertsFor('provider_fallback_reverted');
+    expect(reverted).toHaveLength(1);
+    expect(reverted[0][3]).toContain('turnsServed=2');
+    expect(reverted[0][3]).toContain('turnsEmpty=1');
 
     // A genuinely new window must still alert + count exactly once — the
     // restore suppression must not over-suppress future activations.
