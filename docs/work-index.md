@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 180
+**Total entries:** 183
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | bead=113, doc=14, handoff=4, plan=16, review=1, spec=13, state=19 |
-| Status | closed=9, completed=117, deferred=8, pending=38, unknown=8 |
-| Status source | bead-manifest=3, body-marker=104, directory=7, fallback=3, phase-log=7, state-md-status=56 |
+| Kind | bead=113, doc=15, handoff=4, plan=16, review=2, spec=13, state=20 |
+| Status | active=2, closed=9, completed=117, deferred=8, pending=38, unknown=9 |
+| Status source | bead-manifest=3, body-marker=104, directory=7, fallback=4, phase-log=7, state-md-status=58 |
 
 ## Inconsistencies
 
@@ -34,7 +34,14 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Unknown-status — triage needed (8)
+### Active (2)
+
+| Path | Kind | Topic | Status source |
+|------|------|-------|---------------|
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md` | doc | bot-errors-reliability | state-md-status |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md` | state | bot-errors-reliability | state-md-status |
+
+### Unknown-status — triage needed (9)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -43,6 +50,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-05-12 |
 | `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
+| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | bot-errors-tool-call-audit | 2026-06-12 |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | colony-orchestration-design | 2026-04-04 |
 | `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | scheduled-groups-tabs-design | 2026-04-06 |
 | `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md` | spec | console-test-jsx-runtime-fix | 2026-04-25 |
@@ -301,6 +309,13 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B07-docs-durability.md` | bead | pending | body-marker | whatsoup-full-hardening | 2026-04-04 |  |
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/state.md` | state | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
 
+### docs/sdlc/in-progress/bot-errors-reliability-20260531  _(2 entries)_
+
+| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
+|------|------|--------|--------|-------|----------|------------|
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md` | doc | active | state-md-status | bot-errors-reliability | 2026-06-12 |  |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md` | state | active | state-md-status | bot-errors-reliability | 2026-06-12 |  |
+
 ### docs/superpowers/handoffs  _(4 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
@@ -331,11 +346,12 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | completed | body-marker | twilio-sms-transport | 2026-06-11 |  |
 | `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | completed | body-marker | twilio-voice-webhook | 2026-06-11 |  |
 
-### docs/superpowers/reviews  _(1 entries)_
+### docs/superpowers/reviews  _(2 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | completed | body-marker | anti-echo-review-handoff | 2026-05-12 |  |
+| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | unknown | fallback | bot-errors-tool-call-audit | 2026-06-12 |  |
 
 ### docs/superpowers/specs  _(13 entries)_
 
@@ -358,4 +374,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-12T02:31:58Z from commit `24619e821aa9358f7ba259ada6122d9b5f087a58`
+- Generated at 2026-06-12T19:24:13Z from commit `8f569da0f5bf37ea697b747b260a2e696db34c66`
