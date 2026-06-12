@@ -1729,6 +1729,7 @@ def run_once(
             reachability_lines, reachability_diagnostics = remote_failure_context(host, error)
             remote_record = remote_state.setdefault(remote, {})
             remote_record["consecutiveSuccesses"] = 0
+            remote_record["outboxRecoveryConsecutiveSuccesses"] = 0
             remote_record["lastError"] = error
             remote_record["lastFailureAt"] = int(time.time())
             remote_record["lastFailureIso"] = now_iso()
@@ -1801,7 +1802,18 @@ def run_once(
         if outbox_claim_succeeded:
             remote_record = remote_state.setdefault(remote, {})
             was_down = bool(remote_record.get("downEventEmitted"))
-            if was_down:
+            outbox_recovery_successes = int(remote_record.get("outboxRecoveryConsecutiveSuccesses") or 0) + 1
+            remote_record["outboxRecoveryConsecutiveSuccesses"] = outbox_recovery_successes
+            remote_record["outboxRecoverySuccessesRequired"] = recovery_successes
+            recovered_from_down = (not was_down) or outbox_recovery_successes >= recovery_successes
+            if was_down and not recovered_from_down:
+                append_log({
+                    "type": "relay_host_recovery_deferred",
+                    "remote": remote,
+                    "consecutiveSuccesses": outbox_recovery_successes,
+                    "requiredSuccesses": recovery_successes,
+                })
+            if was_down and recovered_from_down:
                 emit_relay_host_state_event(
                     remote,
                     "relay_host_recovered",
@@ -1809,15 +1821,20 @@ def run_once(
                         f"remote={remote}\n"
                         f"down_since={remote_record.get('downSince')}\n"
                         f"prior_consecutive_failures={remote_record.get('consecutiveFailures')}\n"
+                        f"outbox_recovery_consecutive_successes={outbox_recovery_successes}\n"
+                        f"recovery_successes_required={recovery_successes}\n"
                         f"collector_log={state_root() / 'logs/collector.jsonl'}"
                     ),
                     state,
                 )
-            remote_record["consecutiveFailures"] = 0
-            remote_record["backoffScheduleIndex"] = 0
-            remote_record["nextAttemptAt"] = None
-            remote_record["downSince"] = None
-            remote_record["downEventEmitted"] = False
+            if recovered_from_down:
+                remote_record["consecutiveFailures"] = 0
+                remote_record["backoffScheduleIndex"] = 0
+                remote_record["nextAttemptAt"] = None
+                remote_record["downSince"] = None
+                remote_record["downEventEmitted"] = False
+                remote_record["outboxRecoveryConsecutiveSuccesses"] = 0
+                remote_record["outboxRecoverySuccessesRequired"] = recovery_successes
 
         try:
             writefail_records = ssh_json_lines(
