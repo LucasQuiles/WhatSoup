@@ -112,6 +112,7 @@ echo "Drill 2: severity + event-type title rendering"
 reset_sandbox
 emit --severity warning --instance mini3 --source health --summary "degraded"
 emit --severity info --instance mini3 --source health --summary "fyi"
+dispatch_once
 emit --event-type clear --instance mini3 --source health --summary "recovered"
 dispatch_once
 assert_in "BOT WARNING" "$CAPTURE" "warning -> BOT WARNING"
@@ -438,7 +439,9 @@ echo "Drill 13: WhatsApp socket unavailable keeps alert durable"
 reset_sandbox
 emit --severity critical --instance ana-bot --source socket_down \
   --summary "socket down alert must stay queued" --evidence "send channel unavailable"
-if BOT_ERRORS_DRY_SEND_CAPTURE="" BOT_ERRORS_JID="bot-errors-test-group" \
+D13_GROUP_JID="120363""000000000000""@g.us"
+if BOT_ERRORS_DRY_SEND_CAPTURE="" BOT_ERRORS_JID="$D13_GROUP_JID" \
+     BOT_ERRORS_EXPECTED_JID="$D13_GROUP_JID" \
      BOT_ERRORS_SOCKET_PATH="$SANDBOX/missing.sock" python3 "$DISPATCH" --once \
      > "$SANDBOX/d13-fail.out" 2>&1; then
   fail "dispatcher unexpectedly succeeded while socket missing"
@@ -556,7 +559,13 @@ events = [
     ("writefail", "reboot-writefail", "cold restart writefail event"),
 ]
 for kind, event_id, summary in events:
-    event = {**base, "id": event_id, "summary": summary, "evidence": f"{kind} survived process death"}
+    event = {
+        **base,
+        "id": event_id,
+        "source": f"cold-restart-{kind}",
+        "summary": summary,
+        "evidence": f"{kind} survived process death",
+    }
     if kind == "outbox":
         (root / "outbox" / f"20260531T000000Z.{event_id}.json").write_text(json.dumps(event, indent=2) + "\n")
     elif kind == "processing":
@@ -600,14 +609,19 @@ echo "Drill 18: stale heartbeat alert and recovery"
 reset_sandbox
 D18_Q_STATE="$SANDBOX/d18-q-loop-state.json"
 printf '{"updated_at":100}\n' > "$D18_Q_STATE"
-BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop BOT_ERRORS_DRY_NOW=1000 \
+chmod 0600 "$D18_Q_STATE"
+BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop \
+  BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS=1 BOT_ERRORS_DRY_NOW=1000 \
   python3 "$HEARTBEAT" --once --max-q-loop-age 60 > "$SANDBOX/d18-stale-1.json" 2>&1
 assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 1 "stale q-loop heartbeat queues one alert"
-BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop BOT_ERRORS_DRY_NOW=1001 \
+BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop \
+  BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS=1 BOT_ERRORS_DRY_NOW=1001 \
   python3 "$HEARTBEAT" --once --max-q-loop-age 60 > "$SANDBOX/d18-stale-2.json" 2>&1
 assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 1 "duplicate stale heartbeat suppressed while open"
 printf '{"updated_at":1002}\n' > "$D18_Q_STATE"
-BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop BOT_ERRORS_DRY_NOW=1002 \
+chmod 0600 "$D18_Q_STATE"
+BOT_ERRORS_Q_LOOP_STATE="$D18_Q_STATE" BOT_ERRORS_WATCHDOG_CHECKS=q_loop \
+  BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS=1 BOT_ERRORS_DRY_NOW=1002 \
   python3 "$HEARTBEAT" --once --max-q-loop-age 60 > "$SANDBOX/d18-recovery.json" 2>&1
 assert_count "$BOT_ERRORS_OUTBOX_DIR" "*.json" 2 "heartbeat recovery queues clear event"
 dispatch_once
@@ -966,12 +980,13 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "FAIL credential tokens.env: missing required tokens.env" "$CAPTURE" "D22a missing required credential fails"
+assert_in "FAIL credential: [REDACTED] missing required" "$CAPTURE" "D22a missing required credential fails"
 assert_not_in "D22_SECRET" "$CAPTURE" "D22a no credential body leaked"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22b-home"
 mkdir -p "$D22_HOME/.config/whatsoup"
+chmod 0700 "$D22_HOME/.config/whatsoup"
 printf 'TOKEN=D22_SECRET_UNREADABLE\n' > "$D22_HOME/.config/whatsoup/tokens.env"
 chmod 000 "$D22_HOME/.config/whatsoup/tokens.env"
 HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
@@ -982,12 +997,13 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 chmod 600 "$D22_HOME/.config/whatsoup/tokens.env"
 dispatch_once
-assert_in "FAIL credential tokens.env: unreadable" "$CAPTURE" "D22b unreadable required credential fails"
+assert_in "FAIL credential: [REDACTED] unreadable" "$CAPTURE" "D22b unreadable required credential fails"
 assert_not_in "D22_SECRET_UNREADABLE" "$CAPTURE" "D22b unreadable credential contents not leaked"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22c-warn-home"
 mkdir -p "$D22_HOME/.config/whatsoup"
+chmod 0700 "$D22_HOME/.config/whatsoup"
 printf 'TOKEN=D22_SECRET_MODE_WARN\n' > "$D22_HOME/.config/whatsoup/tokens.env"
 chmod 0644 "$D22_HOME/.config/whatsoup/tokens.env"
 HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
@@ -997,14 +1013,15 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "BOT WARNING" "$CAPTURE" "D22c credential 0644 warns, not critical"
-assert_in "WARN credential tokens.env: mode>600" "$CAPTURE" "D22c credential 0644 warning line"
+assert_in "BOT ERROR" "$CAPTURE" "D22c credential 0644 fails closed"
+assert_in "FAIL credential: [REDACTED] mode>600" "$CAPTURE" "D22c credential 0644 critical line"
 assert_not_in "credential_meta" "$CAPTURE" "D22c required credential does not duplicate metadata line"
 assert_not_in "D22_SECRET_MODE_WARN" "$CAPTURE" "D22c warning credential contents not leaked"
 
 reset_sandbox
 D22_HOME="$SANDBOX/d22c-fail-home"
 mkdir -p "$D22_HOME/.config/whatsoup"
+chmod 0700 "$D22_HOME/.config/whatsoup"
 printf 'TOKEN=D22_SECRET_MODE_FAIL\n' > "$D22_HOME/.config/whatsoup/tokens.env"
 chmod 0666 "$D22_HOME/.config/whatsoup/tokens.env"
 HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
@@ -1014,8 +1031,8 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "FAIL credential tokens.env: world_writable" "$CAPTURE" "D22c credential world-writable fails"
-d22c_fail_count=$(grep -c "FAIL credential tokens.env" "$CAPTURE" 2>/dev/null | tr -d ' ')
+assert_in "FAIL credential: [REDACTED] world_writable" "$CAPTURE" "D22c credential world-writable fails"
+d22c_fail_count=$(grep -cF "FAIL credential: [REDACTED]" "$CAPTURE" 2>/dev/null | tr -d ' ')
 [ "$d22c_fail_count" = "1" ] && pass "D22c world-writable required credential fails once" \
   || fail "D22c expected one required credential FAIL, got $d22c_fail_count"
 assert_not_in "credential_meta" "$CAPTURE" "D22c world-writable required credential does not duplicate metadata line"
@@ -1024,6 +1041,7 @@ assert_not_in "D22_SECRET_MODE_FAIL" "$CAPTURE" "D22c failing credential content
 reset_sandbox
 D22_HOME="$SANDBOX/d22d-home"
 mkdir -p "$D22_HOME/.config/whatsoup/instances/ana-bot"
+chmod 0700 "$D22_HOME/.config/whatsoup" "$D22_HOME/.config/whatsoup/instances" "$D22_HOME/.config/whatsoup/instances/ana-bot"
 HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
@@ -1036,13 +1054,14 @@ assert_in "FAIL config ana-bot: missing required config.json" "$CAPTURE" "D22d m
 reset_sandbox
 D22_HOME="$SANDBOX/d22e-warn-home"
 mkdir -p "$D22_HOME/.config/whatsoup/instances/ana-bot"
+chmod 0700 "$D22_HOME/.config/whatsoup" "$D22_HOME/.config/whatsoup/instances" "$D22_HOME/.config/whatsoup/instances/ana-bot"
 printf '{"type":"agent","secret":"D22_CONFIG_SECRET_WARN"}\n' > "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
 chmod 0644 "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
 HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
-  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"instances":[{"name":"ana-bot","expected":"always_on","service":"com.whatsoup.ana-bot"}]}' \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"allowUnprofiledInstances":true,"instances":[{"name":"ana-bot","expected":"on_demand"}]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
 assert_in "BOT WARNING" "$CAPTURE" "D22e config 0644 warns by default"
@@ -1052,13 +1071,14 @@ assert_not_in "D22_CONFIG_SECRET_WARN" "$CAPTURE" "D22e warning config body not 
 reset_sandbox
 D22_HOME="$SANDBOX/d22e-fail-home"
 mkdir -p "$D22_HOME/.config/whatsoup/instances/ana-bot"
+chmod 0700 "$D22_HOME/.config/whatsoup" "$D22_HOME/.config/whatsoup/instances" "$D22_HOME/.config/whatsoup/instances/ana-bot"
 printf '{"type":"agent","secret":"D22_CONFIG_SECRET_FAIL"}\n' > "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
 chmod 0644 "$D22_HOME/.config/whatsoup/instances/ana-bot/config.json"
 HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_DRY_DISK_FREE_BYTES=$((10 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_DISK_TOTAL_BYTES=$((100 * 1024 * 1024 * 1024)) \
   BOT_ERRORS_DRY_UPTIME_SECONDS=3600 \
-  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"requiredConfigMaxMode":"0600","instances":[{"name":"ana-bot","expected":"always_on","service":"com.whatsoup.ana-bot"}]}' \
+  BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectPluginInventory":false,"requiredCredentialFiles":[],"requiredConfigFiles":["config.json"],"requiredConfigMaxMode":"0600","allowUnprofiledInstances":true,"instances":[{"name":"ana-bot","expected":"on_demand"}]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
 assert_in "FAIL config ana-bot: mode>600 required config.json" "$CAPTURE" "D22e strict config max mode fails"

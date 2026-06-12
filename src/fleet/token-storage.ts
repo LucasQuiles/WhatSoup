@@ -57,6 +57,42 @@ function isFleetTokensFile(value: unknown): value is FleetTokensFile {
   return true;
 }
 
+function tokenStorageError(message: string, code: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
+
+function assertPrivateTokenDirectory(dir: string): void {
+  const stat = fs.lstatSync(dir);
+  if (stat.isSymbolicLink()) {
+    throw tokenStorageError('refusing to use fleet token directory through symlink', 'ELOOP');
+  }
+  if (!stat.isDirectory()) {
+    throw tokenStorageError('refusing to use fleet token directory over non-directory path', 'EINVAL');
+  }
+}
+
+function assertReadableTokenFile(filePath: string, label: string): boolean {
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink()) {
+      throw tokenStorageError(`refusing to read ${label} through symlink`, 'ELOOP');
+    }
+    if (!stat.isFile()) {
+      throw tokenStorageError(`refusing to read ${label} from non-regular path`, 'EINVAL');
+    }
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+function assertWritableTokenFile(filePath: string): void {
+  if (!assertReadableTokenFile(filePath, 'fleet-tokens.json')) return;
+}
+
 /** Generate a fresh 32-byte (64-hex) token. */
 export function generateFleetToken(): string {
   return crypto.randomBytes(32).toString('hex');
@@ -88,6 +124,7 @@ export function verifyFleetToken(candidate: string, tokens: { active: string; ac
 }
 
 function readTokensFile(currentPath: string): FleetTokensFile | null {
+  if (!assertReadableTokenFile(currentPath, 'fleet-tokens.json')) return null;
   let raw: string;
   try {
     raw = fs.readFileSync(currentPath, 'utf-8');
@@ -112,6 +149,7 @@ function readTokensFile(currentPath: string): FleetTokensFile | null {
 }
 
 function readLegacyToken(legacyPath: string): string | null {
+  if (!assertReadableTokenFile(legacyPath, 'legacy fleet-token')) return null;
   let raw: string;
   try {
     raw = fs.readFileSync(legacyPath, 'utf-8').trim();
@@ -122,11 +160,55 @@ function readLegacyToken(legacyPath: string): string | null {
 }
 
 function writeTokensFile(currentPath: string, tokens: FleetTokensFile): void {
-  fs.mkdirSync(path.dirname(currentPath), { recursive: true, mode: 0o700 });
-  // Write to a sibling temp file then rename for atomicity.
+  const dir = path.dirname(currentPath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  assertPrivateTokenDirectory(dir);
+  fs.chmodSync(dir, 0o700);
+  assertWritableTokenFile(currentPath);
+
   const tmpPath = `${currentPath}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmpPath, `${JSON.stringify(tokens, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(tmpPath, currentPath);
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(
+      tmpPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    fs.writeFileSync(fd, `${JSON.stringify(tokens, null, 2)}\n`, 'utf-8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+
+    assertWritableTokenFile(currentPath);
+    fs.renameSync(tmpPath, currentPath);
+    fs.chmodSync(currentPath, 0o600);
+
+    try {
+      const dirFd = fs.openSync(dir, 'r');
+      try {
+        fs.fsyncSync(dirFd);
+      } finally {
+        fs.closeSync(dirFd);
+      }
+    } catch {
+      // Some filesystems reject directory fsync; the file was still fsynced
+      // before the atomic rename.
+    }
+  } catch (err) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // best-effort cleanup
+    }
+    throw err;
+  }
 }
 
 /**

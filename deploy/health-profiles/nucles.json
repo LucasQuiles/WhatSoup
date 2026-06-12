@@ -1,0 +1,12 @@
+{
+  "role": "central",
+  "expectDispatcher": true,
+  "expectQLoop": true,
+  "expectPersonalSocket": true,
+  "expectPersonalTools": true,
+  "expectConfigInventory": true,
+  "expectPrimaryPhoneVerification": false,
+  "requiredCredentialFiles": [
+    "bot-errors.env"
+  ]
+}

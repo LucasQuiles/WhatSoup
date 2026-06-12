@@ -52,7 +52,13 @@ vi.mock('../../../src/mcp/register-all.ts', () => ({
 }));
 
 // Alerts must never leave the test process.
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+  };
+});
 
 // Unit tests must never spawn the real fallback binary; 'unknown' is the
 // safe fail-open value (no alert, no version log).

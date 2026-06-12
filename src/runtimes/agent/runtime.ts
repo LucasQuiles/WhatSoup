@@ -18,7 +18,7 @@ import {
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
-import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
+import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -135,6 +135,9 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
+const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
+const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
+const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
 // Default provider-fallback window when the usage-limit message names no reset
 // time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
 // upper-bound estimate for when the primary provider becomes available again.
@@ -143,9 +146,6 @@ const DEFAULT_FALLBACK_WINDOW_MS = 5 * 60 * 60 * 1000; // 18_000_000 ms (5h)
 // revert almost immediately nor pin the fallback for an unreasonable span.
 const MIN_FALLBACK_WINDOW_MS = 60 * 1000; // 1 minute
 const MAX_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
-const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
-const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
-const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
 const PROVIDER_FALLBACK_NOTICE_DEDUP_MS = (() => {
   const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS']);
   return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60 * 1000;
@@ -1509,8 +1509,8 @@ export class AgentRuntime implements Runtime {
   /** Maps toolScopeKey → (toolId → toolName) so tool_result errors stay isolated per session scope. */
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
-  private recentToolFailureAlerts = new Map<string, number>();
   private recentProviderFallbackNotices = new Map<string, number>();
+  private recentToolFailureAlerts = new Map<string, number>();
 
   /**
    * Tracks toolScopeKeys where at least one non-phantom tool_use event was
@@ -1607,11 +1607,7 @@ export class AgentRuntime implements Runtime {
       }
     }
 
-    // Default an unset provider to claude-cli to match the runtime's canonical
-    // provider default (cf. backfillSessionProvider's `?? 'claude-cli'`), so the
-    // tool-error alert source/fingerprint stays consistent with the rest of the
-    // provider-aware codepaths rather than minting a distinct 'unknown-provider' key.
-    const provider = this.agentProvider || 'claude-cli';
+    const provider = this.effectiveProvider || this.agentProvider || 'unknown-provider';
     const source = `runtime-tool-error:${safeAlertSegment(provider)}:${safeAlertSegment(args.toolName)}`;
     const fingerprint = [
       this.instanceName,
@@ -1647,7 +1643,7 @@ export class AgentRuntime implements Runtime {
     ].join('\n');
 
     try {
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         source,
         `Agent tool failure: ${args.toolName}`,
@@ -3187,7 +3183,7 @@ export class AgentRuntime implements Runtime {
           { err, messageId: msg.messageId, code: codeStr || 'unknown' },
           'inline extractor hook hit unrecoverable DB error — surfacing to operator',
         );
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'substrate-inline-hook',
           `Unrecoverable DB error in inline extractor: ${msgText}`,
@@ -5808,7 +5804,7 @@ export class AgentRuntime implements Runtime {
         firstEligibleIndex = i;
       }
       if (!eligible) {
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'fallback_credential_missing',
           'Fallback provider key not found in keyring',
@@ -5818,7 +5814,7 @@ export class AgentRuntime implements Runtime {
     }
     this.fallbackChainState = state;
     if (requireIndependentProvider && firstEligibleIndex === -1 && firstIndependentIndex === -1) {
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'fallback_no_independent_provider',
         'Auth-required fallback has no independent provider target',
@@ -6018,7 +6014,7 @@ export class AgentRuntime implements Runtime {
       served: this.fallbackTurnsServed,
       empty: this.fallbackTurnsEmpty,
     }, 'fallback turn completed with zero visible output');
-    emitAlert(
+    emitAlertChecked(
       this.instanceName,
       'fallback_empty_turn',
       'Fallback turn produced no visible output',
@@ -6066,7 +6062,7 @@ export class AgentRuntime implements Runtime {
         // operator-visible transition (a restart mid-window; repeated
         // restores are the crash-loop signature), so it gets its own
         // additive source instead of silence.
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'provider_fallback_restored',
           'Provider fallback window restored after restart',
@@ -6075,7 +6071,7 @@ export class AgentRuntime implements Runtime {
         );
       } else {
         this.fallbackActivations += 1;
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'provider_fallback_activated',
           'Provider fallback window activated',
@@ -6107,7 +6103,7 @@ export class AgentRuntime implements Runtime {
       });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'fallback_persist_failed',
         'Failed to persist fallback window — will not survive restart',
@@ -6136,7 +6132,7 @@ export class AgentRuntime implements Runtime {
           fallbackModel: fallbackEntry.model,
         }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
         if (!selection.selectedHadMissingCredential) {
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_credential_missing',
             'Fallback provider key not found in keyring',
@@ -6147,7 +6143,7 @@ export class AgentRuntime implements Runtime {
         void verifyFallbackCredential(service, key).then((result) => {
           if (result !== 'invalid') return;
           log.error({ service, fallbackProvider: fallbackEntry.provider }, 'fallback credential rejected by provider (401/403)');
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_credential_invalid',
             'Fallback API key rejected by provider',
@@ -6167,7 +6163,7 @@ export class AgentRuntime implements Runtime {
             { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
             'fallback provider binary not found on this host',
           );
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_binary_missing',
             'Fallback provider binary not found on this host',
@@ -6198,7 +6194,7 @@ export class AgentRuntime implements Runtime {
                 },
                 'fallback model not found in provider catalog — sessions will fail until corrected',
               );
-              emitAlert(
+              emitAlertChecked(
                 this.instanceName,
                 'fallback_model_unknown',
                 'Fallback model not found in provider catalog',
@@ -6374,7 +6370,7 @@ export class AgentRuntime implements Runtime {
       reason,
     }, 'reverting to primary provider');
     this.fallbackReverts += 1;
-    emitAlert(
+    emitAlertChecked(
       this.instanceName,
       'provider_fallback_reverted',
       'Provider fallback window ended — reverted to primary provider',
@@ -6438,7 +6434,7 @@ export class AgentRuntime implements Runtime {
         // stall episode. Extension continues regardless — surfacing must never
         // strand the instance on a dead primary.
         if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_recovery_stalled',
             'Primary provider recovery probe is stalled — fallback window extending indefinitely',
@@ -6664,7 +6660,7 @@ export class AgentRuntime implements Runtime {
       oldSession: args.oldSession,
     }).then(() => {
       this.fallbackReplays += 1;
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'provider_fallback_replayed',
         'Interrupted turn replayed on fallback provider',
@@ -6677,7 +6673,7 @@ export class AgentRuntime implements Runtime {
         mapKey: args.mapKey,
         fallbackProvider: args.activation.fallbackProvider,
       }, 'failed to replay turn on fallback provider');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'runtime_provider_fallback_replay_failed',
         'Provider fallback replay failed',
@@ -7148,7 +7144,7 @@ export class AgentRuntime implements Runtime {
           session.spawnSession(sessionId, dbRowId ?? undefined).then(async () => {
             await new Promise(r => setTimeout(r, 1_000));
             if (!session.getStatus().active) return;
-            clearAlertSource(this.instanceName, 'agent_respawn_failed');
+            clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
             try {
               // Inject messages that arrived during the crash window
               if (chatJid) {
@@ -7171,7 +7167,7 @@ export class AgentRuntime implements Runtime {
       }
     } else if (crashCount > AUTO_RESPAWN_MAX_CRASHES) {
       log.error({ mapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'agent_respawn_failed',
         `whatsoup@${this.instanceName} agent respawn exhausted (${crashCount} crashes)`,

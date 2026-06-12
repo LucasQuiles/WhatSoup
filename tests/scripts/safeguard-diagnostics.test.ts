@@ -228,10 +228,10 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['private-instance-label']) });
   });
 
-  it('fails when fleet-specific health profiles or generated artifacts are tracked', () => {
+  it('fails when tracked health profiles contain unsafe credential paths or generated artifacts are tracked', () => {
     const fixture = makeRepo({
       trackedExtras: {
-        'deploy/health-profiles/mwlab.json': '{}\n',
+        'deploy/health-profiles/mwlab.json': '{"role":"bot-host","requiredCredentialFiles":["/var/lib/whatsoup/private/tokens.env"]}\n',
         'coverage-target/index.html': '<html></html>\n',
       },
     });
@@ -239,7 +239,7 @@ describe('safeguard diagnostics', () => {
 
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'no-tracked-instance-health-profiles')?.evidence)
-      .toEqual(['deploy/health-profiles/mwlab.json']);
+      .toEqual(['deploy/health-profiles/mwlab.json:unsafe-credential-path']);
     expect(result.checks.find((check) => check.id === 'no-tracked-generated-artifacts')?.evidence)
       .toEqual(['coverage-target/index.html']);
   });

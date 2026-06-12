@@ -1,5 +1,6 @@
 import { existsSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
 interface CliArgs {
@@ -21,7 +22,7 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-function parseArgs(argv: string[]): CliArgs {
+export function parseArgs(argv: string[]): CliArgs {
   const args: Partial<CliArgs> = { json: false };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -77,7 +78,7 @@ function assertInstanceDb(instancePath: string): string {
   return dbPath;
 }
 
-function readTokenWindow(dbPath: string, windowSeconds: number): TokenWindowRow {
+export function readTokenWindow(dbPath: string, windowSeconds: number): TokenWindowRow {
   let db: DatabaseSync | null = null;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
@@ -105,23 +106,22 @@ function readTokenWindow(dbPath: string, windowSeconds: number): TokenWindowRow 
   throw new Error('unreachable');
 }
 
-function main(): void {
-  const args = parseArgs(process.argv.slice(2));
+export function buildTokenWindowReport(instancePath: string, windowArg: string): Record<string, unknown> {
   let windowSeconds: number;
   try {
-    windowSeconds = parseWindowSeconds(args.window);
+    windowSeconds = parseWindowSeconds(windowArg);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     fail(message);
   }
 
-  const dbPath = assertInstanceDb(args.instance);
+  const dbPath = assertInstanceDb(instancePath);
   const row = readTokenWindow(dbPath, windowSeconds);
   const inputTokens = Number(row.input_tokens ?? 0);
   const outputTokens = Number(row.output_tokens ?? 0);
 
-  process.stdout.write(`${JSON.stringify({
-    instance: basename(args.instance),
+  return {
+    instance: basename(instancePath),
     window_seconds: windowSeconds,
     total_tokens: inputTokens + outputTokens,
     input_tokens: inputTokens,
@@ -134,7 +134,15 @@ function main(): void {
         latest_ts: row.latest_ts === null ? null : Number(row.latest_ts),
       },
     },
-  })}\n`);
+  };
 }
 
-main();
+function main(): void {
+  const args = parseArgs(process.argv.slice(2));
+  process.stdout.write(`${JSON.stringify(buildTokenWindowReport(args.instance, args.window))}
+`);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

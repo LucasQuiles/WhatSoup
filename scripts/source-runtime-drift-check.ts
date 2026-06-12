@@ -4,6 +4,8 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { cleanGitEnv } from './lib/guard-core.ts';
+
 export type SourceRuntimeIssueKind =
   | 'invalid-manifest'
   | 'file-missing'
@@ -151,6 +153,7 @@ function sha256(body: Buffer | string): string {
 function git(cwd: string, args: string[]): { status: number | null; stdout: string; stderr: string; error?: string } {
   const proc = spawnSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
+    env: cleanGitEnv(),
     maxBuffer: 1024 * 1024,
   });
   return {

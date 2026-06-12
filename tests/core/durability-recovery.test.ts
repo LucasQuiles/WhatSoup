@@ -14,12 +14,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 
-const emitAlert = vi.hoisted(() => vi.fn());
-const clearAlertSource = vi.hoisted(() => vi.fn());
+const emitAlert = vi.hoisted(() => vi.fn(() => true));
+const clearAlertSource = vi.hoisted(() => vi.fn(() => true));
 
 vi.mock('../../src/lib/emit-alert.ts', () => ({
   emitAlert,
+  emitAlertChecked: emitAlert,
   clearAlertSource,
+  clearAlertSourceChecked: clearAlertSource,
 }));
 
 // ---------------------------------------------------------------------------

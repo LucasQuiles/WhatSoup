@@ -1,0 +1,23 @@
+{
+  "role": "bot-host",
+  "expectDispatcher": false,
+  "expectQLoop": false,
+  "expectPersonalSocket": false,
+  "expectPersonalTools": false,
+  "expectConfigInventory": true,
+  "requiredCredentialFiles": [
+    "fleet-token",
+    "instances/yl-bot/tokens.env"
+  ],
+  "instances": [
+    {
+      "name": "yl-bot",
+      "expected": "always_on",
+      "service": "com.whatsoup.yl-bot",
+      "primaryPhoneVerificationRequired": true,
+      "primaryPhoneOwner": "Lucas"
+    }
+  ],
+  "expectPrimaryPhoneVerification": true,
+  "requiredConfigMaxMode": "600"
+}

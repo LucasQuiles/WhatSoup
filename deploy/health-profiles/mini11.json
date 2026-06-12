@@ -1,10 +1,10 @@
 {
-  "role": "bot-host",
+  "role": "no-bot",
   "expectDispatcher": false,
   "expectQLoop": false,
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
-  "expectConfigInventory": true,
-  "requiredCredentialFiles": [],
-  "instances": []
+  "expectConfigInventory": false,
+  "instances": [],
+  "expectPrimaryPhoneVerification": false
 }

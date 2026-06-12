@@ -5,6 +5,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  buildTokenWindowReport,
+  parseArgs,
+  parseWindowSeconds,
+  readTokenWindow,
+} from '../../scripts/token-window.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const scriptPath = path.join(repoRoot, 'scripts/token-window.ts');
@@ -112,8 +118,37 @@ afterEach(() => {
 describe('token-window helper', () => {
   it('is exposed through the package scripts', () => {
     expect(packageJson.scripts['token-window']).toBe(
-      'node --experimental-strip-types scripts/token-window.ts',
+      'bash scripts/run-with-pinned-node.sh scripts/token-window.ts',
     );
+  });
+
+  it('covers the importable report path against the real SQLite query', () => {
+    const { instancePath, dbPath } = makeInstance('direct fixture');
+    const nowSec = Math.floor(Date.now() / 1000);
+    const db = createTokenDb(dbPath);
+    insertTokenEvent(db, nowSec - 10, 11, 2);
+    insertTokenEvent(db, nowSec - 20, 13, 4);
+    db.close();
+
+    expect(parseArgs(['--instance', instancePath, '--window', '5m', '--json'])).toEqual({
+      instance: instancePath,
+      window: '5m',
+      json: true,
+    });
+    expect(parseWindowSeconds('5m')).toBe(300);
+    expect(readTokenWindow(dbPath, 300)).toMatchObject({
+      input_tokens: 24,
+      output_tokens: 6,
+      event_count: 2,
+    });
+    expect(buildTokenWindowReport(instancePath, '5m')).toMatchObject({
+      instance: 'direct fixture',
+      window_seconds: 300,
+      total_tokens: 30,
+      input_tokens: 24,
+      output_tokens: 6,
+      event_count: 2,
+    });
   });
 
   it('returns the v1 JSON shape reconciled with a direct SQLite sum', () => {

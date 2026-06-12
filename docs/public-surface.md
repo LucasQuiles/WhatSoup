@@ -119,13 +119,13 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:health.status` | `GET /health` | `src/core/health.ts:535` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
-| `http:health.send` | `POST /send` | `src/core/health.ts:154` | stable | active | Send a text message |
-| `http:health.access` | `POST /access` | `src/core/health.ts:372` | stable | active | Allow / block contact or group |
-| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:455` | stable | active | Zero unread + chatModify |
-| `http:health.typing` | `GET /typing` | `src/core/health.ts:520` | stable | active | Currently-composing JIDs from presence cache |
-| `http:health.heal` | `POST /heal` | `src/core/health.ts:297` | stable | active | Inject Type-3 repair report |
-| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:208` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
+| `http:health.status` | `GET /health` | `src/core/health.ts:787` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
+| `http:health.send` | `POST /send` | `src/core/health.ts:382` | stable | active | Send a text message |
+| `http:health.access` | `POST /access` | `src/core/health.ts:610` | stable | active | Allow / block contact or group |
+| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:702` | stable | active | Zero unread + chatModify |
+| `http:health.typing` | `GET /typing` | `src/core/health.ts:772` | stable | active | Currently-composing JIDs from presence cache |
+| `http:health.heal` | `POST /heal` | `src/core/health.ts:525` | stable | active | Inject Type-3 repair report |
+| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:436` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
 ### WebSocket
 
@@ -276,6 +276,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-fail-closed-gate` | `npm run guard:fail-closed-gate` | `package.json` | stable | active | Reject fail-open gate shapes (env-gated paths must fail closed when the gate variable is unset) |
 | `cli:npm.guard-restart-preflight` | `npm run guard:restart-preflight` | `package.json` | stable | active | Deploy-time import-closure probe: refuses service start when the on-disk import graph cannot link |
 | `cli:npm.guard-repo-scan-history` | `npm run guard:repo:scan-history` | `package.json` | stable | active | Scan recent git history for secret-pattern leaks using the shared hygiene pattern set |
+| `cli:npm.guard-bot-errors-simulation-matrix` | `npm run guard:bot-errors-simulation-matrix` | `package.json` | internal | active | Verify BOT ERRORS/Q-loop disaster scenarios are backed by executable fixture anchors |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
 | `cli:npm.guard-agent-decision-polls` | `npm run guard:agent-decision-polls` | `package.json` | stable | active | Verify AskUser poll protocol wiring across prompts, MCP schema, sandbox diagnostics, docs, and release gates |
 | `cli:npm.guard-safeguard-diagnostics` | `npm run guard:safeguard-diagnostics` | `package.json` | stable | active | Deterministic diagnostic map for guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers |

@@ -16,7 +16,7 @@
  * other incident lands.
  */
 import { createChildLogger } from '../logger.ts';
-import { emitAlert, clearAlertSource } from './emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from './emit-alert.ts';
 import { adviseModel, type ModelAdvisory } from './model-catalog.ts';
 
 const log = createChildLogger('model-advisor');
@@ -209,7 +209,7 @@ export function notifyModelAdvisories(
 
   if (advisories.length === 0) {
     if (lastNotifiedKey !== null && lastNotifiedKey !== '') {
-      clearAlertSource(instance, ALERT_SOURCE);
+      clearAlertSourceChecked(instance, ALERT_SOURCE);
     }
     lastNotifiedKey = '';
     if (options.logAllCurrent !== false) {
@@ -231,7 +231,7 @@ export function notifyModelAdvisories(
   const summary = `[${severity}] model updates available (${advisories.length}): ` + advisories
     .map((a) => `${a.role}=${a.model} → ${a.recommended ?? '?'} [${a.level}]`)
     .join('; ');
-  emitAlert(instance, ALERT_SOURCE, summary, JSON.stringify(advisories));
+  emitAlertChecked(instance, ALERT_SOURCE, summary, JSON.stringify(advisories), severity);
 }
 
 export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelScanStatus): void {
@@ -239,7 +239,7 @@ export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelS
 
   if (liveScan.degradedVendors.length === 0) {
     if (lastLiveScanFailureKey !== null && lastLiveScanFailureKey !== '') {
-      clearAlertSource(instance, LIVE_SCAN_ALERT_SOURCE);
+      clearAlertSourceChecked(instance, LIVE_SCAN_ALERT_SOURCE);
     }
     lastLiveScanFailureKey = '';
     return;
@@ -256,7 +256,7 @@ export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelS
     .map((failure) => `${failure.vendor}=${failure.reason}`)
     .join('; ') + '; static catalog fallback in use';
   log.warn({ liveScan }, 'model currency live scan degraded');
-  emitAlert(instance, LIVE_SCAN_ALERT_SOURCE, summary, JSON.stringify(liveScan));
+  emitAlertChecked(instance, LIVE_SCAN_ALERT_SOURCE, summary, JSON.stringify(liveScan), 'warning');
 }
 
 export function notifyModelCurrencyResult(instance: string, result: ModelCurrencyCheckResult): void {

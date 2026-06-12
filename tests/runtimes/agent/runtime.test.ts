@@ -99,7 +99,9 @@ vi.mock('../../../src/logger.ts', () => ({
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: mockEmitAlert,
+  emitAlertChecked: mockEmitAlert,
   clearAlertSource: mockClearAlertSource,
+  clearAlertSourceChecked: mockClearAlertSource,
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
@@ -196,8 +198,6 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     proactiveResumeOnStartup: true,
     mediaDir: '/tmp/whatsoup-test-media/tmp',
     pineconeAllowedIndexes: [] as string[],
-    agentProvider: 'claude-cli',
-    agentProviderConfig: undefined as Record<string, unknown> | undefined,
     voiceReply: 'never' as 'always' | 'when_received' | 'never',
     elevenlabs: {
       defaultVoiceId: 'test-voice-id',
@@ -616,7 +616,9 @@ describe('AgentRuntime', () => {
     mockRuntimeLogger.warn.mockClear();
     mockRuntimeLogger.error.mockClear();
     mockRuntimeLogger.debug.mockClear();
-    const agentConfig = mockConfig as Omit<typeof mockConfig, 'agentProvider' | 'agentProviderConfig'> & {
+    mockEmitAlert.mockClear();
+    mockClearAlertSource.mockClear();
+    const agentConfig = mockConfig as typeof mockConfig & {
       agentProvider?: string;
       agentProviderConfig?: Record<string, unknown>;
       agentFallbackProvider?: string;
@@ -628,8 +630,6 @@ describe('AgentRuntime', () => {
     delete agentConfig.agentFallbackProvider;
     delete agentConfig.agentFallbackModel;
     delete agentConfig.model;
-    mockEmitAlert.mockClear();
-    mockClearAlertSource.mockClear();
     // Ensure mockQueue.flush always returns a resolved Promise (clearAllMocks wipes this)
     mockQueue.flush.mockResolvedValue(undefined);
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
@@ -2996,6 +2996,7 @@ describe('AgentRuntime', () => {
 
     // Should be suppressed
     expect(mockQueue.enqueueToolUpdate).not.toHaveBeenCalled();
+    expect(mockEmitAlert).not.toHaveBeenCalled();
   });
 
   it('second result event after gate does not throw', async () => {
@@ -3189,6 +3190,8 @@ describe('AgentRuntime', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
     const runtime = new AgentRuntime(db, messenger, 'ana-bot');
     await runtime.start();
     await runtime.handleMessage(makeMsg({ content: 'hi' }));
@@ -3270,7 +3273,6 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'tool_result', isError: false, toolId: 'test', content: '' });
 
     expect(mockQueue.enqueueToolUpdate).not.toHaveBeenCalled();
-    expect(mockEmitAlert).not.toHaveBeenCalled();
   });
 
   // ─── Health snapshot ───────────────────────────────────────────────────────

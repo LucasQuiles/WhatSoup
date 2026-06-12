@@ -23,7 +23,16 @@ import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.
 
 // ─── Mocks (declared before importing the runtime, hoisted by vitest) ──────────
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 vi.mock('../../../src/config.ts', () => {
   const config: Record<string, unknown> = {

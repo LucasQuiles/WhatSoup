@@ -1,9 +1,10 @@
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
   collectSourceRuntimeIssues,
   parseSourceRuntimeManifest,
@@ -16,22 +17,22 @@ afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
   process.exitCode = undefined;
+  vi.unstubAllEnvs();
 });
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function execGit(cwd: string, command: string): void {
-  execSync(`git -C ${shellQuote(cwd)} ${command}`, { stdio: 'pipe' });
+function execGit(cwd: string, args: string[]): void {
+  execFileSync('git', ['-c', 'core.hooksPath=.git/hooks', '-C', cwd, ...args], {
+    env: cleanGitEnv(),
+    stdio: 'pipe',
+  });
 }
 
 function makeRepo(): string {
   const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-'));
   tmpRoot = root;
-  execGit(root, 'init -q');
-  execGit(root, 'config user.email test.invalid');
-  execGit(root, 'config user.name Test');
+  execGit(root, ['init', '-q']);
+  execGit(root, ['config', 'user.email', 'test.invalid']);
+  execGit(root, ['config', 'user.name', 'Test']);
   mkdirSync(path.join(root, 'src/transport'), { recursive: true });
   writeFileSync(path.join(root, 'src/main.ts'), "import { connect } from './transport/connection.ts';\nconnect();\n", 'utf8');
   writeFileSync(path.join(root, 'src/transport/connection.ts'), "import { helper } from './helper.ts';\nexport function connect() { return helper(); }\n", 'utf8');
@@ -45,8 +46,8 @@ function makeRepo(): string {
     }, null, 2),
     'utf8',
   );
-  execGit(root, 'add src/main.ts src/transport/connection.ts src/transport/helper.ts manifest.json');
-  execGit(root, 'commit -qm init');
+  execGit(root, ['add', 'src/main.ts', 'src/transport/connection.ts', 'src/transport/helper.ts', 'manifest.json']);
+  execGit(root, ['commit', '-qm', 'init']);
   return root;
 }
 
@@ -56,6 +57,32 @@ describe('source runtime drift check', () => {
     const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
 
     expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
+  });
+
+  it('ignores inherited hook Git environment when creating synthetic repos', () => {
+    const parentHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+    }).trim();
+    const parentGitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+    }).trim();
+    vi.stubEnv('GIT_DIR', parentGitDir);
+    vi.stubEnv('GIT_WORK_TREE', process.cwd());
+    vi.stubEnv('GIT_INDEX_FILE', path.join(process.cwd(), '.git', 'index'));
+
+    const root = makeRepo();
+    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+    expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
+    expect(execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+    }).trim()).toBe(parentHead);
   });
 
   it('flags an imported module that exists but is untracked', () => {
@@ -99,7 +126,7 @@ describe('source runtime drift check', () => {
   it('flags staged-but-uncommitted runtime files', () => {
     const root = makeRepo();
     writeFileSync(path.join(root, 'src/transport/helper.ts'), "export function helper() { return 'changed'; }\n", 'utf8');
-    execGit(root, 'add src/transport/helper.ts');
+    execGit(root, ['add', 'src/transport/helper.ts']);
     const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
 
     expect(collectSourceRuntimeIssues(root, manifest)).toEqual(expect.arrayContaining([

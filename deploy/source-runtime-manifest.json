@@ -5,55 +5,82 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "b507b54b2b17e109be1645b148fa28c567d339fa08df4aec80979b75fb8cc1b5",
-      "mustContain": ["startHealthServer", "ConnectionManager"],
+      "sha256": "fcc98be602cddeb11557731622c1644cdbf5c1840007d10ca06317254db1127f",
+      "mustContain": [
+        "startHealthServer",
+        "createConnection"
+      ],
       "importGraph": true
     },
     {
       "path": "src/bootstrap.ts",
       "sha256": "75fae25e395cf2ecbb73cdb1b17f2473543b3adcfe6d87e39cc92c9405068278",
-      "mustContain": ["bootstrapCommon"],
+      "mustContain": [
+        "bootstrapCommon"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/transport/factory.ts",
+      "sha256": "e4f81559c617d07dd9c4c7698bb9c5ca66371207aabe7dbd8a1cc9b7c1be2cc0",
+      "mustContain": [
+        "createConnection",
+        "ConnectionManager",
+        "assertNeverTransport"
+      ],
       "importGraph": true
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "19db1fb76affa0e31c66f78f8749d3221ed27b59f6000d37a53c6199c8d03242",
-      "mustContain": ["decideDisconnectAction", "whatsapp_device_bond_lost"],
+      "sha256": "59a6145dd21ede81d3b1645cecbce66d342fe82beb2449b470eb61ef9d6c88fa",
+      "mustContain": [
+        "decideDisconnectAction",
+        "QR code received",
+        "Logged out"
+      ],
       "importGraph": true
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "87ba65f9c4a7888360b6d917d63ac10204291f60dac13f22d5dcf64c9e56ca70",
-      "mustContain": ["useMultiFileAuthState"],
-      "importGraph": true
-    },
-    {
-      "path": "src/transport/auth-bond.ts",
-      "mustContain": ["AuthBondGuard", "restoreLatestIfNeeded"],
+      "sha256": "c65617671c70c3560b3c6856972f0cefa8157265f19a37e875062ce85af477a7",
+      "mustContain": [
+        "useMultiFileAuthState",
+        "decideDisconnectAction"
+      ],
       "importGraph": true
     },
     {
       "path": "src/transport/auth-disconnect-policy.ts",
-      "sha256": "fd94295cd05d2ee5e2c120d88c18457cea9efa579b72e2f015586f73859c52a4",
-      "mustContain": ["decideDisconnectAction"],
+      "sha256": "c3bbf053b0ee1082183ac5a0ce84c23e0ba3b4de1ada6768e75cad74710e3452",
+      "mustContain": [
+        "decideDisconnectAction",
+        "logged-out",
+        "restart-required-flapping"
+      ],
       "importGraph": true
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "9f9ee64ee9923f0431fadab48630f0426de30b05f7d2cfbcd30df50154e0a5c3",
-      "mustContain": ["composeWithExactLineDedup"],
+      "sha256": "68b56ff068db74d683bf1cf869bfd2517bf5f5a9394e4cabe916ab2e6bfacecd",
+      "mustContain": [
+        "composeWithExactLineDedup"
+      ],
       "importGraph": true
     },
     {
       "path": "src/runtimes/agent/session-db.ts",
       "sha256": "aa3936fb7a50b996180bad55f93cdacebbbdc851102b6ecf8f677aa9947861d0",
-      "mustContain": ["getSessionTokenSnapshot"],
+      "mustContain": [
+        "getSessionTokenSnapshot"
+      ],
       "importGraph": true
     },
     {
       "path": "src/runtimes/agent/prompt-compose.ts",
       "sha256": "8edabbbc670aa79a9ae91a806db296f9ea6d32d3d7aaffa07da70f20c0b20f43",
-      "mustContain": ["composeWithExactLineDedup"],
+      "mustContain": [
+        "composeWithExactLineDedup"
+      ],
       "importGraph": true
     }
   ]
