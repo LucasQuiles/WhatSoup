@@ -1251,6 +1251,43 @@ def critical_asset_from_health_evidence(evidence: str) -> dict[str, Any] | None:
     }
 
 
+def critical_asset_instance(critical_asset: dict[str, Any] | None) -> str | None:
+    if not isinstance(critical_asset, dict):
+        return None
+    asset = critical_asset.get("asset")
+    if not isinstance(asset, dict):
+        return None
+    instance = str(asset.get("instance") or "").strip()
+    if not instance or instance == "unknown":
+        return None
+    return safe_alert_source_segment(instance)
+
+
+def alert_source_from_critical_asset(critical_asset: dict[str, Any] | None) -> str | None:
+    if not isinstance(critical_asset, dict):
+        return None
+    failure = critical_asset.get("failure")
+    if not isinstance(failure, dict):
+        return None
+    code = str(failure.get("code") or "").strip()
+    if code == "WA_AUTH_BOND_SERVER_REVOKED":
+        return "whatsapp_device_bond_lost"
+    return None
+
+
+def daily_summary_from_critical_asset(critical_asset: dict[str, Any] | None) -> str | None:
+    if not isinstance(critical_asset, dict):
+        return None
+    failure = critical_asset.get("failure")
+    if not isinstance(failure, dict):
+        return None
+    code = str(failure.get("code") or "").strip()
+    instance = critical_asset_instance(critical_asset) or "unknown"
+    if code == "WA_AUTH_BOND_SERVER_REVOKED":
+        return f"BOT ERRORS linked-device bond lost: {instance} requires verified relink"
+    return None
+
+
 def outbox_event(
     summary: str,
     evidence: str,
@@ -1289,7 +1326,12 @@ def outbox_event(
     critical_asset = critical_asset_from_health_evidence(str(event["evidence"]))
     if critical_asset is not None:
         event["criticalAsset"] = redact_json_value(critical_asset)
+        instance = critical_asset_instance(critical_asset)
+        if source == "daily-health" and instance:
+            event["instance"] = instance
     alert_source = alert_source_from_health_evidence(str(event["evidence"]))
+    if not alert_source:
+        alert_source = alert_source_from_critical_asset(critical_asset)
     if alert_source:
         event["alertSource"] = alert_source
     path = outbox / f"{event['createdAt'].replace(':', '').replace('-', '')}.{event_id}.json"
@@ -1943,6 +1985,8 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         append_evidence_field(details, "status", status_text)
         if status_text == "degraded":
             add_marker("health_degraded")
+        elif status_text == "unhealthy":
+            add_marker("health_unhealthy")
     connected = whatsapp.get("connected")
     if isinstance(connected, bool):
         details.append(f"wa_connected={str(connected).lower()}")
@@ -2173,6 +2217,8 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "health_probe_auth_failed" in details
         or "health_identity_mismatch" in details
         or "auth_bond_at_risk" in details
+        or "physical_intervention_required" in details
+        or "health_unhealthy" in details
     ):
         prefix = "FAIL "
     elif (
@@ -4492,15 +4538,19 @@ def daily() -> int:
         failures.append(f"required tools missing: {','.join(missing_required_tools)}")
     warnings = [line for line in lines if line.startswith("WARN ") or " WARN " in line]
     severity = "critical" if failures else "warning" if warnings else "info"
+    evidence = "\n".join(lines)
+    critical_asset = critical_asset_from_health_evidence(evidence) if severity != "info" else None
     if missing_required_tools:
         summary = f"BOT ERRORS daily health found issues: missing required tools {','.join(missing_required_tools)}"
     else:
-        summary = "BOT ERRORS daily health found issues" if severity != "info" else "BOT ERRORS daily health passed"
+        summary = (
+            daily_summary_from_critical_asset(critical_asset)
+            or ("BOT ERRORS daily health found issues" if severity != "info" else "BOT ERRORS daily health passed")
+        )
     event_type = "clear" if severity == "info" else "alert"
     if severity == "info" and has_shadow_source_update_blocked(lines):
         summary = "BOT ERRORS daily health retained source-update shadow observation"
         event_type = "observation"
-    evidence = "\n".join(lines)
     path = outbox_event(summary, evidence, severity=severity, source="daily-health", event_type=event_type)
     print(path)
     source_update_signal = enforced_source_update_signal(lines)
