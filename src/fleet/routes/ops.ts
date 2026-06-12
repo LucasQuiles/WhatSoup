@@ -1280,7 +1280,11 @@ export async function handleAuth(
             const tmpPath = cfgPath + '.tmp';
             writePrivateFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n');
             fs.renameSync(tmpPath, cfgPath);
-          } catch { /* config write failed — intro won't re-fire but not critical */ }
+          } catch (err) {
+            // Not fatal to the auth flow, but without this warn the operator
+            // has no clue why the instance never re-introduced itself.
+            log.warn({ err, instance: params.name }, 'introSent reset failed after re-auth; intro will not re-fire on next boot');
+          }
           deps.serviceManager.startFire(params.name, (err: Error | null) => {
             if (err) log.error({ err, instance: params.name }, 'post-auth start failed');
           });
