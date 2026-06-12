@@ -57,3 +57,50 @@ describe('generateMcpConfigFile – oracle comparison', () => {
     expect(json).toContain(proxyScript);
   });
 });
+
+// ---------------------------------------------------------------------------
+// opencode-cli uses a different schema than claude/gemini/codex: a top-level
+// `mcp` object whose entries are `{ type: 'local', command: [argv...],
+// environment: {...}, enabled: true }` — verified against the installed
+// opencode 1.16.2 global config (~/.config/opencode/opencode.json). The single
+// `command` array is the flattened launch argv (command + args), and the env
+// vars live under `environment` (NOT claude's `env`). The whatsoup MCP must be
+// emitted for opencode-cli or the agent loses send_message + all tools.
+// ---------------------------------------------------------------------------
+
+describe('generateMcpConfigFile – opencode-cli schema', () => {
+  const socketPath = '/tmp/test.sock';
+  const proxyScript = '/opt/whatsoup/deploy/mcp/whatsoup-proxy.ts';
+
+  it('emits opencode mcp shape with flattened command argv and environment', () => {
+    const launch = buildMcpLaunchCommand(proxyScript);
+    const result = generateMcpConfigFile('opencode-cli', socketPath, proxyScript);
+    expect(result).toEqual({
+      mcp: {
+        whatsoup: {
+          type: 'local',
+          command: [launch.command, ...launch.args],
+          environment: { WHATSOUP_SOCKET: socketPath },
+          enabled: true,
+        },
+      },
+    });
+  });
+
+  it('does NOT use claude-style mcpServers/env keys for opencode', () => {
+    const result = generateMcpConfigFile('opencode-cli', socketPath, proxyScript);
+    const json = JSON.stringify(result);
+    expect(json).not.toContain('mcpServers');
+    expect(json).toContain('"environment"');
+    expect(json).not.toContain('"env"');
+    expect(json).toContain('"type":"local"');
+  });
+
+  it('serialized JSON is well-formed and contains the proxy script and socket', () => {
+    const config = generateMcpConfigFile('opencode-cli', socketPath, proxyScript);
+    const json = JSON.stringify(config, null, 2);
+    expect(JSON.parse(json)).toEqual(config);
+    expect(json).toContain(proxyScript);
+    expect(json).toContain(socketPath);
+  });
+});

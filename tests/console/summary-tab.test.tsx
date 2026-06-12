@@ -11,6 +11,27 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
 import { cleanup, render, screen, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+
+// SummaryTab embeds the agent-mode ProvidersKeysCard, which fetches provider
+// status/catalog via use-fleet hooks. Stub realtime (so polling is inert) and
+// the api client (so no real network calls) — these tests assert the static
+// summary surface, not the provider card's fetch behavior (covered by
+// providers-keys-card.test.tsx).
+vi.mock('../../console/src/hooks/use-websocket', () => ({
+  useRealtime: () => ({ connected: false }),
+}))
+vi.mock('../../console/src/lib/api', () => ({
+  api: {
+    restart: vi.fn(),
+    stopInstance: vi.fn(),
+    getProviders: vi.fn().mockResolvedValue([]),
+    getProviderStatus: vi.fn().mockResolvedValue({
+      primary: { provider: null, model: null, keyPresent: null },
+      fallback: { provider: null, model: null, keyPresent: null, active: false, activeUntil: null },
+    }),
+  },
+}))
 
 import { SummaryTab } from '../../console/src/components/line-detail/SummaryTab'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
@@ -40,7 +61,12 @@ const toastValue: ToastContextValue = {
 }
 
 function withToast(node: ReactElement) {
-  return <ToastContext.Provider value={toastValue}>{node}</ToastContext.Provider>
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return (
+    <QueryClientProvider client={client}>
+      <ToastContext.Provider value={toastValue}>{node}</ToastContext.Provider>
+    </QueryClientProvider>
+  )
 }
 
 interface LineOverrides {

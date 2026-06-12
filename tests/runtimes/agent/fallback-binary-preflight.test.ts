@@ -295,6 +295,29 @@ describe('armFallbackWindow — binary pre-flight', () => {
     expect(probeFallbackBinaryMock).not.toHaveBeenCalled();
   });
 
+  // ── probe never blocks arming ────────────────────────────────────────────────
+
+  it('arms the window synchronously even when the probe never settles', () => {
+    // A probe that hangs forever (e.g. a wedged child process the kill-timer
+    // somehow misses) must not delay or gate arming: the window fields are set
+    // before the probe promise is ever inspected.
+    probeFallbackBinaryMock.mockImplementation(() => new Promise(() => {}));
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    fbView(runtime).activateProviderFallback(null);
+
+    // Deliberately NO await / waitFor / microtask drain before these asserts —
+    // the synchronous return of activateProviderFallback must already have
+    // armed the window while the probe is still pending.
+    expect(fbView(runtime).fallbackActiveUntil).not.toBeNull();
+    expect(fbView(runtime).effectiveProvider).toBe('opencode-cli');
+    expect(probeFallbackBinaryMock).toHaveBeenCalledWith('opencode');
+  });
+
   // ── restore path ───────────────────────────────────────────────────────────
 
   it('fires fallback_binary_missing when restorePersistedFallbackWindow arms with missing binary', async () => {

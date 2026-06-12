@@ -370,12 +370,20 @@ describe('validateInstanceConfig — twilioConfig sender XOR', () => {
 // ---------------------------------------------------------------------------
 
 describe('validateInstanceConfig — twilioConfig.inboundMode', () => {
-  it('rejects inboundMode: webhook with exact remediation text', () => {
+  it('accepts inboundMode: webhook with a complete webhook block', () => {
+    const cfg = validTwilioConfig({
+      inboundMode: 'webhook',
+      webhook: { publicBaseUrl: 'https://relay.example.test', listenPort: 8443 },
+    });
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: cfg });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+
+  it('rejects inboundMode: webhook without a webhook block, naming the field', () => {
     const cfg = validTwilioConfig({ inboundMode: 'webhook' });
     const raw = baseRaw({ transport: 'twilio', twilioConfig: cfg });
     const err = validateInstanceConfig(raw, ctx());
-    expect(err?.field).toBe('twilioConfig.inboundMode');
-    expect(err?.message).toBe("webhook inbound is not yet supported; use inboundMode:'poll'");
+    expect(err?.field).toBe('twilioConfig.webhook');
   });
 
   it('rejects unknown inboundMode value', () => {
@@ -587,7 +595,7 @@ describe('validateInstanceConfig — transport review hardening', () => {
       twilioConfig: validTwilioConfig({ inboundMode: 'streaming' }),
     });
     const err = validateInstanceConfig(raw, ctx());
-    expect(err?.message).toBe("twilioConfig.inboundMode must be 'poll' (webhook is not yet supported)");
+    expect(err?.message).toBe("twilioConfig.inboundMode must be 'poll' or 'webhook'");
   });
 
   it('requires twilioConfig in load mode too (daemon startup path)', () => {
@@ -638,5 +646,56 @@ describe('validateInstanceConfig — twilio rateLimit bounds', () => {
       });
       expect(validateInstanceConfig(raw, ctx())).toBeNull();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateInstanceConfig — webhook inbound (stage 2 unlock)
+// ---------------------------------------------------------------------------
+
+describe('validateInstanceConfig — webhook inbound (stage 2 unlock)', () => {
+  it('accepts inboundMode webhook with a complete webhook block', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({
+      inboundMode: 'webhook',
+      webhook: { publicBaseUrl: 'https://relay.example.test', listenPort: 8443 },
+    }) });
+    expect(validateInstanceConfig(raw, ctx())).toBeNull();
+  });
+  it('rejects webhook mode without a webhook block, naming the field', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({ inboundMode: 'webhook' }) });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.field).toBe('twilioConfig.webhook');
+  });
+  it('rejects a non-https publicBaseUrl', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({
+      inboundMode: 'webhook', webhook: { publicBaseUrl: 'http://insecure.example', listenPort: 8443 },
+    }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('twilioConfig.webhook.publicBaseUrl');
+  });
+  it('rejects voice.enabled with poll mode (coherence rule, exact remediation)', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({
+      voice: { enabled: true, voicemailMaxLengthSec: 120 },
+    }) });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.message).toBe("voice requires inboundMode:'webhook' (transcription arrives via webhook callbacks)");
+  });
+  it('rejects webhook block when inboundMode is poll (fail closed)', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: validTwilioConfig({
+      webhook: { publicBaseUrl: 'https://x.example', listenPort: 8443 },
+    }) });
+    expect(validateInstanceConfig(raw, ctx())?.field).toBe('twilioConfig.webhook');
+  });
+  it('rejects voice.enabled:true with no phoneNumber (calls.create requires from: string)', () => {
+    const raw = baseRaw({ transport: 'twilio', twilioConfig: {
+      ...validTwilioConfig({
+        phoneNumber: undefined,
+        messagingServiceSid: 'MG' + 'c'.repeat(32),
+        inboundMode: 'webhook',
+        webhook: { publicBaseUrl: 'https://relay.example.test', listenPort: 8443 },
+        voice: { enabled: true, voicemailMaxLengthSec: 120 },
+      }),
+    } });
+    const err = validateInstanceConfig(raw, ctx());
+    expect(err?.message).toBe('voice requires phoneNumber (calls cannot originate from a messagingServiceSid)');
   });
 });

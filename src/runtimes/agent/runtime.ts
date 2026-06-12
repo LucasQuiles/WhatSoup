@@ -36,7 +36,7 @@ import {
   loadFallbackState,
   clearFallbackState,
 } from './fallback-state-db.ts';
-import { chatJidToWorkspace, provisionWorkspace, writePrivateFileSync, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
+import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
 import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
 import {
@@ -69,7 +69,7 @@ import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
-import { createProviderMcpBridge, generateMcpConfigFile } from './providers/mcp-bridge.ts';
+import { createProviderMcpBridge, writeProviderMcpConfig } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { probeFallbackBinary } from './providers/binary-preflight.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
@@ -2346,14 +2346,31 @@ export class AgentRuntime implements Runtime {
         this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
 
-        // Write .mcp.json so Claude Code discovers the whatsoup MCP server
+        // Write the whatsoup MCP config to the file the active provider's CLI
+        // reads. claude/gemini/codex → .mcp.json (mcpServers shape); opencode-cli
+        // → opencode.json (opencode `mcp` shape), merged with any pre-existing
+        // user opencode.json. Native-bridge/API providers return null (no file).
         const mcpServerScript = resolve(
           new URL('.', import.meta.url).pathname,
           '../../../deploy/mcp/whatsoup-proxy.ts',
         );
-        const mcpConfig = generateMcpConfigFile('claude-cli', socketPath, mcpServerScript);
-        writePrivateFileSync(join(agentCwd, '.mcp.json'), JSON.stringify(mcpConfig, null, 2));
-        log.info({ agentCwd }, 'wrote .mcp.json for whatsoup');
+        const opencodeProviderConfig =
+          this.agentProvider === 'opencode-cli' && this.agentProviderConfig
+            ? {
+                baseUrl: typeof this.agentProviderConfig['baseUrl'] === 'string'
+                  ? (this.agentProviderConfig['baseUrl'] as string)
+                  : undefined,
+                model: this.model,
+              }
+            : undefined;
+        const mcpConfigPath = writeProviderMcpConfig(
+          this.agentProvider,
+          agentCwd,
+          socketPath,
+          mcpServerScript,
+          opencodeProviderConfig,
+        );
+        log.info({ agentCwd, provider: this.agentProvider, mcpConfigPath }, 'wrote whatsoup MCP config');
       } catch (err) {
         if (this.globalSocketServer) {
           try {

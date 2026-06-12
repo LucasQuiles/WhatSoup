@@ -17,6 +17,8 @@ import { PresenceCache } from '../presence-cache.ts';
 import type { WhatsAppSocket, ConnectionStateSnapshot } from '../connection.ts';
 import type { Subscription } from '../contract/subscription.ts';
 import { toSmsJid, fromSmsJid } from '../../core/jid-constants.ts';
+import type { TwilioWebhookServer } from './webhook-server.ts';
+import type { TwilioSmsAdapter } from './adapter.ts';
 
 /** Error thrown when an operation is not supported by the SMS transport. */
 export class UnsupportedTransportOperationError extends Error {
@@ -56,6 +58,7 @@ export class UnsupportedTransportOperationError extends Error {
  * chatJid/senderJid are `@sms`-suffixed (see SMS JID scheme above).
  */
 function contractToIncoming(msg: ContractInboundMessage): IncomingMessage {
+  const voiceAttachment = msg.attachments.find((a) => a.kind === 'voice');
   return {
     messageId: msg.ref.id,
     chatJid: toSmsJid(msg.conversation.id),
@@ -63,7 +66,7 @@ function contractToIncoming(msg: ContractInboundMessage): IncomingMessage {
     senderName: null,
     content: msg.text,
     contentText: null,
-    contentType: 'text',
+    contentType: voiceAttachment !== undefined ? 'audio' : 'text',
     isFromMe: msg.fromMe,
     isGroup: false,
     mentionedJids: [],
@@ -93,10 +96,12 @@ function contractToIncoming(msg: ContractInboundMessage): IncomingMessage {
  *   - src/runtimes/chat/runtime.ts: sendMessage (Messenger interface)
  */
 export class TwilioConnection extends EventEmitter implements RuntimeConnection {
-  private readonly adapter: TransportAdapter;
+  private readonly adapter: TwilioSmsAdapter;
+  private readonly webhookServer: TwilioWebhookServer | null;
   private readonly log = createChildLogger('twilio-bridge');
   private messageSubscription: Subscription | null = null;
   private errorSubscription: Subscription | null = null;
+  private boundPort: number | null = null;
   // NOTE: the adapter also emits 'state' events, but the bridge deliberately
   // does not subscribe — health reporting is pull-based via
   // getConnectionState() (health.ts polls), matching the Baileys path.
@@ -118,9 +123,18 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
   /** Consumer: health.ts:509 (read unconditionally) */
   readonly presenceCache = new PresenceCache();
 
-  constructor(adapter: TransportAdapter) {
+  constructor(adapter: TwilioSmsAdapter, webhookServer?: TwilioWebhookServer) {
     super();
     this.adapter = adapter;
+    this.webhookServer = webhookServer ?? null;
+  }
+
+  /**
+   * Returns the bound port of the webhook server after connect(), or null
+   * when not in webhook mode. Used by tests and ops tooling.
+   */
+  getBoundPort(): number | null {
+    return this.boundPort;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -136,6 +150,11 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
     // Set sender identity from adapter after connect (JID-shaped for any
     // consumer that derives a conversation key from it).
     this.botJid = toSmsJid(this.adapter.selfRef().id);
+
+    // Start webhook server when configured (webhook inbound mode).
+    if (this.webhookServer !== null) {
+      this.boundPort = await this.webhookServer.start();
+    }
 
     // Subscribe inbound messages and translate to IncomingMessage for ingest.
     // Dispose any previous subscription first so a double connect() cannot
@@ -171,12 +190,18 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
   /**
    * Consumer: main.ts:850 (connectionManager.shutdown())
    */
-  shutdown(): void {
+  // RuntimeConnection declares shutdown(): void; returning a promise is
+  // assignable, lets tests await deterministic teardown (port release), and
+  // keeps main.ts's fire-and-forget call site unchanged.
+  async shutdown(): Promise<void> {
     this.messageSubscription?.dispose();
     this.messageSubscription = null;
     this.errorSubscription?.dispose();
     this.errorSubscription = null;
-    void this.adapter.disconnect();
+    if (this.webhookServer !== null) {
+      await this.webhookServer.stop();
+    }
+    await this.adapter.disconnect();
   }
 
   // ── Messenger implementation (src/core/types.ts:24-29) ───────────────────

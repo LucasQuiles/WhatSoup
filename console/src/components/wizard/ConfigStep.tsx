@@ -29,6 +29,8 @@ interface AgentOptions {
   enabledPlugins?: Record<string, boolean>
   provider?: string
   providerConfig?: Record<string, unknown>
+  fallbackProvider?: string
+  fallbackModel?: string
 }
 
 /** All known plugins. Order determines display order in the UI. */
@@ -281,6 +283,26 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
     [agentOptions.provider],
   )
 
+  // Fallback provider/model — optional secondary backend the runtime switches to
+  // when the primary hits a usage limit. Empty values are removed so they never
+  // serialize as blank strings into agentOptions.
+  const handleFallbackOption = useCallback(
+    (key: 'fallbackProvider' | 'fallbackModel', value: string) => {
+      const normalized = value === '' ? undefined : value
+      if ((agentOptions[key] ?? undefined) === normalized) return
+      const next = { ...agentOptions }
+      if (normalized === undefined) {
+        delete next[key]
+      } else {
+        next[key] = normalized
+      }
+      onChange({ agentOptions: next })
+    },
+    [agentOptions, onChange],
+  )
+
+  const fallbackEnabled = (agentOptions.fallbackProvider ?? '') !== ''
+
   const [activeTab, setActiveTab] = useState<string>('access')
 
 
@@ -486,6 +508,51 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               </Field>
             )
           })}
+
+          {/* Fallback provider — optional secondary backend on usage-limit */}
+          <CheckboxField
+            label="Configure a fallback provider"
+            checked={fallbackEnabled}
+            onChange={(v) => {
+              if (v) {
+                // Default to the primary provider id so the select has a value.
+                handleFallbackOption('fallbackProvider', agentOptions.provider ?? DEFAULT_PROVIDER_ID)
+              } else {
+                handleFallbackOption('fallbackProvider', '')
+                handleFallbackOption('fallbackModel', '')
+              }
+            }}
+            helper="Switch to a backup provider when the primary hits a usage limit"
+          />
+          {fallbackEnabled && (
+            <>
+              <Field label="Fallback Provider" helper="Backup AI backend for this agent instance" confirmed={(agentOptions.fallbackProvider ?? '').length > 0}>
+                {(id) => (
+                  <SelectInput
+                    id={id}
+                    value={agentOptions.fallbackProvider ?? DEFAULT_PROVIDER_ID}
+                    onChange={(e) => handleFallbackOption('fallbackProvider', e.target.value)}
+                    confirmed={(agentOptions.fallbackProvider ?? '').length > 0}
+                  >
+                    {PROVIDERS.map(p => (
+                      <option key={p.id} value={p.id}>{p.displayName}</option>
+                    ))}
+                  </SelectInput>
+                )}
+              </Field>
+              <Field label="Fallback Model" confirmed={(agentOptions.fallbackModel ?? '').length > 0}>
+                {(id) => (
+                  <TextInput
+                    id={id}
+                    value={agentOptions.fallbackModel ?? ''}
+                    onChange={(e) => handleFallbackOption('fallbackModel', e.target.value)}
+                    placeholder="claude-sonnet-4-6"
+                    confirmed={(agentOptions.fallbackModel ?? '').length > 0}
+                  />
+                )}
+              </Field>
+            </>
+          )}
 
           {/* Sandbox per chat */}
           <CheckboxField

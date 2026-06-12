@@ -6,7 +6,7 @@ import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
 import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
-import { DEFAULT_TWILIO_SMS, type TwilioSmsConfig, type TwilioInboundMode } from './transport/twilio/types.ts';
+import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -623,6 +623,42 @@ export function resolveTwilioSmsConfig(
   const rateLimitSrc = record(src['rateLimit']);
   const smsPerMinute = numberProp(rateLimitSrc, 'smsPerMinute', DEFAULT_TWILIO_SMS.rateLimit.smsPerMinute);
 
+  // webhook block: pass through when present, normalize trailing slash in publicBaseUrl
+  const webhookSrc = record(src['webhook']);
+  let webhookConfig: TwilioWebhookConfig | undefined;
+  if (webhookSrc !== undefined) {
+    const rawBaseUrl = stringProp(webhookSrc, 'publicBaseUrl') ?? '';
+    const publicBaseUrl = rawBaseUrl.endsWith('/') ? rawBaseUrl.slice(0, -1) : rawBaseUrl;
+    const listenPort = numberProp(webhookSrc, 'listenPort', 0);
+    const listenAddress = stringProp(webhookSrc, 'listenAddress');
+    webhookConfig = {
+      publicBaseUrl,
+      listenPort,
+      ...(listenAddress !== undefined ? { listenAddress } : {}),
+    };
+  }
+
+  // voice block: merge with DEFAULT_TWILIO_VOICE defaults
+  const voiceSrc = record(src['voice']);
+  let voiceConfig: TwilioVoiceConfig | undefined;
+  if (voiceSrc !== undefined) {
+    const enabled =
+      typeof voiceSrc['enabled'] === 'boolean'
+        ? (voiceSrc['enabled'] as boolean)
+        : DEFAULT_TWILIO_VOICE.enabled;
+    const voicemailMaxLengthSec = numberProp(
+      voiceSrc,
+      'voicemailMaxLengthSec',
+      DEFAULT_TWILIO_VOICE.voicemailMaxLengthSec,
+    );
+    const voicemailGreeting = stringProp(voiceSrc, 'voicemailGreeting');
+    voiceConfig = {
+      enabled,
+      voicemailMaxLengthSec,
+      ...(voicemailGreeting !== undefined ? { voicemailGreeting } : {}),
+    };
+  }
+
   // Build result without optional fields, then spread them in only if defined.
   // This preserves the XOR invariant: absent fields remain undefined (not present),
   // matching the type signature readonly phoneNumber?: string.
@@ -635,6 +671,8 @@ export function resolveTwilioSmsConfig(
     rateLimit: { smsPerMinute },
     ...(phoneNumber !== undefined ? { phoneNumber } : {}),
     ...(messagingServiceSid !== undefined ? { messagingServiceSid } : {}),
+    ...(webhookConfig !== undefined ? { webhook: webhookConfig } : {}),
+    ...(voiceConfig !== undefined ? { voice: voiceConfig } : {}),
   };
 }
 

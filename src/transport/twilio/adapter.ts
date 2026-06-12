@@ -23,9 +23,12 @@ import {
   PermanentProviderError,
   RateLimitedError,
   TransientProviderError,
+  UnsupportedCapabilityError,
 } from '../contract/errors.ts';
-import { E164_RE, type TwilioSmsConfig } from './types.ts';
+import type { CallRef, VoiceCapableTransport, PlaceCallOptions } from '../contract/voice.ts';
+import { E164_RE, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioVoiceConfig } from './types.ts';
 import type { InboundSms, TwilioSmsPort } from './port.ts';
+import type { TranscriptDelivery } from './webhook-payloads.ts';
 
 // ---------------------------------------------------------------------------
 // Listener registry
@@ -98,13 +101,13 @@ function mapPortError(
 // Dedupe-set capacity.
 //
 // The seen Set is bounded to DEDUPE_CAP entries (insertion-order eviction).
-// After processing each poll batch, the set is trimmed to DEDUPE_CAP by
-// removing the oldest entries (first inserted). This bounds memory while
-// preserving the dedup guarantee for the most recently seen SIDs.
+// Trimming happens per accepted record inside handleInboundRecord — the
+// shared seam used by both the poll loop and the webhook push path — by
+// removing the oldest entries (first inserted) until the set is back at cap.
 //
-// Eviction is post-batch (not per-record) to prevent cascade: if eviction
-// happened mid-iteration, each new entry in the same batch could evict the
-// previous entry, turning O(1) dedupe into O(n) re-emission.
+// Per-record trimming cannot cascade re-emissions here because the poll
+// fetch is capped at 500 records per tick (< DEDUPE_CAP), so a single batch
+// can never evict entries added earlier in the same batch.
 //
 // Note: a restart that replays within the lookback window will re-emit any
 // message whose SID was evicted — replay within the window is best-effort,
@@ -113,10 +116,12 @@ function mapPortError(
 // ---------------------------------------------------------------------------
 const DEDUPE_CAP = 1000;
 
+const DEFAULT_PLACE_CALL_TWIML = '<Response><Say>This line is text-first. Please leave a message.</Say></Response>';
+
 // ---------------------------------------------------------------------------
 // TwilioSmsAdapter
 // ---------------------------------------------------------------------------
-export class TwilioSmsAdapter implements TransportAdapter {
+export class TwilioSmsAdapter implements TransportAdapter, VoiceCapableTransport {
   readonly capabilities: Capabilities;
 
   private health: AdapterHealth = { state: 'disconnected', since: new Date() };
@@ -132,6 +137,8 @@ export class TwilioSmsAdapter implements TransportAdapter {
   private readonly from: string | undefined;
   private readonly messagingServiceSid?: string;
   private readonly pollIntervalMs: number;
+  private readonly voice: TwilioVoiceConfig;
+  private readonly inboundMode: string;
 
   // Monotonic per-adapter ingest counter — incremented for each emitted message.
   private ingestSeq = 0;
@@ -174,6 +181,8 @@ export class TwilioSmsAdapter implements TransportAdapter {
     this.from = config.phoneNumber;
     this.messagingServiceSid = config.messagingServiceSid;
     this.pollIntervalMs = config.pollIntervalMs;
+    this.voice = config.voice ?? DEFAULT_TWILIO_VOICE;
+    this.inboundMode = config.inboundMode;
 
     this.capabilities = {
       channel: this.channelId,
@@ -219,10 +228,10 @@ export class TwilioSmsAdapter implements TransportAdapter {
     }
     this.transitionTo({ state: 'connected', since: new Date() });
 
-    // Start inbound poll loop when pollIntervalMs > 0.
+    // Start inbound poll loop when pollIntervalMs > 0 and inboundMode is 'poll'.
     // Cursor initialised to (now - pollIntervalMs) as a lookback window so
     // messages that arrived just before connect are not silently dropped.
-    if (this.pollIntervalMs > 0) {
+    if (this.inboundMode === 'poll' && this.pollIntervalMs > 0) {
       this.lastPolledAt = new Date(Date.now() - this.pollIntervalMs);
       this.pollTimer = setInterval(() => {
         void this.pollOnce();
@@ -319,6 +328,50 @@ export class TwilioSmsAdapter implements TransportAdapter {
     };
   }
 
+  // ── Voice (VoiceCapableTransport) ─────────────────────────────────────────
+
+  async placeCall(target: ConversationRef, opts?: PlaceCallOptions): Promise<CallRef> {
+    const correlationId = opts?.correlationId ?? this.nextCorrelationId();
+
+    if (!this.voice.enabled) {
+      throw new UnsupportedCapabilityError({
+        channelId: this.channelId,
+        operation: 'placeCall',
+        correlationId,
+        scope: 'request',
+        message: 'voice is not enabled for this transport; set voice.enabled: true in twilioConfig',
+      });
+    }
+
+    if (!E164_RE.test(target.id)) {
+      throw new ConversationNotFoundError({
+        channelId: this.channelId,
+        operation: 'placeCall',
+        correlationId,
+        scope: 'conversation',
+        message: `target id is not a valid E.164 destination`,
+      });
+    }
+
+    const twiml = opts?.twiml ?? DEFAULT_PLACE_CALL_TWIML;
+
+    let result: { sid: string; status: string };
+    try {
+      result = await this.port.placeCall({
+        to: target.id,
+        from: this.from,
+        twiml,
+      });
+    } catch (err) {
+      throw mapPortError(err, this.channelId, 'placeCall', correlationId, 'request');
+    }
+
+    return {
+      id: result.sid,
+      status: result.status as CallRef['status'],
+    };
+  }
+
   // ── Events ───────────────────────────────────────────────────────────────
 
   on(event: 'message', handler: (e: InboundMessage) => void): Subscription;
@@ -342,10 +395,10 @@ export class TwilioSmsAdapter implements TransportAdapter {
    * On transient/rate-limit failure: emits error, keeps polling (interval
    * cadence is unchanged — no tight loop).
    *
-   * Dedupe eviction is post-batch: all new SIDs in a batch are first processed
-   * and emitted, then the seen set is trimmed to DEDUPE_CAP oldest-first. This
-   * prevents cascade re-emission that would occur if we evicted per-record
-   * mid-iteration (each eviction would expose the next record as "unseen").
+   * Dedupe eviction happens per accepted record inside handleInboundRecord
+   * (shared with the webhook push path); the 500-record fetch cap keeps a
+   * single batch below DEDUPE_CAP, so per-record trimming cannot evict
+   * same-batch entries.
    */
   async pollOnce(): Promise<void> {
     // Guards: skip if disconnected/disposed, not in a pollable state, or a
@@ -388,29 +441,12 @@ export class TwilioSmsAdapter implements TransportAdapter {
     let maxSentAt: Date | null = null;
 
     for (const record of records) {
-      // SID-based dedupe — skip already-seen records
-      if (this.seen.has(record.sid)) continue;
-
-      // Add to seen set (eviction happens post-batch to prevent cascade)
-      this.seen.add(record.sid);
-
       // Track maximum sentAt to advance the cursor after this batch.
       if (maxSentAt === null || record.sentAt > maxSentAt) {
         maxSentAt = record.sentAt;
       }
-
-      // Build the InboundMessage and emit.
-      const msg = this.buildInboundMessage(record);
-      this.safeEmit(this.listeners.message, msg);
-    }
-
-    // Post-batch eviction: trim the seen set to DEDUPE_CAP by removing the
-    // oldest entries (first inserted by insertion-order of Set). This is done
-    // after the full batch loop to avoid cascade: mid-loop eviction would cause
-    // the just-evicted SID to appear "unseen" for the next record in the same tick.
-    for (const oldest of this.seen) {
-      if (this.seen.size <= DEDUPE_CAP) break;
-      this.seen.delete(oldest);
+      // Delegate dedupe + emit + trim to shared seam
+      this.handleInboundRecord(record);
     }
 
     // Advance cursor to max sentAt seen (not Date.now()) to avoid clock-skew
@@ -418,6 +454,58 @@ export class TwilioSmsAdapter implements TransportAdapter {
     if (maxSentAt !== null) {
       this.lastPolledAt = maxSentAt;
     }
+  }
+
+  // ── Shared inbound pipeline ───────────────────────────────────────────────
+
+  /**
+   * Process one provider record through the shared dedupe + emit pipeline.
+   * Used by the poll loop AND (stage 2) the webhook push path, so both
+   * modes share one `seen` set and one emitter. Returns true if emitted.
+   */
+  handleInboundRecord(record: InboundSms): boolean {
+    if (this.disposed || this.health.state !== 'connected') return false;
+    if (this.seen.has(record.sid)) return false;
+    this.seen.add(record.sid);
+    const msg = this.buildInboundMessage(record);
+    this.safeEmit(this.listeners.message, msg);
+    // Post-record eviction: trim the seen set to DEDUPE_CAP by removing the
+    // oldest entries (first inserted by insertion-order of Set).
+    for (const oldest of this.seen) {
+      if (this.seen.size <= DEDUPE_CAP) break;
+      this.seen.delete(oldest);
+    }
+    return true;
+  }
+
+  /**
+   * Process a completed voicemail transcription through the shared dedupe + emit pipeline.
+   * Dedupes on recordingSid (same key-space as message SIDs in the seen set).
+   * Returns true if emitted.
+   */
+  handleTranscript(t: TranscriptDelivery): boolean {
+    if (this.disposed || this.health.state !== 'connected') return false;
+    if (this.seen.has(t.recordingSid)) return false;
+    this.seen.add(t.recordingSid);
+    const peer = t.from;
+    this.safeEmit(this.listeners.message, {
+      ref: { channel: this.channelId, conversation: peer, id: t.recordingSid },
+      conversation: { channel: this.channelId, id: peer },
+      sender: { channel: this.channelId, id: peer },
+      fromMe: false,
+      text: t.text.trim().length > 0 ? t.text : null,
+      attachments: [{ id: t.recordingSid, kind: 'voice', mime: 'audio/mpeg' }],
+      timestamp: new Date(),
+      inboundEventKey: t.recordingSid,
+      transportTimestamp: new Date(),
+      ingestSeq: ++this.ingestSeq,
+    });
+    // Post-record eviction: trim the seen set to DEDUPE_CAP.
+    for (const oldest of this.seen) {
+      if (this.seen.size <= DEDUPE_CAP) break;
+      this.seen.delete(oldest);
+    }
+    return true;
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────

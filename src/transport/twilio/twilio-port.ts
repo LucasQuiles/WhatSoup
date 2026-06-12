@@ -5,7 +5,7 @@
 // error messages.
 
 import type { TwilioSmsConfig } from './types.ts';
-import type { InboundSms, SendSmsArgs, TwilioPortError, TwilioSmsPort } from './port.ts';
+import type { InboundSms, PlaceCallArgs, SendSmsArgs, TwilioPortError, TwilioSmsPort } from './port.ts';
 import { lookupCredential } from '../../lib/keyring.ts';
 
 // ---------------------------------------------------------------------------
@@ -49,6 +49,20 @@ interface MessageListLike {
   }): Promise<MessageInstanceLike[]>;
 }
 
+interface CallInstanceLike {
+  sid: string;
+  status: string;
+}
+
+interface CallListLike {
+  create(params: {
+    to: string;
+    from?: string;
+    twiml?: string;
+    statusCallback?: string;
+  }): Promise<CallInstanceLike>;
+}
+
 export interface TwilioClientLike {
   api: {
     v2010: {
@@ -56,6 +70,7 @@ export interface TwilioClientLike {
     };
   };
   messages: MessageListLike;
+  calls: CallListLike;
 }
 
 // ---------------------------------------------------------------------------
@@ -326,5 +341,20 @@ export class SdkTwilioSmsPort implements TwilioSmsPort {
       return results.slice(0, pageSize);
     }
     return results;
+  }
+
+  async placeCall(args: PlaceCallArgs): Promise<{ sid: string; status: string }> {
+    const c = await this.client();
+    try {
+      const call = await c.calls.create({
+        to: args.to,
+        from: args.from,
+        twiml: args.twiml,
+        statusCallback: args.statusCallback,
+      });
+      return { sid: call.sid, status: call.status };
+    } catch (err) {
+      scrubAndRethrow(err, this._token);
+    }
   }
 }

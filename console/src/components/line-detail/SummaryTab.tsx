@@ -7,6 +7,7 @@ import { formatRelative } from '../../lib/format-time'
 import { getProvider, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import ConfirmDialog from '../ConfirmDialog'
 import { PipelineNode, PipelineArrow } from './PipelineTab'
+import { ProvidersKeysCard } from './ProvidersKeysCard'
 import { buildConfigEntries, TYPE_COLOR } from './config-helpers'
 import { getModeColor } from './types'
 import type { LineInstance } from './types'
@@ -235,6 +236,9 @@ export function SummaryTab({
           </div>
         </motion.div>
       </div>
+
+      {/* Row 4: Providers & Keys — agent mode only (read-only) */}
+      {line.mode === 'agent' && <ProvidersKeysCard lineName={line.name} />}
 
       {/* Confirmation dialogs for destructive actions */}
       <ConfirmDialog

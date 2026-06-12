@@ -454,3 +454,23 @@ describe('TwilioConnection background error logging', () => {
     }
   });
 });
+
+describe('TwilioConnection voice message mapping', () => {
+  it('maps a voice-attachment InboundMessage to contentType audio with transcript content', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { bridge, adapter } = makeBridge({ voice: { enabled: true, voicemailMaxLengthSec: 120 } });
+    const received: IncomingMessage[] = [];
+    bridge.onMessage = (m) => received.push(m);
+    await bridge.connect();
+    adapter.handleTranscript({
+      text: 'voicemail words', recordingSid: 'RE00000000000000000000000000000001',
+      callSid: 'CA1', from: '+15551230001', to: '+15559990000',
+    });
+    expect(received).toHaveLength(1);
+    expect(received[0].contentType).toBe('audio');
+    expect(received[0].content).toBe('voicemail words');
+    expect(received[0].chatJid).toBe('+15551230001@sms');
+    expect(received[0].isResponseWorthy).toBe(true);
+    bridge.shutdown();
+  });
+});
