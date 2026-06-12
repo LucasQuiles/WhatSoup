@@ -174,6 +174,7 @@ export class AnthropicApiProvider implements ProviderSession {
       const toolResultBlocks: AnthropicContentBlock[] = [];
 
       for (const tu of result.toolUses) {
+        if (!this.active) break;
         let toolInput: Record<string, unknown>;
         try {
           toolInput = JSON.parse(tu.inputJson || '{}') as Record<string, unknown>;

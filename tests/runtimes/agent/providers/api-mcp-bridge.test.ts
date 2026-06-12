@@ -530,3 +530,115 @@ describe('HTTP provider MCP bridge', () => {
     ]);
   });
 });
+
+describe('managed tool loop kill behavior', () => {
+  const onCrash = vi.fn();
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it('anthropic-api stops executing queued tool calls after kill()', async () => {
+    const registry = new ToolRegistry();
+    const provider = new AnthropicApiProvider();
+    const afterToolHandler = vi.fn(async () => ({ echoed: 'must not run' }));
+
+    registry.register({
+      name: 'kill_tool',
+      description: 'Kills the session mid-turn',
+      schema: z.object({}),
+      scope: 'chat',
+      targetMode: 'caller-supplied',
+      handler: async () => {
+        provider.kill();
+        return { done: true };
+      },
+    });
+    registry.register({
+      name: 'after_tool',
+      description: 'Queued behind kill_tool in the same turn',
+      schema: z.object({}),
+      scope: 'chat',
+      targetMode: 'caller-supplied',
+      handler: afterToolHandler,
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(makeSseResponse([
+        {
+          type: 'message_start',
+          message: { usage: { input_tokens: 5, output_tokens: 0 } },
+        },
+        {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'toolu_kill', name: 'kill_tool' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partial_json: '{}' },
+        },
+        {
+          type: 'content_block_start',
+          index: 1,
+          content_block: { type: 'tool_use', id: 'toolu_after', name: 'after_tool' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 1,
+          delta: { type: 'input_json_delta', partial_json: '{}' },
+        },
+        { type: 'message_delta', usage: { output_tokens: 2 } },
+        { type: 'message_stop' },
+      ]))
+      .mockResolvedValue(makeSseResponse([
+        {
+          type: 'message_start',
+          message: { usage: { input_tokens: 7, output_tokens: 0 } },
+        },
+        {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'done' },
+        },
+        { type: 'message_delta', usage: { output_tokens: 1 } },
+        { type: 'message_stop' },
+      ]));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: () => {},
+      onCrash,
+      mcpBridge: createProviderMcpBridge(registry, {
+        tier: 'chat-scoped',
+        conversationKey: 'chat-key',
+        deliveryJid: '456@s.whatsapp.net',
+      }),
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Run both tools.' }],
+    });
+
+    // Parity with openai-api (`if (!this.active) break;`): once kill() lands
+    // mid-loop, queued tool calls must not execute against the dead session.
+    expect(afterToolHandler).not.toHaveBeenCalled();
+  });
+});
