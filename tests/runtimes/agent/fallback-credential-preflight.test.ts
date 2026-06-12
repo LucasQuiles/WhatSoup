@@ -84,6 +84,13 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
     verifyFallbackCredentialMock(service, key),
 }));
 
+// Unit tests must never spawn the real fallback binary; 'unknown' is the
+// safe fail-open value (no alert, no version log).
+vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
+  probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
+}));
+
 // ─── Imports after mocks ──────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
@@ -117,6 +124,7 @@ function makeMessenger(): Messenger {
 
 interface RuntimeOverrides {
   agentProvider?: string;
+  agentProviderConfig?: Record<string, unknown>;
   agentFallbackProvider?: string;
   agentFallbackModel?: string;
 }
@@ -124,6 +132,7 @@ interface RuntimeOverrides {
 function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
   const config = mockConfigRef();
   config['agentProvider'] = overrides.agentProvider ?? 'claude-cli';
+  config['agentProviderConfig'] = overrides.agentProviderConfig;
   config['agentFallbackProvider'] = overrides.agentFallbackProvider;
   config['agentFallbackModel'] = overrides.agentFallbackModel;
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
@@ -202,6 +211,28 @@ describe('armFallbackWindow — credential pre-flight', () => {
     fbView(runtime).activateProviderFallback(null);
 
     expect(verifyFallbackCredentialMock).not.toHaveBeenCalled();
+  });
+
+  it('uses providerConfig.apiKeyService for same-provider API fallback pre-flight', () => {
+    lookupCredentialMock.mockImplementation((service) => service === 'tenant-openai' ? 'tenant-openai-key' : null);
+    const runtime = makeRuntime({
+      agentProvider: 'openai-api',
+      agentProviderConfig: { apiKeyService: 'tenant-openai' },
+      agentFallbackProvider: 'openai-api',
+      agentFallbackModel: 'gpt-4o-mini',
+    });
+
+    fbView(runtime).activateProviderFallback(null);
+
+    expect(lookupCredentialMock).toHaveBeenCalledWith('tenant-openai');
+    expect(lookupCredentialMock).not.toHaveBeenCalledWith('openai');
+    expect(verifyFallbackCredentialMock).toHaveBeenCalledWith('tenant-openai', 'tenant-openai-key');
+    expect(vi.mocked(emitAlert)).not.toHaveBeenCalledWith(
+      'test',
+      'fallback_credential_missing',
+      expect.any(String),
+      expect.any(String),
+    );
   });
 
   // ── invalid key ─────────────────────────────────────────────────────────────

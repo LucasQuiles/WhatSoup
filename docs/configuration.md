@@ -131,7 +131,10 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
 | `WHATSOUP_DOCKER` | string | (unset) | Set to `1` to enable Docker platform detection. The Dockerfile sets this automatically. |
 | `WHATSOUP_MODE` | string | `supervisor` | Entrypoint mode: `supervisor` (fleet + instances), `fleet` (fleet only), `instance` (single instance), `auth` (QR code pairing). |
 | `WHATSOUP_INSTANCES` | string | (empty) | Comma-separated instance names to start in supervisor mode. Example: `my-bot,chat-bot`. |
-| `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Set to `0.0.0.0` in Docker. |
+| `WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS` | number (ms) | `300000` (5 min) | For agent instances with a provider fallback configured: how often the background probe re-checks whether the primary provider has recovered, while an `auth-required` fallback is active. Clamped to `[30000, 1800000]` (30 s–30 min); non-positive/invalid values use the default. |
+| `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD` | number | `12` | Consecutive failed primary recovery probes (on the window-extension path) before a single `fallback_recovery_stalled` operator alert is emitted. The window keeps extending regardless — the threshold surfaces the stall, it never reverts to a dead primary. One alert per stall episode (the counter resets when the window deactivates). Clamped to `[3, 100]`; non-positive/invalid values use the default. |
+| `WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS` | number (ms) | `1800000` (30 min) | Dedup window for the user-facing "switched to fallback provider" notice, so repeated fallbacks within the window don't re-notify the chat. Non-positive/invalid values use the default. |
+| `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Non-loopback values are refused at startup unless `WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE=1` is set. The console HTML no longer carries the root fleet token (the console unlocks via `POST /api/console-session`, which sets an HttpOnly session cookie); the guard remains because a remote plain-HTTP bind would still transmit the operator-entered token and session cookie unencrypted. For Docker (`0.0.0.0`) or tailnet binds, set the override only on trusted private networks, and front the port with TLS: the console session cookie intentionally omits `Secure` (the supported default is loopback HTTP), so on a plain-HTTP remote bind both the unlock token and the cookie travel unencrypted. |
 
 ### Docker Volume Layout
 
@@ -195,6 +198,8 @@ into place during deployment.
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
+| `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default) or `twilio` (SMS). See [`twilioConfig`](#twilioconfig). |
+| `twilioConfig` | object | iff `transport: "twilio"` | — | Twilio SMS transport settings. **Required** when `transport` is `twilio`; **rejected** when present with any other transport. See [`twilioConfig`](#twilioconfig). |
 
 [^enabled]: Enforcement sites: [`src/fleet/discovery.ts:94`](../src/fleet/discovery.ts) (fleet scan skip), [`src/fleet/routes/ops.ts:767`](../src/fleet/routes/ops.ts) (port-in-use scan), [`src/fleet/routes/ops.ts:788`](../src/fleet/routes/ops.ts) (existing-port map for PATCH conflict checks).
 
@@ -442,16 +447,18 @@ The operation tracker detects and recovers from stuck operations regardless of t
 ### `agentOptions`
 
 Optional when `type` is `agent`. Fleet create/update APIs fill a default
-`sessionScope` and `cwd` when they are omitted; hand-written configs that
-include `agentOptions` should keep these fields explicit.
+`sessionScope` and `cwd` when they are omitted; hand-written configs may omit
+`sessionScope` (the runtime defaults it to `single`) but should keep it
+explicit for readability.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `sessionScope` | string | no | `per_chat` via fleet API | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). |
+| `sessionScope` | string | no | `single` at runtime (`per_chat` via fleet API) | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). Omitted = the runtime defaults to `single`; the fleet create/update APIs fill `per_chat` when the whole `agentOptions` block is omitted. Invalid values are rejected on every path (create, update, load, discovery). |
 | `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. |
-| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. |
-| `fallbackProvider` | string | no | — | Provider to route **new** sessions to when the primary `provider` hits a usage limit. Must be one of the same IDs as `provider` (`claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`); unknown IDs are rejected before startup. When the primary returns a usage-limit `result`, the in-flight session is torn down, the user is notified in-chat, and the auto-respawned next session uses this provider until the limit resets, then automatically reverts to the primary. Omitted = fallback disabled (the primary session is killed and the user is told to retry after the limit resets). See [Provider fallback behavior](#provider-fallback-behavior) for the full lifecycle: user notice, window persistence across restarts, turn telemetry, credential pre-flight, and admin override commands. |
-| `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2.7`). Non-empty string when present. When omitted, the fallback provider runs with no `--model`/`-m` override (its own default). |
+| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. `providerConfig.baseUrl` selects a custom endpoint and `providerConfig.apiKeyService` names the keyring service that authenticates it — see [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for routing, auth, and validation semantics. |
+| `fallbackProvider` | string | no | — | Legacy single fallback provider. Prefer `fallbacks` when configuring more than one backup. Must be one of the same IDs as `provider` (`claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`); unknown IDs are rejected before startup. When the primary returns a usage-limit, rate-limit, or auth-required terminal result and the selected fallback is usable, the runtime sends a short in-chat handoff notice and replays the interrupted turn on the fallback provider when no tool side effects have started. Usage-limit and rate-limit fallbacks automatically revert when the window ends; auth-required fallbacks stay armed until the primary passes a background recovery probe. Omitted = fallback disabled (unless `fallbacks` is set). See [Provider fallback behavior](#provider-fallback-behavior) for the full lifecycle: user notice, window persistence across restarts, turn telemetry, credential pre-flight, and admin override commands. |
+| `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2`). The id must match the provider's model catalog **exactly, including case** — `opencode` treats `minimax/minimax-m2` and `minimax/MiniMax-M2` as different ids, and a wrong-case id fails every session with an opaque provider error. Copy the id verbatim from `opencode models` — the runtime warns at arm time (`fallback_model_unknown`) when the configured model is not found in the provider catalog. Non-empty string when present. When omitted, a CLI fallback provider runs with no `--model`/`-m` override (its own default); **required when `fallbackProvider` is `openai-api` or `anthropic-api`** (see [Cross-field validation rules](#cross-field-validation-rules)). |
+| `fallbacks` | array | no | — | Ordered fallback chain. Each entry is `{ "provider": "<provider-id>", "model": "<model-id>" }`; `model` may be omitted only for CLI providers. Do not combine with `fallbackProvider` / `fallbackModel`. At arm time the runtime selects the first entry whose required key is present, records per-entry eligibility in `/health` and provider-status (`unknown` until the first selection pass), and fails open to entry zero if no keyed entry is eligible so the operator still gets binary/model/key alerts for the first configured target. Maximum 4 entries. |
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
@@ -462,17 +469,174 @@ include `agentOptions` should keep these fields explicit.
 | `autoCompactInputTokens` | number | no | `150000` | For Claude CLI agent sessions, automatically send a silent `/compact` after this many input tokens since the last successful compact. Default: 150,000 tokens (prevents prompt-too-long errors while leaving headroom for tool results). Valid range: 50,000-100,000,000. **Bootstrap behavior:** the first time eligibility is checked on any session whose `last_compact_input_tokens=0` (a fresh enable, or a brand-new session whose first turn crosses the threshold), the baseline is initialised silently without firing `/compact`. This prevents a compact storm on rollout but means the first real compact is deferred by one full threshold's worth of tokens. **Cooldown behavior:** successful auto-compacts wait 5 minutes before re-arming; scopes that become eligible again inside the rapid re-arm window escalate to 15, 30, then 60 minute cooldowns. Health counters are exposed at `GET /health` under `runtime.agent.autoCompactIneffective`, `runtime.agent.autoCompactConsecutiveRapidRearmsMax`, and `runtime.agent.autoCompactNextTurnOverThreshold`. |
 | `allowM365Mutations` | boolean | no | `false` | Per-instance opt-in for propagating `ALLOW_M365_MUTATIONS` to the agent subprocess. Only consulted when `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set on the parent process (off by default). See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
 
+#### Cross-field validation rules
+
+Beyond the per-field shapes above, the shared validator
+(`src/core/agent-config-validator.ts`) rejects these combinations at
+create/update time and at load/discovery (where the fleet surfaces them as a
+config error):
+
+- **API-type `fallbackProvider` without `fallbackModel`.** `openai-api` and
+  `anthropic-api` take their fallback-window model from `fallbackModel`;
+  without it the window would silently run on a provider-internal default the
+  operator never chose. CLI fallback providers (`claude-cli`, `codex-cli`,
+  `gemini-cli`, `opencode-cli`) may omit it and use their own default.
+- **Malformed `fallbacks`.** `agentOptions.fallbacks` must be an array of at
+  most 4 entries, cannot be combined with the legacy `fallbackProvider` /
+  `fallbackModel` pair, cannot contain duplicate provider/model pairs, and
+  cannot point an entry at the primary provider/model pair.
+- **API-type `fallbacks[]` entry without `model`.** `openai-api` and
+  `anthropic-api` entries require an explicit `model`; CLI entries may omit it.
+- **`providerConfig.baseUrl` with a non-`http(s)` scheme.** The value must be
+  an absolute `http://` or `https://` URL.
+- **`provider: opencode-cli` with `providerConfig.baseUrl` but no resolvable
+  model.** The custom endpoint block written into `opencode.json` is only
+  exercised when the instance's resolved model (top-level `model`, else
+  `models.conversation`) routes to it; without one the endpoint would never be
+  used. API providers consume `baseUrl` directly as an endpoint override and
+  are exempt from this rule.
+- **`providerConfig.apiKeyService` naming an unknown keyring service.** The
+  value must be one of the services in the service→env-var map
+  (`src/lib/provider-key-service.ts`) — the custom-endpoint provider block
+  references the key as an env interpolation, and an unknown service has no
+  env var to interpolate.
+- **`providerConfig.apiKeyService` without `providerConfig.baseUrl`.** The key
+  service only authenticates a custom endpoint; without one it would be
+  silently inert.
+
+A missing `sessionScope` is **not** an error: the runtime defaults it to
+`single`, so load and discovery accept the omission rather than flagging a
+config that would boot fine.
+
+#### Custom endpoint (`providerConfig.baseUrl`)
+
+For `provider: opencode-cli`, `providerConfig.baseUrl` merges a custom
+OpenAI-compatible provider block into the `opencode.json` written at startup;
+for the API providers (`openai-api`, `anthropic-api`) it overrides the HTTP
+endpoint the managed loop calls directly.
+
+**Routing (opencode-cli):** with a `baseUrl` configured, sessions omit the
+`-m`/`--model` argument and `opencode` resolves the model from
+`opencode.json`'s top-level `model` field, which the startup merge points at
+the custom block (`whatsoup-cloud/<model>`). The instance's resolved model
+(top-level `model`, else `models.conversation`) is therefore the model id on
+the endpoint itself, spelled exactly as the endpoint's catalog spells it —
+model ids are case-sensitive, so copy them verbatim. Without a `baseUrl`,
+sessions keep the `-m <model>` argument unchanged.
+
+**Auth (opencode-cli):** the generated provider block references the endpoint
+key as `options.apiKey: "{env:<ENVVAR>}"` (opencode env interpolation) — the
+key value itself is never written to disk. The env var comes from the
+service→env-var map (`src/lib/provider-key-service.ts`) for the keyring
+service named by `providerConfig.apiKeyService`; when `apiKeyService` is
+omitted, the service is derived from the configured model's prefix (e.g.
+`minimax/MiniMax-M2` → `minimax`), and a bare model id with no known prefix
+gets no `apiKey` entry. The runtime injects that service's key (env var or
+platform keyring, `src/lib/keyring.ts`) into the session child's environment
+so the interpolation resolves at spawn time. `apiKeyService` must name a
+known keyring service and requires `baseUrl` (see
+[Cross-field validation rules](#cross-field-validation-rules)).
+
 #### Provider fallback behavior
 
-When the primary provider returns a usage-limit `result` (`src/runtimes/agent/runtime.ts`), the runtime:
+When the primary provider returns a usage-limit, rate-limit, or auth-required terminal `result` (`src/runtimes/agent/runtime.ts`), the runtime:
 
-1. **Tears down and notifies.** The in-flight session is killed and the user receives a notice in the chat — with a fallback configured: "_Hit my usage limit — switching to a backup model. Please resend your last message._"; without one: "_Hit my usage limit — please try again after the limit resets._". The triggering message is deliberately **not** auto-replayed (double-execution risk); the user must resend it.
-2. **Arms a fallback window** (only when `fallbackProvider` is set). New sessions route to the fallback provider until the window expires, then revert to the primary automatically. The window ends at the reset time parsed from the usage-limit message when available, else 5 hours from now, clamped to [1 minute, 24 hours]. A second usage-limit hit while a window is active extends it — never shortens.
+1. **Tears down, explains briefly, and continues when safe.** The in-flight session is killed and the user receives a one- or two-line notice naming the switch reason and backup model, for example: "_Primary model hit a token/quota limit; switching until about 3:00 PM. Backup: OpenCode / minimax/MiniMax-M2.7. I will continue here._" If fallback credentials are missing, the notice says an operator has been notified and does not promise continuation. Provider policy-block results deliberately do **not** activate fallback.
+2. **Arms a fallback window** (only when `fallbackProvider` or `fallbacks` is set). The first arm of a window (never an extension) raises the `provider_fallback_activated` operator alert carrying the reason, the selected entry's provider/model, and the window end; every deactivation of an active window raises `provider_fallback_reverted` carrying the revert reason (`window-elapsed`, `admin-disabled`, `primary-probe-ok`, ...), the turn counters, and the window duration; a successful replay dispatch raises `provider_fallback_replayed` carrying the reason and target entry (a failed replay raises the existing `runtime_provider_fallback_replay_failed`). The interrupted turn is replayed once on a freshly created fallback session when the selected fallback target is usable; later sessions also route to that fallback until the window ends. With `fallbacks`, selection is static at arm/restore time: entries are checked in order for required key presence, the first eligible entry wins, and if every keyed entry is missing a key the runtime fails open to entry zero while alerting per-entry missing-key evidence. Usage-limit windows end at the reset time parsed from the provider message when available, else 5 hours from now, clamped to [1 minute, 24 hours]. Rate-limit windows use the default rolling window. Auth-required windows stay armed until a background primary recovery probe succeeds: while the remaining window exceeds the recheck cadence a standing probe re-checks every `WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS` (early recovery), and once the window reaches its end each failed probe extends it by one recheck interval. After `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD` consecutive failed extension probes (default 12) a single `fallback_recovery_stalled` operator alert fires — once per stall episode — and the window keeps extending so the instance is never stranded on a dead primary. A second usage-limit hit while a window is active extends it — never shortens.
 3. **Persists the window across restarts.** The window is written to the singleton `agent_fallback_state` SQLite table (`src/runtimes/agent/fallback-state-db.ts`) and re-armed on startup, so a restart mid-window resumes on the fallback provider. Restored windows are clamped to at most 24 hours from startup; expired, corrupt, or no-longer-applicable rows are cleared and startup proceeds on the primary. The original activation time is preserved across extensions and restores.
-4. **Pre-flights credentials on every window arm — without ever blocking.** When the fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2.7` → `minimax`; `openai-api` → `openai`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`). The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The window arms in all cases, and the key value is never logged. CLI/native-auth providers (`claude-cli`, `codex-cli`, `gemini-cli`, `anthropic-api`) have no keyring key to check, so the pre-flight does not apply.
-5. **Counts fallback turns.** Every completed user turn during an active window (compact and system turns excluded) increments process-local counters — `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt` — surfaced in the `GET /health` `instance` block and reset on restart. A turn that completes with zero visible output raises the `fallback_empty_turn` operator alert (the silent-dead-bot signal). On `per_chat` sessions the user additionally gets "_The backup model returned no reply — please resend or rephrase your message._"; `single`/`shared` sessions surface their existing generic `_(no response)_` fallback instead.
+4. **Pre-flights credentials and binary on every window arm — without ever blocking.** When the selected fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2` -> `minimax`; `openai-api` -> `openai`; `anthropic-api` -> `anthropic`; same-provider API fallback honors `providerConfig.apiKeyService`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`). The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The key value is never logged. In addition, CLI-backed providers (`opencode-cli`, `claude-cli`, `codex-cli`, `gemini-cli`) have their binary probed via `binary --version` (`src/runtimes/agent/providers/binary-preflight.ts`): a definitive ENOENT raises `fallback_binary_missing`; anything else is fail-open. Managed-loop providers (`openai-api`, `anthropic-api`) have no binary to probe. For `opencode-cli` with a selected model configured, a present binary additionally has its model catalog probed via `opencode models`: a model id absent from the catalog raises `fallback_model_unknown`, carrying the catalog's exact casing as a suggestion when the id differs only by case (model ids are case-sensitive, and a wrong-case id fails sessions with an error indistinguishable from an unknown model). The catalog probe is fail-open too: spawn errors, timeouts, and empty output stay silent. The window arms in all cases — no pre-flight blocks or reverts activation.
+5. **Counts fallback turns.** Every completed user turn during an active window (compact and system turns excluded) increments process-local counters — `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt` — surfaced in the `GET /health` `instance` block along with `effectiveProvider`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, and the recovery-probe telemetry `probeAttempts` (consecutive failed extension probes in the current stall episode) and `lastProbeAt` (epoch ms of the most recent recovery probe, `null` until one runs); counters are reset on restart. Transition totals are counted the same way — `fallbackActivations` (first arms only, extensions excluded), `fallbackReverts`, and `fallbackReplays` are process-local lifetime totals in the same `instance` block, reset on restart like the turn counters. The fleet `GET /api/lines/:name/provider-status` route forwards the same fields under `fallback.probeAttempts` / `fallback.lastProbeAt` / `fallback.activations` / `fallback.reverts` / `fallback.replays` (`null` when the instance health predates them). A turn that completes with zero visible output raises the `fallback_empty_turn` operator alert (the silent-dead-bot signal). On `per_chat` sessions the user additionally gets "_The backup model returned no reply — please resend or rephrase your message._"; `single`/`shared` sessions surface their existing generic `_(no response)_` fallback instead.
 
 Admins can force, end, or inspect the window from WhatsApp with `FALLBACK ON [<n>m|<n>h]` / `FALLBACK OFF` / `FALLBACK STATUS` — see [docs/runbook.md §7.2](runbook.md#72-force-or-inspect-provider-fallback).
+
+#### Enabling provider fallback on a new host
+
+When deploying an instance config that uses `fallbackProvider` or `fallbacks` to a machine where the stack has not run before, complete these steps before starting the service. The runtime will alert on any gap at activation time (`fallback_binary_missing`, `fallback_credential_missing`, `fallback_credential_invalid`, `fallback_model_unknown`), but early provisioning avoids the first-activation surprise.
+
+1. **Install the fallback provider CLI and confirm it is on the service user's PATH.**
+
+   For `opencode-cli`:
+   ```sh
+   # Install opencode per the upstream instructions, then confirm:
+   opencode --version
+   ```
+   The runtime spawns `opencode --version` at window-arm time (`src/runtimes/agent/providers/binary-preflight.ts`) and raises `fallback_binary_missing` if the binary is absent. The check runs on the service user's PATH, so install under that user or ensure the binary is in a PATH entry that the service environment inherits.
+
+2. **Provision the provider API key** via one of three portable routes. The lookup order is: environment variable first (when no per-user scoping is requested), then platform keyring (`src/lib/keyring.ts:82`).
+
+   **Route A — environment variable (universal).**
+   Set the variable named in `SERVICE_ENV_MAP` (`src/lib/provider-key-service.ts`, re-exported from `src/lib/keyring.ts`):
+
+   | Provider service | Environment variable |
+   |-----------------|---------------------|
+   | `minimax`       | `MINIMAX_API_KEY`   |
+   | `deepseek`      | `DEEPSEEK_API_KEY`  |
+   | `openai`        | `OPENAI_API_KEY`    |
+   | `xai`           | `XAI_API_KEY`       |
+   | `groq`          | `GROQ_API_KEY`      |
+   | `mistral`       | `MISTRAL_API_KEY`   |
+   | `openrouter`    | `OPENROUTER_API_KEY` |
+   | `google`        | `GOOGLE_API_KEY`    |
+   | `fireworks-ai`  | `FIREWORKS_API_KEY` |
+   | `togetherai`    | `TOGETHER_API_KEY`  |
+
+   Service names are opencode's models.dev provider ids — the prefix of the
+   configured fallback model (`xai/grok-4` → `xai`). Note the catalog spells
+   them `fireworks-ai` and `togetherai` (not `fireworks` / `together`). The
+   same service name is the keychain service for Routes B and C below.
+
+   For **systemd** managed instances, add a drop-in or `EnvironmentFile`:
+   ```ini
+   # ~/.config/systemd/user/whatsoup@<name>.service.d/fallback-key.conf
+   [Service]
+   Environment="MINIMAX_API_KEY=sk-…"
+   # or: EnvironmentFile=%h/.config/whatsoup/<name>.env
+   ```
+   For **launchd** managed instances, add an `EnvironmentVariables` key to the plist (or regenerate via `npm run deploy:launchd.generated`):
+   ```xml
+   <key>EnvironmentVariables</key>
+   <dict>
+     <key>MINIMAX_API_KEY</key>
+     <string>sk-…</string>
+   </dict>
+   ```
+
+   **Route B — macOS Keychain.**
+   The keyring reads via `security find-generic-password -s <service> -a <username> -w` (`src/lib/keyring.ts:128–134`), where `<service>` is the service name (e.g. `minimax`) and `<username>` is the OS username (`os.userInfo().username`). Store with the matching attributes:
+   ```sh
+   security add-generic-password -s minimax -a "$USER" -w "sk-…"
+   ```
+
+   **Route C — Linux GNOME Keyring (`secret-tool`).**
+   The keyring reads via `secret-tool lookup service <service>` (`src/lib/keyring.ts:99–103, 109`), where `service` is the attribute name and the service name (e.g. `minimax`) is its value. Store with the matching attribute:
+   ```sh
+   secret-tool store --label="WhatSoup minimax key" service minimax
+   # enter the key at the password prompt
+   ```
+
+3. **Set either the legacy single fallback pair or an ordered chain** in the instance `config.json`:
+   ```json
+   "agentOptions": {
+     "fallbackProvider": "opencode-cli",
+     "fallbackModel": "minimax/MiniMax-M2"
+   }
+   ```
+   For multiple backups:
+   ```json
+   "agentOptions": {
+     "fallbacks": [
+       { "provider": "opencode-cli", "model": "minimax/MiniMax-M2" },
+       { "provider": "openai-api", "model": "gpt-4o-mini" }
+     ]
+   }
+   ```
+
+4. **Restart the instance** so the runtime loads the new config and arms any previously-persisted fallback window with the new pre-flight checks active.
+
+5. **Verify.** From an admin WhatsApp DM:
+   - `FALLBACK STATUS` — confirms the current window state and configured provider/model.
+   - `FALLBACK ON 5m` — forces a 5-minute canary window; expect a reply served by the fallback provider. Check the `/health` endpoint `instance` block for `effectiveProvider` (flips to the fallback while the window is active), `fallbackTurnsServed`, and related fields.
+   - Watch for the four arm-time alert sources: `fallback_binary_missing` (binary absent), `fallback_credential_missing` (key absent from keyring/env), `fallback_credential_invalid` (key rejected by provider API), `fallback_model_unknown` (model id absent from the provider catalog — usually a casing mismatch; the alert suggests the catalog's exact casing when one matches case-insensitively). Any of these surfaces via the BOT_ERRORS alert pipeline within seconds of window activation. Further runtime (not pre-flight) sources exist: the transition alerts `provider_fallback_activated` (once per window, on the first arm), `provider_fallback_reverted` (once per window, on deactivation, with turn counters and window duration), and `provider_fallback_replayed` (once per activation, on a successful replay dispatch); and `fallback_recovery_stalled`, fired once per stall episode when an `auth-required` window has extended through `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD` consecutive failed primary recovery probes.
 
 #### Session Scopes
 
@@ -557,6 +721,44 @@ export WHATSOUP_CONNECTOR_FAILCLOSED=1
 }
 ```
 
+### `twilioConfig`
+
+Selects the optional Twilio SMS transport for this instance. Stage 2 supports
+outbound text, poll-mode inbound text, webhook-mode inbound with signature
+validation, and recorded voicemail with transcription. Operational guidance,
+identity model, limitations, and keyring provisioning live in the runbook:
+[`docs/runbooks/twilio-transport.md`](runbooks/twilio-transport.md).
+
+```json
+"transport": "twilio",
+"twilioConfig": {
+  "account": "sms-agent",
+  "accountSid": "AC00000000000000000000000000000000",
+  "authTokenService": "twilio-sms-agent",
+  "phoneNumber": "+15550001111",
+  "inboundMode": "poll",
+  "pollIntervalMs": 15000,
+  "rateLimit": { "smsPerMinute": 30 }
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `account` | string | yes | — | Channel account segment for the `sms:<account>` channel ID. Must match `^[a-z][a-z0-9-]{0,63}$`. Changing it changes the channel identity. |
+| `accountSid` | string | yes | — | Twilio Account SID. Must match `^AC[0-9a-f]{32}$` (hex must be lowercase). |
+| `authTokenService` | string | yes | — | OS keyring **service name** for the auth token — never the token itself. Non-empty, no whitespace, max 128 chars. Resolved via `src/lib/keyring.ts` `lookupCredential` at first use; no environment-variable fallback exists for Twilio. |
+| `phoneNumber` | string | XOR | — | E.164 sender number (`^\+[1-9]\d{6,14}$`). Exactly one of `phoneNumber` or `messagingServiceSid` must be set. |
+| `messagingServiceSid` | string | XOR | — | Messaging Service SID sender. Must match `^MG[0-9a-f]{32}$` (lowercase hex). Without `phoneNumber`, inbound polling uses a single unfiltered call listing all messages on the account in both directions (no targeted per-number filtering). |
+| `inboundMode` | string | no | `poll` | `poll` (REST polling) or `webhook` (signature-validated HTTP listener). |
+| `webhook.publicBaseUrl` | string | webhook-mode | — | Public HTTPS base URL for Twilio to call. Trailing slash is stripped by the loader. Signature validation depends on this matching exactly. |
+| `webhook.listenPort` | integer | webhook-mode | — | Local listener port (`[1, 65535]`; must not equal `healthPort`). Bind address defaults to `127.0.0.1`; use an HTTPS proxy/tunnel. |
+| `webhook.listenAddress` | string | no | `127.0.0.1` | Override local bind address. |
+| `voice.enabled` | boolean | no | `false` | Enable voicemail + `placeCall`. Requires `inboundMode:'webhook'` and `phoneNumber`. |
+| `voice.voicemailMaxLengthSec` | integer | no | `120` | Max recording length (`[5, 600]`). |
+| `voice.voicemailGreeting` | string | no | built-in | Custom `<Say>` greeting text (≤ 500 chars). |
+| `pollIntervalMs` | integer | no | `15000` | Inbound poll interval; also the lookback window at connect. Range `[5000, 86400000]`. |
+| `rateLimit.smsPerMinute` | integer | no | `30` | Range `[1, 600]`. Validated config only — **no rate limiter enforces it yet**. |
+
 ### Validation Rules Summary
 
 The loader enforces these constraints before the process starts:
@@ -568,11 +770,14 @@ The loader enforces these constraints before the process starts:
 - `chat` instances must have a non-empty `systemPrompt`.
 - `passive` instances must not have a `systemPrompt` and must use `accessMode: self_only`.
 - Fleet create/update APIs default omitted `agentOptions` to `sessionScope: per_chat` with a per-instance workspace under the user's home directory.
-- `agent` instances with hand-written `agentOptions` must have a valid `sessionScope`; an empty or missing `cwd` is normalized by the fleet API before persistence.
+- `agent` instances may omit `sessionScope` (the runtime defaults it to `single`); a present value must be `single`, `shared`, or `per_chat`. An empty or missing `cwd` is normalized by the fleet API before persistence.
 - `agentOptions.sandboxPerChat: true` requires `sessionScope: per_chat`.
+- The fallback/custom-endpoint combinations listed under [Cross-field validation rules](#cross-field-validation-rules) are rejected.
 - `agentOptions.allowM365Mutations`, when present, must be a boolean.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
 - `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.
+- `transport`, when present, must be `baileys` or `twilio`.
+- `twilioConfig` is required when `transport` is `twilio` and rejected otherwise; its field rules (SID shapes, sender XOR, inbound mode, webhook block, voice coherence, numeric ranges) are listed under [`twilioConfig`](#twilioconfig).
 
 ---
 

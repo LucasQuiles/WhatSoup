@@ -173,6 +173,8 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 2_000,
+    startupNotifications: true,
+    proactiveResumeOnStartup: true,
     mediaDir: '/tmp/whatsoup-test-media/tmp',
     pineconeAllowedIndexes: [] as string[],
     voiceReply: 'never' as 'always' | 'when_received' | 'never',
@@ -585,12 +587,26 @@ describe('AgentRuntime', () => {
     mockConfig.toolUpdateMode = 'full';
     mockConfig.toolUpdateRedirectJid = null;
     mockConfig.textAggregateDelayMs = 2_000;
+    mockConfig.startupNotifications = true;
+    mockConfig.proactiveResumeOnStartup = true;
     mockSynthesizeSpeech.mockClear();
     mockWriteTempFile.mockClear();
     mockRuntimeLogger.info.mockClear();
     mockRuntimeLogger.warn.mockClear();
     mockRuntimeLogger.error.mockClear();
     mockRuntimeLogger.debug.mockClear();
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentProviderConfig?: Record<string, unknown>;
+      agentFallbackProvider?: string;
+      agentFallbackModel?: string;
+      model?: string;
+    };
+    delete agentConfig.agentProvider;
+    delete agentConfig.agentProviderConfig;
+    delete agentConfig.agentFallbackProvider;
+    delete agentConfig.agentFallbackModel;
+    delete agentConfig.model;
     // Ensure mockQueue.flush always returns a resolved Promise (clearAllMocks wipes this)
     mockQueue.flush.mockResolvedValue(undefined);
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
@@ -1769,6 +1785,33 @@ describe('AgentRuntime', () => {
     expect(state.perChatAssistantItemText.get(otherKey)?.get('item-b')).toBe('value-b');
     expect(state.pendingTurnText.get(otherKey)).toBe('other-pending');
     expect(state.resumeFailedHandling.has(otherKey)).toBe(true);
+  });
+
+  it('skips proactive resume on startup when proactiveResumeOnStartup is false', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockConfig.proactiveResumeOnStartup = false;
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as {
+      durability: {
+        getResumableCheckpoints: () => Array<{ conversation_key: string }>;
+        getSessionCheckpoint: (key: string) => { session_id: string } | null;
+      } | null;
+    };
+    // Both gates that the existing resume test relies on are satisfied (a
+    // resumable checkpoint with a session_id exists); only the new gate is off.
+    const getResumableCheckpoints = vi.fn(() => [{ conversation_key: '15550001111' }]);
+    const getSessionCheckpoint = vi.fn(() => ({ session_id: 'resume-1' }));
+    state.durability = { getResumableCheckpoints, getSessionCheckpoint };
+
+    await runtime.start();
+
+    // The gate short-circuits the whole resume branch: no notifyUser wired,
+    // no session spawned, and the checkpoint scan is never even reached.
+    expect(capturedNotifyUserRef.current).toBeNull();
+    expect(mockSession.spawnSession).not.toHaveBeenCalled();
+    expect(getSessionCheckpoint).not.toHaveBeenCalled();
+    expect(getResumableCheckpoints).not.toHaveBeenCalled();
   });
 
   it('sandbox per_chat notifyUser cleanup removes only the crashed workspace state', async () => {
@@ -4433,6 +4476,39 @@ describe('AgentRuntime', () => {
   });
 
   // ─── sandboxPerChat workspace isolation ────────────────────────────────────
+
+  it('sandboxPerChat provisions workspace MCP config for the effective fallback provider', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentFallbackProvider?: string;
+      agentFallbackModel?: string;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    agentConfig.agentFallbackProvider = 'opencode-cli';
+    agentConfig.agentFallbackModel = 'minimax/minimax-m2';
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    (runtime as unknown as { fallbackActiveUntil: number | null }).fallbackActiveUntil = Date.now() + 60_000;
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello fallback' }));
+
+    expect(mockProvisionWorkspace).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'opencode-cli',
+    }));
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      provider: 'opencode-cli',
+      model: 'minimax/minimax-m2',
+    });
+  });
 
   it('sandboxPerChat: two DMs from different JIDs produce different sessions', async () => {
     const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');

@@ -43,6 +43,15 @@ export type ConnectionLifecycleState =
   | 'cooldown'
   | 'shutting_down';
 
+export interface ConnectionRecentDisconnects {
+  windowMs: number;
+  count: number;
+  lastAt: string | null;
+  lastReason: string | null;
+  lastStatusCode: number | null;
+  byReason: Record<string, number>;
+}
+
 export interface ConnectionStateSnapshot {
   state: ConnectionLifecycleState;
   connected: boolean;
@@ -54,6 +63,7 @@ export interface ConnectionStateSnapshot {
   lastPongAt: string | null;
   lastDisconnectReason: string | null;
   lastStatusCode: number | null;
+  recentDisconnects: ConnectionRecentDisconnects;
 }
 
 /** Maximum time to wait for a send operation before aborting. */
@@ -208,8 +218,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private lastPongAt: number | null = null;
   private lastDisconnectReason: string | null = null;
   private lastStatusCode: number | null = null;
+  private recentDisconnects: Array<{ at: number; reason: string; statusCode: number | null }> = [];
   private connectionState: ConnectionLifecycleState = 'disconnected';
   private stateChangedAt = Date.now();
+  private static readonly RECENT_DISCONNECT_WINDOW_MS = 10 * 60 * 1000;
   private static readonly MAX_FAILURE_DURATION_MS = 30 * 60 * 1000;
   private static readonly COOLDOWN_MS = 5 * 60 * 1000;
   private static readonly KEEPALIVE_INTERVAL_MS = 30_000;
@@ -611,6 +623,35 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastPongAt: toIso(this.lastPongAt),
       lastDisconnectReason: this.lastDisconnectReason,
       lastStatusCode: this.lastStatusCode,
+      recentDisconnects: this.getRecentDisconnectStats(),
+    };
+  }
+
+  private recordDisconnect(statusCode: number | null, reason: string): void {
+    const now = Date.now();
+    this.recentDisconnects.push({ at: now, reason, statusCode });
+    this.pruneRecentDisconnects(now);
+  }
+
+  private pruneRecentDisconnects(now = Date.now()): void {
+    const cutoff = now - ConnectionManager.RECENT_DISCONNECT_WINDOW_MS;
+    this.recentDisconnects = this.recentDisconnects.filter((event) => event.at >= cutoff);
+  }
+
+  private getRecentDisconnectStats(): ConnectionRecentDisconnects {
+    this.pruneRecentDisconnects();
+    const last = this.recentDisconnects.at(-1) ?? null;
+    const byReason: Record<string, number> = {};
+    for (const event of this.recentDisconnects) {
+      byReason[event.reason] = (byReason[event.reason] ?? 0) + 1;
+    }
+    return {
+      windowMs: ConnectionManager.RECENT_DISCONNECT_WINDOW_MS,
+      count: this.recentDisconnects.length,
+      lastAt: last ? toIso(last.at) : null,
+      lastReason: last?.reason ?? null,
+      lastStatusCode: last?.statusCode ?? null,
+      byReason,
     };
   }
 
@@ -977,6 +1018,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.reconnectAttempts = 0;
       this.reconnectPhase = 'backoff';
       this.firstFailureAt = null;
+      this.lastStatusCode = null;
+      this.lastDisconnectReason = null;
       this.gracefulReconnectInFlight = false;
       if (this.cooldownTimer !== null) {
         clearTimeout(this.cooldownTimer);
@@ -1004,6 +1047,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       this.lastStatusCode = statusCode ?? null;
       this.lastDisconnectReason = reason;
+      this.recordDisconnect(statusCode ?? null, reason);
 
       this.log.warn({ statusCode, reason }, 'WhatsApp connection closed');
 

@@ -186,6 +186,76 @@ describe('provisionWorkspace', () => {
     expect(server.env.WHATSOUP_SOCKET).toContain('whatsoup.sock');
   });
 
+  it('writes opencode.json shape for opencode-cli sandbox workspaces', () => {
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+    const opts = {
+      ...makeOpts(workspacePath, instanceCwd),
+      provider: 'opencode-cli',
+      sendMediaServerPath: '/abs/path/to/send-media-server.ts',
+    };
+    provisionWorkspace(opts);
+
+    expect(existsSync(join(workspacePath, '.mcp.json'))).toBe(false);
+    const opencode = JSON.parse(readFileSync(join(workspacePath, 'opencode.json'), 'utf8'));
+    expect(opencode).toHaveProperty('mcp.whatsoup');
+    expect(opencode).toHaveProperty('mcp.send-media');
+    expect(opencode.mcp.whatsoup.type).toBe('local');
+    expect(opencode.mcp.whatsoup.environment.WHATSOUP_SOCKET).toBe(
+      join(workspacePath, '.claude', 'whatsoup.sock'),
+    );
+    expect(opencode.mcp['send-media'].environment.MEDIA_BRIDGE_SOCKET).toBe(
+      join(workspacePath, '.claude', 'media-bridge.sock'),
+    );
+    expect(opencode).not.toHaveProperty('mcpServers');
+  });
+
+  it('merges opencode sandbox MCP entries without clobbering existing opencode.json', () => {
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+    writeFileSync(
+      join(workspacePath, 'opencode.json'),
+      JSON.stringify({
+        $schema: 'https://opencode.ai/config.json',
+        model: 'usercloud/model-a',
+        provider: {
+          usercloud: {
+            options: { baseURL: 'https://user.example/v1' },
+            models: { 'model-a': {} },
+          },
+        },
+        mcp: {
+          custom: { type: 'local', command: ['custom'], enabled: true },
+        },
+      }),
+    );
+
+    provisionWorkspace({
+      ...makeOpts(workspacePath, instanceCwd),
+      provider: 'opencode-cli',
+      sendMediaServerPath: '/abs/path/to/send-media-server.ts',
+    });
+
+    const opencode = JSON.parse(readFileSync(join(workspacePath, 'opencode.json'), 'utf8'));
+    expect(opencode.$schema).toBe('https://opencode.ai/config.json');
+    expect(opencode.model).toBe('usercloud/model-a');
+    expect(opencode.provider.usercloud).toEqual({
+      options: { baseURL: 'https://user.example/v1' },
+      models: { 'model-a': {} },
+    });
+    expect(opencode.mcp.custom).toEqual({ type: 'local', command: ['custom'], enabled: true });
+    expect(opencode.mcp.whatsoup).toMatchObject({
+      type: 'local',
+      environment: { WHATSOUP_SOCKET: join(workspacePath, '.claude', 'whatsoup.sock') },
+      enabled: true,
+    });
+    expect(opencode.mcp['send-media']).toMatchObject({
+      type: 'local',
+      environment: { MEDIA_BRIDGE_SOCKET: join(workspacePath, '.claude', 'media-bridge.sock') },
+      enabled: true,
+    });
+  });
+
   it('CLAUDE.md is a symlink pointing to instanceCwd/CLAUDE.md', () => {
     const workspacePath = makeTmp();
     const instanceCwd = makeTmp();
@@ -242,5 +312,26 @@ describe('provisionWorkspace', () => {
     const policy = JSON.parse(readFileSync(join(workspacePath, '.claude', 'sandbox-policy.json'), 'utf8'));
     expect(policy.bash.enabled).toBe(false);
     expect(policy.bash.pathRestricted).toBe(false);
+  });
+
+  it('skips the opencode merge write when opencode.json is a symlink (mirrors the provider MCP writer preflight)', () => {
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+    const victimDir = makeTmp();
+    const victim = join(victimDir, 'victim.json');
+    writeFileSync(victim, '{"untouched":true}');
+    symlinkSync(victim, join(workspacePath, 'opencode.json'));
+
+    // Provisioning must not read existing config through the symlink, must
+    // not write through it, and must not fail the whole workspace.
+    expect(() =>
+      provisionWorkspace({
+        ...makeOpts(workspacePath, instanceCwd),
+        provider: 'opencode-cli',
+      }),
+    ).not.toThrow();
+
+    expect(readFileSync(victim, 'utf8')).toBe('{"untouched":true}');
+    expect(lstatSync(join(workspacePath, 'opencode.json')).isSymbolicLink()).toBe(true);
   });
 });

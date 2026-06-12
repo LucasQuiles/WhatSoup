@@ -216,6 +216,77 @@ describe('OpenCode parser — step_finish branch', () => {
     });
   });
 
+  it('reason="stop" with cost → result with costUsd populated and tokens parsed identically', () => {
+    const p = createOpenCodeParser();
+    // Live-captured shape from a real opencode step_finish event.
+    const event = p.parse(
+      JSON.stringify({
+        type: 'step_finish',
+        part: {
+          reason: 'stop',
+          tokens: { total: 102512, input: 1941, output: 34, reasoning: 0, cache: { write: 100537, read: 0 } },
+          cost: 0.0006231,
+        },
+      }),
+    );
+    expect(event).toEqual({
+      type: 'result',
+      text: null,
+      inputTokens: 1941,
+      outputTokens: 34,
+      costUsd: 0.0006231,
+    });
+  });
+
+  it('reason="stop" with cost=0 → costUsd 0 (zero is a valid cost)', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(
+      JSON.stringify({ type: 'step_finish', part: { reason: 'stop', cost: 0 } }),
+    );
+    expect(event).toEqual({
+      type: 'result',
+      text: null,
+      inputTokens: undefined,
+      outputTokens: undefined,
+      costUsd: 0,
+    });
+  });
+
+  it('reason="stop" without cost → costUsd undefined', () => {
+    const p = createOpenCodeParser();
+    const event = p.parse(
+      JSON.stringify({
+        type: 'step_finish',
+        part: { reason: 'stop', tokens: { input: 10, output: 5 } },
+      }),
+    );
+    expect(event).toEqual({
+      type: 'result',
+      text: null,
+      inputTokens: 10,
+      outputTokens: 5,
+      costUsd: undefined,
+    });
+  });
+
+  it.each([
+    ['string cost', '"0.5"'],
+    ['negative cost', '-0.001'],
+    ['null cost', 'null'],
+    ['non-finite cost (1e999 → Infinity)', '1e999'],
+  ])('reason="stop" with garbage cost (%s) → costUsd undefined, tokens unaffected', (_label, costJson) => {
+    const p = createOpenCodeParser();
+    const line = `{"type":"step_finish","part":{"reason":"stop","tokens":{"input":7,"output":3},"cost":${costJson}}}`;
+    const event = p.parse(line);
+    expect(event).toEqual({
+      type: 'result',
+      text: null,
+      inputTokens: 7,
+      outputTokens: 3,
+      costUsd: undefined,
+    });
+  });
+
   it('reason="tool-calls" → ignored (more steps follow)', () => {
     const p = createOpenCodeParser();
     expect(p.parse(JSON.stringify({ type: 'step_finish', part: { reason: 'tool-calls' } }))).toEqual({

@@ -2,7 +2,7 @@
 
 **ID:** agent-layer-hardening-20260405
 **Created:** 2026-04-05
-**Status:** in_progress → nearing completion
+**Status:** closed — archived under `completed/` with known gaps (SP9 and SP11 undelivered; Synthesize-phase verification not run); see Bead Manifest
 **Profile:** BUILD
 **Complexity:** complicated
 **Cynefin:** complicated

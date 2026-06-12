@@ -5,8 +5,10 @@ import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
 import { formatRelative } from '../../lib/format-time'
 import { getProvider, DEFAULT_PROVIDER_ID } from '../../lib/providers'
+import { statusTextClass } from '../../lib/status-severity'
 import ConfirmDialog from '../ConfirmDialog'
 import { PipelineNode, PipelineArrow } from './PipelineTab'
+import { ProvidersKeysCard } from './ProvidersKeysCard'
 import { buildConfigEntries, TYPE_COLOR } from './config-helpers'
 import { getModeColor } from './types'
 import type { LineInstance } from './types'
@@ -33,7 +35,7 @@ export function SummaryTab({
 
   // All instance KPIs in one row — health, runtime, identity, tokens
   const cards = [
-    { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
+    { label: 'STATUS', value: line.status, color: statusTextClass(line.status) },
     { label: 'CONNECTION', value: connectionState, color: connectionState === 'connected' ? 'text-s-ok' : connectionState === 'connecting' ? 'text-s-warn' : 'text-t4' },
     ...(line.linkedStatus
       ? [{ label: 'LINK', value: line.linkedStatus, color: line.linkedStatus === 'linked' ? 'text-s-ok' : 'text-s-warn' }]
@@ -235,6 +237,9 @@ export function SummaryTab({
           </div>
         </motion.div>
       </div>
+
+      {/* Row 4: Providers & Keys — agent mode only (read-only) */}
+      {line.mode === 'agent' && <ProvidersKeysCard lineName={line.name} />}
 
       {/* Confirmation dialogs for destructive actions */}
       <ConfirmDialog

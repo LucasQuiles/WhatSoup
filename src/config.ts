@@ -5,16 +5,19 @@ import { normalizePhoneE164 } from './lib/phone.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
 import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
+import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
+import { DEFAULT_FLEET_PORT } from './fleet/constants.ts';
+import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
+import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 
 const APP_NAME = 'whatsoup';
 
 // Name of the Pinecone index used for the memory/chat search mode.
 // This is an index name (data), not a project reference.
-export const DEFAULT_PINECONE_INDEX = 'whatsapp-bot';
-export const DEFAULT_PINECONE_API_KEY_ENV = 'PINECONE_API_KEY';
-export const DEFAULT_PINECONE_RERANK_MODEL = 'pinecone-rerank-v0';
-export const DEFAULT_KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:8799/embed';
-export const DEFAULT_MW_MIND_EMBED_URL = DEFAULT_KNOWLEDGE_EMBED_URL;
+const DEFAULT_PINECONE_INDEX = 'whatsapp-bot';
+const DEFAULT_PINECONE_API_KEY_ENV = 'PINECONE_API_KEY';
+const DEFAULT_PINECONE_RERANK_MODEL = 'pinecone-rerank-v0';
+const DEFAULT_KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:8799/embed';
 
 export type { AccessMode } from './instance-loader.ts';
 export type PineconeSearchMode = 'memory' | 'entity';
@@ -586,6 +589,94 @@ function mergeKnowledgeProfiles(
   return profiles;
 }
 
+// ---------------------------------------------------------------------------
+// resolveTwilioSmsConfig — resolve and apply defaults to a raw twilioConfig block.
+// Returns undefined when the source is absent or missing the required 'account'
+// field. Mirrors the resolveMemoryConfig pattern: record/stringProp/numberProp
+// helpers + default merging. Does NOT resolve keyring secrets or instantiate
+// any SDK; config data only.
+// ---------------------------------------------------------------------------
+export function resolveTwilioSmsConfig(
+  rawSource: Record<string, unknown> | null | undefined,
+): TwilioSmsConfig | undefined {
+  const src = record(rawSource ?? undefined);
+  if (!src) return undefined;
+
+  // Required discriminator: abort if 'account' is absent (not a twilioConfig block)
+  const account = stringProp(src, 'account');
+  if (!account) return undefined;
+
+  const accountSid = stringProp(src, 'accountSid') ?? '';
+  const authTokenService = stringProp(src, 'authTokenService') ?? '';
+  const phoneNumber = stringProp(src, 'phoneNumber');
+  const messagingServiceSid = stringProp(src, 'messagingServiceSid');
+
+  // inboundMode: validated string, default to DEFAULT_TWILIO_SMS.inboundMode
+  const rawMode = src['inboundMode'];
+  const inboundMode: TwilioInboundMode =
+    rawMode === 'poll' || rawMode === 'webhook'
+      ? rawMode
+      : DEFAULT_TWILIO_SMS.inboundMode;
+
+  const pollIntervalMs = numberProp(src, 'pollIntervalMs', DEFAULT_TWILIO_SMS.pollIntervalMs);
+
+  // rateLimit: nested object with smsPerMinute
+  const rateLimitSrc = record(src['rateLimit']);
+  const smsPerMinute = numberProp(rateLimitSrc, 'smsPerMinute', DEFAULT_TWILIO_SMS.rateLimit.smsPerMinute);
+
+  // webhook block: pass through when present, normalize trailing slash in publicBaseUrl
+  const webhookSrc = record(src['webhook']);
+  let webhookConfig: TwilioWebhookConfig | undefined;
+  if (webhookSrc !== undefined) {
+    const rawBaseUrl = stringProp(webhookSrc, 'publicBaseUrl') ?? '';
+    const publicBaseUrl = rawBaseUrl.endsWith('/') ? rawBaseUrl.slice(0, -1) : rawBaseUrl;
+    const listenPort = numberProp(webhookSrc, 'listenPort', 0);
+    const listenAddress = stringProp(webhookSrc, 'listenAddress');
+    webhookConfig = {
+      publicBaseUrl,
+      listenPort,
+      ...(listenAddress !== undefined ? { listenAddress } : {}),
+    };
+  }
+
+  // voice block: merge with DEFAULT_TWILIO_VOICE defaults
+  const voiceSrc = record(src['voice']);
+  let voiceConfig: TwilioVoiceConfig | undefined;
+  if (voiceSrc !== undefined) {
+    const enabled =
+      typeof voiceSrc['enabled'] === 'boolean'
+        ? (voiceSrc['enabled'] as boolean)
+        : DEFAULT_TWILIO_VOICE.enabled;
+    const voicemailMaxLengthSec = numberProp(
+      voiceSrc,
+      'voicemailMaxLengthSec',
+      DEFAULT_TWILIO_VOICE.voicemailMaxLengthSec,
+    );
+    const voicemailGreeting = stringProp(voiceSrc, 'voicemailGreeting');
+    voiceConfig = {
+      enabled,
+      voicemailMaxLengthSec,
+      ...(voicemailGreeting !== undefined ? { voicemailGreeting } : {}),
+    };
+  }
+
+  // Build result without optional fields, then spread them in only if defined.
+  // This preserves the XOR invariant: absent fields remain undefined (not present),
+  // matching the type signature readonly phoneNumber?: string.
+  return {
+    account,
+    accountSid,
+    authTokenService,
+    inboundMode,
+    pollIntervalMs,
+    rateLimit: { smsPerMinute },
+    ...(phoneNumber !== undefined ? { phoneNumber } : {}),
+    ...(messagingServiceSid !== undefined ? { messagingServiceSid } : {}),
+    ...(webhookConfig !== undefined ? { webhook: webhookConfig } : {}),
+    ...(voiceConfig !== undefined ? { voice: voiceConfig } : {}),
+  };
+}
+
 export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | undefined): MemoryConfig {
   const migrated = migrateLegacyMemoryConfig(rawSource ?? {}, { removeLegacy: false }).config;
   const memoryRoot = record(migrated.memory);
@@ -699,6 +790,24 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
 }
 
 const resolvedMemory = resolveMemoryConfig(instance);
+
+const resolvedTransport: TransportId = (() => {
+  const raw = instance?.transport;
+  if (typeof raw === 'string' && isTransportId(raw)) return raw;
+  return DEFAULT_TRANSPORT_ID;
+})();
+
+// Only resolved when the twilio transport is selected — validation rejects a
+// twilioConfig on other transports, and this gate keeps the invariant
+// self-documenting at the resolution site too.
+const resolvedTwilioConfig: TwilioSmsConfig | undefined =
+  resolvedTransport === 'twilio' && record(instance?.twilioConfig) != null
+    ? resolveTwilioSmsConfig(instance?.twilioConfig as Record<string, unknown>)
+    : undefined;
+
+const resolvedAgentOptions = (instance?.agentOptions as Record<string, unknown> | undefined) ?? {};
+const resolvedFallbacks = normalizeFallbackEntriesFromAgentOptions(resolvedAgentOptions);
+
 export const config = {
   // Identity
   botName: (instance?.name as string | undefined) ?? 'Loops',
@@ -759,6 +868,10 @@ export const config = {
   // 'minimal' (suppress most updates — only critical status shown)
   toolUpdateMode: ((instance?.toolUpdateMode as string | undefined) ?? 'full') as 'full' | 'friendly' | 'minimal',
   toolUpdateRedirectJid: stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
+  // Gate the agent restart/back-online notification. Default true preserves existing behavior.
+  startupNotifications: booleanProp(instance ?? undefined, 'startupNotifications', true),
+  // Gate proactive per_chat session resume on startup. Default true preserves existing behavior.
+  proactiveResumeOnStartup: booleanProp(instance ?? undefined, 'proactiveResumeOnStartup', true),
   textAggregateDelayMs: positiveIntValue(instance?.textAggregateDelayMs, 2_000),
 
   // Operation tracker: per-tool progress reporting & stall detection
@@ -781,7 +894,7 @@ export const config = {
 
   // GUI
   gui: (instance?.gui as boolean | undefined) ?? false,
-  guiPort: (instance?.guiPort as number | undefined) ?? intEnv('WHATSOUP_GUI_PORT', 9099),
+  guiPort: (instance?.guiPort as number | undefined) ?? intEnv('WHATSOUP_GUI_PORT', DEFAULT_FLEET_PORT),
 
   // API
   // P3.6 review D-2: env-var override for operator-actionable timeout
@@ -861,15 +974,16 @@ export const config = {
 
   // Agent provider selection — read from agentOptions.provider / agentOptions.providerConfig
   // Defaults to 'claude-cli' for backward compatibility when not specified.
-  agentProvider: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['provider'] as string | undefined) ?? 'claude-cli',
-  agentProviderConfig: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
+  agentProvider: (resolvedAgentOptions['provider'] as string | undefined) ?? 'claude-cli',
+  agentProviderConfig: (resolvedAgentOptions['providerConfig'] as Record<string, unknown> | undefined) ?? undefined,
 
-  // Automatic provider fallback — read from agentOptions.fallbackProvider /
-  // agentOptions.fallbackModel. When the primary provider hits a usage limit,
-  // new sessions are routed to the fallback provider until the limit resets.
-  // Undefined disables fallback (the default).
-  agentFallbackProvider: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['fallbackProvider'] as string | undefined) ?? undefined,
-  agentFallbackModel: ((instance?.agentOptions as Record<string, unknown> | undefined)?.['fallbackModel'] as string | undefined) ?? undefined,
+  // Automatic provider fallback — read from agentOptions.fallbacks[] or the
+  // legacy agentOptions.fallbackProvider / fallbackModel pair. When the primary
+  // provider hits a usage limit, new sessions are routed to the selected
+  // fallback until the limit resets. An empty chain disables fallback.
+  agentFallbacks: resolvedFallbacks,
+  agentFallbackProvider: resolvedFallbacks[0]?.provider,
+  agentFallbackModel: resolvedFallbacks[0]?.model,
 
   // Voice (ElevenLabs TTS)
   elevenlabs: {
@@ -925,6 +1039,14 @@ export const config = {
     }
     return raw as AccessMode;
   })(),
+
+  // Transport selection — read from instance.transport, defaults to DEFAULT_TRANSPORT_ID.
+  // Mirroring agentProvider: simple inline read with a default.
+  transport: resolvedTransport,
+
+  // Twilio SMS config — present only when instance.twilioConfig is set.
+  // Defaults for inboundMode/pollIntervalMs/rateLimit are applied by resolveTwilioSmsConfig.
+  twilioConfig: resolvedTwilioConfig,
 } as const;
 
 // Make intEnv available for external use (e.g. tests, future env-driven fields)

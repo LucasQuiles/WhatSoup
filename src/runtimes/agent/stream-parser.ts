@@ -7,7 +7,7 @@ export type AgentEvent =
   | { type: 'assistant_text'; text: string; itemId?: string; complete?: boolean }
   | { type: 'tool_use'; toolName: string; toolId: string; toolInput: Record<string, unknown> }
   | { type: 'tool_result'; isError: boolean; toolId: string; content: string }
-  | { type: 'result'; text: string | null; inputTokens?: number; outputTokens?: number }
+  | { type: 'result'; text: string | null; inputTokens?: number; outputTokens?: number; costUsd?: number }
   | { type: 'token_usage'; inputTokens?: number; outputTokens?: number }
   | { type: 'ignored' }
   | { type: 'unknown'; raw: unknown }

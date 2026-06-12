@@ -1,7 +1,7 @@
 import { type FC, useReducer, useEffect, useCallback, useRef } from 'react'
 import { X, Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, getApiTicket, getFleetToken } from '../lib/api'
+import { api, getApiTicket, isProductionConsole } from '../lib/api'
 import type { LineInstance } from '../types'
 
 interface UpdateModalProps {
@@ -24,10 +24,14 @@ const STEP_LABELS: Record<string, string> = {
   install: 'Installing dependencies',
   'console-install': 'Installing console dependencies',
   'console-build': 'Building console',
+  preserve: 'Preserving failed update state',
   restart: 'Restarting fleet server',
 }
 
 const STEP_ORDER = ['pull', 'install', 'console-install', 'console-build', 'restart']
+const DYNAMIC_STEP_INSERT_BEFORE: Record<string, string> = {
+  preserve: 'restart',
+}
 
 type Phase = 'confirm' | 'updating' | 'restarting-fleet' | 'restart-instances' | 'done' | 'error'
 
@@ -53,6 +57,18 @@ function makeInitialSteps(): StepState[] {
   return STEP_ORDER.map(s => ({ step: s, status: 'pending' as StepStatus }))
 }
 
+function updateStepProgress(steps: StepState[], next: StepState): StepState[] {
+  const existingIndex = steps.findIndex(s => s.step === next.step)
+  if (existingIndex !== -1) {
+    return steps.map(s => s.step === next.step ? { ...s, status: next.status, message: next.message } : s)
+  }
+
+  const beforeStep = DYNAMIC_STEP_INSERT_BEFORE[next.step]
+  const beforeIndex = beforeStep ? steps.findIndex(s => s.step === beforeStep) : -1
+  if (beforeIndex === -1) return [...steps, next]
+  return [...steps.slice(0, beforeIndex), next, ...steps.slice(beforeIndex)]
+}
+
 function reducer(state: ModalState, action: ModalAction): ModalState {
   switch (action.type) {
     case 'reset':
@@ -68,9 +84,11 @@ function reducer(state: ModalState, action: ModalAction): ModalState {
     case 'stepProgress':
       return {
         ...state,
-        steps: state.steps.map(s =>
-          s.step === action.step ? { ...s, status: action.status, message: action.message } : s
-        ),
+        steps: updateStepProgress(state.steps, {
+          step: action.step,
+          status: action.status,
+          message: action.message,
+        }),
       }
     case 'setError':
       return {
@@ -172,12 +190,12 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
     const controller = new AbortController()
     abortRef.current = controller
 
-    // Audience-scoped ticket (#313): mint an api-audience ticket rather than
-    // sending the root meta-tag token directly. In dev (no meta-tag) skip
-    // the header and let the proxy handle auth.
+    // Audience-scoped ticket (#313): mint an api-audience ticket via the
+    // console session (B1). In dev (no fleet-auth-mode meta) skip the
+    // header and let the proxy handle auth.
     void (async () => {
       let headers: Record<string, string> = {}
-      if (getFleetToken()) {
+      if (isProductionConsole()) {
         try {
           const ticket = await getApiTicket('api')
           headers = { 'Authorization': `Bearer ${ticket}` }

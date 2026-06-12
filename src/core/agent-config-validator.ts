@@ -17,6 +17,12 @@
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
+import { SERVICE_ENV_MAP } from '../lib/provider-key-service.ts';
+import { resolveAgentModel } from './agent-model.ts';
+import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
+import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
+import { ACCOUNT_RE } from './transport-refs.ts';
+import { E164_RE } from '../transport/twilio/types.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -32,6 +38,10 @@ export const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set([
   'shared',
   'per_chat',
 ]);
+
+// Managed-loop API providers (no CLI binary; the runtime drives the HTTP API
+// directly). A fallbackProvider of this type needs an explicit fallbackModel.
+const API_PROVIDER_IDS: ReadonlySet<string> = new Set(['openai-api', 'anthropic-api']);
 
 export interface ValidationError {
   /** Dotted path of the offending field (e.g. "agentOptions.sessionScope"). */
@@ -301,6 +311,9 @@ export function validateInstanceConfig(
   const pineconeGuardErr = validatePineconeProjectGuard(raw, ctx);
   if (pineconeGuardErr) return pineconeGuardErr;
 
+  const transportErr = validateTransportConfig(raw);
+  if (transportErr) return transportErr;
+
   // Auth-only mode (loader bootstrap-auth path) stops here.
   if (ctx.authOnly) return null;
 
@@ -354,23 +367,17 @@ function validateAgentOptions(
   }
   const opts = agentOpts as Record<string, unknown>;
 
-  // sessionScope is required on load/discovery; optional-but-validated on CREATE/PATCH.
+  // sessionScope is optional on every path — the agent runtime defaults a
+  // missing value to 'single' (src/runtimes/agent/runtime.ts AgentRuntime
+  // constructor: `options?.sessionScope ?? (options?.shared ? 'shared' :
+  // 'single')`), so a config the runtime boots happily must not surface
+  // config_error at load or discovery time. Invalid VALUES are still rejected.
   const scope = opts['sessionScope'];
-  if (ctx.mode === 'load' || ctx.mode === 'discovery') {
-    if (!VALID_SESSION_SCOPES.has(String(scope ?? ''))) {
-      return err(
-        'agentOptions.sessionScope',
-        `agentOptions.sessionScope is required and must be one of ${[...VALID_SESSION_SCOPES].join(', ')}`,
-      );
-    }
-  } else {
-    if (scope !== undefined && !VALID_SESSION_SCOPES.has(String(scope))) {
-      // Match the CREATE-path string for back-compat with tests / existing UI.
-      return err(
-        'agentOptions.sessionScope',
-        'agentOptions.sessionScope must be single, shared, or per_chat',
-      );
-    }
+  if (scope !== undefined && !VALID_SESSION_SCOPES.has(String(scope))) {
+    return err(
+      'agentOptions.sessionScope',
+      'agentOptions.sessionScope must be single, shared, or per_chat',
+    );
   }
 
   // cwd must be a string when provided.
@@ -445,6 +452,61 @@ function validateAgentOptions(
     }
   }
 
+  if (opts['fallbacks'] !== undefined) {
+    if (opts['fallbackProvider'] !== undefined || opts['fallbackModel'] !== undefined) {
+      return err(
+        'agentOptions.fallbacks',
+        'agentOptions.fallbacks cannot be combined with agentOptions.fallbackProvider or agentOptions.fallbackModel',
+      );
+    }
+    if (!Array.isArray(opts['fallbacks'])) {
+      return err('agentOptions.fallbacks', 'agentOptions.fallbacks must be an array when provided');
+    }
+    const fallbacks = opts['fallbacks'] as unknown[];
+    if (fallbacks.length > 4) {
+      return err('agentOptions.fallbacks', 'agentOptions.fallbacks may contain at most 4 entries');
+    }
+    const seen = new Set<string>();
+    for (let i = 0; i < fallbacks.length; i++) {
+      const rawEntry = fallbacks[i];
+      const field = `agentOptions.fallbacks[${i}]`;
+      if (!isRecord(rawEntry)) {
+        return err(field, `${field} must be an object`);
+      }
+      const provider = rawEntry['provider'];
+      if (
+        typeof provider !== 'string' ||
+        !(PROVIDER_IDS as readonly string[]).includes(provider)
+      ) {
+        return err(
+          `${field}.provider`,
+          `${field}.provider must be one of: ${PROVIDER_IDS.join(', ')}`,
+        );
+      }
+      const model = rawEntry['model'];
+      if (model !== undefined && (typeof model !== 'string' || model.trim() === '')) {
+        return err(`${field}.model`, `${field}.model must be a non-empty string when provided`);
+      }
+      if (API_PROVIDER_IDS.has(provider) && model === undefined) {
+        return err(
+          `${field}.model`,
+          `${field}.provider "${provider}" is an API provider and requires model to be set`,
+        );
+      }
+      const entry: AgentFallbackEntry = typeof model === 'string'
+        ? { provider, model: model.trim() }
+        : { provider };
+      const key = fallbackEntryKey(entry);
+      if (seen.has(key)) {
+        return err(field, `${field} duplicates an earlier fallback entry`);
+      }
+      seen.add(key);
+      if (isSameAsPrimaryFallbackEntry(entry, raw)) {
+        return err(field, `${field} matches the primary provider/model pair`);
+      }
+    }
+  }
+
   // fallbackProvider: when present, must be a canonical PROVIDER_ID, same as
   // `provider`. Routes new sessions to this provider when the primary hits a
   // usage limit. An unknown ID would fall through the session.ts switches.
@@ -473,6 +535,23 @@ function validateAgentOptions(
     }
   }
 
+  // Cross-field: an API-type fallbackProvider requires an explicit
+  // fallbackModel. The managed-loop providers (openai-api / anthropic-api)
+  // take their model from fallbackModel during a fallback window; without it
+  // the window would silently run on a provider-internal default the operator
+  // never chose. CLI fallback providers keep their own default model and stay
+  // valid without one.
+  if (
+    typeof opts['fallbackProvider'] === 'string' &&
+    API_PROVIDER_IDS.has(opts['fallbackProvider']) &&
+    opts['fallbackModel'] === undefined
+  ) {
+    return err(
+      'agentOptions.fallbackModel',
+      `agentOptions.fallbackProvider "${opts['fallbackProvider']}" is an API provider and requires agentOptions.fallbackModel to be set`,
+    );
+  }
+
   // providerConfig: plain object when present.
   if (opts['providerConfig'] !== undefined) {
     if (
@@ -495,6 +574,359 @@ function validateAgentOptions(
         return err(
           'agentOptions.providerConfig.budget',
           'agentOptions.providerConfig.budget must be an object when provided',
+        );
+      }
+    }
+    // baseUrl: custom OpenAI-compatible cloud endpoint (the opencode-cli
+    // "different cloud provider" surface). When present it must be a non-empty,
+    // parseable absolute URL — it is written into opencode.json's provider
+    // block as `options.baseURL`, so a malformed value would silently break
+    // routing at agent-start time.
+    if (pc['baseUrl'] !== undefined) {
+      if (typeof pc['baseUrl'] !== 'string' || pc['baseUrl'].trim() === '') {
+        return err(
+          'agentOptions.providerConfig.baseUrl',
+          'agentOptions.providerConfig.baseUrl must be a non-empty string when provided',
+        );
+      }
+      let baseUrl: URL;
+      try {
+        baseUrl = new URL(pc['baseUrl'] as string);
+      } catch {
+        return err(
+          'agentOptions.providerConfig.baseUrl',
+          'agentOptions.providerConfig.baseUrl must be a valid URL when provided',
+        );
+      }
+      if (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') {
+        return err(
+          'agentOptions.providerConfig.baseUrl',
+          'agentOptions.providerConfig.baseUrl must use http or https',
+        );
+      }
+      // Cross-field: for opencode-cli, baseUrl is written into opencode.json
+      // as a custom provider block that is only exercised when the instance's
+      // resolved model (top-level `model`, else `models.conversation`) routes
+      // to it. Without a resolvable model the block would never be used —
+      // reject instead of shipping a silently inert endpoint. API providers
+      // (openai-api / anthropic-api) consume baseUrl directly as an endpoint
+      // override with their own model defaults, so they are exempt.
+      if (opts['provider'] === 'opencode-cli' && resolveAgentModel(raw) === undefined) {
+        return err(
+          'agentOptions.providerConfig.baseUrl',
+          'agentOptions.providerConfig.baseUrl is set but no model is configured — without a top-level "model" or "models.conversation" the custom endpoint would never be used; set one that routes to it',
+        );
+      }
+    }
+    // apiKeyService: names the keyring service whose key authenticates a
+    // custom endpoint. It must be a service SERVICE_ENV_MAP knows — the
+    // generated provider block references the key as `{env:<ENVVAR>}` and an
+    // unknown service has no env var to interpolate. It is only meaningful
+    // alongside baseUrl: without one there is no endpoint for the key to
+    // authenticate, so the setting would be silently inert — reject instead.
+    if (pc['apiKeyService'] !== undefined) {
+      if (typeof pc['apiKeyService'] !== 'string' || pc['apiKeyService'].trim() === '') {
+        return err(
+          'agentOptions.providerConfig.apiKeyService',
+          'agentOptions.providerConfig.apiKeyService must be a non-empty string when provided',
+        );
+      }
+      if (SERVICE_ENV_MAP[pc['apiKeyService']] === undefined) {
+        return err(
+          'agentOptions.providerConfig.apiKeyService',
+          `agentOptions.providerConfig.apiKeyService ${JSON.stringify(pc['apiKeyService'])} is not a known keyring service — valid services: ${Object.keys(SERVICE_ENV_MAP).join(', ')}`,
+        );
+      }
+      if (pc['baseUrl'] === undefined) {
+        return err(
+          'agentOptions.providerConfig.apiKeyService',
+          'agentOptions.providerConfig.apiKeyService is set but providerConfig.baseUrl is not — the key service only authenticates a custom endpoint, so without one it would be silently inert; set baseUrl or remove apiKeyService',
+        );
+      }
+    }
+  }
+
+  return null;
+}
+
+const _TWILIO_ACCOUNT_SID_RE = /^AC[0-9a-f]{32}$/;
+
+const _TWILIO_MSG_SVC_SID_RE = /^MG[0-9a-f]{32}$/;
+
+function validateTransportConfig(
+  raw: Record<string, unknown>,
+): ValidationError | null {
+  const transport = raw['transport'];
+  const twilioConfig = raw['twilioConfig'];
+
+  // transport, if present, must be a known TransportId.
+  if (transport !== undefined) {
+    if (!isTransportId(transport)) {
+      return err(
+        'transport',
+        `transport must be one of: ${TRANSPORT_IDS.join(', ')} (got ${JSON.stringify(transport)})`,
+      );
+    }
+  }
+
+  // twilioConfig present with non-twilio transport (or absent transport) → reject as inconsistent.
+  const effectiveTransport = transport ?? DEFAULT_TRANSPORT_ID;
+  if (twilioConfig !== undefined && effectiveTransport !== 'twilio') {
+    return err(
+      'twilioConfig',
+      'twilioConfig is inconsistent with transport ' + JSON.stringify(effectiveTransport) +
+        ' — twilioConfig is only valid when transport is "twilio"',
+    );
+  }
+
+  // twilioConfig is REQUIRED when transport === 'twilio'.
+  if (effectiveTransport === 'twilio') {
+    if (twilioConfig === undefined || twilioConfig === null) {
+      return err('twilioConfig', 'twilioConfig is required when transport is "twilio"');
+    }
+    if (typeof twilioConfig !== 'object' || Array.isArray(twilioConfig)) {
+      return err('twilioConfig', 'twilioConfig must be an object');
+    }
+    const healthPort =
+      typeof raw['healthPort'] === 'number' ? (raw['healthPort'] as number) : undefined;
+    return validateTwilioConfig(twilioConfig as Record<string, unknown>, healthPort);
+  }
+
+  return null;
+}
+
+function validateTwilioConfig(tc: Record<string, unknown>, healthPort?: number): ValidationError | null {
+  // account: non-empty, matches ACCOUNT_RE
+  const account = tc['account'];
+  if (typeof account !== 'string' || account === '' || !ACCOUNT_RE.test(account)) {
+    return err(
+      'twilioConfig.account',
+      'twilioConfig.account must be a non-empty lowercase alphanumeric-and-dash string starting with a letter',
+    );
+  }
+
+  // accountSid: matches ^AC[0-9a-f]{32}$
+  const accountSid = tc['accountSid'];
+  if (typeof accountSid !== 'string' || !_TWILIO_ACCOUNT_SID_RE.test(accountSid)) {
+    return err(
+      'twilioConfig.accountSid',
+      'twilioConfig.accountSid must match AC[0-9a-f]{32} (hex must be lowercase)',
+    );
+  }
+
+  // authTokenService: non-empty, no whitespace, max 128 chars
+  const authTokenService = tc['authTokenService'];
+  if (
+    typeof authTokenService !== 'string' ||
+    authTokenService === '' ||
+    /\s/.test(authTokenService) ||
+    authTokenService.length > 128
+  ) {
+    return err(
+      'twilioConfig.authTokenService',
+      'twilioConfig.authTokenService must be a non-empty keyring service name (no whitespace, max 128 chars)',
+    );
+  }
+
+  // Sender XOR: phoneNumber XOR messagingServiceSid
+  const phoneNumber = tc['phoneNumber'];
+  const messagingServiceSid = tc['messagingServiceSid'];
+  const hasPhone = phoneNumber !== undefined && phoneNumber !== null;
+  const hasMss = messagingServiceSid !== undefined && messagingServiceSid !== null;
+
+  if (hasPhone && hasMss) {
+    return err(
+      'twilioConfig.phoneNumber',
+      'twilioConfig: set exactly one of phoneNumber or messagingServiceSid, not both',
+    );
+  }
+  if (!hasPhone && !hasMss) {
+    return err(
+      'twilioConfig.phoneNumber',
+      'twilioConfig: exactly one of phoneNumber or messagingServiceSid is required',
+    );
+  }
+
+  if (hasPhone) {
+    if (typeof phoneNumber !== 'string' || !E164_RE.test(phoneNumber)) {
+      return err(
+        'twilioConfig.phoneNumber',
+        'twilioConfig.phoneNumber must be an E.164 number (e.g. +15559990000)',
+      );
+    }
+  }
+
+  if (hasMss) {
+    if (typeof messagingServiceSid !== 'string' || !_TWILIO_MSG_SVC_SID_RE.test(messagingServiceSid)) {
+      return err(
+        'twilioConfig.messagingServiceSid',
+        'twilioConfig.messagingServiceSid must match MG[0-9a-f]{32} (hex must be lowercase)',
+      );
+    }
+  }
+
+  // inboundMode: if present must be 'poll' or 'webhook'
+  const inboundMode = tc['inboundMode'];
+  if (inboundMode !== undefined && inboundMode !== 'poll' && inboundMode !== 'webhook') {
+    return err(
+      'twilioConfig.inboundMode',
+      "twilioConfig.inboundMode must be 'poll' or 'webhook'",
+    );
+  }
+  const effectiveInboundMode = inboundMode ?? 'poll';
+
+  // webhook block: required iff inboundMode === 'webhook', forbidden otherwise (fail closed).
+  const webhookBlock = tc['webhook'];
+  if (effectiveInboundMode === 'webhook') {
+    if (webhookBlock === undefined || webhookBlock === null) {
+      return err(
+        'twilioConfig.webhook',
+        "twilioConfig.webhook is required when inboundMode is 'webhook'",
+      );
+    }
+    if (typeof webhookBlock !== 'object' || Array.isArray(webhookBlock)) {
+      return err('twilioConfig.webhook', 'twilioConfig.webhook must be an object');
+    }
+    const wb = webhookBlock as Record<string, unknown>;
+    const publicBaseUrl = wb['publicBaseUrl'];
+    if (typeof publicBaseUrl !== 'string' || publicBaseUrl === '') {
+      return err(
+        'twilioConfig.webhook.publicBaseUrl',
+        'twilioConfig.webhook.publicBaseUrl must be a non-empty string',
+      );
+    }
+    let parsed: URL | null = null;
+    try { parsed = new URL(publicBaseUrl); } catch { /* fall through */ }
+    if (!parsed || parsed.protocol !== 'https:') {
+      return err(
+        'twilioConfig.webhook.publicBaseUrl',
+        'twilioConfig.webhook.publicBaseUrl must be an https:// URL',
+      );
+    }
+    const listenPort = wb['listenPort'];
+    if (
+      typeof listenPort !== 'number' ||
+      !Number.isInteger(listenPort) ||
+      listenPort < 1 ||
+      listenPort > 65535
+    ) {
+      return err(
+        'twilioConfig.webhook.listenPort',
+        'twilioConfig.webhook.listenPort must be an integer between 1 and 65535',
+      );
+    }
+    if (healthPort !== undefined && listenPort === healthPort) {
+      return err(
+        'twilioConfig.webhook.listenPort',
+        `twilioConfig.webhook.listenPort ${listenPort} conflicts with healthPort`,
+      );
+    }
+    const listenAddress = wb['listenAddress'];
+    if (listenAddress !== undefined && typeof listenAddress !== 'string') {
+      return err(
+        'twilioConfig.webhook.listenAddress',
+        'twilioConfig.webhook.listenAddress must be a string',
+      );
+    }
+  } else if (webhookBlock !== undefined) {
+    // poll mode: webhook block is forbidden (fail closed)
+    return err(
+      'twilioConfig.webhook',
+      "twilioConfig.webhook must not be set when inboundMode is 'poll'",
+    );
+  }
+
+  // voice optional block
+  const voiceBlock = tc['voice'];
+  if (voiceBlock !== undefined && voiceBlock !== null) {
+    if (typeof voiceBlock !== 'object' || Array.isArray(voiceBlock)) {
+      return err('twilioConfig.voice', 'twilioConfig.voice must be an object');
+    }
+    const vb = voiceBlock as Record<string, unknown>;
+    const voiceEnabled = vb['enabled'];
+    if (voiceEnabled !== undefined && typeof voiceEnabled !== 'boolean') {
+      return err('twilioConfig.voice.enabled', 'twilioConfig.voice.enabled must be a boolean');
+    }
+    const maxLen = vb['voicemailMaxLengthSec'];
+    if (maxLen !== undefined) {
+      if (
+        typeof maxLen !== 'number' ||
+        !Number.isInteger(maxLen) ||
+        (maxLen as number) < 5 ||
+        (maxLen as number) > 600
+      ) {
+        return err(
+          'twilioConfig.voice.voicemailMaxLengthSec',
+          'twilioConfig.voice.voicemailMaxLengthSec must be an integer between 5 and 600',
+        );
+      }
+    }
+    const greeting = vb['voicemailGreeting'];
+    if (greeting !== undefined) {
+      if (typeof greeting !== 'string' || (greeting as string).length > 500) {
+        return err(
+          'twilioConfig.voice.voicemailGreeting',
+          'twilioConfig.voice.voicemailGreeting must be a string of at most 500 characters',
+        );
+      }
+    }
+    // Coherence rules for voice.enabled
+    if (voiceEnabled === true) {
+      if (effectiveInboundMode !== 'webhook') {
+        return err(
+          'twilioConfig.voice',
+          "voice requires inboundMode:'webhook' (transcription arrives via webhook callbacks)",
+        );
+      }
+      // calls.create requires from: string — messagingServiceSid-only configs cannot place calls
+      const hasPhone =
+        typeof tc['phoneNumber'] === 'string' && (tc['phoneNumber'] as string).length > 0;
+      if (!hasPhone) {
+        return err(
+          'twilioConfig.voice',
+          'voice requires phoneNumber (calls cannot originate from a messagingServiceSid)',
+        );
+      }
+    }
+  }
+
+  // pollIntervalMs: if present, integer in [5000, 86400000] — the floor protects
+  // against rate-limit storms, the 24h ceiling against a config typo silently
+  // disabling inbound polling.
+  const pollIntervalMs = tc['pollIntervalMs'];
+  if (pollIntervalMs !== undefined) {
+    if (
+      typeof pollIntervalMs !== 'number' ||
+      !Number.isFinite(pollIntervalMs) ||
+      !Number.isInteger(pollIntervalMs) ||
+      pollIntervalMs < 5000 ||
+      pollIntervalMs > 86_400_000
+    ) {
+      return err(
+        'twilioConfig.pollIntervalMs',
+        'twilioConfig.pollIntervalMs must be an integer between 5000 and 86400000',
+      );
+    }
+  }
+
+  // rateLimit.smsPerMinute: if present, integer in [1, 600] — protects the
+  // rate-limiter layer from zero/negative caps.
+  const rateLimit = tc['rateLimit'];
+  if (rateLimit !== undefined) {
+    if (typeof rateLimit !== 'object' || rateLimit === null || Array.isArray(rateLimit)) {
+      return err('twilioConfig.rateLimit', 'twilioConfig.rateLimit must be an object');
+    }
+    const smsPerMinute = (rateLimit as Record<string, unknown>)['smsPerMinute'];
+    if (smsPerMinute !== undefined) {
+      if (
+        typeof smsPerMinute !== 'number' ||
+        !Number.isInteger(smsPerMinute) ||
+        smsPerMinute < 1 ||
+        smsPerMinute > 600
+      ) {
+        return err(
+          'twilioConfig.rateLimit.smsPerMinute',
+          'twilioConfig.rateLimit.smsPerMinute must be an integer between 1 and 600',
         );
       }
     }

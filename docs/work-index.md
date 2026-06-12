@@ -18,28 +18,21 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 178
+**Total entries:** 180
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | bead=113, doc=14, handoff=4, plan=14, review=1, spec=13, state=19 |
-| Status | active=2, closed=7, completed=115, deferred=8, pending=38, unknown=8 |
-| Status source | bead-manifest=3, body-marker=102, directory=7, fallback=3, phase-log=7, state-md-status=56 |
+| Kind | bead=113, doc=14, handoff=4, plan=16, review=1, spec=13, state=19 |
+| Status | closed=9, completed=117, deferred=8, pending=38, unknown=8 |
+| Status source | bead-manifest=3, body-marker=104, directory=7, fallback=3, phase-log=7, state-md-status=56 |
 
 ## Inconsistencies
 
 0 detected.
 
 ## Synthesis
-
-### Active (2)
-
-| Path | Kind | Topic | Status source |
-|------|------|-------|---------------|
-| `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | agent-layer-hardening | state-md-status |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | agent-layer-hardening | state-md-status |
 
 ### Unknown-status — triage needed (8)
 
@@ -200,8 +193,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC1-path-traversal.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC2-fts-injection.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC3-ssrf-dns.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | active | state-md-status | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | active | state-md-status | agent-layer-hardening | 2026-05-31 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | closed | state-md-status | agent-layer-hardening | 2026-05-31 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | closed | state-md-status | agent-layer-hardening | 2026-06-11 |  |
 
 ### docs/sdlc/completed/audit-remediation-20260330  _(1 entries)_
 
@@ -317,7 +310,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 
-### docs/superpowers/plans  _(14 entries)_
+### docs/superpowers/plans  _(16 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -335,6 +328,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | completed | body-marker | operation-tracker | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-04-25-pr-0a-transport-contract-foundation.md` | plan | completed | body-marker | pr-0a-transport-contract-foundation | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-05-29-harness-maintenance.md` | plan | completed | body-marker | harness-maintenance | 2026-05-29 |  |
+| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | completed | body-marker | twilio-sms-transport | 2026-06-11 |  |
+| `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | completed | body-marker | twilio-voice-webhook | 2026-06-11 |  |
 
 ### docs/superpowers/reviews  _(1 entries)_
 
@@ -363,4 +358,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-05-31T06:14:04Z from commit `3f680e5fbe0f0c970d48511f1231e0fd306a460e`
+- Generated at 2026-06-12T02:31:58Z from commit `24619e821aa9358f7ba259ada6122d9b5f087a58`

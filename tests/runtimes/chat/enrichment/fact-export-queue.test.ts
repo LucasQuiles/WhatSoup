@@ -636,8 +636,8 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
     }
 
     // Additionally: the row must still exist in the DB so an operator
-    // can inspect it. claimPendingFacts is read-only; the audit is in
-    // sqlite_master + the explicit log path, not row deletion.
+    // can inspect it. Corrupt rows are quarantined (status flip), never
+    // deleted — the audit trail is the row plus the explicit log path.
     const stillThere = db.raw
       .prepare(`SELECT fact_id FROM fact_export_queue WHERE fact_id = ?`)
       .get('corrupt-1') as { fact_id: string } | undefined;
@@ -699,5 +699,49 @@ describe('claimPendingFacts — corrupted payload guard (T1)', () => {
         expect('runId' in ctx).toBe(false);
       }
     }
+  });
+});
+
+describe('claimPendingFacts — quarantine status persistence', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.open();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('flips corrupt rows to status=quarantined so they stop occupying the pending queue head', () => {
+    // Failure mode this prevents: skipped-but-still-pending rows accumulate
+    // at the head of the ORDER BY id queue; once `limit` corrupt rows pile
+    // up, every claimed batch is all garbage and export silently stops.
+    db.raw
+      .prepare(`INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json) VALUES (?, ?, ?)`)
+      .run('corrupt-head', 'test-chat@s.whatsapp.net', '{broken');
+    db.raw
+      .prepare(`INSERT INTO fact_export_queue (fact_id, chat_jid, payload_json) VALUES (?, ?, ?)`)
+      .run('schema-bad-head', 'test-chat@s.whatsapp.net', '{"unexpected":"shape"}');
+    enqueueFacts(db, [makeFact({ factId: 'healthy-tail', text: 'Behind the corrupt rows' })]);
+
+    // With limit=2 both slots are eaten by the corrupt head rows unless
+    // they leave 'pending' after being observed once.
+    const first = claimPendingFacts(db, 2);
+    expect(first).toEqual([]);
+
+    const statuses = db.raw
+      .prepare(`SELECT fact_id, status FROM fact_export_queue ORDER BY id`)
+      .all() as Array<{ fact_id: string; status: string }>;
+    expect(statuses).toEqual([
+      { fact_id: 'corrupt-head', status: 'quarantined' },
+      { fact_id: 'schema-bad-head', status: 'quarantined' },
+      { fact_id: 'healthy-tail', status: 'pending' },
+    ]);
+
+    // The second claim now reaches the healthy row instead of re-reading garbage.
+    const second = claimPendingFacts(db, 2);
+    expect(second.map((c) => c.factId)).toEqual(['healthy-tail']);
   });
 });

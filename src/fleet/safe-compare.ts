@@ -20,9 +20,9 @@
 // for any pair where both sides are empty — callers must not be able to
 // authenticate by supplying nothing on both sides.
 //
-// Precedent: this is the same shape as `safeEqual` in
-// `src/fleet/auth-ticket.ts`. That copy is the template; this module is the
-// single source of truth going forward.
+// Precedent: this generalized the former local `safeEqual` in
+// `src/fleet/auth-ticket.ts`, which now imports this module. This is the
+// single source of truth for constant-time string comparison.
 
 import * as crypto from 'node:crypto';
 

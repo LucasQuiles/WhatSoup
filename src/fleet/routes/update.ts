@@ -8,6 +8,12 @@ import { createChildLogger } from '../../logger.ts';
 import type { UpdateChecker } from '../update-checker.ts';
 import { createServiceManager } from '../platform.ts';
 import { cleanGitEnv } from '../../lib/git-env.ts';
+import {
+  DEFAULT_UPDATE_BRANCH,
+  githubPublicHttpsUrlFromRemote,
+  publicFetchArgs,
+  shouldRetryWithPublicHttps,
+} from '../../lib/git-public-remote.ts';
 
 const execFileAsync = promisify(execFile);
 const log = createChildLogger('fleet:update');
@@ -26,6 +32,33 @@ function execGit(repoRoot: string, args: string[], timeout: number) {
   });
 }
 
+async function pullFromConfiguredRemote(repoRoot: string): Promise<{ stdout: string; stderr: string; publicHttpsFallback: boolean }> {
+  try {
+    const result = await execGit(repoRoot, ['pull', 'origin', DEFAULT_UPDATE_BRANCH], 60_000);
+    return { stdout: result.stdout, stderr: result.stderr, publicHttpsFallback: false };
+  } catch (err) {
+    if (!shouldRetryWithPublicHttps(err)) {
+      throw err;
+    }
+
+    let remoteUrl: string;
+    try {
+      const result = await execGit(repoRoot, ['remote', 'get-url', 'origin'], 5_000);
+      remoteUrl = result.stdout;
+    } catch {
+      throw err;
+    }
+    const publicUrl = githubPublicHttpsUrlFromRemote(remoteUrl);
+    if (!publicUrl) {
+      throw err;
+    }
+
+    await execGit(repoRoot, publicFetchArgs(publicUrl, DEFAULT_UPDATE_BRANCH), 60_000);
+    const merge = await execGit(repoRoot, ['merge', '--ff-only', `origin/${DEFAULT_UPDATE_BRANCH}`], 60_000);
+    return { stdout: merge.stdout, stderr: merge.stderr, publicHttpsFallback: true };
+  }
+}
+
 /**
  * Parse `git status --porcelain` output, filtering out untracked entries (`??`).
  * Returns the list of tracked-file paths with pending modifications.
@@ -39,16 +72,12 @@ function parseTrackedChanges(porcelain: string): string[] {
     .filter(Boolean);
 }
 
-/**
- * Attempt to rollback to a previous SHA after a failed update step. Before resetting,
- * captures any post-pull tracked modifications (typically `package-lock.json` after
- * `npm install` runs) into a private patch file on disk plus a tracked-file `git stash` entry, so the
- * destructive `git reset --hard` does not silently lose work. Best-effort — logs but
- * doesn't throw. Surfaces preserved files / patch path / stash ref via SSE.
- */
-async function rollback(repoRoot: string, sha: string, writeSSE: (event: string, data: unknown) => void): Promise<void> {
+async function preservePostUpdateFailure(
+  repoRoot: string,
+  previousSha: string | null,
+  writeSSE: (event: string, data: unknown) => void,
+): Promise<void> {
   try {
-    // 1. Capture tracked changes that appeared post-pull.
     let preservedFiles: string[] = [];
     let patchPath: string | undefined;
     let stashRef: string | undefined;
@@ -57,28 +86,35 @@ async function rollback(repoRoot: string, sha: string, writeSSE: (event: string,
       const { stdout: porcelain } = await execGit(repoRoot, ['status', '--porcelain'], 5_000);
       preservedFiles = parseTrackedChanges(porcelain);
     } catch (statusErr) {
-      // git status itself failed — log but proceed with the reset; this preserves
-      // existing behaviour for the empty/no-dirt case.
-      log.warn({ err: statusErr, sha }, 'rollback: git status failed, proceeding without preservation');
+      log.warn({ err: statusErr, previousSha }, 'post-update preserve: git status failed');
+      writeSSE('progress', {
+        step: 'preserve',
+        status: 'skipped',
+        reason: 'status-failed',
+        previousSha,
+        message: 'Update validation failed. Unable to inspect local changes; fleet server was not restarted.',
+      });
+      return;
     }
 
     if (preservedFiles.length > 0) {
-      // 2a. Capture diff to a patch file on disk.
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const shortSha = sha.slice(0, 7);
-      const candidatePath = `/tmp/whatsoup-update-rollback-${timestamp}-${shortSha}.patch`;
+      const shortSha = previousSha?.slice(0, 7) ?? 'unknown';
+      const candidatePath = `/tmp/whatsoup-update-preserve-${timestamp}-${shortSha}.patch`;
 
       let diffOut = '';
       try {
         const { stdout } = await execGit(repoRoot, ['diff', 'HEAD'], 10_000);
         diffOut = stdout;
       } catch (diffErr) {
-        log.warn({ err: diffErr, sha }, 'rollback: git diff HEAD failed, skipping reset to avoid silent loss');
+        log.warn({ err: diffErr, previousSha }, 'post-update preserve: git diff HEAD failed');
         writeSSE('progress', {
-          step: 'rollback',
+          step: 'preserve',
           status: 'skipped',
           reason: 'diff-capture-failed',
+          previousSha,
           files: preservedFiles,
+          message: 'Update validation failed. Unable to capture a patch; fleet server was not restarted.',
         });
         return;
       }
@@ -87,45 +123,41 @@ async function rollback(repoRoot: string, sha: string, writeSSE: (event: string,
         writeFileSync(candidatePath, diffOut, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
         patchPath = candidatePath;
       } catch (writeErr) {
-        // ENOSPC / EACCES / read-only fs — do NOT reset; leave the working tree intact
-        // so the operator can recover manually.
-        log.error({ err: writeErr, sha, candidatePath }, 'rollback: patch write failed, skipping reset');
+        log.error({ err: writeErr, previousSha, candidatePath }, 'post-update preserve: patch write failed');
         writeSSE('progress', {
-          step: 'rollback',
+          step: 'preserve',
           status: 'skipped',
           reason: 'patch-write-failed',
+          previousSha,
           files: preservedFiles,
+          message: 'Update validation failed. Unable to write a recovery patch; fleet server was not restarted.',
         });
         return;
       }
 
-      // 2b. Stash as a secondary recovery surface. Failure here is non-fatal — the
-      // patch file is already on disk.
       try {
-        await execGit(repoRoot, ['stash', 'push', '--message', `whatsoup-update-rollback ${timestamp}`, '--', ...preservedFiles], 15_000);
+        await execGit(repoRoot, ['stash', 'push', '--message', `whatsoup-update-preserve ${timestamp}`, '--', ...preservedFiles], 15_000);
         stashRef = 'stash@{0}';
       } catch (stashErr) {
-        log.warn({ err: stashErr, sha }, 'rollback: git stash push failed, patch artifact still on disk');
+        log.warn({ err: stashErr, previousSha }, 'post-update preserve: git stash push failed, patch artifact still on disk');
       }
     }
 
-    // 3. Destructive reset (unchanged behaviour).
-    await execGit(repoRoot, ['reset', '--hard', sha], 15_000);
-
-    // 4. Report.
     writeSSE('progress', {
-      step: 'rollback',
+      step: 'preserve',
       status: 'done',
-      sha,
-      message: `Rolled back to ${sha.slice(0, 7)}`,
+      previousSha,
+      message: preservedFiles.length > 0
+        ? 'Update validation failed. Preserved tracked drift; fleet server was not restarted.'
+        : 'Update validation failed. No tracked drift to preserve; fleet server was not restarted.',
       preservedFiles,
       ...(patchPath ? { patchPath } : {}),
       ...(stashRef ? { stashRef } : {}),
     });
-    log.info({ sha, preservedFiles, patchPath, stashRef }, 'update rollback succeeded');
+    log.info({ previousSha, preservedFiles, patchPath, stashRef }, 'post-update failure preserved');
   } catch (err) {
-    writeSSE('error', { step: 'rollback', message: `Rollback failed: ${(err as Error).message}` });
-    log.error({ err, sha }, 'update rollback failed');
+    writeSSE('error', { step: 'preserve', message: `Post-update preservation failed: ${(err as Error).message}` });
+    log.error({ err, previousSha }, 'post-update preservation failed');
   }
 }
 
@@ -134,7 +166,9 @@ export function handleGetVersion(
   res: ServerResponse,
   checker: UpdateChecker,
 ): void {
-  jsonResponse(res, 200, checker.getState());
+  // B1 observability: non-secret console auth posture rides the version
+  // payload so operators can verify the closure from the API.
+  jsonResponse(res, 200, { ...checker.getState(), consoleAuthMode: 'session', rootTokenInHtml: false });
 }
 
 export async function handleUpdate(
@@ -185,7 +219,7 @@ export async function handleUpdate(
     // Step 1: git pull
     writeSSE('progress', { step: 'pull', status: 'running' });
     try {
-      const { stdout } = await execGit(repoRoot, ['pull', 'origin', 'main'], 60_000);
+      const { stdout, publicHttpsFallback } = await pullFromConfiguredRemote(repoRoot);
       // Read the new SHA explicitly so the console can detect the update
       // without relying on checker.checkNow() completing in time
       let newSha: string | undefined;
@@ -195,9 +229,9 @@ export async function handleUpdate(
 
       const alreadyUpToDate = stdout.includes('Already up to date');
       if (alreadyUpToDate) {
-        writeSSE('progress', { step: 'pull', status: 'done', message: 'Already up to date — no new changes to pull.', noChanges: true, newSha });
+        writeSSE('progress', { step: 'pull', status: 'done', message: 'Already up to date — no new changes to pull.', noChanges: true, newSha, publicHttpsFallback });
       } else {
-        writeSSE('progress', { step: 'pull', status: 'done', message: stdout.trim(), newSha });
+        writeSSE('progress', { step: 'pull', status: 'done', message: stdout.trim(), newSha, publicHttpsFallback });
       }
       // Refresh cached version state so /api/version reflects the pull
       checker.checkNow().catch(() => {});
@@ -225,7 +259,7 @@ export async function handleUpdate(
         writeSSE('progress', { step: 'install', status: 'done' });
       } catch (err: any) {
         writeSSE('error', { step: 'install', message: err.stderr?.trim() || err.message });
-        if (prePullSha) await rollback(repoRoot, prePullSha, writeSSE);
+        await preservePostUpdateFailure(repoRoot, prePullSha, writeSSE);
         finishUpdate();
         return;
       }
@@ -244,7 +278,7 @@ export async function handleUpdate(
         writeSSE('progress', { step: 'console-install', status: 'done' });
       } catch (err: any) {
         writeSSE('error', { step: 'console-install', message: err.stderr?.trim() || err.message });
-        if (prePullSha) await rollback(repoRoot, prePullSha, writeSSE);
+        await preservePostUpdateFailure(repoRoot, prePullSha, writeSSE);
         finishUpdate();
         return;
       }
@@ -263,7 +297,7 @@ export async function handleUpdate(
         writeSSE('progress', { step: 'console-build', status: 'done' });
       } catch (err: any) {
         writeSSE('error', { step: 'console-build', message: err.stderr?.trim() || err.message });
-        if (prePullSha) await rollback(repoRoot, prePullSha, writeSSE);
+        await preservePostUpdateFailure(repoRoot, prePullSha, writeSSE);
         finishUpdate();
         return;
       }

@@ -1,0 +1,101 @@
+/**
+ * B1 closure stage 1: server-side console sessions. The browser never holds
+ * the root fleet token — the operator unlocks once, the server sets an
+ * HttpOnly cookie whose opaque id maps to an in-memory session (restart
+ * relocks the console by design).
+ */
+import { describe, it, expect, vi } from 'vitest';
+
+import {
+  createConsoleSessionStore,
+  CONSOLE_SESSION_COOKIE,
+  CONSOLE_SESSION_TTL_MS,
+  buildSessionCookie,
+  buildSessionClearCookie,
+  parseSessionCookie,
+  isSameOriginRequest,
+} from '../../src/fleet/console-session.ts';
+
+describe('createConsoleSessionStore', () => {
+  it('issues opaque ids that validate until TTL expiry', () => {
+    let nowMs = 1_000_000;
+    const store = createConsoleSessionStore({ now: () => nowMs });
+
+    const { sessionId, expiresIn } = store.issue();
+    expect(sessionId).toMatch(/^[0-9a-f]{64}$/);
+    expect(expiresIn).toBe(Math.floor(CONSOLE_SESSION_TTL_MS / 1000));
+    expect(store.validate(sessionId)).toBe(true);
+
+    nowMs += CONSOLE_SESSION_TTL_MS + 1;
+    expect(store.validate(sessionId)).toBe(false);
+  });
+
+  it('rejects unknown and revoked ids', () => {
+    const store = createConsoleSessionStore({ now: () => 0 });
+    expect(store.validate('f'.repeat(64))).toBe(false);
+
+    const { sessionId } = store.issue();
+    store.revoke(sessionId);
+    expect(store.validate(sessionId)).toBe(false);
+  });
+
+  it('bounds concurrent sessions by evicting the oldest', () => {
+    const store = createConsoleSessionStore({ now: () => 0, maxSessions: 2 });
+    const a = store.issue().sessionId;
+    const b = store.issue().sessionId;
+    const c = store.issue().sessionId;
+    expect(store.validate(a)).toBe(false); // oldest evicted
+    expect(store.validate(b)).toBe(true);
+    expect(store.validate(c)).toBe(true);
+  });
+});
+
+describe('session cookie helpers', () => {
+  it('builds an HttpOnly SameSite=Strict cookie scoped to /', () => {
+    const cookie = buildSessionCookie('a'.repeat(64));
+    expect(cookie).toContain(`${CONSOLE_SESSION_COOKIE}=${'a'.repeat(64)}`);
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('SameSite=Strict');
+    expect(cookie).toContain('Path=/');
+    expect(cookie).toContain(`Max-Age=${Math.floor(CONSOLE_SESSION_TTL_MS / 1000)}`);
+  });
+
+  it('builds a clearing cookie with Max-Age=0', () => {
+    const cookie = buildSessionClearCookie();
+    expect(cookie).toContain(`${CONSOLE_SESSION_COOKIE}=`);
+    expect(cookie).toContain('Max-Age=0');
+  });
+
+  it('parses the session id out of a Cookie header', () => {
+    const id = 'b'.repeat(64);
+    expect(parseSessionCookie(`${CONSOLE_SESSION_COOKIE}=${id}`)).toBe(id);
+    expect(parseSessionCookie(`other=x; ${CONSOLE_SESSION_COOKIE}=${id}; more=y`)).toBe(id);
+    expect(parseSessionCookie('other=x')).toBeNull();
+    expect(parseSessionCookie(undefined)).toBeNull();
+    // malformed values are rejected, not passed through
+    expect(parseSessionCookie(`${CONSOLE_SESSION_COOKIE}=not-hex`)).toBeNull();
+  });
+});
+
+describe('isSameOriginRequest', () => {
+  function req(headers: Record<string, string | undefined>) {
+    return { headers } as unknown as import('node:http').IncomingMessage;
+  }
+
+  it('accepts a matching Origin for the request host', () => {
+    expect(isSameOriginRequest(req({ origin: 'http://127.0.0.1:9099', host: '127.0.0.1:9099' }))).toBe(true);
+    expect(isSameOriginRequest(req({ origin: 'https://fleet.example:9099', host: 'fleet.example:9099' }))).toBe(true);
+  });
+
+  it('rejects a cross-site Origin', () => {
+    expect(isSameOriginRequest(req({ origin: 'http://evil.example', host: '127.0.0.1:9099' }))).toBe(false);
+  });
+
+  it('rejects when Origin is missing (cookie-auth callers must prove origin)', () => {
+    expect(isSameOriginRequest(req({ host: '127.0.0.1:9099' }))).toBe(false);
+  });
+
+  it('rejects malformed Origin values', () => {
+    expect(isSameOriginRequest(req({ origin: 'not a url', host: '127.0.0.1:9099' }))).toBe(false);
+  });
+});

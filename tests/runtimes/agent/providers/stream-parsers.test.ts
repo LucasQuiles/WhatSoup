@@ -674,6 +674,7 @@ describe('OpenCode stream parser', () => {
         text: null,
         inputTokens: 17853,
         outputTokens: 39,
+        costUsd: 0.00270135,
       });
     });
 

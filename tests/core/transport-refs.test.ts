@@ -33,6 +33,15 @@ describe('ChannelId / ChannelKind', () => {
   });
 });
 
+describe('sms channel kind', () => {
+  it('constructs and parses an sms channel id', () => {
+    const id = makeChannelId('sms', 'ml-bot');
+    expect(id).toBe('sms:ml-bot');
+    expect(kindOf(id)).toBe('sms');
+    expect(accountOf(id)).toBe('ml-bot');
+  });
+});
+
 describe('refToKey / msgToKey', () => {
   it('refToKey serializes a ConversationRef stably', () => {
     const c: ConversationRef = { channel: makeChannelId('whatsapp', 'mw-bot'), id: '1234@s.whatsapp.net' };

@@ -21,12 +21,145 @@ export interface InstanceStatus {
   lastPollAt: string;
   consecutiveFailures: number;
   status: 'online' | 'degraded' | 'unreachable' | 'logged_out';
+  statusConfidence: 'confirmed' | 'inferred' | 'ambiguous';
+  statusReason: string;
+  statusEvidence: string[];
   error: string | null;
   lastAlertAt: string | null;
   silencedUntil: string | null;
 }
 
 export type StatusChangeCallback = (instance: string, newStatus: InstanceStatus['status'], oldStatus: InstanceStatus['status']) => void;
+
+type StatusConfidence = InstanceStatus['statusConfidence'];
+
+interface HealthSnapshotClassification {
+  status: 'online' | 'degraded' | 'logged_out';
+  confidence: StatusConfidence;
+  reason: string;
+  evidence: string[];
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function booleanValue(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function evidenceField(name: string, value: unknown): string {
+  if (value === undefined || value === null || value === '') return `${name}=unknown`;
+  return `${name}=${String(value)}`;
+}
+
+function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshotClassification {
+  const healthStatus = stringValue(health.status);
+  const whatsapp = recordValue(health.whatsapp);
+  const connected = booleanValue(whatsapp?.connected);
+  const accountJid = stringValue(whatsapp?.account_jid);
+  const connection = recordValue(whatsapp?.connection);
+  const connectionState = stringValue(connection?.state);
+  const reconnectPhase = stringValue(connection?.reconnect_phase);
+  const reconnectAttempts = numberValue(connection?.reconnect_attempts);
+  const lastDisconnectReason = stringValue(connection?.last_disconnect_reason);
+  const lastStatusCode = numberValue(connection?.last_status_code);
+  const recentDisconnects = recordValue(connection?.recent_disconnects);
+  const recentDisconnectCount = numberValue(recentDisconnects?.count);
+  const recentDisconnectThreshold = numberValue(recentDisconnects?.degraded_threshold);
+  const recentDisconnectWindowMs = numberValue(recentDisconnects?.window_ms);
+  const recentDisconnectLastAt = stringValue(recentDisconnects?.last_at);
+  const recentDisconnectLastReason = stringValue(recentDisconnects?.last_reason);
+  const recentDisconnectLastStatusCode = numberValue(recentDisconnects?.last_status_code);
+  const accountJidStatus = accountJid === null
+    ? 'missing'
+    : accountJid === 'not connected'
+      ? 'not_connected'
+      : 'present';
+
+  const baseEvidence = [
+    evidenceField('health_status', healthStatus),
+    evidenceField('whatsapp_connected', connected),
+    evidenceField('account_jid_status', accountJidStatus),
+    evidenceField('connection_state', connectionState),
+    evidenceField('reconnect_phase', reconnectPhase),
+    evidenceField('reconnect_attempts', reconnectAttempts),
+    evidenceField('last_disconnect_reason', lastDisconnectReason),
+    evidenceField('last_status_code', lastStatusCode),
+    evidenceField('recent_disconnect_count', recentDisconnectCount),
+    evidenceField('recent_disconnect_threshold', recentDisconnectThreshold),
+    evidenceField('recent_disconnect_window_ms', recentDisconnectWindowMs),
+    evidenceField('recent_disconnect_last_at', recentDisconnectLastAt),
+    evidenceField('recent_disconnect_last_reason', recentDisconnectLastReason),
+    evidenceField('recent_disconnect_last_status_code', recentDisconnectLastStatusCode),
+  ];
+
+  const loggedOutHeuristic = reconnectPhase === 'backoff' && reconnectAttempts === 0;
+  const disconnectedCorroboration =
+    connected === false ||
+    accountJid === 'not connected' ||
+    connectionState === 'disconnected' ||
+    healthStatus === 'unhealthy';
+
+  if (loggedOutHeuristic && disconnectedCorroboration) {
+    return {
+      status: 'logged_out',
+      confidence: 'inferred',
+      reason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+      evidence: baseEvidence,
+    };
+  }
+
+  if (loggedOutHeuristic) {
+    return {
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      evidence: baseEvidence,
+    };
+  }
+
+  if (healthStatus === 'unhealthy') {
+    return {
+      status: 'degraded',
+      confidence: 'confirmed',
+      reason: 'health_body_unhealthy',
+      evidence: baseEvidence,
+    };
+  }
+
+  if (healthStatus === 'degraded') {
+    return {
+      status: 'degraded',
+      confidence: 'confirmed',
+      reason: 'health_body_degraded',
+      evidence: baseEvidence,
+    };
+  }
+
+  return {
+    status: 'online',
+    confidence: 'confirmed',
+    reason: 'health_body_ok',
+    evidence: baseEvidence,
+  };
+}
+
+function isNonOnlineClassification(
+  classification: HealthSnapshotClassification,
+): classification is HealthSnapshotClassification & { status: 'degraded' | 'logged_out' } {
+  return classification.status !== 'online';
+}
 
 export class HealthPoller {
   private statuses: Map<string, InstanceStatus> = new Map();
@@ -112,6 +245,9 @@ export class HealthPoller {
             lastPollAt: new Date().toISOString(),
             consecutiveFailures: 0,
             status: 'online',
+            statusConfidence: 'confirmed',
+            statusReason: 'self_health_callback',
+            statusEvidence: ['self_health_callback=ok'],
             error: null,
             lastAlertAt: this.lastAlertAtFor(name, existing),
             silencedUntil: existing?.silencedUntil ?? null,
@@ -140,6 +276,16 @@ export class HealthPoller {
           });
 
           if (!res.ok) {
+            const parsed = await this.parseHealthBody(res);
+            if (parsed) {
+              const classification = classifyHealthSnapshot(parsed);
+              if (!isNonOnlineClassification(classification)) {
+                this.updateFailure(name, `HTTP ${res.status}`);
+                return;
+              }
+              this.updateFromHealthSnapshot(name, parsed, classification);
+              return;
+            }
             this.updateFailure(name, `HTTP ${res.status}`);
             return;
           }
@@ -149,15 +295,9 @@ export class HealthPoller {
           clearTimeout(timeout);
         }
 
-        // Detect logged-out: backoff phase with zero attempts means fresh logout
-        const waConn = (health as any)?.whatsapp?.connection;
-        const isLoggedOut =
-          waConn?.reconnect_phase === 'backoff' && waConn?.reconnect_attempts === 0;
-
-        // HTTP 200 but body signals unhealthy → treat as degraded
-        if (health['status'] === 'unhealthy' || isLoggedOut) {
-          const derivedStatus = isLoggedOut ? 'logged_out' as const : 'degraded' as const;
-          this.updateDegraded(name, health, derivedStatus);
+        const classification = classifyHealthSnapshot(health);
+        if (isNonOnlineClassification(classification)) {
+          this.updateFromHealthSnapshot(name, health, classification);
           return;
         }
 
@@ -169,6 +309,9 @@ export class HealthPoller {
           lastPollAt: new Date().toISOString(),
           consecutiveFailures: 0,
           status: 'online',
+          statusConfidence: classification.confidence,
+          statusReason: classification.reason,
+          statusEvidence: classification.evidence,
           error: null,
           lastAlertAt: this.lastAlertAtFor(name, existing),
           silencedUntil: existing?.silencedUntil ?? null,
@@ -191,11 +334,21 @@ export class HealthPoller {
     }
   }
 
+  private async parseHealthBody(res: Response): Promise<Record<string, unknown> | null> {
+    try {
+      const parsed = await res.json();
+      return recordValue(parsed);
+    } catch {
+      return null;
+    }
+  }
+
   private updateFailure(name: string, error: string): void {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
     const newStatus: InstanceStatus['status'] = failures >= 3 ? 'unreachable' : 'degraded';
+    const confidence: StatusConfidence = newStatus === 'unreachable' ? 'confirmed' : 'inferred';
 
     log.warn({ name, failures, error }, 'instance health poll failed');
     this.statuses.set(name, {
@@ -204,6 +357,9 @@ export class HealthPoller {
       lastPollAt: new Date().toISOString(),
       consecutiveFailures: failures,
       status: newStatus,
+      statusConfidence: confidence,
+      statusReason: newStatus === 'unreachable' ? 'health_poll_failed_threshold' : 'health_poll_failed_transient',
+      statusEvidence: [`consecutive_failures=${failures}`, `error=${error}`],
       error,
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
@@ -227,6 +383,9 @@ export class HealthPoller {
     name: string,
     health: Record<string, unknown>,
     newStatus: 'degraded' | 'logged_out',
+    confidence: StatusConfidence,
+    reason: string,
+    evidence: string[],
   ): void {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
@@ -237,6 +396,9 @@ export class HealthPoller {
       lastPollAt: new Date().toISOString(),
       consecutiveFailures: existing?.consecutiveFailures ?? 0,
       status: newStatus,
+      statusConfidence: confidence,
+      statusReason: reason,
+      statusEvidence: evidence,
       error: null,
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
@@ -249,14 +411,29 @@ export class HealthPoller {
     if (newStatus === 'logged_out' && prevStatus !== 'logged_out') {
       this.maybeEmitAlert(name, 'instance_logged_out',
         `whatsoup@${name} appears logged out`,
-        `reconnect_phase=backoff reconnect_attempts=0`,
+        [`confidence=${confidence}`, `reason=${reason}`, ...evidence].join(' '),
       );
     } else if (newStatus === 'degraded' && prevStatus !== 'degraded') {
       this.maybeEmitAlert(name, 'instance_degraded',
         `whatsoup@${name} is degraded`,
-        `Health body reports status=unhealthy`,
+        [`confidence=${confidence}`, `reason=${reason}`, ...evidence].join(' '),
       );
     }
+  }
+
+  private updateFromHealthSnapshot(
+    name: string,
+    health: Record<string, unknown>,
+    classification: HealthSnapshotClassification & { status: 'degraded' | 'logged_out' },
+  ): void {
+    this.updateDegraded(
+      name,
+      health,
+      classification.status,
+      classification.confidence,
+      classification.reason,
+      classification.evidence,
+    );
   }
 
   private maybeEmitAlert(name: string, source: string, summary: string, evidence: string): void {

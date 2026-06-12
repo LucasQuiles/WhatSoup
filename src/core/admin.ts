@@ -3,10 +3,10 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
-import { toPersonalJid, toLidJid } from './jid-constants.ts';
+import { toPersonalJid, toLidJid, toSmsJid, isGroupJid } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender, type StoredMessage } from './messages.ts';
-import { isAdminPhone } from '../lib/phone.ts';
+import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
 import type { IncomingMessage, Messenger } from './types.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
@@ -19,7 +19,7 @@ const log = createChildLogger('admin');
 const MAX_REPLAYED_IDS = 10_000;
 const replayedIds = new Set<string>();
 
-function rememberReplayedId(messageId: string): void {
+export function rememberReplayedId(messageId: string): void {
   replayedIds.add(messageId);
   if (replayedIds.size > MAX_REPLAYED_IDS) {
     const oldest = replayedIds.values().next().value;
@@ -49,6 +49,33 @@ export function __hasReplayedIdForTests(messageId: string): boolean {
   return replayedIds.has(messageId);
 }
 
+/**
+ * Select which stored messages should be replayed for a newly-allowed sender.
+ *
+ * Filters out:
+ *   - group-chat messages (chatJid ending in @g.us): group mentions are
+ *     dispatched at ingest; unmentioned group messages must not re-enter
+ *     dispatch as pseudo-DMs.
+ *   - already-replayed message IDs (module-level replayedIds set).
+ *
+ * Then sorts ascending by timestamp and applies the cap (.slice(-cap)).
+ *
+ * Callers are responsible for calling rememberReplayedId() per dispatched
+ * message so the dedup set is armed after the replay loop.
+ */
+export function selectReplayableDms(
+  stored: StoredMessage[],
+  cap: number,
+): { toReplay: StoredMessage[]; groupSkipped: number } {
+  const dmStored = stored.filter(m => !isGroupJid(m.chatJid));
+  const groupSkipped = stored.length - dmStored.length;
+  const toReplay = dmStored
+    .filter(m => !replayedIds.has(m.messageId))
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-cap);
+  return { toReplay, groupSkipped };
+}
+
 export async function handleAdminCommand(
   db: Database,
   messenger: Messenger,
@@ -60,6 +87,9 @@ export async function handleAdminCommand(
   durability?: DurabilityEngine,
 ): Promise<void> {
   if (action === 'allow') {
+    // Phone subjects are keyed by resolvePhoneFromJid output (full digits) —
+    // normalize so a 10-digit admin command flips the stored row, not a miss.
+    if (subjectType === 'phone') subjectId = normalizePhoneE164(subjectId);
     updateAccess(db, subjectType, subjectId, 'allowed');
     log.info({ subjectType, subjectId, action: 'allowed_by_admin' }, 'access granted by admin');
 
@@ -68,6 +98,15 @@ export async function handleAdminCommand(
       // to this phone. toLidJid(phone) is wrong — LIDs are opaque numbers
       // unrelated to phone numbers. We must reverse-lookup from lid_mappings.
       const jidFormats: string[] = [toPersonalJid(subjectId)];
+      // SMS rows are stored under '+<digits>@sms' — include that form so
+      // ALLOW over the Twilio transport replays the queued messages too.
+      jidFormats.push(toSmsJid(`+${normalizePhoneE164(subjectId)}`));
+      if (normalizePhoneE164(subjectId) !== subjectId) {
+        // A 10-digit subject (admin typed without country code) must also flip
+        // the access row stored under the full-digit key resolvePhoneFromJid
+        // produces — otherwise replay succeeds while the sender stays pending.
+        jidFormats.push(toPersonalJid(normalizePhoneE164(subjectId)));
+      }
       const lidMap = getAllLidMappings(db);
       for (const [lid, mappedPhone] of lidMap) {
         if (isAdminPhone(mappedPhone, new Set([subjectId]))) {
@@ -75,20 +114,26 @@ export async function handleAdminCommand(
         }
       }
 
-      // Collect all stored messages across JID formats, deduplicate, take most recent N
+      // Collect all stored messages across JID formats
       const allStored: StoredMessage[] = [];
       for (const senderJid of jidFormats) {
         allStored.push(...getMessagesBySender(db, senderJid));
       }
-      const totalQueued = allStored.length;
 
-      // Filter already-replayed, sort by timestamp ascending, take most recent N
-      const toReplay = allStored
-        .filter(m => !replayedIds.has(m.messageId))
-        .slice(-config.adminReplayMax);
+      // Select replayable DMs: excludes group messages and already-replayed IDs, applies cap.
+      const { toReplay, groupSkipped } = selectReplayableDms(allStored, config.adminReplayMax);
+      if (groupSkipped > 0) {
+        log.info({ subjectId, groupSkipped }, 'replay: skipped group messages');
+      }
 
       const replayCount = toReplay.length;
-      await sendTracked(messenger, adminChatJid, `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued messages`, durability, { replayPolicy: 'safe', isTerminal: true });
+      // totalQueued is the DM-only count; group rows are excluded from the denominator
+      // so the admin sees an accurate N of M without an unexplained gap.
+      const totalQueued = allStored.length - groupSkipped;
+      const noticeText = groupSkipped > 0
+        ? `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued DM messages (${groupSkipped} group message${groupSkipped === 1 ? '' : 's'} skipped)`
+        : `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued messages`;
+      await sendTracked(messenger, adminChatJid, noticeText, durability, { replayPolicy: 'safe', isTerminal: true });
 
       for (const msg of toReplay) {
         rememberReplayedId(msg.messageId);
@@ -118,6 +163,7 @@ export async function handleAdminCommand(
       await sendTracked(messenger, adminChatJid, `Got it, allowed group ${subjectId}`, durability, { replayPolicy: 'safe', isTerminal: true });
     }
   } else {
+    if (subjectType === 'phone') subjectId = normalizePhoneE164(subjectId);
     updateAccess(db, subjectType, subjectId, 'blocked');
     log.info({ subjectType, subjectId, action: 'blocked_by_admin' }, 'access blocked by admin');
 
@@ -134,18 +180,35 @@ export async function handleAdminCommand(
 // ---------------------------------------------------------------------------
 
 /**
- * Find the admin's chat JID — checks personal JIDs and reverse-mapped LIDs
- * from the lid_mappings table using a targeted query.
+ * Find the admin's chat JID — checks SMS senders first (when present),
+ * then personal JIDs and reverse-mapped LIDs from the lid_mappings table.
+ *
+ * SMS sender rows are stored as '+<digits>@sms'. The admin phones config
+ * stores digit strings (no leading '+'). We try the exact SMS JID
+ * ('+<phone>@sms') for each admin phone, so the approval reply reaches
+ * the admin over the same transport they used to contact the bot.
+ *
+ * WhatsApp fallback: LIKE `<phone>%` matches '<phone>@s.whatsapp.net'.
+ * Final fallback: when config.transport is 'twilio' and no message rows
+ * exist yet, synthesise a '+<phone>@sms' JID rather than a WhatsApp JID
+ * that the Twilio transport cannot deliver to.
  */
 function resolveAdminChatJid(db: Database): string | null {
   const msgStmt = db.raw.prepare(
     'SELECT chat_jid FROM messages WHERE sender_jid LIKE ? AND is_from_me = 0 ORDER BY timestamp DESC LIMIT 1',
   );
 
-  // Search by admin phone numbers first (fast path)
+  // Search by admin phone numbers — try SMS JID exact match first, then
+  // WhatsApp LIKE prefix (fast path for both transports).
   for (const phone of config.adminPhones) {
-    const row = msgStmt.get(`${phone}%`) as { chat_jid: string } | undefined;
-    if (row) return row.chat_jid;
+    // SMS: sender_jid is '+<phone>@sms' — exact LIKE with no wildcard needed,
+    // but LIKE is fine here; we use the exact string for precision.
+    const smsRow = msgStmt.get(`+${normalizePhoneE164(phone)}@sms`) as { chat_jid: string } | undefined;
+    if (smsRow) return smsRow.chat_jid;
+
+    // WhatsApp: sender_jid starts with '<phone>' (e.g. '15550100001@s.whatsapp.net')
+    const waRow = msgStmt.get(`${phone}%`) as { chat_jid: string } | undefined;
+    if (waRow) return waRow.chat_jid;
   }
 
   // Search by LIDs that map to admin phones (scans lid_mappings — typically small table)
@@ -157,12 +220,22 @@ function resolveAdminChatJid(db: Database): string | null {
     }
   }
 
-  // Fallback to phone@s.whatsapp.net format
+  // No message rows found — synthesise a fallback JID.
   const firstAdmin = [...config.adminPhones][0];
   if (!firstAdmin) {
     log.error('resolveAdminJid: no admin phones configured — cannot resolve admin JID');
     return null;
   }
+
+  // When running on the Twilio transport, return an @sms JID so the
+  // approval message is delivered over SMS rather than failing with a
+  // WhatsApp JID that the bridge cannot route.
+  if (config.transport === 'twilio') {
+    // adminPhones entries may omit the country code (suffix-matching design);
+    // normalize so the SMS JID is valid E.164.
+    return toSmsJid(`+${normalizePhoneE164(firstAdmin)}`);
+  }
+
   return toPersonalJid(firstAdmin);
 }
 
@@ -194,6 +267,17 @@ export async function sendApprovalRequest(
 // handleFallbackCommand
 // ---------------------------------------------------------------------------
 
+/** Format a remaining-time duration for the STATUS reply. */
+function formatRelativeWindow(activeUntil: number): string {
+  const remainingMs = activeUntil - Date.now();
+  const totalMinutes = Math.round(remainingMs / 60_000);
+  if (totalMinutes < 90) {
+    return `≈${totalMinutes}m`;
+  }
+  const hours = Math.round(totalMinutes / 60 * 10) / 10;
+  return `≈${hours}h`;
+}
+
 export async function handleFallbackCommand(
   runtime: Runtime,
   messenger: Messenger,
@@ -204,11 +288,30 @@ export async function handleFallbackCommand(
   const reply = (text: string) =>
     sendTracked(messenger, adminChatJid, text, durability, { replayPolicy: 'safe', isTerminal: true });
 
+  if (cmd.sub === 'help') {
+    await reply(
+      'Fallback commands: FALLBACK ON [<n>m|<n>h] — force backup-provider window (default 5h); FALLBACK OFF — revert to primary; FALLBACK STATUS — current provider, window, turn counters. (support varies by instance type)',
+    );
+    return;
+  }
+
   if (cmd.sub === 'status') {
     const state = runtime.getFallbackState?.();
     if (!state) { await reply('Fallback status not supported on this instance.'); return; }
-    const window = state.fallbackActiveUntil ? `until ${new Date(state.fallbackActiveUntil).toISOString()}` : 'none';
-    await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty`);
+    const window = state.fallbackActiveUntil
+      ? `until ${new Date(state.fallbackActiveUntil).toISOString()} (${formatRelativeWindow(state.fallbackActiveUntil)})`
+      : 'none';
+    const chain = Array.isArray(state.fallbackChain) && state.fallbackChain.length > 1
+      ? `; chain: ${state.fallbackChain.map((entry) => {
+          const target = entry.model ? `${entry.provider} ${entry.model}` : entry.provider;
+          const readiness =
+            entry.eligible === true ? 'ready' :
+            entry.eligible === false ? 'unavailable' :
+            'unknown';
+          return `${target} (${readiness})`;
+        }).join(' -> ')}`
+      : '';
+    await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty${chain}`);
     return;
   }
 

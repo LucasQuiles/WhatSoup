@@ -154,6 +154,9 @@ describe('config — no INSTANCE_CONFIG (backward compat)', () => {
     expect(config.logLevel).toBe('info');
     expect(config.toolUpdateRedirectJid).toBeNull();
     expect(config.textAggregateDelayMs).toBe(2_000);
+    // Startup gates default to true (preserve pre-existing behavior).
+    expect(config.startupNotifications).toBe(true);
+    expect(config.proactiveResumeOnStartup).toBe(true);
   });
 
   it('preserves non-overridable constants', async () => {
@@ -231,6 +234,8 @@ describe('config — full INSTANCE_CONFIG override', () => {
       pineconeIndex: 'custom-index',
       toolUpdateRedirectJid: 'status-log@g.us',
       textAggregateDelayMs: 30_000,
+      startupNotifications: false,
+      proactiveResumeOnStartup: false,
       chatAliases: {
         ops: '15555550100@s.whatsapp.net',
         support: '120363001@g.us',
@@ -257,6 +262,8 @@ describe('config — full INSTANCE_CONFIG override', () => {
     expect(config.pineconeIndex).toBe('custom-index');
     expect(config.toolUpdateRedirectJid).toBe('status-log@g.us');
     expect(config.textAggregateDelayMs).toBe(30_000);
+    expect(config.startupNotifications).toBe(false);
+    expect(config.proactiveResumeOnStartup).toBe(false);
     expect(config.chatAliases).toEqual({
       ops: '15555550100@s.whatsapp.net',
       support: '120363001@g.us',
@@ -264,6 +271,56 @@ describe('config — full INSTANCE_CONFIG override', () => {
     expect(config.configRoot).toBe(instancePaths.configRoot);
     expect(config.dataRoot).toBe(instancePaths.dataRoot);
     expect(config.stateRoot).toBe(instancePaths.stateRoot);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Startup gates: startupNotifications + proactiveResumeOnStartup
+// ---------------------------------------------------------------------------
+
+describe('config — startup gates', () => {
+  const makeMinimal = (overrides: Record<string, unknown>) => ({
+    name: 'gate-bot',
+    type: 'agent',
+    paths: {
+      configRoot: path.join(tmpDir, 'g-config'),
+      dataRoot: path.join(tmpDir, 'g-data'),
+      stateRoot: path.join(tmpDir, 'g-state'),
+      authDir: path.join(tmpDir, 'g-config', 'auth_info'),
+      dbPath: path.join(tmpDir, 'g-data', 'bot.db'),
+      logDir: path.join(tmpDir, 'g-data', 'logs'),
+      lockPath: path.join(tmpDir, 'g-state', 'bot.lock'),
+      mediaDir: path.join(tmpDir, 'g-data', 'media', 'tmp'),
+    },
+    ...overrides,
+  });
+
+  it('each gate is independently overridable', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ startupNotifications: false, proactiveResumeOnStartup: true }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.startupNotifications).toBe(false);
+    expect(config.proactiveResumeOnStartup).toBe(true);
+  });
+
+  it('omitted gates fall back to true even when other fields are set', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ proactiveResumeOnStartup: false }),
+    );
+    const { config } = await import('../src/config.ts');
+    // startupNotifications omitted → default true; proactiveResumeOnStartup explicit false.
+    expect(config.startupNotifications).toBe(true);
+    expect(config.proactiveResumeOnStartup).toBe(false);
+  });
+
+  it('non-boolean gate values fall back to the default (true)', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeMinimal({ startupNotifications: 'nope', proactiveResumeOnStartup: 0 }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.startupNotifications).toBe(true);
+    expect(config.proactiveResumeOnStartup).toBe(true);
   });
 });
 

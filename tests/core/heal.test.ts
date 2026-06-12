@@ -66,6 +66,7 @@ import {
   getActiveReportForClass,
   dequeueNextReport,
   checkGlobalValve,
+  parseHealContext,
 } from '../../src/core/heal.ts';
 
 // ---------------------------------------------------------------------------
@@ -446,5 +447,36 @@ describe('checkGlobalValve', () => {
     }
 
     expect(checkGlobalValve(db)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseHealContext — guarded parse for persisted report context
+// ---------------------------------------------------------------------------
+
+describe('parseHealContext', () => {
+  it('returns {} for corrupt JSON instead of throwing', () => {
+    // The dequeue callers run inside timers — a throw here was a fatal
+    // uncaughtException, with the report already flipped to attempt_1.
+    expect(parseHealContext('{not json')).toEqual({});
+  });
+
+  it('returns {} for null and empty context', () => {
+    expect(parseHealContext(null)).toEqual({});
+    expect(parseHealContext('')).toEqual({});
+  });
+
+  it('returns {} for valid JSON that is not a plain object', () => {
+    expect(parseHealContext('[1,2]')).toEqual({});
+    expect(parseHealContext('"a string"')).toEqual({});
+    expect(parseHealContext('42')).toEqual({});
+    expect(parseHealContext('null')).toEqual({});
+  });
+
+  it('returns the parsed object for valid object JSON', () => {
+    expect(parseHealContext('{"chatJid":"123@s.whatsapp.net","attempt":2}')).toEqual({
+      chatJid: '123@s.whatsapp.net',
+      attempt: 2,
+    });
   });
 });

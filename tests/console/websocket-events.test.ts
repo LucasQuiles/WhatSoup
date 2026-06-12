@@ -63,9 +63,9 @@ describe('getFleetWebSocketUrl', () => {
 });
 
 describe('getInvalidationKeys', () => {
-  it('maps instance_status to lines queries', () => {
+  it('maps instance_status to lines and provider-status queries', () => {
     const keys = getInvalidationKeys({ type: 'instance_status', instance: 'q' });
-    expect(keys).toEqual([['lines'], ['lines', 'q']]);
+    expect(keys).toEqual([['lines'], ['lines', 'q'], ['provider-status', 'q']]);
   });
 
   it('maps message_received to messages, chats, and history search', () => {

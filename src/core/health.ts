@@ -6,7 +6,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
-import type { ConnectionManager } from '../transport/connection.ts';
+import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
@@ -27,7 +27,7 @@ import type { OutboundSendsWriter } from './outbound-sends.ts';
 import { normalizeErrorClass } from './heal-protocol.ts';
 import { markConversationRead } from './mark-read.ts';
 import type { Runtime } from '../runtimes/types.ts';
-import type { ConnectionStateSnapshot } from '../transport/connection.ts';
+import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 
 const log = createChildLogger('health');
@@ -47,7 +47,7 @@ function verifyBearer(header: string | undefined, expectedToken: string | undefi
 
 export interface HealthDeps {
   db: Database;
-  connectionManager: ConnectionManager;
+  connectionManager: RuntimeConnection;
   startedAt: number;
   getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;
@@ -77,6 +77,18 @@ function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
 }
 
 export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
+export const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
+
+function emptyRecentDisconnects(): ConnectionRecentDisconnects {
+  return {
+    windowMs: 10 * 60 * 1000,
+    count: 0,
+    lastAt: null,
+    lastReason: null,
+    lastStatusCode: null,
+    byReason: {},
+  };
+}
 
 function getConnectionState(connectionManager: HealthDeps['connectionManager']): ConnectionStateSnapshot {
   if (typeof (connectionManager as { getConnectionState?: unknown }).getConnectionState === 'function') {
@@ -95,6 +107,7 @@ function getConnectionState(connectionManager: HealthDeps['connectionManager']):
     lastPongAt: null,
     lastDisconnectReason: null,
     lastStatusCode: null,
+    recentDisconnects: emptyRecentDisconnects(),
   };
 }
 
@@ -534,6 +547,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         connectionState.state === 'connecting'
         || connectionState.state === 'reconnecting'
         || connectionState.state === 'cooldown';
+      const exposeDisconnectMetadata = !(isConnected && connectionState.state === 'connected');
+      const recentDisconnects = connectionState.recentDisconnects ?? emptyRecentDisconnects();
+      const connectionChurnIsDegraded =
+        isConnected && recentDisconnects.count >= RECENT_DISCONNECT_DEGRADED_THRESHOLD;
       const enrichmentStaleness = enrichmentStats.lastRun
         ? Date.now() - new Date(enrichmentStats.lastRun).getTime()
         : null;
@@ -545,7 +562,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       let status: 'healthy' | 'degraded' | 'unhealthy';
       if (!isConnected) {
         status = isRecoveringConnection ? 'degraded' : 'unhealthy';
-      } else if (enrichmentIsStale || enrichmentStats.runtimeDegraded) {
+      } else if (enrichmentIsStale || enrichmentStats.runtimeDegraded || connectionChurnIsDegraded) {
         status = 'degraded';
       } else {
         status = 'healthy';
@@ -628,8 +645,17 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             first_failure_at: connectionState.firstFailureAt,
             last_ping_at: connectionState.lastPingAt,
             last_pong_at: connectionState.lastPongAt,
-            last_disconnect_reason: connectionState.lastDisconnectReason ?? null,
-            last_status_code: connectionState.lastStatusCode ?? null,
+            last_disconnect_reason: exposeDisconnectMetadata ? connectionState.lastDisconnectReason ?? null : null,
+            last_status_code: exposeDisconnectMetadata ? connectionState.lastStatusCode ?? null : null,
+            recent_disconnects: {
+              window_ms: recentDisconnects.windowMs,
+              degraded_threshold: RECENT_DISCONNECT_DEGRADED_THRESHOLD,
+              count: recentDisconnects.count,
+              last_at: recentDisconnects.lastAt,
+              last_reason: recentDisconnects.lastReason,
+              last_status_code: recentDisconnects.lastStatusCode,
+              by_reason: recentDisconnects.byReason,
+            },
           },
         },
         sqlite: {

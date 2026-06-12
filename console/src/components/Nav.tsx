@@ -9,6 +9,7 @@ import {
   Download,
   Wifi,
   WifiOff,
+  LogOut,
 } from "lucide-react";
 import { useRealtime } from "../hooks/use-websocket";
 
@@ -19,9 +20,11 @@ interface NavProps {
   updateAvailable?: boolean;
   remoteSha?: string;
   onUpdateClick?: () => void;
+  /** When provided (production session mode), renders a logout control. */
+  onLogout?: () => void;
 }
 
-const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAvailable, remoteSha, onUpdateClick }) => {
+const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAvailable, remoteSha, onUpdateClick, onLogout }) => {
   const { connected } = useRealtime();
   const location = useLocation();
   const isFleetActive = location.pathname === '/' || location.pathname.startsWith('/lines/');
@@ -171,6 +174,21 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               v{version}
             </span>
           )
+        )}
+        {onLogout && (
+          <>
+            <span className="text-t5">|</span>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="flex items-center gap-1 c-hover cursor-pointer text-t4 hover:text-t2 rounded-sm py-[var(--sp-0h)] px-[var(--sp-1h)]"
+              title="Lock console (revoke session)"
+              aria-label="Lock console"
+            >
+              <LogOut size={14} strokeWidth={1.75} />
+              <span>Lock</span>
+            </button>
+          </>
         )}
       </div>
     </nav>

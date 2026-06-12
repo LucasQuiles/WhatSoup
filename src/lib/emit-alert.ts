@@ -39,6 +39,11 @@ export function emitAlert(
   child.on('error', (err) => {
     log.warn({ instance, source, err: err.message }, 'alert emission failed');
   });
+  child.on('exit', (exitCode: number | null, signal: NodeJS.Signals | null) => {
+    if (exitCode !== 0 || signal !== null) {
+      log.warn({ source, exitCode, signal }, 'alert script exited non-zero or via signal');
+    }
+  });
 }
 
 /**
@@ -54,5 +59,10 @@ export function clearAlertSource(instance: string, source: string): void {
   child.unref();
   child.on('error', (err) => {
     log.warn({ instance, source, err: err.message }, 'alert clear failed');
+  });
+  child.on('exit', (exitCode: number | null, signal: NodeJS.Signals | null) => {
+    if (exitCode !== 0 || signal !== null) {
+      log.warn({ source, exitCode, signal }, 'alert script exited non-zero or via signal');
+    }
   });
 }

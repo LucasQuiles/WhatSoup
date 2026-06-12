@@ -38,7 +38,7 @@ import { createChildLogger } from '../logger.ts';
 import { ToolRegistry } from './registry.ts';
 import type { ToolDeclaration, ExtendedBaileysSocket } from './types.ts';
 import type { Database } from '../core/database.ts';
-import type { ConnectionManager } from '../transport/connection.ts';
+import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { createProfileRegistry } from '../core/profiles.ts';
 import { createOutboundSendsWriter } from '../core/outbound-sends.ts';
 
@@ -70,7 +70,7 @@ interface ModuleRegistrationFailure {
 
 export function registerAllTools(
   registry: ToolRegistry,
-  connection: ConnectionManager,
+  connection: RuntimeConnection,
   db: Database,
   options: RegisterAllToolsOptions = {},
 ): void {

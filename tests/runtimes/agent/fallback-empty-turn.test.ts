@@ -64,6 +64,12 @@ vi.mock('../../../src/mcp/registry.ts', () => ({
 // Keyring — mock the whole module; this test file does not need the real exports.
 vi.mock('../../../src/lib/keyring.ts', () => ({
   lookupCredential: vi.fn(() => 'present-key'),
+  resolveProviderKeyService: vi.fn((provider: unknown, model: unknown) => {
+    if (provider === 'opencode-cli' && typeof model === 'string') return model.split('/')[0]?.trim().toLowerCase() || null;
+    if (provider === 'openai-api') return 'openai';
+    if (provider === 'anthropic-api') return 'anthropic';
+    return null;
+  }),
 }));
 
 // Credential probe — stub out to prevent real network calls. The probe is
@@ -71,6 +77,13 @@ vi.mock('../../../src/lib/keyring.ts', () => ({
 // is the safe fail-open value.
 vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
   verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')),
+}));
+
+// Unit tests must never spawn the real fallback binary; 'unknown' is the
+// safe fail-open value (no alert, no version log).
+vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
+  probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
 }));
 
 // ─── Imports after mocks ──────────────────────────────────────────────────────
@@ -207,7 +220,7 @@ describe('zero-text fallback turn signal', () => {
       'test',
       'fallback_empty_turn',
       expect.any(String),
-      expect.any(String),
+      expect.stringContaining('chat=fake@s.whatsapp.net'),
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
@@ -233,7 +246,8 @@ describe('zero-text fallback turn signal', () => {
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(1);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
-    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
+    expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
     expect(queue.enqueueText).not.toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
     );
@@ -279,7 +293,8 @@ describe('zero-text fallback turn signal', () => {
     );
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
-    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
+    expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
     expect(queue.enqueueText).not.toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
     );
@@ -347,7 +362,8 @@ describe('zero-text fallback turn signal', () => {
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
-    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
+    expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
   });
 
   it('handleEvent path: system-result turn is not counted', () => {
@@ -368,6 +384,7 @@ describe('zero-text fallback turn signal', () => {
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
-    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
+    expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
   });
 });

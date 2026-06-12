@@ -71,6 +71,13 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
   verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')),
 }));
 
+// Unit tests must never spawn the real fallback binary; 'unknown' is the
+// safe fail-open value (no alert, no version log).
+vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
+  probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
+}));
+
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
@@ -143,10 +150,10 @@ describe('AgentRuntime.forceFallback', () => {
     vi.useRealTimers();
   });
 
-  it('returns {ok:false} when no fallbackProvider is configured', () => {
+  it('returns {ok:false} when no fallback provider or chain is configured', () => {
     const runtime = makeRuntime();
     const result = runtime.forceFallback();
-    expect(result).toEqual({ ok: false, reason: 'no fallbackProvider configured for this instance' });
+    expect(result).toEqual({ ok: false, reason: 'no fallback provider or chain configured for this instance' });
     expect(view(runtime).fallbackActiveUntil).toBeNull();
   });
 

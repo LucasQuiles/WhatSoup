@@ -2,9 +2,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
-import { lookupCredential } from '../../lib/keyring.ts';
+import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
+import { normalizeFallbackEntriesFromInstanceConfig } from '../../core/fallback-chain.ts';
 import { extractLocal } from '../../core/access-list.ts';
 import { bareNumber } from '../../core/jid-constants.ts';
+import { resolveAgentModel } from '../../instance-loader.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -299,8 +301,14 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
 
     // Poller status
     status: isConfigError ? 'config_error' : (poll?.status ?? 'unknown'),
+    statusConfidence: isConfigError ? 'confirmed' : (poll?.statusConfidence ?? null),
+    statusReason: isConfigError ? 'config_error' : (poll?.statusReason ?? 'not_polled'),
+    statusEvidence: isConfigError
+      ? [inst.configError ?? 'config_error']
+      : (poll?.statusEvidence ?? []),
     error: inst.configError ?? poll?.error ?? null,
     configError: inst.configError ?? null,
+    sharedCwdWith: inst.sharedCwdWith ?? null,
 
     // Derived from health snapshot
     phone: phoneFromJid(accountJid),
@@ -426,37 +434,92 @@ export async function handleGetLine(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the keyring service name used to look up an API key for a given
- * provider/model, or `null` when the provider uses native/subscription auth
- * (no key needed). Mirrors the runtime's API-key resolution:
- *   - opencode-cli → the model's provider prefix (e.g. `minimax/x` → `minimax`)
- *   - openai-api   → `openai`
- *   - claude-cli / codex-cli / gemini-cli / anthropic-api → null (N/A)
- */
-function keyringServiceFor(provider: string | null | undefined, model: string | null | undefined): string | null {
-  if (!provider) return null;
-  switch (provider) {
-    case 'opencode-cli': {
-      const prefix = typeof model === 'string' ? model.split('/')[0]?.trim() : '';
-      return prefix ? prefix : null;
-    }
-    case 'openai-api':
-      return 'openai';
-    default:
-      // claude-cli, codex-cli, gemini-cli, anthropic-api: native auth, no key.
-      return null;
-  }
-}
-
-/**
  * Boolean presence of the API key for a provider/model, or `null` when no key
  * is required (native-auth providers). Never returns or logs the key value —
  * only whether one is resolvable via env or keyring.
  */
-function keyPresentFor(provider: string | null | undefined, model: string | null | undefined): boolean | null {
-  const service = keyringServiceFor(provider, model);
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function keyPresentFor(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+  providerConfig?: Record<string, unknown>,
+): boolean | null {
+  const service = resolveProviderKeyService(provider, model, providerConfig);
   if (service === null) return null;
   return lookupCredential(service) !== null;
+}
+
+function apiProviderConfigModel(
+  provider: string | null | undefined,
+  providerConfig: Record<string, unknown> | undefined,
+): string | undefined {
+  if (provider !== 'openai-api' && provider !== 'anthropic-api') return undefined;
+  const model = providerConfig?.['model'];
+  return typeof model === 'string' && model.trim() !== '' ? model : undefined;
+}
+
+function lineReachableFromPoll(poll: InstanceStatus | undefined): boolean {
+  if (!poll) return false;
+  if (poll.status === 'online' || poll.status === 'logged_out') return poll.health !== null;
+  if (poll.status === 'degraded') return poll.error === null && poll.health !== null;
+  return false;
+}
+
+function healthSignalFromPoll(poll: InstanceStatus | undefined): {
+  status: InstanceStatus['status'] | null;
+  confidence: InstanceStatus['statusConfidence'] | null;
+  reason: string | null;
+  evidence: string[];
+} {
+  if (!poll) {
+    return {
+      status: null,
+      confidence: null,
+      reason: 'not_polled',
+      evidence: [],
+    };
+  }
+  return {
+    status: poll.status,
+    confidence: poll.statusConfidence,
+    reason: poll.statusReason,
+    evidence: poll.statusEvidence,
+  };
+}
+
+function fallbackEntryFromHealth(value: unknown): { provider: string; model: string | null } | null {
+  const entry = recordValue(value);
+  if (!entry) return null;
+  const provider = stringValue(entry.provider);
+  if (!provider) return null;
+  return { provider, model: stringValue(entry.model) };
+}
+
+function fallbackChainFromHealth(
+  value: unknown,
+): Array<{ provider: string; model: string | null; eligible: boolean | null }> | null {
+  if (!Array.isArray(value)) return null;
+  const out: Array<{ provider: string; model: string | null; eligible: boolean | null }> = [];
+  for (const raw of value) {
+    const entry = recordValue(raw);
+    const provider = stringValue(entry?.provider);
+    if (!provider) continue;
+    out.push({
+      provider,
+      model: stringValue(entry?.model),
+      eligible: typeof entry?.eligible === 'boolean' ? entry.eligible : null,
+    });
+  }
+  return out;
 }
 
 /**
@@ -474,40 +537,86 @@ export async function handleGetLineProviderStatus(
   const instance = requireInstance(deps.discovery, params.name, res);
   if (!instance) return;
 
+  let parsedConfig: Record<string, unknown> = {};
   let agentOptions: Record<string, unknown> = {};
   try {
     const raw = await fs.promises.readFile(instance.configPath, 'utf-8');
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const opts = parsed.agentOptions;
-    if (opts && typeof opts === 'object' && !Array.isArray(opts)) {
-      agentOptions = opts as Record<string, unknown>;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      parsedConfig = parsed as Record<string, unknown>;
+      agentOptions = recordValue(parsedConfig.agentOptions) ?? {};
     }
-  } catch { /* config unreadable — treat as empty (provider defaults to null) */ }
+  } catch { /* config unreadable — treat as empty (provider defaults to runtime default) */ }
 
-  const primaryProvider = (agentOptions.provider as string | undefined) ?? null;
-  const primaryModel = (agentOptions.model as string | undefined) ?? null;
-  const fallbackProvider = (agentOptions.fallbackProvider as string | undefined) ?? null;
-  const fallbackModel = (agentOptions.fallbackModel as string | undefined) ?? null;
+  const primaryProvider =
+    stringValue(agentOptions.provider) ?? (instance.type === 'agent' ? 'claude-cli' : null);
+  const providerConfig = recordValue(agentOptions.providerConfig);
+  const primaryModel =
+    resolveAgentModel(parsedConfig) ??
+    apiProviderConfigModel(primaryProvider, providerConfig) ??
+    stringValue(agentOptions.model);
+  const fallbackEntries = normalizeFallbackEntriesFromInstanceConfig(parsedConfig);
+  const configuredFallback = fallbackEntries[0] ?? null;
+  const fallbackProvider = configuredFallback?.provider ?? null;
+  const fallbackModel = configuredFallback?.model ?? null;
+  const fallbackProviderConfig = fallbackProvider === primaryProvider ? providerConfig : undefined;
 
   // Fallback window state from the instance health snapshot (surface C emits
   // instance.fallbackActiveUntil as epoch ms or null).
   const poll = deps.healthPoller.getStatus(params.name);
-  const fallbackActiveUntilRaw = dig(poll?.health as Record<string, unknown> | null | undefined, 'instance', 'fallbackActiveUntil');
+  const health = poll?.health as Record<string, unknown> | null | undefined;
+  const fallbackActiveUntilRaw = dig(health, 'instance', 'fallbackActiveUntil');
   const activeUntil = typeof fallbackActiveUntilRaw === 'number' ? fallbackActiveUntilRaw : null;
   const active = activeUntil !== null && Date.now() < activeUntil;
+  const effectiveProviderRaw = dig(health, 'instance', 'effectiveProvider');
+  const fallbackReasonRaw = dig(health, 'instance', 'fallbackReason');
+  const fallbackResetAtRaw = dig(health, 'instance', 'fallbackResetAt');
+  const fallbackRecoveryProbeRequiredRaw = dig(health, 'instance', 'fallbackRecoveryProbeRequired');
+  const turnsServedRaw = dig(health, 'instance', 'fallbackTurnsServed');
+  const turnsEmptyRaw = dig(health, 'instance', 'fallbackTurnsEmpty');
+  const lastFallbackTurnAtRaw = dig(health, 'instance', 'lastFallbackTurnAt');
+  const probeAttemptsRaw = dig(health, 'instance', 'probeAttempts');
+  const lastProbeAtRaw = dig(health, 'instance', 'lastProbeAt');
+  const activationsRaw = dig(health, 'instance', 'fallbackActivations');
+  const revertsRaw = dig(health, 'instance', 'fallbackReverts');
+  const replaysRaw = dig(health, 'instance', 'fallbackReplays');
+  const fallbackResetAt = typeof fallbackResetAtRaw === 'number' ? fallbackResetAtRaw : null;
+  const activeEntry = fallbackEntryFromHealth(dig(health, 'instance', 'activeFallbackEntry'));
+  const chainFromHealth = fallbackChainFromHealth(dig(health, 'instance', 'fallbackChain'));
+  const fallbackChain = chainFromHealth ?? fallbackEntries.map((entry) => ({
+    provider: entry.provider,
+    model: entry.model ?? null,
+    eligible: null,
+  }));
 
   jsonResponse(res, 200, {
     primary: {
       provider: primaryProvider,
       model: primaryModel,
-      keyPresent: keyPresentFor(primaryProvider, primaryModel),
+      keyPresent: keyPresentFor(primaryProvider, primaryModel, providerConfig),
     },
     fallback: {
       provider: fallbackProvider,
       model: fallbackModel,
-      keyPresent: fallbackProvider ? keyPresentFor(fallbackProvider, fallbackModel) : null,
+      keyPresent: fallbackProvider ? keyPresentFor(fallbackProvider, fallbackModel, fallbackProviderConfig) : null,
       active,
       activeUntil,
+      effectiveProvider: typeof effectiveProviderRaw === 'string' ? effectiveProviderRaw : null,
+      reason: typeof fallbackReasonRaw === 'string' ? fallbackReasonRaw : null,
+      resetAt: fallbackResetAt,
+      recoveryProbeRequired: fallbackRecoveryProbeRequiredRaw === true,
+      turnsServed: typeof turnsServedRaw === 'number' ? turnsServedRaw : null,
+      turnsEmpty: typeof turnsEmptyRaw === 'number' ? turnsEmptyRaw : null,
+      lastFallbackTurnAt: typeof lastFallbackTurnAtRaw === 'number' ? lastFallbackTurnAtRaw : null,
+      probeAttempts: typeof probeAttemptsRaw === 'number' ? probeAttemptsRaw : null,
+      lastProbeAt: typeof lastProbeAtRaw === 'number' ? lastProbeAtRaw : null,
+      activations: typeof activationsRaw === 'number' ? activationsRaw : null,
+      reverts: typeof revertsRaw === 'number' ? revertsRaw : null,
+      replays: typeof replaysRaw === 'number' ? replaysRaw : null,
+      activeEntry,
+      chain: fallbackChain,
     },
+    signal: healthSignalFromPoll(poll),
+    lineReachable: lineReachableFromPoll(poll),
   });
 }

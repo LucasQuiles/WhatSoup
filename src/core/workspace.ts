@@ -24,7 +24,12 @@ import {
 } from './settings-template.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
-import { buildMcpLaunchCommand } from './mcp-launcher.ts';
+import {
+  generateMcpConfigFile,
+  mergeOpencodeConfig,
+  writeProviderMcpConfigTarget,
+  type AdditionalMcpServerConfig,
+} from './provider-mcp-config.ts';
 import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('workspace');
@@ -134,6 +139,7 @@ export interface SandboxConfig {
 export interface ProvisionOptions {
   workspacePath: string;
   instanceCwd: string;           // parent dir for CLAUDE.md symlink target
+  provider?: string;             // agent provider whose CLI config shape should be written
   sandbox: SandboxConfig;        // instance-level config to inherit non-path fields from
   hookPath: string;              // absolute path to agent-sandbox.sh
   mcpServerPath: string;         // absolute path to whatsoup-proxy.ts
@@ -153,6 +159,74 @@ export function buildMcpAllowlist(chatScopedToolNames: string[], includeSendMedi
     list.push('mcp__send-media__send_media');
   }
   return list;
+}
+
+function writeWorkspaceMcpConfig(
+  provider: string,
+  workspacePath: string,
+  socketPath: string,
+  mcpServerPath: string,
+  mediaBridgeSocketPath: string,
+  sendMediaServerPath?: string,
+): void {
+  const additionalServers: AdditionalMcpServerConfig[] = [];
+  if (sendMediaServerPath) {
+    additionalServers.push({
+      name: 'send-media',
+      proxyScriptPath: sendMediaServerPath,
+      env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
+    });
+  }
+  const generated = generateMcpConfigFile(provider, socketPath, mcpServerPath, additionalServers);
+  if (generated === null) return;
+
+  const target = writeProviderMcpConfigTarget(provider, workspacePath);
+  if (target === null) return;
+
+  if (provider === 'opencode-cli') {
+    // Symlink preflight BEFORE reading existing config — mirrors
+    // writeProviderMcpConfig in providers/mcp-bridge.ts. Without it the
+    // merge path reads through a symlinked opencode.json (and the later
+    // ELOOP from writePrivateFileSync would fail the whole provisioning).
+    try {
+      const stat = lstatSync(target);
+      if (stat.isSymbolicLink()) {
+        log.warn({ target }, 'skipping opencode MCP config write because opencode.json is a symlink');
+        return;
+      }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP') {
+        log.warn({ err, target }, 'skipping opencode MCP config write after file stat failed');
+        return;
+      }
+      if (code !== 'ENOENT') throw err;
+    }
+
+    let existing: Record<string, unknown> | null = null;
+    if (existsSync(target)) {
+      try {
+        const parsed = JSON.parse(readFileSync(target, 'utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          existing = parsed as Record<string, unknown>;
+        }
+      } catch (err) {
+        log.warn({ err, target }, 'failed to parse existing opencode.json during workspace provisioning; overwriting managed entries');
+      }
+    }
+    try {
+      writePrivateFileSync(target, JSON.stringify(mergeOpencodeConfig(existing, generated), null, 2));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+        log.warn({ err, target }, 'skipping opencode MCP config write because opencode.json is a symlink');
+        return;
+      }
+      throw err;
+    }
+    return;
+  }
+
+  writePrivateFileSync(target, JSON.stringify(generated, null, 2));
 }
 
 /**
@@ -206,8 +280,9 @@ export function writePermissionsSettings(
     if (existsSync(settingsPath)) {
       try {
         existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
-      } catch {
-        // Corrupt file — overwrite entirely
+      } catch (err) {
+        // Corrupt file — overwrite entirely (destructive: customizations are lost)
+        log.warn({ err, settingsPath }, 'settings.json unreadable; overwriting with generated settings');
       }
     }
 
@@ -271,8 +346,9 @@ export function ensurePermissionsSettings(
         // Has settings (e.g. hooks) but no permissions — add them
         const merged = { ...existing, permissions: defaults.permissions };
         writePrivateFileSync(settingsPath, JSON.stringify(merged, null, 2));
-      } catch {
-        // Corrupt file — overwrite with defaults
+      } catch (err) {
+        // Corrupt file — overwrite with defaults (destructive: customizations are lost)
+        log.warn({ err, settingsPath }, 'settings.json unreadable; overwriting with default permissions');
         const out: Record<string, unknown> = { ...defaults };
         if (enabledPlugins) out.enabledPlugins = enabledPlugins;
         writePrivateFileSync(settingsPath, JSON.stringify(out, null, 2));
@@ -295,7 +371,7 @@ export function ensurePermissionsSettings(
  * Deterministic — always overwrites existing files.
  */
 export function provisionWorkspace(opts: ProvisionOptions): string {
-  const { workspacePath, instanceCwd, sandbox, hookPath, pollLintHookPath, mcpServerPath, sendMediaServerPath } = opts;
+  const { workspacePath, instanceCwd, provider = 'claude-cli', sandbox, hookPath, pollLintHookPath, mcpServerPath, sendMediaServerPath } = opts;
 
   try {
     // 1. Ensure .claude/ directory exists without following directory symlinks.
@@ -320,24 +396,9 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
     // 3. Compute socket path (whatsoup.sock)
     const socketPath = join(claudeDir, 'whatsoup.sock');
 
-    // 4. Write .mcp.json — whatsoup-proxy + optional send-media entry
+    // 4. Write provider-specific MCP config — whatsoup-proxy + optional send-media entry
     const mediaBridgeSocketPath = join(claudeDir, 'media-bridge.sock');
-    const mcpServers: Record<string, unknown> = {
-      'whatsoup': {
-        ...buildMcpLaunchCommand(mcpServerPath),
-        env: { WHATSOUP_SOCKET: socketPath },
-      },
-    };
-    if (sendMediaServerPath) {
-      mcpServers['send-media'] = {
-        ...buildMcpLaunchCommand(sendMediaServerPath),
-        env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
-      };
-    }
-    writePrivateFileSync(
-      join(workspacePath, '.mcp.json'),
-      JSON.stringify({ mcpServers }, null, 2),
-    );
+    writeWorkspaceMcpConfig(provider, workspacePath, socketPath, mcpServerPath, mediaBridgeSocketPath, sendMediaServerPath);
 
     // 5. Symlink CLAUDE.md -> instanceCwd/CLAUDE.md (recreate if already exists)
     const symlinkPath = join(workspacePath, 'CLAUDE.md');

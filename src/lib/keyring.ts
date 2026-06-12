@@ -8,21 +8,17 @@
  */
 import { execFileSync } from 'node:child_process';
 import * as os from 'node:os';
+import { createChildLogger } from '../logger.ts';
 
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
 
-// Probe URLs for fallback credential pre-flight live in src/runtimes/agent/providers/credential-verify.ts (PROBE_ENDPOINTS) — keep services in sync.
-/** Map service names to their conventional env var names. */
-export const SERVICE_ENV_MAP: Record<string, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  minimax: 'MINIMAX_API_KEY',
-  pinecone: 'PINECONE_API_KEY',
-  elevenlabs: 'ELEVENLABS_API_KEY',
-  'whatsoup-health-token': 'WHATSOUP_HEALTH_TOKEN',
-  whatsoup_health: 'WHATSOUP_HEALTH_TOKEN',
-};
+// The pure service map + resolver live in provider-key-service.ts (no
+// child_process/logger imports) so the config validator and provider MCP
+// config generation can consume them. Re-exported here so runtime callers
+// keep one import site for everything keyring-shaped.
+import { SERVICE_ENV_MAP } from './provider-key-service.ts';
+
+export { SERVICE_ENV_MAP, resolveProviderKeyService } from './provider-key-service.ts';
 
 const SERVICE_MIGRATION_FALLBACKS: Record<string, string[]> = {
   'whatsoup-health-token': ['whatsoup_health'],
@@ -35,6 +31,12 @@ export interface CredentialLookupOptions {
 }
 
 let _cachedBackend: KeyringBackend | undefined;
+
+// Lazy logger — avoids any risk of a cycle during module initialisation while
+// still giving us structured log output once the module is fully loaded.
+function getLog() {
+  return createChildLogger('keyring');
+}
 
 /** Detect the available keyring backend for this platform. */
 export function detectKeyringBackend(): KeyringBackend {
@@ -51,8 +53,12 @@ export function detectKeyringBackend(): KeyringBackend {
   try {
     execFileSync('secret-tool', ['--help'], { timeout: 2_000, stdio: 'ignore' });
     _cachedBackend = 'secret-tool';
-  } catch {
+  } catch (err) {
     _cachedBackend = 'env-only';
+    getLog().warn(
+      { backend: 'env-only', err: err instanceof Error ? err.message : String(err) },
+      'keyring backend probe failed — falling back to env-only credential lookup',
+    );
   }
   return _cachedBackend;
 }
@@ -109,8 +115,14 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           const raw = execFileSync('secret-tool', secretToolArgs(candidate, index === 0), { timeout: 5_000 });
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
           if (val) return val;
-        } catch {
-          // Try migration fallback candidates before giving up.
+        } catch (err) {
+          // Warn on primary candidate failure; migration fallback misses are expected.
+          if (index === 0) {
+            getLog().warn(
+              { service, backend, err: err instanceof Error ? err.message : String(err) },
+              'keyring read failed — falling back to env lookup',
+            );
+          }
         }
       }
       return lookupEnvAfterKeyringMiss();
@@ -132,8 +144,14 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           );
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
           if (val) return val;
-        } catch {
-          // Try migration fallback candidates before giving up.
+        } catch (err) {
+          // Warn on primary candidate failure; migration fallback misses are expected.
+          if (index === 0) {
+            getLog().warn(
+              { service, backend, err: err instanceof Error ? err.message : String(err) },
+              'keyring read failed — falling back to env lookup',
+            );
+          }
         }
       }
       return lookupEnvAfterKeyringMiss();

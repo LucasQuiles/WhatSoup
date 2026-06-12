@@ -22,11 +22,11 @@ beforeEach(() => {
   vi.resetModules();
 });
 
-function stubFleetToken(token: string | null): void {
+function stubProductionConsole(enabled: boolean): void {
   vi.stubGlobal('document', {
     querySelector: (selector: string) => {
-      if (selector !== 'meta[name="fleet-token"]' || token === null) return null;
-      return { content: token };
+      if (selector !== 'meta[name="fleet-auth-mode"]' || !enabled) return null;
+      return { content: 'session' };
     },
   });
 }
@@ -46,7 +46,7 @@ function mintResponse(ticket: string, audience: 'api' | 'sse', expiresIn = 60): 
 
 describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
   it('mints an api ticket before the first API call and Bearers it', async () => {
-    stubFleetToken('root-token-xyz');
+    stubProductionConsole(true);
     const fetchMock = vi.fn()
       // 1) availability probe — mint + probe call
       .mockResolvedValueOnce(mintResponse('api-ticket-A', 'api'))
@@ -70,7 +70,10 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
     const mintInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(mintInit.method).toBe('POST');
     const mintHeaders = mintInit.headers as Record<string, string>;
-    expect(mintHeaders.Authorization).toBe('Bearer root-token-xyz');
+    // B1: the browser never holds the root token — the mint authenticates
+    // via the HttpOnly session cookie.
+    expect(mintHeaders.Authorization).toBeUndefined();
+    expect(mintInit.credentials).toBe('same-origin');
     expect(JSON.parse(mintInit.body as string)).toEqual({ audience: 'api' });
 
     expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/lines');
@@ -84,7 +87,7 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
   });
 
   it('does NOT send the root token on /api/* routes', async () => {
-    stubFleetToken('root-token-xyz');
+    stubProductionConsole(true);
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(mintResponse('api-ticket-B', 'api'))
       .mockResolvedValueOnce(jsonResponse([]))
@@ -105,7 +108,7 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
   });
 
   it('omits Authorization (and never mints) when no meta-tag token exists', async () => {
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse([]));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -121,8 +124,8 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
     }
   });
 
-  it('mints WebSocket tickets with the root bootstrap token, not an api-audience ticket', async () => {
-    stubFleetToken('root-token-xyz');
+  it('mints WebSocket tickets via the session cookie, not an api-audience ticket', async () => {
+    stubProductionConsole(true);
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ticket: 'ws-ticket', expiresIn: 60 }));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -133,13 +136,15 @@ describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/ws-ticket');
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(init.method).toBe('POST');
-    expect(init.headers).toEqual({ Authorization: 'Bearer root-token-xyz' });
+    // B1: ws-ticket minting also rides the session cookie, never the root token.
+    expect(init.headers).toBeUndefined();
+    expect(init.credentials).toBe('same-origin');
   });
 });
 
 describe('console api-ticket -- single-use ticket minting', () => {
   it('mints a fresh api ticket for each caller', async () => {
-    stubFleetToken('root-token-xyz');
+    stubProductionConsole(true);
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(mintResponse('api-ticket-1', 'api'))
       .mockResolvedValueOnce(mintResponse('api-ticket-2', 'api'))
@@ -158,7 +163,7 @@ describe('console api-ticket -- single-use ticket minting', () => {
   });
 
   it('mints separate tickets for api and sse audiences', async () => {
-    stubFleetToken('root-token-xyz');
+    stubProductionConsole(true);
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(mintResponse('ticket-for-api', 'api'))
       .mockResolvedValueOnce(mintResponse('ticket-for-sse', 'sse'));
@@ -179,7 +184,7 @@ describe('console api-ticket -- single-use ticket minting', () => {
   });
 
   it('does not reuse an unexpired ticket because server redemption is single-use', async () => {
-    stubFleetToken('root-token-xyz');
+    stubProductionConsole(true);
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(mintResponse('first-ticket', 'api', 60))
       .mockResolvedValueOnce(mintResponse('second-ticket', 'api', 60));

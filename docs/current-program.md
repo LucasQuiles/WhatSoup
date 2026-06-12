@@ -49,7 +49,7 @@ Exactly one SDLC epic is genuinely active. State declared explicitly in its `sta
 
 | Epic | Status source | Notes |
 |---|---|---|
-| [`docs/sdlc/active/agent-layer-hardening-20260405/`](sdlc/active/agent-layer-hardening-20260405/) | `state-md-status` | Phase 6 hardening. 20 beads tracked in its Bead Manifest: SP1–SP8, SP10, SP12, SP13 (note gaps at SP9 and SP11); SEC1–SEC5; CFG1–CFG4. Remaining Synthesize-phase verification is the only open work. |
+| [`docs/sdlc/completed/agent-layer-hardening-20260405/`](sdlc/completed/agent-layer-hardening-20260405/) | `state-md-status` | Agent-layer hardening stage. 20 beads tracked in its Bead Manifest: SP1–SP8, SP10, SP12, SP13 (note gaps at SP9 and SP11); SEC1–SEC5; CFG1–CFG4. Remaining Synthesize-phase verification is the only open work. |
 
 Its state.md and `evidence-reconnect.md` are the two index rows classified `active`. All 20 bead rows under it resolve individually via `bead-manifest` (most `completed`, some still-open tracked in that table).
 

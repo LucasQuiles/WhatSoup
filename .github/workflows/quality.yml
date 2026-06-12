@@ -77,6 +77,9 @@ jobs:
           WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'
         run: npm run guard:test-integrity
 
+      - name: ESLint fitness ring
+        run: npm run guard:lint:src
+
       - name: Tokenomics Python tests
         run: npm run test:tokenomics
 
@@ -97,6 +100,18 @@ jobs:
 
       - name: Claude settings drift guard
         run: npm run guard:claude-settings
+
+      - name: Publication guard
+        run: npm run guard:publication:all
+
+      - name: Node pin consistency guard
+        run: npm run guard:node-pin-consistency
+
+      - name: Agent decision polls guard
+        run: npm run guard:agent-decision-polls
+
+      - name: Safeguard diagnostics
+        run: npm run guard:safeguard-diagnostics
 
       - name: Repo hygiene tests
         run: npm test -- tests/scripts/repo-hygiene-guard.test.ts --pool=forks

@@ -2,15 +2,29 @@
 // Provider-aware MCP bridge: generates .mcp.json configs for CLI providers and
 // converts MCP tool definitions to API function-calling formats for API providers.
 
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import type { ToolRegistry } from '../../../mcp/registry.ts';
 import type { SessionContext, ToolCallResult } from '../../../mcp/types.ts';
-import { buildMcpLaunchCommand } from '../../../core/mcp-launcher.ts';
+import { writePrivateFileSync } from '../../../core/workspace.ts';
+import { createChildLogger } from '../../../logger.ts';
+import {
+  generateMcpConfigFile,
+  mergeOpencodeConfig,
+  writeProviderMcpConfigTarget,
+  type AdditionalMcpServerConfig,
+  type OpencodeProviderConfig,
+} from '../../../core/provider-mcp-config.ts';
 import type {
   McpMode,
   ProviderMcpBridge,
   ProviderMcpTool,
   ProviderMcpToolResult,
 } from './types.ts';
+
+const log = createChildLogger('mcp-bridge');
+
+export { generateMcpConfigFile, mergeOpencodeConfig, writeProviderMcpConfigTarget };
+export type { AdditionalMcpServerConfig, OpencodeProviderConfig };
 
 // ---------------------------------------------------------------------------
 // API tool definition types
@@ -53,35 +67,83 @@ function normalizeToolResult(result: ToolCallResult): ProviderMcpToolResult {
 // CLI config file generation
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// opencode.json merge + per-provider config-file writer
+// ---------------------------------------------------------------------------
+
 /**
- * Generate .mcp.json content for a CLI provider.
- * Different providers may need slightly different formats.
+ * Write the whatsoup MCP config to the file the given provider's CLI reads,
+ * returning the absolute path written (or `null` for native-bridge/API
+ * providers that need no config file).
  *
- * Returns null for API providers that do not use config files.
+ * - claude/gemini/codex → `<agentCwd>/.mcp.json` (claude `mcpServers` shape,
+ *   deterministic overwrite, exactly as before).
+ * - opencode-cli → `<agentCwd>/opencode.json` (opencode `mcp` shape), MERGED
+ *   with any pre-existing user opencode.json so a hand-authored config is never
+ *   clobbered.
+ *
+ * Both paths go through {@link writePrivateFileSync} (0600, symlink-safe).
  */
-export function generateMcpConfigFile(
+export function writeProviderMcpConfig(
   providerId: string,
+  agentCwd: string,
   socketPath: string,
   proxyScriptPath: string,
-): Record<string, unknown> | null {
-  switch (providerId) {
-    case 'claude-cli':
-    case 'gemini-cli':
-    case 'codex-cli':
-      // Claude, Gemini, and Codex all share the same .mcp.json format
-      return {
-        mcpServers: {
-          whatsoup: {
-            ...buildMcpLaunchCommand(proxyScriptPath),
-            env: { WHATSOUP_SOCKET: socketPath },
-          },
-        },
-      };
+  providerConfig?: OpencodeProviderConfig,
+  additionalServers: AdditionalMcpServerConfig[] = [],
+): string | null {
+  const generated = generateMcpConfigFile(providerId, socketPath, proxyScriptPath, additionalServers);
+  if (generated === null) return null;
 
-    default:
-      // API providers don't need config files
-      return null;
+  const target = writeProviderMcpConfigTarget(providerId, agentCwd);
+  if (target === null) return null;
+
+  if (providerId === 'opencode-cli') {
+    try {
+      const stat = lstatSync(target);
+      if (stat.isSymbolicLink()) {
+        log.warn({ target }, 'skipping opencode MCP config write because opencode.json is a symlink');
+        return null;
+      }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP') {
+        log.warn({ err, target }, 'skipping opencode MCP config write after file stat failed');
+        return null;
+      }
+      if (code !== 'ENOENT') throw err;
+    }
+
+    let existing: Record<string, unknown> | null = null;
+    if (existsSync(target)) {
+      try {
+        const parsed = JSON.parse(readFileSync(target, 'utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          existing = parsed as Record<string, unknown>;
+        }
+      } catch (err) {
+        // Corrupt/unreadable user config — fall back to a fresh merge base
+        // rather than refusing to wire MCP. The whatsoup block is what matters.
+        log.warn({ err, target }, 'failed to parse existing opencode.json before MCP config write; overwriting managed entries');
+        existing = null;
+      }
+    }
+    const merged = mergeOpencodeConfig(existing, generated, providerConfig);
+    try {
+      writePrivateFileSync(target, JSON.stringify(merged, null, 2));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+        log.warn({ err, target }, 'skipping opencode MCP config write because opencode.json is a symlink');
+        return null;
+      }
+      throw err;
+    }
+    return target;
   }
+
+  // claude / gemini / codex: overwrite .mcp.json with the mcpServers shape.
+  writePrivateFileSync(target, JSON.stringify(generated, null, 2));
+  return target;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +193,7 @@ export function getMcpStrategy(providerId: string): McpMode {
     case 'claude-cli':
     case 'codex-cli':
     case 'gemini-cli':
+    case 'opencode-cli':
       return 'config_file';
     case 'openai-api':
     case 'anthropic-api':

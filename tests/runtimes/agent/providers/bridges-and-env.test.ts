@@ -263,6 +263,12 @@ describe('getMcpStrategy', () => {
     expect(getMcpStrategy('claude-cli')).toBe('config_file');
   });
 
+  it('opencode-cli → config_file', () => {
+    // opencode-cli is a config-file provider: it reads an on-disk opencode.json
+    // (the `mcp` block) rather than receiving tools over a native API bridge.
+    expect(getMcpStrategy('opencode-cli')).toBe('config_file');
+  });
+
   it('openai-api → native_bridge', () => {
     expect(getMcpStrategy('openai-api')).toBe('native_bridge');
   });

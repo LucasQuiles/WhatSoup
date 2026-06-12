@@ -1,7 +1,9 @@
 // ---------------------------------------------------------------------------
 //  WhatSoup Console — Fleet Data Hooks
 //  Uses TanStack Query with real fleet API calls.
-//  Polling is disabled while WebSocket is connected (realtime push).
+//  Most polling is disabled while WebSocket is connected (realtime push).
+//  Provider-status keeps a short poll because fallback health fields can change
+//  while the instance_status label remains stable.
 // ---------------------------------------------------------------------------
 
 import { queryOptions, useQuery } from '@tanstack/react-query';
@@ -136,5 +138,24 @@ export function useFeed() {
     queryKey: ['feed'],
     queryFn: () => api.getFeed(),
     refetchInterval: connected ? false : POLL_FEED,
+  });
+}
+
+/** Provider catalog (display names + capability flags). Static — long stale time. */
+export function useProviders() {
+  return useQuery({
+    queryKey: ['providers'],
+    queryFn: () => api.getProviders(),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** Per-instance provider / key / fallback status. */
+export function useProviderStatus(name: string) {
+  return useQuery({
+    queryKey: ['provider-status', name],
+    queryFn: () => api.getProviderStatus(name),
+    refetchInterval: POLL_LINES,
+    enabled: !!name,
   });
 }

@@ -6,7 +6,13 @@ vi.mock('node:child_process', async () => {
   return childProcessMock();
 });
 
-import { lookupCredential, detectKeyringBackend, _resetBackendCache } from '../../src/lib/keyring.ts';
+import {
+  lookupCredential,
+  detectKeyringBackend,
+  resolveProviderKeyService,
+  SERVICE_ENV_MAP,
+  _resetBackendCache,
+} from '../../src/lib/keyring.ts';
 import { execFileSync } from 'node:child_process';
 
 const mockedExecFileSync = vi.mocked(execFileSync);
@@ -112,12 +118,84 @@ describe('keyring', () => {
       expect(lookupCredential('anthropic')).toBeNull();
     });
 
+    // Provider IDs and env var names follow opencode's models.dev catalog
+    // (the registry opencode reads at runtime to resolve provider auth), so
+    // injecting these vars into the opencode child env activates the provider.
+    const FALLBACK_PROVIDER_ENV_VARS: ReadonlyArray<[service: string, envVar: string]> = [
+      ['xai', 'XAI_API_KEY'],
+      ['groq', 'GROQ_API_KEY'],
+      ['mistral', 'MISTRAL_API_KEY'],
+      ['openrouter', 'OPENROUTER_API_KEY'],
+      ['google', 'GOOGLE_API_KEY'],
+      ['fireworks-ai', 'FIREWORKS_API_KEY'],
+      ['togetherai', 'TOGETHER_API_KEY'],
+    ];
+
+    it.each(FALLBACK_PROVIDER_ENV_VARS)(
+      'consults %s via the %s environment variable',
+      (service, envVar) => {
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        delete process.env[envVar];
+        process.env[envVar] = `  ${service}-key-123  `;
+        expect(lookupCredential(service)).toBe(`${service}-key-123`);
+      },
+    );
+
     it('handles unknown service names without env mapping', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       mockedExecFileSync.mockReturnValueOnce(Buffer.from('/usr/bin/secret-tool'));
       mockedExecFileSync.mockReturnValueOnce(Buffer.from('custom-val'));
 
       expect(lookupCredential('some_custom_service')).toBe('custom-val');
+    });
+  });
+
+  describe('resolveProviderKeyService', () => {
+    it('maps opencode-cli models to the lower-cased provider prefix', () => {
+      expect(resolveProviderKeyService('opencode-cli', 'minimax/MiniMax-M2.7')).toBe('minimax');
+      expect(resolveProviderKeyService('opencode-cli', ' DeepSeek/deepseek-chat ')).toBe('deepseek');
+    });
+
+    it('maps HTTP API providers to their conventional services', () => {
+      expect(resolveProviderKeyService('openai-api', undefined)).toBe('openai');
+      expect(resolveProviderKeyService('anthropic-api', undefined)).toBe('anthropic');
+    });
+
+    it('honors providerConfig.apiKeyService for HTTP API providers', () => {
+      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: 'prod-openai' })).toBe('prod-openai');
+      expect(resolveProviderKeyService('anthropic-api', undefined, { apiKeyService: 'prod-anthropic' })).toBe('prod-anthropic');
+      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: ' prod-openai ' })).toBe(' prod-openai ');
+      expect(resolveProviderKeyService('opencode-cli', 'minimax/x', { apiKeyService: 'ignored' })).toBe('minimax');
+    });
+
+    it('resolves expanded opencode fallback provider prefixes to mapped key services', () => {
+      // Pairs mirror opencode's models.dev provider ids (the model prefix
+      // opencode-cli sessions are configured with) and the env var opencode
+      // reads for that provider. Each resolved service must be registered in
+      // SERVICE_ENV_MAP so the child env forwards the key.
+      const expected: ReadonlyArray<[model: string, service: string, envVar: string]> = [
+        ['xai/grok-4', 'xai', 'XAI_API_KEY'],
+        ['groq/llama-3.3-70b-versatile', 'groq', 'GROQ_API_KEY'],
+        ['mistral/mistral-large-latest', 'mistral', 'MISTRAL_API_KEY'],
+        ['openrouter/anthropic/claude-sonnet-4', 'openrouter', 'OPENROUTER_API_KEY'],
+        ['google/gemini-2.5-pro', 'google', 'GOOGLE_API_KEY'],
+        ['fireworks-ai/accounts/fireworks/models/kimi-k2-instruct', 'fireworks-ai', 'FIREWORKS_API_KEY'],
+        ['togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo', 'togetherai', 'TOGETHER_API_KEY'],
+      ];
+      for (const [model, service, envVar] of expected) {
+        expect(resolveProviderKeyService('opencode-cli', model)).toBe(service);
+        expect(SERVICE_ENV_MAP[service]).toBe(envVar);
+      }
+    });
+
+    it('returns null for native-auth providers and opencode models without a prefix', () => {
+      expect(resolveProviderKeyService('claude-cli', undefined)).toBeNull();
+      expect(resolveProviderKeyService('codex-cli', undefined)).toBeNull();
+      expect(resolveProviderKeyService('gemini-cli', undefined)).toBeNull();
+      expect(resolveProviderKeyService('opencode-cli', undefined)).toBeNull();
+      expect(resolveProviderKeyService('opencode-cli', '   ')).toBeNull();
+      expect(resolveProviderKeyService('opencode-cli', 42)).toBeNull();
+      expect(resolveProviderKeyService(null, 'minimax/x')).toBeNull();
     });
   });
 });

@@ -3,8 +3,9 @@
 /** Transport library / protocol family. */
 export type ChannelKind =
   | 'whatsapp'
-  | 'telegram';
-  // future: 'imessage' | 'signal' | 'discord' | 'sms'
+  | 'telegram'
+  | 'sms';
+  // future: 'imessage' | 'signal' | 'discord'
 
 declare const __channelIdBrand: unique symbol;
 
@@ -16,7 +17,8 @@ declare const __channelIdBrand: unique symbol;
  */
 export type ChannelId = string & { readonly [__channelIdBrand]: true };
 
-const ACCOUNT_RE = /^[a-z][a-z0-9-]{0,63}$/;
+/** Channel account segment pattern — shared with config validation. */
+export const ACCOUNT_RE = /^[a-z][a-z0-9-]{0,63}$/;
 
 export function makeChannelId(kind: ChannelKind, account: string): ChannelId {
   if (!ACCOUNT_RE.test(account)) {

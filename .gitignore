@@ -75,6 +75,10 @@ artifacts/
 # Test coverage artifacts (vitest --coverage)
 coverage/
 
+# Python test/runtime caches
+__pycache__/
+.pytest_cache/
+
 # Editor/manual backup files
 *.bak
 

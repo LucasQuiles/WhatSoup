@@ -1,7 +1,32 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+
+// Logger mock — capture every warn call so tests can introspect.
+type WarnCall = { obj: Record<string, unknown> | undefined; msg: string };
+const warnCalls: WarnCall[] = [];
+
+vi.mock('../../src/logger.ts', () => {
+  const noop = () => {};
+  const warn = (obj: unknown, msg?: unknown) => {
+    if (typeof obj === 'string') {
+      warnCalls.push({ obj: undefined, msg: obj });
+    } else {
+      warnCalls.push({
+        obj: obj as Record<string, unknown> | undefined,
+        msg: typeof msg === 'string' ? msg : '',
+      });
+    }
+  };
+  const child = () => fakeLogger;
+  const fakeLogger: Record<string, unknown> = {
+    info: noop, warn, error: noop, debug: noop, trace: noop, fatal: noop,
+    child, flush: noop,
+  };
+  return { default: fakeLogger, createChildLogger: () => fakeLogger, flushLogger: async () => {} };
+});
+
 import { FleetDiscovery, type DiscoveredInstance } from '../../src/fleet/discovery.ts';
 
 // ---------------------------------------------------------------------------
@@ -55,6 +80,7 @@ const passiveInstance = {
 };
 
 beforeEach(() => {
+  warnCalls.length = 0;
   savedEnv = {
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     XDG_STATE_HOME: process.env.XDG_STATE_HOME,
@@ -489,6 +515,98 @@ describe('FleetDiscovery — auto-refresh lifecycle', () => {
       discovery.stop();
       discovery.stop();
     }).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shared agent cwd warning
+// ---------------------------------------------------------------------------
+
+describe('FleetDiscovery.scan — shared agent cwd warning', () => {
+  function sharedCwdWarns(): WarnCall[] {
+    return warnCalls.filter((c) => c.msg === 'fleet scan: agent instances share a working directory');
+  }
+
+  it('warns once when two agent instances resolve the same explicit cwd', () => {
+    writeInstanceConfig('agent-a', {
+      ...agentInstance,
+      name: 'agent-a',
+      agentOptions: { cwd: '/opt/shared-agent' },
+    });
+    writeInstanceConfig('agent-b', {
+      ...agentInstance,
+      name: 'agent-b',
+      healthPort: 9093,
+      agentOptions: { cwd: '/opt/shared-agent' },
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    discovery.scan();
+
+    const warns = sharedCwdWarns();
+    expect(warns).toHaveLength(1);
+    expect(warns[0].obj).toMatchObject({
+      cwd: '/opt/shared-agent',
+      instances: ['agent-a', 'agent-b'],
+    });
+
+    expect(discovery.getInstance('agent-a')!.sharedCwdWith).toEqual(['agent-b']);
+    expect(discovery.getInstance('agent-b')!.sharedCwdWith).toEqual(['agent-a']);
+  });
+
+  it('warns when two agent instances both default to the home directory', () => {
+    writeInstanceConfig('agent-a', { ...agentInstance, name: 'agent-a' });
+    writeInstanceConfig('agent-b', { ...agentInstance, name: 'agent-b', healthPort: 9093 });
+
+    const discovery = new FleetDiscovery(configRoot);
+    discovery.scan();
+
+    const warns = sharedCwdWarns();
+    expect(warns).toHaveLength(1);
+    expect(warns[0].obj).toMatchObject({
+      cwd: '<home-default>',
+      instances: ['agent-a', 'agent-b'],
+    });
+
+    expect(discovery.getInstance('agent-a')!.sharedCwdWith).toEqual(['agent-b']);
+    expect(discovery.getInstance('agent-b')!.sharedCwdWith).toEqual(['agent-a']);
+  });
+
+  it('does not warn when agent instances use distinct cwds', () => {
+    writeInstanceConfig('agent-a', {
+      ...agentInstance,
+      name: 'agent-a',
+      agentOptions: { cwd: '/opt/agent-a' },
+    });
+    writeInstanceConfig('agent-b', {
+      ...agentInstance,
+      name: 'agent-b',
+      healthPort: 9093,
+      agentOptions: { cwd: '/opt/agent-b' },
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    discovery.scan();
+
+    expect(sharedCwdWarns()).toHaveLength(0);
+    expect(discovery.getInstance('agent-a')!.sharedCwdWith).toBeUndefined();
+    expect(discovery.getInstance('agent-b')!.sharedCwdWith).toBeUndefined();
+  });
+
+  it('excludes chat-type instances from the shared-cwd check', () => {
+    // Two chat instances plus a single home-default agent: chat instances have
+    // no agent cwd, so no group reaches two members.
+    writeInstanceConfig('loops', chatInstance);
+    writeInstanceConfig('loops2', { ...chatInstance, name: 'loops2', healthPort: 9094 });
+    writeInstanceConfig('agent-a', { ...agentInstance, name: 'agent-a' });
+
+    const discovery = new FleetDiscovery(configRoot);
+    discovery.scan();
+
+    expect(sharedCwdWarns()).toHaveLength(0);
+    expect(discovery.getInstance('loops')!.sharedCwdWith).toBeUndefined();
+    expect(discovery.getInstance('loops2')!.sharedCwdWith).toBeUndefined();
+    expect(discovery.getInstance('agent-a')!.sharedCwdWith).toBeUndefined();
   });
 });
 

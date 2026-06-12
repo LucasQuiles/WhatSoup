@@ -29,7 +29,7 @@ import {
   type ProviderId,
 } from './providers/index.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
-import { lookupCredential, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
+import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -108,9 +108,15 @@ export interface SessionManagerOptions {
  * Extend this function when adding new providers: each provider should only receive
  * its own credentials plus the system essentials below.
  */
+// Services whose model prefix resolved to no SERVICE_ENV_MAP entry — warned
+// once per service per process so spawn-per-turn providers don't spam logs.
+const warnedUnmappedKeyServices = new Set<string>();
+
 export function buildChildEnv(
   provider: string = 'claude-cli',
   baseOpts?: BuildBaseChildEnvOptions,
+  model?: string,
+  providerConfig?: Record<string, unknown>,
 ): NodeJS.ProcessEnv {
   if (!isProviderId(provider)) {
     throw new Error(
@@ -135,19 +141,58 @@ export function buildChildEnv(
       if (process.env.GEMINI_API_KEY) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
       if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
       break;
-    case 'opencode-cli':
+    case 'opencode-cli': {
       // OpenCode reads from its own config or standard API keys
       if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
       if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
       // Forward the standard fleet keys (deepseek/minimax) from the standard
-      // keychain so `opencode run -m minimax/...` / `deepseek/...` can auth.
+      // keychain so `opencode run -m minimax/...` / `deepseek/...` can auth —
+      // opencode's own catalog lets other models be invoked mid-session — PLUS
+      // the key for the session's configured model prefix (resolved via the
+      // shared resolver) so a primary/fallback model outside that pair (e.g.
+      // openai/gpt-4o) can auth too. The Set dedupes overlapping services.
       // lookupCredential resolves env → keychain; SERVICE_ENV_MAP is the single
       // source of truth for the service→env-var mapping (no second copy).
-      for (const svc of ['deepseek', 'minimax'] as const) {
+      const services = new Set<string>(['deepseek', 'minimax']);
+      const warnUnmapped = (service: string, source: string): void => {
+        if (warnedUnmappedKeyServices.has(service)) return;
+        warnedUnmappedKeyServices.add(service);
+        log.warn(
+          { provider, model, service, source },
+          `[session-manager:buildChildEnv] ${source} resolves to key service "${service}" but SERVICE_ENV_MAP has no entry for it — no API key env var will be forwarded to the child. Register the service in SERVICE_ENV_MAP (src/lib/keyring.ts) to enable forwarding.`,
+        );
+      };
+      // Custom-endpoint auth lane: the opencode.json provider block references
+      // the endpoint key as `{env:<ENVVAR>}` for the service named by
+      // providerConfig.apiKeyService — inject that service's key on top of the
+      // defaults so the interpolation resolves inside the child.
+      const endpointServiceRaw = providerConfig?.['apiKeyService'];
+      const endpointService =
+        typeof endpointServiceRaw === 'string' && endpointServiceRaw.trim() !== ''
+          ? endpointServiceRaw
+          : undefined;
+      const endpointServiceMapped = endpointService !== undefined && Boolean(SERVICE_ENV_MAP[endpointService]);
+      if (endpointService) {
+        if (endpointServiceMapped) services.add(endpointService);
+        else warnUnmapped(endpointService, 'providerConfig.apiKeyService');
+      }
+      const modelService = resolveProviderKeyService(provider, model);
+      if (modelService) {
+        if (SERVICE_ENV_MAP[modelService]) {
+          services.add(modelService);
+        } else if (!endpointServiceMapped) {
+          // A mapped explicit endpoint key service already covers auth — a
+          // bare custom-endpoint model id has no meaningful prefix, so the
+          // unmapped-prefix warning would be misleading noise there.
+          warnUnmapped(modelService, 'model prefix');
+        }
+      }
+      for (const svc of services) {
         const key = lookupCredential(svc);
         if (key) env[SERVICE_ENV_MAP[svc]!] = key;
       }
       break;
+    }
     case 'openai-api':
     case 'anthropic-api':
       throw new Error(
@@ -192,6 +237,40 @@ function resolveProviderBinary(provider: ProviderId): string {
   }
 }
 
+/**
+ * Return the CLI binary name for `provider`, or `null` for managed-loop
+ * providers that do not spawn a child process (`openai-api`, `anthropic-api`).
+ *
+ * Exported for use by the binary pre-flight in
+ * `src/runtimes/agent/providers/binary-preflight.ts`. Unknown provider IDs
+ * throw (defence in depth — callers should validate with `isProviderId` first).
+ */
+export function getProviderBinary(provider: string): string | null {
+  if (!isProviderId(provider)) {
+    throw new Error(
+      `[session-manager:getProviderBinary] unknown provider id: ${JSON.stringify(provider)}. ` +
+        `Valid: ${PROVIDER_IDS.join(', ')}.`,
+    );
+  }
+  // Managed-loop providers have no binary.
+  if (provider === 'openai-api' || provider === 'anthropic-api') return null;
+  return resolveProviderBinary(provider);
+}
+
+/**
+ * Whether an opencode-cli session routes through a custom endpoint configured
+ * in opencode.json. The config writer (mergeOpencodeConfig) merges a provider
+ * block for `providerConfig.baseUrl` and points opencode.json's top-level
+ * `model` at it (`<providerId>/<model>`). An explicit `-m <model>` argv would
+ * override that file-level routing and send the turn to opencode's own
+ * catalog instead — so sessions with a baseUrl must omit `-m` and let
+ * opencode resolve the model from the config file.
+ */
+function opencodeUsesConfigModel(providerConfig: Record<string, unknown> | undefined): boolean {
+  const baseUrl = providerConfig?.['baseUrl'];
+  return typeof baseUrl === 'string' && baseUrl.trim() !== '';
+}
+
 /** Resolve the argv for a CLI-backed provider. */
 function resolveProviderArgs(
   provider: ProviderId,
@@ -200,6 +279,7 @@ function resolveProviderArgs(
   resumeSessionId: string | undefined,
   model: string | undefined,
   pluginDirs: string[],
+  providerConfig?: Record<string, unknown>,
 ): string[] {
   switch (provider) {
     case 'claude-cli':
@@ -226,7 +306,7 @@ function resolveProviderArgs(
         'run',
         '--format', 'json',
         '--pure',
-        ...(model ? ['-m', model] : []),
+        ...(model && !opencodeUsesConfigModel(providerConfig) ? ['-m', model] : []),
       ];
     case 'openai-api':
     case 'anthropic-api':
@@ -282,6 +362,7 @@ export const __provider_switch_for_test = {
     resumeSessionId: string | undefined,
     model: string | undefined,
     pluginDirs: string[],
+    providerConfig?: Record<string, unknown>,
   ): string[] {
     if (!isProviderId(provider)) {
       throw new Error(
@@ -289,7 +370,7 @@ export const __provider_switch_for_test = {
           `Valid: ${PROVIDER_IDS.join(', ')}.`,
       );
     }
-    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, model, pluginDirs);
+    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, model, pluginDirs, providerConfig);
   },
   getParser(provider: string): (line: string) => AgentEvent | null {
     if (!isProviderId(provider)) {
@@ -464,7 +545,7 @@ export class SessionManager {
 
   private getProviderArgs(systemPrompt: string, cwd: string, resumeSessionId?: string): string[] {
     const provider = this.assertKnownProvider('getProviderArgs');
-    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, this.model, this.pluginDirs);
+    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, this.model, this.pluginDirs, this.providerConfig);
   }
 
   buildSystemPrompt(): string {
@@ -713,7 +794,14 @@ export class SessionManager {
     switch (this.provider) {
       // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
 
-      case 'opencode-cli':
+      case 'opencode-cli': {
+        // Custom endpoint (providerConfig.baseUrl): the model is resolved from
+        // opencode.json's top-level `model` (written by the config merge), so
+        // `-m` must be omitted — see opencodeUsesConfigModel.
+        const modelArgs =
+          this.model && !opencodeUsesConfigModel(this.providerConfig)
+            ? ['-m', this.model]
+            : [];
         if (this.sessionId && !this.sessionId.startsWith('opencode-cli-')) {
           // Resume previous session for multi-turn memory
           log.info({ chatJid: this.chatJid, provider: this.provider, sessionId: this.sessionId }, 'opencode: resuming session');
@@ -722,7 +810,7 @@ export class SessionManager {
             '--format', 'json',
             '--pure',
             '--session', this.sessionId,
-            ...(this.model ? ['-m', this.model] : []),
+            ...modelArgs,
             prompt,
           ];
         }
@@ -731,9 +819,10 @@ export class SessionManager {
           'run',
           '--format', 'json',
           '--pure',
-          ...(this.model ? ['-m', this.model] : []),
+          ...modelArgs,
           prompt,
         ];
+      }
 
       default:
         return this.getProviderArgs('', cwd);
@@ -905,11 +994,16 @@ export class SessionManager {
       // Without this, Node.js inherits process.env in full — meaning ALL secrets
       // (PINECONE_API_KEY, WHATSOUP_HEALTH_TOKEN, etc.) would flow into every subprocess.
       // Each provider only receives the credentials it actually needs.
-      env: buildChildEnv(this.provider, {
-        allowM365Mutations: this.allowM365Mutations,
-        whatsoupInstance: this.whatsoupInstance,
-        whatsoupMcpSocket: this.whatsoupMcpSocket,
-      }),
+      env: buildChildEnv(
+        this.provider,
+        {
+          allowM365Mutations: this.allowM365Mutations,
+          whatsoupInstance: this.whatsoupInstance,
+          whatsoupMcpSocket: this.whatsoupMcpSocket,
+        },
+        this.model,
+        this.providerConfig,
+      ),
     });
 
     this.child = child;
@@ -1443,11 +1537,16 @@ export class SessionManager {
       const child = spawn(binary, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: buildChildEnv(this.provider, {
-          allowM365Mutations: this.allowM365Mutations,
-          whatsoupInstance: this.whatsoupInstance,
-          whatsoupMcpSocket: this.whatsoupMcpSocket,
-        }),
+        env: buildChildEnv(
+          this.provider,
+          {
+            allowM365Mutations: this.allowM365Mutations,
+            whatsoupInstance: this.whatsoupInstance,
+            whatsoupMcpSocket: this.whatsoupMcpSocket,
+          },
+          this.model,
+          this.providerConfig,
+        ),
       });
 
       this.child = child;

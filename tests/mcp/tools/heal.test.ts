@@ -158,6 +158,16 @@ vi.mock('../../../src/core/heal.ts', () => ({
   handleHealEscalate: vi.fn(),
   getActiveReportForClass: vi.fn(() => null),
   checkGlobalValve: vi.fn(() => true),
+  // Faithful stand-in for the real guarded parse (tests feed valid JSON).
+  parseHealContext: vi.fn((raw: string | null) => {
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }),
 }));
 
 vi.mock('../../../src/core/workspace.ts', () => ({

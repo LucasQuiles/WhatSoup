@@ -3,7 +3,8 @@
 // ---------------------------------------------------------------------------
 
 export type Mode = 'passive' | 'chat' | 'agent';
-export type Status = 'online' | 'degraded' | 'unreachable';
+export type Status = 'online' | 'degraded' | 'unreachable' | 'logged_out' | 'config_error' | 'unknown';
+export type StatusConfidence = 'confirmed' | 'inferred' | 'ambiguous';
 
 export interface LineInstance {
   name: string;
@@ -11,6 +12,9 @@ export interface LineInstance {
   mode: Mode;
   provider?: string;
   status: Status;
+  statusConfidence?: StatusConfidence | null;
+  statusReason?: string | null;
+  statusEvidence?: string[];
   accessMode: string;
   healthPort: number;
   uptime: string;
@@ -166,7 +170,15 @@ export type FeedDetail =
   | { type: 'tool_error'; toolName: string; toolId?: string; error: string }
   | { type: 'tool_use'; toolName: string; toolId?: string }
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }
-  | { type: 'health'; status: string; previousStatus?: string; error?: string }
+  | {
+      type: 'health';
+      status: string;
+      previousStatus?: string;
+      error?: string;
+      confidence?: StatusConfidence;
+      reason?: string;
+      evidence?: string[];
+    }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
   | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string; conversationKey?: string }
   | { type: 'generic' };
@@ -233,4 +245,56 @@ export interface ContactResult {
   name?: string;
   notify?: string;
   number?: string;
+}
+
+// ---------------------------------------------------------------------------
+//  Provider catalog + per-instance provider/key/fallback status
+//  Mirrors GET /api/providers and GET /api/lines/:name/provider-status
+//  (src/fleet/routes/providers.ts, src/fleet/routes/lines.ts).
+// ---------------------------------------------------------------------------
+
+export interface ProviderCatalogEntry {
+  id: string;
+  displayName: string;
+  type: 'cli' | 'api';
+  needsApiKey: boolean;
+  providerConfig: string[];
+}
+
+/** One provider slot (primary or fallback) in the provider-status response. */
+export interface ProviderSlotStatus {
+  provider: string | null;
+  model: string | null;
+  /** true = key set, false = no key, null = native auth (no key required). */
+  keyPresent: boolean | null;
+}
+
+export interface ProviderStatus {
+  primary: ProviderSlotStatus;
+  fallback: ProviderSlotStatus & {
+    /** Whether the runtime is currently serving on its fallback provider. */
+    active: boolean;
+    /** Epoch ms the fallback window reverts, or null when inactive/unset. */
+    activeUntil: number | null;
+    /** Provider currently serving turns according to the health snapshot. */
+    effectiveProvider: string | null;
+    /** Process-local count of turns served during the current fallback window. */
+    turnsServed: number | null;
+    /** Process-local count of fallback turns with no visible output. */
+    turnsEmpty: number | null;
+    /** Epoch ms of the most recent fallback-served turn, or null when absent. */
+    lastFallbackTurnAt: number | null;
+    /** Selected fallback entry while a runtime window is active. */
+    activeEntry: { provider: string; model: string | null } | null;
+    /** Ordered fallback chain; eligible is null when only static config is available. */
+    chain: Array<{ provider: string; model: string | null; eligible: boolean | null }>;
+  };
+  signal?: {
+    status: 'online' | 'degraded' | 'unreachable' | 'logged_out' | null;
+    confidence: StatusConfidence | null;
+    reason: string | null;
+    evidence: string[];
+  };
+  /** True only when the latest poll reached the line's health endpoint. */
+  lineReachable: boolean;
 }

@@ -718,7 +718,7 @@ After `ALLOW`, any messages the user sent while pending are replayed automatical
 
 ### 7.2 Force or Inspect Provider Fallback
 
-Agent instances with `agentOptions.fallbackProvider` configured (see [docs/configuration.md §Provider fallback behavior](configuration.md#provider-fallback-behavior)) accept three more admin commands. Like `ALLOW`/`BLOCK`, they are matched case-insensitively and only from an admin phone in a direct chat — never in groups:
+Agent instances with `agentOptions.fallbackProvider` or `agentOptions.fallbacks` configured (see [docs/configuration.md §Provider fallback behavior](configuration.md#provider-fallback-behavior)) accept three more admin commands. Like `ALLOW`/`BLOCK`, they are matched case-insensitively and only from an admin phone in a direct chat — never in groups:
 
 ```
 FALLBACK ON          # force a fallback window for the default 5 hours
@@ -730,7 +730,8 @@ FALLBACK STATUS      # report effective provider, window expiry, turn counters
 
 - `FALLBACK ON` sets the window **exactly** to the requested duration — unlike usage-limit activation it may *shorten* an already-active window (operator intent wins). Durations are clamped to the allowed bounds (1 minute–24 hours) and the reply notes when clamping occurred. With no duration, the window is 5 hours. Forced windows go through the same hardened path as usage-limit windows: persisted across restarts, with credential pre-flight alerts.
 - `FALLBACK OFF` reverts new sessions to the primary provider immediately and is idempotent — safe to send when no window is active.
-- `FALLBACK STATUS` replies with the effective provider, the window expiry as an ISO timestamp (`none` when on the primary), and the process-local fallback turn counters (`served` / `empty`, reset on restart).
+- `FALLBACK STATUS` replies with the effective provider, the window expiry as an ISO timestamp (`none` when on the primary), the process-local fallback turn counters (`served` / `empty`, reset on restart), and the ordered fallback chain readiness when the configured chain has more than one entry (a single-entry chain is fully described by the provider/window fields).
+- `FALLBACK` or `FALLBACK HELP` replies with a one-line usage summary of these commands (support varies by instance type).
 
 **Canary test:** `FALLBACK ON 5m` is the operator's way to live-test the fallback provider end-to-end — force a short window, send the bot a message, confirm a real reply arrives and `FALLBACK STATUS` shows `served` incrementing while `empty` stays at 0, then let the window lapse or send `FALLBACK OFF`.
 

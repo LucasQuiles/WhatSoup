@@ -99,3 +99,88 @@ describe('validateInstanceConfig — agentOptions.provider (#447)', () => {
     expect(err?.field).toBe('agentOptions.provider');
   });
 });
+
+// ---------------------------------------------------------------------------
+// providerConfig.baseUrl — the "different cloud provider with opencode" surface.
+// Must be a non-empty, parseable URL when present. Used to merge a custom
+// OpenAI-compatible `provider` block into the written opencode.json.
+// ---------------------------------------------------------------------------
+
+function agentWithProviderConfig(providerConfig: unknown): Record<string, unknown> {
+  return {
+    name: 'test-line',
+    type: 'agent',
+    accessMode: 'self_only',
+    adminPhones: ['15555550123'],
+    healthPort: 9095,
+    systemPrompt: 'hi',
+    // opencode-cli + baseUrl requires a resolvable model (the custom endpoint
+    // block is inert without one — see agent-config-validator-crossfield
+    // coverage); set one here so this suite isolates the URL-shape rules.
+    model: 'whatsoup-cloud/some-model',
+    agentOptions: {
+      sessionScope: 'single',
+      provider: 'opencode-cli',
+      providerConfig,
+    },
+  };
+}
+
+describe('validateInstanceConfig — agentOptions.providerConfig.baseUrl', () => {
+  it('accepts a valid https URL but rejects the same config with a bad URL', () => {
+    const good = validateInstanceConfig(
+      agentWithProviderConfig({ baseUrl: 'https://api.cloud.example.com/v1' }),
+      { name: 'test-line', mode: 'create' },
+    );
+    expect(good).toBeNull();
+    // Flip only the baseUrl to a non-URL: the very same shape must now be
+    // rejected on the baseUrl field — proving the accept above was URL-driven.
+    const bad = validateInstanceConfig(
+      agentWithProviderConfig({ baseUrl: 'https://api.cloud.example.com/v1'.replace('https://', 'ht!tp ') }),
+      { name: 'test-line', mode: 'create' },
+    );
+    expect(bad?.field).toBe('agentOptions.providerConfig.baseUrl');
+  });
+
+  it('accepts providerConfig with no baseUrl, still honoring sibling budget rules', () => {
+    const ok = validateInstanceConfig(
+      agentWithProviderConfig({ budget: { tokenBudget: 5000 } }),
+      { name: 'test-line', mode: 'create' },
+    );
+    expect(ok).toBeNull();
+    // A malformed sibling (budget as array) must still be caught — the absent
+    // baseUrl path does not short-circuit the rest of providerConfig validation.
+    const bad = validateInstanceConfig(
+      agentWithProviderConfig({ budget: [] }),
+      { name: 'test-line', mode: 'create' },
+    );
+    expect(bad?.field).toBe('agentOptions.providerConfig.budget');
+  });
+
+  it('rejects a non-string baseUrl on the baseUrl field', () => {
+    const err = validateInstanceConfig(
+      agentWithProviderConfig({ baseUrl: 42 }),
+      { name: 'test-line', mode: 'create' },
+    );
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('agentOptions.providerConfig.baseUrl');
+  });
+
+  it('rejects an empty-string baseUrl on the baseUrl field', () => {
+    const err = validateInstanceConfig(
+      agentWithProviderConfig({ baseUrl: '' }),
+      { name: 'test-line', mode: 'create' },
+    );
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('agentOptions.providerConfig.baseUrl');
+  });
+
+  it('rejects a non-URL baseUrl string on the baseUrl field', () => {
+    const err = validateInstanceConfig(
+      agentWithProviderConfig({ baseUrl: 'not a url' }),
+      { name: 'test-line', mode: 'create' },
+    );
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('agentOptions.providerConfig.baseUrl');
+  });
+});
