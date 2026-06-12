@@ -1060,11 +1060,14 @@ button.soup-pill[aria-disabled="true"] {
   min-height: inherit;
 }
 
-/* Time lane — --type-data-sm, --text-3, monospaced tabular figures */
+/* Time lane — --type-data-sm, --text-2, monospaced tabular figures.
+   DD-8 decision (Option B): time is essential scan-anchor text, so it carries
+   --text-2 (AA on the log bed in both themes); recession comes from the 11px
+   data-sm size and mono weight, not sub-AA ink. */
 .soup-log__time {
   font: var(--type-data-sm, 400 11px/16px var(--font-mono));
   font-feature-settings: "tnum" 1;
-  color: var(--text-3);
+  color: var(--text-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1145,7 +1148,7 @@ button.soup-pill[aria-disabled="true"] {
 .soup-log__detail-component {
   display: block;
   font: var(--type-data-sm, 400 11px/16px var(--font-mono));
-  color: var(--text-3);
+  color: var(--text-2); /* DD-8 Option B: essential component name, AA ink */
   margin-bottom: var(--sp-1);
 }
 

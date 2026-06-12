@@ -129,7 +129,7 @@ const LogRow: FC<LogRowProps> = ({ entry }) => {
       onKeyDown={handleKeyDown}
     >
       <div className="soup-log__grid">
-        {/* Time lane — --type-data-sm, --text-3, monospaced */}
+        {/* Time lane — --type-data-sm, --text-2 (DD-8 Option B), monospaced */}
         <span className="soup-log__time">{entry.timestamp}</span>
 
         {/* Level lane — bordered letter chip: color + border + letter (triple channel) */}
