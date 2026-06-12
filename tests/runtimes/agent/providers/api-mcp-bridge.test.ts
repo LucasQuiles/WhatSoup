@@ -193,6 +193,169 @@ describe('HTTP provider MCP bridge', () => {
       .toContain('"echoed": "hello:123@s.whatsapp.net"');
   });
 
+  it('openai-api blocks malformed MCP tool arguments without executing the tool', async () => {
+    const registry = new ToolRegistry();
+    const handler = vi.fn(async () => ({ echoed: 'must not execute' }));
+
+    registry.register({
+      name: 'echo_tool',
+      description: 'Echoes the provided value',
+      schema: z.object({ value: z.string() }),
+      scope: 'chat',
+      targetMode: 'caller-supplied',
+      handler,
+    });
+
+    const events: AgentEvent[] = [];
+    const provider = new OpenAIApiProvider();
+
+    fetchMock
+      .mockResolvedValueOnce(makeSseResponse([
+        {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: 'call_bad_json',
+                type: 'function',
+                function: {
+                  name: 'echo_tool',
+                  arguments: '{"value":',
+                },
+              }],
+            },
+          }],
+        },
+        '[DONE]',
+      ]))
+      .mockResolvedValueOnce(makeSseResponse([
+        { choices: [{ delta: { content: 'Recovered from bad tool input.' } }] },
+        '[DONE]',
+      ]));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: (event) => events.push(event),
+      onCrash,
+      mcpBridge: createProviderMcpBridge(registry, {
+        tier: 'chat-scoped',
+        conversationKey: 'chat-key',
+        deliveryJid: '123@s.whatsapp.net',
+      }),
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Use the MCP tool.' }],
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as {
+      messages: Array<Record<string, unknown>>;
+    };
+    const toolMessage = secondBody.messages.find((message) => message.role === 'tool');
+    expect(toolMessage).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call_bad_json',
+    });
+    expect(String(toolMessage?.content))
+      .toBe('Tool "echo_tool" failed: malformed provider tool arguments; the tool was not executed.');
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'tool_use',
+        toolId: 'call_bad_json',
+        toolInput: {},
+      }),
+      expect.objectContaining({
+        type: 'tool_result',
+        toolId: 'call_bad_json',
+        isError: true,
+        content: 'Tool "echo_tool" failed: malformed provider tool arguments; the tool was not executed.',
+      }),
+      expect.objectContaining({
+        type: 'assistant_text',
+        text: 'Recovered from bad tool input.',
+      }),
+    ]));
+  });
+
+  it('openai-api blocks non-object MCP tool arguments without executing the tool', async () => {
+    const registry = new ToolRegistry();
+    const handler = vi.fn(async () => ({ echoed: 'must not execute' }));
+
+    registry.register({
+      name: 'echo_tool',
+      description: 'Echoes the provided value',
+      schema: z.object({ value: z.string() }),
+      scope: 'chat',
+      targetMode: 'caller-supplied',
+      handler,
+    });
+
+    const events: AgentEvent[] = [];
+    const provider = new OpenAIApiProvider();
+
+    fetchMock
+      .mockResolvedValueOnce(makeSseResponse([
+        {
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: 'call_bad_shape',
+                type: 'function',
+                function: {
+                  name: 'echo_tool',
+                  arguments: '["value"]',
+                },
+              }],
+            },
+          }],
+        },
+        '[DONE]',
+      ]))
+      .mockResolvedValueOnce(makeSseResponse([
+        { choices: [{ delta: { content: 'Recovered from bad tool shape.' } }] },
+        '[DONE]',
+      ]));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: (event) => events.push(event),
+      onCrash,
+      mcpBridge: createProviderMcpBridge(registry, {
+        tier: 'chat-scoped',
+        conversationKey: 'chat-key',
+        deliveryJid: '123@s.whatsapp.net',
+      }),
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Use the MCP tool.' }],
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const toolResultEvent = events.find((event) => event.type === 'tool_result');
+    expect(toolResultEvent).toMatchObject({
+      type: 'tool_result',
+      toolId: 'call_bad_shape',
+      isError: true,
+      content: 'Tool "echo_tool" failed: provider tool arguments must be a JSON object; the tool was not executed.',
+    });
+  });
+
   it('anthropic-api returns MCP execution failures as tool_result errors', async () => {
     const registry = new ToolRegistry();
     registerFailTool(registry);
