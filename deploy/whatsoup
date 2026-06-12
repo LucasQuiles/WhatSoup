@@ -62,67 +62,32 @@ keyring_lookup() {
 # tracks the repo's single source of truth (see scripts/check-node-pin-consistency.ts).
 SCRIPT_DIR="$(cd "$(dirname "$(_resolve_symlinks "${BASH_SOURCE[0]}")")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-NVMRC_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/.nvmrc" 2>/dev/null || true)"
-if [ -z "$NVMRC_VERSION" ]; then
-  echo "FATAL: cannot read Node version from $REPO_ROOT/.nvmrc" >&2
-  exit 1
-fi
-# Gate requires a dotted version (e.g. 24.15.0) for the -lt arithmetic
-# comparison. lts/iron, latest, or any non-numeric leading value would
-# silently disable the gate.
-if ! printf '%s' "$NVMRC_VERSION" | grep -qE '^[0-9]'; then
-  echo "FATAL: .nvmrc must be a dotted version (e.g. 24.15.0), not '$NVMRC_VERSION'" >&2
-  exit 1
-fi
-DEFAULT_NODE="$HOME/.nvm/versions/node/v${NVMRC_VERSION}/bin/node"
-NODE="${WHATSOUP_NODE:-$DEFAULT_NODE}"
-if [ ! -x "$NODE" ]; then
-  # Do NOT fall back to system node — it likely lacks --experimental-strip-types
-  # and would burn through systemd restart budget with repeated failures.
-  echo "FATAL: node v${NVMRC_VERSION} not found at $NODE. Set WHATSOUP_NODE or run: nvm install ${NVMRC_VERSION}" >&2
+
+# Node-pin resolution + the version-compatibility gate live in a shared library so
+# the launch wrapper and the restart-safety pre-flight gate enforce the SAME logic
+# (DRY — see deploy/lib/resolve-node.sh). The gate prevents a too-old/too-new Node
+# from exec'ing the --experimental-strip-types entrypoint and crash-looping under
+# the service manager (incident 2026-05-18 17:12 EDT).
+# shellcheck source=deploy/lib/resolve-node.sh
+. "$SCRIPT_DIR/lib/resolve-node.sh"
+if ! NODE="$(whatsoup_resolve_node "$REPO_ROOT")"; then
+  # whatsoup_resolve_node already printed a FATAL line describing the failure.
   exit 1
 fi
 
-# Version-compatibility gate: the entrypoint passes --experimental-strip-types,
-# which requires Node >= 22.6 (and the repo pins a specific major via .nvmrc).
-# Without this gate, a wrapper that resolved to a too-old Node via the
-# command -v fallback would exec, hit status 9 on the unknown option, and
-# crash-loop under systemd. See incident 2026-05-18 17:12 EDT.
-required_major="${NVMRC_VERSION%%.*}"
-engine_max_exclusive_major="$("$NODE" -e '
-const fs = require("fs");
-const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-const range = pkg.engines && pkg.engines.node;
-if (typeof range !== "string") process.exit(2);
-const match = range.match(/<\s*(\d+)/);
-if (!match) process.exit(3);
-process.stdout.write(match[1]);
-' "$REPO_ROOT/package.json" 2>/dev/null || true)"
-if ! printf '%s' "$engine_max_exclusive_major" | grep -qE '^[0-9]+$'; then
-  echo "FATAL: cannot parse package.json#engines.node upper bound from $REPO_ROOT/package.json (expected range like >=24.0.0 <26)" >&2
-  exit 1
-fi
-node_major="$("$NODE" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-if ! printf '%s' "$node_major" | grep -qE '^[0-9]+$' \
-  || [ "$node_major" -lt "$required_major" ] \
-  || [ "$node_major" -ge "$engine_max_exclusive_major" ]; then
-  resolved_version="$("$NODE" --version 2>/dev/null || echo "unknown")"
-  cat >&2 <<EOF
-FATAL: resolved Node is incompatible with WhatSoup entrypoint
-  Pinned (.nvmrc):             v${NVMRC_VERSION} (default runtime)
-  Declared compatibility:      package.json#engines.node requires major >= ${required_major} and < ${engine_max_exclusive_major}
-  Resolved:                    ${NODE}
-  Version:                     ${resolved_version}
-
-The entrypoint requires Node >= 22.6 for native TypeScript stripping.
-A resolved Node outside package.json#engines.node is unsupported by the repo's CI and dependency policy.
-
-Install the pinned version on this host:
-  . \$HOME/.nvm/nvm.sh && nvm install ${NVMRC_VERSION}
-
-Or override with WHATSOUP_NODE=/path/to/compatible/node.
-EOF
-  exit 1
+# Restart-safety pre-flight gate: probe the live import graph (bootstrap.ts ->
+# main.ts -> runtimes/agent/runtime.ts) BEFORE exec'ing node, so a dirty/partial
+# tree with a phantom import cannot crash-loop on restart while the old cached
+# process was running fine (incidents 2026-06-12: mini1 personal + nucles hub).
+# Override for emergencies with WHATSOUP_SKIP_PREFLIGHT=1 (logged when skipped).
+if [ "${WHATSOUP_SKIP_PREFLIGHT:-}" = "1" ]; then
+  echo "WARN: WHATSOUP_SKIP_PREFLIGHT=1 — restart-safety pre-flight gate BYPASSED for instance '$INSTANCE'" >&2
+else
+  if ! WHATSOUP_NODE="$NODE" "$SCRIPT_DIR/preflight-check.sh" "$REPO_ROOT" "$INSTANCE"; then
+    echo "FATAL: restart-safety pre-flight gate refused to start instance '$INSTANCE' (see PREFLIGHT-FAIL above)." >&2
+    echo "       Set WHATSOUP_SKIP_PREFLIGHT=1 to override in an emergency (this is logged)." >&2
+    exit 1
+  fi
 fi
 
 # Ensure PATH includes locations needed by agent instances (claude CLI, tools)

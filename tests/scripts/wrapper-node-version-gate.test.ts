@@ -154,11 +154,17 @@ function makeFixtureRepoWithNvmrc(
   wrapperRelPath = path.join('deploy', 'whatsoup'),
 ): string {
   const fixtureRoot = makeTmpDir('whatsoup-gate-fixture-repo-');
-  fs.mkdirSync(path.join(fixtureRoot, 'deploy'), { recursive: true });
+  fs.mkdirSync(path.join(fixtureRoot, 'deploy', 'lib'), { recursive: true });
   const wrapperContents = fs.readFileSync(path.join(repoRoot, wrapperRelPath), 'utf8');
   const fixtureWrapper = path.join(fixtureRoot, wrapperRelPath);
   fs.writeFileSync(fixtureWrapper, wrapperContents, 'utf8');
   fs.chmodSync(fixtureWrapper, 0o755);
+  // The wrapper sources its node-resolution gate from deploy/lib relative to
+  // its own location — stage the library alongside it.
+  fs.copyFileSync(
+    path.join(repoRoot, 'deploy', 'lib', 'resolve-node.sh'),
+    path.join(fixtureRoot, 'deploy', 'lib', 'resolve-node.sh'),
+  );
   fs.writeFileSync(path.join(fixtureRoot, '.nvmrc'), `${nvmrcContents}\n`, 'utf8');
   fs.writeFileSync(
     path.join(fixtureRoot, 'package.json'),

@@ -205,7 +205,11 @@ describe('deploy launchd timer plists', () => {
   it('plists use install-time placeholders, never machine-specific absolute paths', () => {
     for (const file of [harnessPlist, replyPlist]) {
       const plist = fs.readFileSync(file, 'utf8');
-      expect(plist).toContain('${WHATSOUP_REPO_ROOT}');
+      // __TOKEN__ sentinels are the install-time placeholder convention the
+      // service-unit validity guard recognizes; literal ${VAR} forms are
+      // rejected because launchd never expands shell variables.
+      expect(plist).toContain('__WHATSOUP_REPO_ROOT__');
+      expect(plist).not.toMatch(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/);
       expect(plist).not.toMatch(/\/Users\/[^<\s]+|mwlab|anabot|nucles/i);
     }
   });

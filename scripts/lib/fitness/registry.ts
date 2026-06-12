@@ -75,6 +75,33 @@ export const fitnessRules = [
     source: ['feedback:service_route_boundary'],
   },
   {
+    id: 'arch.import-boundaries',
+    title: 'Import boundary ring rule',
+    category: 'architecture',
+    rationale: 'Import direction between src layers is an architectural invariant; uncontrolled cross-layer reach couples modules and defeats abstraction boundaries.',
+    detect: 'mechanical',
+    rings: ['guard', 'ci'],
+    severity: 'block',
+    ratchet: true,
+    params: {
+      // Importer layer → allowed target layers. Same-layer imports are always
+      // permitted by the checker itself; the self-entries here are
+      // documentation only, not enforcement.
+      layers: {
+        lib: ['lib'],
+        core: ['core', 'lib'],
+        transport: ['transport', 'core', 'lib'],
+        mcp: ['mcp', 'core', 'lib', 'transport'],
+        runtimes: ['runtimes', 'core', 'lib', 'mcp', 'transport'],
+        fleet: ['fleet', 'core', 'lib', 'mcp', 'transport', 'runtimes'],
+        memory: ['memory', 'core', 'lib'],
+        root: ['*'],
+      },
+      anyMayImportRoot: true,
+    },
+    source: ['docs:duplicates-report.md', 'architecture:CLAUDE.md'],
+  },
+  {
     id: 'invariant.seq-locality',
     title: 'Sequence invariant locality',
     category: 'invariant',
@@ -94,6 +121,17 @@ export const fitnessRules = [
     rings: ['eslint', 'sdlc'],
     severity: 'warn',
     source: ['feedback:audit_scanners_fail_closed'],
+  },
+  {
+    id: 'invariant.outbox-env-gated',
+    title: 'Bot-errors outbox writes go through the env-aware resolver',
+    category: 'invariant',
+    rationale:
+      'A write to the bot-errors outbox via a hardcoded path literal bypasses resolveBotErrorsOutbox() and lands in the PROD outbox even under VITEST/NODE_ENV=test. Outbox writes must derive their path from the resolver so the test-redirect applies.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    source: ['audit:detector-misconceptions#alert-emitter-not-env-gated', 'feedback:dry_run_purity_run_level_test'],
   },
   {
     id: 'invariant.fail-closed-gate',

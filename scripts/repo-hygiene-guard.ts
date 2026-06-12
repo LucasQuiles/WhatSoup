@@ -6,11 +6,17 @@ import { git, normalizeRepoPath } from './lib/guard-core.ts';
 
 export { normalizeRepoPath } from './lib/guard-core.ts';
 
-export type GuardMode = 'staged' | 'commit-msg' | 'release-hygiene' | 'commit-authors';
+export type GuardMode =
+  | 'staged'
+  | 'commit-msg'
+  | 'release-hygiene'
+  | 'commit-authors'
+  | 'scan-history';
 
 export interface ParsedArgs {
   mode: GuardMode;
   messageFile?: string;
+  historyDepth?: number;
   help: boolean;
 }
 
@@ -79,6 +85,27 @@ const operationalProtocolIdentifiers = new Set([
 
 const trackedSensitiveAllowlist = new Set(['.env.example', '.claude/settings.json']);
 
+// Reserved/fictional phone ranges that are safe as test fixtures and documentation:
+//   - North American 555-line numbers (NANP reserved-for-fiction, e.g. +1 415 555 0100)
+//   - Repo synthetic fixtures: 1555*, 1111111*, 1000000000* (console/test fixtures)
+//   - Obvious placeholders: +1234567890, +0...
+//   - UK Ofcom drama range +447700 9xxxxx
+//   - 15184194479 / 18459780919: repo-wide canonical synthetic test fixtures
+//     (used as conversationKey/JID fixtures across tests/core/*; not a real line).
+const allowedPhoneFixture = /^\+(?:1?(?:\d{3})?555\d{4}|1555\d+|1111111\d*|1?0{6,}\d*|1234567890|0+|44770[09]\d{6}|99990{0,4}\d+|1415555\d+|1999900\d+|1?5184194479|1?8459780919)$/;
+// Twilio Account SID fixtures: all-zero / repeated-char placeholder bodies.
+const allowedTwilioSidFixture = /^AC(?:0{32}|x{32}|X{32}|(?:0123456789abcdef){2})$/;
+// Provider-key fixtures: explicit test/mock/fake/example markers within the token.
+// Markers are delimiter-anchored so a real key body that merely CONTAINS the
+// substring "sample"/"dummy" (e.g. base64 ...Sample...) is not allowlisted.
+const allowedProviderKeyFixture = /(?:[_-]test[_-]|^sk-test|^pcsk_test|[_-](?:mock|fake|fixture|example|placeholder|redacted|dummy|sample)(?:[_-]|$))/i;
+// Obvious non-secret values for the high-entropy secret-assignment pattern:
+// redaction markers, placeholders, and low-entropy/repeated fixtures. Provider
+// prefixed keys (sk-ant-, pcsk_, ghp_, AC...) are caught by their dedicated
+// value-shape patterns, so secret-assignment only needs the keyword-bound
+// high-entropy residual class.
+const allowedSecretAssignmentValue = /(?:redacted|placeholder|example|changeme|your[_-]|dummy|fake|sample|notarealkey|should-be-overridden|0{8,}|(?:0123456789){2}|abcdefabcdef)/i;
+
 const disallowedCommitAuthorPatterns: GuardPattern[] = [
   {
     code: 'placeholder-commit-author',
@@ -95,6 +122,18 @@ const disallowedCommitAuthorPatterns: GuardPattern[] = [
 function isAllowedPatternMatch(filePath: string, code: string, token: string): boolean {
   if (allowedEnvVarNameToken.test(token)) return true;
   if (code === 'personal-email' && allowedMessagingAddressRhs.test(token)) return true;
+  if (code === 'operator-phone') {
+    return allowedPhoneFixture.test(token.replace(/[\s().-]/g, ''));
+  }
+  if (code === 'twilio-account-sid') {
+    return allowedTwilioSidFixture.test(token);
+  }
+  if (code === 'openai-key' || code === 'anthropic-key' || code === 'pinecone-key') {
+    return allowedProviderKeyFixture.test(token);
+  }
+  if (code === 'secret-assignment') {
+    return allowedSecretAssignmentValue.test(token);
+  }
   return code === 'private-instance-label'
     && operationalReleaseHygieneFiles.has(filePath)
     && operationalProtocolIdentifiers.has(token);
@@ -167,27 +206,76 @@ const addedLinePatterns: GuardPattern[] = [
   {
     code: 'github-token',
     message: 'Public repo text must not include GitHub token shapes.',
-    regex: /\bgh[pousr]_[A-Za-z0-9_]{12,}\b/,
+    // Charset-boundary (not \b): catches GH=ghp_... and "token":"ghp_..." forms.
+    // Covers classic prefixes (ghp_/gho_/ghu_/ghs_/ghr_) and fine-grained PATs
+    // (github_pat_...).
+    regex: /(?<![A-Za-z0-9_-])(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_-])/,
+  },
+  {
+    code: 'anthropic-key',
+    message: 'Public repo text must not include Anthropic API key shapes.',
+    // Covers sk-ant-api03-..., sk-ant-admin01-..., etc. Charset-boundary so
+    // ANTHROPIC_API_KEY=sk-ant-... and {"apiKey":"sk-ant-..."} are caught.
+    regex: /(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9-]{12,}(?![A-Za-z0-9_-])/,
   },
   {
     code: 'openai-key',
     message: 'Public repo text must not include OpenAI key shapes.',
-    regex: /\bsk-[A-Za-z0-9_-]{16,}\b/,
+    // Excludes sk-ant- (handled by the dedicated anthropic-key pattern) so each
+    // key matches exactly one code.
+    regex: /(?<![A-Za-z0-9_-])sk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])/,
   },
   {
     code: 'pinecone-key',
     message: 'Public repo text must not include Pinecone key shapes.',
-    regex: /\bpcsk_[A-Za-z0-9_-]{12,}\b/,
+    regex: /(?<![A-Za-z0-9_-])pcsk_[A-Za-z0-9_-]{12,}(?![A-Za-z0-9_-])/,
+  },
+  {
+    code: 'twilio-account-sid',
+    message: 'Public repo text must not include Twilio Account SID shapes.',
+    // AC + 32 hex (case-insensitive). Charset-boundary avoids matching words like ACCOUNT.
+    regex: /(?<![A-Za-z0-9])AC[0-9a-fA-F]{32}(?![A-Za-z0-9])/,
   },
   {
     code: 'slack-token',
     message: 'Public repo text must not include Slack token shapes.',
-    regex: /\bxox[baprs]-[A-Za-z0-9-]{12,}\b/,
+    regex: /(?<![A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{12,}(?![A-Za-z0-9_-])/,
   },
   {
     code: 'private-key',
     message: 'Public repo text must not include private key material.',
-    regex: /BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY/,
+    // Full-block match (header AND body/footer) so a single-line PEM literal is
+    // caught in its entirety; header-only fallback for multi-line diffs where only
+    // the BEGIN line is on an added line. See feedback-secret-scan-word-boundary.
+    regex: /-{5}BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-{5}/,
+  },
+  {
+    code: 'secret-assignment',
+    message: 'Public repo text must not include secret-bearing assignments.',
+    // Keyword-based assignment WITHOUT a leading \b. The historical false-negative
+    // (feedback-secret-scan-word-boundary-false-negative) is that \b never fires
+    // between two word chars, so ANTHROPIC_API_KEY=, PINECONE_API_KEY=, MY_SECRET=,
+    // and JSON "apiKey":"..." were silently missed. We anchor on the END of the
+    // keyword instead and require a QUOTED, HIGH-ENTROPY string literal (>=20
+    // chars with a digit and mixed case) — the form a real hardcoded secret takes.
+    // Bare-identifier RHS (apiKey: config.apiKey) is variable indirection, and
+    // short lowercase dummy fixtures (apiKey: 'sk-ant-secret') stay below the
+    // entropy floor. Provider-prefixed keys are independently caught by the
+    // dedicated value-shape patterns. allowedSecretAssignmentValue filters the
+    // residual placeholder/repeated-char cases (fail-closed default).
+    // Value is captured in the `value` group so allowlist checks see only the RHS
+    // (not the key NAME) — closes the EXAMPLE_API_KEY=<real> bypass. Two value
+    // forms qualify as high-entropy: (a) >=20 chars with a digit AND a letter of
+    // each case OR a special char, (b) a >=20-char all-lowercase/upper hex blob
+    // (HMAC/webhook secrets that carry no case signal).
+    regex: /(?:[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Tt][Oo][Kk][Ee][Nn]|[Aa][Uu][Tt][Hh][_-]?[Tt][Oo][Kk][Ee][Nn]|(?<![A-Za-z])[Ss][Ee][Cc][Rr][Ee][Tt](?:[_-]?[Kk][Ee][Yy])?|(?<![A-Za-z])[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|(?<![A-Za-z])[Pp][Aa][Ss][Ss][Ww][Dd])["']?\s*[:=]\s*["']?(?<value>(?:(?=[A-Za-z0-9_\-./+!@#$%^&*]{20})[A-Za-z0-9_\-./+!@#$%^&*]*[A-Z][A-Za-z0-9_\-./+!@#$%^&*]*[0-9][A-Za-z0-9_\-./+!@#$%^&*]*|(?=[A-Za-z0-9_\-./+!@#$%^&*]{20})[A-Za-z0-9_\-./+!@#$%^&*]*[a-z][A-Za-z0-9_\-./+!@#$%^&*]*[0-9][A-Za-z0-9_\-./+!@#$%^&*]*|[0-9a-fA-F]{32,}))/,
+  },
+  {
+    code: 'operator-phone',
+    message: 'Public repo text must not include real-shaped operator phone numbers.',
+    // E.164 with explicit +; fixture-reserved ranges are allowlisted in
+    // isAllowedPatternMatch (555-line, +1234567890, 1555*, 1111111*, UK +447700).
+    regex: /\+[1-9]\d{9,14}(?!\d)/,
   },
 ];
 
@@ -213,6 +301,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.mode = 'release-hygiene';
     } else if (arg === '--commit-authors') {
       args.mode = 'commit-authors';
+    } else if (arg === '--scan-history') {
+      args.mode = 'scan-history';
+      const next = argv[i + 1];
+      if (next && !next.startsWith('--')) {
+        const depth = Number(next);
+        if (!Number.isInteger(depth) || depth <= 0) {
+          throw new Error(`--scan-history depth must be a positive integer: ${next}`);
+        }
+        args.historyDepth = depth;
+        i += 1;
+      }
     } else if (arg === '--commit-msg') {
       args.mode = 'commit-msg';
       const next = argv[i + 1];
@@ -271,7 +370,11 @@ function findDisallowedMatch(filePath: string, pattern: GuardPattern, text: stri
 
   for (const match of text.matchAll(regex)) {
     const token = match[0];
-    if (!isAllowedPatternMatch(filePath, pattern.code, token)) {
+    // For patterns that capture a `value` group (secret-assignment), the allowlist
+    // must see only the RHS value — not the key NAME — so EXAMPLE_API_KEY=<real>
+    // cannot be suppressed by the word "example" appearing in the key name.
+    const allowlistToken = match.groups?.value ?? token;
+    if (!isAllowedPatternMatch(filePath, pattern.code, allowlistToken)) {
       return token;
     }
     if (token === '') break;
@@ -456,6 +559,62 @@ export function scanTrackedFiles(cwd: string): GuardIssue[] {
   return scanContentLines(lines);
 }
 
+// Secret-shaped detector codes — the high-signal subset used for advisory
+// history scanning. Hygiene-only patterns (focused-test, console calls, internal
+// labels) are intentionally excluded so history scans stay actionable.
+const secretPatternCodes = new Set([
+  'github-token',
+  'anthropic-key',
+  'openai-key',
+  'pinecone-key',
+  'twilio-account-sid',
+  'slack-token',
+  'private-key',
+  'secret-assignment',
+  'operator-phone',
+  'whatsapp-group-jid',
+  'whatsapp-user-jid',
+  'personal-email',
+]);
+
+const secretPatterns = addedLinePatterns.filter((pattern) => secretPatternCodes.has(pattern.code));
+
+/**
+ * Advisory-only: scan added lines of recent commits for leaked secret shapes.
+ * Report-only — never mutates exitCode in run() for this mode. Fail-closed: a
+ * git/parse failure throws rather than returning a silent empty result.
+ */
+export function scanCommitHistory(cwd: string, depth: number): GuardIssue[] {
+  const shas = git(['log', `-${depth}`, '--format=%H'], cwd)
+    .split(/\r?\n/)
+    .filter(Boolean);
+
+  const issues: GuardIssue[] = [];
+  for (const sha of shas) {
+    // --unified=0, no-ext-diff for added lines only; -m flattens merge diffs.
+    const diff = git(
+      ['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha],
+      cwd,
+    );
+    for (const line of parseUnifiedDiffAddedLines(diff)) {
+      const filePath = normalizeRepoPath(line.filePath);
+      if (fixtureFiles.has(filePath)) continue;
+      for (const pattern of secretPatterns) {
+        if (findDisallowedMatch(filePath, pattern, line.text)) {
+          issues.push({
+            code: pattern.code,
+            message: `[history ${sha.slice(0, 12)}] ${pattern.message}`,
+            filePath: line.filePath,
+            line: line.line,
+          });
+        }
+      }
+    }
+  }
+
+  return issues;
+}
+
 export function parseCommitAuthorLog(log: string): CommitAuthor[] {
   return log
     .split('\x1e')
@@ -547,6 +706,8 @@ Modes:
   --staged              Scan staged added lines. This is the default.
   --release-hygiene     Scan tracked release-hygiene files.
   --commit-authors      Scan commits in the branch/PR range for placeholder authors.
+  --scan-history [N]    Advisory: scan added lines of the last N commits (default 50)
+                        for leaked secret shapes. Report-only; exit code stays 0.
   --commit-msg <file>   Scan a commit message file.
   --help                Show this help.
 
@@ -558,6 +719,30 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
   if (args.help) {
     printHelp();
     return [];
+  }
+
+  if (args.mode === 'scan-history') {
+    const depth = args.historyDepth ?? 50;
+    // Advisory-only: a git failure (e.g. shallow clone with no history) must NOT
+    // fail the build, so we never let the throw reach the top-level exit-1 handler.
+    let historyIssues: GuardIssue[];
+    try {
+      historyIssues = scanCommitHistory(cwd, depth);
+    } catch (err) {
+      console.error(
+        `repo hygiene history scan (advisory): skipped — ${(err as Error).message}`,
+      );
+      return [];
+    }
+    if (historyIssues.length > 0) {
+      printIssues(historyIssues);
+      console.error(
+        `repo hygiene history scan (advisory): ${historyIssues.length} secret-shaped finding(s) in last ${depth} commits`,
+      );
+    } else {
+      console.log(`repo hygiene history scan (advisory): no secret shapes in last ${depth} commits`);
+    }
+    return historyIssues;
   }
 
   const issues = args.mode === 'commit-msg'
