@@ -374,3 +374,16 @@ dispositioned as DD-6..DD-10 debt with phases or scheduled C2-C4 work. Full tabl
     lint infra, docs, tests). At push-gate, evaluate splitting into stacked PRs (docs / C0 / C1 /
     lint-infra) per the one-PR-per-phase rule; single-package framing requires explicit operator
     choice. Push remains gated on operator approval + author-email decision.
+
+---
+
+## C2.1 — Badge/Button Primitives + Oversight Waves 3-4 — 2026-06-11
+
+**Verdict: Pass.** Commit `fb67b43f` (impl). Shape law LIVE (DD-6 closed): disc/diamond/square/outline
++ label everywhere status renders, canonical status-map as single rendering driver, ModeBadge via map,
+Button 6x3 + ActionButton with type-level icon-only aria contract, accent primary live on Fleet.
+Pre+post frontend-design checkpoints both themes (Fleet/LineDetail/Ops/LinePicker — no overflow).
+1,674/1,674 tests. All 16 findings from oversight waves 3-4 fixed or dispositioned (check-15 bug,
+rule x file ratchet 153 buckets, shadow superset run, map SSOT, px tokenization, mojibake, weak
+assertions; evidence-vs-baseline reconciled; DD-11 opened). Full packet:
+`06-implementation/c2-1-evidence.md`. Stale agent worktree removal pending operator approval.
