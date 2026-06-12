@@ -11,7 +11,8 @@
  *   - Enter/exit CSS classes; exit faster than enter (motion.md §5).
  *   - Reduced motion: backdrop + shell appear/disappear instantly via the global
  *     prefers-reduced-motion CSS rule (no JS check needed — CSS handles it).
- *   - Background content inert via aria-hidden on sibling; callers manage their
+ * Background inert/aria-hidden management is NOT implemented yet (DD-19) — the modal
+ * portals to body and relies on the focus trap for containment.
  *     own app root ref if needed (inert attribute delegation is caller-side).
  *
  * Sub-components exported from this module:
@@ -92,12 +93,11 @@ export const Modal: FC<ModalProps> = ({
         ? 'soup-modal-shell--lg'
         : 'soup-modal-shell--md';
 
+  // Outside dismissal is owned EXCLUSIVELY by useDismissable's stack-aware pointerdown
+  // handler — no backdrop onClick, so a real browser sequence (pointerdown -> pointerup
+  // -> click) can never double-fire onClose.
   return createPortal(
-    <div
-      className="soup-modal-backdrop"
-      data-soup-backdrop
-      onClick={dismissable ? (e) => { if (e.target === e.currentTarget) onClose(); } : undefined}
-    >
+    <div className="soup-modal-backdrop" data-soup-backdrop>
       <div
         ref={shellRef}
         role="dialog"

@@ -60,7 +60,8 @@ body::before {
 }
 
 #root {
-  min-height: 100vh;
+  /* dvh keeps the shell honest under mobile chrome/zoom/split-screen (matches App h-dvh) */
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   isolation: isolate;

@@ -266,7 +266,9 @@ describe('App — KeyboardShortcutsHelp modal', () => {
     await waitFor(() => screen.getByRole('dialog'));
     const dialog = screen.getByRole('dialog');
     const backdrop = dialog.parentElement!;
-    await act(async () => { fireEvent.click(backdrop); });
+    // Real browsers fire pointerdown before click; outside dismissal is owned by
+    // useDismissable's pointerdown handler (single owner — no backdrop onClick).
+    await act(async () => { fireEvent.pointerDown(backdrop); fireEvent.click(backdrop); });
     await waitFor(() => {
       expect(screen.queryByRole('dialog')).toBeNull();
     });

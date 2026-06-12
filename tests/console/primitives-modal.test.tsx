@@ -434,3 +434,21 @@ describe('Modal — class structure', () => {
     expect(shell).not.toBeNull();
   });
 });
+
+describe('Modal outside-dismissal single-owner contract', () => {
+  it('a full browser click sequence on the backdrop calls onClose exactly once', () => {
+    const onClose = vi.fn()
+    render(
+      <Modal open onClose={onClose} dismissable>
+        <ModalHeader title="Single fire" />
+        <ModalBody>content</ModalBody>
+      </Modal>,
+    )
+    const backdrop = document.querySelector('[data-soup-backdrop]') as HTMLElement
+    // pointerdown -> pointerup -> click, as real browsers dispatch
+    fireEvent.pointerDown(backdrop)
+    fireEvent.pointerUp(backdrop)
+    fireEvent.click(backdrop)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})

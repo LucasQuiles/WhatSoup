@@ -35,6 +35,8 @@ interface FilterPillProps {
   activeBorder?: string
   onClick: () => void
   count?: number
+  /** DECORATIVE content only — rendered OUTSIDE the interactive control (not part of
+   *  its accessible name or pointer target). Meaningful state must live in the label. */
   suffix?: ReactNode
   /** @deprecated */
   style?: React.CSSProperties
