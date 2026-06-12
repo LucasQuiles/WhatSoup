@@ -133,7 +133,10 @@ describe('handleAuth introSent reset failure', () => {
           && msg.includes('introSent')
           && typeof ctx === 'object'
           && ctx !== null
-          && (ctx as Record<string, unknown>).instance === 'test-line',
+          && (ctx as Record<string, unknown>).instance === 'test-line'
+          // The err binding is the point of the fix — operators need the
+          // underlying failure, not just that one happened.
+          && (ctx as Record<string, unknown>).err !== undefined,
       );
       expect(warned).toBe(true);
     });
