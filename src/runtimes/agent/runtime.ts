@@ -5875,7 +5875,20 @@ export class AgentRuntime implements Runtime {
     // and re-alert the activation that already fired before the restart.
     if (this.fallbackArmReason === null) {
       this.fallbackArmReason = reason;
-      if (!opts?.restored) {
+      if (opts?.restored) {
+        // A restored window is the SAME window resuming after a restart, so
+        // it never re-counts as an activation — but the resume itself is an
+        // operator-visible transition (a restart mid-window; repeated
+        // restores are the crash-loop signature), so it gets its own
+        // additive source instead of silence.
+        emitAlert(
+          this.instanceName,
+          'provider_fallback_restored',
+          'Provider fallback window restored after restart',
+          `reason=${reason} provider=${fallbackEntry.provider} model=${fallbackEntry.model ?? 'default'}`
+            + ` until=${new Date(until).toISOString()} probeAttempts=${this.fallbackProbeAttempts}`,
+        );
+      } else {
         this.fallbackActivations += 1;
         emitAlert(
           this.instanceName,
@@ -5901,7 +5914,12 @@ export class AgentRuntime implements Runtime {
     this.fallbackRecoveryProbeRequired = fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
     this.scheduleFallbackPrimaryProbe();
     try {
-      saveFallbackState(this.db, { activeUntil: until, activatedAt, reason: persistReason });
+      saveFallbackState(this.db, {
+        activeUntil: until,
+        activatedAt,
+        reason: persistReason,
+        probeAttempts: this.fallbackProbeAttempts,
+      });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
       emitAlert(
@@ -6026,9 +6044,16 @@ export class AgentRuntime implements Runtime {
       // Clamp the restored window so a clock-skew or tampered row cannot pin
       // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
       const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
+      // Resume the stall clock BEFORE re-arming: the persisted attempts feed
+      // both the re-persist inside armFallbackWindow and the restore alert's
+      // evidence. Without this, every restart reset the count to zero and a
+      // dead primary could extend forever without ever reaching the stall
+      // threshold (restarts happen more often than 12 recheck cadences).
+      this.fallbackProbeAttempts = Number.isFinite(persisted.probeAttempts) ? persisted.probeAttempts : 0;
       // Pass persisted.reason so the original cause survives the restart, and
-      // restored:true so the resumed window is not re-counted/re-alerted —
-      // provider_fallback_activated already fired when the window first armed.
+      // restored:true so the resumed window is not re-counted as an
+      // activation — provider_fallback_activated already fired when the
+      // window first armed; the resume emits provider_fallback_restored.
       this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
       const wasClamped = clampedUntil < persisted.activeUntil;
       log.info({
@@ -6181,6 +6206,9 @@ export class AgentRuntime implements Runtime {
         activeUntil: until,
         activatedAt: this.fallbackActivatedAt ?? now,
         reason: this.fallbackArmReason ?? 'auth-required',
+        // Persist the stall clock with the window so a restart mid-stall
+        // resumes the count instead of resetting it.
+        probeAttempts: this.fallbackProbeAttempts,
       });
     } catch (err) {
       log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');

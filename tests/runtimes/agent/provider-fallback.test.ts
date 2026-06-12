@@ -828,6 +828,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeUntil,
       activatedAt: originalActivatedAt,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const saveSpy = vi
@@ -867,6 +868,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeUntil: now - 1000,
       activatedAt: now - 10_000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const clearSpy = vi
@@ -891,6 +893,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const clearSpy = vi
@@ -951,6 +954,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeUntil: farFuture,
       activatedAt: now - 1000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const saveSpy = vi
