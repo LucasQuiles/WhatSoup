@@ -57,7 +57,7 @@ const KeyBadge: FC<{ keyPresent: boolean | null }> = ({ keyPresent }) => {
       ? { label: 'key set', icon: KeyRound, color: 'var(--color-s-ok)', bg: 'var(--s-ok-wash)' }
       : keyPresent === false
       ? { label: 'no key', icon: ShieldOff, color: 'var(--color-s-crit)', bg: 'var(--s-crit-wash)' }
-      : { label: 'n/a — native auth', icon: ShieldCheck, color: 'var(--color-t3)', bg: 'var(--color-d4)' }
+      : { label: 'n/a — native auth', icon: ShieldCheck, color: 'var(--text-2)', bg: 'var(--surface-inset)' }
   const Icon = spec.icon
   return (
     <span
