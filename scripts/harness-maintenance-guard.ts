@@ -41,6 +41,8 @@ export interface ManifestValidation {
   tier1Harnesses: string[];
   probes: string[];
   floatingReferences: FloatingReference[];
+  allowedFloatingReferences: FloatingReference[];
+  unexpectedFloatingReferences: FloatingReference[];
   warnings: string[];
 }
 
@@ -175,10 +177,20 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
   const floatingReferences: FloatingReference[] = [];
   walkForFloatingReferences(payload, '', floatingReferences);
 
+  // Paths matching ^tier1\[\d+\]\.(update|rollback) are intentional update/rollback
+  // channels (e.g. "claude install latest") and are expected to contain floating refs.
+  const allowedFloatingPattern = /^tier1\[\d+\]\.(update|rollback)(?:[.\[]|$)/;
+  const allowedFloatingReferences = floatingReferences.filter((ref) =>
+    allowedFloatingPattern.test(ref.path),
+  );
+  const unexpectedFloatingReferences = floatingReferences.filter(
+    (ref) => !allowedFloatingPattern.test(ref.path),
+  );
+
   const warnings: string[] = [];
-  if (floatingReferences.length > 0) {
+  if (allowedFloatingReferences.length > 0) {
     warnings.push(
-      `${floatingReferences.length} floating latest reference(s) will be reported by maintenance checks`,
+      `${allowedFloatingReferences.length} allowed floating latest reference(s) in tier1 update/rollback channels`,
     );
   }
 
@@ -190,6 +202,8 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
     tier1Harnesses,
     probes,
     floatingReferences,
+    allowedFloatingReferences,
+    unexpectedFloatingReferences,
     warnings,
   };
 }
@@ -369,7 +383,11 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
       `harness-maintenance manifest ok: tier1=${result.tier1Harnesses.join(',')} probes=${result.probes.join(',')}`,
     );
     for (const warning of result.warnings) console.warn(warning);
+    for (const ref of result.unexpectedFloatingReferences) {
+      console.error(`unexpected floating latest reference at ${ref.path}: ${ref.value}`);
+    }
   }
+  if (result.unexpectedFloatingReferences.length > 0) process.exitCode = 2;
   return result;
 }
 
