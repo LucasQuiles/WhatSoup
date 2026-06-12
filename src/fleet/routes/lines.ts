@@ -149,14 +149,119 @@ function getMessageStats(dbReader: FleetDbReader, inst: DiscoveredInstance): Mes
   });
 }
 
-function getLinkedStatus(configPath: string): 'linked' | 'unlinked' {
+type LinkedStatus = 'linked' | 'unlinked' | 'unknown';
+
+interface LinkedStatusDetails {
+  status: LinkedStatus;
+  confidence: InstanceStatus['statusConfidence'];
+  reason: string;
+  evidence: string[];
+}
+
+function linkedEvidenceField(name: string, value: unknown): string {
+  if (value === undefined || value === null || value === '') return `${name}=unknown`;
+  return `${name}=${String(value)}`;
+}
+
+function linkedStatusFromHealth(health: Record<string, unknown> | null): LinkedStatusDetails | null {
+  if (!health) return null;
+
+  const connected = dig(health, 'whatsapp', 'connected');
+  const accountJid = dig(health, 'whatsapp', 'account_jid');
+  const connectionState =
+    dig(health, 'whatsapp', 'connection', 'state') ??
+    dig(health, 'connection', 'state');
+  const healthStatus = dig(health, 'status');
+  const accountJidStatus = accountJid === 'not connected'
+    ? 'not_connected'
+    : typeof accountJid === 'string' && accountJid.trim() !== ''
+      ? 'present'
+      : 'unknown';
+  const evidence = [
+    linkedEvidenceField('link_source', 'health'),
+    linkedEvidenceField('health_status', healthStatus),
+    linkedEvidenceField('whatsapp_connected', connected),
+    linkedEvidenceField('account_jid_status', accountJidStatus),
+    linkedEvidenceField('connection_state', connectionState),
+  ];
+
+  if (connected === true && accountJidStatus === 'present') {
+    return {
+      status: 'linked',
+      confidence: 'confirmed',
+      reason: 'whatsapp_health_connected',
+      evidence,
+    };
+  }
+
+  if (
+    connected === false &&
+    accountJidStatus === 'not_connected' &&
+    (connectionState === 'disconnected' || healthStatus === 'unhealthy')
+  ) {
+    return {
+      status: 'unlinked',
+      confidence: 'confirmed',
+      reason: 'whatsapp_health_disconnected',
+      evidence,
+    };
+  }
+
+  if (accountJidStatus === 'present') {
+    return {
+      status: 'linked',
+      confidence: 'inferred',
+      reason: 'whatsapp_account_present',
+      evidence,
+    };
+  }
+
+  return null;
+}
+
+function getLinkedStatus(configPath: string, health: Record<string, unknown> | null): LinkedStatusDetails {
+  const healthStatus = linkedStatusFromHealth(health);
+  if (healthStatus) return healthStatus;
+
   try {
     const authDir = path.join(path.dirname(configPath), 'auth');
     const entries = fs.readdirSync(authDir);
-    return entries.some(f => f.startsWith('creds') || f.startsWith('app-state-sync'))
-      ? 'linked' : 'unlinked';
-  } catch {
-    return 'unlinked';
+    const hasAuthArtifacts = entries.some(f => f.startsWith('creds') || f.startsWith('app-state-sync'));
+    return {
+      status: hasAuthArtifacts ? 'linked' : 'unlinked',
+      confidence: 'inferred',
+      reason: hasAuthArtifacts ? 'auth_artifacts_present' : 'auth_artifacts_absent',
+      evidence: [
+        linkedEvidenceField('link_source', 'auth_artifacts'),
+        linkedEvidenceField('auth_artifacts_present', hasAuthArtifacts),
+        linkedEvidenceField('auth_entry_count', entries.length),
+      ],
+    };
+  } catch (err) {
+    const code = typeof err === 'object' && err !== null && 'code' in err
+      ? String((err as { code?: unknown }).code)
+      : 'UNKNOWN';
+    if (code === 'ENOENT') {
+      return {
+        status: 'unlinked',
+        confidence: 'inferred',
+        reason: 'auth_artifacts_absent',
+        evidence: [
+          linkedEvidenceField('link_source', 'auth_artifacts'),
+          linkedEvidenceField('auth_artifacts_present', false),
+          linkedEvidenceField('auth_read_error_code', code),
+        ],
+      };
+    }
+    return {
+      status: 'unknown',
+      confidence: 'ambiguous',
+      reason: 'auth_artifacts_unreadable',
+      evidence: [
+        linkedEvidenceField('link_source', 'auth_artifacts'),
+        linkedEvidenceField('auth_read_error_code', code),
+      ],
+    };
   }
 }
 
@@ -279,6 +384,7 @@ interface EnrichOpts {
 function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefined, opts: EnrichOpts = {}): Record<string, unknown> {
   const h = poll?.health ?? null;
   const isConfigError = inst.configError != null;
+  const linkedStatus = getLinkedStatus(inst.configPath, h);
 
   const uptimeSec = dig(h, 'uptime_seconds') as number | undefined;
   const accountJid = dig(h, 'whatsapp', 'account_jid') as string | undefined;
@@ -329,7 +435,10 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     activeSessions: activeSessions ?? 0,
     lastSessionStatus,
     messageStats: opts.messageStats ?? null,
-    linkedStatus: getLinkedStatus(inst.configPath),
+    linkedStatus: linkedStatus.status,
+    linkedStatusConfidence: linkedStatus.confidence,
+    linkedStatusReason: linkedStatus.reason,
+    linkedStatusEvidence: linkedStatus.evidence,
     totalSessions: opts.totalSessions ?? 0,
     models: inst.models ?? null,
     sandboxPerChat: inst.sandboxPerChat ?? false,
@@ -575,6 +684,11 @@ export async function handleGetLineProviderStatus(
   const turnsServedRaw = dig(health, 'instance', 'fallbackTurnsServed');
   const turnsEmptyRaw = dig(health, 'instance', 'fallbackTurnsEmpty');
   const lastFallbackTurnAtRaw = dig(health, 'instance', 'lastFallbackTurnAt');
+  const probeAttemptsRaw = dig(health, 'instance', 'probeAttempts');
+  const lastProbeAtRaw = dig(health, 'instance', 'lastProbeAt');
+  const activationsRaw = dig(health, 'instance', 'fallbackActivations');
+  const revertsRaw = dig(health, 'instance', 'fallbackReverts');
+  const replaysRaw = dig(health, 'instance', 'fallbackReplays');
   const fallbackResetAt = typeof fallbackResetAtRaw === 'number' ? fallbackResetAtRaw : null;
   const activeEntry = fallbackEntryFromHealth(dig(health, 'instance', 'activeFallbackEntry'));
   const chainFromHealth = fallbackChainFromHealth(dig(health, 'instance', 'fallbackChain'));
@@ -603,6 +717,11 @@ export async function handleGetLineProviderStatus(
       turnsServed: typeof turnsServedRaw === 'number' ? turnsServedRaw : null,
       turnsEmpty: typeof turnsEmptyRaw === 'number' ? turnsEmptyRaw : null,
       lastFallbackTurnAt: typeof lastFallbackTurnAtRaw === 'number' ? lastFallbackTurnAtRaw : null,
+      probeAttempts: typeof probeAttemptsRaw === 'number' ? probeAttemptsRaw : null,
+      lastProbeAt: typeof lastProbeAtRaw === 'number' ? lastProbeAtRaw : null,
+      activations: typeof activationsRaw === 'number' ? activationsRaw : null,
+      reverts: typeof revertsRaw === 'number' ? revertsRaw : null,
+      replays: typeof replaysRaw === 'number' ? replaysRaw : null,
       activeEntry,
       chain: fallbackChain,
     },

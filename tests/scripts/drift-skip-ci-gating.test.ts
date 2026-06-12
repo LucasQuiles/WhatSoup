@@ -20,6 +20,7 @@ function makeStalePublicSurfaceRoot(): string {
   const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-pub-ci-gate-'));
   const docsDir = path.join(root, 'docs');
   mkdirSync(docsDir, { recursive: true });
+  writeFileSync(path.join(root, 'package.json'), '{"scripts":{}}\n', 'utf8');
   writeFileSync(
     path.join(docsDir, 'public-surface.md'),
     `# Public surface

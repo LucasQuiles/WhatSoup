@@ -10,6 +10,20 @@ export interface ContradictionResult {
   explanation: string;
 }
 
+export type ContradictionDetectionStatus =
+  | 'ok'
+  | 'skipped_no_existing_facts'
+  | 'llm_failed'
+  | 'parse_failed'
+  | 'invalid_response';
+
+export interface ContradictionDetectionDetails {
+  results: ContradictionResult[];
+  status: ContradictionDetectionStatus;
+  error?: string;
+  rawLength?: number;
+}
+
 interface FactLike {
   claim?: string;
   text: string;
@@ -48,7 +62,18 @@ export async function detectContradictions(
   newFact: FactLike,
   existingFacts: ExistingFactLike[],
 ): Promise<ContradictionResult[]> {
-  if (existingFacts.length === 0) return [];
+  const details = await detectContradictionsDetailed(provider, newFact, existingFacts);
+  return details.results;
+}
+
+export async function detectContradictionsDetailed(
+  provider: LLMProvider,
+  newFact: FactLike,
+  existingFacts: ExistingFactLike[],
+): Promise<ContradictionDetectionDetails> {
+  if (existingFacts.length === 0) {
+    return { results: [], status: 'skipped_no_existing_facts' };
+  }
 
   const prompt = `NEW CLAIM: "${newFact.claim || newFact.text}"
 
@@ -65,8 +90,9 @@ ${existingFacts.map((f, i) => `[${i}] "${f.claim || f.text}" (id: ${f.id})`).joi
     });
     raw = response.content.trim();
   } catch (err) {
-    log.warn({ err }, 'contradiction detection: LLM call failed');
-    return [];
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn({ err: message }, 'contradiction detection: LLM call failed');
+    return { results: [], status: 'llm_failed', error: message };
   }
 
   const jsonStr = stripJsonFences(raw);
@@ -74,12 +100,16 @@ ${existingFacts.map((f, i) => `[${i}] "${f.claim || f.text}" (id: ${f.id})`).joi
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonStr);
-  } catch {
-    log.warn({ raw: raw.slice(0, 200) }, 'contradiction detection: JSON parse failed');
-    return [];
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn({ err: message, rawLength: raw.length }, 'contradiction detection: JSON parse failed');
+    return { results: [], status: 'parse_failed', error: message, rawLength: raw.length };
   }
 
-  if (!Array.isArray(parsed)) return [];
+  if (!Array.isArray(parsed)) {
+    log.warn({ rawLength: raw.length, parsedType: typeof parsed }, 'contradiction detection: invalid response shape');
+    return { results: [], status: 'invalid_response', rawLength: raw.length };
+  }
 
   const results: ContradictionResult[] = [];
   for (const item of parsed) {
@@ -97,5 +127,5 @@ ${existingFacts.map((f, i) => `[${i}] "${f.claim || f.text}" (id: ${f.id})`).joi
     });
   }
 
-  return results;
+  return { results, status: 'ok', rawLength: raw.length };
 }

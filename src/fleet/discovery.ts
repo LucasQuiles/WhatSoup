@@ -5,6 +5,7 @@ import { VALID_TYPES } from '../instance-loader.ts';
 import { validateInstanceConfig } from '../core/agent-config-validator.ts';
 import { expandHomePath } from '../lib/home-path.ts';
 import { createChildLogger } from '../logger.ts';
+import { DEFAULT_INSTANCE_HEALTH_PORT } from './constants.ts';
 import { configRoot as defaultConfigRoot, dataRoot, stateRoot } from './paths.ts';
 
 const log = createChildLogger('fleet:discovery');
@@ -165,7 +166,7 @@ export class FleetDiscovery {
           name,
           type: VALID_TYPES.has(String(raw.type)) ? (raw.type as 'passive' | 'chat' | 'agent') : 'chat',
           accessMode: typeof raw.accessMode === 'string' ? raw.accessMode : 'self_only',
-          healthPort: typeof raw.healthPort === 'number' ? raw.healthPort : 3010,
+          healthPort: typeof raw.healthPort === 'number' ? raw.healthPort : DEFAULT_INSTANCE_HEALTH_PORT,
           dbPath,
           stateRoot: instStateRoot,
           logDir,

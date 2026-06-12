@@ -90,7 +90,9 @@ vi.mock('../../../src/logger.ts', () => ({
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: mockEmitAlert,
+  emitAlertChecked: mockEmitAlert,
   clearAlertSource: mockClearAlertSource,
+  clearAlertSourceChecked: mockClearAlertSource,
 }));
 
 vi.mock('../../../src/core/messages.ts', () => ({
@@ -3179,7 +3181,8 @@ describe('AgentRuntime', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
-    mockConfig.agentProvider = 'claude-cli';
+    const agentConfig = mockConfig as typeof mockConfig & { agentProvider?: string };
+    agentConfig.agentProvider = 'claude-cli';
     const runtime = new AgentRuntime(db, messenger, 'ana-bot');
     await runtime.start();
     await runtime.handleMessage(makeMsg({ content: 'hi' }));

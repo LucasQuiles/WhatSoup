@@ -1,7 +1,7 @@
 import { createChildLogger } from '../logger.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
-import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottle, recordAlertThrottle } from './alert-throttle-store.ts';
+import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 
 const log = createChildLogger('fleet:health-poller');
@@ -215,6 +215,7 @@ export class HealthPoller {
   private intervalMs: number;
   private statusChangeListeners: StatusChangeCallback[] = [];
   private persistedAlertThrottle: Map<string, string>;
+  private alertThrottleLoadErrorCode: string | null;
   private weakLoggedOutPolls: Map<string, number> = new Map();
   private failureStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedStartedAt: Map<string, number> = new Map();
@@ -232,7 +233,9 @@ export class HealthPoller {
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
     this.intervalMs = intervalMs;
-    this.persistedAlertThrottle = loadAlertThrottle();
+    const throttle = loadAlertThrottleDetailed();
+    this.persistedAlertThrottle = throttle.entries;
+    this.alertThrottleLoadErrorCode = throttle.loadError?.code ?? (throttle.loadError ? 'UNKNOWN' : null);
   }
 
   /** Register a callback for instance status changes. */
@@ -1220,9 +1223,10 @@ export class HealthPoller {
       }
     }
 
-    const emitted = severity === 'critical'
-      ? emitAlertChecked(name, source, summary, evidence, severity, criticalAsset)
-      : emitAlertChecked(name, source, summary, evidence, severity, criticalAsset);
+    const throttleEvidence = this.alertThrottleLoadErrorCode
+      ? `${evidence} alert_throttle_load_error=true alert_throttle_load_error_code=${this.alertThrottleLoadErrorCode}`
+      : evidence;
+    const emitted = emitAlertChecked(name, source, summary, throttleEvidence, severity, criticalAsset);
     if (!emitted) return false;
 
     if (existing) {

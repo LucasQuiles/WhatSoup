@@ -121,7 +121,15 @@ export function createOpenCodeParser(): OpenCodeParser {
             if (typeof out === 'number') outputTokens = out;
           }
 
-          return { type: 'result', text: null, inputTokens, outputTokens };
+          // part.cost is the per-turn USD cost reported by opencode.
+          // Accept only finite, non-negative numbers; anything else stays undefined.
+          let costUsd: number | undefined;
+          const cost = part['cost'];
+          if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0) {
+            costUsd = cost;
+          }
+
+          return { type: 'result', text: null, inputTokens, outputTokens, costUsd };
         }
 
         // reason="tool-calls": more steps follow

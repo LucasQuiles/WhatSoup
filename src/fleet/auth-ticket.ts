@@ -29,7 +29,7 @@
 // audience is part of the signed payload.
 
 import * as crypto from 'node:crypto';
-import { safeStringEqual } from '../lib/safe-compare.ts';
+import { safeStringEqual } from './safe-compare.ts';
 
 /** Default ticket TTL -- 60 seconds. */
 export const TICKET_TTL_MS = 60_000;

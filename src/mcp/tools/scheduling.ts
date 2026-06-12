@@ -206,12 +206,20 @@ function buildScheduledPayload(params: z.infer<typeof ScheduleMessageSchema>, se
 }
 
 function rowToScheduledMessage(row: ScheduledMessageRow) {
+  // Guarded parse: list/get/update map EVERY row through this function, so
+  // one corrupt persisted payload must not brick the read tools wholesale.
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(row.payload) as Record<string, unknown>;
+  } catch {
+    payload = { corrupt: true };
+  }
   return {
     id: row.id,
     chatJid: row.chat_jid,
     chatName: row.chat_name,
     contentType: row.content_type,
-    payload: JSON.parse(row.payload) as Record<string, unknown>,
+    payload,
     scheduledAt: row.scheduled_at,
     recurrence: row.recurrence,
     nextRunAt: row.next_run_at,

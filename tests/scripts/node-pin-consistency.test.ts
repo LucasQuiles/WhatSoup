@@ -102,7 +102,7 @@ describe('node-pin consistency check', () => {
     expect(drift.mismatches).toHaveLength(3);
     for (const m of drift.mismatches) {
       expect(m.version).toBe('24.13.0');
-      expect(m.source.startsWith('deploy/') || m.source === 'scripts/run-with-pinned-node.sh').toBe(true);
+      expect(m.source.startsWith('deploy/')).toBe(true);
     }
   });
 

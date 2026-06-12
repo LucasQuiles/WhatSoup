@@ -30,6 +30,10 @@ function queryLogFields(query: string): { queryHash: string; queryLength: number
   };
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 function getBreaker(operation: string): CircuitBreaker {
   if (!breakers[operation]) {
     breakers[operation] = new CircuitBreaker(operation, FAILURE_ALERT_THRESHOLD, 30_000, logger);
@@ -40,7 +44,7 @@ function getBreaker(operation: string): CircuitBreaker {
 function trackFailure(operation: string, err: unknown): void {
   const breaker = getBreaker(operation);
   breaker.recordFailure();
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
 
   logger.warn(
     { operation, error: message },
@@ -217,6 +221,30 @@ export interface EntitySearchResult {
   record: EntityRecord;
 }
 
+export type PineconeSearchStatus =
+  | 'ok'
+  | 'breaker_open'
+  | 'project_guard_failed'
+  | 'failed';
+
+export interface PineconeSearchDetails {
+  results: SearchResult[];
+  status: PineconeSearchStatus;
+  durationMs?: number;
+  retried?: boolean;
+  error?: string;
+  projectGuardError?: string;
+}
+
+export interface PineconeEntitySearchDetails {
+  results: EntitySearchResult[];
+  status: PineconeSearchStatus;
+  durationMs?: number;
+  retried?: boolean;
+  error?: string;
+  projectGuardError?: string;
+}
+
 type PineconeRecord = {
   _id: string;
   text: string;
@@ -373,19 +401,19 @@ export class PineconeMemory {
     return this.projectGuardCheck;
   }
 
-  private async _searchCore(
+  private async _searchCoreDetailed(
     query: string,
     filters: Record<string, unknown>,
     topK: number,
-  ): Promise<SearchResult[]> {
+  ): Promise<PineconeSearchDetails> {
     if (isBreakerOpen('search')) {
       logger.warn('pinecone search circuit breaker open — skipping');
-      return [];
+      return { results: [], status: 'breaker_open' };
     }
     const projectGuardError = await this.getProjectGuardError();
     if (projectGuardError) {
       logger.error({ projectGuardError, index: config.pineconeIndex }, 'Pinecone project guard failed — skipping search');
-      return [];
+      return { results: [], status: 'project_guard_failed', projectGuardError };
     }
 
     const doSearch = () =>
@@ -408,7 +436,7 @@ export class PineconeMemory {
         'Pinecone search complete',
       );
       trackSuccess('search');
-      return results;
+      return { results, status: 'ok', durationMs };
     } catch (err) {
       // One retry after a short delay to catch transient blips
       await sleep(RETRY_DELAY_MS);
@@ -421,17 +449,38 @@ export class PineconeMemory {
           'Pinecone search complete (after retry)',
         );
         trackSuccess('search');
-        return results;
+        return { results, status: 'ok', durationMs, retried: true };
       } catch (retryErr) {
         const durationMs = Date.now() - startMs;
+        const message = errorMessage(retryErr);
         trackFailure('search', retryErr);
         logger.error(
           { err: retryErr, ...queryLogFields(query), topK, filter: filters, durationMs },
           'Pinecone search failed — returning empty results',
         );
-        return [];
+        return { results: [], status: 'failed', durationMs, retried: true, error: message };
       }
     }
+  }
+
+  private async _searchCore(
+    query: string,
+    filters: Record<string, unknown>,
+    topK: number,
+  ): Promise<SearchResult[]> {
+    return (await this._searchCoreDetailed(query, filters, topK)).results;
+  }
+
+  async searchDetailed(
+    query: string,
+    filters: Record<string, unknown>,
+    topK: number,
+  ): Promise<PineconeSearchDetails> {
+    const details = await this._searchCoreDetailed(query, filters, topK);
+    return {
+      ...details,
+      results: applyDecay(details.results, config.recencyHalfLifeDays, config.maxAgeDays),
+    };
   }
 
   async search(
@@ -439,8 +488,7 @@ export class PineconeMemory {
     filters: Record<string, unknown>,
     topK: number,
   ): Promise<SearchResult[]> {
-    const results = await this._searchCore(query, filters, topK);
-    return applyDecay(results, config.recencyHalfLifeDays, config.maxAgeDays);
+    return (await this.searchDetailed(query, filters, topK)).results;
   }
 
   private searchByField(
@@ -465,14 +513,18 @@ export class PineconeMemory {
   }
 
   async searchEntities(query: string): Promise<EntitySearchResult[]> {
+    return (await this.searchEntitiesDetailed(query)).results;
+  }
+
+  async searchEntitiesDetailed(query: string): Promise<PineconeEntitySearchDetails> {
     if (isBreakerOpen('searchEntities')) {
       logger.warn('pinecone searchEntities circuit breaker open — skipping');
-      return [];
+      return { results: [], status: 'breaker_open' };
     }
     const projectGuardError = await this.getProjectGuardError();
     if (projectGuardError) {
       logger.error({ projectGuardError, index: config.pineconeIndex }, 'Pinecone project guard failed — skipping entity search');
-      return [];
+      return { results: [], status: 'project_guard_failed', projectGuardError };
     }
 
     const doSearch = () =>
@@ -486,6 +538,7 @@ export class PineconeMemory {
       });
 
     const startMs = Date.now();
+    let retried = false;
     try {
       // Step 1: vector search (no server-side rerank — docs may exceed 512-token reranker limit)
       let response: Awaited<ReturnType<typeof doSearch>>;
@@ -494,6 +547,7 @@ export class PineconeMemory {
       } catch (firstErr) {
         logger.debug({ err: (firstErr as Error).message, operation: 'searchEntities' }, 'pinecone_first_attempt_failed');
         // One retry after short delay
+        retried = true;
         await sleep(RETRY_DELAY_MS);
         response = await doSearch();
       }
@@ -558,15 +612,16 @@ export class PineconeMemory {
         'Pinecone entity search complete',
       );
       trackSuccess('searchEntities');
-      return capped;
+      return { results: capped, status: 'ok', durationMs };
     } catch (err) {
       const durationMs = Date.now() - startMs;
+      const message = errorMessage(err);
       trackFailure('searchEntities', err);
       logger.error(
         { err, ...queryLogFields(query), durationMs },
         'Pinecone entity search failed — returning empty results',
       );
-      return [];
+      return { results: [], status: 'failed', durationMs, retried, error: message };
     }
   }
 

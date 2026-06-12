@@ -34,7 +34,7 @@ vi.mock('node:fs/promises', () => ({
   readFile: mockReadFile,
 }));
 
-import { extractFrames } from '../../../../src/runtimes/chat/media/video.ts';
+import { extractFrames, extractFramesDetailed } from '../../../../src/runtimes/chat/media/video.ts';
 
 // The module uses promisify(execFile). promisify-wrapped callbacks expect node-style
 // (err, value) callbacks. We simulate this by implementing execFile as a function
@@ -272,6 +272,32 @@ describe('extractFrames — ffmpeg failure recovery', () => {
     expect(fallbackArgs[idx + 1]).toBe('1');
   });
 
+  it('marks fallback success with no produced frames separately from extractor failure', async () => {
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '30\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: Error) => void) =>
+          cb(new Error('ffmpeg error')),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '', stderr: '' }),
+      );
+    mockReaddir.mockResolvedValue([]);
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [],
+      status: 'fallback_no_frames',
+      fallbackUsed: true,
+      durationSeconds: 30,
+    });
+  });
+
   it('returns empty array when both primary and fallback ffmpeg calls reject', async () => {
     mockExecFile
       .mockImplementationOnce(
@@ -290,6 +316,32 @@ describe('extractFrames — ffmpeg failure recovery', () => {
     const frames = await extractFrames(Buffer.from('fake-video'));
     expect(frames).toEqual([]);
     expect(mockExecFile).toHaveBeenCalledTimes(3);
+  });
+
+  it('marks fallback ffmpeg failure separately from a clean no-frame result', async () => {
+    mockExecFile
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: null, v: { stdout: string; stderr: string }) => void) =>
+          cb(null, { stdout: '30\n', stderr: '' }),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: Error) => void) =>
+          cb(new Error('ffmpeg primary error')),
+      )
+      .mockImplementationOnce(
+        (_b: string, _a: string[], _o: unknown, cb: (e: Error) => void) =>
+          cb(new Error('ffmpeg fallback error')),
+      );
+
+    const details = await extractFramesDetailed(Buffer.from('fake-video'));
+
+    expect(details).toEqual({
+      frames: [],
+      status: 'fallback_failed',
+      fallbackUsed: true,
+      durationSeconds: 30,
+      error: 'ffmpeg fallback error',
+    });
   });
 
   it('returns empty array when ffprobe fails and ffmpeg also fails', async () => {

@@ -229,6 +229,11 @@ function expectedFallbackDetails(): Record<string, unknown> {
     fallbackTurnsServed: 0,
     fallbackTurnsEmpty: 0,
     lastFallbackTurnAt: null,
+    probeAttempts: 0,
+    lastProbeAt: null,
+    fallbackActivations: 0,
+    fallbackReverts: 0,
+    fallbackReplays: 0,
     activeFallbackEntry: null,
     fallbackChain: [],
   };

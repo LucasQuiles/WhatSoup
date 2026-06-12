@@ -224,6 +224,25 @@ export function dequeueNextReport(db: Database): HealReportRow | null {
 }
 
 /**
+ * Parse a persisted heal-report context column. The dequeue callers run
+ * inside timers and tool-completion paths where a parse throw is fatal
+ * (uncaughtException) with the report already flipped to 'attempt_1' —
+ * so a corrupt cell degrades to {} instead of throwing.
+ */
+export function parseHealContext(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // fall through to {}
+  }
+  return {};
+}
+
+/**
  * Get the count of non-queued heal reports created in the past hour.
  * Used by emitHealReport for global valve logging.
  */

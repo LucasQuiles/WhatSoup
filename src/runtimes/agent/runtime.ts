@@ -8,7 +8,7 @@ import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
-import { dequeueNextReport, emitHealReport } from '../../core/heal.ts';
+import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
@@ -157,6 +157,16 @@ const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
   return Math.min(Math.max(raw, 30 * 1000), 30 * 60 * 1000);
 })();
 const PROVIDER_FALLBACK_PRIMARY_PROBE_TIMEOUT_MS = 5_000;
+// Consecutive failed recovery probes (revert-timer extension path) before a
+// single fallback_recovery_stalled alert is emitted. The cap only surfaces the
+// stall — the window keeps extending so the instance is never stranded on a
+// dead primary. One alert per stall episode; the counter resets on deactivation
+// (which a successful probe triggers).
+const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
+  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD']);
+  if (!Number.isFinite(raw) || raw <= 0) return 12;
+  return Math.min(Math.max(Math.trunc(raw), 3), 100);
+})();
 
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required';
 
@@ -1425,6 +1435,23 @@ export class AgentRuntime implements Runtime {
   private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Consecutive failed recovery probes on the revert-timer EXTENSION path
+  // (process-local, reset on deactivation — which a successful probe triggers).
+  // Early-window standing probes do not count: nothing is extending yet.
+  // At PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD one fallback_recovery_stalled
+  // alert fires per stall episode; the window keeps extending regardless.
+  private fallbackProbeAttempts = 0;
+  // Epoch ms of the most recent recovery probe (either path); null until the
+  // first probe. Process-local observability only — never persisted.
+  private fallbackLastProbeAt: number | null = null;
+  // Lifetime-of-process transition totals (countable report fields for the
+  // expensive fallback paths — never just logs). Activations count first arms
+  // only (extensions and post-restart restores excluded), reverts count
+  // deactivations of an active window, replays count COMPLETED
+  // continue-on-fallback replays (failed replays count nothing here).
+  private fallbackActivations = 0;
+  private fallbackReverts = 0;
+  private fallbackReplays = 0;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -3025,7 +3052,7 @@ export class AgentRuntime implements Runtime {
           // Dequeue next report if any
           const next = dequeueNextReport(this.db);
           if (next) {
-            const context = next.context ? JSON.parse(next.context) : {};
+            const context = parseHealContext(next.context);
             void this.handleControlTurn(next.report_id, JSON.stringify({
               ...context,
               reportId: next.report_id,
@@ -5244,7 +5271,7 @@ export class AgentRuntime implements Runtime {
         // Dequeue next report if any
         const next = dequeueNextReport(this.db);
         if (next) {
-          const context = next.context ? JSON.parse(next.context) : {};
+          const context = parseHealContext(next.context);
           void this.handleControlTurn(next.report_id, JSON.stringify({
             ...context,
             reportId: next.report_id,
@@ -5787,6 +5814,11 @@ export class AgentRuntime implements Runtime {
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
+    probeAttempts: number;
+    lastProbeAt: number | null;
+    fallbackActivations: number;
+    fallbackReverts: number;
+    fallbackReplays: number;
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   } {
@@ -5802,6 +5834,11 @@ export class AgentRuntime implements Runtime {
       fallbackTurnsServed: this.fallbackTurnsServed,
       fallbackTurnsEmpty: this.fallbackTurnsEmpty,
       lastFallbackTurnAt: this.lastFallbackTurnAt,
+      probeAttempts: this.fallbackProbeAttempts,
+      lastProbeAt: this.fallbackLastProbeAt,
+      fallbackActivations: this.fallbackActivations,
+      fallbackReverts: this.fallbackReverts,
+      fallbackReplays: this.fallbackReplays,
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
     };
@@ -5923,8 +5960,9 @@ export class AgentRuntime implements Runtime {
 
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,
    *  and persist best-effort so a restart mid-window resumes on fallback.
-   *  Pass `activatedAt` explicitly when restoring to preserve the original time. */
-  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now()): void {
+   *  Pass `activatedAt` explicitly when restoring to preserve the original
+   *  time, and `opts.restored` so a resumed window is not re-counted. */
+  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean }): void {
     const selection = this.selectFallbackEntryForWindow();
     if (!selection) return;
     const fallbackEntry = selection.entry;
@@ -5932,9 +5970,23 @@ export class AgentRuntime implements Runtime {
     this.fallbackActiveUntil = until;
     this.fallbackActivatedAt = activatedAt;
     // Preserve original cause: only set on first arm; extensions and restores
-    // must pass the original reason so it is not overwritten.
+    // must pass the original reason so it is not overwritten. The null-guard
+    // doubles as the first-arm discriminator: the activation alert + counter
+    // fire exactly once per window, never on extensions. A restored window
+    // is the SAME window resuming after a restart — the null-guard is
+    // per-process, so without the restored flag every restart would re-count
+    // and re-alert the activation that already fired before the restart.
     if (this.fallbackArmReason === null) {
       this.fallbackArmReason = reason;
+      if (!opts?.restored) {
+        this.fallbackActivations += 1;
+        emitAlertChecked(
+          this.instanceName,
+          'provider_fallback_activated',
+          'Provider fallback window activated',
+          `reason=${reason} provider=${fallbackEntry.provider} model=${fallbackEntry.model ?? 'default'} until=${new Date(until).toISOString()}`,
+        );
+      }
     }
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -6077,9 +6129,10 @@ export class AgentRuntime implements Runtime {
       // Clamp the restored window so a clock-skew or tampered row cannot pin
       // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
       const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
-      // Pass persisted.reason so the original cause survives the restart.
-      // 'restored' is already captured in the log line below.
-      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt);
+      // Pass persisted.reason so the original cause survives the restart, and
+      // restored:true so the resumed window is not re-counted/re-alerted —
+      // provider_fallback_activated already fired when the window first armed.
+      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt, { restored: true });
       const wasClamped = clampedUntil < persisted.activeUntil;
       log.info({
         activeUntil: new Date(clampedUntil).toISOString(),
@@ -6173,12 +6226,20 @@ export class AgentRuntime implements Runtime {
       this.fallbackPrimaryProbeTimer = null;
     }
     if (this.fallbackActiveUntil === null) return;
+    // Capture before clearing: the revert alert reports how long the window
+    // ran. The idempotency guard above means this fires once per window.
+    const windowMs = this.fallbackActivatedAt !== null ? Date.now() - this.fallbackActivatedAt : null;
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
     this.activeFallbackEntry = null;
     this.fallbackResetAt = null;
     this.fallbackRecoveryProbeRequired = false;
+    // End of the stall episode (covers both successful-probe reverts and
+    // manual/elapsed deactivations) — the next episode counts from zero and
+    // may alert again at the threshold. fallbackLastProbeAt is kept as
+    // historical observability, mirroring lastFallbackTurnAt.
+    this.fallbackProbeAttempts = 0;
     try {
       clearFallbackState(this.db);
     } catch (err) {
@@ -6189,6 +6250,14 @@ export class AgentRuntime implements Runtime {
       primaryProvider: this.agentProvider,
       reason,
     }, 'reverting to primary provider');
+    this.fallbackReverts += 1;
+    emitAlertChecked(
+      this.instanceName,
+      'provider_fallback_reverted',
+      'Provider fallback window ended — reverted to primary provider',
+      `reason=${reason} turnsServed=${this.fallbackTurnsServed} turnsEmpty=${this.fallbackTurnsEmpty}`
+        + ` windowMs=${windowMs ?? 'unknown'}`,
+    );
   }
 
   private handleFallbackRevertTimer(): void {
@@ -6197,10 +6266,12 @@ export class AgentRuntime implements Runtime {
       this.deactivateProviderFallback('window-elapsed');
       return;
     }
+    this.fallbackLastProbeAt = Date.now();
     if (this.probePrimaryProviderRecovered()) {
       this.deactivateProviderFallback('primary-probe-ok');
       return;
     }
+    this.fallbackProbeAttempts += 1;
     const now = Date.now();
     const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
     this.fallbackActiveUntil = until;
@@ -6217,24 +6288,55 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
     }
-    this.scheduleFallbackPrimaryProbe();
+    // Exactly-once-at-threshold stall alert. The counter only resets on
+    // deactivation, so attempts > threshold never re-alerts within the same
+    // stall episode. Extension continues regardless — surfacing must never
+    // strand the instance on a dead primary.
+    if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
+      emitAlertChecked(
+        this.instanceName,
+        'fallback_recovery_stalled',
+        'Primary provider recovery probe is stalled — fallback window extending indefinitely',
+        `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${this.fallbackProbeAttempts} `
+          + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
+      );
+    }
+    // No scheduleFallbackPrimaryProbe() here: the extension window equals the
+    // recheck cadence, so this timer IS the probe cadence. Re-arming the
+    // standing probe alongside it produced a double-probe (two probes per
+    // cadence); the standing probe's guard makes it a no-op in this state.
     log.warn({
       instanceName: this.instanceName,
       primaryProvider: this.agentProvider,
       fallbackProvider: this.activeFallbackEntry?.provider,
       reason: this.fallbackArmReason,
+      probeAttempts: this.fallbackProbeAttempts,
     }, 'primary provider recovery probe still failing; keeping fallback armed');
   }
 
+  /**
+   * Standing early-recovery probe. Its only purpose is to revert BEFORE a long
+   * window (e.g. the 5h usage-limit default) elapses; once the remaining window
+   * is within one recheck cadence the revert timer itself probes on the same
+   * cadence, so arming this timer too would double-probe — the guard below
+   * makes it a no-op in that state (the revert-timer path is authoritative).
+   */
   private scheduleFallbackPrimaryProbe(): void {
     if (this.fallbackPrimaryProbeTimer) {
       clearTimeout(this.fallbackPrimaryProbeTimer);
       this.fallbackPrimaryProbeTimer = null;
     }
     if (!this.fallbackRecoveryProbeRequired) return;
+    if (
+      this.fallbackActiveUntil === null
+      || this.fallbackActiveUntil - Date.now() <= PROVIDER_FALLBACK_PRIMARY_RECHECK_MS
+    ) {
+      return;
+    }
     this.fallbackPrimaryProbeTimer = setTimeout(() => {
       this.fallbackPrimaryProbeTimer = null;
       if (this.fallbackActiveUntil === null || !this.fallbackRecoveryProbeRequired) return;
+      this.fallbackLastProbeAt = Date.now();
       if (this.probePrimaryProviderRecovered()) {
         this.deactivateProviderFallback('primary-probe-ok');
         return;
@@ -6388,12 +6490,29 @@ export class AgentRuntime implements Runtime {
       ? this.pendingTurnActorJid.get(args.mapKey)
       : this.currentTurnReplayActorJid;
 
+    // Past every gate: the replay dispatches. Once-per-activation by the
+    // extended-guard above (extensions never reach this point). The replayed
+    // counter + alert report a COMPLETED replay, so they fire only after the
+    // dispatch resolves — emitting before the await meant a rejected replay
+    // produced success AND failure telemetry for the same turn.
+    // Known limitation: sendTurnToSession swallows STDIN_WRITE_TIMEOUT
+    // (notifies the user, resolves normally), so that delivery failure still
+    // lands in the success branch here — fixing it means changing
+    // sendTurnToSession's contract for ALL callers, tracked separately.
     void this.replayTurnOnFallback({
       chatJid: args.chatJid,
       mapKey: args.mapKey,
       replayText,
       actorJid,
       oldSession: args.oldSession,
+    }).then(() => {
+      this.fallbackReplays += 1;
+      emitAlertChecked(
+        this.instanceName,
+        'provider_fallback_replayed',
+        'Interrupted turn replayed on fallback provider',
+        `reason=${args.activation.reason} provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'}`,
+      );
     }).catch((err) => {
       log.error({
         err,

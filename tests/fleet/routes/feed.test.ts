@@ -757,6 +757,31 @@ describe('noise suppression via handleGetFeed', () => {
     expect(res._body).toEqual([]);
   });
 
+  it('surfaces invalid log paths instead of making the feed look quiet', () => {
+    const notADir = path.join(tmpDir, 'not-a-dir');
+    fs.writeFileSync(notADir, 'not a directory');
+    const inst = fakeInstance({ name: 'eta', type: 'passive', logDir: notADir });
+    const instances = new Map([['eta', inst]]);
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq(), res, deps);
+
+    expect(res._status).toBe(200);
+    expect(res._body).toEqual([
+      expect.objectContaining({
+        instance: 'eta',
+        component: 'logs',
+        level: 'warn',
+        text: 'eta: log evidence unavailable (ENOTDIR)',
+      }),
+    ]);
+  });
+
   it('preserves two distinct messages in the same minute (dedupe by messageId)', () => {
     const lines = [
       makeLine({ msg: 'Sending message', chatJid: 'chat@s.whatsapp.net', messageId: 'msg-001' }),

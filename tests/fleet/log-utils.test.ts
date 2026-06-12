@@ -13,7 +13,12 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, utimesSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { findLatestLogFile, readTailLines } from '../../src/fleet/log-utils.ts';
+import {
+  findLatestLogFile,
+  inspectLatestLogFile,
+  readTailLines,
+  readTailLinesDetailed,
+} from '../../src/fleet/log-utils.ts';
 
 describe('findLatestLogFile', () => {
   let dir: string;
@@ -67,6 +72,25 @@ describe('findLatestLogFile', () => {
     writeFileSync(f, 'x');
     // Pointing at a file rather than dir — readdirSync throws ENOTDIR → null
     expect(findLatestLogFile(f)).toBeNull();
+  });
+
+  it('preserves the scan failure reason for callers that must not report false quiet', () => {
+    const f = join(dir, 'app.log');
+    writeFileSync(f, 'x');
+
+    const result = inspectLatestLogFile(f);
+
+    expect(result).toMatchObject({
+      ok: false,
+      path: f,
+      code: 'ENOTDIR',
+    });
+  });
+
+  it('treats a missing directory as an empty log source, not a scan failure', () => {
+    const missing = join(dir, 'missing');
+
+    expect(inspectLatestLogFile(missing)).toEqual({ ok: true, file: null });
   });
 });
 
@@ -126,5 +150,22 @@ describe('readTailLines', () => {
     mkdirSync(subdir);
     // openSync on a directory throws EISDIR → caught → []
     expect(readTailLines(subdir, 10)).toEqual([]);
+  });
+
+  it('preserves the tail failure reason for callers that must not report false quiet', () => {
+    const subdir = join(dir, 'subdir');
+    mkdirSync(subdir);
+
+    const result = readTailLinesDetailed(subdir, 10);
+
+    expect(result).toMatchObject({
+      ok: false,
+      path: subdir,
+      code: 'EISDIR',
+    });
+  });
+
+  it('treats a vanished log file as an empty transient tail during rotation', () => {
+    expect(readTailLinesDetailed(join(dir, 'missing.log'), 10)).toEqual({ ok: true, lines: [] });
   });
 });

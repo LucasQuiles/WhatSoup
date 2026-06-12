@@ -1242,6 +1242,74 @@ describe('handleCreateLine', () => {
     expect(fs.existsSync(path.join(process.env.XDG_DATA_HOME!, 'whatsoup', 'instances', name))).toBe(true);
     expect(fs.existsSync(path.join(process.env.XDG_STATE_HOME!, 'whatsoup', 'instances', name))).toBe(true);
   });
+
+  it('treats a legacy sibling without healthPort as occupying the runtime default port during create', async () => {
+    const siblingDir = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'legacy-line');
+    fs.mkdirSync(siblingDir, { recursive: true });
+    fs.writeFileSync(path.join(siblingDir, 'config.json'), JSON.stringify({
+      name: 'legacy-line',
+      type: 'chat',
+      adminPhones: ['18459780919'],
+      accessMode: 'self_only',
+    }));
+
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'new-line',
+        type: 'chat',
+        adminPhones: ['18459780919'],
+        healthPort: 9090,
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(409);
+    expect(JSON.parse(res._body).error).toMatch(/healthPort 9090 is already in use/);
+    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'new-line'))).toBe(false);
+  });
+
+  it('fails closed during create when sibling healthPort inventory is unreadable', async () => {
+    const siblingDir = path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'bad-line');
+    fs.mkdirSync(siblingDir, { recursive: true });
+    fs.writeFileSync(path.join(siblingDir, 'config.json'), '{bad json');
+
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => undefined),
+        getInstances: vi.fn(() => new Map()),
+        scan: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq(JSON.stringify({
+        name: 'new-line',
+        type: 'chat',
+        adminPhones: ['18459780919'],
+        healthPort: 9200,
+      })),
+      res,
+      deps,
+    );
+
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toMatchObject({
+      error: 'healthPort inventory unavailable: failed to read instance config',
+      instance: 'bad-line',
+    });
+    expect(fs.existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'whatsoup', 'instances', 'new-line'))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

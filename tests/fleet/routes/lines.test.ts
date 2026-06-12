@@ -1,6 +1,9 @@
 /**
  * Tests for src/fleet/routes/lines.ts
  */
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   _getLineCachesForTests,
@@ -35,6 +38,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     health: { uptime: 1234 },
     lastPollAt: '2026-04-01T00:00:00.000Z',
     consecutiveFailures: 0,
+    everReachable: true,
     status: 'online',
     statusConfidence: 'confirmed',
     statusReason: 'health_body_ok',
@@ -42,6 +46,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     error: null,
     lastAlertAt: null,
     silencedUntil: null,
+    activeAlertSources: [],
     ...overrides,
   };
 }
@@ -221,6 +226,130 @@ describe('handleGetLines', () => {
         'reconnect_attempts=0',
       ],
     });
+  });
+
+  it('uses live WhatsApp health to avoid a false unlinked read when auth artifacts are absent', () => {
+    const inst = fakeInstance({ name: 'mini4', configPath: '/missing/mini4/config.json' });
+    const status = fakeStatus({
+      name: 'mini4',
+      health: {
+        status: 'healthy',
+        whatsapp: {
+          connected: true,
+          account_jid: '15550001111@s.whatsapp.net',
+          connection: { state: 'connected' },
+        },
+      },
+    });
+
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['mini4', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['mini4', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+
+    const body = JSON.parse(res._body);
+    expect(body[0]).toMatchObject({
+      linkedStatus: 'linked',
+      linkedStatusConfidence: 'confirmed',
+      linkedStatusReason: 'whatsapp_health_connected',
+    });
+    expect(body[0].linkedStatusEvidence).toEqual(expect.arrayContaining([
+      'link_source=health',
+      'whatsapp_connected=true',
+      'account_jid_status=present',
+      'connection_state=connected',
+    ]));
+  });
+
+  it('reports unknown linkage instead of unlinked when auth artifacts are unreadable', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-link-state-'));
+    try {
+      fs.writeFileSync(path.join(tmp, 'auth'), 'not a directory');
+      const inst = fakeInstance({ name: 'mini4', configPath: path.join(tmp, 'config.json') });
+      const deps = makeDeps({
+        discovery: {
+          getInstances: vi.fn(() => new Map([['mini4', inst]])),
+          getInstance: vi.fn(),
+        } as any,
+        healthPoller: {
+          getStatuses: vi.fn(() => new Map()),
+          getStatus: vi.fn(),
+        } as any,
+      });
+
+      const res = mockRes();
+      handleGetLines(mockReq(), res, deps);
+
+      const body = JSON.parse(res._body);
+      expect(body[0]).toMatchObject({
+        linkedStatus: 'unknown',
+        linkedStatusConfidence: 'ambiguous',
+        linkedStatusReason: 'auth_artifacts_unreadable',
+      });
+      expect(body[0].linkedStatusEvidence).toEqual(expect.arrayContaining([
+        'link_source=auth_artifacts',
+        'auth_read_error_code=ENOTDIR',
+      ]));
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('lets confirmed disconnected health override stale auth artifacts', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-link-state-'));
+    try {
+      fs.mkdirSync(path.join(tmp, 'auth'));
+      fs.writeFileSync(path.join(tmp, 'auth', 'creds.json'), '{}');
+      const inst = fakeInstance({ name: 'mini4', configPath: path.join(tmp, 'config.json') });
+      const status = fakeStatus({
+        name: 'mini4',
+        health: {
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            account_jid: 'not connected',
+            connection: { state: 'disconnected' },
+          },
+        },
+      });
+      const deps = makeDeps({
+        discovery: {
+          getInstances: vi.fn(() => new Map([['mini4', inst]])),
+          getInstance: vi.fn(),
+        } as any,
+        healthPoller: {
+          getStatuses: vi.fn(() => new Map([['mini4', status]])),
+          getStatus: vi.fn(),
+        } as any,
+      });
+
+      const res = mockRes();
+      handleGetLines(mockReq(), res, deps);
+
+      const body = JSON.parse(res._body);
+      expect(body[0]).toMatchObject({
+        linkedStatus: 'unlinked',
+        linkedStatusConfidence: 'confirmed',
+        linkedStatusReason: 'whatsapp_health_disconnected',
+      });
+      expect(body[0].linkedStatusEvidence).toEqual(expect.arrayContaining([
+        'link_source=health',
+        'whatsapp_connected=false',
+        'account_jid_status=not_connected',
+        'connection_state=disconnected',
+      ]));
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('does not include dbStats in the list response', () => {

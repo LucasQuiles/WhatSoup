@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, parseQueryString, parseIntParam } from '../../lib/http.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
 import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
-import { findLatestLogFile, readTailLines } from '../log-utils.ts';
+import { inspectLatestLogFile, readTailLinesDetailed, type LogReadFailure } from '../log-utils.ts';
 import { normalizeTimestamp } from '../time-utils.ts';
 import type { FleetDbReader } from '../db-reader.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
@@ -361,6 +361,20 @@ function synthesizeHealthEvents(
   return events;
 }
 
+function logEvidenceUnavailableEvent(inst: DiscoveredInstance, failure: LogReadFailure): FeedEvent {
+  const code = failure.code ?? 'UNKNOWN';
+  return {
+    time: new Date().toISOString(),
+    mode: inst.type,
+    text: `${inst.name}: log evidence unavailable (${code})`,
+    instance: inst.name,
+    provider: inst.provider,
+    component: 'logs',
+    level: 'warn',
+    detail: { type: 'generic' },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Post-parse coalescing
 // ---------------------------------------------------------------------------
@@ -666,9 +680,18 @@ export function handleGetFeed(
   // 2. Parse log files for business events
   for (const inst of instances.values()) {
     try {
-      const logResult = findLatestLogFile(inst.logDir);
-      if (!logResult) continue;
-      const lines = readTailLines(logResult.path, 60);
+      const logResult = inspectLatestLogFile(inst.logDir);
+      if (!logResult.ok) {
+        events.push(logEvidenceUnavailableEvent(inst, logResult));
+        continue;
+      }
+      if (!logResult.file) continue;
+      const tailResult = readTailLinesDetailed(logResult.file.path, 60);
+      if (!tailResult.ok) {
+        events.push(logEvidenceUnavailableEvent(inst, tailResult));
+        continue;
+      }
+      const lines = tailResult.lines;
       for (const line of lines) {
         const result = parsePinoLine(line, { instanceName: inst.name, instanceType: inst.type, provider: inst.provider });
         if (result) {
@@ -741,4 +764,4 @@ export function handleGetFeed(
   jsonResponse(res, 200, deduped.slice(0, limit));
 }
 
-// readTailLines and findLatestLogFile imported from ../log-utils.ts
+// readTailLinesDetailed and inspectLatestLogFile imported from ../log-utils.ts

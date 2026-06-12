@@ -302,6 +302,21 @@ describe('PineconeMemory', () => {
       expect(mockSearchRecords.mock.calls).toEqual([[expectedCall], [expectedCall]]);
     });
 
+    it('searchDetailed marks retry-exhausted search failure separately from no matches', async () => {
+      mockSearchRecords.mockRejectedValueOnce(new Error('Pinecone down'));
+      mockSearchRecords.mockRejectedValueOnce(new Error('Pinecone still down'));
+
+      const details = await memory.searchDetailed('query', {}, 5);
+
+      expect(details).toMatchObject({
+        results: [],
+        status: 'failed',
+        retried: true,
+        error: 'Pinecone still down',
+      });
+      expect(details.durationMs).toEqual(expect.any(Number));
+    });
+
     it('returns retry results after transient search failure', async () => {
       const expectedCall = {
         query: {
@@ -322,6 +337,19 @@ describe('PineconeMemory', () => {
         { id: 'retry-hit', score: expectedDecayedScore(0.81) },
       ]);
       expect(mockSearchRecords.mock.calls).toEqual([[expectedCall], [expectedCall]]);
+    });
+
+    it('searchDetailed marks retry recovery without losing results', async () => {
+      mockSearchRecords.mockRejectedValueOnce(new Error('network error'));
+      mockSearchRecords.mockResolvedValueOnce({
+        result: { hits: [makePineconeHit('retry-hit', 0.81)] },
+      });
+
+      const details = await memory.searchDetailed('query', {}, 5);
+
+      expect(details.status).toBe('ok');
+      expect(details.retried).toBe(true);
+      expect(details.results.map((r) => r.id)).toEqual(['retry-hit']);
     });
 
     it('skips search for non-q instances without a project guard', async () => {
@@ -919,6 +947,21 @@ describe('entity mode', () => {
 
     expect(result).toEqual([]);
     expect(mockSearchRecords.mock.calls).toEqual([[expectedCall], [expectedCall]]);
+  });
+
+  it('searchEntitiesDetailed marks retry-exhausted API failure separately from no matches', async () => {
+    mockSearchRecords.mockRejectedValueOnce(new Error('entity index down'));
+    mockSearchRecords.mockRejectedValueOnce(new Error('entity index still down'));
+
+    const details = await memory.searchEntitiesDetailed('query');
+
+    expect(details).toMatchObject({
+      results: [],
+      status: 'failed',
+      retried: true,
+      error: 'entity index still down',
+    });
+    expect(details.durationMs).toEqual(expect.any(Number));
   });
 
   // ── fromPineconeHitEntity — field mapping ──────────────────────────────────

@@ -13,6 +13,10 @@ const logger = vi.hoisted(() => ({
 }));
 const alertThrottleStore = vi.hoisted(() => ({
   loadAlertThrottle: vi.fn(() => new Map<string, string>()),
+  loadAlertThrottleDetailed: vi.fn((): {
+    entries: Map<string, string>;
+    loadError: { file: string; code?: string; error: string } | null;
+  } => ({ entries: new Map<string, string>(), loadError: null })),
   recordAlertThrottle: vi.fn(),
 }));
 const silenceManager = vi.hoisted(() => ({
@@ -166,6 +170,8 @@ describe('HealthPoller', () => {
     alertFns.clearAlertSource.mockReturnValue(true);
     alertThrottleStore.loadAlertThrottle.mockReset();
     alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
+    alertThrottleStore.loadAlertThrottleDetailed.mockReset();
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({ entries: new Map(), loadError: null });
     alertThrottleStore.recordAlertThrottle.mockClear();
     silenceManager.isInstanceSilenced.mockReset();
     silenceManager.isInstanceSilenced.mockReturnValue(false);
@@ -1386,7 +1392,10 @@ describe('HealthPoller', () => {
 
   it('hydrates lastAlertAt from the persisted alert throttle store', async () => {
     const lastAlertAt = '2026-05-20T11:55:00.000Z';
-    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map([['remote-1:instance_unreachable', lastAlertAt]]));
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([['remote-1:instance_unreachable', lastAlertAt]]),
+      loadError: null,
+    });
     mockFetch.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ status: 'healthy' }),
@@ -1545,9 +1554,12 @@ describe('HealthPoller', () => {
   });
 
   it('suppresses restart-cycle alerts using persisted lastAlertAt', async () => {
-    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map([
-      ['remote-1:instance_never_reachable', '2026-05-20T11:55:00.000Z'],
-    ]));
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([
+        ['remote-1:instance_never_reachable', '2026-05-20T11:55:00.000Z'],
+      ]),
+      loadError: null,
+    });
     mockFetch.mockRejectedValue(new Error('connection refused'));
 
     const instances = makeInstances(
@@ -1573,6 +1585,7 @@ describe('HealthPoller', () => {
 
     poller.stop();
   });
+
 
   it('rate-limits alerts per incident source', async () => {
     mockFetch
@@ -2393,6 +2406,39 @@ describe('HealthPoller', () => {
     expect(poller.getStatus('remote-1')!.status).toBe('online');
     expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
     expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  it('marks alert evidence when persisted alert throttle state was unreadable', async () => {
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map(),
+      loadError: { file: '/redacted/fleet-alert-throttle.json', code: 'EACCES', error: 'permission denied' },
+    });
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_never_reachable',
+      'whatsoup@remote-1 has never answered health checks',
+      expect.stringContaining('alert_throttle_load_error=true alert_throttle_load_error_code=EACCES'),
+      'warning',
+      undefined,
+    );
+    const evidence = String((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[])[0]?.[3] ?? '');
+    expect(evidence).not.toContain('/redacted');
+    expect(evidence).not.toContain('permission denied');
 
     poller.stop();
   });
