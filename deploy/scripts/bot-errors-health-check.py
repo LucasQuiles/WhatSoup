@@ -4814,6 +4814,53 @@ def service_health_line(label: str, unit: str, expected: bool) -> str:
     return f"{prefix}{label}: {status} ({unit})"
 
 
+_TREE_PROVENANCE_MODULE: Any = None
+
+
+def _load_tree_provenance_module() -> Any:
+    """Lazily load the sibling tree-provenance guard by file path.
+
+    The hyphen in ``bot-errors-tree-provenance.py`` blocks a normal import, so
+    load it via importlib the same way the test harness loads this file.  The
+    module is cached after first load.  Returns None if the sibling script is
+    absent (so an older deploy without the guard degrades gracefully).
+    """
+    global _TREE_PROVENANCE_MODULE
+    if _TREE_PROVENANCE_MODULE is not None:
+        return _TREE_PROVENANCE_MODULE
+    script = Path(__file__).resolve().parent / "bot-errors-tree-provenance.py"
+    if not script.exists():
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("bot_errors_tree_provenance", script)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _TREE_PROVENANCE_MODULE = module
+    return module
+
+
+def tree_provenance_inventory(profile: dict[str, Any]) -> list[str]:
+    """Daily-health lines reporting this host's tree provenance.
+
+    Delegates to ``bot-errors-tree-provenance.tree_provenance_inventory`` so the
+    detector logic lives in one place (DRY).  Network fetch is gated behind the
+    ``treeProvenanceFetch`` profile flag (default offline).  Inspection errors
+    are swallowed into a WARN line -- the daily probe must never crash the host
+    health run.
+    """
+    module = _load_tree_provenance_module()
+    if module is None:
+        return ["tree_provenance: guard script unavailable"]
+    do_fetch = profile_bool(profile, "treeProvenanceFetch", False)
+    try:
+        return list(module.tree_provenance_inventory(profile, do_fetch=do_fetch))
+    except Exception as exc:  # defensive: never crash daily() on provenance
+        return [f"WARN tree_provenance: inventory_error {str(exc)[:160]}"]
+
+
 def daily() -> int:
     profile = load_health_profile()
     tool_lines, missing_required_tools = tool_inventory(profile)
@@ -4850,6 +4897,7 @@ def daily() -> int:
         *rustdesk_inventory(profile),
         *source_update_inventory(profile),
         *runtime_manifest_inventory(profile),
+        *tree_provenance_inventory(profile),
         *queue_inventory(),
         *config_inventory(profile),
         *plugin_inventory(profile),
