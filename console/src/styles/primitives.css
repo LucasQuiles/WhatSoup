@@ -712,7 +712,11 @@ button.soup-pill[aria-disabled="true"] {
   vertical-align: middle;
 }
 
-/* Sort button inside th — inline-flex, no visual chrome, full th height */
+/* Sort button inside th — inline-flex, no visual chrome, full th height.
+   Visual glyph/text stays at font-derived height (~16px); the pointer target
+   is expanded to the 24px floor via the ::before pseudo-element below
+   (same mechanism as .soup-pill__remove — 16px + 2×4px = 24px, sp-1=4px).
+   The th has no overflow:hidden so the pseudo-element is not clipped. */
 .soup-table-th__sort-btn {
   display: inline-flex;
   align-items: center;
@@ -726,6 +730,16 @@ button.soup-pill[aria-disabled="true"] {
   color: inherit;
   cursor: pointer;
   white-space: nowrap;
+  position: relative; /* anchor for ::before hit-extension */
+}
+
+/* Hit-area extension — 16px visual + 2×4px = 24px effective target (WCAG 2.2 §2.5.8).
+   sp-1 = 4px. The th carries no overflow clip so the extension reaches out freely.
+   jsdom class-contract pin: primitives-table.test.tsx §sort-btn-hit-extension. */
+.soup-table-th__sort-btn::before {
+  content: '';
+  position: absolute;
+  inset: calc(-1 * var(--sp-1));
 }
 
 .soup-table-th__sort-btn:focus-visible {

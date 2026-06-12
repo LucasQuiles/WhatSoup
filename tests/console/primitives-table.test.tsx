@@ -511,3 +511,39 @@ describe('Table — EM_DASH', () => {
     expect(el.textContent).toBe('—');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Sort button hit-extension class-contract pin (DD-10 §sort-btn-hit-extension)
+//
+// jsdom cannot verify computed CSS or pseudo-element geometry, so this is a
+// cheap regression layer: confirm the sort button element carries the class
+// (.soup-table-th__sort-btn) that now holds `position: relative` and the
+// ::before hit-extension in primitives.css.
+//
+// If this class is removed or the element stops being a <button>, the browser
+// suite's target-size §8 will catch the regression in real Chromium. This pin
+// is the fast jsdom pre-flight that the class contract hasn't been silently
+// broken at the HTML level.
+// ---------------------------------------------------------------------------
+
+describe('Table — sort button hit-extension class-contract pin', () => {
+  it('sort button carries soup-table-th__sort-btn class (hit-extension anchor)', () => {
+    render(makeSortTable('name', { key: 'name', dir: 'none' }, vi.fn()));
+    const btn = document.querySelector('.soup-table-th__sort-btn');
+    // Class must be present — primitives.css assigns position:relative + ::before
+    // hit-extension on this class (DD-10 closure leg (a)).
+    expect(btn).not.toBeNull();
+    expect(btn!.tagName).toBe('BUTTON');
+  });
+
+  it('sort button is the only button in the th (no extra hit targets)', () => {
+    render(makeSortTable('name', { key: 'name', dir: 'none' }, vi.fn()));
+    const th = document.querySelector('.soup-table-th');
+    expect(th).not.toBeNull();
+    const buttons = th!.querySelectorAll('button');
+    // Exactly one sort button per th — multiple buttons would mean the hit-extension
+    // geometry assumptions in primitives.css are no longer valid.
+    expect(buttons.length).toBe(1);
+    expect(buttons[0].classList.contains('soup-table-th__sort-btn')).toBe(true);
+  });
+});
