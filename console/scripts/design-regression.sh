@@ -415,6 +415,269 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# CSS tier-boundary checks (17-20)
+#
+# Derived from tokens-v3 §1 "three layers with must-not-own boundaries":
+#   Primitive owns raw values; semantic/component tiers must only var()-reference.
+#   Semantic owns per-theme role assignments; component tier must not own reused values.
+#   Component tier values are scoped to the owning component only.
+#
+# ALL four checks are REPORT-ONLY (not in EXIT_ON_FAIL) per lint-plan §2 lifecycle.
+# Promote only after baseline count is zero or fully waivered.
+#
+# CSS-tier file groups used by checks 17-20:
+CSS_TIER_COMPONENT_FILES="$CONSOLE_SRC/styles/tokens.component.css $CONSOLE_SRC/styles/primitives.css $CONSOLE_SRC/styles/composites.css"
+CSS_TIER_PRIMITIVE_FILE="$CONSOLE_SRC/styles/tokens.primitive.css"
+CSS_TIER_SEMANTIC_FILE="$CONSOLE_SRC/styles/tokens.semantic.css"
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Check 17: Raw color values in component/primitives/composites CSS
+#
+# Spec: tokens-v3 §1 — "Component: must NOT own … raw values duplicating a
+# primitive." The component tier must only var()-reference colors defined in the
+# primitive or semantic tiers. Raw hex, rgb(), hsl(), oklch() in these files is a
+# boundary violation. tokens.primitive.css and tokens.semantic.css are the ONLY
+# files permitted to contain raw color literals (primitive = value assignments;
+# semantic = per-theme value assignments per §3).
+#
+# Fixture proof — FIRES on violation:
+#   printf '.c { box-shadow: 0 4px rgba(0,0,0,0.3); }\n' > /tmp/f17v.css
+#   rg 'rgba?\(' /tmp/f17v.css                           # exits 0, 1 hit
+# Fixture proof — SILENT on compliant:
+#   printf '.c { box-shadow: var(--shadow-overlay); }\n' > /tmp/f17c.css
+#   rg 'rgba?\(' /tmp/f17c.css                           # exits 1, 0 hits
+#
+# Live-tree violations (1):
+#   composites.css:959  .c-kpi-hover:hover {
+#                         box-shadow: var(--shadow-inset), 0 4px 12px rgba(0,0,0,0.3); }
+#   WAIVER-PENDING CSS-C17-01: no semantic shadow token covers this elevation level.
+#   Burndown: migrate to var(--shadow-overlay) or add a new --shadow-float semantic
+#   token at P1 shadow token completion. Owner: console-maintainer.
+# ---------------------------------------------------------------------------
+check_start "17" "CSS tier-boundary: raw color values in component/primitives/composites CSS"
+C17_RGB_HITS=""
+# shellcheck disable=SC2086
+C17_RGB_HITS=$(rg -n 'rgba?\(|hsla?\(|oklch\(' $CSS_TIER_COMPONENT_FILES 2>/dev/null \
+  | grep -v '/\*' || true)
+C17_HEX_HITS=""
+# shellcheck disable=SC2086
+C17_HEX_HITS=$(rg -n '#(?:[0-9a-fA-F]{6,8}|[0-9a-fA-F]*[a-fA-F][0-9a-fA-F]*)' \
+  $CSS_TIER_COMPONENT_FILES 2>/dev/null \
+  | grep -v '/\*' || true)
+C17_RGB_COUNT=0
+C17_HEX_COUNT=0
+if [ -n "$C17_RGB_HITS" ]; then
+  C17_RGB_COUNT=$(printf '%s\n' "$C17_RGB_HITS" | grep -c '.' || true)
+fi
+if [ -n "$C17_HEX_HITS" ]; then
+  C17_HEX_COUNT=$(printf '%s\n' "$C17_HEX_HITS" | grep -c '.' || true)
+fi
+C17_TOTAL=$((C17_RGB_COUNT + C17_HEX_COUNT))
+echo "    rgb/rgba/hsl/oklch hits in component-tier CSS: $C17_RGB_COUNT"
+echo "    hex hits in component-tier CSS: $C17_HEX_COUNT"
+if [ "$C17_RGB_COUNT" -gt 0 ]; then
+  printf '%s\n' "$C17_RGB_HITS" | head -5 | sed "s|$CONSOLE_SRC/||" | sed 's/^/    /'
+fi
+if [ "$C17_HEX_COUNT" -gt 0 ]; then
+  printf '%s\n' "$C17_HEX_HITS" | head -5 | sed "s|$CONSOLE_SRC/||" | sed 's/^/    /'
+fi
+echo "    Spec: tokens-v3 §1 (component tier must not own raw color values)"
+echo "    WAIVER-PENDING CSS-C17-01: composites.css:959 rgba(0,0,0,0.3) in .c-kpi-hover"
+echo "    Lifecycle: REPORT-ONLY (shadow); promote after all raw colors migrate to semantic tokens"
+check_result "17" "$C17_TOTAL" "zero raw colors in component-tier CSS (report-only baseline)" "WARN"
+
+# ---------------------------------------------------------------------------
+# Check 18: Legacy alias names defined inside tokens.primitive.css
+#
+# Spec: tokens-v3 §7 — "Aliases live in a clearly marked tokens-legacy-aliases.css
+# block." The authoritative home for §7 migration aliases (--color-d*, --color-t*,
+# --b1..4, --color-m-*, --color-s-*, --ease, --dur-norm) is tokens.semantic.css
+# (the alias block at lines 224-301). Defining these same names ALSO in
+# tokens.primitive.css's @theme inline block creates a dual-authority SSOT violation
+# and cascade ordering fragility.
+#
+# Fixture proof — FIRES:
+#   printf '@theme inline { --color-d0: var(--surface-base); }\n' > /tmp/f18v.css
+#   rg '^\s*--color-d[0-6]\s*:' /tmp/f18v.css             # exits 0, 1 hit
+# Fixture proof — SILENT (the semantic file IS the authority; check is scoped to
+#   primitive file only, so tokens.semantic.css passing this pattern is CORRECT):
+#   The same pattern on tokens.semantic.css fires but this check only reads the
+#   primitive file.
+#
+# Live-tree violations (21 in tokens.primitive.css):
+#   --color-d0..d6 (7), --color-t1..t5 (5), --color-m-{pas,cht,agt} (3),
+#   --color-s-{ok,warn,crit} (3), --ease (1), --dur-norm (1), --color-s-ok (1
+#   — already counted above), plus mode aliases: 21 total definitions found.
+# Burndown: remove duplicate aliases from tokens.primitive.css @theme inline block
+#           at C2 alias consolidation; tokens.semantic.css is the sole SSOT.
+# ---------------------------------------------------------------------------
+check_start "18" "CSS tier-boundary: legacy alias names defined in tokens.primitive.css"
+C18_HITS=""
+C18_HITS=$(rg -n '^\s*--(color-d[0-6]|color-t[1-5]|color-m-[a-z]+|color-s-[a-z]+|b[1-4]|ease|dur-norm)\s*:' \
+  "$CSS_TIER_PRIMITIVE_FILE" 2>/dev/null || true)
+C18_COUNT=0
+if [ -n "$C18_HITS" ]; then
+  C18_COUNT=$(printf '%s\n' "$C18_HITS" | grep -c '.' || true)
+fi
+echo "    Legacy alias names defined in tokens.primitive.css: $C18_COUNT"
+if [ -n "$C18_HITS" ] && [ "$C18_COUNT" -gt 0 ]; then
+  printf '%s\n' "$C18_HITS" | head -12 | sed "s|$CSS_TIER_PRIMITIVE_FILE:|tokens.primitive.css:|" | sed 's/^/    /'
+  echo "    BURNDOWN: remove duplicate aliases from tokens.primitive.css @theme inline block"
+  echo "    Authority: tokens.semantic.css §7 alias block (lines 224-301)"
+fi
+echo "    Spec: tokens-v3 §7 (alias block authority is semantic tier, not primitive)"
+echo "    Lifecycle: REPORT-ONLY (shadow); promote at C2 alias consolidation"
+check_result "18" "$C18_COUNT" "zero legacy aliases in primitive tier (report-only baseline)" "WARN"
+
+# ---------------------------------------------------------------------------
+# Check 19: Dangling var() references without fallback in component-tier CSS
+#
+# Spec: tokens-v3 §1 (highest-value check) — a var(--X) that has no definition
+# and no fallback resolves to empty string at runtime = silent visual breakage.
+# This check parses var(--X) refs that have no comma (no fallback) in the
+# component/primitives/composites CSS files and reports any --X absent from the
+# combined definition set of all CSS tier files.
+#
+# Per-theme dual definitions (dark + light) within the SAME file are legitimate;
+# the definition scan uses sort -u so each name is counted once.
+# Fallback form var(--X, fallback) is intentional (runtime override) and excluded:
+# only var(--X) with no comma inside is checked.
+#
+# Fixture proof — FIRES:
+#   printf '.c { color: var(--z-nonexistent); }\n' > /tmp/f19v.css
+#   The token --z-nonexistent is absent from the definition set; appears in dangling list.
+# Fixture proof — SILENT:
+#   printf '.c { color: var(--z-nonexistent, red); }\n' > /tmp/f19c.css
+#   Fallback form excluded from no-fallback ref set; not reported.
+#
+# Live-tree dangling no-fallback refs (5):
+#   --r-1, --r-2        not yet defined in any CSS file (§2.3 radii tokens missing
+#                       from tokens.primitive.css — P0 CSS split incomplete)
+#   --type-label        not yet defined (§2.6 type ramp tokens not added to CSS yet)
+#   --type-body-st      not yet defined (§2.6 type ramp tokens not added to CSS yet)
+#   --wizard-accent     runtime inline custom property set from AddLineWizard.tsx:265
+#                       via style={{ '--wizard-accent': ... }} — never a CSS definition.
+#                       WAIVER-RUNTIME-VAR: intentional; TSX sets it before CSS consumes it.
+# Burndown: add --r-1 (4px), --r-2 (6px) to tokens.primitive.css §2.3 radii block;
+#           add --type-label, --type-body-st to tokens.primitive.css §2.6 type ramp block.
+#           Document --wizard-accent with WAIVER-RUNTIME-VAR in eslint-waivers.yaml.
+# ---------------------------------------------------------------------------
+check_start "19" "CSS tier-boundary: dangling var() refs without fallback in component-tier CSS"
+
+# Step 1: Build definition set (LHS names only) from ALL CSS tier files combined.
+# Use --no-filename + sed to strip values after the first colon, ensuring only the
+# property name on the left side of each definition is captured (not token names
+# inside var() values on the right side).
+# shellcheck disable=SC2086
+C19_DEFINED=$(rg --no-filename '^\s*--[a-zA-Z0-9_-]+\s*:' \
+  "$CSS_TIER_PRIMITIVE_FILE" "$CSS_TIER_SEMANTIC_FILE" \
+  $CSS_TIER_COMPONENT_FILES 2>/dev/null \
+  | sed 's/:.*//' | sed 's/^[[:space:]]*//' | sort -u || true)
+
+# Step 2: Extract var(--name) refs WITHOUT fallback from component-tier files.
+# Pattern: var( then --name then ) — the closing ) immediately follows the name
+# with no comma inside, meaning no fallback value is present.
+C19_NO_FALLBACK_REFS=""
+# shellcheck disable=SC2086
+C19_NO_FALLBACK_REFS=$(rg -o 'var\(--[a-zA-Z0-9_-]+\)' \
+  $CSS_TIER_COMPONENT_FILES 2>/dev/null \
+  | grep -oE -- '--[a-zA-Z0-9_-]+' | sort -u || true)
+
+# Step 3: Set difference — no-fallback refs not present in the definition set
+C19_DANGLING=""
+if [ -n "$C19_NO_FALLBACK_REFS" ] && [ -n "$C19_DEFINED" ]; then
+  C19_DANGLING=$(comm -23 \
+    <(printf '%s\n' "$C19_NO_FALLBACK_REFS") \
+    <(printf '%s\n' "$C19_DEFINED") 2>/dev/null || true)
+fi
+
+C19_COUNT=0
+if [ -n "$C19_DANGLING" ]; then
+  C19_COUNT=$(printf '%s\n' "$C19_DANGLING" | grep -c '.' || true)
+fi
+echo "    Dangling var() refs (no fallback, no CSS definition): $C19_COUNT"
+if [ -n "$C19_DANGLING" ] && [ "$C19_COUNT" -gt 0 ]; then
+  printf '%s\n' "$C19_DANGLING" | sed 's/^/    /'
+  echo ""
+  echo "    BURNDOWN:"
+  echo "      --r-1: add to tokens.primitive.css §2.3 (--r-1: 4px)"
+  echo "      --r-2: add to tokens.primitive.css §2.3 (--r-2: 6px)"
+  echo "      --type-label: add to tokens.primitive.css §2.6 (500 12px/16px var(--font-sans))"
+  echo "      --type-body-st: add to tokens.primitive.css §2.6 (500 14px/20px var(--font-sans))"
+  echo "      --wizard-accent: WAIVER-RUNTIME-VAR (AddLineWizard.tsx:265 inline style prop)"
+fi
+echo "    Spec: tokens-v3 §1 (highest-value: undefined tokens = silent visual breakage)"
+echo "    Lifecycle: REPORT-ONLY (shadow); promote after P0 type+radius token definitions land"
+if [ "$C19_COUNT" -eq 0 ]; then
+  check_result "19" "0" "no dangling var() refs without fallback" "OK"
+else
+  check_result "19" "$C19_COUNT" "dangling var() refs found -- see burndown above" "WARN"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 20: Cross-tier duplicate custom property definitions (SSOT violation)
+#
+# Spec: tokens-v3 §1 — each tier owns its names exclusively. A --name defined in
+# BOTH tokens.primitive.css AND tokens.semantic.css violates SSOT: the CSS cascade
+# ordering between @import statements determines which definition wins, making the
+# effective value fragile to import reordering.
+#
+# Per-theme dual definitions (dark + light) within the SAME file are legitimate
+# and are excluded: this check diffs name sets across FILE BOUNDARIES only.
+#
+# Fixture proof — FIRES:
+#   Define --surface-base in both a primitive-file and semantic-file fixture; extract
+#   each file's name set; comm -12 returns the duplicate → count > 0.
+# Fixture proof — SILENT:
+#   Define --surface-base only in the semantic fixture; comm -12 returns empty.
+#
+# Live-tree cross-tier duplicates (20 total):
+#   --color-d0..d6 (7), --color-t1..t5 (5), --color-m-{pas,cht,agt} (3),
+#   --color-s-{ok,warn,crit} (3), --ease (1), --dur-norm (1)
+#   Root cause: tokens.primitive.css @theme inline block re-defines the §7 migration
+#   aliases already owned by tokens.semantic.css §7 alias block (lines 224-301).
+# Burndown: remove the duplicate definitions from tokens.primitive.css @theme inline
+#           block and :root block at C2 consolidation; authority = tokens.semantic.css.
+# ---------------------------------------------------------------------------
+check_start "20" "CSS tier-boundary: cross-tier duplicate custom property definitions (SSOT)"
+
+C20_PRIM_NAMES=""
+# Use sed to extract LHS property names only (strip value after first colon).
+# This prevents token names inside var() references from appearing as false duplicates.
+C20_PRIM_NAMES=$(rg --no-filename '^\s*--[a-zA-Z0-9_-]+\s*:' \
+  "$CSS_TIER_PRIMITIVE_FILE" 2>/dev/null \
+  | sed 's/:.*//' | sed 's/^[[:space:]]*//' | sort -u || true)
+
+C20_SEM_NAMES=""
+C20_SEM_NAMES=$(rg --no-filename '^\s*--[a-zA-Z0-9_-]+\s*:' \
+  "$CSS_TIER_SEMANTIC_FILE" 2>/dev/null \
+  | sed 's/:.*//' | sed 's/^[[:space:]]*//' | sort -u || true)
+
+C20_DUPES=""
+if [ -n "$C20_PRIM_NAMES" ] && [ -n "$C20_SEM_NAMES" ]; then
+  C20_DUPES=$(comm -12 \
+    <(printf '%s\n' "$C20_PRIM_NAMES") \
+    <(printf '%s\n' "$C20_SEM_NAMES") 2>/dev/null || true)
+fi
+
+C20_COUNT=0
+if [ -n "$C20_DUPES" ]; then
+  C20_COUNT=$(printf '%s\n' "$C20_DUPES" | grep -c '.' || true)
+fi
+echo "    Custom properties in BOTH tokens.primitive.css AND tokens.semantic.css: $C20_COUNT"
+if [ -n "$C20_DUPES" ] && [ "$C20_COUNT" -gt 0 ]; then
+  printf '%s\n' "$C20_DUPES" | sed 's/^/    /'
+  echo ""
+  echo "    Root cause: tokens.primitive.css @theme inline block re-defines §7 migration"
+  echo "    aliases already owned by tokens.semantic.css (lines 224-301)."
+  echo "    BURNDOWN: remove duplicate definitions from tokens.primitive.css at C2 consolidation"
+fi
+echo "    Spec: tokens-v3 §1 (each tier owns its names; §7 aliases belong in semantic tier)"
+echo "    Lifecycle: REPORT-ONLY (shadow); promote at C2 alias consolidation gate"
+check_result "20" "$C20_COUNT" "zero cross-tier duplicates (report-only baseline)" "WARN"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "----------------------------------------"

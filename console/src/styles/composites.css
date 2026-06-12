@@ -890,9 +890,9 @@ body::before {
 .wizard-accent-scope input:focus-visible,
 .wizard-accent-scope select:focus-visible,
 .wizard-accent-scope textarea:focus-visible {
-  border-color: var(--wizard-accent);
-  box-shadow: 0 0 0 var(--bw-focus) color-mix(in srgb, var(--wizard-accent) 20%, transparent),
-              0 0 0 var(--bw-focus-outer) color-mix(in srgb, var(--wizard-accent) 10%, transparent);
+  border-color: var(--wizard-accent, var(--color-m-cht));
+  box-shadow: 0 0 0 var(--bw-focus) color-mix(in srgb, var(--wizard-accent, var(--color-m-cht)) 20%, transparent),
+              0 0 0 var(--bw-focus-outer) color-mix(in srgb, var(--wizard-accent, var(--color-m-cht)) 10%, transparent);
 }
 
 /* Wizard confirmation check animation — fade + scale in */
@@ -902,7 +902,7 @@ body::before {
 }
 
 .wizard-accent-scope svg.wizard-check {
-  color: var(--wizard-accent);
+  color: var(--wizard-accent, var(--color-m-cht));
   flex-shrink: 0;
   animation: wizard-check-in 0.3s ease both;
 }

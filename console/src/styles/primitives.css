@@ -78,7 +78,7 @@
 }
 
 .soup-status-cell__lbl {
-  font: var(--type-label);
+  font: var(--type-label, 500 11px/16px var(--font-sans));
   color: var(--text-2);
 }
 
@@ -91,7 +91,7 @@
 }
 
 .soup-status-cell__name {
-  font: var(--type-body-st);
+  font: var(--type-body-st, 500 13px/20px var(--font-sans));
   color: var(--text-1);
 }
 
@@ -138,8 +138,8 @@
   gap: var(--sp-2);
   height: var(--btn-h);
   padding: 0 var(--sp-3);
-  font: var(--type-label);
-  border-radius: var(--r-2);
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  border-radius: var(--r-2, var(--radius-md));
   border: var(--bw) solid transparent;
   white-space: nowrap;
   cursor: pointer;
@@ -247,7 +247,7 @@
   padding: 0 var(--sp-1h);
   justify-content: center;
   color: var(--text-2);
-  border-radius: var(--r-1);
+  border-radius: var(--r-1, var(--radius-sm));
   border: none;
   background: transparent;
   cursor: pointer;
@@ -280,7 +280,7 @@
   opacity: 0;
   overflow: hidden;
   white-space: nowrap;
-  font: var(--type-label);
+  font: var(--type-label, 500 11px/16px var(--font-sans));
   transition:
     max-width var(--dur-fast) var(--ease-enter),
     opacity var(--dur-fast) var(--ease-linear),
@@ -1389,7 +1389,7 @@ button.soup-pill[aria-disabled="true"] {
   z-index: var(--z-overlay, 100);
   background: var(--surface-overlay);
   border: var(--bw) solid var(--border-subtle);
-  border-radius: var(--r-2);
+  border-radius: var(--r-2, var(--radius-md));
   box-shadow: var(--shadow-overlay);
   min-width: var(--popover-min-w, 200px);
   max-height: var(--popover-max-h, 200px);
@@ -1433,7 +1433,7 @@ button.soup-pill[aria-disabled="true"] {
   padding: 0 var(--sp-3);
   cursor: pointer;
   user-select: none;
-  font: var(--type-label);
+  font: var(--type-label, 500 11px/16px var(--font-sans));
   color: var(--text-1);
   position: relative;
 }
