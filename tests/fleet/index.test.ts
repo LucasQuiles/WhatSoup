@@ -458,8 +458,10 @@ describe('fleet server -- runtime token rotation', () => {
       ws.close();
 
       const html = await fetch(dynamicBaseUrl).then((res) => res.text());
-      expect(html).toContain(`<meta name="fleet-token" content="${newToken}">`);
-      expect(html).not.toContain(`<meta name="fleet-token" content="${oldToken}">`);
+      // SECURITY PIN (B1): rotation must not surface ANY token in HTML.
+      expect(html).not.toContain('fleet-token');
+      expect(html).not.toContain(newToken);
+      expect(html).not.toContain(oldToken);
 
       tokenSet = { active: newToken, accept: [] };
       const expiredPrior = await fetch(`${dynamicBaseUrl}/api/lines`, {
@@ -842,17 +844,17 @@ describe('fleet server -- audience-scoped auth tickets (#313)', () => {
 // ---------------------------------------------------------------------------
 
 describe('fleet server -- static file serving', () => {
-  it('serves index.html for root path with token+version meta injected', async () => {
+  it('serves index.html for root path with version meta and NO token (B1)', async () => {
     const res = await fetch(`${baseUrl}/`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
     const body = await res.text();
-    // Locks in the createStaticHandler(distDir, fleetToken, getVersion) wiring:
-    // a server constructed with only distDir would still pass status+content-type
-    // but would skip meta injection entirely.
-    expect(body).toContain(`<meta name="fleet-token" content="${FLEET_TOKEN}">`);
+    // SECURITY PIN (B1): unauthenticated HTML must never carry the root token.
+    expect(body).not.toContain('fleet-token');
+    expect(body).not.toContain(FLEET_TOKEN);
     // execFileSync is mocked to return 'abc1234' — pin to the exact version tag.
     expect(body).toContain('<meta name="fleet-version" content="abc1234">');
+    expect(body).toContain('<meta name="fleet-auth-mode" content="session">');
   });
 
   it('SPA fallback: extensionless non-API paths serve index.html', async () => {
@@ -860,7 +862,7 @@ describe('fleet server -- static file serving', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
     const body = await res.text();
-    expect(body).toContain(`<meta name="fleet-token" content="${FLEET_TOKEN}">`);
+    expect(body).not.toContain('fleet-token');
     expect(body).toContain('<meta name="fleet-version" content="abc1234">');
   });
 });
@@ -916,5 +918,98 @@ describe('loadOrCreateFleetToken', () => {
     expect(fs.existsSync(jsonPath)).toBe(true);
     // Legacy file preserved for one rollback cycle
     expect(fs.existsSync(legacyPath)).toBe(true);
+  });
+});
+
+describe('fleet server -- console session auth (B1 closure)', () => {
+  function origin(): string {
+    return baseUrl; // http://127.0.0.1:<port> — matches the Host header
+  }
+
+  async function unlock(): Promise<string> {
+    const res = await fetch(`${baseUrl}/api/console-session`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, Origin: origin() },
+    });
+    expect(res.status).toBe(200);
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('whatsoup_console_session=');
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('SameSite=Strict');
+    return setCookie.split(';')[0];
+  }
+
+  it('unlock requires a valid root token', async () => {
+    const res = await fetch(`${baseUrl}/api/console-session`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer wrong-token', Origin: origin() },
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('unlock requires same-origin proof even with a valid token', async () => {
+    const res = await fetch(`${baseUrl}/api/console-session`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${FLEET_TOKEN}`, Origin: 'http://evil.example' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('a session cookie with same-origin proof mints api and ws tickets without the root token', async () => {
+    const cookie = await unlock();
+
+    const apiTicket = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Cookie: cookie, Origin: origin(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'api' }),
+    });
+    expect(apiTicket.status).toBe(200);
+    const { ticket } = await apiTicket.json() as { ticket: string };
+    const viaTicket = await fetch(`${baseUrl}/api/lines?ticket=${encodeURIComponent(ticket)}`);
+    expect(viaTicket.status).toBe(200);
+
+    const wsTicket = await fetch(`${baseUrl}/api/ws-ticket`, {
+      method: 'POST',
+      headers: { Cookie: cookie, Origin: origin() },
+    });
+    expect(wsTicket.status).toBe(200);
+  });
+
+  it('a session cookie WITHOUT Origin is rejected (CSRF defense-in-depth)', async () => {
+    const cookie = await unlock();
+    const res = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'api' }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('the session cookie does NOT authorize general API routes directly', async () => {
+    const cookie = await unlock();
+    const res = await fetch(`${baseUrl}/api/lines`, {
+      headers: { Cookie: cookie, Origin: origin() },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('logout revokes the session and clears the cookie', async () => {
+    const cookie = await unlock();
+    // DELETE deliberately needs only cookie possession — no Origin proof
+    // (revocation is strictly risk-reducing; CLI logout stays simple).
+    const logout = await fetch(`${baseUrl}/api/console-session`, {
+      method: 'DELETE',
+      headers: { Cookie: cookie },
+    });
+    expect(logout.status).toBe(200);
+    expect(logout.headers.get('set-cookie')).toContain('Max-Age=0');
+
+    const afterLogout = await fetch(`${baseUrl}/api/auth-ticket`, {
+      method: 'POST',
+      headers: { Cookie: cookie, Origin: origin(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience: 'api' }),
+    });
+    expect(afterLogout.status).toBe(401);
   });
 });

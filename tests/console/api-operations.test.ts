@@ -14,11 +14,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function stubFleetToken(token: string | null): void {
+function stubProductionConsole(enabled: boolean): void {
   vi.stubGlobal('document', {
     querySelector: (selector: string) => {
-      if (selector !== 'meta[name="fleet-token"]' || token === null) return null;
-      return { content: token };
+      if (selector !== 'meta[name="fleet-auth-mode"]' || !enabled) return null;
+      return { content: 'session' };
     },
   });
 }
@@ -85,7 +85,7 @@ describe('api write operations', () => {
 
 describe('api auth headers', () => {
   it('mints an api-audience ticket and threads it on availability probes and fallback-backed reads (#313)', async () => {
-    stubFleetToken('fleet-token-123');
+    stubProductionConsole(true);
     // Sequence: mint -> probe -> mint -> read. Tickets are single-use, so the
     // fallback-backed read cannot reuse the availability probe credential.
     const fetch = vi.fn()
@@ -105,8 +105,8 @@ describe('api auth headers', () => {
     expect(fetch.mock.calls[0]?.[0]).toBe('/api/auth-ticket');
     expect(headersFor(fetchInit(fetch, 0))).toEqual({
       'Content-Type': 'application/json',
-      Authorization: 'Bearer fleet-token-123',
     });
+    expect(fetchInit(fetch, 0)?.credentials).toBe('same-origin');
 
     expect(fetch.mock.calls[1]?.[0]).toBe('/api/lines');
     expect(headersFor(fetchInit(fetch, 1))).toEqual({
@@ -116,8 +116,8 @@ describe('api auth headers', () => {
     expect(fetch.mock.calls[2]?.[0]).toBe('/api/auth-ticket');
     expect(headersFor(fetchInit(fetch, 2))).toEqual({
       'Content-Type': 'application/json',
-      Authorization: 'Bearer fleet-token-123',
     });
+    expect(fetchInit(fetch, 2)?.credentials).toBe('same-origin');
 
     expect(fetch.mock.calls[3]?.[0]).toBe('/api/lines');
     expect(headersFor(fetchInit(fetch, 3))).toEqual({
@@ -127,7 +127,7 @@ describe('api auth headers', () => {
   });
 
   it('omits Authorization on availability probes and reads when no meta token exists', async () => {
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn().mockResolvedValue(jsonResponse([]));
     vi.stubGlobal('fetch', fetch);
 
@@ -145,7 +145,7 @@ describe('api auth headers', () => {
   });
 
   it('clears the availability probe timeout when fetch rejects (dev/mock-mode fallback path)', async () => {
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn().mockRejectedValue(new Error('offline'));
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
     vi.stubGlobal('fetch', fetch);
@@ -162,7 +162,7 @@ describe('api auth headers', () => {
   });
 
   it('threads the api-audience ticket (not the root token) on write requests (#313)', async () => {
-    stubFleetToken('fleet-token-123');
+    stubProductionConsole(true);
     const fetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ ticket: 'api-ticket-xyz', audience: 'api', expiresIn: 60 }))
       .mockResolvedValueOnce(jsonResponse({ status: 'ok', instance: 'line-a' }));
@@ -183,7 +183,7 @@ describe('api auth headers', () => {
   });
 
   it('omits Authorization on write requests when no meta token exists', async () => {
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok', instance: 'line-a' }));
     vi.stubGlobal('fetch', fetch);
 
@@ -204,7 +204,7 @@ describe('api production mock-fallback gating (#420)', () => {
   it('does NOT fall back to mock data when checkFleetAvailable rejects in PROD without opt-in', async () => {
     vi.stubEnv('PROD', true);
     vi.stubEnv('VITE_MOCK_MODE', '');
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn().mockRejectedValue(new Error('offline'));
     vi.stubGlobal('fetch', fetch);
 
@@ -218,7 +218,7 @@ describe('api production mock-fallback gating (#420)', () => {
   it('does NOT fall back to mock data when apiFn throws in PROD without opt-in', async () => {
     vi.stubEnv('PROD', true);
     vi.stubEnv('VITE_MOCK_MODE', '');
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 503,
@@ -235,7 +235,7 @@ describe('api production mock-fallback gating (#420)', () => {
   it('authHeaders surfaces ticket-mint failures in PROD without opt-in', async () => {
     vi.stubEnv('PROD', true);
     vi.stubEnv('VITE_MOCK_MODE', '');
-    stubFleetToken('fleet-token-123');
+    stubProductionConsole(true);
     // Auth-ticket mint returns 401 — in PROD this must throw instead
     // of falling through to a bare-token (unauthenticated) request.
     const fetch = vi.fn().mockResolvedValueOnce({
@@ -248,7 +248,7 @@ describe('api production mock-fallback gating (#420)', () => {
 
     const { api: freshApi } = await import('../../console/src/lib/api.ts');
 
-    await expect(freshApi.getLines()).rejects.toThrow(/auth-ticket api 401/);
+    await expect(freshApi.getLines()).rejects.toThrow(/console locked/);
     // Critical: we must NOT have proceeded to /api/lines with a bare
     // token — the mint failure short-circuits the request.
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -258,7 +258,7 @@ describe('api production mock-fallback gating (#420)', () => {
   it('getTyping surfaces production API failures instead of returning an empty list', async () => {
     vi.stubEnv('PROD', true);
     vi.stubEnv('VITE_MOCK_MODE', '');
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 503,
@@ -275,7 +275,7 @@ describe('api production mock-fallback gating (#420)', () => {
   it('honors VITE_MOCK_MODE=1 opt-in to restore mock fallback in PROD', async () => {
     vi.stubEnv('PROD', true);
     vi.stubEnv('VITE_MOCK_MODE', '1');
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn().mockRejectedValue(new Error('offline'));
     vi.stubGlobal('fetch', fetch);
 
@@ -312,7 +312,7 @@ describe('api read operations', () => {
   });
 
   it('normalizes nullable chat history rows before returning chats to the console', async () => {
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse([
@@ -342,7 +342,7 @@ describe('api read operations', () => {
   });
 
   it('normalizes nullable message history rows before returning messages to the console', async () => {
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse([
@@ -378,7 +378,7 @@ describe('api read operations', () => {
   });
 
   it('normalizes nullable message rows returned by history search', async () => {
-    stubFleetToken(null);
+    stubProductionConsole(false);
     const fetch = vi.fn().mockResolvedValueOnce(jsonResponse({
       results: [
         {

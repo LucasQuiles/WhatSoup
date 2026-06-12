@@ -301,7 +301,17 @@ export async function handleFallbackCommand(
     const window = state.fallbackActiveUntil
       ? `until ${new Date(state.fallbackActiveUntil).toISOString()} (${formatRelativeWindow(state.fallbackActiveUntil)})`
       : 'none';
-    await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty`);
+    const chain = Array.isArray(state.fallbackChain) && state.fallbackChain.length > 1
+      ? `; chain: ${state.fallbackChain.map((entry) => {
+          const target = entry.model ? `${entry.provider} ${entry.model}` : entry.provider;
+          const readiness =
+            entry.eligible === true ? 'ready' :
+            entry.eligible === false ? 'unavailable' :
+            'unknown';
+          return `${target} (${readiness})`;
+        }).join(' -> ')}`
+      : '';
+    await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty${chain}`);
     return;
   }
 

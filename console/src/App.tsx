@@ -5,6 +5,8 @@ import ErrorBoundary from './components/ErrorBoundary'
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'
 import Nav from './components/Nav'
 import { useLines } from './hooks/use-fleet'
+import { useConsoleSession } from './hooks/use-console-session'
+import UnlockScreen from './components/UnlockScreen'
 import { useUpdateCheck, getStaticVersion } from './hooks/use-update-check'
 import { useKeyboardShortcuts } from './hooks/use-keyboard-shortcuts'
 
@@ -26,6 +28,19 @@ function PageLoader() {
 }
 
 export default function App() {
+  // B1 closure: in production the console is locked until the operator
+  // starts a session — no data hooks fire before the gate opens.
+  const session = useConsoleSession()
+  if (session.state === 'locked') {
+    return <UnlockScreen onUnlocked={session.onUnlocked} />
+  }
+  if (session.state === 'checking') {
+    return <PageLoader />
+  }
+  return <UnlockedApp />
+}
+
+function UnlockedApp() {
   const { data: lines } = useLines()
   const alertCount = lines?.filter(l => l.status !== 'online').length ?? 0
   const unreadCount = lines?.reduce((sum, l) => sum + (l.unread ?? 0), 0) ?? 0

@@ -10,6 +10,10 @@ import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import {
+  normalizeFallbackEntriesFromAgentOptions,
+  type AgentFallbackEntry,
+} from '../../core/fallback-chain.ts';
+import {
   createAuditedReplyGuaranteeSender,
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
@@ -1230,9 +1234,8 @@ export class AgentRuntime implements Runtime {
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
   // Automatic provider fallback (claude-cli → opencode-cli etc.) on usage limit.
-  // Both undefined unless configured via agentOptions.fallback{Provider,Model}.
-  private readonly agentFallbackProvider: string | undefined;
-  private readonly agentFallbackModel: string | undefined;
+  // The legacy scalar pair is normalized as entry zero for compatibility.
+  private readonly agentFallbacks: AgentFallbackEntry[];
   private readonly replyGuaranteeTimeoutMs: number;
   private readonly registry: ToolRegistry;
 
@@ -1290,6 +1293,8 @@ export class AgentRuntime implements Runtime {
   private fallbackTurnsServed = 0;
   private fallbackTurnsEmpty = 0;
   private lastFallbackTurnAt: number | null = null;
+  private activeFallbackEntry: AgentFallbackEntry | null = null;
+  private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
@@ -2053,9 +2058,15 @@ export class AgentRuntime implements Runtime {
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
-    this.agentFallbackProvider = config.agentFallbackProvider;
-    this.agentFallbackModel = config.agentFallbackModel;
-
+    const configuredFallbacks = Array.isArray(config.agentFallbacks)
+      ? config.agentFallbacks
+      : normalizeFallbackEntriesFromAgentOptions({
+          fallbackProvider: config.agentFallbackProvider,
+          fallbackModel: config.agentFallbackModel,
+        });
+    this.agentFallbacks = configuredFallbacks.map((entry) =>
+      entry.model ? { provider: entry.provider, model: entry.model } : { provider: entry.provider },
+    );
     this.registry = new ToolRegistry();
     this.registerAllTools();
 
@@ -2387,15 +2398,16 @@ export class AgentRuntime implements Runtime {
               }
             : undefined;
         writeFor(this.agentProvider, primaryOpencodeProviderConfig);
-        if (this.agentFallbackProvider && this.agentFallbackProvider !== this.agentProvider) {
+        for (const entry of this.agentFallbacks) {
+          if (entry.provider === this.agentProvider) continue;
           writeFor(
-            this.agentFallbackProvider,
-            this.agentFallbackProvider === 'opencode-cli'
-              ? { model: this.agentFallbackModel }
+            entry.provider,
+            entry.provider === 'opencode-cli'
+              ? { model: entry.model }
               : undefined,
           );
         }
-        log.info({ agentCwd, provider: this.agentProvider, fallbackProvider: this.agentFallbackProvider, mcpConfigPaths: writtenPaths }, 'wrote whatsoup MCP config');
+        log.info({ agentCwd, provider: this.agentProvider, fallbackChain: this.agentFallbacks, mcpConfigPaths: writtenPaths }, 'wrote whatsoup MCP config');
       } catch (err) {
         if (this.globalSocketServer) {
           try {
@@ -5362,14 +5374,64 @@ export class AgentRuntime implements Runtime {
    * takes effect on the next auto-respawned or freshly created session.
    */
   private get effectiveProvider(): string {
-    return this.isFallbackWindowActive && this.agentFallbackProvider
-      ? this.agentFallbackProvider
+    const fallbackEntry = this.effectiveFallbackEntry;
+    return fallbackEntry
+      ? fallbackEntry.provider
       : this.agentProvider;
   }
 
   /** True while a fallback window is armed and not yet expired. */
   private get isFallbackWindowActive(): boolean {
     return this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil;
+  }
+
+  private get effectiveFallbackEntry(): AgentFallbackEntry | null {
+    if (!this.isFallbackWindowActive) return null;
+    return this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
+  }
+
+  private fallbackChainSnapshot(): Array<AgentFallbackEntry & { eligible: boolean | null }> {
+    if (this.fallbackChainState.length > 0) {
+      return this.fallbackChainState.map((entry) => ({ ...entry }));
+    }
+    return this.agentFallbacks.map((entry) => ({ ...entry, eligible: null }));
+  }
+
+  private selectFallbackEntryForWindow(): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
+    if (this.agentFallbacks.length === 0) {
+      this.fallbackChainState = [];
+      return null;
+    }
+
+    let firstEligibleIndex = -1;
+    const state: Array<AgentFallbackEntry & { eligible: boolean }> = [];
+    for (let i = 0; i < this.agentFallbacks.length; i++) {
+      const entry = this.agentFallbacks[i]!;
+      const service = resolveProviderKeyService(
+        entry.provider,
+        entry.model,
+        this.fallbackProviderConfigFor(entry.provider),
+      );
+      const eligible = service ? lookupCredential(service) !== null : true;
+      state.push({ ...entry, eligible });
+      if (eligible && firstEligibleIndex === -1) {
+        firstEligibleIndex = i;
+      }
+      if (!eligible) {
+        emitAlert(
+          this.instanceName,
+          'fallback_credential_missing',
+          'Fallback provider key not found in keyring',
+          `entry=${i} service=${service} provider=${entry.provider} model=${entry.model ?? ''}`,
+        );
+      }
+    }
+    this.fallbackChainState = state;
+    const selectedIndex = firstEligibleIndex === -1 ? 0 : firstEligibleIndex;
+    return {
+      entry: this.agentFallbacks[selectedIndex]!,
+      selectedHadMissingCredential: state[selectedIndex]?.eligible === false,
+    };
   }
 
   /**
@@ -5380,8 +5442,8 @@ export class AgentRuntime implements Runtime {
    * on restart). Mirrors {@link effectiveProvider} but does not widen the
    * underlying fields' visibility.
    *
-   * Hand-constructed scalar fields only — health.ts spreads this object
-   * verbatim into /health; do not add non-scalar fields.
+   * Health spreads this object verbatim into /health, so new fields must be
+   * JSON-safe and additive.
    */
   getFallbackState(): {
     effectiveProvider: string;
@@ -5389,6 +5451,8 @@ export class AgentRuntime implements Runtime {
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
+    activeFallbackEntry: AgentFallbackEntry | null;
+    fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   } {
     const active = this.isFallbackWindowActive;
     return {
@@ -5397,6 +5461,8 @@ export class AgentRuntime implements Runtime {
       fallbackTurnsServed: this.fallbackTurnsServed,
       fallbackTurnsEmpty: this.fallbackTurnsEmpty,
       lastFallbackTurnAt: this.lastFallbackTurnAt,
+      activeFallbackEntry: this.effectiveFallbackEntry ? { ...this.effectiveFallbackEntry } : null,
+      fallbackChain: this.fallbackChainSnapshot(),
     };
   }
 
@@ -5412,7 +5478,7 @@ export class AgentRuntime implements Runtime {
    * operator action rather than the original automatic trigger.
    */
   forceFallback(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string } {
-    if (!this.agentFallbackProvider) {
+    if (this.agentFallbacks.length === 0) {
       return { ok: false, reason: 'no fallbackProvider configured for this instance' };
     }
     const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
@@ -5434,8 +5500,9 @@ export class AgentRuntime implements Runtime {
 
   /** Model paired with {@link effectiveProvider}: fallbackModel while the window is active, else the primary model. */
   private get effectiveModel(): string | undefined {
-    return this.isFallbackWindowActive && this.agentFallbackProvider
-      ? this.agentFallbackModel
+    const fallbackEntry = this.effectiveFallbackEntry;
+    return fallbackEntry
+      ? fallbackEntry.model
       : this.model;
   }
 
@@ -5469,7 +5536,7 @@ export class AgentRuntime implements Runtime {
   /** User-facing notice for a usage-limit teardown. Asks the user to resend
    *  rather than auto-replaying the triggering message (double-execution risk). */
   private usageLimitNotice(): string {
-    return this.agentFallbackProvider
+    return this.agentFallbacks.length > 0
       ? '_Hit my usage limit — switching to a backup model. Please resend your last message._'
       : '_Hit my usage limit — please try again after the limit resets._';
   }
@@ -5489,10 +5556,11 @@ export class AgentRuntime implements Runtime {
     this.lastFallbackTurnAt = Date.now();
     if (hadVisibleOutput || hadToolWork) return;
     this.fallbackTurnsEmpty += 1;
+    const entry = this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
     log.warn({
       chatJid: queue.targetChatJid,
-      fallbackProvider: this.agentFallbackProvider,
-      fallbackModel: this.agentFallbackModel,
+      fallbackProvider: entry?.provider,
+      fallbackModel: entry?.model,
       served: this.fallbackTurnsServed,
       empty: this.fallbackTurnsEmpty,
     }, 'fallback turn completed with zero visible output');
@@ -5500,7 +5568,7 @@ export class AgentRuntime implements Runtime {
       this.instanceName,
       'fallback_empty_turn',
       'Fallback turn produced no visible output',
-      `provider=${this.agentFallbackProvider} model=${this.agentFallbackModel} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
+      `provider=${entry?.provider} model=${entry?.model} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
     );
   }
 
@@ -5508,6 +5576,10 @@ export class AgentRuntime implements Runtime {
    *  and persist best-effort so a restart mid-window resumes on fallback.
    *  Pass `activatedAt` explicitly when restoring to preserve the original time. */
   private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now()): void {
+    const selection = this.selectFallbackEntryForWindow();
+    if (!selection) return;
+    const fallbackEntry = selection.entry;
+    this.activeFallbackEntry = fallbackEntry;
     this.fallbackActiveUntil = until;
     this.fallbackActivatedAt = activatedAt;
     // Preserve original cause: only set on first arm; extensions and restores
@@ -5542,33 +5614,35 @@ export class AgentRuntime implements Runtime {
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
     const service = resolveProviderKeyService(
-      this.agentFallbackProvider,
-      this.agentFallbackModel,
-      this.fallbackProviderConfigFor(this.agentFallbackProvider),
+      fallbackEntry.provider,
+      fallbackEntry.model,
+      this.fallbackProviderConfigFor(fallbackEntry.provider),
     );
     if (service) {
       const key = lookupCredential(service);
       if (!key) {
         log.warn({
           instanceName: this.instanceName,
-          fallbackProvider: this.agentFallbackProvider,
-          fallbackModel: this.agentFallbackModel,
+          fallbackProvider: fallbackEntry.provider,
+          fallbackModel: fallbackEntry.model,
         }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
-        emitAlert(
-          this.instanceName,
-          'fallback_credential_missing',
-          'Fallback provider key not found in keyring',
-          `service=${service} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
-        );
+        if (!selection.selectedHadMissingCredential) {
+          emitAlert(
+            this.instanceName,
+            'fallback_credential_missing',
+            'Fallback provider key not found in keyring',
+            `service=${service} provider=${fallbackEntry.provider} model=${fallbackEntry.model}`,
+          );
+        }
       } else {
         void verifyFallbackCredential(service, key).then((result) => {
           if (result !== 'invalid') return;
-          log.error({ service, fallbackProvider: this.agentFallbackProvider }, 'fallback credential rejected by provider (401/403)');
+          log.error({ service, fallbackProvider: fallbackEntry.provider }, 'fallback credential rejected by provider (401/403)');
           emitAlert(
             this.instanceName,
             'fallback_credential_invalid',
             'Fallback API key rejected by provider',
-            `service=${service} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+            `service=${service} provider=${fallbackEntry.provider} model=${fallbackEntry.model}`,
           );
         });
       }
@@ -5576,26 +5650,24 @@ export class AgentRuntime implements Runtime {
     // Pre-flight: check binary presence for CLI-backed fallback providers.
     // Managed-loop providers (openai-api, anthropic-api) have no binary to probe.
     // Never blocks or reverts the window — fail-open on anything except ENOENT.
-    const fallbackBinary = this.agentFallbackProvider
-      ? getProviderBinary(this.agentFallbackProvider)
-      : null;
+    const fallbackBinary = getProviderBinary(fallbackEntry.provider);
     if (fallbackBinary) {
       void probeFallbackBinary(fallbackBinary).then((r) => {
         if (r.status === 'missing') {
           log.error(
-            { fallbackProvider: this.agentFallbackProvider, binary: fallbackBinary },
+            { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
             'fallback provider binary not found on this host',
           );
           emitAlert(
             this.instanceName,
             'fallback_binary_missing',
             'Fallback provider binary not found on this host',
-            `binary=${fallbackBinary} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+            `binary=${fallbackBinary} provider=${fallbackEntry.provider} model=${fallbackEntry.model}`,
           );
         } else if (r.status === 'present') {
           if (r.version) {
             log.info(
-              { fallbackProvider: this.agentFallbackProvider, binary: fallbackBinary, version: r.version },
+              { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary, version: r.version },
               'fallback provider binary present',
             );
           }
@@ -5605,13 +5677,13 @@ export class AgentRuntime implements Runtime {
           // operator now instead of at first-turn failure. opencode-cli only —
           // it is the one CLI provider whose `models` output we parse.
           // Fire-and-forget, fail-open: never blocks or reverts the window.
-          if (this.agentFallbackModel && this.agentFallbackProvider === 'opencode-cli') {
-            const fallbackModel = this.agentFallbackModel;
+          if (fallbackEntry.model && fallbackEntry.provider === 'opencode-cli') {
+            const fallbackModel = fallbackEntry.model;
             void probeModelCatalog(fallbackBinary, fallbackModel).then((catalog) => {
               if (catalog.status !== 'not_found') return;
               log.error(
                 {
-                  fallbackProvider: this.agentFallbackProvider,
+                  fallbackProvider: fallbackEntry.provider,
                   fallbackModel,
                   catalogSuggestion: catalog.suggestion,
                 },
@@ -5623,7 +5695,7 @@ export class AgentRuntime implements Runtime {
                 'Fallback model not found in provider catalog',
                 `model=${fallbackModel}`
                   + (catalog.suggestion ? ` suggestion=${catalog.suggestion}` : '')
-                  + ` provider=${this.agentFallbackProvider}`,
+                  + ` provider=${fallbackEntry.provider}`,
               );
             });
           }
@@ -5647,7 +5719,7 @@ export class AgentRuntime implements Runtime {
         clearFallbackState(this.db);
         return;
       }
-      if (!this.agentFallbackProvider || persisted.activeUntil <= Date.now()) {
+      if (this.agentFallbacks.length === 0 || persisted.activeUntil <= Date.now()) {
         clearFallbackState(this.db);
         return;
       }
@@ -5679,7 +5751,7 @@ export class AgentRuntime implements Runtime {
    * process alive).
    */
   private activateProviderFallback(resetAt: Date | null): void {
-    if (!this.agentFallbackProvider) return;
+    if (this.agentFallbacks.length === 0) return;
 
     const now = Date.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
@@ -5707,8 +5779,9 @@ export class AgentRuntime implements Runtime {
 
     log.info({
       instanceName: this.instanceName,
-      fallbackProvider: this.agentFallbackProvider,
-      fallbackModel: this.agentFallbackModel,
+      fallbackProvider: this.activeFallbackEntry?.provider,
+      fallbackModel: this.activeFallbackEntry?.model,
+      fallbackChain: this.fallbackChainSnapshot(),
       resetAt: resetAt ? resetAt.toISOString() : null,
       activeUntil: new Date(until).toISOString(),
       extended: wasActive,
@@ -5725,6 +5798,7 @@ export class AgentRuntime implements Runtime {
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
+    this.activeFallbackEntry = null;
     try {
       clearFallbackState(this.db);
     } catch (err) {

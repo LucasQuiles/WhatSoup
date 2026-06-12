@@ -203,6 +203,8 @@ const PROVIDER_STATUS_1: ProviderStatus = {
     turnsServed: 0,
     turnsEmpty: 0,
     lastFallbackTurnAt: null,
+    activeEntry: null,
+    chain: [],
   },
   lineReachable: true,
 };

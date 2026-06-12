@@ -48,42 +48,75 @@ import type {
 
 const API_BASE = '';
 
-/** Read the root fleet token from the meta tag injected by the production server. */
-export function getFleetToken(): string | null {
-  const meta = document.querySelector<HTMLMetaElement>('meta[name="fleet-token"]');
+/**
+ * B1 closure: the served HTML carries NO credentials. The production server
+ * advertises its auth mode via a meta tag; the browser authenticates ticket
+ * minting with an HttpOnly session cookie set by POST /api/console-session
+ * after the operator unlocks the console with the root token.
+ */
+export function getConsoleAuthMode(): string | null {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="fleet-auth-mode"]');
   return meta?.content || null;
+}
+
+/** True when served by the production fleet server (session-auth mode). */
+export function isProductionConsole(): boolean {
+  return getConsoleAuthMode() === 'session';
+}
+
+/** Thrown when the console session is missing/expired — UI should show the unlock screen. */
+export class ConsoleLockedError extends Error {
+  constructor() { super('console locked: no valid session'); this.name = 'ConsoleLockedError'; }
+}
+
+/** Unlock the console: exchange the operator-entered root token for an HttpOnly session cookie. */
+export async function unlockConsole(rootToken: string): Promise<{ expiresIn: number }> {
+  const res = await fetch(`${API_BASE}/api/console-session`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${rootToken}` },
+    credentials: 'same-origin',
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) {
+    throw new Error(res.status === 401 ? 'invalid token' : `unlock failed (${res.status})`);
+  }
+  return await res.json() as { expiresIn: number };
+}
+
+/** Lock the console: revoke the session and clear the cookie. */
+export async function lockConsole(): Promise<void> {
+  await fetch(`${API_BASE}/api/console-session`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+    signal: AbortSignal.timeout(5000),
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Audience-scoped tickets (#313)
 //
-// The root meta-tag token is the bootstrap credential and is used ONLY to
-// mint short-lived tickets via POST /api/auth-ticket. Every other call --
-// HTTP API or EventSource -- threads a ticket of the matching audience so
-// the root token never leaves the bootstrap path.
+// The HttpOnly console-session cookie (set by the unlock flow) is the
+// bootstrap credential and is used ONLY to mint short-lived tickets via
+// POST /api/auth-ticket. Every other call -- HTTP API or EventSource --
+// threads a ticket of the matching audience; the browser never holds the
+// root token (B1).
 // ---------------------------------------------------------------------------
 
 type TicketAudience = 'api' | 'sse';
 
-function rootAuthHeaders(): Record<string, string> {
-  const token = getFleetToken();
-  return token ? { 'Authorization': `Bearer ${token}` } : {};
-}
+
 
 async function mintTicket(audience: TicketAudience): Promise<string> {
-  // Bootstrap: present the root token to the dedicated mint endpoint and
-  // immediately discard it from the request shape. The browser still has
-  // the meta-tag (a v1 limitation called out in the issue), but it never
-  // travels anywhere except this one path.
+  // Bootstrap: the HttpOnly session cookie (set by the unlock flow)
+  // authenticates this mint; the browser never holds the root token.
   const res = await fetch(`${API_BASE}/api/auth-ticket`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...rootAuthHeaders(),
-    },
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     body: JSON.stringify({ audience }),
     signal: AbortSignal.timeout(5000),
   });
+  if (res.status === 401) throw new ConsoleLockedError();
   if (!res.ok) {
     throw new Error(`auth-ticket ${audience} ${res.status}: ${await res.text()}`);
   }
@@ -118,7 +151,7 @@ export function clearTicketCache(): void {
  * the header and let the Vite proxy / mock fallback handle the request.
  */
 async function authHeaders(): Promise<Record<string, string>> {
-  if (!getFleetToken()) return {};
+  if (!isProductionConsole()) return {};
   try {
     const ticket = await getApiTicket('api');
     return { 'Authorization': `Bearer ${ticket}` };
@@ -510,9 +543,10 @@ export const api = {
   getWsTicket: async () => {
     const res = await fetch(`${API_BASE}/api/ws-ticket`, {
       method: 'POST',
-      headers: rootAuthHeaders(),
+      credentials: 'same-origin',
       signal: AbortSignal.timeout(5000),
     });
+    if (res.status === 401) throw new ConsoleLockedError();
     if (!res.ok) {
       throw new Error(`API ${res.status}: ${await res.text()}`);
     }

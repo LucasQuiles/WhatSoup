@@ -55,6 +55,8 @@ function fallbackStatus(
     turnsServed: null,
     turnsEmpty: null,
     lastFallbackTurnAt: null,
+    activeEntry: null,
+    chain: [],
     ...overrides,
   }
 }
@@ -183,6 +185,37 @@ describe('ProvidersKeysCard — fallback states', () => {
     expect(screen.getByText('3 served')).toBeDefined()
     expect(screen.getByText('1 empty')).toBeDefined()
     expect(screen.getByText('last turn 2m ago')).toBeDefined()
+  })
+
+  it('renders ordered chain eligibility when multiple fallback entries are present', async () => {
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'opencode-cli',
+        model: 'minimax/MiniMax-M2',
+        keyPresent: false,
+        active: true,
+        activeUntil: Date.now() + 90_000,
+        effectiveProvider: 'openai-api',
+        activeEntry: { provider: 'openai-api', model: 'gpt-4o-mini' },
+        chain: [
+          { provider: 'opencode-cli', model: 'minimax/MiniMax-M2', eligible: false },
+          { provider: 'openai-api', model: 'gpt-4o-mini', eligible: true },
+        ],
+      }),
+      lineReachable: true,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    render(withProviders(<ProvidersKeysCard lineName="line-chain" />))
+
+    expect(await screen.findByText('chain')).toBeDefined()
+    expect(screen.getAllByText('OpenCode').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('minimax/MiniMax-M2').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText('unavailable')).toBeDefined()
+    expect(screen.getByText('OpenAI')).toBeDefined()
+    expect(screen.getByText('gpt-4o-mini')).toBeDefined()
+    expect(screen.getByText('ready')).toBeDefined()
   })
 
   it('suppresses fallback counters when older payloads omit the metric fields', async () => {

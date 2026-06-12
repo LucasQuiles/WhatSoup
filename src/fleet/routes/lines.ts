@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
+import { normalizeFallbackEntriesFromInstanceConfig } from '../../core/fallback-chain.ts';
 import { extractLocal } from '../../core/access-list.ts';
 import { bareNumber } from '../../core/jid-constants.ts';
 import { resolveAgentModel } from '../../instance-loader.ts';
@@ -467,6 +468,32 @@ function lineReachableFromPoll(poll: InstanceStatus | undefined): boolean {
   return false;
 }
 
+function fallbackEntryFromHealth(value: unknown): { provider: string; model: string | null } | null {
+  const entry = recordValue(value);
+  if (!entry) return null;
+  const provider = stringValue(entry.provider);
+  if (!provider) return null;
+  return { provider, model: stringValue(entry.model) };
+}
+
+function fallbackChainFromHealth(
+  value: unknown,
+): Array<{ provider: string; model: string | null; eligible: boolean | null }> | null {
+  if (!Array.isArray(value)) return null;
+  const out: Array<{ provider: string; model: string | null; eligible: boolean | null }> = [];
+  for (const raw of value) {
+    const entry = recordValue(raw);
+    const provider = stringValue(entry?.provider);
+    if (!provider) continue;
+    out.push({
+      provider,
+      model: stringValue(entry?.model),
+      eligible: typeof entry?.eligible === 'boolean' ? entry.eligible : null,
+    });
+  }
+  return out;
+}
+
 /**
  * GET /api/lines/:name/provider-status — per-instance provider / key / fallback
  * status. Read-only: surfaces the configured primary + fallback providers, the
@@ -500,8 +527,10 @@ export async function handleGetLineProviderStatus(
     resolveAgentModel(parsedConfig) ??
     apiProviderConfigModel(primaryProvider, providerConfig) ??
     stringValue(agentOptions.model);
-  const fallbackProvider = stringValue(agentOptions.fallbackProvider);
-  const fallbackModel = stringValue(agentOptions.fallbackModel);
+  const fallbackEntries = normalizeFallbackEntriesFromInstanceConfig(parsedConfig);
+  const configuredFallback = fallbackEntries[0] ?? null;
+  const fallbackProvider = configuredFallback?.provider ?? null;
+  const fallbackModel = configuredFallback?.model ?? null;
   const fallbackProviderConfig = fallbackProvider === primaryProvider ? providerConfig : undefined;
 
   // Fallback window state from the instance health snapshot (surface C emits
@@ -515,6 +544,13 @@ export async function handleGetLineProviderStatus(
   const turnsServedRaw = dig(health, 'instance', 'fallbackTurnsServed');
   const turnsEmptyRaw = dig(health, 'instance', 'fallbackTurnsEmpty');
   const lastFallbackTurnAtRaw = dig(health, 'instance', 'lastFallbackTurnAt');
+  const activeEntry = fallbackEntryFromHealth(dig(health, 'instance', 'activeFallbackEntry'));
+  const chainFromHealth = fallbackChainFromHealth(dig(health, 'instance', 'fallbackChain'));
+  const fallbackChain = chainFromHealth ?? fallbackEntries.map((entry) => ({
+    provider: entry.provider,
+    model: entry.model ?? null,
+    eligible: null,
+  }));
 
   jsonResponse(res, 200, {
     primary: {
@@ -532,6 +568,8 @@ export async function handleGetLineProviderStatus(
       turnsServed: typeof turnsServedRaw === 'number' ? turnsServedRaw : null,
       turnsEmpty: typeof turnsEmptyRaw === 'number' ? turnsEmptyRaw : null,
       lastFallbackTurnAt: typeof lastFallbackTurnAtRaw === 'number' ? lastFallbackTurnAtRaw : null,
+      activeEntry,
+      chain: fallbackChain,
     },
     lineReachable: lineReachableFromPoll(poll),
   });

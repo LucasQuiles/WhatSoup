@@ -8,7 +8,7 @@
  *  - `@tanstack/react-query` useQueryClient stubbed so invalidateQueries never
  *    fires real network calls.
  *  - `../lib/api` stubbed with vi.fn() for `api.restart` and `api.getVersion`.
- *  - `getFleetToken` returns null (no-auth dev path) by default.
+ *  - `isProductionConsole` returns false (no-auth dev path) by default.
  *  - Native `fetch` is mocked per-test for the /api/update SSE stream.
  *  - restart-instances phase is reached via real timers + immediate getVersion
  *    resolution rather than fake timers (fake timers + waitFor deadlock).
@@ -43,7 +43,7 @@ vi.mock('../../console/src/lib/api', () => ({
     restart: (...args: unknown[]) => mockApiRestart(...args),
     getVersion: (...args: unknown[]) => mockApiGetVersion(...args),
   },
-  getFleetToken: () => null,
+  isProductionConsole: () => false,
   getApiTicket: vi.fn(),
 }))
 
@@ -277,6 +277,7 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     expect(screen.getByText('Installing console dependencies')).toBeDefined()
     expect(screen.getByText('Building console')).toBeDefined()
     expect(screen.getByText('Restarting fleet server')).toBeDefined()
+    expect(screen.queryByText('Preserving failed update state')).toBeNull()
   })
 
   it('hides confirm description text after clicking Update', async () => {
@@ -287,7 +288,7 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     expect(screen.queryByText(/Pull latest code, rebuild/)).toBeNull()
   })
 
-  it('POSTs to /api/update without Authorization header when getFleetToken returns null', async () => {
+  it('POSTs to /api/update without Authorization header in the dev (non-production) path', async () => {
     const fetchMock = vi.fn(() => Promise.resolve({ ok: true, body: makeHangingStream() }))
     vi.stubGlobal('fetch', fetchMock)
     render(<UpdateModal {...defaultProps()} />)
@@ -309,6 +310,16 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
     fireEvent.click(updateBtn)
     await waitFor(() => expect(screen.getByText('fetching...')).toBeDefined())
+  })
+
+  it('adds the preserve step only when SSE emits a preserve progress event', async () => {
+    const chunk = 'event: progress\ndata: {"step":"preserve","status":"done","message":"saved recovery patch"}\n\n'
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([chunk]) })))
+    render(<UpdateModal {...defaultProps()} />)
+    const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
+    fireEvent.click(updateBtn)
+    await waitFor(() => expect(screen.getByText('Preserving failed update state')).toBeDefined())
+    expect(screen.getByText('saved recovery patch')).toBeDefined()
   })
 })
 

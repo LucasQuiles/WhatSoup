@@ -2,6 +2,23 @@
 
 The WhatSoup Fleet Console is a React dashboard for managing all WhatsApp instances from a browser. It runs on the same port as the fleet server in production (`http://localhost:9099`) or via Vite dev proxy during development.
 
+## Console Authentication
+
+In production the console starts **locked**. The served page carries no
+credentials — enter the fleet token on the lock screen to start a session:
+
+- The token is sent once to `POST /api/console-session` and never stored in
+  the browser; the server answers with an HttpOnly `SameSite=Strict` session
+  cookie (24-hour fixed lifetime).
+- All API/WebSocket access then rides short-lived audience tickets minted
+  against that session. A fleet-server restart relocks the console.
+- To log out early, call `DELETE /api/console-session` (the cookie is also
+  cleared); there is currently no logout button in the UI.
+- The fleet token lives in `~/.config/whatsoup/fleet-tokens.json` on the
+  fleet host.
+- Dev mode (Vite proxy) bypasses the lock screen — the proxy injects auth
+  server-side and the page carries no `fleet-auth-mode` meta tag.
+
 ## Pages
 
 The console has four main pages accessible from the top navigation bar.

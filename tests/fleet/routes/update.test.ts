@@ -30,5 +30,8 @@ describe('handleGetVersion', () => {
     const body = JSON.parse(res.end.mock.calls[0][0]);
     expect(body.sha).toBe('abc1234');
     expect(body.updateAvailable).toBe(true);
+    // B1 observability pin: the closure posture rides this endpoint.
+    expect(body.consoleAuthMode).toBe('session');
+    expect(body.rootTokenInHtml).toBe(false);
   });
 });
