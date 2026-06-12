@@ -5744,9 +5744,9 @@ export class AgentRuntime implements Runtime {
   /** Provider config paired with {@link effectiveProvider}. */
   private get effectiveProviderConfig(): Record<string, unknown> | undefined {
     const fallbackEntry = this.effectiveFallbackEntry;
-    return fallbackEntry
-      ? this.fallbackProviderConfigFor(fallbackEntry.provider)
-      : this.agentProviderConfig;
+    if (!fallbackEntry) return this.agentProviderConfig;
+    if (fallbackEntry.provider === 'opencode-cli') return this.agentProviderConfig;
+    return this.fallbackProviderConfigFor(fallbackEntry.provider) ?? this.agentProviderConfig;
   }
 
   /**
@@ -5761,8 +5761,8 @@ export class AgentRuntime implements Runtime {
    *
    * Service mapping: opencode-cli → the model's provider prefix
    * (`minimax/...` → `minimax`); openai-api → `openai`;
-   * anthropic-api → `anthropic`; same-provider API fallback honors the
-   * primary `providerConfig.apiKeyService`. Never logs the value.
+   * anthropic-api → `anthropic`. Managed API fallbacks honor inherited
+   * `providerConfig.apiKeyService`. Never logs the value.
    */
   private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
     const service = resolveProviderKeyService(provider, model, this.fallbackProviderConfigFor(provider));
@@ -5771,9 +5771,10 @@ export class AgentRuntime implements Runtime {
   }
 
   private fallbackProviderConfigFor(provider: string | undefined): Record<string, unknown> | undefined {
-    return provider !== undefined && provider === this.agentProvider
-      ? this.agentProviderConfig
-      : undefined;
+    if (provider === undefined) return undefined;
+    if (provider === this.agentProvider) return this.agentProviderConfig;
+    if (provider === 'openai-api' || provider === 'anthropic-api') return this.agentProviderConfig;
+    return undefined;
   }
 
   /** User-facing notice for a usage-limit teardown when no fallback replay can run. */
