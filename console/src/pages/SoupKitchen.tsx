@@ -628,7 +628,7 @@ const SoupKitchen: FC = () => {
             label="Chart range"
             options={RANGE_OPTIONS}
             value={chartRange}
-            onChange={setChartRange}
+            onChange={(v) => setChartRange(v as MetricsRange)}
           />
         </div>
 

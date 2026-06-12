@@ -46,7 +46,7 @@ export function MetricsTab({
             { label: '30d', value: '30d' },
           ]}
           value={metricsRange}
-          onChange={setMetricsRange}
+          onChange={(v) => setMetricsRange(v as MetricsRange)}
         />
         {metrics?.messageVolume && metrics.messageVolume.length > 0 && (
           <button
