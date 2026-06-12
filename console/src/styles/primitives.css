@@ -1480,3 +1480,28 @@ button.soup-pill[aria-disabled="true"] {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* --------------------------------------------------------------------------
+   INBOX LAYOUT BAND — soup-inbox-layout / soup-inbox-contact (DD-18r)
+   Container query root: the Inbox page flex root carries container-type so
+   the contact-pane collapse is expressed as a container query, not a viewport
+   query (layout-density §5; C2.3 squeeze idiom, second use after soup-drawer-layout).
+   Threshold: ~1080px — "inbox loses contact pane" per layout-density §5, pinned
+   at 1080px container width per C-B4-2.
+   Below 1080px: contact pane is removed from layout (display:none). The chat-list
+   keeps its --inbox-pane-chats fixed width; the thread flexes into the freed space.
+   Re-growing the container restores the pane with identical content (CSS-only —
+   React state is never touched, §6.1).
+   Orphaned actions note: Mark Read / Allow / Block / Save Contact are unreachable
+   below the threshold (DD-24; spec-mandated drop, C-B4-3).
+   -------------------------------------------------------------------------- */
+
+.soup-inbox-layout {
+  container-type: inline-size;
+}
+
+@container (max-width: 1079px) {
+  .soup-inbox-contact {
+    display: none;
+  }
+}

@@ -20,8 +20,8 @@
   --config-key-col: 140px;   /* config key-value grid key column width */
   --badge-unread: 20px;      /* chat unread count badge */
   /* ═══ Panel widths ═══ */
-  --panel-chat-list: 288px;  /* inbox left panel */
-  --panel-contact: 256px;    /* inbox right panel */
+  --inbox-pane-chats: 264px;   /* inbox chat-list pane (tokens-v3 §4/§6.12; renamed from --panel-chat-list 288px) */
+  --inbox-pane-contact: 248px; /* inbox contact pane  (tokens-v3 §4/§6.12; renamed from --panel-contact 256px) */
   --panel-actions: 260px;    /* line detail actions panel */
   --panel-history: 288px;    /* line detail history chat list */
   --dropdown-min-w: 200px;   /* dropdown minimum width */

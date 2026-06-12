@@ -205,7 +205,7 @@ export default function Inbox() {
 
   return (
     <motion.div
-      className="flex-1 flex min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"
+      className="soup-inbox-layout flex-1 flex min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5, ease }}
@@ -213,7 +213,7 @@ export default function Inbox() {
 
       {/* ═══ Left: Line picker + Chat list ═══ */}
       <div
-        className="c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--panel-chat-list)]"
+        className="c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-chats)]"
       >
         {/* Line picker — toolbar pattern */}
         <LinePicker
@@ -460,7 +460,7 @@ export default function Inbox() {
 
       {/* ═══ Right: Contact details ═══ */}
       <div
-        className="c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--panel-contact)]"
+        className="soup-inbox-contact c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-contact)]"
       >
         {currentChat ? (
           <>
