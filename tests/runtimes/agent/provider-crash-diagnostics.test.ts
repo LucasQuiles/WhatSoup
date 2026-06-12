@@ -38,8 +38,24 @@ describe('provider crash diagnostics', () => {
     ['ECONNRESET while reading stream', 'provider_network_error'],
     ['Gateway timeout from provider', 'provider_timeout'],
     ['Internal server error 500', 'provider_server_error'],
+    // 5xx with HTTP-ish context: these are real provider server errors.
+    ['request failed with status: 503', 'provider_server_error'],
+    ['request failed with status code 502', 'provider_server_error'],
+    ['HTTP 502 from upstream', 'provider_server_error'],
+    ['provider returned error 500', 'provider_server_error'],
   ])('classifies %s as %s', (text, crashClass) => {
     expect(classifyProviderCrash(text)).toBe(crashClass);
+  });
+
+  it.each([
+    // Bare 5xx-looking numbers WITHOUT HTTP-ish context must not classify as
+    // provider_server_error: this crashClass keys heal single-flight, so a
+    // false positive suppresses healing of genuinely distinct crashes.
+    ['TypeError: x is undefined at line 503 of foo.ts'],
+    ['request took 550 ms before crashing'],
+    ['request took 550ms before crashing'],
+  ])('does NOT classify %s as provider_server_error', (text) => {
+    expect(classifyProviderCrash(text)).not.toBe('provider_server_error');
   });
 
   it('keeps the newest bounded stderr preview', () => {

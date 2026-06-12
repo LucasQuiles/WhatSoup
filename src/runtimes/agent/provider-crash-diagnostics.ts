@@ -82,7 +82,10 @@ export function classifyProviderCrash(text: string): string | undefined {
     lower.includes('service unavailable') ||
     lower.includes('bad gateway') ||
     lower.includes('gateway timeout') ||
-    /\b5\d\d\b/.test(lower)
+    // A 5xx number alone is too weak ("line 503", "550 ms"): this class keys
+    // heal single-flight, so a false positive suppresses distinct crashes.
+    // Require HTTP-ish context immediately before the status number.
+    /\b(?:status(?:\s+code)?|http|error)\s*[:=]?\s*5\d\d\b/.test(lower)
   ) {
     return 'provider_server_error';
   }
