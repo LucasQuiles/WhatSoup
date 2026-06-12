@@ -54,7 +54,11 @@ execution log.
   their data," and `git ls-files -u` plus a whole-tree marker scan proves completion.
 - **Test integrity:** real terminal assertions only; no stderr masking in test
   commands; fragment edits on test files can fail hook parsing — append complete
-  describe blocks via heredoc instead.
+  describe blocks via heredoc instead. Every agent-produced test diff additionally
+  gets an independent signal-weakening audit before the integrator commits it
+  (assertions rewritten to match broken behavior, deleted-without-replacement
+  coverage, weak terminals, name/assertion mismatch); deliberate assertion
+  inversions must trace to a packet constraint.
 - **Tooling traps:** never pipe a dev server through `head` (SIGPIPE kills it and
   fakes a crash); the CDP browser harness cannot do trusted keyboard QA (false
   positives — trusted-event proof belongs to the D7 lane); keep browser-agent briefs
