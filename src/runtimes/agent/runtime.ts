@@ -69,7 +69,7 @@ import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
-import { createProviderMcpBridge, writeProviderMcpConfig } from './providers/mcp-bridge.ts';
+import { createProviderMcpBridge, writeProviderMcpConfig, writeProviderMcpConfigTarget } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { probeFallbackBinary } from './providers/binary-preflight.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
@@ -2346,15 +2346,38 @@ export class AgentRuntime implements Runtime {
         this.globalMcpSocketPath = socketPath;
         log.info({ socketPath }, 'global WhatSoup socket server started');
 
-        // Write the whatsoup MCP config to the file the active provider's CLI
-        // reads. claude/gemini/codex → .mcp.json (mcpServers shape); opencode-cli
-        // → opencode.json (opencode `mcp` shape), merged with any pre-existing
-        // user opencode.json. Native-bridge/API providers return null (no file).
+        // Write the whatsoup MCP config to every configured CLI provider target:
+        // primary first, then fallback when it uses a distinct config file.
         const mcpServerScript = resolve(
           new URL('.', import.meta.url).pathname,
           '../../../deploy/mcp/whatsoup-proxy.ts',
         );
-        const opencodeProviderConfig =
+        const writtenTargets = new Set<string>();
+        const writtenPaths: string[] = [];
+        const writeFor = (provider: string, providerConfig?: { baseUrl?: string; model?: string }): void => {
+          const target = writeProviderMcpConfigTarget(provider, agentCwd);
+          if (target === null) return;
+          if (writtenTargets.has(target)) {
+            log.warn(
+              { primary: this.agentProvider, fallback: provider, target },
+              'primary and fallback providers share an MCP config target — primary shape kept',
+            );
+            return;
+          }
+          const written = writeProviderMcpConfig(
+            provider,
+            agentCwd,
+            socketPath,
+            mcpServerScript,
+            providerConfig,
+          );
+          if (written) {
+            writtenTargets.add(written);
+            writtenPaths.push(written);
+          }
+        };
+
+        const primaryOpencodeProviderConfig =
           this.agentProvider === 'opencode-cli' && this.agentProviderConfig
             ? {
                 baseUrl: typeof this.agentProviderConfig['baseUrl'] === 'string'
@@ -2363,14 +2386,16 @@ export class AgentRuntime implements Runtime {
                 model: this.model,
               }
             : undefined;
-        const mcpConfigPath = writeProviderMcpConfig(
-          this.agentProvider,
-          agentCwd,
-          socketPath,
-          mcpServerScript,
-          opencodeProviderConfig,
-        );
-        log.info({ agentCwd, provider: this.agentProvider, mcpConfigPath }, 'wrote whatsoup MCP config');
+        writeFor(this.agentProvider, primaryOpencodeProviderConfig);
+        if (this.agentFallbackProvider && this.agentFallbackProvider !== this.agentProvider) {
+          writeFor(
+            this.agentFallbackProvider,
+            this.agentFallbackProvider === 'opencode-cli'
+              ? { model: this.agentFallbackModel }
+              : undefined,
+          );
+        }
+        log.info({ agentCwd, provider: this.agentProvider, fallbackProvider: this.agentFallbackProvider, mcpConfigPaths: writtenPaths }, 'wrote whatsoup MCP config');
       } catch (err) {
         if (this.globalSocketServer) {
           try {
@@ -5800,6 +5825,7 @@ export class AgentRuntime implements Runtime {
         const socketPath = provisionWorkspace({
           workspacePath,
           instanceCwd: this.cwd ?? homedir(),
+          provider: this.effectiveProvider,
           sandbox: this.sandbox!,
           hookPath,
           pollLintHookPath,

@@ -173,7 +173,18 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
     this.errorSubscription = this.adapter.on('error', (err) => {
       const p = err.payload;
       this.log.error(
-        { code: p.code, operation: p.operation, correlationId: p.correlationId, retryable: p.retryable },
+        {
+          code: p.code,
+          operation: p.operation,
+          correlationId: p.correlationId,
+          retryable: p.retryable,
+          providerCode: p.providerCode,
+          channelId: p.channelId,
+          hint: p.hint,
+          scope: p.scope,
+          phase: p.phase,
+          idempotencyKey: p.idempotencyKey,
+        },
         `twilio transport error: ${err.message}`,
       );
     });

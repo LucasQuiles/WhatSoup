@@ -1,5 +1,7 @@
 # Twilio Transport Stage 2: Webhook Inbound + Recorded Voice — Implementation Plan
 
+**Status:** completed — shipped as PR #736 (squash `c93ea0fc`, merged 2026-06-12).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 > **Execution prerequisite:** a clean dedicated worktree on branch `feat/twilio-voice-webhook` off main `3d11897d`.
 > **Design spec:** `docs/specs/2026-06-10-twilio-transport-design.md` §3 (D3), §4, §5, §14 — stage 2 scope: webhook inbound + signature validation, recorded voice (voicemail → transcript), `contract/voice.ts`. Live voice AI stays deferred.

@@ -85,10 +85,14 @@ describe('PostToolUse RGP error logger', () => {
       toolName: 'Bash',
       inputSummary: 'npm test -- --runInBand',
     });
-    expect(JSON.stringify(entries[0])).toContain('<redacted-path>');
-    expect(JSON.stringify(entries[0])).toContain('<redacted-phone>');
-    expect(JSON.stringify(entries[0])).not.toContain('/private/tmp');
-    expect(JSON.stringify(entries[0])).not.toContain('415');
+    // Assert redaction on the excerpt field, not the serialized entry — the
+    // createdAt timestamp can legitimately contain any digit substring
+    // (a `.415Z` millisecond once failed this as a whole-line check).
+    const excerpt = String((entries[0] as { excerpt: string }).excerpt);
+    expect(excerpt).toContain('<redacted-path>');
+    expect(excerpt).toContain('<redacted-phone>');
+    expect(excerpt).not.toContain('/private/tmp');
+    expect(excerpt).not.toContain('415');
   });
 
   it('does not log successful tool responses and truncates oversized error logs', () => {

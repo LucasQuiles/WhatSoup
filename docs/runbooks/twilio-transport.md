@@ -145,7 +145,7 @@ mentions, `contentType: 'text'`.
   lookback window so messages that arrived just before connect are not lost).
 - Delivery is **at-least-once**. The port's `listInboundSince` boundary is
   inclusive, and the adapter deduplicates by message SID with a bounded set of
-  **1000 SIDs** (oldest evicted first, after each batch). A restart that
+  **1000 SIDs** (oldest evicted first, trimmed per accepted record). A restart that
   replays inside the lookback window, or an eviction at very high volume, can
   re-emit a message — replay protection is best-effort, not exactly-once.
 - The cursor advances to the maximum `sentAt` seen (not wall-clock now), which

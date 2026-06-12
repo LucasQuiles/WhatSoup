@@ -1253,22 +1253,3 @@ export function resolveDecryptionFailure(db: Database, messageId: string): void 
   `).run(messageId);
 }
 
-export interface DecryptionFailureRow {
-  id: number;
-  messageId: string;
-  chatJid: string;
-  senderJid: string;
-  errorMessage: string;
-  rawKey: string;
-  seenCount: number;
-  createdAt: string;
-}
-
-export function getUnresolvedDecryptionFailures(db: Database, limit = 100): DecryptionFailureRow[] {
-  return db.raw.prepare(`
-    SELECT id, message_id AS messageId, chat_jid AS chatJid, sender_jid AS senderJid,
-           error_message AS errorMessage, raw_key AS rawKey, seen_count AS seenCount,
-           created_at AS createdAt
-    FROM decryption_failures WHERE resolved = 0 ORDER BY created_at DESC LIMIT ?
-  `).all(limit) as unknown as DecryptionFailureRow[];
-}

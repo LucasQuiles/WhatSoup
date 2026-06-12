@@ -1,7 +1,10 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createChildLogger } from '../logger.ts';
 import { isRecord } from '../lib/type-guards.ts';
+
+const log = createChildLogger('alert-throttle-store');
 
 const CONFIG_DIR = join(homedir(), '.config', 'whatsoup');
 const ALERT_THROTTLE_FILE = join(CONFIG_DIR, 'fleet-alert-throttle.json');
@@ -44,7 +47,14 @@ export function loadAlertThrottle(nowMs = Date.now()): Map<string, string> {
 
     const entries = Object.entries(parsed).filter(([, value]) => isFreshTimestamp(value, nowMs)) as Array<[string, string]>;
     return new Map(entries);
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      log.warn(
+        { file: ALERT_THROTTLE_FILE, err: err instanceof Error ? err.message : String(err) },
+        'failed to load alert throttle file — resetting to empty (corrupt or unreadable)',
+      );
+    }
     return new Map();
   }
 }
