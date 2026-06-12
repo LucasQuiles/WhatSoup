@@ -26,15 +26,26 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
 };
 
 export function resolveProviderKeyService(
-  provider: string | null | undefined,
-  model: string | null | undefined,
+  provider: unknown,
+  model: unknown,
+  providerConfig?: unknown,
 ): string | null {
+  if (providerConfig && typeof providerConfig === 'object' && !Array.isArray(providerConfig)) {
+    const service = (providerConfig as Record<string, unknown>)['apiKeyService'];
+    if ((provider === 'openai-api' || provider === 'anthropic-api') && typeof service === 'string') {
+      const trimmed = service.trim();
+      if (trimmed !== '') return trimmed;
+    }
+  }
   if (provider === 'opencode-cli') {
-    const prefix = model?.split('/')[0]?.trim();
+    const prefix = typeof model === 'string' ? model.split('/')[0]?.trim() : '';
     return prefix ? prefix.toLowerCase() : null;
   }
   if (provider === 'openai-api') {
     return 'openai';
+  }
+  if (provider === 'anthropic-api') {
+    return 'anthropic';
   }
   return null;
 }

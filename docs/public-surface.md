@@ -57,7 +57,7 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:306` | stable | active | Instance detail + config |
 | `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:305` | stable | active | Stop + cleanup |
 | `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:303` | stable | active | Registration probe |
-| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:304` | beta | active | Per-instance primary/fallback provider, key presence (boolean), and active fallback window |
+| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:304` | beta | active | Per-instance primary/fallback provider, key presence (boolean), resolved primary model, full fallback window/counter state, effective provider, and line reachability |
 | `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:320` | stable | active | Update `config.json` |
 | `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:321` | stable | active | QR-code SSE stream |
 | `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:318` | stable | active | Restart unit |

@@ -371,9 +371,17 @@ describe('AgentRuntime — fallback key-presence guard', () => {
     expect(lookupCredentialMock).toHaveBeenCalledWith('openai');
   });
 
+  it('maps anthropic-api to the anthropic service', () => {
+    const runtime = makeRuntime({ agentFallbackProvider: 'anthropic-api' });
+    lookupCredentialMock.mockImplementation((svc) => (svc === 'anthropic' ? 'anthropic-key' : null));
+    const present = view(runtime).fallbackKeyPresent('anthropic-api', 'claude-sonnet-4-6');
+    expect(present).toBe(true);
+    expect(lookupCredentialMock).toHaveBeenCalledWith('anthropic');
+  });
+
   it('returns null (not-applicable) for native-auth CLI providers', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'claude-cli' });
-    for (const p of ['claude-cli', 'codex-cli', 'gemini-cli', 'anthropic-api']) {
+    for (const p of ['claude-cli', 'codex-cli', 'gemini-cli']) {
       expect(view(runtime).fallbackKeyPresent(p, undefined)).toBeNull();
     }
     expect(lookupCredentialMock).not.toHaveBeenCalled();

@@ -132,17 +132,25 @@ describe('keyring', () => {
       expect(resolveProviderKeyService('opencode-cli', ' DeepSeek/deepseek-chat ')).toBe('deepseek');
     });
 
-    it('maps openai-api to the openai service', () => {
+    it('maps HTTP API providers to their conventional services', () => {
       expect(resolveProviderKeyService('openai-api', undefined)).toBe('openai');
+      expect(resolveProviderKeyService('anthropic-api', undefined)).toBe('anthropic');
+    });
+
+    it('honors providerConfig.apiKeyService for HTTP API providers', () => {
+      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: 'prod-openai' })).toBe('prod-openai');
+      expect(resolveProviderKeyService('anthropic-api', undefined, { apiKeyService: 'prod-anthropic' })).toBe('prod-anthropic');
+      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: '   ' })).toBe('openai');
+      expect(resolveProviderKeyService('opencode-cli', 'minimax/x', { apiKeyService: 'ignored' })).toBe('minimax');
     });
 
     it('returns null for native-auth providers and opencode models without a prefix', () => {
       expect(resolveProviderKeyService('claude-cli', undefined)).toBeNull();
       expect(resolveProviderKeyService('codex-cli', undefined)).toBeNull();
       expect(resolveProviderKeyService('gemini-cli', undefined)).toBeNull();
-      expect(resolveProviderKeyService('anthropic-api', undefined)).toBeNull();
       expect(resolveProviderKeyService('opencode-cli', undefined)).toBeNull();
       expect(resolveProviderKeyService('opencode-cli', '   ')).toBeNull();
+      expect(resolveProviderKeyService('opencode-cli', 42)).toBeNull();
       expect(resolveProviderKeyService(null, 'minimax/x')).toBeNull();
     });
   });

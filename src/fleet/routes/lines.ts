@@ -431,14 +431,31 @@ export async function handleGetLine(
  * is required (native-auth providers). Never returns or logs the key value —
  * only whether one is resolvable via env or keyring.
  */
-function keyPresentFor(provider: string | null | undefined, model: string | null | undefined): boolean | null {
-  const service = resolveProviderKeyService(provider, model);
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function keyPresentFor(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+  providerConfig?: Record<string, unknown>,
+): boolean | null {
+  const service = resolveProviderKeyService(provider, model, providerConfig);
   if (service === null) return null;
   return lookupCredential(service) !== null;
 }
 
 function lineReachableFromPoll(poll: InstanceStatus | undefined): boolean {
-  return poll?.status === 'online' || poll?.status === 'degraded' || poll?.status === 'logged_out';
+  if (!poll) return false;
+  if (poll.status === 'online' || poll.status === 'logged_out') return poll.health !== null;
+  if (poll.status === 'degraded') return poll.error === null && poll.health !== null;
+  return false;
 }
 
 /**
@@ -463,17 +480,16 @@ export async function handleGetLineProviderStatus(
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       parsedConfig = parsed as Record<string, unknown>;
-      const opts = parsedConfig.agentOptions;
-      if (opts && typeof opts === 'object' && !Array.isArray(opts)) {
-        agentOptions = opts as Record<string, unknown>;
-      }
+      agentOptions = recordValue(parsedConfig.agentOptions) ?? {};
     }
   } catch { /* config unreadable — treat as empty (provider defaults to null) */ }
 
-  const primaryProvider = (agentOptions.provider as string | undefined) ?? null;
-  const primaryModel = resolveAgentModel(parsedConfig) ?? (agentOptions.model as string | undefined) ?? null;
-  const fallbackProvider = (agentOptions.fallbackProvider as string | undefined) ?? null;
-  const fallbackModel = (agentOptions.fallbackModel as string | undefined) ?? null;
+  const primaryProvider = stringValue(agentOptions.provider);
+  const primaryModel = resolveAgentModel(parsedConfig) ?? stringValue(agentOptions.model);
+  const providerConfig = recordValue(agentOptions.providerConfig);
+  const fallbackProvider = stringValue(agentOptions.fallbackProvider);
+  const fallbackModel = stringValue(agentOptions.fallbackModel);
+  const fallbackProviderConfig = fallbackProvider === primaryProvider ? providerConfig : undefined;
 
   // Fallback window state from the instance health snapshot (surface C emits
   // instance.fallbackActiveUntil as epoch ms or null).
@@ -491,12 +507,12 @@ export async function handleGetLineProviderStatus(
     primary: {
       provider: primaryProvider,
       model: primaryModel,
-      keyPresent: keyPresentFor(primaryProvider, primaryModel),
+      keyPresent: keyPresentFor(primaryProvider, primaryModel, providerConfig),
     },
     fallback: {
       provider: fallbackProvider,
       model: fallbackModel,
-      keyPresent: fallbackProvider ? keyPresentFor(fallbackProvider, fallbackModel) : null,
+      keyPresent: fallbackProvider ? keyPresentFor(fallbackProvider, fallbackModel, fallbackProviderConfig) : null,
       active,
       activeUntil,
       effectiveProvider: typeof effectiveProviderRaw === 'string' ? effectiveProviderRaw : null,

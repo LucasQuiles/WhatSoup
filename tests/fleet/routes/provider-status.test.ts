@@ -97,7 +97,7 @@ describe('handleGetLineProviderStatus', () => {
     mockedReadFile.mockResolvedValue(
       JSON.stringify({ agentOptions: { provider: 'openai-api', model: 'gpt-4o' } }),
     );
-    mockedLookup.mockReturnValue('sk-secret-value');
+    mockedLookup.mockReturnValue('secret-value');
 
     const res = mockRes();
     await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance()), { name: 'agent-line' });
@@ -122,19 +122,70 @@ describe('handleGetLineProviderStatus', () => {
     });
   });
 
+  it('honors providerConfig.apiKeyService for HTTP primary providers', async () => {
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({
+        agentOptions: {
+          provider: 'openai-api',
+          providerConfig: { apiKeyService: 'prod-openai' },
+          model: 'gpt-4o',
+        },
+      }),
+    );
+    mockedLookup.mockImplementation((service) => service === 'prod-openai' ? 'prod-openai-key' : null);
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), fakeStatus()), { name: 'agent-line' });
+
+    expect(mockedLookup).toHaveBeenCalledWith('prod-openai');
+    expect(mockedLookup).not.toHaveBeenCalledWith('openai');
+    const body = JSON.parse(res._body);
+    expect(body.primary).toEqual({ provider: 'openai-api', model: 'gpt-4o', keyPresent: true });
+    expect(res._body).not.toContain('prod-openai-key');
+  });
+
+  it('maps anthropic-api to the anthropic keyring service and reports keyPresent', async () => {
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({ agentOptions: { provider: 'anthropic-api', model: 'claude-sonnet-4-6' } }),
+    );
+    mockedLookup.mockReturnValue('anthropic-secret-value');
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), fakeStatus()), { name: 'agent-line' });
+
+    expect(mockedLookup).toHaveBeenCalledWith('anthropic');
+    const body = JSON.parse(res._body);
+    expect(body.primary).toEqual({ provider: 'anthropic-api', model: 'claude-sonnet-4-6', keyPresent: true });
+    expect(res._body).not.toContain('anthropic-secret-value');
+  });
+
   it('derives the opencode-cli keyring service from the model prefix and never leaks the key value', async () => {
     mockedReadFile.mockResolvedValue(
       JSON.stringify({ agentOptions: { provider: 'opencode-cli', model: 'minimax/abab6.5' } }),
     );
-    mockedLookup.mockReturnValue(null);
+    mockedLookup.mockReturnValue('minimax-secret-value');
 
     const res = mockRes();
     await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance()), { name: 'agent-line' });
 
     expect(mockedLookup).toHaveBeenCalledWith('minimax');
     const body = JSON.parse(res._body);
-    expect(res._body).not.toContain('sk-');
-    expect(body.primary).toEqual({ provider: 'opencode-cli', model: 'minimax/abab6.5', keyPresent: false });
+    expect(res._body).not.toContain('minimax-secret-value');
+    expect(body.primary).toEqual({ provider: 'opencode-cli', model: 'minimax/abab6.5', keyPresent: true });
+  });
+
+  it('does not 500 when an invalid opencode model value reaches provider-status', async () => {
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({ agentOptions: { provider: 'opencode-cli', model: 42 } }),
+    );
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), fakeStatus()), { name: 'agent-line' });
+
+    expect(res._status).toBe(200);
+    expect(mockedLookup).not.toHaveBeenCalled();
+    const body = JSON.parse(res._body);
+    expect(body.primary).toEqual({ provider: 'opencode-cli', model: null, keyPresent: null });
   });
 
   it('returns keyPresent=null for native-auth CLI providers without calling lookupCredential', async () => {
@@ -161,7 +212,7 @@ describe('handleGetLineProviderStatus', () => {
         },
       }),
     );
-    mockedLookup.mockReturnValue('sk-fallback');
+    mockedLookup.mockReturnValue('fallback-secret-value');
 
     const status = fakeStatus({
       health: {
@@ -193,6 +244,35 @@ describe('handleGetLineProviderStatus', () => {
     expect(body.lineReachable).toBe(true);
   });
 
+  it('uses providerConfig.apiKeyService for same-provider API fallback key presence', async () => {
+    const activeUntil = Date.now() + 300_000;
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({
+        agentOptions: {
+          provider: 'openai-api',
+          providerConfig: { apiKeyService: 'tenant-openai' },
+          model: 'gpt-4o',
+          fallbackProvider: 'openai-api',
+          fallbackModel: 'gpt-4o-mini',
+        },
+      }),
+    );
+    mockedLookup.mockImplementation((service) => service === 'tenant-openai' ? 'tenant-openai-key' : null);
+
+    const status = fakeStatus({
+      health: { instance: { effectiveProvider: 'openai-api', fallbackActiveUntil: activeUntil } },
+    });
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), status), { name: 'agent-line' });
+
+    expect(mockedLookup).toHaveBeenCalledWith('tenant-openai');
+    expect(mockedLookup).not.toHaveBeenCalledWith('openai');
+    const body = JSON.parse(res._body);
+    expect(body.fallback.keyPresent).toBe(true);
+    expect(res._body).not.toContain('tenant-openai-key');
+  });
+
   it('reports an inactive fallback window when fallbackActiveUntil has elapsed', async () => {
     const elapsed = Date.now() - 1_000;
     mockedReadFile.mockResolvedValue(
@@ -204,7 +284,7 @@ describe('handleGetLineProviderStatus', () => {
         },
       }),
     );
-    mockedLookup.mockReturnValue('sk-fallback');
+    mockedLookup.mockReturnValue('fallback-secret-value');
 
     const status = fakeStatus({
       health: { instance: { effectiveProvider: 'claude-cli', fallbackActiveUntil: elapsed } },
@@ -228,15 +308,17 @@ describe('handleGetLineProviderStatus', () => {
   });
 
   it.each([
-    ['online', true],
-    ['unreachable', false],
-    ['stopped', false],
-  ] as const)('sets lineReachable from poller status %s', async (statusName, reachable) => {
+    [{ status: 'online' as const }, true],
+    [{ status: 'logged_out' as const }, true],
+    [{ status: 'degraded' as const, health: { status: 'unhealthy', instance: {} }, error: null }, true],
+    [{ status: 'degraded' as const, health: { stale: true }, error: 'HTTP 500' }, false],
+    [{ status: 'unreachable' as const }, false],
+  ] as const)('sets lineReachable from poller state %#', async (statusOverrides, reachable) => {
     mockedReadFile.mockResolvedValue(
       JSON.stringify({ agentOptions: { provider: 'claude-cli' } }),
     );
 
-    const status = fakeStatus({ status: statusName as InstanceStatus['status'] });
+    const status = fakeStatus(statusOverrides);
 
     const res = mockRes();
     await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), status), { name: 'agent-line' });
