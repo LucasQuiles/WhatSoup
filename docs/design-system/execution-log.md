@@ -686,3 +686,198 @@ deterministic path that is supposed to block. Integrator probe: a synthetically 
 yields the stale-ceiling count and warning at exit 0; tree restored clean. Harvested from a
 context-limit-terminated hardening lane and independently verified by the integrator before
 commit.
+
+---
+
+## DD-21r — Wizard in-step tablists onto Tabs (ConfigStep + ModelAuthStep) — 2026-06-12
+
+**Verdict: Pass.**
+
+`ed6391e7`: ConfigStep's five-section tablist and ModelAuthStep's provider tablist replace
+their hand-rolled onClick-only role=tab arrays with the Tabs primitive — roving tabindex
+single stop, arrow traversal with wrap, Home/End, manual activation; the disabled Local
+provider tab becomes arrow-reachable with its reason exposed instead of click-dead; panels
+gain tabpanel role wiring. Thirteen keyboard-contract tests pin the behavior. Protected
+system-prompt content unchanged; the WVR-011 suppression pin moves one line with its import
+and the registry scope follows. Ratchet 509→501 with the regen riding the change (eight tab
+buttons leave the raw-button buckets); the wizard files stay off the scoped-error M list
+until their remaining raw buttons migrate (per the commit record — superseded for
+AddLineWizard by B3 wave 4 below).
+
+---
+
+## B5 — Modal exit motion + refcounted background inert + toast portal — 2026-06-12
+
+**Verdict: Pass** (DD-19 CLOSED — register flip on the D7 evidence packet).
+
+`25629451` after packet `b5-investigation.md`: Modal gains the decided exit mechanism — a
+closing phase drives the exit keyframes (120ms ease-exit per the motion law) with unmount on
+guarded animationend plus a computed-duration timeout fallback, in a dedicated
+use-exit-presence hook; jsdom's empty computed duration takes the synchronous-instant path so
+the existing modal suite stayed byte-stable, and reduced motion rides the CSS kill plus the
+zero-duration read. Background inert is a refcounted hook on the app root, Modal-only (the
+drawer keeps its documented non-modal exception); the toast live region portals to body in
+the same change so alerts are never silenced under inert; inert release precedes focus
+restore, pinned by test. A separate no-reduce browser-motion config + suite proves the
+animated exit path (3/3, reproduced fresh in d7-evidence.md; deliberately NOT in test:browser
+or CI pending the gate-placement decision — C-B5-7, recorded not silent). Suite 2,296 green,
+ratchet flat (commit record). Harvested from a context-terminated lane; integrator-verified.
+The per-directory coverage ratchet later caught the two new hooks under the hooks floor —
+closed by the B5 hook suites entry below. DD-25 (toast motion literals) remains open against
+the B5 phase.
+
+---
+
+## DD-8 — TSX essential ghost-tier promotions to AA ink — 2026-06-12
+
+**Verdict: Pass.**
+
+`2cd0d5b0`: the decision package's remaining TSX-classified essential sites leave ghost tier
+per the approved Option B law — the Inbox chat meta lane (sole rendering of owning line and
+chat kind), the MessageBubble at-rest timestamp and media-type row, and the Nav Polling badge
+(degraded-transport status). Recession stays size/weight-borne. Thirteen new tests pin each
+promotion with positive controls and branch-isolation proofs; exempt de-emphasis sites
+verified untouched. Ratchet counts fall below ceiling; the baseline regen deliberately waited
+for the in-flight wizard lane so its mid-slice falls could not contaminate the ceiling.
+Remaining DD-8 legs (c-col-header tier, empty-state tiering, the log-theme orphan) stay
+queued on the wizard lane's CSS files and the C3 per-screen pass — the register row stays
+open and blocking.
+
+---
+
+## Console-lint CI parity — 2026-06-12
+
+**Verdict: Pass.**
+
+`b260800e`: the full console eslint step lands in `quality.yml` (verified live: "Console
+lint" step ahead of the four design gates). Closes the gate audit's console-lint parity gap —
+lint-staged covered only staged files at pre-commit, so merge-introduced or bypassed files
+were never linted by the general config anywhere. The audit had held this as needs-decision
+pending backlog verification; every integration battery since proved the full run clean, so
+the step landed zero-risk additive.
+
+---
+
+## Origin merge — deterministic guard train (#787) — 2026-06-12
+
+**Verdict: Pass.**
+
+`a78737a9` absorbed origin/main's guard train (`2cd4c4d8`, PR #787): restart-safety
+pre-flight gate (import-closure link probe blocking the restart-landmine class),
+tree-provenance guard for bot hosts, ring import-boundary guard with a 31-edge grandfather
+baseline, the fail-closed-gate guard IMPLEMENTED and wired (the registry had declared the
+rule with nothing enforcing it), service-unit validity guard (which caught and fixed a real
+launchd ${VAR} defect), hardened secret/redaction patterns + advisory history scan (closing
+the documented \b-anchored false-negative class), and instance-config integrity (silent-dead-
+memory and port-collision classes). Verify chains unioned cleanly: `verify:push:branch` and
+`verify:release` now run main's guard set (guard:boundaries, guard:fail-closed-gate,
+guard:service-units, guard:instance-config) alongside the branch's four design gates —
+verified live in root `package.json`. Console untouched by the merge.
+
+---
+
+## D6 — enforcement promotion wave ACCEPTED — 2026-06-12
+
+**Verdict: Pass with deferred debt** (supersedes the interim "Inconclusive — acceptance
+evidence packet outstanding" D6 entry above).
+
+Evidence packet `d6-evidence.md` (design commit `2442ddfd`), gate runs executed fresh
+2026-06-12 at impl HEAD `b260800e`: console lint exit 0 (S/F/M/P scopes all hold live),
+shadow ratchet 489 ≤ ceiling 501, design-regression 20 checks with blocking set
+`1 2 6 8 10 13 14 16` all PASS, design-metrics exit 0 with byte-identical double run and 0
+expired waivers, design-lints fixture suite 69/69. All five qa-hardening reviews recorded
+(positive, negative, omission, regression, conformance). Flip groups verified against the
+live config: S structural global-error outside primitives; F focus-suppression console-wide
+with the carve-out narrowed to HistoryTab only (B4 close `9bfde5c3` retired the Inbox
+carve-out); M raw-button/ad-hoc-modal scoped-error with the M list growing with migrations
+(UpdateModal at `d73bef54`); P legacy-tokens/utility-smell error inside primitives. Shared
+selector SSOT `console/eslint-rules/design-selectors.mjs` feeds both configs. Gate wiring
+parity closed across pre-push, branch verify, release verify, and CI. Register/waiver delta:
+DD-26 opened; WVR-003/004 retired, WVR-002 → permanent with spec citation, WVR-013/014
+filed. Deferred debt, named and owned: the lint-plan lifecycle table update (owed to the docs
+lane — closed by this docs pass, see lint-plan changelog 2026-06-12), the unrecorded
+per-check EXIT_ON_FAIL tripwire transcripts, the `--strict` coverage flip behind the
+gate-placement decision, the file-size implement-or-demote operator decision, and the
+immature checks each behind a named landing gate.
+
+---
+
+## D7 — browser harness wave ACCEPTED — 2026-06-12
+
+**Verdict: Pass with deferred debt** (supersedes the "Inconclusive — lane in flight" D7
+commit-1 entry above). **Zero conformance-manifest flips** — tally stays 14 PASS / 7
+INCONCLUSIVE / 3 PENDING by design.
+
+Evidence packet `d7-evidence.md` (design commit `b966fd84`), runs reproduced
+integrator-independent from an unmutated clone of committed head `b260800e`: browser suite
+76/76 (viewport-matrix 23, keyboard-proofs 9, smoke 4, target-size 37, b5-inert-toast 3) and
+the no-reduce motion suite 3/3. The harness performed its designed function on first full
+pass: the wave-3 "self-healing recapture" claim (C-B3W3-7) was FALSIFIED under trusted
+Chromium Tab — DD-27 filed, the wave-3 disposition formally revised. B2's deferred keyboard
+proof debt retired: both reported picker P1s positively exonerated under isTrusted events.
+DD-10 narrowed by the computed-box battery with two measured findings — FINDING 1: table
+sort buttons measure ~16px, below the 24px floor (pinned as a numeric FINDING case, fix
+direction recorded; fix lane dispatched, see below); FINDING 2: pseudo-element hit-areas
+confirmed top-side only. DD-18r narrowed (Fleet/LineDetail/Ops viewport matrix in CI; Inbox
+rows unblocked but unwritten; drawer-flip case undelivered). DD-19 closed by the integrator
+on this packet's evidence. The packet's own strong-claim audit recorded one commit-message
+overclaim, one false test pointer, and one name/assertion mismatch — all listed, none
+silent. Omissions named: drawer-squeeze suite, focus-ring battery, honesty-label edits,
+DD-23 fold case, CI cache + failure-screenshot artifacts, the C-D7-2 live glance.
+
+---
+
+## B3 wave 4 — AddLineWizard onto Modal; dialog burn-down COMPLETE — 2026-06-12
+
+**Verdict: Inconclusive — committed; acceptance evidence packet outstanding** (same standing
+as waves 2–3; live QA pending).
+
+`061986ee` after packet `b3-wave4-investigation.md` (`6be734a6`, Blocked(decision)) and the
+operator-approved wave-4 decisions (`b970a138`: wizard-local step composite + save-unlinked
+discard). The last ad-hoc dialog adopts the shell: open-prop latched lazy mount with
+reset-on-open (SoupKitchen's conditional mount would have silently lost focus restore and
+exit motion), the step strip rebuilt as the wizard-local composite to the locked v2 anatomy
+with aria-current and tokenized step accents, instant step transitions with framer-motion
+leaving the file, and the operator-approved discard fix: abandoning after creation keeps the
+line unlinked as the confirmation copy always promised — deletion no longer silent
+(test-pinned: deleteLine never fires on discard). Static data-line-type accents replace the
+runtime injection, retiring WVR-014 — the retirement the D6 packet had flagged as sitting
+uncommitted in the wizard lane (registry 11→10 active, matching the metrics expectation
+recorded there). Token endgame grep-proven: panel-wizard, modal-min-h, the orphaned
+overlay alias, and the stepper one-offs deleted; the c-dialog-backdrop block is dead
+console-wide. AddLineWizard joins the scoped-error M list and **the ad-hoc-modal shadow set
+is EMPTY across the console** — the dialog burn-down that began at C2.2 is complete; every
+dialog surface renders through Modal. New 23-test written-first behavioral suite; ratchet
+501→486 with every wizard bucket eliminated (commit record). Resumed from a session-limit-
+terminated lane; integrator-verified end to end.
+
+---
+
+## B5 hook unit suites — coverage floor breach closed — 2026-06-12
+
+**Verdict: Pass.**
+
+`889bff89`: closes the coverage-floor breach the per-directory ratchet caught at D6
+(test-coverage-audit refresh: hooks 91.79% statements vs the 97 floor, wholly attributable
+to the two new B5 hooks). use-exit-presence rises 32→88.5% statements (stubbed computed
+durations drive the closing phase in jsdom: guarded animationend, timeout fallback under
+fake timers, instant path, StrictMode double-invoke, rapid reopen); use-background-inert
+reaches full statement coverage (refcount across stacked consumers, release ordering,
+missing-root guard, unmount-while-open cleanup). 42 tests; suite 2,374 green (commit
+record). Remaining gaps held honestly: jsdom-unreachable SSR guards accepted, and one
+structurally-dead branch the suite analysis exposed — the cancelClosingRef reopen-cancel
+mechanism never executes because React effect cleanup nulls the ref before the open=true
+check runs — filed as **DD-30** (C3 hook-design finding; whether reopen-mid-dwell can leave
+the closing phase stale needs a browser round-trip proof, not a blind delete).
+
+---
+
+## DD-10 sort-button floor — fix lane DISPATCHED — 2026-06-12
+
+**Verdict: Inconclusive — lane in flight.**
+
+Fix lane dispatched for the D7 packet's FINDING 1: give `.soup-table-th__sort-btn` a
+min-height meeting the 24px floor and flip the target-size suite's numeric FINDING case to
+the floor assertion as the fix proof (the remediation direction the suite itself records).
+No commit yet; the DD-10 register row carries the remaining scope (sort-button fix +
+bottom hit-extension proof or accepted ruling).
