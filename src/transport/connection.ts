@@ -48,6 +48,7 @@ import { decideDisconnectAction } from './auth-disconnect-policy.ts';
 import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
 import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
+import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 
 function connectionWriteError(message: string, code: string): NodeJS.ErrnoException {
@@ -677,6 +678,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (preflight.status === 'invalid') {
         this.emitLocalAuthBondFailureAlert('connect-preflight', preflight);
       }
+
+      installThirdPartyConsoleRedaction();
 
       const { state } = await useMultiFileAuthState(config.authDir);
       const saveCredsAtomically = createAtomicCredsSaver(config.authDir, () => state.creds);

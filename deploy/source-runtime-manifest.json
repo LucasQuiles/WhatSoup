@@ -32,7 +32,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "7e767c8b9ed50c35052db17780817caf09f06a7ba1ee6f97436aec49b0276389",
+      "sha256": "59a6145dd21ede81d3b1645cecbce66d342fe82beb2449b470eb61ef9d6c88fa",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -42,7 +42,7 @@
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "35c9626503da9327d7dd0bfe104e498e49b948d75d757e6df05f8208050abc09",
+      "sha256": "c65617671c70c3560b3c6856972f0cefa8157265f19a37e875062ce85af477a7",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"

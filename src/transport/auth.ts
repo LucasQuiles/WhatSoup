@@ -18,6 +18,7 @@ import { config } from '../config.ts';
 import { decideDisconnectAction } from './auth-disconnect-policy.ts';
 import { redactAuthCliText } from './auth-cli-redaction.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
+import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,8 @@ function recordRestartRequired(statusCode: number | undefined): number {
 }
 
 async function startSocket(): Promise<void> {
+  installThirdPartyConsoleRedaction();
+
   const { state } = await useMultiFileAuthState(config.authDir);
   const saveCreds = createAtomicCredsSaver(config.authDir, () => state.creds);
   const resolvedVersion = await resolveBaileysVersion();
