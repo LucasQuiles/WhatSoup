@@ -1,7 +1,11 @@
 # DD-8 Decision Package — ghost-tier essential-text spec conflict
 
-Status: **USER-GATED** — per program-directives §2, spec conflicts route to a debt entry
-plus a user decision; this package frames that decision. It implements nothing.
+Status: **DECIDED 2026-06-12 — Option B approved by operator** (promote the time lane
+and detail-component to --text-2). Spec amendment landed in log-stream.md; the two
+CSS ink changes landed with the decision-execution commit. Remaining DD-8 work is the
+per-screen essential-text corrections in the package's decision-independent list,
+owned by the C3 stage. Contrast claims in this package were independently recomputed
+by the integrator before approval (4.14/3.37 fail; 7.60/6.03 pass).
 Inputs: `06-implementation/dd8-ghost-survey.md` (staged survey), `03-spec/color.md`,
 `03-spec/components/log-stream.md`, the design-debt register DD-8 row, live tokens in
 `console/src/styles/tokens.semantic.css`, and a fresh whole-tree call-site sweep
