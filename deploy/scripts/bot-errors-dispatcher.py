@@ -595,30 +595,30 @@ def daily_health_recovered_incident_keys(
         probe = match.group(2).strip()
         scope = f"{machine}|{instance}"
         for source in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES:
-            key = f"{scope}|{source}"
-            record = open_incidents.get(key)
-            if not isinstance(record, dict):
-                continue
-            status = str(record.get("status") or "open")
-            if status in {"closed", "resolved"}:
-                continue
-            opened = int_field(record, "eventCreatedAtEpoch")
-            if opened > 0 and created is not None and created < opened:
-                continue
-            require_outbound_proof = source in DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES
-            if not is_verified_whatsapp_health_recovery(probe, require_outbound_proof=require_outbound_proof):
-                continue
-            if require_outbound_proof:
-                outbound_epoch = evidence_epoch(probe, "outbound_success_at")
-                if outbound_epoch is None:
+            for key in [f"{scope}|{source}", f"{scope}|daily-health:{source}"]:
+                record = open_incidents.get(key)
+                if not isinstance(record, dict):
                     continue
-                opened_at = int_field(record, "openedAt", opened)
-                required_after = max(opened, opened_at)
-                if required_after > 0 and outbound_epoch <= required_after:
+                status = str(record.get("status") or "open")
+                if status in {"closed", "resolved"}:
                     continue
-            if key not in seen:
-                seen.add(key)
-                recovered.append(key)
+                opened = int_field(record, "eventCreatedAtEpoch")
+                if opened > 0 and created is not None and created < opened:
+                    continue
+                require_outbound_proof = source in DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES
+                if not is_verified_whatsapp_health_recovery(probe, require_outbound_proof=require_outbound_proof):
+                    continue
+                if require_outbound_proof:
+                    outbound_epoch = evidence_epoch(probe, "outbound_success_at")
+                    if outbound_epoch is None:
+                        continue
+                    opened_at = int_field(record, "openedAt", opened)
+                    required_after = max(opened, opened_at)
+                    if required_after > 0 and outbound_epoch <= required_after:
+                        continue
+                if key not in seen:
+                    seen.add(key)
+                    recovered.append(key)
     return recovered
 
 
@@ -2001,6 +2001,9 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
         asset_kind = str(critical_asset_asset(event).get("kind") or "").strip()
         if asset_kind:
             updated_record["assetKind"] = asset_kind
+        asset_instance = str(critical_asset_asset(event).get("instance") or "").strip()
+        if asset_instance:
+            updated_record["assetInstance"] = asset_instance
         update_awaiting_physical_tracking(event, updated_record, current)
         incident_state.setdefault("openIncidents", {})[key] = updated_record
         legacy_key = legacy_unqualified_incident_key(event)

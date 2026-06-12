@@ -10,6 +10,10 @@ const logger = vi.hoisted(() => ({
 }));
 const alertThrottleStore = vi.hoisted(() => ({
   loadAlertThrottle: vi.fn(() => new Map<string, string>()),
+  loadAlertThrottleDetailed: vi.fn((): {
+    entries: Map<string, string>;
+    loadError: { file: string; code?: string; error: string } | null;
+  } => ({ entries: new Map<string, string>(), loadError: null })),
   recordAlertThrottle: vi.fn(),
 }));
 const silenceManager = vi.hoisted(() => ({
@@ -60,6 +64,8 @@ describe('HealthPoller', () => {
     emitAlert.mockClear();
     alertThrottleStore.loadAlertThrottle.mockReset();
     alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
+    alertThrottleStore.loadAlertThrottleDetailed.mockReset();
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({ entries: new Map(), loadError: null });
     alertThrottleStore.recordAlertThrottle.mockClear();
     silenceManager.isInstanceSilenced.mockReset();
     silenceManager.isInstanceSilenced.mockReturnValue(false);
@@ -406,6 +412,185 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('does not classify a backoff-zero reconnect hint as logged_out without disconnected corroboration', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'healthy',
+        whatsapp: {
+          connected: true,
+          account_jid: '15550001111@s.whatsapp.net',
+          connection: {
+            state: 'connected',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['mini4', makeInstance({ name: 'mini4', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('mini4');
+    expect(status).toMatchObject({
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+    });
+    expect(status!.statusEvidence).toEqual(expect.arrayContaining([
+      'health_status=healthy',
+      'whatsapp_connected=true',
+      'account_jid_status=present',
+      'connection_state=connected',
+      'reconnect_phase=backoff',
+      'reconnect_attempts=0',
+    ]));
+    expect(emitAlert).toHaveBeenCalledWith(
+      'mini4',
+      'instance_degraded',
+      'whatsoup@mini4 is degraded',
+      expect.stringContaining('confidence=ambiguous'),
+      'critical',
+    );
+    expect(emitAlert).not.toHaveBeenCalledWith(
+      'mini4',
+      'instance_logged_out',
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+
+  it('includes recent disconnect churn evidence for degraded connected instances', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        whatsapp: {
+          connected: true,
+          account_jid: '15550001111@s.whatsapp.net',
+          connection: {
+            state: 'connected',
+            reconnect_phase: null,
+            reconnect_attempts: 0,
+            last_disconnect_reason: null,
+            last_status_code: null,
+            recent_disconnects: {
+              window_ms: 600_000,
+              degraded_threshold: 3,
+              count: 4,
+              last_at: '2026-05-20T11:59:30.000Z',
+              last_reason: 'connectionReplaced',
+              last_status_code: 440,
+            },
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('remote-1');
+    expect(status).toMatchObject({
+      status: 'degraded',
+      statusConfidence: 'confirmed',
+      statusReason: 'health_body_degraded',
+    });
+    expect(status!.statusEvidence).toEqual(expect.arrayContaining([
+      'health_status=degraded',
+      'whatsapp_connected=true',
+      'connection_state=connected',
+      'recent_disconnect_count=4',
+      'recent_disconnect_threshold=3',
+      'recent_disconnect_window_ms=600000',
+      'recent_disconnect_last_at=2026-05-20T11:59:30.000Z',
+      'recent_disconnect_last_reason=connectionReplaced',
+      'recent_disconnect_last_status_code=440',
+    ]));
+  });
+
+  it('classifies backoff-zero as logged_out only when disconnected evidence corroborates it', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        whatsapp: {
+          connected: false,
+          account_jid: 'not connected',
+          connection: {
+            state: 'reconnecting',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('remote-1');
+    expect(status).toMatchObject({
+      status: 'logged_out',
+      statusConfidence: 'inferred',
+      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+      error: null,
+    });
+    expect(emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('reason=whatsapp_backoff_zero_attempts_with_disconnect_corroboration'),
+      'critical',
+    );
+  });
+
+  it('parses non-ok health JSON before falling back to generic HTTP failure', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          account_jid: 'not connected',
+          connection: {
+            state: 'disconnected',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'logged_out',
+      consecutiveFailures: 0,
+      error: null,
+      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+    });
+  });
+
   it('logs and continues when a status change listener throws', async () => {
     mockFetch.mockRejectedValue(new Error('connection refused'));
 
@@ -466,7 +651,10 @@ describe('HealthPoller', () => {
 
   it('hydrates lastAlertAt from the persisted alert throttle store', async () => {
     const lastAlertAt = '2026-05-20T11:55:00.000Z';
-    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map([['remote-1', lastAlertAt]]));
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([['remote-1', lastAlertAt]]),
+      loadError: null,
+    });
     mockFetch.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ status: 'healthy' }),
@@ -510,9 +698,12 @@ describe('HealthPoller', () => {
   });
 
   it('suppresses restart-cycle alerts using persisted lastAlertAt', async () => {
-    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map([
-      ['remote-1', '2026-05-20T11:55:00.000Z'],
-    ]));
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([
+        ['remote-1', '2026-05-20T11:55:00.000Z'],
+      ]),
+      loadError: null,
+    });
     mockFetch.mockRejectedValue(new Error('connection refused'));
 
     const instances = makeInstances(
@@ -537,6 +728,41 @@ describe('HealthPoller', () => {
       }),
       'alert suppressed — rate limit (15min)',
     );
+
+    poller.stop();
+  });
+
+  it('marks alert evidence when persisted alert throttle state was unreadable', async () => {
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map(),
+      loadError: { file: '/redacted/fleet-alert-throttle.json', code: 'EACCES', error: 'permission denied' },
+    });
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    // An instance that has never answered on its health port is a never-reachable
+    // phantom (hub hardening): it pages as a non-critical warning, not a critical
+    // outage. The throttle-load-error evidence must still be threaded through this
+    // alert path and the raw error file path must still be redacted.
+    expect(emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_never_reachable',
+      'whatsoup@remote-1 configured but never came online (3 consecutive poll failures)',
+      expect.stringContaining('alert_throttle_load_error=true alert_throttle_load_error_code=EACCES'),
+      'warning',
+    );
+    expect(emitAlert.mock.calls[0]?.[3]).not.toContain('/redacted');
+    expect(emitAlert.mock.calls[0]?.[3]).not.toContain('permission denied');
 
     poller.stop();
   });

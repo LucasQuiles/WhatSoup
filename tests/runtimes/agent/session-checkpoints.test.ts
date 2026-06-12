@@ -191,11 +191,12 @@ describe('SessionManager — durability checkpoints', () => {
     expect(upsertCalls).toStrictEqual([
       [CONVERSATION_KEY, { sessionStatus: 'orphaned' }],
     ]);
-    expect(onCrash).toHaveBeenCalledWith({
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
       exitCode: 1,
       signal: null,
       sessionId: null,
       dbRowId: 42,
-    });
+      provider: 'claude-cli',
+    }));
   });
 });

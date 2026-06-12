@@ -29,6 +29,10 @@ import {
   type ProviderId,
 } from './providers/index.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
+import {
+  appendProviderCrashPreview,
+  buildProviderCrashMetadata,
+} from './provider-crash-diagnostics.ts';
 import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 
 const log = createChildLogger('session-manager');
@@ -72,6 +76,12 @@ export interface SessionCrashInfo {
   sessionId: string | null;
   /** The agent_sessions DB row ID — useful for resume with existing row. */
   dbRowId: number | null;
+  /** Provider that crashed, when known. */
+  provider?: string;
+  /** Coarse, non-secret crash class derived from provider output. */
+  crashClass?: string;
+  /** Redacted, bounded stderr preview from the provider process. */
+  stderrPreview?: string;
 }
 
 export interface SessionManagerOptions {
@@ -116,6 +126,7 @@ export function buildChildEnv(
   provider: string = 'claude-cli',
   baseOpts?: BuildBaseChildEnvOptions,
   model?: string,
+  providerConfig?: Record<string, unknown>,
 ): NodeJS.ProcessEnv {
   if (!isProviderId(provider)) {
     throw new Error(
@@ -153,16 +164,37 @@ export function buildChildEnv(
       // lookupCredential resolves env → keychain; SERVICE_ENV_MAP is the single
       // source of truth for the service→env-var mapping (no second copy).
       const services = new Set<string>(['deepseek', 'minimax']);
+      const warnUnmapped = (service: string, source: string): void => {
+        if (warnedUnmappedKeyServices.has(service)) return;
+        warnedUnmappedKeyServices.add(service);
+        log.warn(
+          { provider, model, service, source },
+          `[session-manager:buildChildEnv] ${source} resolves to key service "${service}" but SERVICE_ENV_MAP has no entry for it — no API key env var will be forwarded to the child. Register the service in SERVICE_ENV_MAP (src/lib/keyring.ts) to enable forwarding.`,
+        );
+      };
+      // Custom-endpoint auth lane: the opencode.json provider block references
+      // the endpoint key as `{env:<ENVVAR>}` for the service named by
+      // providerConfig.apiKeyService — inject that service's key on top of the
+      // defaults so the interpolation resolves inside the child.
+      const endpointServiceRaw = providerConfig?.['apiKeyService'];
+      const endpointService =
+        typeof endpointServiceRaw === 'string' && endpointServiceRaw.trim() !== ''
+          ? endpointServiceRaw
+          : undefined;
+      const endpointServiceMapped = endpointService !== undefined && Boolean(SERVICE_ENV_MAP[endpointService]);
+      if (endpointService) {
+        if (endpointServiceMapped) services.add(endpointService);
+        else warnUnmapped(endpointService, 'providerConfig.apiKeyService');
+      }
       const modelService = resolveProviderKeyService(provider, model);
       if (modelService) {
         if (SERVICE_ENV_MAP[modelService]) {
           services.add(modelService);
-        } else if (!warnedUnmappedKeyServices.has(modelService)) {
-          warnedUnmappedKeyServices.add(modelService);
-          log.warn(
-            { provider, model, service: modelService },
-            `[session-manager:buildChildEnv] model prefix resolves to key service "${modelService}" but SERVICE_ENV_MAP has no entry for it — no API key env var will be forwarded to the child. Register the service in SERVICE_ENV_MAP (src/lib/keyring.ts) to enable forwarding.`,
-          );
+        } else if (!endpointServiceMapped) {
+          // A mapped explicit endpoint key service already covers auth — a
+          // bare custom-endpoint model id has no meaningful prefix, so the
+          // unmapped-prefix warning would be misleading noise there.
+          warnUnmapped(modelService, 'model prefix');
         }
       }
       for (const svc of services) {
@@ -235,6 +267,20 @@ export function getProviderBinary(provider: string): string | null {
   return resolveProviderBinary(provider);
 }
 
+/**
+ * Whether an opencode-cli session routes through a custom endpoint configured
+ * in opencode.json. The config writer (mergeOpencodeConfig) merges a provider
+ * block for `providerConfig.baseUrl` and points opencode.json's top-level
+ * `model` at it (`<providerId>/<model>`). An explicit `-m <model>` argv would
+ * override that file-level routing and send the turn to opencode's own
+ * catalog instead — so sessions with a baseUrl must omit `-m` and let
+ * opencode resolve the model from the config file.
+ */
+function opencodeUsesConfigModel(providerConfig: Record<string, unknown> | undefined): boolean {
+  const baseUrl = providerConfig?.['baseUrl'];
+  return typeof baseUrl === 'string' && baseUrl.trim() !== '';
+}
+
 /** Resolve the argv for a CLI-backed provider. */
 function resolveProviderArgs(
   provider: ProviderId,
@@ -243,6 +289,7 @@ function resolveProviderArgs(
   resumeSessionId: string | undefined,
   model: string | undefined,
   pluginDirs: string[],
+  providerConfig?: Record<string, unknown>,
 ): string[] {
   switch (provider) {
     case 'claude-cli':
@@ -269,7 +316,7 @@ function resolveProviderArgs(
         'run',
         '--format', 'json',
         '--pure',
-        ...(model ? ['-m', model] : []),
+        ...(model && !opencodeUsesConfigModel(providerConfig) ? ['-m', model] : []),
       ];
     case 'openai-api':
     case 'anthropic-api':
@@ -325,6 +372,7 @@ export const __provider_switch_for_test = {
     resumeSessionId: string | undefined,
     model: string | undefined,
     pluginDirs: string[],
+    providerConfig?: Record<string, unknown>,
   ): string[] {
     if (!isProviderId(provider)) {
       throw new Error(
@@ -332,7 +380,7 @@ export const __provider_switch_for_test = {
           `Valid: ${PROVIDER_IDS.join(', ')}.`,
       );
     }
-    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, model, pluginDirs);
+    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, model, pluginDirs, providerConfig);
   },
   getParser(provider: string): (line: string) => AgentEvent | null {
     if (!isProviderId(provider)) {
@@ -418,6 +466,7 @@ export class SessionManager {
   private lastCrashNotifiedAt: number | null = null;
   private static readonly CRASH_NOTIFY_COOLDOWN_MS = 60_000;
   private shutdownKillTimer: ReturnType<typeof setTimeout> | null = null;
+  private crashStderrPreview = '';
 
   private durability: DurabilityEngine | null = null;
 
@@ -507,7 +556,7 @@ export class SessionManager {
 
   private getProviderArgs(systemPrompt: string, cwd: string, resumeSessionId?: string): string[] {
     const provider = this.assertKnownProvider('getProviderArgs');
-    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, this.model, this.pluginDirs);
+    return resolveProviderArgs(provider, systemPrompt, cwd, resumeSessionId, this.model, this.pluginDirs, this.providerConfig);
   }
 
   buildSystemPrompt(): string {
@@ -756,7 +805,14 @@ export class SessionManager {
     switch (this.provider) {
       // codex-cli and gemini-cli are now persistent, not spawn-per-turn.
 
-      case 'opencode-cli':
+      case 'opencode-cli': {
+        // Custom endpoint (providerConfig.baseUrl): the model is resolved from
+        // opencode.json's top-level `model` (written by the config merge), so
+        // `-m` must be omitted — see opencodeUsesConfigModel.
+        const modelArgs =
+          this.model && !opencodeUsesConfigModel(this.providerConfig)
+            ? ['-m', this.model]
+            : [];
         if (this.sessionId && !this.sessionId.startsWith('opencode-cli-')) {
           // Resume previous session for multi-turn memory
           log.info({ chatJid: this.chatJid, provider: this.provider, sessionId: this.sessionId }, 'opencode: resuming session');
@@ -765,7 +821,7 @@ export class SessionManager {
             '--format', 'json',
             '--pure',
             '--session', this.sessionId,
-            ...(this.model ? ['-m', this.model] : []),
+            ...modelArgs,
             prompt,
           ];
         }
@@ -774,9 +830,10 @@ export class SessionManager {
           'run',
           '--format', 'json',
           '--pure',
-          ...(this.model ? ['-m', this.model] : []),
+          ...modelArgs,
           prompt,
         ];
+      }
 
       default:
         return this.getProviderArgs('', cwd);
@@ -824,6 +881,7 @@ export class SessionManager {
       this.managedProviderSession = providerSession;
       this.active = true;
       this.resetStdoutBuffers();
+      this.crashStderrPreview = '';
       this.startedAt = new Date().toISOString();
       this.messageCount = 0;
       this.lastMessageAt = null;
@@ -859,7 +917,7 @@ export class SessionManager {
           allowM365Mutations: this.allowM365Mutations,
           instanceName: this.instanceName,
           onEvent: (event) => this.handleProviderEvent(event),
-          onCrash: ({ exitCode, signal }) => {
+          onCrash: ({ exitCode, signal, provider, crashClass, stderrPreview }) => {
             const crashedSessionId = this.sessionId;
             const crashedDbRowId = this.dbRowId;
             if (this.dbRowId !== null) {
@@ -874,6 +932,7 @@ export class SessionManager {
               signal: signal as NodeJS.Signals | null,
               sessionId: crashedSessionId,
               dbRowId: crashedDbRowId,
+              ...this.buildCrashMetadata(crashClass, stderrPreview, provider ?? this.provider),
             });
           },
           mcpBridge: this.mcpBridge,
@@ -919,6 +978,7 @@ export class SessionManager {
       this.startedAt = new Date().toISOString();
       this.systemPrompt = systemPrompt;
       this.configuredCwd = cwd;
+      this.crashStderrPreview = '';
       // Record in DB with pid=0 (no process yet)
       if (existingRowId !== undefined) {
         this.dbRowId = existingRowId;
@@ -956,12 +1016,14 @@ export class SessionManager {
           whatsoupMcpSocket: this.whatsoupMcpSocket,
         },
         this.model,
+        this.providerConfig,
       ),
     });
 
     this.child = child;
     this.active = true;
     this.resetStdoutBuffers();
+    this.crashStderrPreview = '';
     this.startedAt = new Date().toISOString();
     this.messageCount = 0;
     this.lastMessageAt = null;
@@ -1079,7 +1141,13 @@ export class SessionManager {
       this.sessionId = null;
       // Notify user — without this, spawn failures are silent and the chat goes dead
       this.notifyUser?.('_Agent failed to start — will retry on your next message._');
-      this.onCrash?.({ exitCode: null, signal: null, sessionId: null, dbRowId: null });
+      this.onCrash?.({
+        exitCode: null,
+        signal: null,
+        sessionId: null,
+        dbRowId: null,
+        ...this.buildCrashMetadata('spawn_error', err.message),
+      });
     });
 
     // Pipe stdout through line parser — use provider-specific parser
@@ -1150,13 +1218,15 @@ export class SessionManager {
 
     // Log stderr but don't act on it
     child.stderr.on('data', (chunk: Buffer) => {
-      const stderr = chunk.toString('utf8').trim();
-      if (!stderr) return;
+      const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
+      if (nextPreview === this.crashStderrPreview) return;
+      this.crashStderrPreview = nextPreview;
+      if (!this.crashStderrPreview) return;
       log.warn({
         provider: this.provider,
         chatJid: this.chatJid,
         pid: child.pid ?? null,
-        stderrPreview: stderr.slice(0, 500),
+        stderrPreview: this.crashStderrPreview.slice(-500),
       }, 'claude stderr');
     });
 
@@ -1231,7 +1301,13 @@ export class SessionManager {
         // Allow the runtime to clean up the outbound queue (clears typing heartbeat).
         // onCrash does NOT send 'paused' — the composing indicator times out naturally,
         // acting as a soft signal to the user that the session is in trouble.
-        this.onCrash?.({ exitCode: code, signal, sessionId: crashedSessionId, dbRowId: crashedDbRowId });
+        this.onCrash?.({
+          exitCode: code,
+          signal,
+          sessionId: crashedSessionId,
+          dbRowId: crashedDbRowId,
+          ...this.buildCrashMetadata(),
+        });
         this.notifyUnexpectedExit(code, signal);
       }
     });
@@ -1403,11 +1479,28 @@ export class SessionManager {
     }
 
     log.warn({ err, provider: this.provider, chatJid: this.chatJid, sessionId: crashedSessionId, dbRowId: crashedDbRowId, reason }, 'managed provider session crashed');
+    const errText = err instanceof Error ? `${err.name}: ${err.message}` : err === undefined ? undefined : String(err);
+    const extraText = [reason, errText].filter(Boolean).join('\n');
+    const fallbackClass = reason.includes('watchdog') ? 'provider_turn_watchdog' : 'managed_provider_error';
     this.onCrash?.({
       exitCode: null,
       signal: null,
       sessionId: crashedSessionId,
       dbRowId: crashedDbRowId,
+      ...this.buildCrashMetadata(fallbackClass, extraText),
+    });
+  }
+
+  private buildCrashMetadata(
+    fallbackClass?: string,
+    extraText?: string,
+    provider = this.provider,
+  ): Pick<SessionCrashInfo, 'provider' | 'crashClass' | 'stderrPreview'> {
+    return buildProviderCrashMetadata({
+      provider,
+      existingPreview: this.crashStderrPreview,
+      extraText,
+      fallbackClass,
     });
   }
 
@@ -1467,6 +1560,7 @@ export class SessionManager {
       // Clear any partial JSON from the previous turn before spawning a new process.
       // Without this, leftover bytes in the buffer can corrupt the next turn's output.
       this.resetStdoutBuffers();
+      this.crashStderrPreview = '';
 
       // Reset provider-specific parser state so the next turn's first step_start
       // is correctly recognized as an init event.
@@ -1498,6 +1592,7 @@ export class SessionManager {
             whatsoupMcpSocket: this.whatsoupMcpSocket,
           },
           this.model,
+          this.providerConfig,
         ),
       });
 
@@ -1526,7 +1621,13 @@ export class SessionManager {
         this.active = false;
         this.child = null;
         this.notifyUser?.('_Agent failed to start — will retry on your next message._');
-        this.onCrash?.({ exitCode: null, signal: null, sessionId: null, dbRowId: null });
+        this.onCrash?.({
+          exitCode: null,
+          signal: null,
+          sessionId: null,
+          dbRowId: null,
+          ...this.buildCrashMetadata('spawn_error', err.message),
+        });
       });
 
       child.stdout.on('data', (chunk: Buffer) => {
@@ -1539,13 +1640,15 @@ export class SessionManager {
       });
 
       child.stderr.on('data', (chunk: Buffer) => {
-        const stderr = chunk.toString('utf8').trim();
-        if (!stderr) return;
+        const nextPreview = appendProviderCrashPreview(this.crashStderrPreview, chunk);
+        if (nextPreview === this.crashStderrPreview) return;
+        this.crashStderrPreview = nextPreview;
+        if (!this.crashStderrPreview) return;
         log.warn({
           provider: this.provider,
           chatJid: this.chatJid,
           pid: child.pid ?? null,
-          stderrPreview: stderr.slice(0, 500),
+          stderrPreview: this.crashStderrPreview.slice(-500),
         }, 'provider stderr');
       });
 
@@ -1587,6 +1690,7 @@ export class SessionManager {
             signal,
             sessionId: this.sessionId,
             dbRowId: this.dbRowId,
+            ...this.buildCrashMetadata(),
           });
           this.notifyUnexpectedExit(code, signal);
         }

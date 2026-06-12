@@ -7,29 +7,47 @@
 // switches used a `default:` fall-through.
 //
 // Add a new provider:
-//   1. Append the canonical ID below (kebab-case, transport-suffixed).
+//   1. Append the canonical ID to provider-ids.json (kebab-case,
+//      transport-suffixed) AND to the ProviderIdTuple type below — the
+//      registry test pins the two in lockstep.
 //   2. Add display name in src/runtimes/agent/session.ts PROVIDER_DISPLAY_NAMES.
 //   3. Add a case in the three switches in session.ts (getProviderBinary,
 //      getProviderArgs, getParser) — TypeScript will surface any miss via
 //      the assertNever pattern at the throw site.
-//   4. Mirror the entry in console/src/lib/providers.ts (PROVIDERS).
+//   4. Add display metadata in console/src/lib/providers.ts (PROVIDER_META) —
+//      the ID list itself is shared via provider-ids.json, so the console
+//      picks up the new ID automatically.
 //   5. Add an impl file (parser or API client) here under providers/.
 
+import providerIdsJson from './provider-ids.json' with { type: 'json' };
+
 /**
- * Canonical, ordered list of supported provider IDs. Frozen at module load
- * so accidental mutation throws in strict mode. Treat as a closed set — if
- * a new provider is needed, add it here and update the consumers listed
- * above (the conformance test in tests/runtimes/agent/providers/registry.test.ts
- * pins the relationship to impl files).
+ * Literal tuple type of the canonical provider IDs. TypeScript widens JSON
+ * imports to `string[]`, so the literal types live here while the runtime
+ * values live in provider-ids.json (the single source shared with the
+ * console). tests/runtimes/agent/providers/registry.test.ts pins the JSON
+ * values to this tuple, so the two cannot drift silently.
  */
-export const PROVIDER_IDS = Object.freeze([
+type ProviderIdTuple = readonly [
   'claude-cli',
   'codex-cli',
   'gemini-cli',
   'opencode-cli',
   'openai-api',
   'anthropic-api',
-] as const);
+];
+
+/**
+ * Canonical, ordered list of supported provider IDs, loaded from
+ * provider-ids.json (shared with the console catalog). Frozen at module load
+ * so accidental mutation throws in strict mode. Treat as a closed set — if
+ * a new provider is needed, follow the steps listed above (the conformance
+ * test in tests/runtimes/agent/providers/registry.test.ts pins the
+ * relationship to impl files).
+ */
+export const PROVIDER_IDS: ProviderIdTuple = Object.freeze(
+  providerIdsJson,
+) as ProviderIdTuple;
 
 /** Discriminated-union of supported provider IDs derived from {@link PROVIDER_IDS}. */
 export type ProviderId = (typeof PROVIDER_IDS)[number];

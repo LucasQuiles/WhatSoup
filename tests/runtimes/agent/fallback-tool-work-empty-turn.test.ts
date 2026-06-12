@@ -185,7 +185,8 @@ describe('fallback empty-turn suppression when turn had tool work', () => {
     // Turn was served but NOT counted as empty — tool activity was the reply.
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(1);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
-    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
+    expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
     expect(queue.enqueueText).not.toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
     );

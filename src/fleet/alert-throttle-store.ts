@@ -11,6 +11,17 @@ const ALERT_THROTTLE_FILE = join(CONFIG_DIR, 'fleet-alert-throttle.json');
 
 export const ALERT_THROTTLE_INTERVAL_MS = 15 * 60 * 1000;
 
+export interface AlertThrottleLoadError {
+  file: string;
+  code?: string;
+  error: string;
+}
+
+export interface AlertThrottleLoadResult {
+  entries: Map<string, string>;
+  loadError: AlertThrottleLoadError | null;
+}
+
 function isFreshTimestamp(value: unknown, nowMs: number): value is string {
   if (typeof value !== 'string') return false;
   const timestampMs = Date.parse(value);
@@ -40,13 +51,21 @@ function saveThrottle(entries: Map<string, string>): void {
   }
 }
 
-export function loadAlertThrottle(nowMs = Date.now()): Map<string, string> {
+export function loadAlertThrottleDetailed(nowMs = Date.now()): AlertThrottleLoadResult {
   try {
     const parsed = JSON.parse(readFileSync(ALERT_THROTTLE_FILE, 'utf-8')) as unknown;
-    if (!isRecord(parsed)) return new Map();
+    if (!isRecord(parsed)) {
+      return {
+        entries: new Map(),
+        loadError: {
+          file: ALERT_THROTTLE_FILE,
+          error: 'throttle file root is not an object',
+        },
+      };
+    }
 
     const entries = Object.entries(parsed).filter(([, value]) => isFreshTimestamp(value, nowMs)) as Array<[string, string]>;
-    return new Map(entries);
+    return { entries: new Map(entries), loadError: null };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
@@ -55,8 +74,21 @@ export function loadAlertThrottle(nowMs = Date.now()): Map<string, string> {
         'failed to load alert throttle file — resetting to empty (corrupt or unreadable)',
       );
     }
-    return new Map();
+    return {
+      entries: new Map(),
+      loadError: code === 'ENOENT'
+        ? null
+        : {
+            file: ALERT_THROTTLE_FILE,
+            ...(typeof code === 'string' ? { code } : {}),
+            error: err instanceof Error ? err.message : String(err),
+          },
+    };
   }
+}
+
+export function loadAlertThrottle(nowMs = Date.now()): Map<string, string> {
+  return loadAlertThrottleDetailed(nowMs).entries;
 }
 
 export function recordAlertThrottle(name: string, lastAlertAt: string, nowMs = Date.now()): void {

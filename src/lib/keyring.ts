@@ -12,42 +12,13 @@ import { createChildLogger } from '../logger.ts';
 
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
 
-// Probe URLs for fallback credential pre-flight live in src/runtimes/agent/providers/credential-verify.ts (PROBE_ENDPOINTS) — keep services in sync.
-/** Map service names to their conventional env var names. */
-export const SERVICE_ENV_MAP: Record<string, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  minimax: 'MINIMAX_API_KEY',
-  pinecone: 'PINECONE_API_KEY',
-  elevenlabs: 'ELEVENLABS_API_KEY',
-  'whatsoup-health-token': 'WHATSOUP_HEALTH_TOKEN',
-  whatsoup_health: 'WHATSOUP_HEALTH_TOKEN',
-};
+// The pure service map + resolver live in provider-key-service.ts (no
+// child_process/logger imports) so the config validator and provider MCP
+// config generation can consume them. Re-exported here so runtime callers
+// keep one import site for everything keyring-shaped.
+import { SERVICE_ENV_MAP } from './provider-key-service.ts';
 
-export function resolveProviderKeyService(
-  provider: unknown,
-  model: unknown,
-  providerConfig?: unknown,
-): string | null {
-  if (providerConfig && typeof providerConfig === 'object' && !Array.isArray(providerConfig)) {
-    const service = (providerConfig as Record<string, unknown>)['apiKeyService'];
-    if ((provider === 'openai-api' || provider === 'anthropic-api') && typeof service === 'string') {
-      if (service.length > 0) return service;
-    }
-  }
-  if (provider === 'opencode-cli') {
-    const prefix = typeof model === 'string' ? model.split('/')[0]?.trim() : '';
-    return prefix ? prefix.toLowerCase() : null;
-  }
-  if (provider === 'openai-api') {
-    return 'openai';
-  }
-  if (provider === 'anthropic-api') {
-    return 'anthropic';
-  }
-  return null;
-}
+export { SERVICE_ENV_MAP, resolveProviderKeyService } from './provider-key-service.ts';
 
 const SERVICE_MIGRATION_FALLBACKS: Record<string, string[]> = {
   'whatsoup-health-token': ['whatsoup_health'],

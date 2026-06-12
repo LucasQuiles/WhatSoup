@@ -89,4 +89,62 @@ describe('ClaudeProvider child env', () => {
 
     expect(env).not.toHaveProperty('ALLOW_M365_MUTATIONS');
   });
+
+  it('classifies and redacts stderr in crash callbacks', async () => {
+    const provider = new ClaudeProvider();
+    const onCrash = vi.fn();
+    const child = makeChild();
+    const email = `lucas${'@'}example.com`;
+    const token = 'abcdefghijklmnopqrstuvwxyz';
+    spawnMock.mockReturnValueOnce(child);
+
+    await provider.initialize({
+      cwd: '/tmp/whatsoup-provider',
+      systemPrompt: 'system prompt',
+      instanceName: 'test',
+      onEvent: vi.fn(),
+      onCrash,
+    });
+
+    child.stderr.emit('data', Buffer.from(`Authentication required for ${email} with Bearer ${token}`));
+    child.emit('exit', 1, null);
+
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: 1,
+      signal: null,
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+    }));
+
+    const crashInfo = onCrash.mock.calls[0]?.[0] as { stderrPreview?: string };
+    expect(crashInfo.stderrPreview).toContain('Authentication required');
+    expect(crashInfo.stderrPreview).toContain('Bearer [REDACTED]');
+    expect(crashInfo.stderrPreview).not.toContain(email);
+    expect(crashInfo.stderrPreview).not.toContain(token);
+  });
+
+  it('classifies spawn errors instead of reporting only a generic crash', async () => {
+    const provider = new ClaudeProvider();
+    const onCrash = vi.fn();
+    const child = makeChild();
+    spawnMock.mockReturnValueOnce(child);
+
+    await provider.initialize({
+      cwd: '/tmp/whatsoup-provider',
+      systemPrompt: 'system prompt',
+      instanceName: 'test',
+      onEvent: vi.fn(),
+      onCrash,
+    });
+
+    child.emit('error', new Error('spawn claude ENOENT'));
+
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: null,
+      signal: null,
+      provider: 'claude-cli',
+      crashClass: 'provider_binary_missing',
+      stderrPreview: 'spawn claude ENOENT',
+    }));
+  });
 });

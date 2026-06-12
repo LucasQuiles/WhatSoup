@@ -409,6 +409,9 @@ describe('health transition events via handleGetFeed', () => {
     // Now simulate transition to unreachable
     (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
       status: 'unreachable',
+      statusConfidence: 'confirmed',
+      statusReason: 'health_poll_failed_threshold',
+      statusEvidence: ['consecutive_failures=3', 'error=ECONNREFUSED'],
       error: 'ECONNREFUSED',
     });
 
@@ -423,10 +426,112 @@ describe('health transition events via handleGetFeed', () => {
       status: 'unreachable',
       previousStatus: 'online',
       error: 'ECONNREFUSED',
+      confidence: 'confirmed',
+      reason: 'health_poll_failed_threshold',
+      evidence: ['consecutive_failures=3', 'error=ECONNREFUSED'],
     });
     expect(healthEvent.component).toBe('health');
     expect(healthEvent.level).toBe('error');
     expect(healthEvent.instance).toBe('alpha');
+  });
+
+  it('emits logged-out health transitions with confidence evidence', () => {
+    const inst = fakeInstance({ name: 'logout-feed', type: 'agent' });
+    const instances = new Map([['logout-feed', inst]]);
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: {
+        getStatus: vi.fn(() => ({
+          status: 'online',
+          statusConfidence: 'confirmed',
+          statusReason: 'health_ok',
+          statusEvidence: ['health_status=healthy'],
+          error: null,
+        })),
+      } as any,
+    });
+
+    handleGetFeed(mockReq(), mockRes(), deps);
+    (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
+      status: 'logged_out',
+      statusConfidence: 'inferred',
+      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+      statusEvidence: ['account_jid_status=not_connected', 'connection_state=disconnected'],
+      error: null,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const body = res._body as any[];
+    const healthEvent = body.find((e: any) => e.detail?.type === 'health' && e.detail?.status === 'logged_out');
+    expect(healthEvent).toBeDefined();
+    expect(healthEvent).toMatchObject({
+      text: 'logout-feed: logged out',
+      isError: true,
+      level: 'error',
+      instance: 'logout-feed',
+      component: 'health',
+      detail: {
+        type: 'health',
+        status: 'logged_out',
+        previousStatus: 'online',
+        confidence: 'inferred',
+        reason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+        evidence: ['account_jid_status=not_connected', 'connection_state=disconnected'],
+      },
+    });
+  });
+
+  it('emits ambiguous degraded health transitions as warning, not critical error', () => {
+    const inst = fakeInstance({ name: 'ambiguous-feed', type: 'chat' });
+    const instances = new Map([['ambiguous-feed', inst]]);
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: {
+        getStatus: vi.fn(() => ({
+          status: 'online',
+          statusConfidence: 'confirmed',
+          statusReason: 'health_ok',
+          statusEvidence: ['health_status=healthy'],
+          error: null,
+        })),
+      } as any,
+    });
+
+    handleGetFeed(mockReq(), mockRes(), deps);
+    (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      statusEvidence: ['reconnect_phase=backoff', 'reconnect_attempts=0'],
+      error: 'reconnect hint without disconnect corroboration',
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const body = res._body as any[];
+    const healthEvent = body.find((e: any) => e.detail?.type === 'health' && e.detail?.status === 'degraded');
+    expect(healthEvent).toEqual({
+      time: expect.any(String),
+      mode: 'chat',
+      text: 'ambiguous-feed: degraded - reconnect hint without disconnect corroboration',
+      level: 'warn',
+      instance: 'ambiguous-feed',
+      component: 'health',
+      detail: {
+        type: 'health',
+        status: 'degraded',
+        previousStatus: 'online',
+        confidence: 'ambiguous',
+        reason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+        evidence: ['reconnect_phase=backoff', 'reconnect_attempts=0'],
+        error: 'reconnect hint without disconnect corroboration',
+      },
+    });
   });
 
   it('emits structured health detail when instance recovers (degraded → online)', () => {
@@ -445,6 +550,9 @@ describe('health transition events via handleGetFeed', () => {
     // Simulate recovery
     (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
       status: 'online',
+      statusConfidence: 'confirmed',
+      statusReason: 'health_body_ok',
+      statusEvidence: ['health_status=healthy'],
       error: null,
     });
 
@@ -458,8 +566,53 @@ describe('health transition events via handleGetFeed', () => {
       type: 'health',
       status: 'online',
       previousStatus: 'degraded',
+      confidence: 'confirmed',
+      reason: 'health_body_ok',
+      evidence: ['health_status=healthy'],
     });
     expect(healthEvent.level).toBe('info');
+  });
+
+  it('emits ambiguous degraded health metadata without marking it as an error', () => {
+    const inst = fakeInstance({ name: 'mini4', type: 'agent' });
+    const instances = new Map([['mini4', inst]]);
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => ({ status: 'online', error: null })) } as any,
+    });
+
+    handleGetFeed(mockReq(), mockRes(), deps);
+
+    (deps.healthPoller.getStatus as ReturnType<typeof vi.fn>).mockReturnValue({
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      statusEvidence: ['reconnect_phase=backoff', 'reconnect_attempts=0'],
+      error: null,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq(), res, deps);
+
+    const body = res._body as any[];
+    const healthEvent = body.find((e: any) => e.detail?.type === 'health');
+    expect(healthEvent).toEqual({
+      time: expect.any(String),
+      mode: 'agent',
+      text: 'mini4: degraded - health signal degraded',
+      component: 'health',
+      level: 'warn',
+      instance: 'mini4',
+      detail: {
+        type: 'health',
+        status: 'degraded',
+        previousStatus: 'online',
+        confidence: 'ambiguous',
+        reason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+        evidence: ['reconnect_phase=backoff', 'reconnect_attempts=0'],
+      },
+    });
   });
 
   it('emits no health events when status is unchanged', () => {
@@ -599,8 +752,34 @@ describe('noise suppression via handleGetFeed', () => {
     });
 
     const res = mockRes();
-    expect(() => handleGetFeed(mockReq(), res, deps)).not.toThrow();
+    handleGetFeed(mockReq(), res, deps);
     expect(res._status).toBe(200);
+    expect(res._body).toEqual([]);
+  });
+
+  it('surfaces invalid log paths instead of making the feed look quiet', () => {
+    const notADir = path.join(tmpDir, 'not-a-dir');
+    fs.writeFileSync(notADir, 'not a directory');
+    const inst = fakeInstance({ name: 'eta', type: 'passive', logDir: notADir });
+    const instances = new Map([['eta', inst]]);
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq(), res, deps);
+
+    expect(res._status).toBe(200);
+    expect(res._body).toEqual([
+      expect.objectContaining({
+        instance: 'eta',
+        component: 'logs',
+        level: 'warn',
+        text: 'eta: log evidence unavailable (ENOTDIR)',
+      }),
+    ]);
   });
 
   it('preserves two distinct messages in the same minute (dedupe by messageId)', () => {
@@ -623,8 +802,29 @@ describe('noise suppression via handleGetFeed', () => {
 
     const body = res._body as any[];
     const messageEvents = body.filter((e: any) => e.detail?.type === 'message' && e.detail?.direction === 'outbound');
-    // Both distinct messageIds must survive dedupe
-    expect(messageEvents).toHaveLength(2);
+    expect(messageEvents.map((event) => event.detail.messageId).sort()).toEqual(['msg-001', 'msg-002']);
+    expect(messageEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        instance: 'theta',
+        mode: 'passive',
+        text: 'theta: Sending message',
+        detail: expect.objectContaining({
+          chatJid: 'chat@s.whatsapp.net',
+          conversationKey: 'chat',
+          messageId: 'msg-001',
+        }),
+      }),
+      expect.objectContaining({
+        instance: 'theta',
+        mode: 'passive',
+        text: 'theta: Sending message',
+        detail: expect.objectContaining({
+          chatJid: 'chat@s.whatsapp.net',
+          conversationKey: 'chat',
+          messageId: 'msg-002',
+        }),
+      }),
+    ]));
   });
 });
 

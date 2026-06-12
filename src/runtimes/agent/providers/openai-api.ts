@@ -73,6 +73,10 @@ interface CallApiResult {
   terminalResultText?: string;
 }
 
+type ParsedToolInput =
+  | { ok: true; input: Record<string, unknown> }
+  | { ok: false; content: string };
+
 const MAX_TOOL_ITERATIONS = 20;
 const MAX_HISTORY_MESSAGES = 100;
 
@@ -177,13 +181,8 @@ export class OpenAIApiProvider implements ProviderSession {
       // Emit tool_use events and feed executed tool results back into the loop.
       for (const tc of result.toolCalls) {
         if (!this.active) break;
-        const toolInput = (() => {
-          try {
-            return JSON.parse(tc.function.arguments || '{}') as Record<string, unknown>;
-          } catch {
-            return {};
-          }
-        })();
+        const parsedToolInput = this.parseToolInput(tc, turnModel);
+        const toolInput = parsedToolInput.ok ? parsedToolInput.input : {};
 
         this.opts.onEvent({
           type: 'tool_use',
@@ -192,7 +191,9 @@ export class OpenAIApiProvider implements ProviderSession {
           toolInput,
         });
 
-        const toolResult = await this.executeTool(tc.function.name, toolInput);
+        const toolResult = parsedToolInput.ok
+          ? await this.executeTool(tc.function.name, toolInput)
+          : { content: parsedToolInput.content, isError: true };
 
         this.messages.push({
           role: 'tool',
@@ -207,6 +208,11 @@ export class OpenAIApiProvider implements ProviderSession {
           content: toolResult.content,
         });
       }
+
+      // Killed mid-loop: do not re-enter callApi. The history now has
+      // tool_calls without matching tool messages (the inner loop broke
+      // early) and the session is dead anyway.
+      if (!this.active) break;
 
       if (i === MAX_TOOL_ITERATIONS - 1) {
         log.warn({ model: turnModel, toolCallCount: result.toolCalls.length }, 'managed tool loop exhausted');
@@ -438,5 +444,40 @@ export class OpenAIApiProvider implements ProviderSession {
         isError: true,
       };
     }
+  }
+
+  private parseToolInput(toolCall: ToolCall, model: string): ParsedToolInput {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(toolCall.function.arguments || '{}');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn({
+        err: message,
+        model,
+        toolId: toolCall.id,
+        toolName: toolCall.function.name,
+        argumentLength: toolCall.function.arguments.length,
+      }, 'malformed OpenAI-compatible tool arguments; tool call blocked');
+      return {
+        ok: false,
+        content: `Tool "${toolCall.function.name}" failed: malformed provider tool arguments; the tool was not executed.`,
+      };
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      log.warn({
+        model,
+        toolId: toolCall.id,
+        toolName: toolCall.function.name,
+        argumentType: Array.isArray(parsed) ? 'array' : typeof parsed,
+      }, 'non-object OpenAI-compatible tool arguments; tool call blocked');
+      return {
+        ok: false,
+        content: `Tool "${toolCall.function.name}" failed: provider tool arguments must be a JSON object; the tool was not executed.`,
+      };
+    }
+
+    return { ok: true, input: parsed as Record<string, unknown> };
   }
 }

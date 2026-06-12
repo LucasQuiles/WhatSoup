@@ -164,14 +164,14 @@ describe('FleetDiscovery.scan — finds all valid instances', () => {
     expect(inst!.healthPort).toBe(4000);
   });
 
-  it('defaults healthPort to 3010 when not specified', () => {
+  it('defaults healthPort to the runtime health port when not specified', () => {
     writeInstanceConfig('minimal', { type: 'chat' });
 
     const discovery = new FleetDiscovery(configRoot);
     discovery.scan();
     const inst = discovery.getInstance('minimal');
 
-    expect(inst!.healthPort).toBe(3010);
+    expect(inst!.healthPort).toBe(9090);
   });
 });
 

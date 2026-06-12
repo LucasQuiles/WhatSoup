@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { detectContradictions } from '../../../../src/runtimes/chat/enrichment/contradiction.ts';
+import {
+  detectContradictions,
+  detectContradictionsDetailed,
+} from '../../../../src/runtimes/chat/enrichment/contradiction.ts';
 import type { LLMProvider } from '../../../../src/runtimes/chat/providers/types.ts';
 
 function providerWithContent(content: string): LLMProvider {
@@ -71,10 +74,37 @@ describe('detectContradictions', () => {
     expect(results).toEqual([]);
   });
 
+  it('surfaces LLM failure separately from a clean no-contradiction result', async () => {
+    const mockProvider: LLMProvider = {
+      name: 'test-provider',
+      generate: async () => {
+        throw new Error('API down');
+      },
+    };
+
+    const details = await detectContradictionsDetailed(
+      mockProvider,
+      { claim: 'x', text: 'x' },
+      [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+    );
+
+    expect(details).toMatchObject({
+      results: [],
+      status: 'llm_failed',
+      error: 'API down',
+    });
+  });
+
   it('returns empty for empty existing facts', async () => {
     const mockProvider = providerWithContent('[]');
     const results = await detectContradictions(mockProvider, { claim: 'x', text: 'x' }, []);
     expect(results).toEqual([]);
+  });
+
+  it('marks empty existing facts as an intentional skip', async () => {
+    const mockProvider = providerWithContent('[]');
+    const details = await detectContradictionsDetailed(mockProvider, { claim: 'x', text: 'x' }, []);
+    expect(details).toEqual({ results: [], status: 'skipped_no_existing_facts' });
   });
 
   it('handles malformed JSON gracefully', async () => {
@@ -87,6 +117,39 @@ describe('detectContradictions', () => {
     );
 
     expect(results).toEqual([]);
+  });
+
+  it('surfaces malformed JSON separately from no contradictions', async () => {
+    const mockProvider = providerWithContent('not json at all');
+
+    const details = await detectContradictionsDetailed(
+      mockProvider,
+      { claim: 'x', text: 'x' },
+      [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+    );
+
+    expect(details).toMatchObject({
+      results: [],
+      status: 'parse_failed',
+      rawLength: 'not json at all'.length,
+    });
+    expect(details.error).toEqual(expect.any(String));
+  });
+
+  it('surfaces invalid response shapes separately from no contradictions', async () => {
+    const mockProvider = providerWithContent('{"relationship":"contradiction"}');
+
+    const details = await detectContradictionsDetailed(
+      mockProvider,
+      { claim: 'x', text: 'x' },
+      [{ id: 'f1', claim: 'y', text: 'y', score: 0.5 }],
+    );
+
+    expect(details).toEqual({
+      results: [],
+      status: 'invalid_response',
+      rawLength: '{"relationship":"contradiction"}'.length,
+    });
   });
 
   it('handles out-of-bounds index gracefully', async () => {

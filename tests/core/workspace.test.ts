@@ -319,4 +319,25 @@ describe('provisionWorkspace', () => {
     expect(policy.bash.enabled).toBe(false);
     expect(policy.bash.pathRestricted).toBe(false);
   });
+
+  it('skips the opencode merge write when opencode.json is a symlink (mirrors the provider MCP writer preflight)', () => {
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+    const victimDir = makeTmp();
+    const victim = join(victimDir, 'victim.json');
+    writeFileSync(victim, '{"untouched":true}');
+    symlinkSync(victim, join(workspacePath, 'opencode.json'));
+
+    // Provisioning must not read existing config through the symlink, must
+    // not write through it, and must not fail the whole workspace.
+    expect(() =>
+      provisionWorkspace({
+        ...makeOpts(workspacePath, instanceCwd),
+        provider: 'opencode-cli',
+      }),
+    ).not.toThrow();
+
+    expect(readFileSync(victim, 'utf8')).toBe('{"untouched":true}');
+    expect(lstatSync(join(workspacePath, 'opencode.json')).isSymbolicLink()).toBe(true);
+  });
 });

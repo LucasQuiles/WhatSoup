@@ -8,6 +8,15 @@ import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.
 // vi.hoisted values are available inside vi.mock factory callbacks.
 
 const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRef, capturedOnResumeFailedRef, capturedOnCrashRef, capturedNotifyUserRef } = vi.hoisted(() => {
+  type CapturedCrashInfo = {
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    sessionId: string | null;
+    dbRowId: number | null;
+    provider?: string;
+    crashClass?: string;
+    stderrPreview?: string;
+  };
   const capturedSessionManagerOptsRef: {
     current: {
       allowM365Mutations?: boolean;
@@ -18,7 +27,7 @@ const { mockSession, mockQueue, capturedSessionManagerOptsRef, capturedOnEventRe
   } = { current: null };
   const capturedOnEventRef: { current: ((event: AgentEvent) => void) | null } = { current: null };
   const capturedOnResumeFailedRef: { current: (() => void) | null } = { current: null };
-  const capturedOnCrashRef: { current: ((info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void) | null } = { current: null };
+  const capturedOnCrashRef: { current: ((info: CapturedCrashInfo) => void) | null } = { current: null };
   const capturedNotifyUserRef: { current: ((msg: string) => void) | null } = { current: null };
 
   const mockSession = {
@@ -146,7 +155,7 @@ vi.mock('../../../src/runtimes/agent/session.ts', () => ({
       whatsoupMcpSocket?: string;
       onEvent: (event: AgentEvent) => void;
       onResumeFailed?: () => void;
-      onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
+      onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null; provider?: string; crashClass?: string; stderrPreview?: string }) => void;
       notifyUser?: (msg: string) => void;
     },
   ) {
@@ -183,6 +192,8 @@ const { mockConfig, mockSynthesizeSpeech, mockWriteTempFile } = vi.hoisted(() =>
     toolUpdateMode: 'full' as 'full' | 'minimal' | 'friendly',
     toolUpdateRedirectJid: null as string | null,
     textAggregateDelayMs: 2_000,
+    startupNotifications: true,
+    proactiveResumeOnStartup: true,
     mediaDir: '/tmp/whatsoup-test-media/tmp',
     pineconeAllowedIndexes: [] as string[],
     agentProvider: 'claude-cli',
@@ -580,7 +591,7 @@ describe('AgentRuntime', () => {
         whatsoupMcpSocket?: string;
         onEvent: (event: AgentEvent) => void;
         onResumeFailed?: () => void;
-        onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null }) => void;
+        onCrash?: (info: { exitCode: number | null; signal: NodeJS.Signals | null; sessionId: string | null; dbRowId: number | null; provider?: string; crashClass?: string; stderrPreview?: string }) => void;
         notifyUser?: (msg: string) => void;
       }) {
         capturedSessionManagerOptsRef.current = opts;
@@ -597,13 +608,15 @@ describe('AgentRuntime', () => {
     mockConfig.toolUpdateMode = 'full';
     mockConfig.toolUpdateRedirectJid = null;
     mockConfig.textAggregateDelayMs = 2_000;
+    mockConfig.startupNotifications = true;
+    mockConfig.proactiveResumeOnStartup = true;
     mockSynthesizeSpeech.mockClear();
     mockWriteTempFile.mockClear();
     mockRuntimeLogger.info.mockClear();
     mockRuntimeLogger.warn.mockClear();
     mockRuntimeLogger.error.mockClear();
     mockRuntimeLogger.debug.mockClear();
-    const agentConfig = mockConfig as typeof mockConfig & {
+    const agentConfig = mockConfig as Omit<typeof mockConfig, 'agentProvider' | 'agentProviderConfig'> & {
       agentProvider?: string;
       agentProviderConfig?: Record<string, unknown>;
       agentFallbackProvider?: string;
@@ -1795,6 +1808,33 @@ describe('AgentRuntime', () => {
     expect(state.perChatAssistantItemText.get(otherKey)?.get('item-b')).toBe('value-b');
     expect(state.pendingTurnText.get(otherKey)).toBe('other-pending');
     expect(state.resumeFailedHandling.has(otherKey)).toBe(true);
+  });
+
+  it('skips proactive resume on startup when proactiveResumeOnStartup is false', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    mockConfig.proactiveResumeOnStartup = false;
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as {
+      durability: {
+        getResumableCheckpoints: () => Array<{ conversation_key: string }>;
+        getSessionCheckpoint: (key: string) => { session_id: string } | null;
+      } | null;
+    };
+    // Both gates that the existing resume test relies on are satisfied (a
+    // resumable checkpoint with a session_id exists); only the new gate is off.
+    const getResumableCheckpoints = vi.fn(() => [{ conversation_key: '15550001111' }]);
+    const getSessionCheckpoint = vi.fn(() => ({ session_id: 'resume-1' }));
+    state.durability = { getResumableCheckpoints, getSessionCheckpoint };
+
+    await runtime.start();
+
+    // The gate short-circuits the whole resume branch: no notifyUser wired,
+    // no session spawned, and the checkpoint scan is never even reached.
+    expect(capturedNotifyUserRef.current).toBeNull();
+    expect(mockSession.spawnSession).not.toHaveBeenCalled();
+    expect(getSessionCheckpoint).not.toHaveBeenCalled();
+    expect(getResumableCheckpoints).not.toHaveBeenCalled();
   });
 
   it('sandbox per_chat notifyUser cleanup removes only the crashed workspace state', async () => {

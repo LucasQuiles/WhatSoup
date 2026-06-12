@@ -67,6 +67,15 @@ describe('computeKpis', () => {
     expect(result.needAttention).toBe(1);
   });
 
+  it.each(['logged_out', 'config_error', 'unknown'] as const)(
+    'counts %s as needAttention=1',
+    (status) => {
+      const result = computeKpis([makeLine({ status })]);
+      expect(result.connected).toBe(0);
+      expect(result.needAttention).toBe(1);
+    },
+  );
+
   it('counts an online line with non-null error as both connected AND needAttention', () => {
     const result = computeKpis([makeLine({ status: 'online', error: 'boom' })]);
     expect(result.connected).toBe(1);

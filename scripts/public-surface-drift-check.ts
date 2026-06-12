@@ -6,6 +6,7 @@ import { normalizeRepoPath } from './lib/guard-core.ts';
 export type PublicSurfaceDriftKind =
   | 'missing-source'
   | 'missing-npm-script'
+  | 'package-json-unreadable'
   | 'missing-registry-entry'
   | 'missing-registry-row'
   | 'registry-doc-mismatch'
@@ -70,6 +71,14 @@ interface RegistryMcpModule {
   tools: number | null;
   line: number;
   text: string;
+}
+
+interface PackageScriptsReadResult {
+  scripts: Set<string>;
+  error?: {
+    message: string;
+    sourcePath: string;
+  };
 }
 
 function splitTableRow(line: string): string[] {
@@ -194,15 +203,30 @@ function identifierFromRow(row: TableRow): string {
   return stripBackticks(raw).trim();
 }
 
-function loadPackageScripts(cwd: string): Set<string> {
+function loadPackageScripts(cwd: string): PackageScriptsReadResult {
   const pkgPath = path.resolve(cwd, 'package.json');
-  if (!existsSync(pkgPath)) return new Set();
+  if (!existsSync(pkgPath)) {
+    return {
+      scripts: new Set(),
+      error: {
+        message: 'package.json is missing; public npm surface cannot be verified',
+        sourcePath: 'package.json',
+      },
+    };
+  }
   const text = readFileSync(pkgPath, 'utf8');
   try {
     const pkg = JSON.parse(text) as { scripts?: Record<string, unknown> };
-    return new Set(Object.keys(pkg.scripts ?? {}));
-  } catch {
-    return new Set();
+    return { scripts: new Set(Object.keys(pkg.scripts ?? {})) };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      scripts: new Set(),
+      error: {
+        message: `package.json could not be parsed: ${message}`,
+        sourcePath: 'package.json',
+      },
+    };
   }
 }
 
@@ -458,12 +482,24 @@ export function findPublicSurfaceDrift(
 
   const text = readFileSync(registryAbs, 'utf8');
   const tables = parseTables(text);
-  const packageScripts = loadPackageScripts(cwd);
+  const packageScriptsRead = loadPackageScripts(cwd);
+  const packageScripts = packageScriptsRead.scripts;
   const documentedMcpModules = loadDocumentedMcpModules(cwd);
   const registeredMcpModules = registryMcpModules(tables);
   const registeredNpmScripts = new Set<string>();
   const hasNpmRegistrySection = /^##\s+NPM scripts\b/m.test(text);
   const issues: PublicSurfaceDriftIssue[] = [];
+
+  if (packageScriptsRead.error) {
+    issues.push({
+      filePath: packageScriptsRead.error.sourcePath,
+      line: 1,
+      kind: 'package-json-unreadable',
+      identifier: 'package.json#scripts',
+      sourcePath: packageScriptsRead.error.sourcePath,
+      text: packageScriptsRead.error.message,
+    });
+  }
 
   // Per-file caches so we don't re-parse `src/fleet/index.ts` for every HTTP row.
   const routeCache = new Map<string, ParsedRouteEntry[]>();
@@ -631,7 +667,7 @@ export function findPublicSurfaceDrift(
         }
       }
 
-      if (identifier.startsWith(cliNpmIdentifierPrefix) && scriptIdx >= 0) {
+      if (!packageScriptsRead.error && identifier.startsWith(cliNpmIdentifierPrefix) && scriptIdx >= 0) {
         const scriptCell = row.cells[scriptIdx] ?? '';
         const scriptName = extractNpmScriptName(scriptCell);
         if (scriptName) {
@@ -660,7 +696,7 @@ export function findPublicSurfaceDrift(
   // (e.g. fixtures that exercise only HTTP/MCP rows) don't trigger drift for
   // npm scripts they intentionally omit, while an emptied NPM table still
   // fails closed.
-  if (hasNpmRegistrySection || registeredNpmScripts.size > 0) {
+  if (!packageScriptsRead.error && (hasNpmRegistrySection || registeredNpmScripts.size > 0)) {
     for (const scriptName of [...packageScripts].sort()) {
       if (!isOperatorFacingScript(scriptName)) continue;
       if (registeredNpmScripts.has(scriptName)) continue;

@@ -1447,6 +1447,43 @@ def critical_asset_from_health_evidence(evidence: str) -> dict[str, Any] | None:
     }
 
 
+def critical_asset_instance(critical_asset: dict[str, Any] | None) -> str | None:
+    if not isinstance(critical_asset, dict):
+        return None
+    asset = critical_asset.get("asset")
+    if not isinstance(asset, dict):
+        return None
+    instance = str(asset.get("instance") or "").strip()
+    if not instance or instance == "unknown":
+        return None
+    return safe_alert_source_segment(instance)
+
+
+def alert_source_from_critical_asset(critical_asset: dict[str, Any] | None) -> str | None:
+    if not isinstance(critical_asset, dict):
+        return None
+    failure = critical_asset.get("failure")
+    if not isinstance(failure, dict):
+        return None
+    code = str(failure.get("code") or "").strip()
+    if code == "WA_AUTH_BOND_SERVER_REVOKED":
+        return "whatsapp_device_bond_lost"
+    return None
+
+
+def daily_summary_from_critical_asset(critical_asset: dict[str, Any] | None) -> str | None:
+    if not isinstance(critical_asset, dict):
+        return None
+    failure = critical_asset.get("failure")
+    if not isinstance(failure, dict):
+        return None
+    code = str(failure.get("code") or "").strip()
+    instance = critical_asset_instance(critical_asset) or "unknown"
+    if code == "WA_AUTH_BOND_SERVER_REVOKED":
+        return f"BOT ERRORS linked-device bond lost: {instance} requires verified relink"
+    return None
+
+
 def outbox_event(
     summary: str,
     evidence: str,
@@ -1486,10 +1523,17 @@ def outbox_event(
     critical_asset = critical_asset_from_health_evidence(str(event["evidence"]))
     if critical_asset is not None:
         event["criticalAsset"] = redact_json_value(critical_asset)
+        instance = critical_asset_instance(critical_asset)
+        if source == "daily-health" and instance:
+            event["instance"] = instance
     if alert_source is not None:
+        # Explicit caller-supplied alert source wins (hub hardening).
         event["alertSource"] = alert_source
     else:
+        # Otherwise derive from evidence, then fall back to the critical asset.
         derived_alert_source = alert_source_from_health_evidence(str(event["evidence"]))
+        if not derived_alert_source:
+            derived_alert_source = alert_source_from_critical_asset(critical_asset)
         if derived_alert_source:
             event["alertSource"] = derived_alert_source
     if force_notify:
@@ -1551,17 +1595,26 @@ def _instance_from_fail_line(line: str) -> str | None:
     return None
 
 
-def emit_per_instance_health_failures(failures: list[str]) -> list[Path]:
+def emit_per_instance_health_failures(
+    failures: list[str],
+    suppress_instance: str | None = None,
+) -> list[Path]:
     """Emit one salient critical outbox event per failing instance.
 
     Groups failing daily-health lines by their per-instance identifier and
     emits a distinct critical, force-notify event for each instance so a real
     per-instance FAIL is not buried inside the generic daily-health summary.
+
+    ``suppress_instance`` names an instance already surfaced as a source-specific
+    critical-asset incident by the caller; its generic per-instance event is
+    skipped to avoid emitting the same failure twice.
     """
     grouped: dict[str, list[str]] = {}
     for line in failures:
         instance = _instance_from_fail_line(line)
         if instance is None:
+            continue
+        if suppress_instance is not None and instance == suppress_instance:
             continue
         grouped.setdefault(instance, []).append(line)
     paths: list[Path] = []
@@ -2228,6 +2281,8 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         append_evidence_field(details, "status", status_text)
         if status_text == "degraded":
             add_marker("health_degraded")
+        elif status_text == "unhealthy":
+            add_marker("health_unhealthy")
     connected = whatsapp.get("connected")
     if isinstance(connected, bool):
         details.append(f"wa_connected={str(connected).lower()}")
@@ -2458,6 +2513,8 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "health_probe_auth_failed" in details
         or "health_identity_mismatch" in details
         or "auth_bond_at_risk" in details
+        or "physical_intervention_required" in details
+        or "health_unhealthy" in details
     ):
         prefix = "FAIL "
     elif (
@@ -2573,6 +2630,22 @@ def provider_secret_status(text: str, rc: int, stdout: str) -> str:
     if rc == 0:
         return "ok" if stdout else "empty"
     return f"rc_{rc}"
+
+
+def provider_keychain_unlock_status(keychain_path: Path, timeout_seconds: int) -> str:
+    try:
+        stdout, stderr, rc, _ = provider_command_output(
+            ["security", "unlock-keychain", "-p", "", str(keychain_path)],
+            min(timeout_seconds, 8),
+            "BOT_ERRORS_DRY_PROVIDER_KEYCHAIN_UNLOCK_STDOUT",
+            "BOT_ERRORS_DRY_PROVIDER_KEYCHAIN_UNLOCK_STDERR",
+            "BOT_ERRORS_DRY_PROVIDER_KEYCHAIN_UNLOCK_RC",
+        )
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never hide the provider failure.
+        return f"probe_error_{redact_evidence_string(str(exc), 80)}"
+    return provider_keychain_status("\n".join(part for part in [stdout, stderr] if part), rc)
 
 
 def provider_host_uptime_seconds() -> int | None:
@@ -2900,10 +2973,12 @@ def provider_credential_fragments(profile: dict[str, Any], item: dict[str, Any],
         f"credential_service={redact_evidence_string(service, 80)}",
         f"credential_account={redact_evidence_string(account, 80)}",
     ]
+    keychain_path = Path.home() / "Library" / "Keychains" / "login.keychain-db"
+    fragments.append(f"keychain_unlock_status={provider_keychain_unlock_status(keychain_path, timeout_seconds)}")
 
     try:
         stdout, stderr, rc, _ = provider_command_output(
-            ["security", "find-generic-password", "-s", service, "-a", account],
+            ["security", "find-generic-password", "-s", service, "-a", account, str(keychain_path)],
             min(timeout_seconds, 8),
             "BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDOUT",
             "BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_FIND_STDERR",
@@ -2918,7 +2993,7 @@ def provider_credential_fragments(profile: dict[str, Any], item: dict[str, Any],
 
     try:
         stdout, stderr, rc, _ = provider_command_output(
-            ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            ["security", "find-generic-password", "-s", service, "-a", account, "-w", str(keychain_path)],
             min(timeout_seconds, 8),
             "BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_SECRET_STDOUT",
             "BOT_ERRORS_DRY_PROVIDER_CREDENTIAL_SECRET_STDERR",
@@ -2931,7 +3006,6 @@ def provider_credential_fragments(profile: dict[str, Any], item: dict[str, Any],
     except Exception as exc:  # noqa: BLE001 - diagnostics must never hide the provider failure.
         fragments.append(f"credential_secret_status=probe_error_{redact_evidence_string(str(exc), 80)}")
 
-    keychain_path = Path.home() / "Library" / "Keychains" / "login.keychain-db"
     try:
         stdout, stderr, rc, _ = provider_command_output(
             ["security", "show-keychain-info", str(keychain_path)],
@@ -3445,6 +3519,38 @@ def fleet_api_profile_value(profile: dict[str, Any], key: str) -> str | None:
     return None
 
 
+def fleet_api_profile_port(profile: dict[str, Any]) -> str | None:
+    fleet_api = profile.get("fleetApi") if isinstance(profile.get("fleetApi"), dict) else {}
+    for source in (profile, fleet_api):
+        for key in ("fleetApiPort", "port"):
+            value = source.get(key)
+            if isinstance(value, int):
+                return str(value)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def fleet_api_default_url(profile: dict[str, Any]) -> str:
+    raw_bind = (
+        os.environ.get("FLEET_BIND_ADDRESS")
+        or fleet_api_profile_value(profile, "fleetBindAddress")
+        or fleet_api_profile_value(profile, "bindAddress")
+        or "127.0.0.1"
+    )
+    bind = raw_bind.strip()
+    if bind in {"", "0.0.0.0", "::", "[::]"}:
+        bind = "127.0.0.1"
+    elif ":" in bind and not bind.startswith("["):
+        bind = f"[{bind}]"
+    port = (
+        os.environ.get("BOT_ERRORS_FLEET_API_PORT")
+        or fleet_api_profile_port(profile)
+        or "9099"
+    ).strip()
+    return f"http://{bind}:{port}"
+
+
 def load_fleet_api_token(profile: dict[str, Any]) -> tuple[str | None, str, int, str | None]:
     dry = os.environ.get("BOT_ERRORS_DRY_FLEET_TOKEN_JSON")
     token_path = (
@@ -3516,7 +3622,7 @@ def fleet_api_inventory(profile: dict[str, Any]) -> list[str]:
     raw_url = (
         os.environ.get("BOT_ERRORS_FLEET_API_URL")
         or fleet_api_profile_value(profile, "fleetApiUrl")
-        or "http://127.0.0.1:9099"
+        or fleet_api_default_url(profile)
     )
     endpoint = fleet_api_endpoint(raw_url)
     token, token_source, accept_count, token_error = load_fleet_api_token(profile)
@@ -4728,18 +4834,29 @@ def daily() -> int:
         failures.append(f"required tools missing: {','.join(missing_required_tools)}")
     warnings = [line for line in lines if line.startswith("WARN ") or " WARN " in line]
     severity = "critical" if failures else "warning" if warnings else "info"
+    evidence = "\n".join(lines)
+    critical_asset = critical_asset_from_health_evidence(evidence) if severity != "info" else None
     if missing_required_tools:
         summary = f"BOT ERRORS daily health found issues: missing required tools {','.join(missing_required_tools)}"
     else:
-        summary = "BOT ERRORS daily health found issues" if severity != "info" else "BOT ERRORS daily health passed"
+        summary = (
+            daily_summary_from_critical_asset(critical_asset)
+            or ("BOT ERRORS daily health found issues" if severity != "info" else "BOT ERRORS daily health passed")
+        )
     event_type = "clear" if severity == "info" else "alert"
     if severity == "info" and has_shadow_source_update_blocked(lines):
         summary = "BOT ERRORS daily health retained source-update shadow observation"
         event_type = "observation"
-    evidence = "\n".join(lines)
     path = outbox_event(summary, evidence, severity=severity, source="daily-health", event_type=event_type)
     print(path)
-    emit_per_instance_health_failures(failures)
+    # When the main daily-health event already represents an instance as a
+    # source-specific critical-asset incident (e.g. a linked-device bond loss),
+    # the generic per-instance daily-health-fail event for that same instance is
+    # redundant — suppress it so the failure surfaces exactly once with its most
+    # actionable framing, while still emitting per-instance events for any other
+    # failing instances.
+    suppress_instance = critical_asset_instance(critical_asset)
+    emit_per_instance_health_failures(failures, suppress_instance=suppress_instance)
     source_update_signal = enforced_source_update_signal(lines)
     if source_update_signal is not None and alert_source_from_health_evidence(evidence) != "source_update":
         source_event_type, source_severity, source_summary, source_evidence = source_update_signal

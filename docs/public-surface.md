@@ -57,7 +57,7 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:316` | stable | active | Instance detail + config |
 | `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:315` | stable | active | Stop + cleanup |
 | `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:313` | stable | active | Registration probe |
-| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:314` | beta | active | Per-instance primary/fallback provider, key presence (boolean), resolved primary model, fallback window/counter state, effective provider, active fallback-chain entry, chain eligibility, and line reachability |
+| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:314` | beta | active | Per-instance primary/fallback provider, key presence (boolean), resolved primary model, fallback reason/model/reset/probe state, fallback window/counter state, effective provider, active fallback-chain entry, chain eligibility, and line reachability |
 | `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:330` | stable | active | Update `config.json` |
 | `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:331` | stable | active | QR-code SSE stream |
 | `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:328` | stable | active | Restart unit |
@@ -119,13 +119,13 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:health.status` | `GET /health` | `src/core/health.ts:522` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
-| `http:health.send` | `POST /send` | `src/core/health.ts:140` | stable | active | Send a text message |
-| `http:health.access` | `POST /access` | `src/core/health.ts:358` | stable | active | Allow / block contact or group |
-| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:441` | stable | active | Zero unread + chatModify |
-| `http:health.typing` | `GET /typing` | `src/core/health.ts:506` | stable | active | Currently-composing JIDs from presence cache |
-| `http:health.heal` | `POST /heal` | `src/core/health.ts:283` | stable | active | Inject Type-3 repair report |
-| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:194` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
+| `http:health.status` | `GET /health` | `src/core/health.ts:535` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
+| `http:health.send` | `POST /send` | `src/core/health.ts:154` | stable | active | Send a text message |
+| `http:health.access` | `POST /access` | `src/core/health.ts:372` | stable | active | Allow / block contact or group |
+| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:455` | stable | active | Zero unread + chatModify |
+| `http:health.typing` | `GET /typing` | `src/core/health.ts:520` | stable | active | Currently-composing JIDs from presence cache |
+| `http:health.heal` | `POST /heal` | `src/core/health.ts:297` | stable | active | Inject Type-3 repair report |
+| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:208` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
 ### WebSocket
 
@@ -271,6 +271,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
 | `cli:npm.guard-agent-decision-polls` | `npm run guard:agent-decision-polls` | `package.json` | stable | active | Verify AskUser poll protocol wiring across prompts, MCP schema, sandbox diagnostics, docs, and release gates |
+| `cli:npm.guard-safeguard-diagnostics` | `npm run guard:safeguard-diagnostics` | `package.json` | stable | active | Deterministic diagnostic map for guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers |
 | `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when the plugin is absent only outside CI |
 | `cli:npm.guard-lint-src` | `npm run guard:lint:src` | `package.json` | stable | active | ESLint architectural-fitness ring over src/scripts/tests; warns (non-blocking), fails only on errors/config faults |
 | `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |

@@ -174,6 +174,7 @@ export class AnthropicApiProvider implements ProviderSession {
       const toolResultBlocks: AnthropicContentBlock[] = [];
 
       for (const tu of result.toolUses) {
+        if (!this.active) break;
         let toolInput: Record<string, unknown>;
         try {
           toolInput = JSON.parse(tu.inputJson || '{}') as Record<string, unknown>;
@@ -207,6 +208,12 @@ export class AnthropicApiProvider implements ProviderSession {
 
       // Anthropic requires tool results in a user turn
       this.messages.push({ role: 'user', content: toolResultBlocks });
+
+      // Killed mid-loop: do not re-enter callApi. The history now has
+      // tool_use blocks without matching tool_result entries (the inner
+      // loop broke early), which the API rejects with a hard 400 — and the
+      // session is dead anyway.
+      if (!this.active) break;
 
       if (i === MAX_TOOL_ITERATIONS - 1) {
         log.warn({ model: turnModel, toolUseCount: result.toolUses.length }, 'managed tool loop exhausted');

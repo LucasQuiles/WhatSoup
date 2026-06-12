@@ -164,6 +164,37 @@ describe('handleConfigUpdate PATCH healthPort validation (#244)', () => {
     expect(JSON.parse(res._body).healthPort).toBe(9200);
   });
 
+  it('rejects healthPort that collides with a legacy sibling using the runtime default', async () => {
+    writeConfig('sibling', { healthPort: undefined });
+    const cfg = writeConfig('test-line');
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ healthPort: 9090 })),
+      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+    );
+    expect(res._status).toBe(409);
+    expect(JSON.parse(res._body).error).toMatch(/healthPort 9090 is already in use/);
+  });
+
+  it('fails closed and preserves config when healthPort sibling inventory is unreadable', async () => {
+    const siblingDir = path.join(tmpDir, 'whatsoup', 'instances', 'bad-sibling');
+    fs.mkdirSync(siblingDir, { recursive: true });
+    fs.writeFileSync(path.join(siblingDir, 'config.json'), '{bad json');
+    const cfg = writeConfig('test-line');
+    const before = fs.readFileSync(cfg, 'utf-8');
+    const res = mockRes();
+    await handleConfigUpdate(
+      mockReq(JSON.stringify({ healthPort: 9200 })),
+      res, makeDeps(fakeInstance(cfg)), { name: 'test-line' },
+    );
+    expect(res._status).toBe(500);
+    expect(JSON.parse(res._body)).toMatchObject({
+      error: 'healthPort inventory unavailable: failed to read instance config',
+      instance: 'bad-sibling',
+    });
+    expect(fs.readFileSync(cfg, 'utf-8')).toBe(before);
+  });
+
   it('rejects type changes with 400 and leaves the file untouched', async () => {
     const cfg = writeConfig('test-line');
     const before = fs.readFileSync(cfg, 'utf-8');

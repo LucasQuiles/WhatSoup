@@ -29,6 +29,7 @@ import { systemdUnitName, type ServiceManager } from '../platform.ts';
 import { lookupCredential } from '../../lib/keyring.ts';
 import { expandHomePath, hasUnsupportedTildePrefix } from '../../lib/home-path.ts';
 import { migrateLegacyMemoryConfig } from '../../config-memory-migration.ts';
+import { DEFAULT_INSTANCE_HEALTH_PORT } from '../constants.ts';
 
 /** Valid instance name pattern: lowercase alphanumeric + hyphens, must start with a letter. */
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
@@ -498,10 +499,15 @@ export async function handleConfigUpdate(
   // Runs on the post-merge view so partial patches are checked against the
   // assembled config, not the bare patch. Mirrors loader + CREATE.
   {
+    const portInventory = patch.healthPort === undefined ? null : scanHealthPortInventory(params.name);
+    if (portInventory && !portInventory.ok) {
+      emitInventoryFailure(res, portInventory);
+      return;
+    }
     const validationError = validateInstanceConfig(merged, {
       name: params.name,
       mode: 'patch',
-      existingHealthPorts: existingHealthPortMap(params.name),
+      ...(portInventory ? { existingHealthPorts: portInventory.ports } : {}),
       originalType: existing.type,
     });
     if (validationError) {
@@ -811,43 +817,98 @@ function normalizeAdminPhones(phones: string[]): string[] {
 // Helpers for handleCreateLine
 // ---------------------------------------------------------------------------
 
-/** Scan all existing config.json files for healthPort values. */
-function usedHealthPorts(): number[] {
-  const root = configRoot();
-  let entries: string[];
-  try { entries = fs.readdirSync(root); } catch { return []; }
-  const ports: number[] = [];
-  for (const name of entries) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(path.join(root, name, 'config.json'), 'utf-8'));
-      // Skip instances flagged as disabled so their port can be reused by a
-      // new line — mirrors the fleet discovery opt-out semantics.
-      if (raw.enabled === false) continue;
-      if (typeof raw.healthPort === 'number') ports.push(raw.healthPort);
-    } catch { /* skip unreadable configs */ }
-  }
-  return ports;
+type HealthPortInventory =
+  | { ok: true; ports: ReadonlyMap<string, number> }
+  | {
+      ok: false;
+      status: number;
+      body: { error: string; code?: string; instance?: string };
+    };
+
+function errnoCode(err: unknown): string | undefined {
+  return typeof err === 'object' && err !== null && typeof (err as NodeJS.ErrnoException).code === 'string'
+    ? (err as NodeJS.ErrnoException).code
+    : undefined;
+}
+
+function inventoryFailure(
+  error: string,
+  err?: unknown,
+  instance?: string,
+): HealthPortInventory {
+  const code = errnoCode(err);
+  return {
+    ok: false,
+    status: 500,
+    body: {
+      error,
+      ...(code ? { code } : {}),
+      ...(instance ? { instance } : {}),
+    },
+  };
+}
+
+function emitInventoryFailure(res: ServerResponse, result: HealthPortInventory): boolean {
+  if (result.ok) return false;
+  jsonResponse(res, result.status, result.body);
+  return true;
 }
 
 /**
  * Build a name -> healthPort map by scanning the config root.
- * Excludes the named instance so a self-PATCH that doesn't change the port
- * isn't flagged as a duplicate against itself.
+ *
+ * Missing config root means no instances exist yet. Existing unreadable or
+ * malformed instance configs are different: CREATE/PATCH cannot safely prove a
+ * requested port is free, so fail closed rather than authorizing a collision.
  */
-function existingHealthPortMap(excludeName?: string): ReadonlyMap<string, number> {
+function scanHealthPortInventory(excludeName?: string): HealthPortInventory {
   const map = new Map<string, number>();
   const root = configRoot();
-  let entries: string[];
-  try { entries = fs.readdirSync(root); } catch { return map; }
-  for (const n of entries) {
-    if (n === excludeName) continue;
-    try {
-      const raw = JSON.parse(fs.readFileSync(path.join(root, n, 'config.json'), 'utf-8'));
-      if (raw.enabled === false) continue;
-      if (typeof raw.healthPort === 'number') map.set(n, raw.healthPort);
-    } catch { /* skip unreadable */ }
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch (err) {
+    if (errnoCode(err) === 'ENOENT') return { ok: true, ports: map };
+    log.warn({ err, configRoot: root }, 'healthPort inventory scan failed');
+    return inventoryFailure('healthPort inventory unavailable: failed to read config root', err);
   }
-  return map;
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const name = entry.name;
+    if (name === excludeName) continue;
+
+    const configPath = path.join(root, name, 'config.json');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as unknown;
+    } catch (err) {
+      if (errnoCode(err) === 'ENOENT') continue;
+      log.warn({ err, instance: name, configPath }, 'healthPort inventory config read failed');
+      return inventoryFailure('healthPort inventory unavailable: failed to read instance config', err, name);
+    }
+
+    if (!isRecord(parsed)) {
+      log.warn({ instance: name, configPath }, 'healthPort inventory config is not an object');
+      return inventoryFailure('healthPort inventory unavailable: instance config is not a JSON object', undefined, name);
+    }
+    if (parsed.enabled === false) continue;
+
+    const rawPort = parsed.healthPort ?? DEFAULT_INSTANCE_HEALTH_PORT;
+    if (
+      typeof rawPort !== 'number' ||
+      !Number.isFinite(rawPort) ||
+      !Number.isInteger(rawPort) ||
+      rawPort < 1024 ||
+      rawPort > 65535
+    ) {
+      log.warn({ instance: name, configPath }, 'healthPort inventory config has invalid healthPort');
+      return inventoryFailure('healthPort inventory unavailable: instance config has invalid healthPort', undefined, name);
+    }
+    map.set(name, rawPort);
+  }
+
+  return { ok: true, ports: map };
 }
 
 /** Map a ValidationError to the HTTP response and return false to halt the handler. */
@@ -984,12 +1045,17 @@ export async function handleCreateLine(
     jsonResponse(res, 400, { error: 'healthPort must be between 1024 and 65535' });
     return;
   }
+  const portInventory = scanHealthPortInventory();
+  if (!portInventory.ok) {
+    emitInventoryFailure(res, portInventory);
+    return;
+  }
   if (healthPort == null) {
-    const used = usedHealthPorts();
+    const used = [...portInventory.ports.values()];
     healthPort = used.length > 0 ? Math.max(...used) + 1 : 9095;
   } else {
     // Validate user-supplied port isn't already in use
-    const used = usedHealthPorts();
+    const used = [...portInventory.ports.values()];
     if (used.includes(healthPort)) {
       jsonResponse(res, 409, { error: `healthPort ${healthPort} is already in use` });
       return;
@@ -1058,7 +1124,7 @@ export async function handleCreateLine(
   {
     const validationError = validateInstanceConfig(
       { ...config, claudeMd: body.claudeMd },
-      { name, mode: 'create', existingHealthPorts: existingHealthPortMap(name) },
+      { name, mode: 'create', existingHealthPorts: portInventory.ports },
     );
     if (validationError) {
       jsonResponse(res, validationError.status ?? 400, { error: validationError.message });
@@ -1280,7 +1346,11 @@ export async function handleAuth(
             const tmpPath = cfgPath + '.tmp';
             writePrivateFileSync(tmpPath, JSON.stringify(raw, null, 2) + '\n');
             fs.renameSync(tmpPath, cfgPath);
-          } catch { /* config write failed — intro won't re-fire but not critical */ }
+          } catch (err) {
+            // Not fatal to the auth flow, but without this warn the operator
+            // has no clue why the instance never re-introduced itself.
+            log.warn({ err, instance: params.name }, 'introSent reset failed after re-auth; intro will not re-fire on next boot');
+          }
           deps.serviceManager.startFire(params.name, (err: Error | null) => {
             if (err) log.error({ err, instance: params.name }, 'post-auth start failed');
           });

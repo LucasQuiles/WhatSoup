@@ -66,6 +66,7 @@ import {
   getActiveReportForClass,
   dequeueNextReport,
   checkGlobalValve,
+  parseHealContext,
 } from '../../src/core/heal.ts';
 
 // ---------------------------------------------------------------------------
@@ -178,6 +179,40 @@ describe('emitHealReport', () => {
     const [, targetJid, message] = vi.mocked(sendTracked).mock.calls[0]!;
     expect(targetJid).toBe('15559998888@s.whatsapp.net');
     expect(message).toMatch(/^\[LOOPS_HEAL\]/);
+  });
+
+  it('includes provider crash classification in Q payload and human summary', async () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    const reportId = emitHealReport(db, messenger, null, {
+      type: 'crash',
+      chatJid: '1234@s.whatsapp.net',
+      exitCode: 1,
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+      stderr: 'Please run /login\nBearer [REDACTED]',
+    });
+
+    expect(reportId).not.toBeNull();
+    const row = db.raw.prepare('SELECT error_class, context FROM heal_reports WHERE report_id = ?').get(reportId) as { error_class: string; context: string } | undefined;
+    expect(row?.error_class).toBe('crash__provider_auth_required');
+    expect(JSON.parse(row?.context ?? '{}')).toMatchObject({
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+    });
+
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendTracked)).toHaveBeenCalledOnce();
+    });
+    const [, , message] = vi.mocked(sendTracked).mock.calls[0]!;
+    const payload = JSON.parse(String(message).split('\n')[0]!.replace('[LOOPS_HEAL] ', '')) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+    });
+    expect(message).toContain('Provider: claude-cli');
+    expect(message).toContain('Crash class: provider_auth_required');
   });
 });
 
@@ -446,5 +481,36 @@ describe('checkGlobalValve', () => {
     }
 
     expect(checkGlobalValve(db)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseHealContext — guarded parse for persisted report context
+// ---------------------------------------------------------------------------
+
+describe('parseHealContext', () => {
+  it('returns {} for corrupt JSON instead of throwing', () => {
+    // The dequeue callers run inside timers — a throw here was a fatal
+    // uncaughtException, with the report already flipped to attempt_1.
+    expect(parseHealContext('{not json')).toEqual({});
+  });
+
+  it('returns {} for null and empty context', () => {
+    expect(parseHealContext(null)).toEqual({});
+    expect(parseHealContext('')).toEqual({});
+  });
+
+  it('returns {} for valid JSON that is not a plain object', () => {
+    expect(parseHealContext('[1,2]')).toEqual({});
+    expect(parseHealContext('"a string"')).toEqual({});
+    expect(parseHealContext('42')).toEqual({});
+    expect(parseHealContext('null')).toEqual({});
+  });
+
+  it('returns the parsed object for valid object JSON', () => {
+    expect(parseHealContext('{"chatJid":"123@s.whatsapp.net","attempt":2}')).toEqual({
+      chatJid: '123@s.whatsapp.net',
+      attempt: 2,
+    });
   });
 });

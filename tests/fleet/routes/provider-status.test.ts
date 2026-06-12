@@ -57,9 +57,13 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     lastPollAt: '2026-04-01T00:00:00.000Z',
     consecutiveFailures: 0,
     status: 'online',
+    statusConfidence: 'confirmed',
+    statusReason: 'health_body_ok',
+    statusEvidence: ['health_status=healthy'],
     error: null,
     lastAlertAt: null,
     silencedUntil: null,
+    everReachable: true,
     ...overrides,
   };
 }
@@ -114,11 +118,25 @@ describe('handleGetLineProviderStatus', () => {
         active: false,
         activeUntil: null,
         effectiveProvider: null,
+        reason: null,
+        resetAt: null,
+        recoveryProbeRequired: false,
         turnsServed: null,
         turnsEmpty: null,
         lastFallbackTurnAt: null,
+        probeAttempts: null,
+        lastProbeAt: null,
+        activations: null,
+        reverts: null,
+        replays: null,
         activeEntry: null,
         chain: [],
+      },
+      signal: {
+        status: null,
+        confidence: null,
+        reason: 'not_polled',
+        evidence: [],
       },
       lineReachable: false,
     });
@@ -224,6 +242,11 @@ describe('handleGetLineProviderStatus', () => {
           fallbackTurnsServed: 7,
           fallbackTurnsEmpty: 2,
           lastFallbackTurnAt: 1_781_087_200_000,
+          probeAttempts: 4,
+          lastProbeAt: 1_781_087_300_000,
+          fallbackActivations: 2,
+          fallbackReverts: 1,
+          fallbackReplays: 1,
           activeFallbackEntry: { provider: 'openai-api', model: 'gpt-4o' },
           fallbackChain: [{ provider: 'openai-api', model: 'gpt-4o', eligible: true }],
         },
@@ -241,9 +264,17 @@ describe('handleGetLineProviderStatus', () => {
       active: true,
       activeUntil,
       effectiveProvider: 'openai-api',
+      reason: null,
+      resetAt: null,
+      recoveryProbeRequired: false,
       turnsServed: 7,
       turnsEmpty: 2,
       lastFallbackTurnAt: 1_781_087_200_000,
+      probeAttempts: 4,
+      lastProbeAt: 1_781_087_300_000,
+      activations: 2,
+      reverts: 1,
+      replays: 1,
       activeEntry: { provider: 'openai-api', model: 'gpt-4o' },
       chain: [{ provider: 'openai-api', model: 'gpt-4o', eligible: true }],
     });
@@ -355,9 +386,17 @@ describe('handleGetLineProviderStatus', () => {
       active: false,
       activeUntil: elapsed,
       effectiveProvider: 'claude-cli',
+      reason: null,
+      resetAt: null,
+      recoveryProbeRequired: false,
       turnsServed: null,
       turnsEmpty: null,
       lastFallbackTurnAt: null,
+      probeAttempts: null,
+      lastProbeAt: null,
+      activations: null,
+      reverts: null,
+      replays: null,
       activeEntry: null,
       chain: [{ provider: 'openai-api', model: 'gpt-4o', eligible: null }],
     });
@@ -381,6 +420,40 @@ describe('handleGetLineProviderStatus', () => {
 
     const body = JSON.parse(res._body);
     expect(body.lineReachable).toBe(reachable);
+  });
+
+  it('surfaces poller signal confidence and evidence for provider diagnostics', async () => {
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({ agentOptions: { provider: 'claude-cli' } }),
+    );
+
+    const status = fakeStatus({
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      statusEvidence: [
+        'health_status=healthy',
+        'whatsapp_connected=true',
+        'reconnect_phase=backoff',
+        'reconnect_attempts=0',
+      ],
+    });
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), status), { name: 'agent-line' });
+
+    const body = JSON.parse(res._body);
+    expect(body.signal).toEqual({
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      evidence: [
+        'health_status=healthy',
+        'whatsapp_connected=true',
+        'reconnect_phase=backoff',
+        'reconnect_attempts=0',
+      ],
+    });
   });
 
   it.each([
@@ -487,6 +560,9 @@ describe('handleGetLineProviderStatus', () => {
         instance: {
           effectiveProvider: 'opencode-cli',
           fallbackActiveUntil: activeUntil,
+          fallbackReason: 'auth-required',
+          fallbackResetAt: activeUntil,
+          fallbackRecoveryProbeRequired: true,
           fallbackTurnsServed: 3,
           fallbackTurnsEmpty: 1,
           lastFallbackTurnAt: 1_781_087_200_000,
@@ -503,7 +579,23 @@ describe('handleGetLineProviderStatus', () => {
       model: 'gpt-4o',
       keyPresent: true,
     });
-    const { effectiveProvider, turnsServed, turnsEmpty, lastFallbackTurnAt, activeEntry, chain, ...existingFallback } = body.fallback;
+    const {
+      effectiveProvider,
+      reason,
+      resetAt,
+      recoveryProbeRequired,
+      turnsServed,
+      turnsEmpty,
+      lastFallbackTurnAt,
+      probeAttempts,
+      lastProbeAt,
+      activations,
+      reverts,
+      replays,
+      activeEntry,
+      chain,
+      ...existingFallback
+    } = body.fallback;
     expect(existingFallback).toEqual({
       provider: 'opencode-cli',
       model: 'minimax/minimax-m2',
@@ -511,11 +603,23 @@ describe('handleGetLineProviderStatus', () => {
       active: true,
       activeUntil,
     });
-    expect({ effectiveProvider, turnsServed, turnsEmpty, lastFallbackTurnAt }).toEqual({
+    expect({ effectiveProvider, reason, resetAt, recoveryProbeRequired, turnsServed, turnsEmpty, lastFallbackTurnAt, probeAttempts, lastProbeAt }).toEqual({
       effectiveProvider: 'opencode-cli',
+      reason: 'auth-required',
+      resetAt: activeUntil,
+      recoveryProbeRequired: true,
       turnsServed: 3,
       turnsEmpty: 1,
       lastFallbackTurnAt: 1_781_087_200_000,
+      // Health omits the probe-cap fields here — the route tolerates absence (null).
+      probeAttempts: null,
+      lastProbeAt: null,
+    });
+    // Old-instance tolerance: health predating the transition counters → null.
+    expect({ activations, reverts, replays }).toEqual({
+      activations: null,
+      reverts: null,
+      replays: null,
     });
     expect(activeEntry).toBeNull();
     expect(chain).toEqual([{ provider: 'opencode-cli', model: 'minimax/minimax-m2', eligible: null }]);

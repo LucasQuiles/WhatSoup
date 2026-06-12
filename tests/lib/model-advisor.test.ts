@@ -8,9 +8,13 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 import { emitAlert, clearAlertSource } from '../../src/lib/emit-alert.ts';
 import {
   checkModelCurrency,
+  checkModelCurrencyStatus,
   notifyModelAdvisories,
+  notifyModelCurrencyResult,
+  notifyModelLiveScanStatus,
   getModelAdvisories,
   fetchLiveModelIds,
+  fetchLiveModelIdsWithStatus,
   __resetModelAdvisorForTest,
 } from '../../src/lib/model-advisor.ts';
 
@@ -49,18 +53,31 @@ describe('fetchLiveModelIds', () => {
     expect(await fetchLiveModelIds()).toEqual(['claude-opus-4-9', 'claude-fable-5']);
   });
 
-  it('fails open on network errors', async () => {
+  it('keeps ids empty but records degraded status on network errors', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubEnv('OPENAI_API_KEY', '');
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline sk-ant-secretvalue')));
     expect(await fetchLiveModelIds()).toEqual([]);
+    const result = await fetchLiveModelIdsWithStatus();
+    expect(result.ids).toEqual([]);
+    expect(result.liveScan).toMatchObject({
+      mode: 'degraded',
+      attemptedVendors: ['anthropic'],
+      fetchedCount: 0,
+      degradedVendors: [{ vendor: 'anthropic', reason: 'offline [redacted-key]' }],
+    });
   });
 
-  it('fails open on non-OK responses', async () => {
+  it('keeps ids empty but records degraded status on non-OK responses', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubEnv('OPENAI_API_KEY', '');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }));
     expect(await fetchLiveModelIds()).toEqual([]);
+    const result = await fetchLiveModelIdsWithStatus();
+    expect(result.liveScan).toMatchObject({
+      mode: 'degraded',
+      degradedVendors: [{ vendor: 'anthropic', status: 401, reason: 'HTTP 401' }],
+    });
   });
 });
 
@@ -103,6 +120,20 @@ describe('checkModelCurrency', () => {
     }));
     const advisories = await checkModelCurrency({ conversation: 'claude-opus-4-8' });
     expect(advisories[0]).toMatchObject({ level: 'upgrade-available', recommended: 'claude-opus-4-9' });
+  });
+
+  it('returns static advisories with degraded live-scan metadata when vendor discovery fails', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+    const result = await checkModelCurrencyStatus({ conversation: 'claude-opus-4-6' });
+    expect(result.advisories[0]).toMatchObject({
+      role: 'conversation',
+      recommended: 'claude-opus-4-8',
+    });
+    expect(result.liveScan).toMatchObject({
+      mode: 'degraded',
+      degradedVendors: [{ vendor: 'anthropic', reason: 'offline' }],
+    });
   });
 });
 
@@ -163,5 +194,67 @@ describe('notifyModelAdvisories', () => {
     const snapshot = getModelAdvisories();
     expect(snapshot.checkedAt).toBeTruthy();
     expect(snapshot.advisories).toEqual([advisory]);
+  });
+
+  it('emits a separate alert when the live model scan degrades', () => {
+    notifyModelLiveScanStatus('test-bot', {
+      mode: 'degraded',
+      attemptedVendors: ['anthropic'],
+      degradedVendors: [{ vendor: 'anthropic', status: 401, reason: 'HTTP 401' }],
+      fetchedCount: 0,
+    });
+    expect(emitAlertMock).toHaveBeenCalledWith(
+      'test-bot',
+      'model-currency-live-scan',
+      expect.stringContaining('anthropic=HTTP 401'),
+      expect.stringContaining('"mode":"degraded"'),
+    );
+    expect(getModelAdvisories().liveScan).toMatchObject({ mode: 'degraded' });
+  });
+
+  it('dedupes unchanged live-scan degradation alerts', () => {
+    const degraded = {
+      mode: 'degraded' as const,
+      attemptedVendors: ['openai'],
+      degradedVendors: [{ vendor: 'openai', reason: 'offline' }],
+      fetchedCount: 0,
+    };
+    notifyModelLiveScanStatus('test-bot', degraded);
+    notifyModelLiveScanStatus('test-bot', degraded);
+    expect(emitAlertMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the live-scan alert once vendor discovery recovers', () => {
+    notifyModelLiveScanStatus('test-bot', {
+      mode: 'degraded',
+      attemptedVendors: ['openai'],
+      degradedVendors: [{ vendor: 'openai', reason: 'offline' }],
+      fetchedCount: 0,
+    });
+    notifyModelLiveScanStatus('test-bot', {
+      mode: 'live',
+      attemptedVendors: ['openai'],
+      degradedVendors: [],
+      fetchedCount: 1,
+    });
+    expect(clearAlertSourceMock).toHaveBeenCalledWith('test-bot', 'model-currency-live-scan');
+  });
+
+  it('records monitor results and alerts only the live-scan source when a clean static fallback is degraded', () => {
+    notifyModelCurrencyResult('test-bot', {
+      advisories: [],
+      liveScan: {
+        mode: 'degraded',
+        attemptedVendors: ['anthropic'],
+        degradedVendors: [{ vendor: 'anthropic', reason: 'offline' }],
+        fetchedCount: 0,
+      },
+    });
+    expect(emitAlertMock).toHaveBeenCalledTimes(1);
+    expect(emitAlertMock.mock.calls[0][1]).toBe('model-currency-live-scan');
+    expect(getModelAdvisories()).toMatchObject({
+      advisories: [],
+      liveScan: { mode: 'degraded' },
+    });
   });
 });

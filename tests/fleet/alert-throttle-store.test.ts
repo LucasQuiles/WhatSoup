@@ -45,9 +45,30 @@ describe('alert throttle store', () => {
   it('loads an empty map when the throttle file is corrupt', async () => {
     mkdirSync(configDir(), { recursive: true });
     writeFileSync(throttleFile(), '{not-json');
-    const { loadAlertThrottle } = await importStore();
+    const { loadAlertThrottle, loadAlertThrottleDetailed } = await importStore();
 
     expect(loadAlertThrottle()).toEqual(new Map());
+    expect(loadAlertThrottleDetailed()).toMatchObject({
+      entries: new Map(),
+      loadError: {
+        file: throttleFile(),
+      },
+    });
+  });
+
+  it('exposes malformed throttle shape as loadError without losing compatibility map shape', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(throttleFile(), '[]');
+    const { loadAlertThrottle, loadAlertThrottleDetailed } = await importStore();
+
+    expect(loadAlertThrottle()).toEqual(new Map());
+    expect(loadAlertThrottleDetailed()).toEqual({
+      entries: new Map(),
+      loadError: {
+        file: throttleFile(),
+        error: 'throttle file root is not an object',
+      },
+    });
   });
 
   it('records and reloads fresh throttle timestamps with private file permissions', async () => {

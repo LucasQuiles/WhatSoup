@@ -152,4 +152,42 @@ describe('extended scheduling tools', () => {
       expect(row.next_run_at).toBe(scheduledAt);
     });
   });
+
+  describe('corrupt payload resilience', () => {
+    // One corrupt persisted payload must not brick the read tools for ALL
+    // rows — list/get/update map every row through the payload parse.
+    it('list_scheduled returns every row even when one payload is corrupt', async () => {
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run('123@s.whatsapp.net', 'text', '{broken json', 1700000000, 'pending');
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run('123@s.whatsapp.net', 'text', '{"text":"fine"}', 1700000100, 'pending');
+
+      const result = await registry.call('list_scheduled', {}, globalSession());
+      expect(result.isError).toBeUndefined();
+      const body = JSON.parse(result.content[0].text);
+      expect(body.count).toBe(2);
+      const corrupt = body.messages.find((m: { id: number }) => m.id === 1);
+      const healthy = body.messages.find((m: { id: number }) => m.id === 2);
+      expect(corrupt.payload).toEqual({ corrupt: true });
+      expect(healthy.payload).toEqual({ text: 'fine' });
+    });
+
+    it('get_scheduled on a corrupt row returns the placeholder payload instead of failing', async () => {
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run('123@s.whatsapp.net', 'text', 'not json at all', 1700000000, 'pending');
+
+      const result = await registry.call('get_scheduled', { id: 1 }, globalSession());
+      expect(result.isError).toBeUndefined();
+      const body = JSON.parse(result.content[0].text);
+      expect(body.id).toBe(1);
+      expect(body.payload).toEqual({ corrupt: true });
+      expect(body.status).toBe('pending');
+    });
+  });
 });

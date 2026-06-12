@@ -376,14 +376,51 @@ describe('SessionManager', () => {
     mockChild._exitCb?.(1, null);
     await vi.waitFor(() => expect(notifyUser).toHaveBeenCalledTimes(1));
 
-    expect(onCrash).toHaveBeenCalledWith({
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
       exitCode: 1,
       signal: null,
       sessionId: null,
       dbRowId: 42,
-    });
+      provider: 'opencode-cli',
+    }));
     expect(notifyUser).toHaveBeenCalledTimes(1);
     expect(notifyUser.mock.calls[0][0]).toContain('exited with code 1');
+  });
+
+  it('classifies and redacts provider stderr in crash metadata', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const onCrash = vi.fn();
+    const email = `lucas${'@'}example.com`;
+    const token = 'abcdefghijklmnopqrstuvwxyz';
+
+    const sm = new SessionManager({
+      db,
+      messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      onCrash,
+    });
+
+    await sm.spawnSession();
+
+    mockChild.stderr.emit('data', Buffer.from(`Please run /login for ${email} with Bearer ${token}`));
+    mockChild._exitCb?.(1, null);
+
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: 1,
+      signal: null,
+      sessionId: null,
+      dbRowId: 42,
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+    }));
+
+    const crashInfo = onCrash.mock.calls[0]?.[0] as { stderrPreview?: string };
+    expect(crashInfo.stderrPreview).toContain('Please run /login');
+    expect(crashInfo.stderrPreview).toContain('Bearer [REDACTED]');
+    expect(crashInfo.stderrPreview).not.toContain(email);
+    expect(crashInfo.stderrPreview).not.toContain(token);
   });
 
   it('getStatus returns correct state when active', async () => {

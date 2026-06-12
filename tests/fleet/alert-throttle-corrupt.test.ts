@@ -68,8 +68,11 @@ describe('alert throttle store corrupt-file warn', () => {
   it('still returns an empty Map after a corrupt-file warn', async () => {
     mkdirSync(configDir(), { recursive: true });
     writeFileSync(throttleFile(), 'totally-not-json!!!');
-    const { loadAlertThrottle } = await importStore();
+    const { loadAlertThrottle, loadAlertThrottleDetailed } = await importStore();
 
     expect(loadAlertThrottle()).toEqual(new Map());
+    expect(loadAlertThrottleDetailed().loadError).toMatchObject({
+      file: throttleFile(),
+    });
   });
 });

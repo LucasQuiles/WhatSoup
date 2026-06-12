@@ -19,6 +19,22 @@ export interface VideoFrame {
   buffer: Buffer;
 }
 
+export type VideoFrameExtractionStatus =
+  | 'ok'
+  | 'no_frames'
+  | 'fallback_ok'
+  | 'fallback_no_frames'
+  | 'fallback_failed'
+  | 'failed';
+
+export interface VideoFrameExtractionDetails {
+  frames: VideoFrame[];
+  status: VideoFrameExtractionStatus;
+  fallbackUsed: boolean;
+  durationSeconds?: number;
+  error?: string;
+}
+
 async function getVideoDuration(inputPath: string): Promise<number> {
   try {
     const opts: ExecFileOptions = { timeout: FFPROBE_TIMEOUT_MS };
@@ -43,6 +59,11 @@ function formatTimestamp(seconds: number): string {
 }
 
 export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> {
+  const details = await extractFramesDetailed(videoBuffer);
+  return details.frames;
+}
+
+export async function extractFramesDetailed(videoBuffer: Buffer): Promise<VideoFrameExtractionDetails> {
   const inputPath = writeTempFile(videoBuffer, 'mp4');
   const outputDir = dirname(inputPath);
   const outputPattern = join(outputDir, `frames_${Date.now()}_%03d.jpg`);
@@ -83,8 +104,15 @@ export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> 
           fallbackPattern,
         ], opts);
       } catch (fallbackErr) {
-        log.error({ err: fallbackErr }, 'ffmpeg single frame fallback also failed');
-        return [];
+        const message = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        log.error({ err: message }, 'ffmpeg single frame fallback also failed');
+        return {
+          frames: [],
+          status: 'fallback_failed',
+          fallbackUsed: true,
+          durationSeconds: duration,
+          error: message,
+        };
       }
 
       // Read the fallback frame
@@ -93,7 +121,14 @@ export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> 
         .filter(f => f.endsWith('.jpg') && f.includes('frames_'))
         .sort();
 
-      if (files.length === 0) return [];
+      if (files.length === 0) {
+        return {
+          frames: [],
+          status: 'fallback_no_frames',
+          fallbackUsed: true,
+          durationSeconds: duration,
+        };
+      }
 
       const framePaths = files.slice(0, 1);
       const frames: VideoFrame[] = [];
@@ -108,7 +143,12 @@ export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> 
           cleanupTempFile(join(outputDir, file));
         }
       }
-      return frames;
+      return {
+        frames,
+        status: frames.length > 0 ? 'fallback_ok' : 'fallback_no_frames',
+        fallbackUsed: true,
+        durationSeconds: duration,
+      };
     }
 
     // Collect output frames
@@ -139,10 +179,16 @@ export async function extractFrames(videoBuffer: Buffer): Promise<VideoFrame[]> 
       }
     }
 
-    return frames;
+    return {
+      frames,
+      status: frames.length > 0 ? 'ok' : 'no_frames',
+      fallbackUsed: false,
+      durationSeconds: duration,
+    };
   } catch (err) {
-    log.error({ err }, 'extractFrames failed entirely');
-    return [];
+    const message = err instanceof Error ? err.message : String(err);
+    log.error({ err: message }, 'extractFrames failed entirely');
+    return { frames: [], status: 'failed', fallbackUsed: false, error: message };
   } finally {
     cleanupTempFile(inputPath);
   }

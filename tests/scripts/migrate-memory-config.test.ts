@@ -291,6 +291,7 @@ describe('migrate-memory-config operator errors', () => {
     }
   });
 
+  // @skip-env Windows does not preserve POSIX chmod unreadable-file semantics.
   it.skipIf(isWindows)('reports EACCES with path context on unreadable config', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-error-'));
     try {
@@ -310,6 +311,7 @@ describe('migrate-memory-config operator errors', () => {
     }
   });
 
+  // @skip-env Windows does not preserve POSIX chmod read-only-directory semantics.
   it.skipIf(isWindows)('reports EACCES with path context when write dir is read-only', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-migrate-error-'));
     try {
@@ -356,6 +358,7 @@ describe('migrate-memory-config rollback operator errors', () => {
     }
   });
 
+  // @skip-env Windows does not preserve POSIX chmod read-only-directory semantics.
   it.skipIf(isWindows)('reports EACCES with path context when backup rename fails', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-rollback-error-'));
     try {
