@@ -232,6 +232,7 @@ describe('fallback chain selection — restore path', () => {
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
     const clearSpy = vi
@@ -274,6 +275,7 @@ describe('fallback chain selection — restore path', () => {
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     const saveSpy = vi
       .spyOn(fallbackStateDb, 'saveFallbackState')
