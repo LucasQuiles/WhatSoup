@@ -1,3 +1,9 @@
+/**
+ * Collector tests intentionally assert rendered BOT ERRORS dispatch captures
+ * and collector log text as behavioral output contracts.
+ *
+ * test-integrity: source-string-ok
+ */
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -301,7 +307,7 @@ describe('bot-errors-collector', () => {
     };
     expect(state.configuredRemoteHosts).toEqual(['mini5']);
     expect(state.configuredRemotes).toEqual(['mini5']);
-    expect(state.openAlerts?.['mini5:remote-claim-failed']).toBeUndefined();
+    expect(state.openAlerts ?? {}).not.toHaveProperty('mini5:remote-claim-failed');
   });
 
   it('persists best-effort remote hosts for watchdog daily-health classification', () => {

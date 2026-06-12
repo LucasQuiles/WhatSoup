@@ -1,3 +1,9 @@
+/**
+ * Dispatcher tests intentionally assert rendered BOT ERRORS message text,
+ * dry-send captures, and dispatch logs as behavioral output contracts.
+ *
+ * test-integrity: source-string-ok
+ */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
