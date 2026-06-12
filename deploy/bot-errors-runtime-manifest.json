@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-12T19:40:54Z",
+  "generatedAt": "2026-06-12T21:20:26Z",
   "scope": "bot-errors-runtime-scripts",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "fa24b74cb7f282a168206a04c8c31f8ba82c6efaf1c4e8bd09a3d1ce2149eadc",
+      "sha256": "0507fb3411a9e836e934b4cbd0904e5971e6cf99fb6ccc6465e76c0bd75db829",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -17,7 +17,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "7513d444c256526140a2744f8a31151d7f47d7ea8c91da63dcc358a2bab7571e",
+      "sha256": "b4925437b5dd6c3a135ea9daec35efe438e1dba84b9067f273ccde0eaa0b9705",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -64,7 +64,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "740fc5f3977465b114e113d8cf28a3663b7bc7f975ed09ce4d912d4f33833390",
+      "sha256": "e328e9105dfdf4611540c27654a40a67a330e79b2475697f73a5358eb31777d8",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "critical_file_problem",
