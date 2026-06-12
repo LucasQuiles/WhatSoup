@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -186,6 +186,7 @@ vi.mock('../../../src/core/media-download.ts', () => ({
 }));
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
+import { writeProviderMcpConfig } from '../../../src/runtimes/agent/providers/mcp-bridge.ts';
 
 function makeDb(): Database {
   return {
@@ -294,5 +295,103 @@ describe('AgentRuntime startup MCP config dual-write', () => {
 
     expect(existsSync(join(cwd, '.mcp.json'))).toBe(true);
     expect(existsSync(join(cwd, 'opencode.json'))).toBe(false);
+  });
+});
+
+describe('opencode MCP config write hardening', () => {
+  let tmpDirs: string[] = [];
+  const socketPath = '/tmp/test.sock';
+  const proxyScript = '/opt/whatsoup/deploy/mcp/whatsoup-proxy.ts';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tmpDirs = [];
+  });
+
+  afterEach(() => {
+    for (const dir of tmpDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function tmp(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ws-opencode-hardening-'));
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  it('warns on corrupt user opencode.json, overwrites from a fresh base, and proceeds', () => {
+    const dir = tmp();
+    writeFileSync(join(dir, 'opencode.json'), '{ not json');
+
+    const written = writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript);
+
+    expect(written).toBe(join(dir, 'opencode.json'));
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ target: join(dir, 'opencode.json') }),
+      expect.stringContaining('failed to parse existing opencode.json'),
+    );
+    const parsed = readJson(join(dir, 'opencode.json'));
+    expect((parsed.mcp as Record<string, unknown>).whatsoup).toBeDefined();
+  });
+
+  it('skips symlinked opencode.json with a warning and does not throw', () => {
+    const dir = tmp();
+    const decoyDir = tmp();
+    const decoyTarget = join(decoyDir, 'attacker-opencode.json');
+    symlinkSync(decoyTarget, join(dir, 'opencode.json'));
+
+    const written = writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript);
+
+    expect(written).toBeNull();
+    expect(existsSync(decoyTarget)).toBe(false);
+    expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ target: join(dir, 'opencode.json') }),
+      expect.stringContaining('skipping opencode MCP config write'),
+    );
+  });
+
+  it('removes the managed whatsoup-cloud provider and model when baseUrl is no longer configured', () => {
+    const dir = tmp();
+    writeFileSync(
+      join(dir, 'opencode.json'),
+      JSON.stringify({
+        $schema: 'https://opencode.ai/config.json',
+        model: 'whatsoup-cloud/old-model',
+        provider: {
+          'whatsoup-cloud': {
+            options: { baseURL: 'https://old.example/v1' },
+            models: { 'old-model': {} },
+          },
+          usercloud: {
+            options: { baseURL: 'https://user.example/v1' },
+            models: { usermodel: {} },
+          },
+        },
+        mcp: {
+          custom: { type: 'local', command: ['custom'], enabled: true },
+        },
+      }),
+    );
+
+    writeProviderMcpConfig('opencode-cli', dir, socketPath, proxyScript);
+
+    const parsed = readJson(join(dir, 'opencode.json'));
+    expect(parsed.$schema).toBe('https://opencode.ai/config.json');
+    expect(parsed.model).toBeUndefined();
+    const provider = parsed.provider as Record<string, unknown>;
+    expect(provider['whatsoup-cloud']).toBeUndefined();
+    expect(provider.usercloud).toEqual({
+      options: { baseURL: 'https://user.example/v1' },
+      models: { usermodel: {} },
+    });
+    const mcp = parsed.mcp as Record<string, unknown>;
+    expect(mcp.custom).toEqual({ type: 'local', command: ['custom'], enabled: true });
+    expect(mcp.whatsoup).toMatchObject({
+      type: 'local',
+      command: expect.arrayContaining([proxyScript]),
+      environment: { WHATSOUP_SOCKET: socketPath },
+      enabled: true,
+    });
   });
 });

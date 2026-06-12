@@ -2,18 +2,21 @@
 // Provider-aware MCP bridge: generates .mcp.json configs for CLI providers and
 // converts MCP tool definitions to API function-calling formats for API providers.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolRegistry } from '../../../mcp/registry.ts';
 import type { SessionContext, ToolCallResult } from '../../../mcp/types.ts';
 import { buildMcpLaunchCommand } from '../../../core/mcp-launcher.ts';
 import { writePrivateFileSync } from '../../../core/workspace.ts';
+import { createChildLogger } from '../../../logger.ts';
 import type {
   McpMode,
   ProviderMcpBridge,
   ProviderMcpTool,
   ProviderMcpToolResult,
 } from './types.ts';
+
+const log = createChildLogger('mcp-bridge');
 
 /**
  * Subset of `agentOptions.providerConfig` consumed when writing an opencode
@@ -180,6 +183,20 @@ export function mergeOpencodeConfig(
     if (model) {
       base.model = `${providerId}/${model}`;
     }
+  } else {
+    const providerId = providerConfig?.providerId ?? DEFAULT_OPENCODE_PROVIDER_ID;
+    if (base.provider && typeof base.provider === 'object' && !Array.isArray(base.provider)) {
+      const existingProvider = { ...(base.provider as Record<string, unknown>) };
+      delete existingProvider[providerId];
+      if (Object.keys(existingProvider).length > 0) {
+        base.provider = existingProvider;
+      } else {
+        delete base.provider;
+      }
+    }
+    if (typeof base.model === 'string' && base.model.startsWith(`${providerId}/`)) {
+      delete base.model;
+    }
   }
 
   return base;
@@ -212,6 +229,19 @@ export function writeProviderMcpConfig(
   if (target === null) return null;
 
   if (providerId === 'opencode-cli') {
+    try {
+      const stat = lstatSync(target);
+      if (stat.isSymbolicLink()) {
+        log.warn({ target }, 'skipping opencode MCP config write because opencode.json is a symlink');
+        return null;
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        log.warn({ err, target }, 'skipping opencode MCP config write after file stat failed');
+        return null;
+      }
+    }
+
     let existing: Record<string, unknown> | null = null;
     if (existsSync(target)) {
       try {
@@ -219,14 +249,23 @@ export function writeProviderMcpConfig(
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           existing = parsed as Record<string, unknown>;
         }
-      } catch {
+      } catch (err) {
         // Corrupt/unreadable user config — fall back to a fresh merge base
         // rather than refusing to wire MCP. The whatsoup block is what matters.
+        log.warn({ err, target }, 'failed to parse existing opencode.json before MCP config write; overwriting managed entries');
         existing = null;
       }
     }
     const merged = mergeOpencodeConfig(existing, generated, providerConfig);
-    writePrivateFileSync(target, JSON.stringify(merged, null, 2));
+    try {
+      writePrivateFileSync(target, JSON.stringify(merged, null, 2));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+        log.warn({ err, target }, 'skipping opencode MCP config write because opencode.json is a symlink');
+        return null;
+      }
+      throw err;
+    }
     return target;
   }
 
