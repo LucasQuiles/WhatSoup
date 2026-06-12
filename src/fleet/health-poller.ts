@@ -1,5 +1,8 @@
 import { createChildLogger } from '../logger.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
+// Aliased to keep this module's call sites unchanged (asRecord returns
+// `undefined` for non-records; the one null-typed seam adapts with `?? null`).
+import { asRecord as recordValue } from '../lib/type-guards.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 
@@ -42,12 +45,6 @@ interface HealthSnapshotClassification {
   confidence: StatusConfidence;
   reason: string;
   evidence: string[];
-}
-
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
 }
 
 function stringValue(value: unknown): string | null {
@@ -359,7 +356,7 @@ export class HealthPoller {
   private async parseHealthBody(res: Response): Promise<Record<string, unknown> | null> {
     try {
       const parsed = await res.json();
-      return recordValue(parsed);
+      return recordValue(parsed) ?? null;
     } catch {
       return null;
     }
