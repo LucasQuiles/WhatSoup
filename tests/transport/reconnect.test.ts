@@ -325,6 +325,42 @@ describe('ConnectionManager — phase transitions', () => {
     await manager.shutdown();
   });
 
+  it('successful reconnect clears stale disconnect metadata from the current health snapshot', async () => {
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const s = makeMockSocket();
+      sockets.push(s);
+      return s.mockSock as any;
+    });
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    sockets[0]!.emit(openEvent());
+
+    sockets[0]!.emit(closeEvent(428));
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'reconnecting',
+      connected: false,
+      lastDisconnectReason: 'Unknown',
+      lastStatusCode: 428,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    sockets[1]!.emit(openEvent());
+
+    expect(manager.getConnectionState()).toMatchObject({
+      state: 'connected',
+      connected: true,
+      reconnectAttempts: 0,
+      reconnectPhase: null,
+      lastDisconnectReason: null,
+      lastStatusCode: null,
+    });
+
+    await manager.shutdown();
+  });
+
   it('restartRequired disconnect triggers immediate reconnect without backoff', async () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
