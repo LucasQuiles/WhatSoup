@@ -3177,6 +3177,38 @@ def fleet_api_profile_value(profile: dict[str, Any], key: str) -> str | None:
     return None
 
 
+def fleet_api_profile_port(profile: dict[str, Any]) -> str | None:
+    fleet_api = profile.get("fleetApi") if isinstance(profile.get("fleetApi"), dict) else {}
+    for source in (profile, fleet_api):
+        for key in ("fleetApiPort", "port"):
+            value = source.get(key)
+            if isinstance(value, int):
+                return str(value)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def fleet_api_default_url(profile: dict[str, Any]) -> str:
+    raw_bind = (
+        os.environ.get("FLEET_BIND_ADDRESS")
+        or fleet_api_profile_value(profile, "fleetBindAddress")
+        or fleet_api_profile_value(profile, "bindAddress")
+        or "127.0.0.1"
+    )
+    bind = raw_bind.strip()
+    if bind in {"", "0.0.0.0", "::", "[::]"}:
+        bind = "127.0.0.1"
+    elif ":" in bind and not bind.startswith("["):
+        bind = f"[{bind}]"
+    port = (
+        os.environ.get("BOT_ERRORS_FLEET_API_PORT")
+        or fleet_api_profile_port(profile)
+        or "9099"
+    ).strip()
+    return f"http://{bind}:{port}"
+
+
 def load_fleet_api_token(profile: dict[str, Any]) -> tuple[str | None, str, int, str | None]:
     dry = os.environ.get("BOT_ERRORS_DRY_FLEET_TOKEN_JSON")
     token_path = (
@@ -3248,7 +3280,7 @@ def fleet_api_inventory(profile: dict[str, Any]) -> list[str]:
     raw_url = (
         os.environ.get("BOT_ERRORS_FLEET_API_URL")
         or fleet_api_profile_value(profile, "fleetApiUrl")
-        or "http://127.0.0.1:9099"
+        or fleet_api_default_url(profile)
     )
     endpoint = fleet_api_endpoint(raw_url)
     token, token_source, accept_count, token_error = load_fleet_api_token(profile)

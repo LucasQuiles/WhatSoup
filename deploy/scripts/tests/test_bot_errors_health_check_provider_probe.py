@@ -96,3 +96,40 @@ def test_provider_credential_probe_unlocks_and_pins_login_keychain(monkeypatch):
     assert ["security", "unlock-keychain", "-p", "", keychain_path] in commands
     assert ["security", "find-generic-password", "-s", service, "-a", account, keychain_path] in commands
     assert ["security", "find-generic-password", "-s", service, "-a", account, "-w", keychain_path] in commands
+
+
+def test_fleet_api_default_url_uses_configured_bind_address(monkeypatch):
+    monkeypatch.setenv("FLEET_BIND_ADDRESS", "100.91.13.7")
+    monkeypatch.delenv("BOT_ERRORS_FLEET_API_PORT", raising=False)
+
+    assert _mod.fleet_api_default_url({}) == "http://100.91.13.7:9099"
+
+
+def test_fleet_api_default_url_uses_loopback_for_wildcard_bind(monkeypatch):
+    monkeypatch.setenv("FLEET_BIND_ADDRESS", "0.0.0.0")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_API_PORT", "19099")
+
+    assert _mod.fleet_api_default_url({}) == "http://127.0.0.1:19099"
+
+
+def test_fleet_api_default_url_brackets_ipv6_bind(monkeypatch):
+    monkeypatch.delenv("FLEET_BIND_ADDRESS", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_FLEET_API_PORT", raising=False)
+
+    assert _mod.fleet_api_default_url({"fleetApi": {"bindAddress": "fd7a:115c:a1e0::1", "port": 9098}}) == (
+        "http://[fd7a:115c:a1e0::1]:9098"
+    )
+
+
+def test_fleet_api_inventory_explicit_url_still_wins(monkeypatch):
+    monkeypatch.setenv("FLEET_BIND_ADDRESS", "100.91.13.7")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_API_URL", "http://127.0.0.1:18080/api/instances")
+    monkeypatch.setenv("BOT_ERRORS_DRY_FLEET_TOKEN_JSON", '{"active":"token","accept":[]}')
+    monkeypatch.setenv("BOT_ERRORS_DRY_FLEET_API_STATUS", "200")
+    monkeypatch.setenv("BOT_ERRORS_DRY_FLEET_API_BODY", '{"instances":[{"name":"q"}]}')
+
+    lines = _mod.fleet_api_inventory({"expectFleetApi": True})
+
+    assert len(lines) == 1
+    assert "endpoint=http://127.0.0.1:18080/api/instances" in lines[0]
+    assert "instances=1" in lines[0]
