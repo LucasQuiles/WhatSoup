@@ -66,7 +66,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "e328e9105dfdf4611540c27654a40a67a330e79b2475697f73a5358eb31777d8",
+      "sha256": "6643a3cdad9482e2fe3824cd5a47f2504288bd27c24e6dc8fef624f6319058e2",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "critical_file_problem",
@@ -101,7 +101,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "f3ce989cd6967c852b034c1bd34cc964d5e49db8aadda3602d13b01afde3f397",
+      "sha256": "16d9b10ddf4f6c1b779ebf4cb4a4b3e9acfcc0fcd3ea07115078d033e6b4ef44",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -109,6 +109,8 @@
         "meta_alert_recovery_deferred",
         "recovery_successes_required",
         "tailscale_online_ssh_timeout",
+        "preflight_remote_unreachable",
+        "remote_writefail_claim_skipped_unreachable",
         "best-effort-remote",
         "redact_collector_text"
       ]
