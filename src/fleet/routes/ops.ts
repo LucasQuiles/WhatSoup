@@ -1099,7 +1099,9 @@ export async function handleCreateLine(
       if (token) {
         writePrivateFileSync(path.join(configDir, 'tokens.env'), `WHATSOUP_HEALTH_TOKEN=${token}\n`, { exclusive: true });
       }
-    } catch { /* keyring unavailable — skip token */ }
+    } catch {
+      log.warn({ instance: name }, 'keyring read failed — spawned instance will start without a health token');
+    }
 
     // --- Write CLAUDE.md for agent instances ---
     if (body.claudeMd && type === 'agent' && body.agentOptions &&
