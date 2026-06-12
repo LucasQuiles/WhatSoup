@@ -136,7 +136,7 @@ export default function LineDetail() {
     >
       {/* ═══ Line Header ═══ */}
       <div
-        className="flex items-center gap-4 c-toolbar flex-shrink-0 bg-d2 c-border rounded-lg"
+        className="flex flex-wrap md:flex-nowrap items-center gap-4 c-toolbar flex-shrink-0 bg-d2 c-border rounded-lg"
       >
         <ActionButton
           label="Back"
@@ -148,9 +148,9 @@ export default function LineDetail() {
         <StatusCell status={line.status} live={line.status === 'online'} />
 
         {/* Identity */}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <h1 className="text-t1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl truncate">
+        <div className="flex-1 min-w-[var(--header-identity-min)]">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <h1 className="text-t1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl truncate min-w-0 flex-1">
               {line.name}
             </h1>
             <ModeBadge mode={line.mode} />
@@ -162,14 +162,16 @@ export default function LineDetail() {
         </div>
 
         {/* Meta */}
-        <div className="hidden md:flex gap-4 font-mono text-t4 text-sm">
+        <div className="hidden lg:flex gap-4 font-mono text-t4 text-sm">
           <span>uptime: {line.uptime ?? '—'}</span>
           <span>port: {line.healthPort}</span>
           <span>msgs: {(line.messagesTotal ?? 0).toLocaleString()}</span>
         </div>
 
         {/* Heartbeat + Actions */}
-        <HeartbeatStrip beats={line.heartbeat} />
+        <div className="hidden md:block">
+          <HeartbeatStrip beats={line.heartbeat} />
+        </div>
         <div className="flex items-center gap-[var(--sp-2)]">
           {line.linkedStatus === 'unlinked' && (
             <Button variant="ghost" size="sm" icon={<Link2 size={15} strokeWidth={1.75} />} onClick={() => setShowRelink(true)}>
