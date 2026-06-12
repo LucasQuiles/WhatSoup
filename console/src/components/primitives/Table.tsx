@@ -28,7 +28,6 @@ import {
   type ThHTMLAttributes,
   type HTMLAttributes,
   type KeyboardEvent,
-  type Ref,
 } from 'react';
 import { ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react';
 
@@ -192,9 +191,13 @@ export interface TableRowProps extends HTMLAttributes<HTMLTableRowElement> {
   current?: boolean;
   /**
    * Ref to the underlying <tr> (React 19 ref-as-prop). Used by callers that
-   * need the row element, e.g. as a Drawer restoreFocus target.
+   * need the row element, e.g. as a Drawer restoreFocus target. Declared
+   * structurally (callback or {current}) rather than as React.Ref: the repo
+   * typechecks console sources under two @types/react installations, and
+   * React.Ref's unique-symbol cleanup variant is not identity-compatible
+   * across copies.
    */
-  ref?: Ref<HTMLTableRowElement>;
+  ref?: ((instance: HTMLTableRowElement | null) => void) | { current: HTMLTableRowElement | null };
   children: ReactNode;
 }
 
