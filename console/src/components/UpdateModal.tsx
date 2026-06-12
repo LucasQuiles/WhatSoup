@@ -224,8 +224,13 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
               if (!eventMatch || !dataMatch) continue
 
               const event = eventMatch[1]
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- waiver:WVR-010 SSE stream JSON has no typed schema; expires 2026-07-01
-              const data = JSON.parse(dataMatch[1]) as any
+              // SSE payload shape is server-defined; type the fields this
+              // client actually reads (retires waiver WVR-010).
+              const data = JSON.parse(dataMatch[1]) as {
+                step?: string
+                status?: string
+                message?: string
+              }
 
               if (event === 'progress') {
                 dispatch({ type: 'stepProgress', step: data.step, status: data.status as StepStatus, message: data.message })

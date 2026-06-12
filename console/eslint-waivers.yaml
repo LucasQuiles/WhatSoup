@@ -192,18 +192,6 @@ waivers:
     expiration_phase: C4
     cleanup_trigger: react-hooks plugin/library compatibility update
     user_approval_required: no
-  - id: WVR-010
-    rule: "@typescript-eslint/no-explicit-any"
-    owner: console-maintainer
-    reason: SSE stream JSON has no typed schema yet.
-    scope: console/src/components/UpdateModal.tsx:227
-    expiry: 2026-07-01
-    replacement_plan: type the update-stream events when UpdateModal migrates to the Modal primitive (C2).
-    safer_alternative_considered: unknown + narrowing — rejected pending the C2 rewrite to avoid double churn.
-    status: temporary
-    expiration_phase: C2
-    cleanup_trigger: UpdateModal migration slice
-    user_approval_required: no
   - id: WVR-011
     rule: react-hooks/exhaustive-deps
     owner: console-maintainer
