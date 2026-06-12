@@ -2365,7 +2365,7 @@ export class AgentRuntime implements Runtime {
         );
         const writtenTargets = new Set<string>();
         const writtenPaths: string[] = [];
-        const writeFor = (provider: string, providerConfig?: { baseUrl?: string; model?: string }): void => {
+        const writeFor = (provider: string, providerConfig?: { baseUrl?: string; model?: string; apiKeyService?: string }): void => {
           const target = writeProviderMcpConfigTarget(provider, agentCwd);
           if (target === null) return;
           if (writtenTargets.has(target)) {
@@ -2395,6 +2395,9 @@ export class AgentRuntime implements Runtime {
                   ? (this.agentProviderConfig['baseUrl'] as string)
                   : undefined,
                 model: this.model,
+                apiKeyService: typeof this.agentProviderConfig['apiKeyService'] === 'string'
+                  ? (this.agentProviderConfig['apiKeyService'] as string)
+                  : undefined,
               }
             : undefined;
         writeFor(this.agentProvider, primaryOpencodeProviderConfig);

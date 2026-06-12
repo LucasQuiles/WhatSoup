@@ -1,16 +1,20 @@
 import { join } from 'node:path';
 import { buildMcpLaunchCommand } from './mcp-launcher.ts';
+import { SERVICE_ENV_MAP, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 
 /**
  * Subset of `agentOptions.providerConfig` consumed when writing an opencode
  * config file. `baseUrl` selects a custom OpenAI-compatible cloud endpoint;
- * `model` is the model id opencode should target on that endpoint.
+ * `model` is the model id opencode should target on that endpoint;
+ * `apiKeyService` names the keyring service whose key authenticates the
+ * endpoint (defaults to the model-prefix-derived service).
  */
 export interface OpencodeProviderConfig {
   baseUrl?: string;
   /** Provider id under opencode's top-level `provider` map. Defaults to `whatsoup-cloud`. */
   providerId?: string;
   model?: string;
+  apiKeyService?: string;
 }
 
 export interface AdditionalMcpServerConfig {
@@ -114,13 +118,25 @@ export function mergeOpencodeConfig(
   if (providerConfig?.baseUrl) {
     const providerId = providerConfig.providerId ?? DEFAULT_OPENCODE_PROVIDER_ID;
     const model = providerConfig.model;
+    // Auth: reference the endpoint key via opencode's env interpolation so the
+    // key VALUE never lands on disk — buildChildEnv injects the matching env
+    // var into the session child. Service: explicit apiKeyService override,
+    // else derived from the model prefix. A service SERVICE_ENV_MAP does not
+    // know has no env var to interpolate, so apiKey is omitted entirely
+    // (the validator rejects unknown apiKeyService values at config load).
+    const keyService =
+      providerConfig.apiKeyService ?? resolveProviderKeyService('opencode-cli', model);
+    const keyEnvVar = keyService ? SERVICE_ENV_MAP[keyService] : undefined;
     const existingProvider = (base.provider && typeof base.provider === 'object' && !Array.isArray(base.provider))
       ? (base.provider as Record<string, unknown>)
       : {};
     base.provider = {
       ...existingProvider,
       [providerId]: {
-        options: { baseURL: providerConfig.baseUrl },
+        options: {
+          baseURL: providerConfig.baseUrl,
+          ...(keyEnvVar ? { apiKey: `{env:${keyEnvVar}}` } : {}),
+        },
         models: model ? { [model]: {} } : {},
       },
     };

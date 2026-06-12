@@ -116,6 +116,7 @@ export function buildChildEnv(
   provider: string = 'claude-cli',
   baseOpts?: BuildBaseChildEnvOptions,
   model?: string,
+  providerConfig?: Record<string, unknown>,
 ): NodeJS.ProcessEnv {
   if (!isProviderId(provider)) {
     throw new Error(
@@ -153,16 +154,37 @@ export function buildChildEnv(
       // lookupCredential resolves env → keychain; SERVICE_ENV_MAP is the single
       // source of truth for the service→env-var mapping (no second copy).
       const services = new Set<string>(['deepseek', 'minimax']);
+      const warnUnmapped = (service: string, source: string): void => {
+        if (warnedUnmappedKeyServices.has(service)) return;
+        warnedUnmappedKeyServices.add(service);
+        log.warn(
+          { provider, model, service, source },
+          `[session-manager:buildChildEnv] ${source} resolves to key service "${service}" but SERVICE_ENV_MAP has no entry for it — no API key env var will be forwarded to the child. Register the service in SERVICE_ENV_MAP (src/lib/keyring.ts) to enable forwarding.`,
+        );
+      };
+      // Custom-endpoint auth lane: the opencode.json provider block references
+      // the endpoint key as `{env:<ENVVAR>}` for the service named by
+      // providerConfig.apiKeyService — inject that service's key on top of the
+      // defaults so the interpolation resolves inside the child.
+      const endpointServiceRaw = providerConfig?.['apiKeyService'];
+      const endpointService =
+        typeof endpointServiceRaw === 'string' && endpointServiceRaw.trim() !== ''
+          ? endpointServiceRaw
+          : undefined;
+      const endpointServiceMapped = endpointService !== undefined && Boolean(SERVICE_ENV_MAP[endpointService]);
+      if (endpointService) {
+        if (endpointServiceMapped) services.add(endpointService);
+        else warnUnmapped(endpointService, 'providerConfig.apiKeyService');
+      }
       const modelService = resolveProviderKeyService(provider, model);
       if (modelService) {
         if (SERVICE_ENV_MAP[modelService]) {
           services.add(modelService);
-        } else if (!warnedUnmappedKeyServices.has(modelService)) {
-          warnedUnmappedKeyServices.add(modelService);
-          log.warn(
-            { provider, model, service: modelService },
-            `[session-manager:buildChildEnv] model prefix resolves to key service "${modelService}" but SERVICE_ENV_MAP has no entry for it — no API key env var will be forwarded to the child. Register the service in SERVICE_ENV_MAP (src/lib/keyring.ts) to enable forwarding.`,
-          );
+        } else if (!endpointServiceMapped) {
+          // A mapped explicit endpoint key service already covers auth — a
+          // bare custom-endpoint model id has no meaningful prefix, so the
+          // unmapped-prefix warning would be misleading noise there.
+          warnUnmapped(modelService, 'model prefix');
         }
       }
       for (const svc of services) {
@@ -980,6 +1002,7 @@ export class SessionManager {
           whatsoupMcpSocket: this.whatsoupMcpSocket,
         },
         this.model,
+        this.providerConfig,
       ),
     });
 
@@ -1522,6 +1545,7 @@ export class SessionManager {
             whatsoupMcpSocket: this.whatsoupMcpSocket,
           },
           this.model,
+          this.providerConfig,
         ),
       });
 
