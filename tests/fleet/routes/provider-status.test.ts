@@ -123,6 +123,8 @@ describe('handleGetLineProviderStatus', () => {
         turnsServed: null,
         turnsEmpty: null,
         lastFallbackTurnAt: null,
+        probeAttempts: null,
+        lastProbeAt: null,
         activeEntry: null,
         chain: [],
       },
@@ -236,6 +238,8 @@ describe('handleGetLineProviderStatus', () => {
           fallbackTurnsServed: 7,
           fallbackTurnsEmpty: 2,
           lastFallbackTurnAt: 1_781_087_200_000,
+          probeAttempts: 4,
+          lastProbeAt: 1_781_087_300_000,
           activeFallbackEntry: { provider: 'openai-api', model: 'gpt-4o' },
           fallbackChain: [{ provider: 'openai-api', model: 'gpt-4o', eligible: true }],
         },
@@ -259,6 +263,8 @@ describe('handleGetLineProviderStatus', () => {
       turnsServed: 7,
       turnsEmpty: 2,
       lastFallbackTurnAt: 1_781_087_200_000,
+      probeAttempts: 4,
+      lastProbeAt: 1_781_087_300_000,
       activeEntry: { provider: 'openai-api', model: 'gpt-4o' },
       chain: [{ provider: 'openai-api', model: 'gpt-4o', eligible: true }],
     });
@@ -376,6 +382,8 @@ describe('handleGetLineProviderStatus', () => {
       turnsServed: null,
       turnsEmpty: null,
       lastFallbackTurnAt: null,
+      probeAttempts: null,
+      lastProbeAt: null,
       activeEntry: null,
       chain: [{ provider: 'openai-api', model: 'gpt-4o', eligible: null }],
     });
@@ -566,6 +574,8 @@ describe('handleGetLineProviderStatus', () => {
       turnsServed,
       turnsEmpty,
       lastFallbackTurnAt,
+      probeAttempts,
+      lastProbeAt,
       activeEntry,
       chain,
       ...existingFallback
@@ -577,7 +587,7 @@ describe('handleGetLineProviderStatus', () => {
       active: true,
       activeUntil,
     });
-    expect({ effectiveProvider, reason, resetAt, recoveryProbeRequired, turnsServed, turnsEmpty, lastFallbackTurnAt }).toEqual({
+    expect({ effectiveProvider, reason, resetAt, recoveryProbeRequired, turnsServed, turnsEmpty, lastFallbackTurnAt, probeAttempts, lastProbeAt }).toEqual({
       effectiveProvider: 'opencode-cli',
       reason: 'auth-required',
       resetAt: activeUntil,
@@ -585,6 +595,9 @@ describe('handleGetLineProviderStatus', () => {
       turnsServed: 3,
       turnsEmpty: 1,
       lastFallbackTurnAt: 1_781_087_200_000,
+      // Health omits the probe-cap fields here — the route tolerates absence (null).
+      probeAttempts: null,
+      lastProbeAt: null,
     });
     expect(activeEntry).toBeNull();
     expect(chain).toEqual([{ provider: 'opencode-cli', model: 'minimax/minimax-m2', eligible: null }]);

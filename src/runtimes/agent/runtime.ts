@@ -154,6 +154,16 @@ const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
   return Math.min(Math.max(raw, 30 * 1000), 30 * 60 * 1000);
 })();
 const PROVIDER_FALLBACK_PRIMARY_PROBE_TIMEOUT_MS = 5_000;
+// Consecutive failed recovery probes (revert-timer extension path) before a
+// single fallback_recovery_stalled alert is emitted. The cap only surfaces the
+// stall — the window keeps extending so the instance is never stranded on a
+// dead primary. One alert per stall episode; the counter resets on deactivation
+// (which a successful probe triggers).
+const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
+  const raw = Number(process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD']);
+  if (!Number.isFinite(raw) || raw <= 0) return 12;
+  return Math.min(Math.max(Math.trunc(raw), 3), 100);
+})();
 
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required';
 
@@ -1405,6 +1415,15 @@ export class AgentRuntime implements Runtime {
   private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Consecutive failed recovery probes on the revert-timer EXTENSION path
+  // (process-local, reset on deactivation — which a successful probe triggers).
+  // Early-window standing probes do not count: nothing is extending yet.
+  // At PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD one fallback_recovery_stalled
+  // alert fires per stall episode; the window keeps extending regardless.
+  private fallbackProbeAttempts = 0;
+  // Epoch ms of the most recent recovery probe (either path); null until the
+  // first probe. Process-local observability only — never persisted.
+  private fallbackLastProbeAt: number | null = null;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -5681,6 +5700,8 @@ export class AgentRuntime implements Runtime {
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
+    probeAttempts: number;
+    lastProbeAt: number | null;
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   } {
@@ -5696,6 +5717,8 @@ export class AgentRuntime implements Runtime {
       fallbackTurnsServed: this.fallbackTurnsServed,
       fallbackTurnsEmpty: this.fallbackTurnsEmpty,
       lastFallbackTurnAt: this.lastFallbackTurnAt,
+      probeAttempts: this.fallbackProbeAttempts,
+      lastProbeAt: this.fallbackLastProbeAt,
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
     };
@@ -6073,6 +6096,11 @@ export class AgentRuntime implements Runtime {
     this.activeFallbackEntry = null;
     this.fallbackResetAt = null;
     this.fallbackRecoveryProbeRequired = false;
+    // End of the stall episode (covers both successful-probe reverts and
+    // manual/elapsed deactivations) — the next episode counts from zero and
+    // may alert again at the threshold. fallbackLastProbeAt is kept as
+    // historical observability, mirroring lastFallbackTurnAt.
+    this.fallbackProbeAttempts = 0;
     try {
       clearFallbackState(this.db);
     } catch (err) {
@@ -6091,10 +6119,12 @@ export class AgentRuntime implements Runtime {
       this.deactivateProviderFallback('window-elapsed');
       return;
     }
+    this.fallbackLastProbeAt = Date.now();
     if (this.probePrimaryProviderRecovered()) {
       this.deactivateProviderFallback('primary-probe-ok');
       return;
     }
+    this.fallbackProbeAttempts += 1;
     const now = Date.now();
     const until = now + PROVIDER_FALLBACK_PRIMARY_RECHECK_MS;
     this.fallbackActiveUntil = until;
@@ -6111,24 +6141,55 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
     }
-    this.scheduleFallbackPrimaryProbe();
+    // Exactly-once-at-threshold stall alert. The counter only resets on
+    // deactivation, so attempts > threshold never re-alerts within the same
+    // stall episode. Extension continues regardless — surfacing must never
+    // strand the instance on a dead primary.
+    if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
+      emitAlert(
+        this.instanceName,
+        'fallback_recovery_stalled',
+        'Primary provider recovery probe is stalled — fallback window extending indefinitely',
+        `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${this.fallbackProbeAttempts} `
+          + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
+      );
+    }
+    // No scheduleFallbackPrimaryProbe() here: the extension window equals the
+    // recheck cadence, so this timer IS the probe cadence. Re-arming the
+    // standing probe alongside it produced a double-probe (two probes per
+    // cadence); the standing probe's guard makes it a no-op in this state.
     log.warn({
       instanceName: this.instanceName,
       primaryProvider: this.agentProvider,
       fallbackProvider: this.activeFallbackEntry?.provider,
       reason: this.fallbackArmReason,
+      probeAttempts: this.fallbackProbeAttempts,
     }, 'primary provider recovery probe still failing; keeping fallback armed');
   }
 
+  /**
+   * Standing early-recovery probe. Its only purpose is to revert BEFORE a long
+   * window (e.g. the 5h usage-limit default) elapses; once the remaining window
+   * is within one recheck cadence the revert timer itself probes on the same
+   * cadence, so arming this timer too would double-probe — the guard below
+   * makes it a no-op in that state (the revert-timer path is authoritative).
+   */
   private scheduleFallbackPrimaryProbe(): void {
     if (this.fallbackPrimaryProbeTimer) {
       clearTimeout(this.fallbackPrimaryProbeTimer);
       this.fallbackPrimaryProbeTimer = null;
     }
     if (!this.fallbackRecoveryProbeRequired) return;
+    if (
+      this.fallbackActiveUntil === null
+      || this.fallbackActiveUntil - Date.now() <= PROVIDER_FALLBACK_PRIMARY_RECHECK_MS
+    ) {
+      return;
+    }
     this.fallbackPrimaryProbeTimer = setTimeout(() => {
       this.fallbackPrimaryProbeTimer = null;
       if (this.fallbackActiveUntil === null || !this.fallbackRecoveryProbeRequired) return;
+      this.fallbackLastProbeAt = Date.now();
       if (this.probePrimaryProviderRecovered()) {
         this.deactivateProviderFallback('primary-probe-ok');
         return;
