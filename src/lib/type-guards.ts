@@ -16,3 +16,18 @@
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+/**
+ * Coerce `unknown` to a plain-object record, else `undefined`.
+ *
+ * Companion coercer to {@link isRecord} (the predicate stays the single
+ * source of truth). Returns `undefined` rather than `null` so the result
+ * composes with optional parameters, optional chaining, and `??` defaults.
+ *
+ * Consolidates the 4 private coercer clones that accreted across the
+ * codebase (config.ts `record`, core/fallback-chain `record`,
+ * fleet/health-poller `recordValue`, fleet/routes/lines `recordValue`).
+ */
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
+}
