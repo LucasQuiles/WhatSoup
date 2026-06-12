@@ -297,7 +297,108 @@ def current_epoch() -> int:
 
 
 def state_root() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_STATE_DIR", Path.home() / ".local/state/bot-errors"))
+    explicit = os.environ.get("BOT_ERRORS_STATE_DIR")
+    if explicit and explicit.strip():
+        return Path(explicit)
+    test_state = test_state_root()
+    return test_state or (Path.home() / ".local/state/bot-errors")
+
+
+# ---------------------------------------------------------------------------
+# Test-provenance leak blocking (hub 78cc4cb9).
+# Redirects outbox writes away from live state dirs when running under a test
+# harness (Vitest / Jest / pytest).  Production paths are completely unaffected
+# when none of the strong test signals are present.
+# ---------------------------------------------------------------------------
+
+def safe_segment(value: str) -> str:
+    """Sanitise a string for use as a safe filename segment."""
+    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
+    return (cleaned or "unknown")[:80]
+
+
+STRONG_TEST_SIGNAL_KEYS = ("VITEST", "VITEST_WORKER_ID", "JEST_WORKER_ID", "PYTEST_CURRENT_TEST")
+
+
+def env_value(key: str) -> str | None:
+    value = os.environ.get(key)
+    return value.strip() if value and value.strip() else None
+
+
+def strong_test_signals() -> list[str]:
+    return [key for key in STRONG_TEST_SIGNAL_KEYS if env_value(key)]
+
+
+def provenance_signals() -> list[str]:
+    signals = strong_test_signals()
+    if os.environ.get("NODE_ENV", "").strip().lower() == "test":
+        signals.append("NODE_ENV")
+    return sorted(set(signals))
+
+
+def test_state_root() -> Path | None:
+    if not strong_test_signals():
+        return None
+    cwd_hash = hashlib.sha256(os.getcwd().encode("utf-8")).hexdigest()[:12]
+    worker = safe_segment(env_value("VITEST_WORKER_ID") or env_value("JEST_WORKER_ID") or f"pid-{os.getpid()}")
+    return Path(os.environ.get("TMPDIR", "/tmp")) / "whatsoup-vitest-bot-errors" / f"{cwd_hash}.{worker}"
+
+
+def canonical_path(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve(strict=True)
+    except OSError:
+        try:
+            return path.expanduser().parent.resolve(strict=True) / path.name
+        except OSError:
+            return path.expanduser().absolute()
+
+
+def live_outbox_candidates() -> list[Path]:
+    candidates = [Path.home() / ".local/state/bot-errors/outbox"]
+    override = env_value("BOT_ERRORS_LIVE_OUTBOX_DIR")
+    if override:
+        candidates.append(Path(override))
+    return [canonical_path(path) for path in candidates]
+
+
+def test_live_outbox_allowed() -> bool:
+    return os.environ.get("BOT_ERRORS_ALLOW_TEST_LIVE_OUTBOX", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_outbox_dir() -> tuple[Path, dict[str, Any]]:
+    explicit_outbox = env_value("BOT_ERRORS_OUTBOX_DIR")
+    explicit_state = env_value("BOT_ERRORS_STATE_DIR")
+    test_state = test_state_root()
+    policy = "default"
+    outbox = Path.home() / ".local/state/bot-errors/outbox"
+    if explicit_outbox:
+        outbox = Path(explicit_outbox)
+        policy = "explicit-outbox"
+    elif explicit_state:
+        outbox = Path(explicit_state) / "outbox"
+        policy = "explicit-state"
+    elif test_state:
+        outbox = test_state / "outbox"
+        policy = "test-default"
+    original = outbox
+    if strong_test_signals() and not test_live_outbox_allowed() and canonical_path(outbox) in live_outbox_candidates():
+        outbox = (test_state or (Path(os.environ.get("TMPDIR", "/tmp")) / "whatsoup-vitest-bot-errors" / f"pid-{os.getpid()}")) / "outbox"
+        policy = "test-redirect"
+    provenance = {
+        "producer": "python-health",
+        "test": bool(strong_test_signals()),
+        "signals": provenance_signals(),
+        "strongSignals": strong_test_signals(),
+        "outboxPolicy": policy,
+        "liveOutboxRedirected": outbox != original,
+        "resolvedOutbox": str(outbox),
+    }
+    return outbox, provenance
+
+
+def runtime_provenance() -> dict[str, Any]:
+    return resolve_outbox_dir()[1]
 
 
 def socket_rpc_lock_path() -> Path:
@@ -942,6 +1043,101 @@ def fsync_parent(path: Path) -> None:
         os.close(fd)
 
 
+# ---------------------------------------------------------------------------
+# Outbox failure preservation (hub 81d0061c).
+# When an outbox write fails the event is not silently lost — a breadcrumb is
+# written to the writefail fallback directories so the alert can be recovered.
+# ---------------------------------------------------------------------------
+
+def writefail_dirs() -> list[Path]:
+    """Return ordered fallback directories for outbox write-failure breadcrumbs."""
+    candidates: list[Path] = []
+    override = os.environ.get("BOT_ERRORS_WRITEFAIL_DIR")
+    if override:
+        candidates.append(Path(override))
+    candidates.append(state_root() / "writefail")
+    candidates.append(Path.home() / ".bot-errors-writefail")
+    candidates.append(Path(os.environ.get("TMPDIR", "/tmp")) / "bot-errors-writefail")
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(path)
+    return deduped
+
+
+def safe_child_path(directory: Path, name: str) -> Path:
+    """Return an exclusive, non-colliding writable path inside *directory*."""
+    ensure_private_dir(directory)
+    first = directory / name
+    stem = name[:140].rstrip("._:-") or "unknown"
+    prefix = f"{int(time.time())}.{os.getpid()}"
+    candidates = [first, *[directory / f"{prefix}.{index}.{stem}" for index in range(1000)]]
+    for target in candidates:
+        try:
+            fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        else:
+            os.close(fd)
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            return target
+    raise FileExistsError(f"no available child path in {directory}: {name}")
+
+
+def record_writefail(event: dict[str, Any], exc: BaseException, target: Path) -> Path | None:
+    """Persist a breadcrumb for a lost outbox alert when the primary write fails."""
+    reason = f"{type(exc).__name__}: {exc}"
+    event_id = event.get("id")
+    instance = event.get("instance")
+    try:
+        sys.stderr.write(
+            f"[bot-errors-health] CRITICAL outbox write FAILED for {target}: {reason}; "
+            f"id={event_id} instance={instance} source={event.get('source')} "
+            f"severity={event.get('severity')} - recording breadcrumb\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
+    breadcrumb = {
+        "schemaVersion": 1,
+        "kind": "outbox_write_failure",
+        "recordedAt": now_iso(),
+        "failedTarget": str(target),
+        "reason": reason,
+        "emitPid": os.getpid(),
+        "event": event,
+    }
+    stamp = now_iso().replace("-", "").replace(":", "")
+    name = f"{stamp}.{safe_segment(str(instance))}.{safe_segment(str(event_id))}.writefail"
+    for base in writefail_dirs():
+        try:
+            path = safe_child_path(base, name)
+            atomic_write_json(path, breadcrumb)
+            try:
+                sys.stderr.write(f"[bot-errors-health] lost-alert breadcrumb written: {path}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            return path
+        except Exception:
+            continue
+    try:
+        sys.stderr.write(
+            "[bot-errors-health] breadcrumb write failed in ALL fallback dirs; "
+            f"lost-event payload follows:\n{json.dumps(event, sort_keys=True)}\n"
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
+    return None
+
+
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     ensure_private_dir(path.parent)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -1327,11 +1523,11 @@ def outbox_event(
     severity: str = "critical",
     source: str = "daily-health",
     event_type: str = "alert",
+    alert_source: str | None = None,
+    force_notify: bool = False,
 ) -> Path:
     root = state_root()
-    outbox = Path(os.environ.get("BOT_ERRORS_OUTBOX_DIR", root / "outbox"))
-    ensure_private_dir(root)
-    ensure_private_dir(outbox)
+    outbox, provenance = resolve_outbox_dir()
     event_id = f"health-{time.time_ns()}-{os.getpid()}"
     event = {
         "schemaVersion": 1,
@@ -1346,6 +1542,7 @@ def outbox_event(
         "summary": redact_event_text(summary),
         "evidence": redact_event_text(evidence),
         "process": {"pid": os.getpid(), "cwd": os.getcwd(), "argv": [redact_event_text(arg) for arg in sys.argv]},
+        "runtime": {"provenance": provenance},
         "diagnostics": {
             "logHints": [
                 health_log_hint(),
@@ -1362,14 +1559,113 @@ def outbox_event(
         instance = critical_asset_instance(critical_asset)
         if source == "daily-health" and instance:
             event["instance"] = instance
-    alert_source = alert_source_from_health_evidence(str(event["evidence"]))
-    if not alert_source:
-        alert_source = alert_source_from_critical_asset(critical_asset)
-    if alert_source:
+    if alert_source is not None:
+        # Explicit caller-supplied alert source wins (hub hardening).
         event["alertSource"] = alert_source
+    else:
+        # Otherwise derive from evidence, then fall back to the critical asset.
+        derived_alert_source = alert_source_from_health_evidence(str(event["evidence"]))
+        if not derived_alert_source:
+            derived_alert_source = alert_source_from_critical_asset(critical_asset)
+        if derived_alert_source:
+            event["alertSource"] = derived_alert_source
+    if force_notify:
+        event["diagnostics"]["forceNotify"] = True
+        event["diagnostics"]["forceNotifyLevel"] = "critical"
     path = outbox / f"{event['createdAt'].replace(':', '').replace('-', '')}.{event_id}.json"
-    atomic_write_json(path, event)
+    try:
+        ensure_private_dir(root)
+        ensure_private_dir(outbox)
+        atomic_write_json(path, event)
+    except Exception as exc:
+        record_writefail(event, exc, outbox)
+        raise
     return path
+
+
+_INSTANCE_FAIL_PREFIXES = {
+    "config",
+    "health",
+    "socket",
+    "service",
+    "service_enabled",
+    "auth_bond",
+    "provider_probe",
+    "primary_phone_state",
+    "profile_coverage",
+    "profile_coverage_service",
+}
+
+
+def _instance_from_fail_line(line: str) -> str | None:
+    """Extract the per-instance identifier from a daily-health FAIL line.
+
+    Strips a leading "FAIL " token if present, then inspects the first
+    whitespace-delimited token: when it names a known per-instance condition
+    prefix, the second token (with any trailing ":" stripped) is the instance.
+    Returns None for empty/short lines or non-per-instance conditions.
+
+    A token that contains a path separator is NOT an instance name — some
+    inventories emit `config <full/path/config.json>: invalid JSON` where the
+    second token is a filesystem path, not an instance id. Reject those so a
+    salient event is never keyed on (or titled with) a leaked path.
+    """
+    if not line:
+        return None
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("FAIL "):
+        stripped = stripped[len("FAIL "):].strip()
+    tokens = stripped.split()
+    if len(tokens) < 2:
+        return None
+    if tokens[0] in _INSTANCE_FAIL_PREFIXES:
+        candidate = tokens[1].rstrip(":")
+        if not candidate or "/" in candidate or os.sep in candidate:
+            return None
+        return candidate
+    return None
+
+
+def emit_per_instance_health_failures(
+    failures: list[str],
+    suppress_instance: str | None = None,
+) -> list[Path]:
+    """Emit one salient critical outbox event per failing instance.
+
+    Groups failing daily-health lines by their per-instance identifier and
+    emits a distinct critical, force-notify event for each instance so a real
+    per-instance FAIL is not buried inside the generic daily-health summary.
+
+    ``suppress_instance`` names an instance already surfaced as a source-specific
+    critical-asset incident by the caller; its generic per-instance event is
+    skipped to avoid emitting the same failure twice.
+    """
+    grouped: dict[str, list[str]] = {}
+    for line in failures:
+        instance = _instance_from_fail_line(line)
+        if instance is None:
+            continue
+        if suppress_instance is not None and instance == suppress_instance:
+            continue
+        grouped.setdefault(instance, []).append(line)
+    paths: list[Path] = []
+    for instance in sorted(grouped):
+        lines_for_instance = grouped[instance]
+        evidence = "\n".join([f"instance: {instance}", *lines_for_instance])
+        path = outbox_event(
+            summary=f"BOT ERRORS daily-health FAIL: instance {instance}",
+            evidence=evidence,
+            severity="critical",
+            source="daily-health-fail",
+            event_type="alert",
+            alert_source=instance,
+            force_notify=True,
+        )
+        print(path)
+        paths.append(path)
+    return paths
 
 
 def health_log_hint() -> str:
@@ -4588,6 +4884,14 @@ def daily() -> int:
         event_type = "observation"
     path = outbox_event(summary, evidence, severity=severity, source="daily-health", event_type=event_type)
     print(path)
+    # When the main daily-health event already represents an instance as a
+    # source-specific critical-asset incident (e.g. a linked-device bond loss),
+    # the generic per-instance daily-health-fail event for that same instance is
+    # redundant — suppress it so the failure surfaces exactly once with its most
+    # actionable framing, while still emitting per-instance events for any other
+    # failing instances.
+    suppress_instance = critical_asset_instance(critical_asset)
+    emit_per_instance_health_failures(failures, suppress_instance=suppress_instance)
     source_update_signal = enforced_source_update_signal(lines)
     if source_update_signal is not None and alert_source_from_health_evidence(evidence) != "source_update":
         source_event_type, source_severity, source_summary, source_evidence = source_update_signal

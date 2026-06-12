@@ -5,11 +5,23 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const loggerWarn = vi.hoisted(() => vi.fn());
 const existsSyncMock = vi.hoisted(() => vi.fn(() => true));
+// emitAlert/clearAlertSource are outbox-first: they only fall through to the
+// legacy spawn (whose exit handler this suite verifies) when the durable
+// bot-errors outbox write fails. Force that fallback so the legacy path — and
+// its exit handler — is exercised.
+const writeBotErrorsEventMock = vi.hoisted(() =>
+  vi.fn(() => {
+    throw new Error('outbox unavailable (test)');
+  }),
+);
 
 vi.mock('node:child_process', async () => {
   const { childProcessMock } = await import('../helpers/child-process.ts');
   return childProcessMock();
 });
+vi.mock('../../src/lib/bot-errors-outbox.ts', () => ({
+  writeBotErrorsEvent: writeBotErrorsEventMock,
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = (await importOriginal()) as typeof import('node:fs');
   return {
@@ -34,6 +46,10 @@ describe('emitAlert exit handler', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     existsSyncMock.mockReturnValue(true);
+    writeBotErrorsEventMock.mockImplementation(() => {
+      throw new Error('outbox unavailable (test)');
+    });
+    process.env['BOT_ERRORS_JID'] = '120363555555555000@g.us';
   });
 
   it('warns when the child exits with a non-zero exit code', () => {
@@ -64,6 +80,9 @@ describe('emitAlert exit handler', () => {
     emitAlert('primary-line', 'agent_crash', 'summary text', 'evidence text');
 
     const child = spawnedChild();
+    // Ignore the outbox-fallback warning that routed us to the legacy spawn;
+    // assert only that the exit handler itself stays silent on a clean exit.
+    loggerWarn.mockClear();
     child?.emit('exit', 0, null);
 
     expect(loggerWarn).not.toHaveBeenCalled();
@@ -94,6 +113,10 @@ describe('clearAlertSource exit handler', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     existsSyncMock.mockReturnValue(true);
+    writeBotErrorsEventMock.mockImplementation(() => {
+      throw new Error('outbox unavailable (test)');
+    });
+    process.env['BOT_ERRORS_JID'] = '120363555555555000@g.us';
   });
 
   it('warns when the clear script exits with a non-zero code', () => {
@@ -112,6 +135,9 @@ describe('clearAlertSource exit handler', () => {
     clearAlertSource('primary-line', 'agent_crash');
 
     const child = spawnedChild();
+    // Ignore the outbox-fallback warning that routed us to the legacy spawn;
+    // assert only that the exit handler itself stays silent on a clean exit.
+    loggerWarn.mockClear();
     child?.emit('exit', 0, null);
 
     expect(loggerWarn).not.toHaveBeenCalled();

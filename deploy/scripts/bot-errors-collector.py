@@ -1622,7 +1622,6 @@ def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: di
     it emits unconditionally (no cooldown gate) and contributes no open-alert tracking.
     """
     host, _remote_root = parse_remote(remote)
-    current = int(time.time())
     severity = "warning" if kind == "relay_host_down" else "info"
     # time_ns + pid keep the id (and thus the outbox filename) unique even when
     # two state events for the same remote/kind land within the same wall second.

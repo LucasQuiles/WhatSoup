@@ -45,6 +45,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     error: null,
     lastAlertAt: null,
     silencedUntil: null,
+    everReachable: true,
     ...overrides,
   };
 }

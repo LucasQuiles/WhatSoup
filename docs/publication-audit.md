@@ -2,15 +2,15 @@
 
 `docs/publication-audit.md` is the tracked source of truth for documentation that must be reviewed before public publication. The publication guard validates that every tracked internal documentation path has exactly one row here.
 
-**Total classification rows:** 197
+**Total classification rows:** 205
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 197 |
+| PRIVATE-ARCHIVE | 205 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 197 |
+| Total | 205 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -163,6 +163,13 @@
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B07-decision-trace.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B07-docs-durability.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/state.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-collector.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-dispatcher.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-health-check.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-heartbeat-watchdog.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-runner.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-08-whatsoup-protection-layer-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-09-fleet-topology-control-plane-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-09-settings-migration-framework-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
@@ -194,6 +201,7 @@
 | `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
