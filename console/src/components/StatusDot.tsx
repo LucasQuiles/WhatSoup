@@ -1,56 +1,30 @@
-import { type FC } from "react";
-
-type Status = "online" | "degraded" | "unreachable";
-type Size = "sm" | "md";
+/**
+ * StatusDot.tsx — thin wrapper over StatusCell (DUP-06 migration, badge.md).
+ *
+ * Kept for backward compatibility with existing consumers (LinePicker, etc.).
+ * Prop contract preserved: status + size.
+ *
+ * MIGRATION NOTE: The previous implementation rendered color-only (no label).
+ * This wrapper renders StatusCell which always shows shape + label per the
+ * shape law (badge.md).  For contexts that need shape-only, use StatusCell
+ * directly with labelStyle="status".
+ *
+ * The `size` prop is accepted but ignored at v3 — all status shapes are 8px
+ * per the shape law (the legacy 6px "sm" size used --dot-feed which is
+ * deprecated in tokens-v3 §6.12).
+ */
+import { type FC } from 'react';
+import { StatusCell } from './primitives/Badge';
+import type { Status } from '../lib/status-map';
 
 interface StatusDotProps {
-  status: Status;
-  size?: Size;
+  status: Status | string;
+  /** @deprecated Size variants removed in v3 — all shapes are 8px per shape law. */
+  size?: 'sm' | 'md';
 }
 
-const sizePx: Record<Size, number> = {
-  sm: 6,
-  md: 8,
-};
-
-const colorMap: Record<Status, string> = {
-  online: "bg-s-ok",
-  degraded: "bg-s-warn",
-  unreachable: "bg-s-crit",
-};
-
-const glowMap: Record<Status, string> = {
-  online: "0 0 12px var(--s-ok-glow)",
-  degraded: "0 0 12px var(--s-warn-glow)",
-  unreachable: "0 0 12px var(--s-crit-glow)",
-};
-
-const StatusDot: FC<StatusDotProps> = ({ status, size = "md" }) => {
-  const px = sizePx[size];
-
-  return (
-    <span
-      className="relative inline-block flex-shrink-0"
-      style={{ width: `${px}px`, height: `${px}px` }}
-      aria-label={status}
-    >
-      {/* Dot */}
-      <span
-        className={`absolute inset-0 rounded-full ${colorMap[status]}`}
-        style={{ boxShadow: glowMap[status] }}
-      />
-      {/* Expanding ring for online status */}
-      {status === "online" && (
-        <span
-          className="absolute rounded-full animate-breathe-ring"
-          style={{
-            inset: "-3px",
-            borderWidth: "var(--bw)", borderStyle: "solid", borderColor: "var(--s-ok-soft)",
-          }}
-        />
-      )}
-    </span>
-  );
-};
+const StatusDot: FC<StatusDotProps> = ({ status }) => (
+  <StatusCell status={status} />
+);
 
 export default StatusDot;

@@ -13,6 +13,7 @@ import KpiCard from "../components/KpiCard";
 import AlertBanner from "../components/AlertBanner";
 import ActivityFeed from "../components/ActivityFeed";
 import ModeBadge from "../components/ModeBadge";
+import { Button } from "../components/primitives";
 import FilterPill from "../components/FilterPill";
 import { ChartPanel } from "../components/ChartPanel";
 import { FleetMetricsChart } from "../components/FleetMetricsChart";
@@ -418,14 +419,15 @@ const SoupKitchen: FC = () => {
               />
             </div>
 
-            <button
-              type="button"
-              className="c-btn c-btn-add flex-shrink-0 ml-[var(--sp-3)]"
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Plus size={16} strokeWidth={1.75} />}
+              className="flex-shrink-0 ml-[var(--sp-3)]"
               onClick={() => setShowAddWizard(true)}
             >
-              <Plus size={16} strokeWidth={1.75} />
-              <span className="c-btn-add-label">Add Line</span>
-            </button>
+              Add Line
+            </Button>
           </div>
 
           {/* Table */}

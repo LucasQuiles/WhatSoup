@@ -291,11 +291,12 @@ echo "    'infinite' occurrences in CSS: $C13_COUNT"
 if [ -n "$C13_ALL" ]; then
   echo "$C13_ALL" | sed 's|'"$CONSOLE_SRC/"'||' | sed 's/^/    /'
 fi
-echo "    Sanctioned: breathe-ring (ok-breathing), breathe, typing-bounce"
+echo "    Sanctioned: breathe-ring x2 (ok-disc halo in composites+primitives), breathe, typing-bounce"
 echo "    Waivered until P5: shimmer (WVR-005), typing-bounce (WVR-006)"
 echo "    Unsanctioned: any new 'infinite' not in the above list"
-# Unsanctioned count = total minus the 4 known occurrences
-C13_UNSANCTIONED=$((C13_COUNT - 4))
+# Unsanctioned count = total minus the 5 known occurrences
+# (+1 at C2: primitives.css uses breathe-ring for the ok-disc halo, same sanctioned animation)
+C13_UNSANCTIONED=$((C13_COUNT - 5))
 if [ "$C13_UNSANCTIONED" -le 0 ]; then
   check_result "13" "$C13_COUNT" "all $C13_COUNT occurrences are waivered/sanctioned" "OK"
 else
@@ -337,7 +338,8 @@ check_start "15" "Suppression directives without waiver: tag"
 DISABLE_PATTERN='eslint-''disable'  # split to avoid self-matching the hygiene guard
 ALL_DISABLES=$(rg -n "$DISABLE_PATTERN" "$CONSOLE_SRC" -g '*.ts' -g '*.tsx' 2>/dev/null || true)
 UNTAGGED=$(echo "$ALL_DISABLES" | grep -v 'waiver:' || true)
-C15_COUNT=$(echo "$UNTAGGED" | grep -c "$DISABLE_PATTERN" || echo 0)
+C15_COUNT=$(printf '%s' "$UNTAGGED" | grep -c "$DISABLE_PATTERN" || true)
+C15_COUNT=${C15_COUNT:-0}
 echo "    Untagged disable directives: $C15_COUNT"
 if [ -n "$UNTAGGED" ] && [ "$C15_COUNT" -gt 0 ]; then
   echo "$UNTAGGED" | head -5 | sed 's/^/    /'

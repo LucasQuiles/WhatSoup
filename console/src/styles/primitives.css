@@ -1,0 +1,308 @@
+/* primitives.css — shape, button, and action-button styles for SOUP v3 primitives.
+   Imported from index.css (after composites).
+   Values reference semantic/component tokens; the only remaining raw px are the
+   badge.md shape-geometry constants (8px shape element, focus outline 2px) which are
+   spec-normative geometry, not theme values — tokenizing them would invite per-use drift.
+   Shapes: badge.md shape law (disc/diamond/square/outline).
+   Buttons: button.md v2.html locked spec. */
+
+/* --------------------------------------------------------------------------
+   STATUS SHAPES — 8px shape element (badge.md § The shape law)
+   Classes: .soup-shape-{ok|warn|crit|off}
+   The shape element itself carries width/height via component token --status-shape-size.
+   -------------------------------------------------------------------------- */
+
+.soup-shape {
+  width: var(--status-shape-size, 8px);
+  height: var(--status-shape-size, 8px);
+  flex: none;
+  position: relative;
+  display: inline-block;
+}
+
+/* disc — online (50% radius) */
+.soup-shape--ok {
+  border-radius: 50%;
+  background: var(--status-ok-solid);
+}
+
+/* diamond — degraded (rotated square, scale 0.92, 1px radius per badge.md) */
+.soup-shape--warn {
+  background: var(--status-warn-solid);
+  rotate: 45deg;
+  scale: 0.92;
+  border-radius: var(--bw); /* 1px radius per badge.md shape spec */
+}
+
+/* square — unreachable (1px radius) */
+.soup-shape--crit {
+  background: var(--status-crit-solid);
+  border-radius: var(--bw); /* 1px radius per badge.md shape spec */
+}
+
+/* outline disc — unlinked (transparent fill, --border-strong ring) */
+.soup-shape--off {
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+/* live halo — ok-disc only, the sole ambient loop (motion.md §8) */
+/* waiver:MOTION-AMBIENT-OK — badge.md explicitly grants this loop */
+.soup-shape--ok.soup-shape--live::after {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--sp-0h)); /* halo ring offset, 3px = sp-0h */
+  border-radius: 50%;
+  border: 1px solid var(--status-ok-solid);
+  opacity: 0;
+  animation: breathe-ring 3s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-shape--ok.soup-shape--live::after {
+    display: none;
+  }
+}
+
+/* breathe-ring keyframe defined in composites.css */
+
+/* --------------------------------------------------------------------------
+   STATUS CELL — [shape] [label] inline-flex row (badge.md § Renderers)
+   -------------------------------------------------------------------------- */
+
+.soup-status-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.soup-status-cell__lbl {
+  font: var(--type-label);
+  color: var(--text-2);
+}
+
+.soup-status-cell__lbl--warn {
+  color: var(--status-warn-fg);
+}
+
+.soup-status-cell__lbl--crit {
+  color: var(--status-crit-fg);
+}
+
+.soup-status-cell__name {
+  font: var(--type-body-st);
+  color: var(--text-1);
+}
+
+/* --------------------------------------------------------------------------
+   MODE BADGE — 6px square dot (2px radius) + label (badge.md § Renderers)
+   -------------------------------------------------------------------------- */
+
+.soup-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dot-badge); /* 5px gap matches mode-dot scale */
+  font: 500 11px/16px var(--font-sans);
+}
+
+.soup-mode__dot {
+  width: var(--dot-feed);
+  height: var(--dot-feed); /* 6px mode dot per badge.md */
+  border-radius: var(--radius-xs);
+  flex: none;
+}
+
+.soup-mode--passive { color: var(--mode-passive-solid); }
+.soup-mode--passive .soup-mode__dot { background: var(--mode-passive-solid); }
+
+.soup-mode--chat { color: var(--mode-chat-solid); }
+.soup-mode--chat .soup-mode__dot { background: var(--mode-chat-solid); }
+
+.soup-mode--agent { color: var(--mode-agent-solid); }
+.soup-mode--agent .soup-mode__dot { background: var(--mode-agent-solid); }
+
+/* Unknown mode fallback dot — uses neutral text-3 */
+.soup-mode__dot--unknown { background: var(--text-3); }
+
+/* --------------------------------------------------------------------------
+   BUTTON PRIMITIVE — 6 variants × 3 sizes (button.md)
+   Base: height --btn-h (32px), padding --sp-3, gap --sp-2, radius --r-2.
+   Sizes: md (default), sm (28px), xs (24px floor).
+   -------------------------------------------------------------------------- */
+
+.soup-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: var(--btn-h);
+  padding: 0 var(--sp-3);
+  font: var(--type-label);
+  border-radius: var(--r-2);
+  border: var(--bw) solid transparent;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-enter),
+    border-color var(--dur-fast) var(--ease-enter),
+    color var(--dur-fast) var(--ease-enter);
+}
+
+/* Focus ring — global 2px, 2px offset; never suppressed */
+.soup-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+/* Disabled — opacity token, cursor not-allowed, variant colours kept */
+.soup-btn[disabled],
+.soup-btn[aria-disabled="true"] {
+  opacity: var(--opacity-disabled);
+  cursor: not-allowed;
+}
+
+/* Size modifiers */
+.soup-btn--sm {
+  height: var(--btn-h-sm);
+  padding: 0 var(--sp-2);
+}
+
+.soup-btn--xs {
+  height: var(--btn-h-xs);
+  padding: 0 var(--sp-2);
+  font: 500 11px/16px var(--font-sans);
+}
+
+/* Variant: primary — --accent fill, --accent-fg ink */
+.soup-btn--primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.soup-btn--primary:not([disabled]):not([aria-disabled="true"]):hover {
+  background: var(--accent-hover);
+}
+
+/* Variant: neutral — --btn-neutral-bg fill, --text-1 ink, --border-strong + shadow-xs */
+.soup-btn--neutral {
+  background: var(--btn-neutral-bg);
+  color: var(--text-1);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-xs);
+}
+.soup-btn--neutral:not([disabled]):not([aria-disabled="true"]):hover {
+  background: var(--btn-neutral-bg-hover);
+}
+
+/* Variant: ghost — no fill, --text-2 ink */
+.soup-btn--ghost {
+  color: var(--text-2);
+}
+.soup-btn--ghost:not([disabled]):not([aria-disabled="true"]):hover {
+  color: var(--text-1);
+  background: var(--btn-neutral-bg);
+}
+
+/* Variant: danger — crit channel wash */
+.soup-btn--danger {
+  background: var(--status-crit-wash);
+  color: var(--status-crit-fg);
+  border-color: var(--status-crit-border);
+}
+.soup-btn--danger:not([disabled]):not([aria-disabled="true"]):hover {
+  background: color-mix(in srgb, var(--status-crit-solid) 18%, transparent);
+}
+
+/* Variant: success — ok channel wash */
+.soup-btn--success {
+  background: var(--status-ok-wash);
+  color: var(--status-ok-fg);
+  border-color: var(--status-ok-border);
+}
+.soup-btn--success:not([disabled]):not([aria-disabled="true"]):hover {
+  background: color-mix(in srgb, var(--status-ok-solid) 18%, transparent);
+}
+
+/* Variant: warning — warn channel wash */
+.soup-btn--warning {
+  background: var(--status-warn-wash);
+  color: var(--status-warn-fg);
+  border-color: var(--status-warn-border);
+}
+.soup-btn--warning:not([disabled]):not([aria-disabled="true"]):hover {
+  background: color-mix(in srgb, var(--status-warn-solid) 18%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   ACTION BUTTON — icon-action with reveal-label mechanic (button.md)
+   28×28px minimum hit area; label expands on hover/focus-visible.
+   waiver:MOTION-LABEL-REVEAL — button.md §ActionButton max-width animation sanctioned.
+   -------------------------------------------------------------------------- */
+
+.soup-actbtn {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--input-btn);
+  min-width: var(--input-btn); /* 28px hit area = input-btn token */
+  padding: 0 var(--sp-1h);
+  justify-content: center;
+  color: var(--text-2);
+  border-radius: var(--r-1);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-enter),
+    background-color var(--dur-fast) var(--ease-enter);
+}
+
+.soup-actbtn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+.soup-actbtn:hover,
+.soup-actbtn:focus-visible {
+  color: var(--text-1);
+  background: var(--btn-neutral-bg);
+}
+
+/* Danger flavor */
+.soup-actbtn--danger:hover,
+.soup-actbtn--danger:focus-visible {
+  color: var(--status-crit-fg);
+  background: var(--status-crit-wash);
+}
+
+/* Reveal label — ONE mechanic (DUP-01 consolidation) */
+.soup-actbtn__label {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font: var(--type-label);
+  transition:
+    max-width var(--dur-fast) var(--ease-enter),
+    opacity var(--dur-fast) var(--ease-linear),
+    margin-left var(--dur-fast) var(--ease-enter);
+}
+
+.soup-actbtn:hover .soup-actbtn__label,
+.soup-actbtn:focus-visible .soup-actbtn__label {
+  max-width: var(--feed-preview-max); /* 120px reveal-label cap per button.md */
+  opacity: 1;
+  margin-left: var(--sp-1h);
+}
+
+/* Reduced motion: label appears instantly, no width animation */
+@media (prefers-reduced-motion: reduce) {
+  .soup-actbtn__label {
+    transition: none;
+  }
+  .soup-actbtn:hover .soup-actbtn__label,
+  .soup-actbtn:focus-visible .soup-actbtn__label {
+    max-width: var(--feed-preview-max); /* 120px reveal-label cap per button.md */
+    opacity: 1;
+    margin-left: var(--sp-1h);
+  }
+}

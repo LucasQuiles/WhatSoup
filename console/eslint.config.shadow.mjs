@@ -44,9 +44,9 @@ import soupPlugin from './eslint-rules/index.mjs'
 const shadowSyntaxRules = [
 
   // ── soup/no-raw-button (shadow) ──────────────────────────────────────────
-  // Flag raw <button> usage. Baseline: ~135 across console/src.
-  // Permanent exemption: components/primitives/** (no such dir yet, so no
-  // files are exempted at this stage).
+  // Flag raw <button> usage outside the primitives dir.
+  // Permanent exemption: console/src/components/primitives/ — the primitive
+  // IS the canonical <button> renderer so it must be exempt.
   {
     selector: 'JSXOpeningElement[name.name="button"]',
     message:
@@ -154,13 +154,34 @@ const shadowSyntaxRules = [
 // 2. Add a catch-all block that registers the soup plugin + shadow rules at warn.
 // ---------------------------------------------------------------------------
 
+// Extract the base config's no-restricted-syntax selectors so the shadow run remains
+// a strict superset of the default lint (see comment at the rule below).
+const baseSyntaxSelectors = baseConfig.flatMap((c) => {
+  const entry = c.rules?.['no-restricted-syntax'];
+  return Array.isArray(entry) ? entry.slice(1).flat() : [];
+});
+
+// ESLint rejects duplicate selector items; base and shadow lists overlap on a few entries.
+function dedupeSelectors(items) {
+  const seen = new Set();
+  return items.filter((it) => {
+    const k = JSON.stringify(it);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 const shadowConfig = [
   // Spread the base config so all existing error-severity rules remain intact.
   ...baseConfig,
 
   // Shadow-stage additions: soup plugin + warn-severity selectors + custom rules.
+  // Permanent exemption: console/src/components/primitives/ — the primitive IS
+  // the canonical <button> renderer and must not be counted as a violation.
   {
     files: ['**/*.{ts,tsx}'],
+    ignores: ['**/components/primitives/**'],
     plugins: {
       soup: soupPlugin,
     },
@@ -178,13 +199,14 @@ const shadowConfig = [
       'soup/no-format-bypass': 'warn',
       'soup/no-inline-dismiss-handler': 'warn',
 
-      // no-restricted-syntax shadow selectors.
-      // Using 'warn' here directly as a second no-restricted-syntax entry —
-      // ESLint flat config merges rules per config object, so this block's
-      // no-restricted-syntax ONLY applies to this block's files scope.
-      // The base config's error-severity no-restricted-syntax stays in its
-      // own config block and is not overridden here.
-      'no-restricted-syntax': ['warn', ...shadowSyntaxRules],
+      // no-restricted-syntax shadow selectors PLUS the base config's selectors.
+      // Flat-config semantics: for files matched by multiple config objects, the LAST
+      // object's entry for a rule key replaces earlier ones. So this block must carry
+      // the base selectors too, or the shadow run would silently drop the 106
+      // error-severity design selectors for every non-primitive file. Severity is warn
+      // here because the shadow run is report-only by design; the default `npm run lint`
+      // (base config alone) remains the error-severity enforcement gate.
+      'no-restricted-syntax': ['warn', ...dedupeSelectors([...baseSyntaxSelectors, ...shadowSyntaxRules])],
     },
   },
 ]

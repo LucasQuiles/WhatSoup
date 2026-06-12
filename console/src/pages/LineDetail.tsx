@@ -9,6 +9,7 @@ import { getPreference, setPreference } from '../lib/preferences'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
+import { StatusCell } from '../components/primitives'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -145,20 +146,8 @@ export default function LineDetail() {
           <ArrowLeft size={18} strokeWidth={1.75} />
         </button>
 
-        {/* Status dot */}
-        <span
-          className={`inline-block rounded-full flex-shrink-0 w-[var(--dot-header)] h-[var(--dot-header)] ${
-            line.status === 'online' ? 'bg-s-ok animate-breathe' :
-            line.status === 'degraded' ? 'bg-s-warn' : 'bg-s-crit'
-          }`}
-          style={{
-            boxShadow: line.status === 'online'
-              ? '0 0 12px var(--s-ok-glow)'
-              : line.status === 'degraded'
-              ? '0 0 12px var(--s-warn-glow)'
-              : '0 0 12px var(--s-crit-glow)',
-          }}
-        />
+        {/* Status — shape law: disc/diamond/square/outline + label */}
+        <StatusCell status={line.status} live={line.status === 'online'} />
 
         {/* Identity */}
         <div className="flex-1">

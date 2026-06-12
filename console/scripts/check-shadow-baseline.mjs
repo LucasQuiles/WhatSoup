@@ -28,14 +28,20 @@ try {
 }
 
 const results = JSON.parse(raw);
+// Ratchet at rule x file granularity: a new violation in one file cannot be masked by
+// removing an old violation elsewhere under the same rule bucket.
 const counts = {};
 for (const file of results) {
+  const rel = file.filePath.startsWith(consoleRoot)
+    ? file.filePath.slice(consoleRoot.length + 1)
+    : file.filePath;
   for (const msg of file.messages) {
     // Shadow rules implemented as no-restricted-syntax selectors tag their messages
     // with a [soup/...] prefix — key the ratchet by that tag so each rule has its own ceiling.
     const tag = /^\[([a-z/-]+)[ \]]/.exec(msg.message ?? '')?.[1];
     const rule = tag ?? msg.ruleId ?? '(no-rule)';
-    counts[rule] = (counts[rule] ?? 0) + 1;
+    const key = `${rule} :: ${rel}`;
+    counts[key] = (counts[key] ?? 0) + 1;
   }
 }
 const sorted = Object.fromEntries(Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)));

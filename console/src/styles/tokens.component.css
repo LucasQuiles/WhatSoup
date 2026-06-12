@@ -73,8 +73,13 @@
   /* ═══ Z-index scale ═══ */
   --z-float: 10;             /* floating buttons, scroll indicators */
   --z-overlay: 100;          /* modal overlays, dialogs */
-  /* ═══ Opacity scale ═══ */
-  --opacity-muted: 0.6;      /* blocked/dimmed entries */
-  --opacity-soft: 0.3;       /* background decorations, sparklines */
-  --opacity-faint: 0.4;      /* separators, subdued inline markers */
+  /* --- Button heights (button.md variants x sizes) --- */
+  --btn-h:    32px;           /* md default button height */
+  --btn-h-sm: 28px;           /* sm button height */
+  --btn-h-xs: 24px;           /* xs button height, WCAG target floor */
+  /* --- Opacity scale --- */
+  --opacity-muted:    0.6;    /* blocked/dimmed entries */
+  --opacity-soft:     0.3;    /* background decorations, sparklines */
+  --opacity-faint:    0.4;    /* separators, subdued inline markers */
+  --opacity-disabled: 0.45;   /* disabled controls (button.md states) */
 }
