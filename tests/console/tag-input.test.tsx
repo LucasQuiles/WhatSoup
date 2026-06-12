@@ -1,9 +1,18 @@
 /**
  * TagInput — keyboard-driven tag list with validate/normalize/dedupe semantics.
  * @vitest-environment jsdom
+ *
+ * DD-13 migration: chips render via Pill variant="removable". All behavioral
+ * contracts (Enter/trim/dedupe/normalize/validate/Backspace/blur/displayLabels)
+ * are preserved. New assertions added:
+ *   - remove buttons carry accessible names "Remove <label>" (getByRole)
+ *   - chip containers carry the soup-pill class contract
+ *
+ * pillByLabel updated: Pill wraps the label in <span class="soup-pill__label">
+ * so we locate by that inner span and return the parent soup-pill span.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import TagInput from '../../console/src/components/TagInput'
 
 afterEach(() => cleanup())
@@ -16,12 +25,15 @@ function setup(initial: string[] = [], extraProps: Partial<React.ComponentProps<
   const utils = render(<TagInput values={initial} onChange={onChange} {...extraProps} />)
   const { rerender } = utils
   const input = () => utils.container.querySelector('input') as HTMLInputElement
+  // Pill variant="removable" wraps the label in <span class="soup-pill__label">.
+  // We find that inner span by text content and return its parent pill span.
   const pillByLabel = (label: string) => {
-    // Pills are <span> elements that directly contain the label text node.
-    const spans = Array.from(utils.container.querySelectorAll('span'))
-    const match = spans.find(s => Array.from(s.childNodes).some(n => n.nodeType === 3 && n.textContent?.trim() === label))
+    const labelSpans = Array.from(utils.container.querySelectorAll('.soup-pill__label'))
+    const match = labelSpans.find(s => s.textContent?.trim() === label)
     if (!match) throw new Error(`pill not found for label: ${label}`)
-    return match
+    const pill = match.closest('.soup-pill')
+    if (!pill) throw new Error(`soup-pill container not found for label: ${label}`)
+    return pill as HTMLElement
   }
   return { onChange, input, rerender, container: utils.container, pillByLabel }
 }
@@ -102,10 +114,10 @@ describe('TagInput', () => {
     expect(onChange).toHaveBeenLastCalledWith(['mixed'])
   })
 
-  it('removes a tag when its X button is clicked', () => {
-    const { onChange, pillByLabel } = setup(['alpha', 'beta', 'gamma'])
-    const betaPill = pillByLabel('beta')
-    const removeBtn = within(betaPill).getByRole('button')
+  it('removes a tag when its labeled remove button is clicked', () => {
+    // DD-13: remove button must carry accessible name "Remove <label>".
+    const { onChange } = setup(['alpha', 'beta', 'gamma'])
+    const removeBtn = screen.getByRole('button', { name: 'Remove beta' })
     fireEvent.click(removeBtn)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenLastCalledWith(['alpha', 'gamma'])
@@ -147,8 +159,12 @@ describe('TagInput', () => {
     expect(container.textContent).toContain('Key Two')
     expect(container.textContent).not.toContain('k1')
     // Removing still emits the raw key, not the label.
-    fireEvent.click(within(pillByLabel('Key One')).getByRole('button'))
+    // With displayLabels, the remove button name matches the display label.
+    const removeBtn = screen.getByRole('button', { name: 'Remove Key One' })
+    fireEvent.click(removeBtn)
     expect(onChange).toHaveBeenLastCalledWith(['k2'])
+    // pillByLabel still resolves the display label via soup-pill__label
+    void pillByLabel('Key Two')
   })
 
   it('falls back to the raw tag when displayLabels has no entry for it', () => {
@@ -191,5 +207,33 @@ describe('TagInput', () => {
     fireEvent.keyDown(input(), { key: 'Enter' })
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenLastCalledWith(['a,b'])
+  })
+
+  // -------------------------------------------------------------------------
+  // DD-13: Pill primitive contract assertions
+  // -------------------------------------------------------------------------
+
+  it('chips carry the soup-pill class (Pill primitive contract)', () => {
+    // Verifies chips are rendered via Pill, not re-rolled spans.
+    const { pillByLabel } = setup(['alpha', 'beta'])
+    const pillA = pillByLabel('alpha')
+    expect(pillA.classList.contains('soup-pill')).toBe(true)
+    expect(pillA.classList.contains('soup-pill--removable')).toBe(true)
+  })
+
+  it('each remove button carries an accessible name "Remove <label>"', () => {
+    // Core DD-13 requirement: unlabeled X buttons become labeled ActionButtons.
+    setup(['one', 'two', 'three'])
+    expect(screen.getByRole('button', { name: 'Remove one' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Remove two' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Remove three' })).toBeDefined()
+  })
+
+  it('remove button accessible name reflects the display label, not the raw value', () => {
+    // When displayLabels is provided, the aria-label uses the display string.
+    setup(['k1'], { displayLabels: { k1: 'Key One' } })
+    expect(screen.getByRole('button', { name: 'Remove Key One' })).toBeDefined()
+    // The raw value "k1" does not appear as a button name.
+    expect(screen.queryByRole('button', { name: 'Remove k1' })).toBeNull()
   })
 })

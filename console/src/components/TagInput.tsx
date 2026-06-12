@@ -1,7 +1,48 @@
 import { type FC, useState, useCallback, useRef, type KeyboardEvent } from 'react'
-import { X } from 'lucide-react'
-// inputStyle replaced by c-input CSS class
+import { Pill, type PillTone } from './primitives/Pill'
 
+// ---------------------------------------------------------------------------
+// accentColor → PillTone mapping
+//
+// accentColor is a CSS custom-property string passed by wizard/dialog
+// consumers. Rather than forwarding raw inline styles onto the Pill
+// primitive, we resolve the string to the nearest semantic PillTone.
+//
+// Mapping (callers enumerated by grep as of 2026-06-12):
+//   'var(--wizard-accent)'  → 'accent'  (runtime token; nearest channel = accent)
+//   'var(--color-m-agt)'   → 'agent'
+//   'var(--color-m-cht)'   → 'chat'
+//   'var(--color-m-pas)'   → 'passive'
+//   'var(--color-s-ok)'    → 'ok'
+//   'var(--color-s-warn)'  → 'warn'
+//   'var(--color-s-crit)'  → 'crit'
+//   undefined              → 'neutral'
+//   (unrecognised)         → 'neutral'
+//
+// Visual change (C-B2-3): per-wizard arbitrary-color chip tint is replaced by
+// the closest Pill semantic tone. Reviewed at the live frontend-design
+// checkpoint.
+// ---------------------------------------------------------------------------
+const ACCENT_TO_TONE: Record<string, PillTone> = {
+  'var(--wizard-accent)': 'accent',
+  'var(--color-m-agt)':   'agent',
+  'var(--color-m-cht)':   'chat',
+  'var(--color-m-pas)':   'passive',
+  'var(--color-s-ok)':    'ok',
+  'var(--color-s-warn)':  'warn',
+  'var(--color-s-crit)':  'crit',
+}
+
+function resolveTone(accentColor: string | undefined): PillTone {
+  if (!accentColor) return 'neutral'
+  return ACCENT_TO_TONE[accentColor] ?? 'neutral'
+}
+
+// ---------------------------------------------------------------------------
+// Props — public contract preserved verbatim (DD-13).
+// accentColor is still accepted so existing consumers (ConfigStep,
+// IdentityStep, ConfigEditDialog) compile without change.
+// ---------------------------------------------------------------------------
 interface TagInputProps {
   values: string[]
   onChange: (values: string[]) => void
@@ -16,6 +57,8 @@ interface TagInputProps {
 const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, normalizeValue, accentColor, displayLabels }) => {
   const [input, setInput] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const tone = resolveTone(accentColor)
 
   const addTag = useCallback((raw: string) => {
     const trimmed = raw.trim()
@@ -52,39 +95,23 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, 
         onBlur={() => addTag(input)}
         placeholder={placeholder ? `${placeholder} (press Enter to add)` : 'Press Enter to add'}
         className="c-input w-full font-mono"
-        style={{
-          borderColor: (accentColor && values.length > 0) ? accentColor : 'var(--b2)',
-        }}
       />
       {values.length > 0 && (
         <div className="flex flex-wrap gap-[var(--sp-2)] mt-[var(--sp-2)]">
-          {values.map((tag, i) => (
-            <span
-              key={tag}
-              className="inline-flex items-center font-mono font-medium rounded-sm py-[var(--sp-1)] px-[var(--sp-2)] gap-[var(--sp-1)] text-label"
-              style={{
-                background: accentColor ? `color-mix(in srgb, ${accentColor} 15%, var(--color-d4))` : 'var(--color-d4)',
-                color: accentColor ?? 'var(--color-t4)',
-                borderWidth: 'var(--bw)',
-                borderStyle: 'solid',
-                borderColor: accentColor ?? 'var(--b2)',
-              }}
-            >
-              {displayLabels?.[tag] ?? tag}
-              <button
-                type="button"
-                onClick={() => removeTag(i)}
-                className="inline-flex items-center justify-center cursor-pointer c-hover text-t3"
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  padding: 0,
-                }}
+          {values.map((tag, i) => {
+            const label = displayLabels?.[tag] ?? tag
+            return (
+              <Pill
+                key={tag}
+                variant="removable"
+                tone={tone}
+                onRemove={() => removeTag(i)}
+                removeLabel={`Remove ${label}`}
               >
-                <X className="w-[var(--sp-3)] h-[var(--sp-3)]" />
-              </button>
-            </span>
-          ))}
+                {label}
+              </Pill>
+            )
+          })}
         </div>
       )}
     </div>
