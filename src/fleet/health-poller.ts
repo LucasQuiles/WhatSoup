@@ -1,6 +1,6 @@
 import { createChildLogger } from '../logger.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
-import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottle, recordAlertThrottle } from './alert-throttle-store.ts';
+import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
 import { isInstanceSilenced } from './silence-manager.ts';
 
 const log = createChildLogger('fleet:health-poller');
@@ -170,6 +170,7 @@ export class HealthPoller {
   private intervalMs: number;
   private statusChangeListeners: StatusChangeCallback[] = [];
   private persistedAlertThrottle: Map<string, string>;
+  private alertThrottleLoadErrorCode: string | null;
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -181,7 +182,9 @@ export class HealthPoller {
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
     this.intervalMs = intervalMs;
-    this.persistedAlertThrottle = loadAlertThrottle();
+    const throttle = loadAlertThrottleDetailed();
+    this.persistedAlertThrottle = throttle.entries;
+    this.alertThrottleLoadErrorCode = throttle.loadError?.code ?? (throttle.loadError ? 'UNKNOWN' : null);
   }
 
   /** Register a callback for instance status changes. */
@@ -464,6 +467,9 @@ export class HealthPoller {
       }
     }
 
-    emitAlert(name, source, summary, evidence);
+    const throttleEvidence = this.alertThrottleLoadErrorCode
+      ? `${evidence} alert_throttle_load_error=true alert_throttle_load_error_code=${this.alertThrottleLoadErrorCode}`
+      : evidence;
+    emitAlert(name, source, summary, throttleEvidence);
   }
 }
