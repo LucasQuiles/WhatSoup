@@ -1,7 +1,8 @@
 /**
  * primitives/index.ts — barrel export for SOUP v3 primitive components.
  *
- * Badge (StatusCell + ModeBadge), Button, ActionButton, Modal, Pill.
+ * Badge (StatusCell + ModeBadge), Button, ActionButton, Modal, Pill,
+ * Table, Toolbar.
  * All consumers import from this barrel; never import from individual files.
  */
 export { StatusCell, ModeBadge } from './Badge';
@@ -31,3 +32,46 @@ export type {
   InteractivePillProps,
   RemovablePillProps,
 } from './Pill';
+
+export {
+  Table,
+  TableHeader,
+  TableHeaderCell,
+  TableBody,
+  TableRow,
+  TableCell,
+  TableEmpty,
+  TableError,
+  TableLoading,
+  EM_DASH,
+} from './Table';
+export type {
+  TableProps,
+  TableDensity,
+  TableHeaderProps,
+  TableHeaderCellProps,
+  TableBodyProps,
+  TableRowProps,
+  TableCellProps,
+  TableEmptyProps,
+  TableErrorProps,
+  TableLoadingProps,
+  SortState,
+  SortDir,
+  RowSeverity,
+} from './Table';
+
+export {
+  Toolbar,
+  ToolbarFilters,
+  ToolbarTimeRange,
+  ToolbarSearch,
+  ToolbarSpring,
+} from './Toolbar';
+export type {
+  ToolbarProps,
+  ToolbarFiltersProps,
+  ToolbarTimeRangeProps,
+  ToolbarSearchProps,
+  TimeRangeOption,
+} from './Toolbar';

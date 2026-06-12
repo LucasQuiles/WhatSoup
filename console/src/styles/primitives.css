@@ -617,3 +617,366 @@ button.soup-pill[aria-disabled="true"] {
   background: var(--accent-wash);
   border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
+
+/* --------------------------------------------------------------------------
+   TABLE PRIMITIVE — soup-table* (table.md)
+   Outer wrap: --surface-raised, 1px --border-hairline, --r-2, --shadow-raised,
+               overflow-x auto (governed scroll region).
+   thead th: sticky ghost headers, --type-overline, --text-2, 28px,
+             --surface-raised fill, --border-subtle bottom, z above rows.
+   tbody tr: height via --row-default (36px) / --row-compressed (28px) tokens.
+   td default: truncation (white-space nowrap + ellipsis); td.num: right-aligned
+               tabular figures mono lane.
+   Severity rows: channel wash fill + 2px inset left edge (warn/crit only).
+   Interactive rows: pointer cursor, focusable, hover wash (--row-hover).
+   -------------------------------------------------------------------------- */
+
+/* Outer wrap — scrollable surface card */
+.soup-tblwrap {
+  background: var(--surface-raised);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--r-2, var(--radius-md));
+  box-shadow: var(--shadow-raised);
+  overflow-x: auto;
+}
+
+/* Table element — border-collapse separate, spacing 0 */
+.soup-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: auto;
+}
+
+/* thead — sticky ghost header band */
+.soup-table-thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* th — overline style header, 28px height, surface-raised fill */
+.soup-table-th {
+  height: 28px;
+  padding: 0 var(--sp-3);
+  background: var(--surface-raised);
+  border-bottom: var(--bw) solid var(--border-subtle);
+  font: var(--type-overline, 500 10px/16px var(--font-sans));
+  letter-spacing: var(--tracking-caps, 0.08em);
+  text-transform: uppercase;
+  color: var(--text-2);
+  text-align: left;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* Sort button inside th — inline-flex, no visual chrome, full th height */
+.soup-table-th__sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.soup-table-th__sort-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+  border-radius: var(--radius-xs);
+}
+
+/* Sort glyph — inline, no animation (table.md: instant) */
+.soup-table-th__sort-glyph {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+/* tbody */
+.soup-table-tbody {
+  /* no extra styles — rows carry all geometry */
+}
+
+/* Row base */
+.soup-table-row {
+  height: var(--row-default, 36px);
+  border-bottom: var(--bw) solid var(--border-hairline);
+}
+
+/* Compressed density — driven by data-density attribute on the wrap */
+.soup-tblwrap[data-density="compressed"] .soup-table-row {
+  height: var(--row-compressed, 28px);
+}
+
+/* Interactive row — pointer cursor, hover wash, focus ring */
+.soup-table-row--interactive {
+  cursor: pointer;
+}
+
+.soup-table-row--interactive:hover {
+  background: var(--row-hover);
+}
+
+.soup-table-row--interactive:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px; /* inset ring stays inside the row */
+}
+
+/* Severity: warn — channel wash fill + 2px inset left edge */
+.soup-table-row--warn {
+  background: var(--status-warn-wash);
+  box-shadow: inset 2px 0 0 var(--status-warn-solid);
+}
+
+.soup-table-row--warn:hover {
+  background: color-mix(in srgb, var(--status-warn-solid) 16%, transparent);
+}
+
+/* Severity: crit — channel wash fill + 2px inset left edge */
+.soup-table-row--crit {
+  background: var(--status-crit-wash);
+  box-shadow: inset 2px 0 0 var(--status-crit-solid);
+}
+
+.soup-table-row--crit:hover {
+  background: color-mix(in srgb, var(--status-crit-solid) 16%, transparent);
+}
+
+/* Current/selected row — accent wash + inset accent edge */
+.soup-table-row--current {
+  background: var(--accent-wash);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* State rows (empty/error/loading) */
+.soup-table-row--state {
+  height: auto;
+}
+
+.soup-table-row--skeleton {
+  height: var(--row-default, 36px);
+}
+
+.soup-tblwrap[data-density="compressed"] .soup-table-row--skeleton {
+  height: var(--row-compressed, 28px);
+}
+
+/* td base — truncation by default */
+.soup-table-td {
+  padding: 0 var(--sp-3);
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0; /* required for ellipsis on table cells */
+  vertical-align: middle;
+}
+
+/* Compressed density td type */
+.soup-tblwrap[data-density="compressed"] .soup-table-td {
+  font: var(--type-caption, 400 11px/16px var(--font-sans));
+}
+
+/* Numeric / data lane — right-aligned, tabular figures, mono */
+.soup-table-td--num {
+  font: var(--type-data, 400 12px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+  text-align: right;
+  color: var(--text-2);
+}
+
+.soup-tblwrap[data-density="compressed"] .soup-table-td--num {
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+}
+
+/* State td — centered message layout */
+.soup-table-td--state {
+  text-align: center;
+  padding: var(--sp-6) var(--sp-3);
+  white-space: normal;
+  overflow: visible;
+  max-width: none;
+}
+
+.soup-table-td--error {
+  color: var(--status-crit-fg);
+}
+
+.soup-table-state-msg {
+  display: block;
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+  color: var(--text-2);
+}
+
+.soup-table-state-msg--error {
+  color: var(--status-crit-fg);
+}
+
+.soup-table-state-remedy {
+  display: block;
+  margin-top: var(--sp-2);
+}
+
+/* Ghost em-dash — text-3 tier for absent values */
+.soup-table-ghost {
+  color: var(--text-3);
+  font: var(--type-data, 400 12px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+}
+
+/* Skeleton bar — placeholder geometry */
+.soup-table-skeleton-bar {
+  display: block;
+  height: 10px;
+  border-radius: var(--radius-xs);
+  background: var(--btn-neutral-bg);
+  width: 60%;
+}
+
+/* Reduced motion: remove row-hover transition */
+@media (prefers-reduced-motion: reduce) {
+  .soup-table-row--interactive:hover {
+    background: var(--row-hover);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   TOOLBAR PRIMITIVE — soup-toolbar* (toolbar.md)
+   Shell: --surface-raised, 1px --border-hairline, --r-2, --shadow-raised,
+          padding --sp-2 --sp-3, flex wrap, gap --sp-2.
+   Flush variant: no radius/side borders — joins its table/log block.
+   Density: 28px controls by construction.
+   -------------------------------------------------------------------------- */
+
+/* Toolbar shell */
+.soup-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-raised);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--r-2, var(--radius-md));
+  box-shadow: var(--shadow-raised);
+}
+
+/* Flush variant — no radius/side borders, joins the table/log block */
+.soup-toolbar--flush {
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+}
+
+/* Filter group — role="group", interactive Pills */
+.soup-toolbar-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* Segmented time-range control */
+.soup-toolbar-seg {
+  display: inline-flex;
+  align-items: center;
+  border: var(--bw) solid var(--border-strong);
+  border-radius: var(--r-1, var(--radius-sm));
+  overflow: hidden;
+  flex: none;
+}
+
+/* Seg button — 24px height, data-sm type, pressed = accent fill */
+.soup-toolbar-seg__btn {
+  height: 24px;
+  padding: 0 var(--sp-2);
+  font: var(--type-data-sm, 500 11px/16px var(--font-sans));
+  color: var(--text-2);
+  background: none;
+  border: none;
+  border-right: var(--bw) solid var(--border-strong);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) var(--ease-enter),
+    color var(--dur-fast) var(--ease-enter);
+}
+
+.soup-toolbar-seg__btn:last-child {
+  border-right: none;
+}
+
+.soup-toolbar-seg__btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.soup-toolbar-seg__btn:not([aria-pressed="true"]):hover {
+  background: var(--btn-neutral-bg-hover);
+  color: var(--text-1);
+}
+
+.soup-toolbar-seg__btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px; /* inset, stays inside the seg frame */
+}
+
+/* Search input wrapper */
+.soup-toolbar-search-wrap {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+}
+
+/* Visually hide the label text while keeping it accessible */
+.soup-toolbar-search__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Search input — 28px height, width from component token */
+.soup-toolbar-search {
+  height: 28px;
+  width: var(--toolbar-search-w, 200px);
+  padding: 0 var(--sp-2);
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+  color: var(--text-1);
+  background: var(--surface-inset);
+  border: var(--bw) solid var(--border-subtle);
+  border-radius: var(--r-1, var(--radius-sm));
+}
+
+.soup-toolbar-search::placeholder {
+  color: var(--text-3);
+}
+
+.soup-toolbar-search:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+  border-color: var(--focus-ring);
+}
+
+/* Spring — fills available horizontal space */
+.soup-toolbar-spring {
+  flex: 1 1 auto;
+}
+
+/* Reduced motion: remove seg button transitions */
+@media (prefers-reduced-motion: reduce) {
+  .soup-toolbar-seg__btn {
+    transition: none;
+  }
+}

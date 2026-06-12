@@ -82,4 +82,9 @@
   --opacity-soft:     0.3;    /* background decorations, sparklines */
   --opacity-faint:    0.4;    /* separators, subdued inline markers */
   --opacity-disabled: 0.45;   /* disabled controls (button.md states) */
+  /* === Table density tokens (table.md Densities, layout-density 3) === */
+  --row-default:      36px;   /* default row height (browse, forms-adjacent) */
+  --row-compressed:   28px;   /* compressed row height (Fleet, Ops, logs) */
+  /* === Toolbar search component token (toolbar.md Anatomy) === */
+  --toolbar-search-w: 200px;  /* search input width in the toolbar */
 }
