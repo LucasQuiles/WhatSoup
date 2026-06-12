@@ -30,6 +30,13 @@ framewrap (the host frame: toolbar + table + drawer share one container)
 The drawer has two layout modes, chosen by **container width of the host frame**, measured with a
 container query (flex-basis fallback where container queries are unavailable):
 
+> **C2.3 amendment (2026-06-11, live-QA finding D2):** the threshold below was authored against a
+> full-width container. In production the Fleet table container shares the viewport with the
+> activity feed (~1044px at a 1440px window), so 1080px produced overlay on desktop —
+> contradicting this rule's own intent. The implemented threshold is **900px container width**
+> (squeezed content keeps ≥ ~540px, with the table's governed x-scroll absorbing the rest).
+> Wherever this section says 1080px, read 900px.
+
 1. **Squeeze mode — container ≥ 1080px.** The drawer participates in layout as a flex sibling of
    the content region (`flex: 0 0 var(--drawer-w)`); the content region shrinks
    (`flex: 1 1 auto; min-width: 0`) and the table **reflows narrower** instead of being covered.
