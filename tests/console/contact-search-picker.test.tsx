@@ -288,6 +288,7 @@ describe('ContactSearchPicker in-flight guard', () => {
         resolveSearch = res
       }),
     )
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { unmount } = render(<ContactSearchPicker {...defaultProps()} />)
 
     // Trigger a search
@@ -304,8 +305,10 @@ describe('ContactSearchPicker in-flight guard', () => {
       await Promise.resolve()
     })
 
-    // Test passes if no throw and no "setState on unmounted" error.
-    expect(true).toBe(true)
+    // The contract: the stale response is silently discarded — React surfaces
+    // no error (state updates on unmounted trees log via console.error).
+    expect(errorSpy).not.toHaveBeenCalled()
+    errorSpy.mockRestore()
   })
 })
 
