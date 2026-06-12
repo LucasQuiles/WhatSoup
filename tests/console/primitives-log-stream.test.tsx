@@ -317,7 +317,6 @@ describe('LogStream — focus survives rerender with new entries', () => {
     const newRows = screen.getAllByRole('listitem');
     expect(newRows.length).toBe(3);
     // The "entry A" row should still exist
-    const entryARow = newRows.find((r) => r.textContent?.includes('entry A'));
-    expect(entryARow).toBeDefined();
+    expect(newRows.map((r) => r.textContent).join('\n')).toContain('entry A');
   });
 });

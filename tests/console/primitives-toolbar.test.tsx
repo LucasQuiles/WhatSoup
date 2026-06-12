@@ -81,7 +81,7 @@ describe('ToolbarFilters — group role + label', () => {
       </Toolbar>,
     );
     const group = screen.getByRole('group', { name: 'Mode filter' });
-    expect(group).toBeDefined();
+    expect(group.getAttribute('aria-label')).toBe('Mode filter');
   });
 
   it('aria-label matches the label prop', () => {
@@ -133,7 +133,7 @@ describe('ToolbarTimeRange — seg control', () => {
       </Toolbar>,
     );
     const group = screen.getByRole('group', { name: 'Time range' });
-    expect(group).toBeDefined();
+    expect(group.getAttribute('aria-label')).toBe('Time range');
   });
 
   it('aria-label matches the label prop', () => {

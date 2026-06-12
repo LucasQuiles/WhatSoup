@@ -168,7 +168,7 @@ describe('Pill — removable variant', () => {
   it('renders remove button with aria-label="Remove <label>"', () => {
     render(<Pill variant="removable" onRemove={() => {}}>env:prod</Pill>);
     const removeBtn = screen.getByRole('button', { name: 'Remove env:prod' });
-    expect(removeBtn).toBeDefined();
+    expect(removeBtn.className).toContain('soup-pill__remove');
   });
 
   it('custom removeLabel overrides the default aria-label', () => {

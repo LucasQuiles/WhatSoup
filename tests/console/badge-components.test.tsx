@@ -50,8 +50,8 @@ describe('STATUS_MAP', () => {
   it('maps online to disc shape', () => {
     expect(STATUS_MAP.online.shape).toBe('disc');
     expect(STATUS_MAP.online.label).toBe('online');
-    expect(STATUS_MAP.online.token).toBe('--status-ok-solid');
     expect(STATUS_MAP.online.labelToken).toBeNull();
+    expect(STATUS_MAP.online.token).toBe('--status-ok-solid');
   });
 
   it('maps degraded to diamond shape with warn label token', () => {
