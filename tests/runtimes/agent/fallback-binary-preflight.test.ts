@@ -353,4 +353,33 @@ describe('armFallbackWindow — binary pre-flight', () => {
       );
     }, { interval: 0 });
   });
+
+  // ── extension re-arm (window already active) ────────────────────────────────
+
+  it('does NOT re-probe the binary when an extension re-arms the active window', async () => {
+    probeFallbackBinaryMock.mockResolvedValue({ status: 'missing', version: null });
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    // First arm: the binary probe spawns once and alerts once.
+    fbView(runtime).activateProviderFallback(null);
+    await vi.waitFor(() => {
+      expect(probeFallbackBinaryMock).toHaveBeenCalledTimes(1);
+    }, { interval: 0 });
+
+    // Extension: a second usage-limit hit while the window is active must not
+    // re-spawn the probe nor re-fire the alert (per-turn usage-limits would
+    // otherwise spawn an unthrottled probe storm).
+    fbView(runtime).activateProviderFallback(null);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(probeFallbackBinaryMock).toHaveBeenCalledTimes(1);
+    const missingAlerts = vi.mocked(emitAlert).mock.calls.filter(
+      (c) => c[1] === 'fallback_binary_missing',
+    );
+    expect(missingAlerts).toHaveLength(1);
+  });
 });

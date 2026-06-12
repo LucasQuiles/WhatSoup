@@ -5866,14 +5866,22 @@ export class AgentRuntime implements Runtime {
     this.activeFallbackEntry = fallbackEntry;
     this.fallbackActiveUntil = until;
     this.fallbackActivatedAt = activatedAt;
+    // First-arm discriminator, captured before the guard below consumes it:
+    // null means this call is the window's first arm in this process (a fresh
+    // activation or a post-restart restore), non-null means an extension of
+    // the already-armed window. Pre-flight runs only on first arms — an
+    // extension re-arm re-spawning the credential/binary/catalog probes and
+    // re-firing their alerts on every per-turn usage-limit is an unthrottled
+    // storm, and nothing about the target entry's environment changed.
+    const firstArm = this.fallbackArmReason === null;
     // Preserve original cause: only set on first arm; extensions and restores
-    // must pass the original reason so it is not overwritten. The null-guard
-    // doubles as the first-arm discriminator: the activation alert + counter
-    // fire exactly once per window, never on extensions. A restored window
-    // is the SAME window resuming after a restart — the null-guard is
-    // per-process, so without the restored flag every restart would re-count
-    // and re-alert the activation that already fired before the restart.
-    if (this.fallbackArmReason === null) {
+    // must pass the original reason so it is not overwritten. The activation
+    // alert + counter fire exactly once per window, never on extensions. A
+    // restored window is the SAME window resuming after a restart — the
+    // first-arm discriminator is per-process, so without the restored flag
+    // every restart would re-count and re-alert the activation that already
+    // fired before the restart.
+    if (firstArm) {
       this.fallbackArmReason = reason;
       if (opts?.restored) {
         // A restored window is the SAME window resuming after a restart, so
@@ -5929,6 +5937,12 @@ export class AgentRuntime implements Runtime {
         `until=${new Date(until).toISOString()} reason=${persistReason}`,
       );
     }
+    // Pre-flight is gated to first arms (fresh activation or post-restart
+    // restore). An extension re-arm changes nothing about the target entry's
+    // environment, and per-turn usage-limit extensions would otherwise
+    // re-spawn every probe and re-fire every pre-flight alert — an
+    // unthrottled storm under sustained load.
+    if (!firstArm) return;
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
     const service = resolveProviderKeyService(
