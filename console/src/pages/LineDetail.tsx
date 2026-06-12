@@ -142,6 +142,7 @@ export default function LineDetail() {
           label="Back"
           icon={<ArrowLeft size={18} strokeWidth={1.75} />}
           onClick={() => navigate('/')}
+
         />
 
         {/* Status — shape law: disc/diamond/square/outline + label */}

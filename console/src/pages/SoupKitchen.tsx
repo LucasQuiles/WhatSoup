@@ -65,6 +65,7 @@ import {
   type RowSeverity,
   type TimeRangeOption,
 } from "../components/primitives";
+import { statusNeedsAttention, statusAlertMessage, statusSeverity } from "../lib/status-severity";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -407,15 +408,10 @@ const SoupKitchen: FC = () => {
   const alerts = useMemo(
     () =>
       lines
-        .filter((l) => l.status === "unreachable" || l.status === "degraded")
+        .filter((l) => statusNeedsAttention(l.status))
         .map((l) => ({
           line: l.name,
-          message:
-            l.status === "unreachable"
-              ? l.lastSessionStatus === "auth_expired"
-                ? "auth expired"
-                : "connection lost"
-              : "degraded",
+          message: statusAlertMessage(l.status, l.lastSessionStatus),
         })),
     [lines]
   );
@@ -438,7 +434,7 @@ const SoupKitchen: FC = () => {
       result = result.filter((l) => l.status === "online");
     else if (activeKpi === "attention")
       result = result.filter(
-        (l) => l.status === "unreachable" || l.status === "degraded" || l.error
+        (l) => statusNeedsAttention(l.status) || l.error
       );
     else if (activeKpi === "unread")
       result = result.filter((l) => (l.unread ?? 0) > 0);
@@ -786,6 +782,7 @@ const SoupKitchen: FC = () => {
             <div className="overflow-y-auto overflow-x-auto scrollbar-hide h-full">
               <Table density="compressed">
                 <TableHeader>
+
                   <tr>
                     {/* Col 0: Status+name — StatusCell (shape law) */}
                     <TableHeaderCell
@@ -884,13 +881,12 @@ const SoupKitchen: FC = () => {
                     />
                   ) : (
                     filtered.map((line) => {
-                      const isError = line.status === "unreachable";
-                      const isDegraded = line.status === "degraded";
-                      const severity: RowSeverity | undefined = isError
-                        ? "crit"
-                        : isDegraded
-                          ? "warn"
-                          : undefined;
+                      const _statusSev = statusSeverity(line.status);
+                      const severity: RowSeverity | undefined =
+                        _statusSev === "crit" ? "crit" :
+                        _statusSev === "warn" ? "warn" :
+                        undefined;
+                      const isError = _statusSev === "crit";
                       const isCurrent = selectedName === line.name;
                       const sent = line.messageStats?.sent ?? 0;
                       const recv = line.messageStats?.received ?? 0;

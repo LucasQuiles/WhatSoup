@@ -138,19 +138,21 @@ describe('buildChildEnv — opencode-cli model-derived key', () => {
   it('injects no key and warns once when the model prefix resolves to a service missing from SERVICE_ENV_MAP', () => {
     lookupCredentialMock.mockReturnValue(null);
 
-    const env = buildChildEnv('opencode-cli', undefined, 'xai/grok-4');
-    expect(hasKey(env, 'XAI_API_KEY')).toBe(false);
+    // 'unmapped-vendor' stands in for any provider absent from SERVICE_ENV_MAP
+    // (xai, the previous fixture, is now a mapped fallback provider).
+    const env = buildChildEnv('opencode-cli', undefined, 'unmapped-vendor/model-x');
+    expect(hasKey(env, 'UNMAPPED_VENDOR_API_KEY')).toBe(false);
     // The keyring is never consulted for a service with no env-var mapping —
     // there is nowhere to put the result.
-    expect(lookupCredentialMock).not.toHaveBeenCalledWith('xai');
+    expect(lookupCredentialMock).not.toHaveBeenCalledWith('unmapped-vendor');
 
     expect(warnMock).toHaveBeenCalledTimes(1);
     const call = JSON.stringify(warnMock.mock.calls[0]);
-    expect(call).toContain('xai');
+    expect(call).toContain('unmapped-vendor');
     expect(call).toContain('SERVICE_ENV_MAP');
 
     // The warning is emitted once per service, not once per spawn.
-    buildChildEnv('opencode-cli', undefined, 'xai/grok-4');
+    buildChildEnv('opencode-cli', undefined, 'unmapped-vendor/model-x');
     expect(warnMock).toHaveBeenCalledTimes(1);
   });
 

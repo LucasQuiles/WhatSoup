@@ -307,6 +307,7 @@ describe('SoupKitchen KPI cards with data', () => {
         runtime: { agent: { activeSessions: 2, lastSessionStatus: null, lastSessionStartedAt: null } } } }),
     makeLine({ name: 'charlie', status: 'degraded', mode: 'chat', messageStats: { sent: 20, received: 30, images: 0, audio: 0, documents: 0 } }),
     makeLine({ name: 'delta', status: 'unreachable', mode: 'passive', lastSessionStatus: 'auth_expired' }),
+    makeLine({ name: 'echo', status: 'logged_out', mode: 'agent' }),
   ];
 
   const kpis = computeKpis(lines);
@@ -316,7 +317,7 @@ describe('SoupKitchen KPI cards with data', () => {
   });
 
   it('computes need attention count correctly', () => {
-    expect(kpis.needAttention).toBe(2); // charlie (degraded) + delta (unreachable)
+    expect(kpis.needAttention).toBe(3); // charlie (degraded) + delta (unreachable) + echo (logged_out)
   });
 
   it('aggregates sent messages', () => {
@@ -354,7 +355,7 @@ describe('SoupKitchen KPI cards with data', () => {
   it('renders the computed KPI values on the cards', () => {
     renderPage({ lines });
     expect(within(getKpiCard('Lines Connected')).getByText('2')).toBeDefined();
-    expect(within(getKpiCard('Need Attention')).getByText('2')).toBeDefined();
+    expect(within(getKpiCard('Need Attention')).getByText('3')).toBeDefined();
     expect(within(getKpiCard('Messages Sent')).getByText('170')).toBeDefined();
     expect(within(getKpiCard('Messages Received')).getByText('310')).toBeDefined();
     expect(within(getKpiCard('Agent Sessions')).getByText('2')).toBeDefined();
@@ -503,6 +504,21 @@ describe('SoupKitchen error state handling', () => {
     expect(within(banner!).getByText('slow-line')).toBeDefined();
   });
 
+  it('renders explicit messages for logged-out, config-error, and unknown lines', () => {
+    const lines = [
+      makeLine({ name: 'logout-line', status: 'logged_out' }),
+      makeLine({ name: 'bad-config-line', status: 'config_error' }),
+      makeLine({ name: 'unknown-line', status: 'unknown' }),
+    ];
+    renderPage({ lines });
+    const banner = alertBanner();
+    expect(banner).not.toBeNull();
+    expect(screen.getByText('3 alerts')).toBeDefined();
+    expect(within(banner!).getByText('logged out')).toBeDefined();
+    expect(within(banner!).getByText('configuration error')).toBeDefined();
+    expect(within(banner!).getByText('awaiting health signal')).toBeDefined();
+  });
+
   it('renders no AlertBanner when all lines are healthy', () => {
     const lines = [makeLine({ name: 'a', status: 'online' }), makeLine({ name: 'b', status: 'online' })];
     renderPage({ lines });
@@ -517,34 +533,45 @@ describe('SoupKitchen error state handling', () => {
       makeLine({ name: 'alert-b', status: 'degraded' }),
       makeLine({ name: 'alert-c', status: 'online' }),
       makeLine({ name: 'alert-d', status: 'unreachable', lastSessionStatus: null }),
+      makeLine({ name: 'alert-e', status: 'logged_out' }),
     ];
     renderPage({ lines });
-    expect(screen.getByText('3 alerts')).toBeDefined();
+    expect(screen.getByText('4 alerts')).toBeDefined();
     const banner = alertBanner();
     expect(banner).not.toBeNull();
     expect(within(banner!).getByText('auth expired')).toBeDefined();
     expect(within(banner!).getByText('degraded')).toBeDefined();
     expect(within(banner!).getByText('connection lost')).toBeDefined();
+    expect(within(banner!).getByText('logged out')).toBeDefined();
+    // Healthy line 'alert-c' should NOT appear in the banner (it still
+    // renders as a table row).
     expect(within(banner!).queryByText('alert-c')).toBeNull();
     expect(within(banner!).getByText('alert-a')).toBeDefined();
     expect(within(banner!).getByText('alert-b')).toBeDefined();
     expect(within(banner!).getByText('alert-d')).toBeDefined();
+    expect(within(banner!).getByText('alert-e')).toBeDefined();
   });
 
   it('applies crit severity class on unreachable rows and warn severity on degraded rows', () => {
     const lines = [
       makeLine({ name: 'row-down', status: 'unreachable' }),
       makeLine({ name: 'row-slow', status: 'degraded' }),
+      makeLine({ name: 'row-logout', status: 'logged_out' }),
+      makeLine({ name: 'row-unknown', status: 'unknown' }),
       makeLine({ name: 'row-fine', status: 'online' }),
     ];
     renderPage({ lines });
     const body = tableBody();
     const downRow = within(body).getByText('row-down').closest('tr') as HTMLElement;
     const slowRow = within(body).getByText('row-slow').closest('tr') as HTMLElement;
+    const logoutRow = within(body).getByText('row-logout').closest('tr') as HTMLElement;
+    const unknownRow = within(body).getByText('row-unknown').closest('tr') as HTMLElement;
     const fineRow = within(body).getByText('row-fine').closest('tr') as HTMLElement;
     // C2.3: TableRow severity prop maps to soup-table-row--crit / --warn classes.
     expect(downRow.className).toContain('crit');
     expect(slowRow.className).toContain('warn');
+    expect(logoutRow.className).toContain('crit');
+    expect(unknownRow.className).toContain('warn');
     expect(fineRow.className).not.toContain('crit');
     expect(fineRow.className).not.toContain('warn');
   });
@@ -631,10 +658,17 @@ describe('SoupKitchen filter behavior', () => {
     expect(getKpiCard('Lines Connected').getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('clicking "Need Attention" KPI filters to degraded + unreachable lines', () => {
-    renderPage({ lines });
+  it('clicking "Need Attention" KPI filters to non-online lines and errored online lines', () => {
+    const attentionLines = [
+      ...lines,
+      makeLine({ name: 'foxtrot', status: 'logged_out', mode: 'agent' }),
+      makeLine({ name: 'golf', status: 'config_error', mode: 'chat' }),
+      makeLine({ name: 'hotel', status: 'unknown', mode: 'passive' }),
+      makeLine({ name: 'india', status: 'online', mode: 'chat', error: 'late poll error' }),
+    ];
+    renderPage({ lines: attentionLines });
     fireEvent.click(getKpiCard('Need Attention'));
-    expect(visibleTableLineNames(lines)).toEqual(['charlie', 'delta']);
+    expect(visibleTableLineNames(attentionLines)).toEqual(['charlie', 'delta', 'foxtrot', 'golf', 'hotel', 'india']);
   });
 
   it('clicking "Unread" KPI filters to lines with unread > 0', () => {

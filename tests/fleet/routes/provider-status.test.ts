@@ -57,6 +57,9 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     lastPollAt: '2026-04-01T00:00:00.000Z',
     consecutiveFailures: 0,
     status: 'online',
+    statusConfidence: 'confirmed',
+    statusReason: 'health_body_ok',
+    statusEvidence: ['health_status=healthy'],
     error: null,
     lastAlertAt: null,
     silencedUntil: null,
@@ -122,6 +125,12 @@ describe('handleGetLineProviderStatus', () => {
         lastFallbackTurnAt: null,
         activeEntry: null,
         chain: [],
+      },
+      signal: {
+        status: null,
+        confidence: null,
+        reason: 'not_polled',
+        evidence: [],
       },
       lineReachable: false,
     });
@@ -390,6 +399,40 @@ describe('handleGetLineProviderStatus', () => {
 
     const body = JSON.parse(res._body);
     expect(body.lineReachable).toBe(reachable);
+  });
+
+  it('surfaces poller signal confidence and evidence for provider diagnostics', async () => {
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({ agentOptions: { provider: 'claude-cli' } }),
+    );
+
+    const status = fakeStatus({
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      statusEvidence: [
+        'health_status=healthy',
+        'whatsapp_connected=true',
+        'reconnect_phase=backoff',
+        'reconnect_attempts=0',
+      ],
+    });
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), status), { name: 'agent-line' });
+
+    const body = JSON.parse(res._body);
+    expect(body.signal).toEqual({
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      evidence: [
+        'health_status=healthy',
+        'whatsapp_connected=true',
+        'reconnect_phase=backoff',
+        'reconnect_attempts=0',
+      ],
+    });
   });
 
   it.each([

@@ -301,6 +301,11 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
 
     // Poller status
     status: isConfigError ? 'config_error' : (poll?.status ?? 'unknown'),
+    statusConfidence: isConfigError ? 'confirmed' : (poll?.statusConfidence ?? null),
+    statusReason: isConfigError ? 'config_error' : (poll?.statusReason ?? 'not_polled'),
+    statusEvidence: isConfigError
+      ? [inst.configError ?? 'config_error']
+      : (poll?.statusEvidence ?? []),
     error: inst.configError ?? poll?.error ?? null,
     configError: inst.configError ?? null,
     sharedCwdWith: inst.sharedCwdWith ?? null,
@@ -469,6 +474,28 @@ function lineReachableFromPoll(poll: InstanceStatus | undefined): boolean {
   return false;
 }
 
+function healthSignalFromPoll(poll: InstanceStatus | undefined): {
+  status: InstanceStatus['status'] | null;
+  confidence: InstanceStatus['statusConfidence'] | null;
+  reason: string | null;
+  evidence: string[];
+} {
+  if (!poll) {
+    return {
+      status: null,
+      confidence: null,
+      reason: 'not_polled',
+      evidence: [],
+    };
+  }
+  return {
+    status: poll.status,
+    confidence: poll.statusConfidence,
+    reason: poll.statusReason,
+    evidence: poll.statusEvidence,
+  };
+}
+
 function fallbackEntryFromHealth(value: unknown): { provider: string; model: string | null } | null {
   const entry = recordValue(value);
   if (!entry) return null;
@@ -579,6 +606,7 @@ export async function handleGetLineProviderStatus(
       activeEntry,
       chain: fallbackChain,
     },
+    signal: healthSignalFromPoll(poll),
     lineReachable: lineReachableFromPoll(poll),
   });
 }

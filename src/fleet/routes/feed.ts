@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, parseQueryString, parseIntParam } from '../../lib/http.ts';
 import type { FleetDiscovery, DiscoveredInstance } from '../discovery.ts';
-import type { HealthPoller } from '../health-poller.ts';
+import type { HealthPoller, InstanceStatus } from '../health-poller.ts';
 import { findLatestLogFile, readTailLines } from '../log-utils.ts';
 import { normalizeTimestamp } from '../time-utils.ts';
 import type { FleetDbReader } from '../db-reader.ts';
@@ -20,7 +20,15 @@ type FeedDetail =
   | { type: 'tool_error'; toolName: string; toolId?: string; error: string }
   | { type: 'tool_use'; toolName: string; toolId?: string }
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }
-  | { type: 'health'; status: string; previousStatus?: string; error?: string }
+  | {
+      type: 'health';
+      status: string;
+      previousStatus?: string;
+      error?: string;
+      confidence?: InstanceStatus['statusConfidence'];
+      reason?: string;
+      evidence?: string[];
+    }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
   | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string; conversationKey?: string }
   | { type: 'generic' };
@@ -272,6 +280,34 @@ export function parsePinoLine(line: string, ctx: ParseContext): FeedEvent | null
 
 const previousStatuses = new Map<string, string>();
 
+function healthStatusMessage(status: InstanceStatus['status'], error: string | null): string {
+  if (status === 'online') return 'came online';
+  if (status === 'unreachable') return 'connection lost';
+  if (status === 'logged_out') return 'logged out';
+  return `degraded - ${error ?? 'health signal degraded'}`;
+}
+
+function healthStatusLevel(status: InstanceStatus['status']): FeedEvent['level'] {
+  if (status === 'online') return 'info';
+  if (status === 'degraded') return 'warn';
+  return 'error';
+}
+
+function healthDetail(
+  poll: InstanceStatus,
+  previousStatus: string,
+): Extract<FeedDetail, { type: 'health' }> {
+  return {
+    type: 'health',
+    status: poll.status,
+    previousStatus,
+    ...(poll.error ? { error: poll.error } : {}),
+    confidence: poll.statusConfidence,
+    reason: poll.statusReason,
+    evidence: poll.statusEvidence,
+  };
+}
+
 function synthesizeHealthEvents(
   instances: Map<string, DiscoveredInstance>,
   healthPoller: HealthPoller,
@@ -296,31 +332,20 @@ function synthesizeHealthEvents(
           provider: inst.provider,
           component: 'health',
           level: 'info',
-          detail: { type: 'health', status: currStatus, previousStatus: prevStatus },
+          detail: healthDetail(poll, prevStatus),
         });
-      } else if (currStatus === 'unreachable') {
+      } else {
+        const level = healthStatusLevel(currStatus);
         events.push({
           time: now,
           mode: inst.type,
-          text: `${inst.name}: connection lost`,
-          isError: true,
+          text: `${inst.name}: ${healthStatusMessage(currStatus, poll.error)}`,
+          ...(level === 'error' ? { isError: true } : {}),
           instance: inst.name,
           provider: inst.provider,
           component: 'health',
-          level: 'error',
-          detail: { type: 'health', status: currStatus, previousStatus: prevStatus, error: poll.error ?? undefined },
-        });
-      } else if (currStatus === 'degraded') {
-        events.push({
-          time: now,
-          mode: inst.type,
-          text: `${inst.name}: degraded — ${poll.error ?? 'enrichment stale'}`,
-          isError: true,
-          instance: inst.name,
-          provider: inst.provider,
-          component: 'health',
-          level: 'warn',
-          detail: { type: 'health', status: currStatus, previousStatus: prevStatus, error: poll.error ?? undefined },
+          level,
+          detail: healthDetail(poll, prevStatus),
         });
       }
     }

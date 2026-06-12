@@ -5,6 +5,7 @@ import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
 import { formatRelative } from '../../lib/format-time'
 import { getProvider, DEFAULT_PROVIDER_ID } from '../../lib/providers'
+import { statusTextClass } from '../../lib/status-severity'
 import ConfirmDialog from '../ConfirmDialog'
 import { Button } from '../primitives/Button'
 import { PipelineNode, PipelineArrow } from './PipelineTab'
@@ -40,7 +41,7 @@ export function SummaryTab({
   // disconnected line IS a problem; spec-aligned (CONNECTION_MAP in status-map.ts).
   const conn = resolveConnection(connectionState)
   const cards = [
-    { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
+    { label: 'STATUS', value: line.status, color: statusTextClass(line.status) },
     { label: 'CONNECTION', value: conn.label, color: conn.inkClass },
     ...(line.linkedStatus
       ? [{ label: 'LINK', value: line.linkedStatus, color: line.linkedStatus === 'linked' ? 'text-s-ok' : 'text-s-warn' }]

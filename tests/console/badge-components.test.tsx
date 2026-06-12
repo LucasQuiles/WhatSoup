@@ -33,6 +33,7 @@ import ModeBadge from '../../console/src/components/ModeBadge.tsx';
 import StatusDot from '../../console/src/components/StatusDot.tsx';
 import { STATUS_MAP, MODE_MAP, resolveStatus, resolveMode, CONNECTION_MAP, resolveConnection } from '../../console/src/lib/status-map.ts';
 
+
 afterEach(() => {
   cleanup();
 });
@@ -104,6 +105,7 @@ describe('resolveStatus', () => {
   });
 });
 
+
 describe('resolveMode', () => {
   it('returns entry for known modes', () => {
     expect(resolveMode('passive')).not.toBeNull();
@@ -131,6 +133,7 @@ describe('StatusCell shape law', () => {
     { status: 'degraded',    expectedShapeClass: 'soup-shape--warn',  expectedLabel: 'degraded' },
     { status: 'unreachable', expectedShapeClass: 'soup-shape--crit',  expectedLabel: 'unreachable' },
     { status: 'unlinked',    expectedShapeClass: 'soup-shape--off',   expectedLabel: 'unlinked' },
+
   ];
 
   for (const { status, expectedShapeClass, expectedLabel } of shapeCases) {
@@ -277,5 +280,6 @@ describe('CONNECTION_MAP — connection-state taxonomy lives in status-map (DD-1
     const odd = resolveConnection('half-open');
     expect(odd.inkClass).toBe('text-t4');
     expect(odd.label).toBe('half-open');
+
   });
 });
