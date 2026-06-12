@@ -8,6 +8,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import * as os from 'node:os';
+import { createChildLogger } from '../logger.ts';
 
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
 
@@ -36,6 +37,12 @@ export interface CredentialLookupOptions {
 
 let _cachedBackend: KeyringBackend | undefined;
 
+// Lazy logger — avoids any risk of a cycle during module initialisation while
+// still giving us structured log output once the module is fully loaded.
+function getLog() {
+  return createChildLogger('keyring');
+}
+
 /** Detect the available keyring backend for this platform. */
 export function detectKeyringBackend(): KeyringBackend {
   if (_cachedBackend !== undefined) return _cachedBackend;
@@ -51,8 +58,12 @@ export function detectKeyringBackend(): KeyringBackend {
   try {
     execFileSync('secret-tool', ['--help'], { timeout: 2_000, stdio: 'ignore' });
     _cachedBackend = 'secret-tool';
-  } catch {
+  } catch (err) {
     _cachedBackend = 'env-only';
+    getLog().warn(
+      { backend: 'env-only', err: err instanceof Error ? err.message : String(err) },
+      'keyring backend probe failed — falling back to env-only credential lookup',
+    );
   }
   return _cachedBackend;
 }
@@ -109,8 +120,14 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           const raw = execFileSync('secret-tool', secretToolArgs(candidate, index === 0), { timeout: 5_000 });
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
           if (val) return val;
-        } catch {
-          // Try migration fallback candidates before giving up.
+        } catch (err) {
+          // Warn on primary candidate failure; migration fallback misses are expected.
+          if (index === 0) {
+            getLog().warn(
+              { service, backend, err: err instanceof Error ? err.message : String(err) },
+              'keyring read failed — falling back to env lookup',
+            );
+          }
         }
       }
       return lookupEnvAfterKeyringMiss();
@@ -132,8 +149,14 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           );
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
           if (val) return val;
-        } catch {
-          // Try migration fallback candidates before giving up.
+        } catch (err) {
+          // Warn on primary candidate failure; migration fallback misses are expected.
+          if (index === 0) {
+            getLog().warn(
+              { service, backend, err: err instanceof Error ? err.message : String(err) },
+              'keyring read failed — falling back to env lookup',
+            );
+          }
         }
       }
       return lookupEnvAfterKeyringMiss();
