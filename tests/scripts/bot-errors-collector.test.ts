@@ -136,7 +136,7 @@ function runCollector(fakeSsh: string, mode: 'fail' | 'success') {
       '--timeout',
       '2',
       '--alert-cooldown',
-      '1',
+      '3600',
     ],
     {
       cwd: process.cwd(),
