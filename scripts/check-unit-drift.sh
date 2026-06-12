@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+ALLOW_MISSING_SYSTEMD_DIR=0
 UNITS=(
   "whatsoup@.service"
   "whatsoup-fleet.service"
@@ -16,10 +17,13 @@ UNITS=(
 usage() {
   cat <<'USAGE'
 Usage: check-unit-drift.sh [--repo-root PATH] [--systemd-dir PATH] [--unit NAME ...]
+                           [--allow-missing-systemd-dir]
 
 Compare checked-in deploy/*.service|*.timer files with installed systemd user
 units. Exits 0 when all managed installed units match, 1 when a unit is missing
-or drifted.
+or drifted, 3 when the systemd directory is absent (unless
+--allow-missing-systemd-dir is passed, in which case exits 0 with a skip
+message).
 USAGE
 }
 
@@ -32,6 +36,10 @@ while [ "$#" -gt 0 ]; do
     --systemd-dir)
       SYSTEMD_DIR="${2:?missing --systemd-dir value}"
       shift 2
+      ;;
+    --allow-missing-systemd-dir)
+      ALLOW_MISSING_SYSTEMD_DIR=1
+      shift
       ;;
     --unit)
       UNITS=()
@@ -54,8 +62,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ ! -d "$SYSTEMD_DIR" ]; then
-  echo "systemd unit directory not found; skipping drift check: $SYSTEMD_DIR"
-  exit 0
+  if [ "$ALLOW_MISSING_SYSTEMD_DIR" -eq 1 ]; then
+    echo "SKIP: systemd unit directory not found; skipping drift check: $SYSTEMD_DIR"
+    exit 0
+  fi
+  echo "SKIP: systemd unit directory not found; skipping drift check: $SYSTEMD_DIR"
+  exit 3
 fi
 
 failures=0
