@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-12T21:20:26Z",
+  "generatedAt": "2026-06-12T21:34:55Z",
   "scope": "bot-errors-runtime-scripts",
   "files": [
     {
@@ -99,7 +99,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "c7ee6e1935e4a6a0cfec0866dbbb7b566a6d509917d502e1ca75fc71c76c1840",
+      "sha256": "f3ce989cd6967c852b034c1bd34cc964d5e49db8aadda3602d13b01afde3f397",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
