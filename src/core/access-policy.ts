@@ -130,10 +130,13 @@ export function shouldRespond(
       return { respond: true, reason: 'group_auto_respond' };
     }
 
-    // Media messages (audio, image, sticker, video) can't contain @mentions in
-    // WhatsApp, so treat them as implicit mentions in groups the bot is known to
-    // (has an access_list entry). This allows media to reach the bot without
-    // requiring a separate text @tag.
+    // Media in a known group (access_list entry) is treated as an implicit
+    // mention: audio and stickers can never carry an @mention, and image/video
+    // captions are optional, so requiring one would silently drop most media.
+    // Captioned media that DOES @mention the bot is already handled by the
+    // explicit `mentioned` check above (contextInfo is extracted from media
+    // content nodes by parseIncomingMessage). Documents are excluded from the
+    // implicit set; a captioned document must @mention the bot explicitly.
     if (IMPLICIT_MENTION_TYPES.has(msg.contentType) && groupEntry && groupEntry.status !== 'blocked') {
       log.debug({ messageId: msg.messageId, chatJid: msg.chatJid, contentType: msg.contentType }, 'trigger: media in known group — implicit mention');
       return { respond: true, reason: 'media_implicit_mention' };

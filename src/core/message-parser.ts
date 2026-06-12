@@ -29,6 +29,28 @@ export function unwrapMessage(message: any): any {
   return message;
 }
 
+/**
+ * Locate the `contextInfo` carried by a (already unwrapped) message payload.
+ * Baileys attaches contextInfo to the content node — extendedTextMessage,
+ * imageMessage, documentMessage, videoMessage, … — never to the message
+ * wrapper itself. Scanning first-level values covers every content type,
+ * including ones added later, so caption mentions and media replies are not
+ * silently dropped.
+ */
+export function extractContextInfo(message: any): any | null {
+  if (!message || typeof message !== 'object') return null;
+  if (message.contextInfo && typeof message.contextInfo === 'object') {
+    return message.contextInfo;
+  }
+  for (const value of Object.values(message)) {
+    if (value && typeof value === 'object') {
+      const ci = (value as { contextInfo?: unknown }).contextInfo;
+      if (ci && typeof ci === 'object') return ci;
+    }
+  }
+  return null;
+}
+
 export const MEDIA_CONTENT_TYPES = new Set(['image', 'video', 'audio', 'document', 'sticker']);
 
 export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
@@ -216,21 +238,18 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
     senderName = bareNumber(senderJid) ?? null;
   }
 
+  // --- contextInfo (mentions + quoted reply) ---
+  // contextInfo rides on the content node (extendedTextMessage, imageMessage,
+  // documentMessage, …), never on the message wrapper. Check the unwrapped
+  // payload first, then the original message in case a wrapper carried it.
+  const contextInfo =
+    extractContextInfo(innerMessage) ?? extractContextInfo(msg.message);
+
   // --- @mentioned JIDs ---
-  // Mentions can live in contextInfo on various message types
-  const mentionedJids: string[] =
-    innerMessage.extendedTextMessage?.contextInfo?.mentionedJid ??
-    (innerMessage as any).contextInfo?.mentionedJid ??
-    msg.message?.extendedTextMessage?.contextInfo?.mentionedJid ??
-    (msg.message as any)?.contextInfo?.mentionedJid ??
-    [];
+  const mentionedJids: string[] = contextInfo?.mentionedJid ?? [];
 
   // --- Quoted message ---
-  // Prefer contextInfo from the unwrapped message, fall back to original
-  const quotedMessageId: string | null =
-    innerMessage.extendedTextMessage?.contextInfo?.stanzaId ??
-    (msg.message?.extendedTextMessage?.contextInfo?.stanzaId) ??
-    null;
+  const quotedMessageId: string | null = contextInfo?.stanzaId ?? null;
 
   // --- isResponseWorthy ---
   const isStatusBroadcast = msg.key.remoteJid === 'status@broadcast';

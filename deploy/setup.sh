@@ -7,6 +7,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
+PLATFORM="$(uname -s)"
 
 if [ "${1:-}" = "--check" ]; then
   exec "$REPO_ROOT/scripts/check-unit-drift.sh"
@@ -62,29 +63,48 @@ else
   errors=$((errors + 1))
 fi
 
-# systemctl (systemd user units)
-if command -v systemctl &>/dev/null; then
-  if systemctl --user list-units &>/dev/null; then
-    echo "  ✓ systemd user units available"
+# Service manager and credential store — platform-specific
+if [ "$PLATFORM" = "Darwin" ]; then
+  # --- darwin (macos launchd) requirements ---
+  if command -v launchctl &>/dev/null; then
+    echo "  ✓ launchd available (launchctl)"
   else
-    echo "  ✗ systemctl found but user session unavailable"
-    echo "    Ensure you're logged into a graphical session or enable lingering:"
-    echo "    loginctl enable-linger $USER"
+    echo "  ✗ launchctl not found — launchd is required for instance management on macOS"
     errors=$((errors + 1))
   fi
-else
-  echo "  ✗ systemctl not found — systemd is required for instance management"
-  echo "    WhatSoup uses systemd user units to manage WhatsApp instances"
-  errors=$((errors + 1))
-fi
 
-# secret-tool (GNOME Keyring) — warn but don't block
-if command -v secret-tool &>/dev/null; then
-  echo "  ✓ secret-tool available (GNOME Keyring)"
+  # macOS Keychain (security binary ships with macOS) — warn but don't block
+  if command -v security &>/dev/null; then
+    echo "  ✓ macOS Keychain available (security)"
+  else
+    echo "  ⚠ security not found (optional)"
+    echo "    API keys can be set via environment variables instead"
+  fi
 else
-  echo "  ⚠ secret-tool not found (optional)"
-  echo "    API keys can be set via environment variables in systemd overrides instead"
-  echo "    Install: sudo apt install libsecret-tools  (Debian/Ubuntu)"
+  # --- linux (systemd) requirements ---
+  if command -v systemctl &>/dev/null; then
+    if systemctl --user list-units &>/dev/null; then
+      echo "  ✓ systemd user units available"
+    else
+      echo "  ✗ systemctl found but user session unavailable"
+      echo "    Ensure you're logged into a graphical session or enable lingering:"
+      echo "    loginctl enable-linger $USER"
+      errors=$((errors + 1))
+    fi
+  else
+    echo "  ✗ systemctl not found — systemd is required for instance management"
+    echo "    WhatSoup uses systemd user units to manage WhatsApp instances"
+    errors=$((errors + 1))
+  fi
+
+  # secret-tool (GNOME Keyring) — warn but don't block
+  if command -v secret-tool &>/dev/null; then
+    echo "  ✓ secret-tool available (GNOME Keyring)"
+  else
+    echo "  ⚠ secret-tool not found (optional)"
+    echo "    API keys can be set via environment variables in systemd overrides instead"
+    echo "    Install: sudo apt install libsecret-tools  (Debian/Ubuntu)"
+  fi
 fi
 
 # ffmpeg — optional
@@ -117,6 +137,9 @@ echo "  ✓ whatsoup → $REPO_ROOT/deploy/whatsoup"
 ln -sf "$REPO_ROOT/deploy/whatsoup-fleet" "$BIN_DIR/whatsoup-fleet"
 chmod +x "$REPO_ROOT/deploy/whatsoup-fleet"
 echo "  ✓ whatsoup-fleet → $REPO_ROOT/deploy/whatsoup-fleet"
+ln -sf "$REPO_ROOT/deploy/whatsoup-auth" "$BIN_DIR/whatsoup-auth"
+chmod +x "$REPO_ROOT/deploy/whatsoup-auth"
+echo "  ✓ whatsoup-auth → $REPO_ROOT/deploy/whatsoup-auth"
 ln -sf "$REPO_ROOT/deploy/scripts/ensure-node-installed.sh" "$BIN_DIR/whatsoup-ensure-node"
 chmod +x "$REPO_ROOT/deploy/scripts/ensure-node-installed.sh"
 echo "  ✓ whatsoup-ensure-node → $REPO_ROOT/deploy/scripts/ensure-node-installed.sh"
@@ -133,22 +156,31 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
   echo "    Add to your shell profile: export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
-# ── Step 4: Install systemd unit ────────────────────────────────────
-echo "[4/7] Installing systemd user units..."
-mkdir -p "$SYSTEMD_DIR"
-cp "$REPO_ROOT/deploy/whatsoup@.service" "$SYSTEMD_DIR/whatsoup@.service"
-cp "$REPO_ROOT/deploy/whatsoup-fleet.service" "$SYSTEMD_DIR/whatsoup-fleet.service"
-cp "$REPO_ROOT/deploy/whatsoup-heal-notify@.service" "$SYSTEMD_DIR/whatsoup-heal-notify@.service"
-cp "$REPO_ROOT/deploy/whatsoup-reply-guarantee.service" "$SYSTEMD_DIR/whatsoup-reply-guarantee.service"
-cp "$REPO_ROOT/deploy/whatsoup-reply-guarantee.timer" "$SYSTEMD_DIR/whatsoup-reply-guarantee.timer"
-cp "$REPO_ROOT/deploy/harness-maintenance.service" "$SYSTEMD_DIR/harness-maintenance.service"
-cp "$REPO_ROOT/deploy/harness-maintenance.timer" "$SYSTEMD_DIR/harness-maintenance.timer"
-systemctl --user daemon-reload 2>/dev/null || true
-echo "  ✓ whatsoup@.service installed"
-echo "  ✓ whatsoup-fleet.service installed"
-echo "  ✓ whatsoup-heal-notify@.service installed"
-echo "  ✓ whatsoup-reply-guarantee.{service,timer} installed"
-echo "  ✓ harness-maintenance.{service,timer} installed"
+# ── Step 4: Install service units ───────────────────────────────────
+# --- step 4 start ---
+if [ "$PLATFORM" = "Darwin" ]; then
+  echo "[4/7] Configuring service management (macOS)..."
+  echo "  macOS: instance services are launchd plists generated by the fleet on line creation"
+  echo "         (~/Library/LaunchAgents/com.whatsoup.<name>.plist) — no unit install needed"
+  echo "  ⚠ macOS: harness-maintenance and reply-guarantee timers are not yet packaged for"
+  echo "           launchd — see docs/runbook.md"
+else
+  echo "[4/7] Installing systemd user units..."
+  mkdir -p "$SYSTEMD_DIR"
+  cp "$REPO_ROOT/deploy/whatsoup@.service" "$SYSTEMD_DIR/whatsoup@.service"
+  cp "$REPO_ROOT/deploy/whatsoup-fleet.service" "$SYSTEMD_DIR/whatsoup-fleet.service"
+  cp "$REPO_ROOT/deploy/whatsoup-heal-notify@.service" "$SYSTEMD_DIR/whatsoup-heal-notify@.service"
+  cp "$REPO_ROOT/deploy/whatsoup-reply-guarantee.service" "$SYSTEMD_DIR/whatsoup-reply-guarantee.service"
+  cp "$REPO_ROOT/deploy/whatsoup-reply-guarantee.timer" "$SYSTEMD_DIR/whatsoup-reply-guarantee.timer"
+  cp "$REPO_ROOT/deploy/harness-maintenance.service" "$SYSTEMD_DIR/harness-maintenance.service"
+  cp "$REPO_ROOT/deploy/harness-maintenance.timer" "$SYSTEMD_DIR/harness-maintenance.timer"
+  systemctl --user daemon-reload 2>/dev/null || true
+  echo "  ✓ whatsoup@.service installed"
+  echo "  ✓ whatsoup-fleet.service installed"
+  echo "  ✓ whatsoup-heal-notify@.service installed"
+  echo "  ✓ whatsoup-reply-guarantee.{service,timer} installed"
+  echo "  ✓ harness-maintenance.{service,timer} installed"
+fi
 mkdir -p "$HOME/.config/whatsoup"
 if [ ! -f "$HOME/.config/whatsoup/fleet.env" ]; then
   cp "$REPO_ROOT/deploy/fleet.env.example" "$HOME/.config/whatsoup/fleet.env.example"
@@ -179,14 +211,16 @@ fi
 
 # ── Step 7: Check API keys ──────────────────────────────────────────
 echo "[7/7] Checking API keys..."
-if command -v secret-tool &>/dev/null; then
+if [ "$PLATFORM" = "Darwin" ]; then
+  # --- darwin (macos keychain) key check ---
+  # Uses the same lookup conventions as src/lib/keyring.ts: security find-generic-password -s <service> -a <username> -w
   check_key() {
     local service="$1"
     local required="$2"
-    if secret-tool lookup service "$service" &>/dev/null; then
-      echo "  ✓ $service key found in keyring"
+    if security find-generic-password -s "$service" -a "$USER" -w &>/dev/null; then
+      echo "  ✓ $service key found in macOS Keychain"
     elif [ "$required" = "required" ]; then
-      echo "  ✗ $service key missing — run: secret-tool store --label='$service' service $service"
+      echo "  ✗ $service key missing — run: security add-generic-password -s $service -a \"\$USER\" -w"
     else
       echo "  - $service key not set (optional)"
     fi
@@ -194,10 +228,34 @@ if command -v secret-tool &>/dev/null; then
   check_key "anthropic" "required"
   check_key "openai" "optional"
   check_key "pinecone" "optional"
+  # minimax/deepseek keys are required when agentOptions.fallbackProvider uses those model prefixes
+  check_key "minimax" "optional"
+  check_key "deepseek" "optional"
 else
-  echo "  Skipped — no secret-tool (set keys via environment variables)"
-  echo "  Required: ANTHROPIC_API_KEY"
-  echo "  Optional: OPENAI_API_KEY, PINECONE_API_KEY"
+  # --- linux (secret-tool) key check ---
+  if command -v secret-tool &>/dev/null; then
+    check_key() {
+      local service="$1"
+      local required="$2"
+      if secret-tool lookup service "$service" &>/dev/null; then
+        echo "  ✓ $service key found in keyring"
+      elif [ "$required" = "required" ]; then
+        echo "  ✗ $service key missing — run: secret-tool store --label='$service' service $service"
+      else
+        echo "  - $service key not set (optional)"
+      fi
+    }
+    check_key "anthropic" "required"
+    check_key "openai" "optional"
+    check_key "pinecone" "optional"
+    # minimax/deepseek keys are required when agentOptions.fallbackProvider uses those model prefixes
+    check_key "minimax" "optional"
+    check_key "deepseek" "optional"
+  else
+    echo "  Skipped — no secret-tool (set keys via environment variables)"
+    echo "  Required: ANTHROPIC_API_KEY"
+    echo "  Optional: OPENAI_API_KEY, PINECONE_API_KEY"
+  fi
 fi
 
 echo ""
@@ -212,14 +270,19 @@ echo "  3. Click 'Add Line' to create your first WhatsApp instance"
 echo ""
 echo "  4. Scan the QR code with WhatsApp → Linked Devices → Link a Device"
 echo ""
-echo "  To run the fleet server as a persistent background service:"
-echo "     systemctl --user enable --now whatsoup-fleet"
-echo "     systemctl --user status whatsoup-fleet"
-echo ""
-echo "  To run harness maintenance daily:"
-echo "     systemctl --user enable --now harness-maintenance.timer"
-echo "     whatsoup-harness-maintenance --check"
-echo ""
-echo "  To run reply-guarantee drain every minute:"
-echo "     systemctl --user enable --now whatsoup-reply-guarantee.timer"
+if [ "$PLATFORM" = "Darwin" ]; then
+  echo "  macOS: instances are managed via launchctl (plists auto-generated by the fleet)"
+  echo "  macOS: harness-maintenance and reply-guarantee timers are not yet packaged for launchd"
+else
+  echo "  To run the fleet server as a persistent background service:"
+  echo "     systemctl --user enable --now whatsoup-fleet"
+  echo "     systemctl --user status whatsoup-fleet"
+  echo ""
+  echo "  To run harness maintenance daily:"
+  echo "     systemctl --user enable --now harness-maintenance.timer"
+  echo "     whatsoup-harness-maintenance --check"
+  echo ""
+  echo "  To run reply-guarantee drain every minute:"
+  echo "     systemctl --user enable --now whatsoup-reply-guarantee.timer"
+fi
 echo ""

@@ -50,7 +50,7 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-import { parseIncomingMessage, unwrapMessage } from '../../src/core/message-parser.ts';
+import { parseIncomingMessage, unwrapMessage, extractContextInfo } from '../../src/core/message-parser.ts';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -598,5 +598,143 @@ describe('parseIncomingMessage — structured content (SP2)', () => {
     expect(result.contentType).toBe('text');
     expect(result.content).toBe('Hello world');
     expect(result.contentText).toStrictEqual(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractContextInfo — contextInfo lives on the content node, not the wrapper
+// ---------------------------------------------------------------------------
+
+describe('extractContextInfo', () => {
+  it('finds contextInfo on extendedTextMessage', () => {
+    const ci = extractContextInfo({
+      extendedTextMessage: { text: 'hi @bot', contextInfo: { mentionedJid: ['111@lid'] } },
+    });
+    expect(ci).toEqual({ mentionedJid: ['111@lid'] });
+  });
+
+  it('finds contextInfo on documentMessage', () => {
+    const ci = extractContextInfo({
+      documentMessage: { fileName: 'a.pdf', contextInfo: { mentionedJid: ['111@lid'] } },
+    });
+    expect(ci).toEqual({ mentionedJid: ['111@lid'] });
+  });
+
+  it('finds contextInfo on imageMessage', () => {
+    const ci = extractContextInfo({
+      imageMessage: { caption: 'pic', contextInfo: { stanzaId: 'Q1' } },
+    });
+    expect(ci).toEqual({ stanzaId: 'Q1' });
+  });
+
+  it('returns top-level contextInfo when present', () => {
+    const ci = extractContextInfo({ contextInfo: { mentionedJid: ['222@lid'] }, conversation: 'x' });
+    expect(ci).toEqual({ mentionedJid: ['222@lid'] });
+  });
+
+  it('skips sibling metadata objects without contextInfo (messageContextInfo)', () => {
+    const ci = extractContextInfo({
+      messageContextInfo: { deviceListMetadataVersion: 2 },
+      documentMessage: { contextInfo: { mentionedJid: ['111@lid'] } },
+    });
+    expect(ci).toEqual({ mentionedJid: ['111@lid'] });
+  });
+
+  it('returns null for plain conversation payloads', () => {
+    expect(extractContextInfo({ conversation: 'hello' })).toBeNull();
+  });
+
+  it('returns null for null/undefined/non-object input', () => {
+    expect(extractContextInfo(null)).toBeNull();
+    expect(extractContextInfo(undefined)).toBeNull();
+    expect(extractContextInfo('string')).toBeNull();
+  });
+
+  it('returns null when contextInfo is explicitly null on the content node', () => {
+    expect(extractContextInfo({ imageMessage: { caption: 'pic', contextInfo: null } })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Media caption mentions + media replies (regression: BOT - GENERAL ADMIN
+// group, 2026-06-11 — document caption @mention dropped as not_mentioned)
+// ---------------------------------------------------------------------------
+
+describe('parseIncomingMessage — contextInfo on media content nodes', () => {
+  it('document-with-caption @mention → mentionedJids extracted (production shape)', () => {
+    const msg = msgWith(
+      {
+        messageContextInfo: { deviceListMetadataVersion: 2 },
+        documentWithCaptionMessage: {
+          message: {
+            documentMessage: {
+              caption: '@111111199834183 Review the attached PDF',
+              fileName: 'invoice.pdf',
+              mimetype: 'application/pdf',
+              contextInfo: { mentionedJid: ['111111199834183@lid'] },
+            },
+          },
+        },
+      },
+      {
+        key: {
+          id: 'msg-doc-mention',
+          remoteJid: '120363555555555000@g.us',
+          fromMe: false,
+          participant: '15557654321@s.whatsapp.net',
+        },
+      },
+    );
+    const result = parseIncomingMessage(msg);
+    expect(result).not.toBeNull();
+    expect(result!.contentType).toBe('document');
+    expect(result!.content).toBe('@111111199834183 Review the attached PDF');
+    expect(result!.mentionedJids).toContain('111111199834183@lid');
+  });
+
+  it('image caption @mention → mentionedJids extracted', () => {
+    const msg = msgWith({
+      imageMessage: {
+        caption: '@111111199834183 look at this',
+        contextInfo: { mentionedJid: ['111111199834183@lid'] },
+      },
+    });
+    expect(parseIncomingMessage(msg)!.mentionedJids).toContain('111111199834183@lid');
+  });
+
+  it('video caption @mention → mentionedJids extracted', () => {
+    const msg = msgWith({
+      videoMessage: {
+        caption: '@111111199834183 watch',
+        seconds: 12,
+        contextInfo: { mentionedJid: ['111111199834183@lid'] },
+      },
+    });
+    expect(parseIncomingMessage(msg)!.mentionedJids).toContain('111111199834183@lid');
+  });
+
+  it('reply-with-image → quotedMessageId taken from media contextInfo.stanzaId', () => {
+    const msg = msgWith({
+      imageMessage: {
+        caption: 'replying with a pic',
+        contextInfo: { stanzaId: 'QUOTED-123', participant: '15551234567@s.whatsapp.net' },
+      },
+    });
+    expect(parseIncomingMessage(msg)!.quotedMessageId).toBe('QUOTED-123');
+  });
+
+  it('plain text reply still carries quotedMessageId (no regression)', () => {
+    const msg = msgWith({
+      extendedTextMessage: { text: 'replying', contextInfo: { stanzaId: 'QUOTED-456' } },
+    });
+    expect(parseIncomingMessage(msg)!.quotedMessageId).toBe('QUOTED-456');
+  });
+
+  it('plain conversation → mentionedJids=[] and quotedMessageId=null (no regression)', () => {
+    const result = parseIncomingMessage(msgWith({ conversation: 'hi' }))!;
+    expect({ mentionedJids: result.mentionedJids, quotedMessageId: result.quotedMessageId }).toEqual({
+      mentionedJids: [],
+      quotedMessageId: null,
+    });
   });
 });
