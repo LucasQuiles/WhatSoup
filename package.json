@@ -32,6 +32,7 @@
     "guard:repo:commit-msg": "npm run guard:repo -- --commit-msg",
     "guard:repo:commit-authors": "npm run guard:repo -- --commit-authors",
     "guard:repo:staged": "npm run guard:repo -- --staged",
+    "guard:repo:scan-history": "npm run guard:repo -- --scan-history",
     "guard:harness-maintenance": "node --experimental-strip-types scripts/harness-maintenance-guard.ts",
     "guard:unit-drift": "bash scripts/check-unit-drift.sh",
     "guard:source-runtime-drift": "node --experimental-strip-types scripts/source-runtime-drift-check.ts",
