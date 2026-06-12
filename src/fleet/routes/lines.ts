@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { jsonResponse, requireInstance } from '../../lib/http.ts';
+import { asRecord } from '../../lib/type-guards.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { normalizeFallbackEntriesFromInstanceConfig } from '../../core/fallback-chain.ts';
 import { extractLocal } from '../../core/access-list.ts';
@@ -551,12 +552,6 @@ function stringValue(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
 function keyPresentFor(
   provider: string | null | undefined,
   model: string | null | undefined,
@@ -606,7 +601,7 @@ function healthSignalFromPoll(poll: InstanceStatus | undefined): {
 }
 
 function fallbackEntryFromHealth(value: unknown): { provider: string; model: string | null } | null {
-  const entry = recordValue(value);
+  const entry = asRecord(value);
   if (!entry) return null;
   const provider = stringValue(entry.provider);
   if (!provider) return null;
@@ -619,7 +614,7 @@ function fallbackChainFromHealth(
   if (!Array.isArray(value)) return null;
   const out: Array<{ provider: string; model: string | null; eligible: boolean | null }> = [];
   for (const raw of value) {
-    const entry = recordValue(raw);
+    const entry = asRecord(raw);
     const provider = stringValue(entry?.provider);
     if (!provider) continue;
     out.push({
@@ -653,13 +648,13 @@ export async function handleGetLineProviderStatus(
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       parsedConfig = parsed as Record<string, unknown>;
-      agentOptions = recordValue(parsedConfig.agentOptions) ?? {};
+      agentOptions = asRecord(parsedConfig.agentOptions) ?? {};
     }
   } catch { /* config unreadable — treat as empty (provider defaults to runtime default) */ }
 
   const primaryProvider =
     stringValue(agentOptions.provider) ?? (instance.type === 'agent' ? 'claude-cli' : null);
-  const providerConfig = recordValue(agentOptions.providerConfig);
+  const providerConfig = asRecord(agentOptions.providerConfig);
   const primaryModel =
     resolveAgentModel(parsedConfig) ??
     apiProviderConfigModel(primaryProvider, providerConfig) ??
