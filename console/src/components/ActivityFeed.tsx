@@ -7,7 +7,7 @@ import FilterPill from "./FilterPill";
 import FeedCard from "./FeedCard";
 import ConfirmDialog from "./ConfirmDialog";
 import type { FeedEvent } from "../types";
-import { statusNeedsAttention } from "../lib/status-severity";
+import { statusNeedsAttention, statusSeverity } from "../lib/status-severity";
 
 interface ActivityFeedProps {
   events: FeedEvent[];
@@ -24,13 +24,19 @@ const filterConfig: { key: FeedFilter; label: string }[] = [
   { key: "sessions", label: "sessions" },
 ];
 
+function eventCountsAsError(event: FeedEvent): boolean {
+  const d = event.detail;
+  if (d?.type === "health") return statusSeverity(d.status) === "crit";
+  return d?.type === "tool_error" || !!event.isError;
+}
+
 function matchesFilter(event: FeedEvent, filter: FeedFilter): boolean {
   if (filter === "all") return true;
   const t = event.detail?.type;
   switch (filter) {
     case "msgs": return t === "message";
     case "conn": return t === "connection";
-    case "errors": return t === "tool_error" || !!event.isError;
+    case "errors": return eventCountsAsError(event);
     case "health": return t === "health";
     case "sessions": return t === "session";
     default: return true;
@@ -69,7 +75,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
       const t = e.detail?.type;
       if (t === "message") counts.msgs++;
       if (t === "connection") counts.conn++;
-      if (t === "tool_error" || e.isError) counts.errors++;
+      if (eventCountsAsError(e)) counts.errors++;
       if (t === "health") counts.health++;
       if (t === "session") counts.sessions++;
     }

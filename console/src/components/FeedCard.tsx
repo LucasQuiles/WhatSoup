@@ -56,16 +56,15 @@ function optionalText(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function healthTone(event: FeedEvent, d: HealthDetail): BadgeTone {
-  if (event.isError) return "crit";
+function healthTone(d: HealthDetail): BadgeTone {
   const severity = statusSeverity(d.status);
   if (severity === "ok") return "ok";
   if (severity === "crit") return "crit";
   return "warn";
 }
 
-function healthEdgeColor(event: FeedEvent, d: HealthDetail): string {
-  const tone = healthTone(event, d);
+function healthEdgeColor(d: HealthDetail): string {
+  const tone = healthTone(d);
   if (tone === "ok") return "var(--color-s-ok)";
   if (tone === "crit") return "var(--color-s-crit)";
   return "var(--color-s-warn)";
@@ -79,6 +78,7 @@ function healthHeadline(d: HealthDetail): string {
 function edgeColor(event: FeedEvent): string {
   const d = event.detail;
   if (!d) return "var(--b1)";
+  if (d.type === "health") return healthEdgeColor(d);
   if (event.isError) return "var(--color-s-crit)";
   switch (d.type) {
     case "connection":
@@ -87,7 +87,6 @@ function edgeColor(event: FeedEvent): string {
       if (d.state === "disconnected" || d.statusCode) return "var(--color-s-crit)";
       return "var(--b2)";
     case "message": return d.direction === "inbound" ? "var(--color-m-cht)" : "var(--color-m-agt)";
-    case "health": return healthEdgeColor(event, d);
     case "tool_error": return "var(--color-s-crit)";
     case "session": return "var(--color-m-agt)";
     default: return "var(--b1)";
@@ -123,6 +122,7 @@ function connectionTone(event: FeedEvent, d: ConnectionDetail): BadgeTone {
 }
 
 function headlineTone(event: FeedEvent, d: FeedDetail): BadgeTone {
+  if (d.type === "health") return healthTone(d);
   if (event.isError) return "crit";
   switch (d.type) {
     case "connection":
@@ -134,8 +134,6 @@ function headlineTone(event: FeedEvent, d: FeedDetail): BadgeTone {
     case "tool_use":
     case "session":
       return "agent";
-    case "health":
-      return healthTone(event, d);
     default:
       return "neutral";
   }
@@ -300,6 +298,12 @@ function renderCard(event: FeedEvent): CardPresentation {
   }
 }
 
+function eventIsCritical(event: FeedEvent): boolean {
+  const d = event.detail;
+  if (d?.type === "health") return statusSeverity(d.status) === "crit";
+  return !!event.isError;
+}
+
 // ---------------------------------------------------------------------------
 //  Metadata row — hover/focus disclosure
 // ---------------------------------------------------------------------------
@@ -456,7 +460,7 @@ interface FeedCardProps {
 }
 
 const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate, onCopyResult }) => {
-  const isErr = !!event.isError;
+  const isErr = eventIsCritical(event);
   const card = renderCard(event);
   const meta = metadataParts(event);
   const hasMeta = meta.length > 0;

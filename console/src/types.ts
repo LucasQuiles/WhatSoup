@@ -170,7 +170,15 @@ export type FeedDetail =
   | { type: 'tool_error'; toolName: string; toolId?: string; error: string }
   | { type: 'tool_use'; toolName: string; toolId?: string }
   | { type: 'session'; action: string; sessionId?: string; chatJid?: string; reason?: string }
-  | { type: 'health'; status: string; previousStatus?: string; error?: string }
+  | {
+      type: 'health';
+      status: string;
+      previousStatus?: string;
+      error?: string;
+      confidence?: StatusConfidence;
+      reason?: string;
+      evidence?: string[];
+    }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
   | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string; conversationKey?: string }
   | { type: 'generic' };
