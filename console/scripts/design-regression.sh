@@ -2,7 +2,7 @@
 # console/scripts/design-regression.sh
 #
 # Design-regression check suite (lint-plan section 5).
-# Implements all 15 labeled checks from the lint-plan's rg-based regression table.
+# Implements all 16 labeled checks from the lint-plan's rg-based regression table.
 #
 # Shadow stage policy:
 #   - All checks are REPORT-ONLY at shadow stage.
@@ -92,16 +92,30 @@ print_header
 
 # ---------------------------------------------------------------------------
 # Check 1: Raw hex colors in TSX/TS
-# Expectation: only waivered lines (WVR-003 covers chart-utils.ts:10; WVR-004 QrDisplay.tsx)
+# Expectation: zero real hex colors (WVR-003/WVR-004 subjects gone; registry retirement pending)
+#
+# Pattern tightened to color contexts only:
+#   - At least one hex letter [a-fA-F] in a 3-8 digit sequence (#f00, #3fb, #ABC123), OR
+#   - Exactly 6 or 8 hex digits (full long-form: #000000, #00000080)
+# This excludes pure-decimal identifiers (#4921, #512, #237) which are
+# order/build/issue numbers, never CSS colors.
+#
+# Comment filter covers // inline and ' * ' block-comment continuation lines.
+# rg -n directory output is 'path:line:content', so the filter anchors past
+# the prefix — a bare '^\s*//' never matches rg output and silently passes
+# commented-out hex through.
 # ---------------------------------------------------------------------------
 check_start "1" "Raw hex colors in TSX/TS"
-C1_COUNT=$(rg -n '#[0-9a-fA-F]{3,8}\b' "$CONSOLE_SRC" --type-add 'tsx:*.tsx' -t ts -t tsx 2>/dev/null | grep -v '//.*#[0-9a-fA-F]\|^\s*//' | wc -l | tr -d ' ')
-echo "    Matches: $C1_COUNT (excluding comment lines)"
-echo "    Waivered: chart-utils.ts (WVR-003), QrDisplay.tsx (WVR-004)"
-if [ "$C1_COUNT" -le 10 ]; then
-  check_result "1" "$C1_COUNT" "only waivered lines" "WARN"
+C1_COUNT=$(rg -n '#(?:[0-9a-fA-F]{6,8}|[0-9a-fA-F]*[a-fA-F][0-9a-fA-F]*)\b' \
+  "$CONSOLE_SRC" --type-add 'tsx:*.tsx' -t ts -t tsx 2>/dev/null \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*)' \
+  | wc -l | tr -d ' ')
+echo "    Matches: $C1_COUNT (color-context pattern; comment lines excluded)"
+echo "    Note: WVR-003/WVR-004 subjects eliminated from the tree; registry retirement is a later D6 commit"
+if [ "$C1_COUNT" -eq 0 ]; then
+  check_result "1" "$C1_COUNT" "zero raw hex colors" "OK"
 else
-  check_result "1" "$C1_COUNT" "only waivered lines — review for new violations" "WARN"
+  check_result "1" "$C1_COUNT" "raw hex colors found -- review for violations" "FAIL"
 fi
 
 # ---------------------------------------------------------------------------
@@ -116,9 +130,9 @@ C2_COUNT=$(rg_count 'rgba?\(|hsla?\(' \
 echo "    Matches: $C2_COUNT"
 echo "    Expectation: zero after P1 (primitive tier files exempt at shadow stage)"
 if [ "$C2_COUNT" -eq 0 ]; then
-  check_result "2" "$C2_COUNT" "zero — clean" "OK"
+  check_result "2" "$C2_COUNT" "zero -- clean" "OK"
 else
-  check_result "2" "$C2_COUNT" "zero after P1 — shadow baseline" "WARN"
+  check_result "2" "$C2_COUNT" "zero after P1 -- shadow baseline" "WARN"
 fi
 
 # ---------------------------------------------------------------------------
@@ -128,7 +142,7 @@ fi
 check_start "3" "Legacy token refs var(--color-d*/t*) and var(--b1..b4)"
 C3_COUNT=$(rg_count 'var\(--color-[dt][0-9]\)|var\(--b[1-4]\)' "$CONSOLE_SRC")
 echo "    Matches: $C3_COUNT"
-echo "    Expectation: zero at P2-complete (shadow baseline — non-blocking)"
+echo "    Expectation: zero at P2-complete (shadow baseline -- non-blocking)"
 check_result "3" "$C3_COUNT" "zero at P2-complete; current shadow baseline" "WARN"
 
 # ---------------------------------------------------------------------------
@@ -137,7 +151,7 @@ check_result "3" "$C3_COUNT" "zero at P2-complete; current shadow baseline" "WAR
 check_start "4" "Legacy utility classes bg-d*/text-t*"
 C4_COUNT=$(rg_count '\b(bg-d[0-6]|text-t[1-5])\b' "$CONSOLE_SRC")
 echo "    Matches: $C4_COUNT"
-echo "    Expectation: zero at P2-complete (shadow baseline — non-blocking)"
+echo "    Expectation: zero at P2-complete (shadow baseline -- non-blocking)"
 check_result "4" "$C4_COUNT" "zero at P2-complete; current shadow baseline" "WARN"
 
 # ---------------------------------------------------------------------------
@@ -147,7 +161,7 @@ check_result "4" "$C4_COUNT" "zero at P2-complete; current shadow baseline" "WAR
 # ---------------------------------------------------------------------------
 check_start "5" "WhatSoup in UI copy (non-contract lines)"
 # Get all matches, then filter out: comment lines, contract-pattern lines, and test files.
-# rg output format: path:linenum:content — filter on the content part (after 2nd colon).
+# rg output format: path:linenum:content -- filter on the content part (after 2nd colon).
 RAW_MATCHES=$(rg -n 'WhatSoup' "$CONSOLE_SRC" --glob '!**/*.test.*' 2>/dev/null || true)
 # Filter: exclude lines whose CONTENT (3rd field) is a comment or contract identifier.
 # Use awk to extract content after "path:N:" prefix, then apply filters.
@@ -162,7 +176,7 @@ FILTERED=$(echo "$RAW_MATCHES" | awk -F: 'NF>=3 {
   print $0
 }' | grep -v 'WhatSoupError\|mcp__whatsoup__\|whatsoup:\|/run/whatsoup/\|whatsoup/instances\|whatsoup@\|config/whatsoup' | grep -v 'wizard/ConfigStep.tsx' || true)
 # ConfigStep.tsx exemption: system-prompt template is bot-identity/protocol copy (EXEMPT-PROTECTED
-# in branding-touchpoints.md) — kept in lockstep with the soup/no-brand-regression ESLint exemption.
+# in branding-touchpoints.md) -- kept in lockstep with the soup/no-brand-regression ESLint exemption.
 C5_COUNT=$(echo "$FILTERED" | grep -c 'WhatSoup' || echo 0)
 echo "    Non-contract matches: $C5_COUNT"
 if [ -n "$FILTERED" ] && [ "$C5_COUNT" -gt 0 ]; then
@@ -182,7 +196,7 @@ echo "    Expectation: zero after P4"
 echo "    Current: Nav.tsx:39-40 split wordmark (P4 flip)"
 if [ "$C6_COUNT" -eq 0 ]; then
   # The split wordmark in Nav uses className spans so the > < pattern may not match
-  check_result "6" "$C6_COUNT" "zero (or Nav spans don't match > < — see soup/no-brand-regression)" "OK"
+  check_result "6" "$C6_COUNT" "zero (or Nav spans don't match > < -- see soup/no-brand-regression)" "OK"
 else
   check_result "6" "$C6_COUNT" "zero after P4" "WARN"
 fi
@@ -199,12 +213,27 @@ check_result "7" "$C7_COUNT" "zero after P4 (shadow baseline)" "WARN"
 
 # ---------------------------------------------------------------------------
 # Check 8: index.html title
+# Asserts the title tag content equals the pinned value exactly.
+# Emits FAIL on content drift or if the tag is missing.
+# Re-pin the EXPECTED_TITLE constant in the C4 branding flip PR.
 # ---------------------------------------------------------------------------
 check_start "8" "index.html <title> content"
-TITLE_LINE=$(rg -n '<title>' "$CONSOLE_DIR/index.html" 2>/dev/null || echo "NOT FOUND")
-echo "    Title: $TITLE_LINE"
-echo "    Expectation: equals the P4-specced title (currently WhatSoup Console, flip at P4)"
-check_result "8" "1" "title line found — flip at P4" "OK"
+EXPECTED_TITLE="<title>WhatSoup Console</title>"
+# Extract the full title tag from index.html; strip surrounding whitespace for comparison.
+ACTUAL_TITLE_RAW=$(rg -o '<title>[^<]*</title>' "$CONSOLE_DIR/index.html" 2>/dev/null || true)
+ACTUAL_TITLE=$(echo "$ACTUAL_TITLE_RAW" | tr -d ' \t')
+EXPECTED_TITLE_STRIPPED=$(echo "$EXPECTED_TITLE" | tr -d ' \t')
+echo "    Found:    $ACTUAL_TITLE_RAW"
+echo "    Expected: $EXPECTED_TITLE"
+if [ -z "$ACTUAL_TITLE" ]; then
+  echo "    ERROR: <title> tag not found in index.html"
+  check_result "8" "0" "title tag missing -- possible template deletion" "FAIL"
+elif [ "$ACTUAL_TITLE" = "$EXPECTED_TITLE_STRIPPED" ]; then
+  check_result "8" "1" "title matches pinned value" "OK"
+else
+  echo "    DRIFT: title does not match pinned value"
+  check_result "8" "1" "title drift detected -- update copy or re-pin EXPECTED_TITLE" "FAIL"
+fi
 
 # ---------------------------------------------------------------------------
 # Check 9: Theme parity (requires check-theme-parity.mjs)
@@ -215,12 +244,12 @@ if [ -f "$PARITY_SCRIPT" ]; then
   if node "$PARITY_SCRIPT" 2>&1; then
     check_result "9" "0" "both theme scopes define identical token name sets" "OK"
   else
-    check_result "9" "?" "parity check failed — see output above" "WARN"
+    check_result "9" "?" "parity check failed -- see output above" "WARN"
   fi
 else
-  echo "    SKIP — $PARITY_SCRIPT not yet created (P1 task)"
+  echo "    SKIP -- $PARITY_SCRIPT not yet created (P1 task)"
   echo "    Expectation: shadow until the light scope exists, then CI-blocking"
-  check_result "9" "N/A" "script not yet created — SKIP" "OK"
+  check_result "9" "N/A" "script not yet created -- SKIP" "OK"
 fi
 
 # ---------------------------------------------------------------------------
@@ -247,7 +276,7 @@ check_contract "whatsoup/instances" "console/src/lib/agent-cwd.ts" "agent worksp
 if [ "$C10_FAIL" -eq 0 ]; then
   check_result "10" "0" "all protected contracts present" "OK"
 else
-  check_result "10" "$C10_FAIL" "MISSING contracts — possible over-eager rename" "FAIL"
+  check_result "10" "$C10_FAIL" "MISSING contracts -- possible over-eager rename" "FAIL"
 fi
 
 # ---------------------------------------------------------------------------
@@ -310,7 +339,7 @@ check_start "14" "Expired waivers in eslint-waivers.yaml"
 WAIVERS_FILE="$CONSOLE_DIR/eslint-waivers.yaml"
 TODAY=$(date '+%Y-%m-%d')
 if [ ! -f "$WAIVERS_FILE" ]; then
-  echo "    SKIP — eslint-waivers.yaml not found"
+  echo "    SKIP -- eslint-waivers.yaml not found"
   check_result "14" "N/A" "waivers file missing" "OK"
 else
   C14_COUNT=0
@@ -348,7 +377,7 @@ echo "    Expectation: zero (all suppressions must carry waiver:<id>)"
 if [ "$C15_COUNT" -eq 0 ]; then
   check_result "15" "0" "all suppressions carry waiver: tag" "OK"
 else
-  check_result "15" "$C15_COUNT" "untagged suppressions — add waiver:<id> (shadow: non-blocking)" "WARN"
+  check_result "15" "$C15_COUNT" "untagged suppressions -- add waiver:<id> (shadow: non-blocking)" "WARN"
 fi
 
 # ---------------------------------------------------------------------------
