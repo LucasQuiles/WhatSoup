@@ -26,7 +26,15 @@ export function normalizeRepoPath(filePath: string): string {
 }
 
 export function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', env: cleanGitEnv() });
+  // maxBuffer matches readStagedAddedLines below: large merge commits (50+
+  // upstream commits) produce staged diffs beyond the node default, and the
+  // guard must fail on findings, not on buffer size.
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: cleanGitEnv(),
+    maxBuffer: 20 * 1024 * 1024,
+  });
 }
 
 export function gitList(args: string[], cwd: string): string[] {

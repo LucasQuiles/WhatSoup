@@ -80,6 +80,7 @@ describe('provisionWorkspace', () => {
       },
       hookPath: '/abs/path/to/agent-sandbox.sh',
       pollLintHookPath: '/abs/path/to/poll-interaction-lint.mjs',
+      postToolUseLogHookPath: '/abs/path/to/post-tool-use-log.sh',
       mcpServerPath: '/abs/path/to/whatsoup-proxy.ts',
     };
   }
@@ -169,6 +170,8 @@ describe('provisionWorkspace', () => {
     const settings = JSON.parse(readFileSync(join(workspacePath, '.claude', 'settings.json'), 'utf8'));
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(opts.hookPath);
     expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe(opts.pollLintHookPath);
+    expect(settings.hooks.PostToolUse[0].hooks[1].command).toBe(opts.postToolUseLogHookPath);
+    expect(settings.hooks.PostToolUseFailure[0].hooks[0].command).toBe(opts.postToolUseLogHookPath);
   });
 
   it('.mcp.json contains the mcpServerPath and socket path under .claude/ (whatsoup.sock)', () => {
@@ -280,12 +283,15 @@ describe('provisionWorkspace', () => {
       ...opts,
       hookPath: '/new/path/to/hook.sh',
       pollLintHookPath: '/new/path/to/poll-interaction-lint.mjs',
+      postToolUseLogHookPath: '/new/path/to/post-tool-use-log.sh',
     };
     provisionWorkspace(opts2);
 
     const settings = JSON.parse(readFileSync(join(workspacePath, '.claude', 'settings.json'), 'utf8'));
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe('/new/path/to/hook.sh');
     expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe('/new/path/to/poll-interaction-lint.mjs');
+    expect(settings.hooks.PostToolUse[0].hooks[1].command).toBe('/new/path/to/post-tool-use-log.sh');
+    expect(settings.hooks.PostToolUseFailure[0].hooks[0].command).toBe('/new/path/to/post-tool-use-log.sh');
   });
 
   it('returns the socket path (ends with .claude/whatsoup.sock)', () => {

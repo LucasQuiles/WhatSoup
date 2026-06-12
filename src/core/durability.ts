@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
-import { emitAlert, clearAlertSource } from '../lib/emit-alert.ts';
+import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import type { Database } from './database.ts';
 import type { Messenger } from './types.ts';
 import { toConversationKey } from './conversation-key.ts';
@@ -740,7 +740,7 @@ export class DurabilityEngine {
               { opId: op.id, replayPolicy: op.replay_policy },
               'postConnectRecovery: maybe_sent not confirmed, non-safe → quarantined',
             );
-            emitAlert(
+            emitAlertChecked(
               config.botName,
               'outbound_quarantined',
               `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
@@ -763,7 +763,7 @@ export class DurabilityEngine {
               { opId: op.id, replayPolicy: op.replay_policy },
               'postConnectRecovery: maybe_sent (no wa_message_id), non-safe → quarantined',
             );
-            emitAlert(
+            emitAlertChecked(
               config.botName,
               'outbound_quarantined',
               `whatsoup@${config.botName} outbound op ${op.id} quarantined`,
@@ -781,7 +781,7 @@ export class DurabilityEngine {
 
     // Clear quarantine alert source now that recovery is complete — prevents
     // stale sweep retries when the instance is healthy.
-    clearAlertSource(config.botName, 'outbound_quarantined');
+    clearAlertSourceChecked(config.botName, 'outbound_quarantined');
 
     log.info(stats, 'postConnectRecovery: complete');
     return stats;

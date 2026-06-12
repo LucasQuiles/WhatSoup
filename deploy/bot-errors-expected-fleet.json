@@ -1,0 +1,173 @@
+{
+  "schemaVersion": 1,
+  "hosts": [
+    {
+      "host": "maclab",
+      "role": "relay-only",
+      "profile": "maclab.json",
+      "instances": [
+        {
+          "name": "agent",
+          "expected": "on_demand",
+          "healthPort": 9095,
+          "service": "com.whatsoup.agent",
+          "reason": "MACLAB agent launchd label is loaded but RunAtLoad=false; down is healthy until invoked"
+        }
+      ],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini1",
+      "role": "bot-host",
+      "profile": "mini1.json",
+      "instances": [
+        {
+          "name": "ana-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.ana-bot",
+          "primaryPhoneVerificationRequired": true,
+          "primaryPhoneOwner": "Lucas"
+        }
+      ],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini10",
+      "role": "bot-host",
+      "profile": "mini10.json",
+      "instances": [
+        {
+          "name": "ad-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.ad-bot",
+          "primaryPhoneVerificationRequired": true,
+          "primaryPhoneOwner": "Lucas"
+        }
+      ],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini11",
+      "role": "no-bot",
+      "profile": "mini11.json",
+      "instances": [],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini2",
+      "role": "bot-host-blocked",
+      "profile": "mini2.json",
+      "instances": [
+        {
+          "name": "ar-bot",
+          "expected": "blocked",
+          "service": "com.whatsoup.ar-bot",
+          "reason": "Service is unloaded/down pending Lucas approval to bootstrap"
+        }
+      ],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini3",
+      "role": "bot-host",
+      "profile": "mini3.json",
+      "instances": [
+        {
+          "name": "yl-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.yl-bot",
+          "primaryPhoneVerificationRequired": true,
+          "primaryPhoneOwner": "Lucas"
+        }
+      ],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini4",
+      "role": "bot-host",
+      "profile": "mini4.json",
+      "instances": [
+        {
+          "name": "eh-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.eh-bot",
+          "primaryPhoneVerificationRequired": true,
+          "primaryPhoneOwner": "Lucas"
+        }
+      ],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini5",
+      "role": "no-bot",
+      "profile": "mini5.json",
+      "instances": [],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini6",
+      "role": "no-bot",
+      "profile": "mini6.json",
+      "instances": [],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini7",
+      "role": "bot-host",
+      "profile": "mini7.json",
+      "instances": [
+        {
+          "name": "rb-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.rb-bot",
+          "primaryPhoneVerificationRequired": true,
+          "primaryPhoneOwner": "Lucas"
+        }
+      ],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini8",
+      "role": "bot-host",
+      "profile": "mini8.json",
+      "instances": [
+        {
+          "name": "ml-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.ml-bot",
+          "primaryPhoneVerificationRequired": true,
+          "primaryPhoneOwner": "Lucas"
+        }
+      ],
+      "collectorRemote": true
+    },
+    {
+      "host": "mini9",
+      "role": "bot-host",
+      "profile": "mini9.json",
+      "instances": [
+        {
+          "name": "ew-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.ew-bot",
+          "primaryPhoneVerificationRequired": true,
+          "primaryPhoneOwner": "Lucas"
+        }
+      ],
+      "collectorRemote": true
+    },
+    {
+      "host": "mwlab",
+      "role": "relay-only",
+      "profile": "mwlab.json",
+      "instances": [],
+      "collectorRemote": true
+    },
+    {
+      "host": "nucles",
+      "role": "central",
+      "profile": "nucles.json",
+      "instances": []
+    }
+  ]
+}

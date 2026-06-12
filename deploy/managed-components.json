@@ -58,15 +58,21 @@
     },
     {
       "name": "opencode",
-      "kind": "native",
+      "kind": "npm-global",
+      "package": "opencode-ai",
       "update": [
-        "opencode",
-        "upgrade"
+        "npm",
+        "install",
+        "-g",
+        "opencode-ai@{target}",
+        "--ignore-scripts"
       ],
       "rollback": [
-        "opencode",
-        "upgrade",
-        "{previous}"
+        "npm",
+        "install",
+        "-g",
+        "opencode-ai@{previous}",
+        "--ignore-scripts"
       ],
       "smoke": [
         "opencode",

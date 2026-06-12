@@ -1,4 +1,4 @@
-import { writeFileSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -6,9 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_COOLDOWN_MINUTES,
   DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS,
+  latestEligibleVersion,
   npmCooldownConfigCheck,
   npmVersionAge,
   run,
+  validateManifestText,
   validateManifestPayload,
 } from '../../scripts/harness-maintenance-guard.ts';
 
@@ -69,6 +71,54 @@ describe('harness maintenance guard', () => {
     expect(result.codexNodeNpmMinVersion).toBe('11.12.0');
     expect(result.tier1Harnesses).toEqual(['claude', 'codex', 'opencode']);
     expect(result.probes).toEqual(['mcp-servers']);
+  });
+
+  it('declares OpenCode as an installable npm-backed harness in the checked-in manifest', () => {
+    const source = JSON.parse(
+      readFileSync(path.join(process.cwd(), 'deploy/managed-components.json'), 'utf8'),
+    ) as { tier1: Array<{ name?: string; kind?: string; package?: string; update?: string[] }> };
+
+    const opencode = source.tier1.find((entry) => entry.name === 'opencode');
+    expect(opencode?.kind).toBe('npm-global');
+    expect(opencode?.package).toBe('opencode-ai');
+    expect(opencode?.update).toContain('opencode-ai@{target}');
+  });
+
+  it('validates manifest text and rejects malformed manifest field shapes', () => {
+    expect(validateManifestText(JSON.stringify(manifest())).tier1Harnesses).toEqual([
+      'claude',
+      'codex',
+      'opencode',
+    ]);
+
+    expect(() => validateManifestPayload(null)).toThrow('manifest must be an object');
+    expect(() => validateManifestPayload({ ...manifest(), schema_version: 2 })).toThrow('schema_version must be 1');
+    expect(() => validateManifestPayload({ ...manifest(), schema_version: '1' })).toThrow('schema_version must be a number');
+    expect(() => validateManifestPayload({ ...manifest(), npm: null })).toThrow('npm must be an object');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      npm: { ...(manifest().npm as Record<string, unknown>), codex_node: null },
+    })).toThrow('npm.codex_node must be an object');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      npm: {
+        ...(manifest().npm as Record<string, unknown>),
+        codex_node: { node_bin: '', npm_min_version: '11.12.0' },
+      },
+    })).toThrow('npm.codex_node.node_bin must be a non-empty string');
+    expect(() => validateManifestPayload({ ...manifest(), tier1: 'bad' })).toThrow('tier1 must be an array');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      tier1: [null, { name: 'codex', kind: 'npm-global', smoke: [] }, { name: 'opencode', kind: 'native', smoke: [] }],
+    })).toThrow('tier1[0] must be an object');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      tier1: [{ name: '', kind: 'native', smoke: [] }, { name: 'codex', kind: 'npm-global', smoke: [] }, { name: 'opencode', kind: 'native', smoke: [] }],
+    })).toThrow('tier1[0].name must be a non-empty string');
+    expect(() => validateManifestPayload({
+      ...manifest(),
+      tier2: { probes: [{ name: 'mcp-servers', mode: '' }] },
+    })).toThrow('tier2.probes[0].mode must be a non-empty string');
   });
 
   it('rejects manifests that omit a required harness', () => {
@@ -135,6 +185,36 @@ describe('harness maintenance guard', () => {
     expect(result.ageMinutes).toBe(24 * 60);
   });
 
+  it('selects the newest npm version older than the cooldown window', () => {
+    const now = new Date('2026-06-12T08:47:00Z');
+    const result = latestEligibleVersion(
+      {
+        '1.15.13': '2026-05-30T23:39:08.179Z',
+        '1.16.0': '2026-06-05T03:06:04.474Z',
+        '1.16.1': '2026-06-05T15:04:43.007Z',
+        '1.17.4': '2026-06-12T02:17:23.837Z',
+        modified: '2026-06-12T08:41:55.650Z',
+      },
+      now,
+      DEFAULT_COOLDOWN_MINUTES,
+    );
+
+    expect(result.version).toBe('1.16.0');
+  });
+
+  it('reports null when no npm version is older than the cooldown window', () => {
+    const result = latestEligibleVersion(
+      { '1.0.0': '2026-06-12T07:47:00Z' },
+      new Date('2026-06-12T08:47:00Z'),
+      DEFAULT_COOLDOWN_MINUTES,
+    );
+
+    expect(result).toEqual({
+      version: null,
+      cooldownMinutes: DEFAULT_COOLDOWN_MINUTES,
+    });
+  });
+
   it('marks codex npm cooldown config as ok when npm recognizes min-release-age', () => {
     const result = npmCooldownConfigCheck({
       npmVersion: '11.12.1',
@@ -182,6 +262,28 @@ describe('harness maintenance guard', () => {
     ]);
   });
 
+  it('marks codex npm cooldown config as degraded when min-release-age is missing', () => {
+    const result = npmCooldownConfigCheck({
+      npmVersion: '11.12.1',
+      minVersion: '11.12.0',
+      expectedDays: '7',
+      npmrcText: '# comments only\n; and semicolon comments\n',
+      installExitCode: 0,
+      stderr: '',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.npmrcValue).toBeNull();
+    expect(result.reasons).toEqual(['npmrc min-release-age is (missing), expected 7']);
+  });
+
+  it('rejects missing or invalid npm publish times', () => {
+    expect(() => npmVersionAge({}, '0.135.2')).toThrow('no npm publish time');
+    expect(() =>
+      npmVersionAge({ '0.135.2': 'not-a-date' }, '0.135.2'),
+    ).toThrow('invalid npm publish time');
+  });
+
   it('run() returns exit code 2 for held npm versions', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-harness-'));
     const timeJson = path.join(dir, 'time.json');
@@ -203,5 +305,152 @@ describe('harness maintenance guard', () => {
 
     expect((result as { eligible: boolean }).eligible).toBe(false);
     expect(process.exitCode).toBe(2);
+  });
+
+  it('run() prints the latest eligible npm version for installer flows', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-harness-'));
+    const timeJson = path.join(dir, 'time.json');
+    writeFileSync(
+      timeJson,
+      JSON.stringify({
+        '1.15.13': '2026-05-30T23:39:08.179Z',
+        '1.16.0': '2026-06-05T03:06:04.474Z',
+        '1.17.4': '2026-06-12T02:17:23.837Z',
+      }),
+      'utf8',
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      const result = run([
+        '--latest-eligible-version',
+        '--time-json',
+        timeJson,
+        '--now',
+        '2026-06-12T08:47:00Z',
+      ]);
+
+      expect((result as { version: string | null }).version).toBe('1.16.0');
+      expect(log.mock.calls.flat().join('\n')).toContain('1.16.0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('run() prints JSON and plain output for manifest validation', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-harness-'));
+    const manifestPath = path.join(dir, 'managed-components.json');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      writeFileSync(manifestPath, JSON.stringify(manifest()), 'utf8');
+
+      const jsonResult = run(['--manifest', manifestPath, '--json']);
+      const plainResult = run(['--manifest', manifestPath]);
+
+      expect((jsonResult as { schemaVersion: number }).schemaVersion).toBe(1);
+      expect((plainResult as { probes: string[] }).probes).toEqual(['mcp-servers']);
+      expect(JSON.parse(String(log.mock.calls[0][0])).schemaVersion).toBe(1);
+      expect(log.mock.calls.flat().join('\n')).toContain('harness-maintenance manifest ok');
+      expect(warn.mock.calls.flat().join('\n')).toContain('floating latest reference');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('run() prints JSON and plain output for npm cooldown config checks', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-harness-'));
+    const npmrcPath = path.join(dir, '.npmrc');
+    const stderrPath = path.join(dir, 'stderr.txt');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      writeFileSync(npmrcPath, 'min-release-age=7\n', 'utf8');
+      writeFileSync(stderrPath, '', 'utf8');
+
+      const jsonResult = run([
+        '--npm-cooldown-config',
+        '--npm-version',
+        '11.12.1',
+        '--min-version',
+        '11.12.0',
+        '--expected-days',
+        '7',
+        '--npmrc-file',
+        npmrcPath,
+        '--stderr-file',
+        stderrPath,
+        '--install-exit-code',
+        '0',
+        '--json',
+      ]);
+      const plainResult = run([
+        '--npm-cooldown-config',
+        '--npm-version',
+        '11.12.1',
+        '--min-version',
+        '11.12.0',
+        '--expected-days',
+        '7',
+        '--npmrc-file',
+        npmrcPath,
+        '--stderr-file',
+        stderrPath,
+        '--install-exit-code',
+        '0',
+      ]);
+
+      expect((jsonResult as { ok: boolean }).ok).toBe(true);
+      expect((plainResult as { ok: boolean }).ok).toBe(true);
+      expect(JSON.parse(String(log.mock.calls[0][0])).ok).toBe(true);
+      expect(log.mock.calls.flat().join('\n')).toContain('codex npm cooldown config ok');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('run() rejects malformed CLI arguments and invalid install exit codes', () => {
+    expect(() => run(['positional'])).toThrow('unexpected argument');
+    expect(() => run(['--manifest'])).toThrow('missing value for --manifest');
+    expect(() => run([
+      '--npm-cooldown-config',
+      '--npm-version',
+      '11.12.1',
+      '--min-version',
+      '11.12.0',
+      '--expected-days',
+      '7',
+      '--npmrc-file',
+      'missing',
+      '--stderr-file',
+      'missing',
+      '--install-exit-code',
+      '-1',
+    ])).toThrow('--install-exit-code must be a non-negative integer');
+  });
+
+  it('harness-maintenance.sh publishes state with exclusive private writes', () => {
+    const source = readFileSync(
+      path.join(process.cwd(), 'deploy/scripts/harness-maintenance.sh'),
+      'utf8',
+    );
+
+    expect(source).toContain('chmod 700 "$STATE_DIR"');
+    expect(source).toContain("flag: 'wx'");
+    expect(source).toContain('mode: 0o600');
+    expect(source).toContain('[ -L "$STATE_FILE" ]');
+    expect(source).toContain('chmod 600 "$STATE_FILE"');
+  });
+
+  it('harness-maintenance.sh can install a missing OpenCode harness into a user-owned prefix', () => {
+    const source = readFileSync(
+      path.join(process.cwd(), 'deploy/scripts/harness-maintenance.sh'),
+      'utf8',
+    );
+
+    expect(source).toContain('NPM_GLOBAL_PREFIX="${WHATSOUP_HARNESS_NPM_GLOBAL_PREFIX:-$HOME/.local/share/whatsoup/npm-global}"');
+    expect(source).toContain('npm_latest_eligible_version opencode-ai');
+    expect(source).toContain('install_opencode_npm "$target"');
+    expect(source).toContain('--prefix "$NPM_GLOBAL_PREFIX"');
+    expect(source).toContain('opencode-ai@$target');
   });
 });

@@ -56,6 +56,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     health: { uptime: 1 },
     lastPollAt: '2026-04-01T00:00:00.000Z',
     consecutiveFailures: 0,
+    everReachable: true,
     status: 'online',
     statusConfidence: 'confirmed',
     statusReason: 'health_body_ok',
@@ -63,6 +64,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     error: null,
     lastAlertAt: null,
     silencedUntil: null,
+    activeAlertSources: [],
     ...overrides,
   };
 }

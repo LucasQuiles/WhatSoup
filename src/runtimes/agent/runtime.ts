@@ -18,7 +18,7 @@ import {
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
-import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
+import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -135,6 +135,9 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
+const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
+const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
+const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;
 // Default provider-fallback window when the usage-limit message names no reset
 // time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
 // upper-bound estimate for when the primary provider becomes available again.
@@ -1328,6 +1331,23 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
   return { category, detail };
 }
 
+function safeAlertSegment(value: string): string {
+  const cleaned = value.trim().replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '');
+  return cleaned.length > 0 ? cleaned.slice(0, 80) : 'unknown';
+}
+
+function alertEvidenceValue(value: string | null | undefined): string {
+  const text = value == null || value.trim() === '' ? 'unknown' : value.trim();
+  return text.replace(/@/g, ' at ');
+}
+
+function alertExcerpt(value: string): string {
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  return cleaned.length > TOOL_FAILURE_ALERT_EXCERPT_CHARS
+    ? `${cleaned.slice(0, TOOL_FAILURE_ALERT_EXCERPT_CHARS - 1)}…`
+    : cleaned;
+}
+
 export class AgentRuntime implements Runtime {
   private static readonly WORKSPACE_IDLE_MS = 30 * 60 * 1000;
   private static readonly WORKSPACE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -1410,6 +1430,11 @@ export class AgentRuntime implements Runtime {
   // restart); the durable artifact is the window itself (agent_fallback_state).
   private fallbackTurnsServed = 0;
   private fallbackTurnsEmpty = 0;
+  // Arm-time snapshots of the lifetime turn counters. The lifetime counters
+  // accrue across windows (getFallbackState contract), so the revert alert
+  // subtracts these to report THIS window's turns instead of cumulative totals.
+  private fallbackTurnsServedAtArm = 0;
+  private fallbackTurnsEmptyAtArm = 0;
   private lastFallbackTurnAt: number | null = null;
   private activeFallbackEntry: AgentFallbackEntry | null = null;
   private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
@@ -1485,6 +1510,7 @@ export class AgentRuntime implements Runtime {
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
   private recentProviderFallbackNotices = new Map<string, number>();
+  private recentToolFailureAlerts = new Map<string, number>();
 
   /**
    * Tracks toolScopeKeys where at least one non-phantom tool_use event was
@@ -1561,6 +1587,77 @@ export class AgentRuntime implements Runtime {
     this.activeToolNames.delete(toolScopeKey);
     // Note: turnHadToolActivity is NOT cleared here — the result handler captures
     // it for the empty-turn check and clears it explicitly after the check.
+  }
+
+  private maybeEmitToolFailureAlert(args: {
+    chatJid: string | null | undefined;
+    toolId: string;
+    toolName: string;
+    content: string;
+    classification: ToolUpdate;
+    toolScopeKey: string;
+    mapKey?: string;
+  }): void {
+    if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
+
+    const now = Date.now();
+    for (const [key, recordedAt] of this.recentToolFailureAlerts) {
+      if (now - recordedAt > TOOL_FAILURE_ALERT_DEDUP_MS) {
+        this.recentToolFailureAlerts.delete(key);
+      }
+    }
+
+    const provider = this.effectiveProvider || this.agentProvider || 'unknown-provider';
+    const source = `runtime-tool-error:${safeAlertSegment(provider)}:${safeAlertSegment(args.toolName)}`;
+    const fingerprint = [
+      this.instanceName,
+      provider,
+      args.toolName,
+      args.classification.category,
+      args.content.replace(/\s+/g, ' ').trim().slice(0, 500),
+    ].join('\n');
+
+    if (this.recentToolFailureAlerts.has(fingerprint)) return;
+    this.recentToolFailureAlerts.set(fingerprint, now);
+    while (this.recentToolFailureAlerts.size > MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS) {
+      const oldest = this.recentToolFailureAlerts.keys().next().value;
+      if (oldest === undefined) break;
+      this.recentToolFailureAlerts.delete(oldest);
+    }
+
+    const evidence = [
+      'runtime_source=src/runtimes/agent/runtime.ts:tool_result',
+      `instance=${alertEvidenceValue(this.instanceName)}`,
+      `provider=${alertEvidenceValue(provider)}`,
+      `session_scope=${this.sessionScope}`,
+      `chat_jid=${alertEvidenceValue(args.chatJid ?? null)}`,
+      `tool_scope_key=${alertEvidenceValue(args.toolScopeKey)}`,
+      `map_key=${alertEvidenceValue(args.mapKey ?? null)}`,
+      `tool_id=${alertEvidenceValue(args.toolId)}`,
+      `tool_name=${alertEvidenceValue(args.toolName)}`,
+      `classification=${args.classification.category}`,
+      `detail=${alertEvidenceValue(args.classification.detail)}`,
+      `cwd=${alertEvidenceValue(this.cwd ?? process.cwd())}`,
+      'error_excerpt:',
+      alertExcerpt(args.content) || 'unknown',
+    ].join('\n');
+
+    try {
+      emitAlertChecked(
+        this.instanceName,
+        source,
+        `Agent tool failure: ${args.toolName}`,
+        evidence,
+      );
+    } catch (err) {
+      log.warn({
+        instance: this.instanceName,
+        provider,
+        toolId: args.toolId,
+        toolName: args.toolName,
+        err: err instanceof Error ? err.message : String(err),
+      }, 'failed to emit BOT ERRORS tool failure alert');
+    }
   }
 
   private beginSilentCompact(scopeKey: string): void {
@@ -2476,8 +2573,12 @@ export class AgentRuntime implements Runtime {
           new URL('.', import.meta.url).pathname,
           '../../../deploy/hooks/poll-interaction-lint.mjs',
         );
-        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath, pollLintHookPath);
-        log.info({ cwd, hookPath, pollLintHookPath }, 'wrote sandbox-policy.json and settings.json');
+        const postToolUseLogHookPath = resolve(
+          new URL('.', import.meta.url).pathname,
+          '../../../deploy/hooks/post-tool-use-log.sh',
+        );
+        writeSandboxArtifacts(claudeDir, resolvedPolicy, hookPath, pollLintHookPath, postToolUseLogHookPath);
+        log.info({ cwd, hookPath, pollLintHookPath, postToolUseLogHookPath }, 'wrote sandbox-policy.json and settings.json');
       } catch (err) {
         log.error({ err, cwd }, 'failed to initialize sandbox artifacts');
         throw err;
@@ -3082,7 +3183,7 @@ export class AgentRuntime implements Runtime {
           { err, messageId: msg.messageId, code: codeStr || 'unknown' },
           'inline extractor hook hit unrecoverable DB error — surfacing to operator',
         );
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'substrate-inline-hook',
           `Unrecoverable DB error in inline extractor: ${msgText}`,
@@ -4693,7 +4794,17 @@ export class AgentRuntime implements Runtime {
           const toolName = toolNames?.get(event.toolId) ?? 'unknown';
           const errorPreview = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
           log.warn({ toolId: event.toolId, toolName, error: errorPreview }, 'tool error reported by agent');
-          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
+          const classification = classifyToolError(toolName, event.content);
+          queue.enqueueToolUpdate(classification);
+          this.maybeEmitToolFailureAlert({
+            chatJid: queue.targetChatJid,
+            toolId: event.toolId,
+            toolName,
+            content: event.content,
+            classification,
+            toolScopeKey,
+            mapKey,
+          });
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {
@@ -5693,7 +5804,7 @@ export class AgentRuntime implements Runtime {
         firstEligibleIndex = i;
       }
       if (!eligible) {
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'fallback_credential_missing',
           'Fallback provider key not found in keyring',
@@ -5703,7 +5814,7 @@ export class AgentRuntime implements Runtime {
     }
     this.fallbackChainState = state;
     if (requireIndependentProvider && firstEligibleIndex === -1 && firstIndependentIndex === -1) {
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'fallback_no_independent_provider',
         'Auth-required fallback has no independent provider target',
@@ -5903,7 +6014,7 @@ export class AgentRuntime implements Runtime {
       served: this.fallbackTurnsServed,
       empty: this.fallbackTurnsEmpty,
     }, 'fallback turn completed with zero visible output');
-    emitAlert(
+    emitAlertChecked(
       this.instanceName,
       'fallback_empty_turn',
       'Fallback turn produced no visible output',
@@ -5939,13 +6050,19 @@ export class AgentRuntime implements Runtime {
     // fired before the restart.
     if (firstArm) {
       this.fallbackArmReason = reason;
+      // Snapshot the lifetime turn counters at the first arm of every window
+      // (the null-guard skips extensions; restores hit it too because the
+      // guard is per-process, which is correct — the counters are also
+      // per-process, so a restored window counts from this process's zero).
+      this.fallbackTurnsServedAtArm = this.fallbackTurnsServed;
+      this.fallbackTurnsEmptyAtArm = this.fallbackTurnsEmpty;
       if (opts?.restored) {
         // A restored window is the SAME window resuming after a restart, so
         // it never re-counts as an activation — but the resume itself is an
         // operator-visible transition (a restart mid-window; repeated
         // restores are the crash-loop signature), so it gets its own
         // additive source instead of silence.
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'provider_fallback_restored',
           'Provider fallback window restored after restart',
@@ -5954,7 +6071,7 @@ export class AgentRuntime implements Runtime {
         );
       } else {
         this.fallbackActivations += 1;
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'provider_fallback_activated',
           'Provider fallback window activated',
@@ -5986,7 +6103,7 @@ export class AgentRuntime implements Runtime {
       });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'fallback_persist_failed',
         'Failed to persist fallback window — will not survive restart',
@@ -6015,7 +6132,7 @@ export class AgentRuntime implements Runtime {
           fallbackModel: fallbackEntry.model,
         }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
         if (!selection.selectedHadMissingCredential) {
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_credential_missing',
             'Fallback provider key not found in keyring',
@@ -6026,7 +6143,7 @@ export class AgentRuntime implements Runtime {
         void verifyFallbackCredential(service, key).then((result) => {
           if (result !== 'invalid') return;
           log.error({ service, fallbackProvider: fallbackEntry.provider }, 'fallback credential rejected by provider (401/403)');
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_credential_invalid',
             'Fallback API key rejected by provider',
@@ -6046,7 +6163,7 @@ export class AgentRuntime implements Runtime {
             { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
             'fallback provider binary not found on this host',
           );
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_binary_missing',
             'Fallback provider binary not found on this host',
@@ -6077,7 +6194,7 @@ export class AgentRuntime implements Runtime {
                 },
                 'fallback model not found in provider catalog — sessions will fail until corrected',
               );
-              emitAlert(
+              emitAlertChecked(
                 this.instanceName,
                 'fallback_model_unknown',
                 'Fallback model not found in provider catalog',
@@ -6227,6 +6344,10 @@ export class AgentRuntime implements Runtime {
     // Capture before clearing: the revert alert reports how long the window
     // ran. The idempotency guard above means this fires once per window.
     const windowMs = this.fallbackActivatedAt !== null ? Date.now() - this.fallbackActivatedAt : null;
+    // Per-window deltas against the arm-time snapshots — the lifetime counters
+    // are NOT reset here (getFallbackState keeps reporting process totals).
+    const windowTurnsServed = this.fallbackTurnsServed - this.fallbackTurnsServedAtArm;
+    const windowTurnsEmpty = this.fallbackTurnsEmpty - this.fallbackTurnsEmptyAtArm;
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
@@ -6249,11 +6370,11 @@ export class AgentRuntime implements Runtime {
       reason,
     }, 'reverting to primary provider');
     this.fallbackReverts += 1;
-    emitAlert(
+    emitAlertChecked(
       this.instanceName,
       'provider_fallback_reverted',
       'Provider fallback window ended — reverted to primary provider',
-      `reason=${reason} turnsServed=${this.fallbackTurnsServed} turnsEmpty=${this.fallbackTurnsEmpty}`
+      `reason=${reason} turnsServed=${windowTurnsServed} turnsEmpty=${windowTurnsEmpty}`
         + ` windowMs=${windowMs ?? 'unknown'}`,
     );
   }
@@ -6313,7 +6434,7 @@ export class AgentRuntime implements Runtime {
         // stall episode. Extension continues regardless — surfacing must never
         // strand the instance on a dead primary.
         if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_recovery_stalled',
             'Primary provider recovery probe is stalled — fallback window extending indefinitely',
@@ -6539,7 +6660,7 @@ export class AgentRuntime implements Runtime {
       oldSession: args.oldSession,
     }).then(() => {
       this.fallbackReplays += 1;
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'provider_fallback_replayed',
         'Interrupted turn replayed on fallback provider',
@@ -6552,7 +6673,7 @@ export class AgentRuntime implements Runtime {
         mapKey: args.mapKey,
         fallbackProvider: args.activation.fallbackProvider,
       }, 'failed to replay turn on fallback provider');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'runtime_provider_fallback_replay_failed',
         'Provider fallback replay failed',
@@ -6716,6 +6837,7 @@ export class AgentRuntime implements Runtime {
         // Provision workspace (deterministic rewrite of control files)
         const hookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/agent-sandbox.sh');
         const pollLintHookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/poll-interaction-lint.mjs');
+        const postToolUseLogHookPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/hooks/post-tool-use-log.sh');
         const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
         const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
         const chatScopedToolNames = this.registry.getChatScopedToolNames();
@@ -6726,6 +6848,7 @@ export class AgentRuntime implements Runtime {
           sandbox: this.sandbox!,
           hookPath,
           pollLintHookPath,
+          postToolUseLogHookPath,
           mcpServerPath,
           sendMediaServerPath,
           chatScopedToolNames,
@@ -7021,7 +7144,7 @@ export class AgentRuntime implements Runtime {
           session.spawnSession(sessionId, dbRowId ?? undefined).then(async () => {
             await new Promise(r => setTimeout(r, 1_000));
             if (!session.getStatus().active) return;
-            clearAlertSource(this.instanceName, 'agent_respawn_failed');
+            clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
             try {
               // Inject messages that arrived during the crash window
               if (chatJid) {
@@ -7044,7 +7167,7 @@ export class AgentRuntime implements Runtime {
       }
     } else if (crashCount > AUTO_RESPAWN_MAX_CRASHES) {
       log.error({ mapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'agent_respawn_failed',
         `whatsoup@${this.instanceName} agent respawn exhausted (${crashCount} crashes)`,
@@ -7432,7 +7555,16 @@ export class AgentRuntime implements Runtime {
             toolName,
             error: errorPreview,
           }, 'tool error reported by agent');
-          queue.enqueueToolUpdate(classifyToolError(toolName, event.content));
+          const classification = classifyToolError(toolName, event.content);
+          queue.enqueueToolUpdate(classification);
+          this.maybeEmitToolFailureAlert({
+            chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
+            toolId: event.toolId,
+            toolName,
+            content: event.content,
+            classification,
+            toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
+          });
         }
         toolNames?.delete(event.toolId);
         if (toolNames && toolNames.size === 0) {

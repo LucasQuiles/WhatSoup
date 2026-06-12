@@ -125,6 +125,15 @@ describe('auth-ticket -- HMAC integrity', () => {
     expect(s.redeem(tampered, 'api', [KEY])).toBe(false);
   });
 
+  it('rejects malformed HMAC text without throwing', () => {
+    const s = freshStore();
+    const { ticket } = s.issue(KEY, 'api');
+    const parts = ticket.split('.');
+    const tampered = `${parts[0]}.${parts[1]}.${parts[2]}.\uD800`;
+    expect(() => s.redeem(tampered, 'api', [KEY])).not.toThrow();
+    expect(s.redeem(tampered, 'api', [KEY])).toBe(false);
+  });
+
   it('rejects a ticket whose audience segment was tampered with', () => {
     // An attacker who swaps the audience in the wire format breaks the HMAC
     // because audience is part of the signed payload.

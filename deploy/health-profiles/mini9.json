@@ -1,0 +1,23 @@
+{
+  "role": "bot-host",
+  "expectDispatcher": false,
+  "expectQLoop": false,
+  "expectPersonalSocket": false,
+  "expectPersonalTools": false,
+  "expectConfigInventory": true,
+  "requiredCredentialFiles": [
+    "fleet-tokens.json",
+    "instances/ew-bot/tokens.env"
+  ],
+  "instances": [
+    {
+      "name": "ew-bot",
+      "expected": "always_on",
+      "service": "com.whatsoup.ew-bot",
+      "primaryPhoneVerificationRequired": true,
+      "primaryPhoneOwner": "Lucas"
+    }
+  ],
+  "expectPrimaryPhoneVerification": true,
+  "requiredConfigMaxMode": "600"
+}

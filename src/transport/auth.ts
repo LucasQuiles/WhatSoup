@@ -10,13 +10,16 @@ import { existsSync } from 'node:fs';
 import {
   makeWASocket,
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   DisconnectReason,
 } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import { config } from '../config.ts';
 import { decideDisconnectAction } from './auth-disconnect-policy.ts';
+import { redactAuthCliText } from './auth-cli-redaction.ts';
+import { createAtomicCredsSaver } from './atomic-auth-save.ts';
+import { installThirdPartyConsoleRedaction } from './third-party-console-redaction.ts';
+import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 
 // ---------------------------------------------------------------------------
 // Lock check
@@ -60,14 +63,18 @@ function recordRestartRequired(statusCode: number | undefined): number {
 }
 
 async function startSocket(): Promise<void> {
-  const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
-  const { version } = await fetchLatestBaileysVersion();
+  installThirdPartyConsoleRedaction();
+
+  const { state } = await useMultiFileAuthState(config.authDir);
+  const saveCreds = createAtomicCredsSaver(config.authDir, () => state.creds);
+  const resolvedVersion = await resolveBaileysVersion();
+  console.error(`Using Baileys web version ${baileysVersionLabel(resolvedVersion.version)} (${resolvedVersion.source})`);
 
   // Suppress Baileys internals (handshake material, signal keys, etc.)
   const baileysLogger = { level: 'silent', trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => baileysLogger } as any;
 
   const sock = makeWASocket({
-    version,
+    version: resolvedVersion.version,
     logger: baileysLogger,
     auth: {
       creds: state.creds,
@@ -96,7 +103,7 @@ async function startSocket(): Promise<void> {
       clearTimeout(timeoutHandle);
       const rawId: string | undefined = (sock as any).user?.id;
       const jid = rawId ?? 'unknown';
-      console.error(`\nAuthenticated successfully as ${jid}`);
+      console.error(`\nAuthenticated successfully as ${redactAuthCliText(jid)}`);
       console.error('Saving credentials...');
       await saveCreds();
       // Give the file system a moment to flush before we exit
@@ -146,11 +153,11 @@ async function startSocket(): Promise<void> {
 
 async function main(): Promise<void> {
   console.error('Starting WhatsApp authentication...');
-  console.error(`Auth directory: ${config.authDir}`);
+  console.error(`Auth directory: ${redactAuthCliText(config.authDir)}`);
   await startSocket();
 }
 
 main().catch((err) => {
-  console.error('Auth failed:', err instanceof Error ? err.message : String(err));
+  console.error('Auth failed:', redactAuthCliText(err instanceof Error ? err.message : String(err)));
   process.exit(1);
 });

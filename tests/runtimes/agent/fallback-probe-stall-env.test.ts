@@ -14,7 +14,16 @@ vi.hoisted(() => {
   process.env['WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD'] = '1';
 });
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 vi.mock('../../../src/config.ts', () => {
   const config: Record<string, unknown> = {

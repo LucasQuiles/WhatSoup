@@ -806,6 +806,8 @@ function runMigration24(db: DatabaseSync): void {
 
 // ─── Database class ──────────────────────────────────────────────────────────
 
+export const CURRENT_SCHEMA_MIGRATION = Math.max(...MIGRATIONS.keys());
+
 export class Database {
   private db: DatabaseSync;
 

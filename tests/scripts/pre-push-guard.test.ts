@@ -16,6 +16,10 @@ const packageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { scripts: Record<string, string> };
 const qualityWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+const whatsoupGuardWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/whatsoup-guard.yml'), 'utf8');
+const guardPackageJson = JSON.parse(
+  readFileSync(resolve(repoRoot, 'tools/whatsoup_guard/package.json'), 'utf8'),
+) as { scripts: Record<string, string>; devDependencies?: Record<string, string> };
 
 describe('pre-push guard classifier', () => {
   it('classifies delete-only ref updates as metadata-only', () => {
@@ -77,6 +81,14 @@ describe('pre-push guard classifier', () => {
 });
 
 describe('verify chain composition (package.json)', () => {
+  it('runs TypeScript package entrypoints through the pinned Node wrapper', () => {
+    const directAmbientScripts = Object.entries(packageJson.scripts)
+      .filter(([, command]) => /\bnode\s+--experimental-strip-types\b/.test(command))
+      .map(([scriptName]) => scriptName);
+
+    expect(directAmbientScripts).toEqual([]);
+  });
+
   it('verify:push:branch invokes guard:work-index', () => {
     const chain = packageJson.scripts['verify:push:branch'];
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
@@ -130,6 +142,16 @@ describe('verify chain composition (package.json)', () => {
     }
   });
 
+  it('verify chains invoke BOT ERRORS runtime-source and simulation-matrix guards', () => {
+    for (const scriptName of ['verify:push:branch', 'verify:release']) {
+      const chain = packageJson.scripts[scriptName];
+      expect(chain, `${scriptName} script must exist`).toBeDefined();
+      expect(chain).toMatch(/\bnpm run guard:source-runtime-drift\b/);
+      expect(chain).toMatch(/\bnpm run guard:bot-errors-simulation-matrix\b/);
+      expect(chain).not.toMatch(/\bnpm run guard:bot-errors-critical-surfaces\b/);
+    }
+  });
+
   it('verify:push:branch invokes full test typecheck, not source-only typecheck', () => {
     const chain = packageJson.scripts['verify:push:branch'];
     expect(chain, 'verify:push:branch script must exist').toBeDefined();
@@ -143,6 +165,7 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard ci\b/);
     expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard run typecheck\b/);
     expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard test\b/);
+    expect(chain).not.toMatch(/\bnpm --prefix tools\/whatsoup_guard run coverage:proof\b/);
   });
 
   it('verify:release invokes full publication audit guard', () => {
@@ -183,5 +206,10 @@ describe('quality workflow composition', () => {
 
   it('runs the commit-author guard in CI quality workflow', () => {
     expect(qualityWorkflow).toContain('npm run guard:repo:commit-authors');
+  });
+
+  it('runs the standalone guard package test workflow', () => {
+    expect(whatsoupGuardWorkflow).toContain('run: npm test');
+    expect(whatsoupGuardWorkflow).not.toContain('npm run coverage:proof');
   });
 });

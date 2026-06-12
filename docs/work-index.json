@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-06-12T02:31:58Z",
+  "generated_at": "2026-06-12T21:27:14Z",
   "repo": "WhatSoup",
-  "git_head": "24619e821aa9358f7ba259ada6122d9b5f087a58",
+  "git_head": "ee506547913301918dbcb47895a44d0db26a3d8b",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 180,
+  "total": 183,
   "schema_version": 5,
   "rows": [
     {
@@ -1759,6 +1759,30 @@
       "size_bytes": 3796
     },
     {
+      "path": "docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md",
+      "kind": "doc",
+      "topic_raw": "bot-errors-reliability-20260531",
+      "topic": "bot-errors-reliability",
+      "status": "active",
+      "status_source": "state-md-status",
+      "canonical_parent": "docs/sdlc/in-progress/bot-errors-reliability-20260531",
+      "supersedes_hint": null,
+      "last_modified": "2026-06-12",
+      "size_bytes": 4465
+    },
+    {
+      "path": "docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md",
+      "kind": "state",
+      "topic_raw": "bot-errors-reliability-20260531",
+      "topic": "bot-errors-reliability",
+      "status": "active",
+      "status_source": "state-md-status",
+      "canonical_parent": "docs/sdlc/in-progress/bot-errors-reliability-20260531",
+      "supersedes_hint": null,
+      "last_modified": "2026-06-12",
+      "size_bytes": 4069
+    },
+    {
       "path": "docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md",
       "kind": "handoff",
       "topic_raw": "2026-04-07-fleet-charts-guidelines",
@@ -2009,6 +2033,18 @@
       "supersedes_hint": null,
       "last_modified": "2026-05-12",
       "size_bytes": 13939
+    },
+    {
+      "path": "docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md",
+      "kind": "review",
+      "topic_raw": "2026-05-31-bot-errors-tool-call-audit",
+      "topic": "bot-errors-tool-call-audit",
+      "status": "unknown",
+      "status_source": "fallback",
+      "canonical_parent": "docs/superpowers/reviews",
+      "supersedes_hint": null,
+      "last_modified": "2026-06-12",
+      "size_bytes": 6741
     },
     {
       "path": "docs/superpowers/specs/2026-04-04-colony-orchestration-design.md",

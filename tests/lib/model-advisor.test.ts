@@ -1,8 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+const alertFns = vi.hoisted(() => ({
+  emitAlert: vi.fn(() => true),
+  clearAlertSource: vi.fn(() => true),
+}));
+
 vi.mock('../../src/lib/emit-alert.ts', () => ({
-  emitAlert: vi.fn(),
-  clearAlertSource: vi.fn(),
+  emitAlert: alertFns.emitAlert,
+  emitAlertChecked: alertFns.emitAlert,
+  clearAlertSource: alertFns.clearAlertSource,
+  clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
 
 import { emitAlert, clearAlertSource } from '../../src/lib/emit-alert.ts';
@@ -208,6 +215,7 @@ describe('notifyModelAdvisories', () => {
       'model-currency-live-scan',
       expect.stringContaining('anthropic=HTTP 401'),
       expect.stringContaining('"mode":"degraded"'),
+      'warning',
     );
     expect(getModelAdvisories().liveScan).toMatchObject({ mode: 'degraded' });
   });

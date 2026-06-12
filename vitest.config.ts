@@ -34,6 +34,7 @@ export default defineConfig({
     // tests/browser/** runs only via vitest.browser.config.ts (npm run test:browser).
     exclude: ['tests/browser/**'],
     testTimeout: 10_000,
+    setupFiles: ['./tests/setup/bot-errors-vitest-isolation.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'json', 'json-summary'],

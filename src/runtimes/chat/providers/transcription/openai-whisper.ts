@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { config } from '../../../../config.ts';
 import { CircuitBreaker } from '../../../../core/circuit-breaker.ts';
-import { clearAlertSource, emitAlert } from '../../../../lib/emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from '../../../../lib/emit-alert.ts';
 import { createChildLogger } from '../../../../logger.ts';
 import { extensionForMimeType } from './local-audio.ts';
 import type { TranscriptionProvider } from './types.ts';
@@ -41,7 +41,7 @@ export async function transcribeWithOpenAI(buffer: Buffer, mimeType: string): Pr
     breaker.recordSuccess();
     if (whisperAlerted) {
       whisperAlerted = false;
-      clearAlertSource(config.botName, 'whisper_degraded');
+      clearAlertSourceChecked(config.botName, 'whisper_degraded');
     }
     log.info({ durationMs: Date.now() - startMs, textLength: result.text.length }, 'OpenAI whisper transcription complete');
     return result.text;
@@ -52,7 +52,7 @@ export async function transcribeWithOpenAI(buffer: Buffer, mimeType: string): Pr
 
     if (breaker.isOpen()) {
       whisperAlerted = true;
-      emitAlert(
+      emitAlertChecked(
         config.botName,
         'whisper_degraded',
         'Whisper circuit breaker tripped',
