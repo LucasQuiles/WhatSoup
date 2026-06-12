@@ -101,8 +101,7 @@
         "name": "mcp-servers",
         "mode": "detect-only",
         "commands": [
-          "claude mcp list",
-          "npx @playwright/mcp@latest"
+          "claude mcp list"
         ]
       },
       {

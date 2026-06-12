@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ManifestValidation } from '../../scripts/harness-maintenance-guard.ts';
 
 import {
   DEFAULT_COOLDOWN_MINUTES,
@@ -152,13 +153,47 @@ describe('harness maintenance guard', () => {
 
   it('reports floating latest references without failing validation', () => {
     const result = validateManifestPayload(manifest());
+    // The fixture mcp-servers probe has an unexpected floating ref
     expect(result.floatingReferences).toEqual([
       {
         path: 'tier2.probes[0].commands[1]',
         value: 'npx @playwright/mcp@latest',
       },
     ]);
-    expect(result.warnings[0]).toContain('floating latest reference');
+    // Unexpected: not in a tier1 update/rollback channel
+    expect(result.unexpectedFloatingReferences).toEqual([
+      {
+        path: 'tier2.probes[0].commands[1]',
+        value: 'npx @playwright/mcp@latest',
+      },
+    ]);
+    // No allowed floating refs in this fixture
+    expect(result.allowedFloatingReferences).toEqual([]);
+    // No warning for allowed refs when there are none
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('allows floating latest references in tier1 update and rollback channels', () => {
+    const withChannels = {
+      ...manifest(),
+      tier1: [
+        {
+          name: 'claude',
+          kind: 'native',
+          update: ['claude', 'install', 'latest'],
+          rollback: ['claude', 'install', '{previous}'],
+          smoke: ['claude', '--version'],
+        },
+        { name: 'codex', kind: 'npm-global', package: '@openai/codex', smoke: ['codex', '--version'] },
+        { name: 'opencode', kind: 'native', smoke: ['opencode', '--version'] },
+      ],
+      tier2: { probes: [{ name: 'runtime', mode: 'detect-only' }] },
+    };
+    const result = validateManifestPayload(withChannels);
+    // 'latest' appears in tier1[0].update[2] and tier1[0].rollback is fine (no latest there)
+    expect(result.allowedFloatingReferences.length).toBeGreaterThan(0);
+    expect(result.unexpectedFloatingReferences).toEqual([]);
+    expect(result.warnings[0]).toContain('allowed floating');
   });
 
   it('marks npm versions older than the cooldown as eligible', () => {
@@ -341,18 +376,83 @@ describe('harness maintenance guard', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-harness-'));
     const manifestPath = path.join(dir, 'managed-components.json');
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       writeFileSync(manifestPath, JSON.stringify(manifest()), 'utf8');
 
       const jsonResult = run(['--manifest', manifestPath, '--json']);
+      // fixture has an unexpected floating ref — exits with code 2
+      expect(process.exitCode).toBe(2);
+      process.exitCode = undefined;
+
       const plainResult = run(['--manifest', manifestPath]);
 
-      expect((jsonResult as { schemaVersion: number }).schemaVersion).toBe(1);
-      expect((plainResult as { probes: string[] }).probes).toEqual(['mcp-servers']);
+      expect((jsonResult as ManifestValidation).schemaVersion).toBe(1);
+      expect((plainResult as ManifestValidation).probes).toEqual(['mcp-servers']);
       expect(JSON.parse(String(log.mock.calls[0][0])).schemaVersion).toBe(1);
       expect(log.mock.calls.flat().join('\n')).toContain('harness-maintenance manifest ok');
-      expect(warn.mock.calls.flat().join('\n')).toContain('floating latest reference');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('run() exits 2 for unexpected floating latest references', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-harness-'));
+    const manifestPath = path.join(dir, 'managed-components.json');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // unexpected floating ref in a non-update-channel location
+      const badManifest = {
+        ...manifest(),
+        tier2: {
+          probes: [{ name: 'mcp-servers', mode: 'detect-only', commands: ['npx @playwright/mcp@latest'] }],
+        },
+      };
+      writeFileSync(manifestPath, JSON.stringify(badManifest), 'utf8');
+
+      const result = run(['--manifest', manifestPath]) as ManifestValidation;
+
+      expect(result.unexpectedFloatingReferences).toHaveLength(1);
+      expect(result.unexpectedFloatingReferences[0].path).toContain('tier2');
+      expect(process.exitCode).toBe(2);
+      expect(errSpy.mock.calls.flat().join('\n')).toContain('unexpected floating latest reference');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('run() exits 0 for manifests with floating latest only in tier1 update/rollback channels', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-harness-'));
+    const manifestPath = path.join(dir, 'managed-components.json');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const allowedManifest = {
+        ...manifest(),
+        tier1: [
+          {
+            name: 'claude',
+            kind: 'native',
+            update: ['claude', 'install', 'latest'],
+            rollback: ['claude', 'install', '{previous}'],
+            smoke: ['claude', '--version'],
+          },
+          { name: 'codex', kind: 'npm-global', package: '@openai/codex', smoke: ['codex', '--version'] },
+          { name: 'opencode', kind: 'native', smoke: ['opencode', '--version'] },
+        ],
+        tier2: { probes: [{ name: 'runtime', mode: 'detect-only' }] },
+      };
+      writeFileSync(manifestPath, JSON.stringify(allowedManifest), 'utf8');
+
+      const result = run(['--manifest', manifestPath]) as ManifestValidation;
+
+      expect(result.unexpectedFloatingReferences).toHaveLength(0);
+      expect(result.allowedFloatingReferences.length).toBeGreaterThan(0);
+      expect(process.exitCode).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

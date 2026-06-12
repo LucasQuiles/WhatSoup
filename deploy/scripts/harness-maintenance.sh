@@ -680,6 +680,8 @@ probe_tier2() {
     set -e
     if [ "$drift_rc" -eq 0 ]; then
       record_event "systemd-content" "ok" "$drift_out"
+    elif [ "$drift_rc" -eq 3 ]; then
+      record_event "systemd-content" "skipped" "$drift_out"
     else
       record_event "systemd-content" "drift" "$drift_out"
     fi

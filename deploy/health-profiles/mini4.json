@@ -5,6 +5,10 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
+  "requiredConfigMaxMode": "600",
+  "expectAlertTarget": true,
+  "expectRuntimeManifest": true,
+  "expectPrimaryPhoneVerification": true,
   "requiredCredentialFiles": [
     "fleet-tokens.json",
     "instances/eh-bot/tokens.env"
@@ -14,10 +18,13 @@
       "name": "eh-bot",
       "expected": "always_on",
       "service": "com.whatsoup.eh-bot",
-      "primaryPhoneVerificationRequired": true,
-      "primaryPhoneOwner": "Lucas"
+      "healthPort": 9096,
+      "primaryPhoneOwner": "instance:eh-bot",
+      "expectProviderProbe": true,
+      "providerProbeProvider": "claude-cli",
+      "providerCredentialAccount": "esther",
+      "providerProbeCommand": "/opt/homebrew/bin/claude",
+      "providerLiveSessionFreshSeconds": 7200
     }
-  ],
-  "expectPrimaryPhoneVerification": true,
-  "requiredConfigMaxMode": "600"
+  ]
 }

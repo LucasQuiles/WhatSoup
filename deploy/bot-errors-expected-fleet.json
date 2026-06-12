@@ -1,62 +1,107 @@
 {
   "schemaVersion": 1,
+  "description": "Expected BOT ERRORS monitoring fleet. Brick is intentionally excluded.",
   "hosts": [
     {
       "host": "maclab",
       "role": "relay-only",
       "profile": "maclab.json",
+      "collectorRemote": true,
       "instances": [
         {
           "name": "agent",
           "expected": "on_demand",
-          "healthPort": 9095,
           "service": "com.whatsoup.agent",
+          "healthPort": 9095,
           "reason": "MACLAB agent launchd label is loaded but RunAtLoad=false; down is healthy until invoked"
         }
-      ],
-      "collectorRemote": true
+      ]
+    },
+    {
+      "host": "mwlab",
+      "role": "bot-host",
+      "profile": "mwlab.json",
+      "collectorRemote": true,
+      "instances": [
+        {
+          "name": "primary-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.primary-bot",
+          "healthPort": 9090
+        },
+        {
+          "name": "secondary-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.secondary-bot",
+          "healthPort": 9190
+        }
+      ]
+    },
+    {
+      "host": "gupta",
+      "role": "bot-host",
+      "profile": "gupta.json",
+      "collectorRemote": true,
+      "instances": [
+        {
+          "name": "clanka",
+          "expected": "always_on",
+          "service": "com.whatsoup.clanka",
+          "healthPort": 9096
+        }
+      ]
+    },
+    {
+      "host": "nucles",
+      "role": "central",
+      "profile": "nucles.json",
+      "collectorRemote": false,
+      "instances": [
+        {
+          "name": "primary",
+          "expected": "always_on",
+          "service": "whatsoup-primary.service",
+          "healthPort": 9092
+        },
+        {
+          "name": "secondary",
+          "expected": "always_on",
+          "service": "whatsoup-secondary.service",
+          "healthPort": 9094
+        },
+        {
+          "name": "automation",
+          "expected": "always_on",
+          "service": "whatsoup-automation.service",
+          "healthPort": 9095
+        }
+      ]
     },
     {
       "host": "mini1",
       "role": "bot-host",
       "profile": "mini1.json",
+      "collectorRemote": true,
       "instances": [
         {
           "name": "ana-bot",
           "expected": "always_on",
           "service": "com.whatsoup.ana-bot",
-          "primaryPhoneVerificationRequired": true,
-          "primaryPhoneOwner": "Lucas"
-        }
-      ],
-      "collectorRemote": true
-    },
-    {
-      "host": "mini10",
-      "role": "bot-host",
-      "profile": "mini10.json",
-      "instances": [
+          "healthPort": 9096
+        },
         {
-          "name": "ad-bot",
+          "name": "secondary-bot",
           "expected": "always_on",
-          "service": "com.whatsoup.ad-bot",
-          "primaryPhoneVerificationRequired": true,
-          "primaryPhoneOwner": "Lucas"
+          "service": "com.whatsoup.secondary-bot",
+          "healthPort": 9095
         }
-      ],
-      "collectorRemote": true
-    },
-    {
-      "host": "mini11",
-      "role": "no-bot",
-      "profile": "mini11.json",
-      "instances": [],
-      "collectorRemote": true
+      ]
     },
     {
       "host": "mini2",
       "role": "bot-host-blocked",
       "profile": "mini2.json",
+      "collectorRemote": true,
       "instances": [
         {
           "name": "ar-bot",
@@ -64,109 +109,111 @@
           "service": "com.whatsoup.ar-bot",
           "reason": "Service is unloaded/down pending Lucas approval to bootstrap"
         }
-      ],
-      "collectorRemote": true
+      ]
     },
     {
       "host": "mini3",
       "role": "bot-host",
       "profile": "mini3.json",
+      "collectorRemote": true,
       "instances": [
         {
           "name": "yl-bot",
           "expected": "always_on",
           "service": "com.whatsoup.yl-bot",
-          "primaryPhoneVerificationRequired": true,
-          "primaryPhoneOwner": "Lucas"
+          "healthPort": 9095
         }
-      ],
-      "collectorRemote": true
+      ]
     },
     {
       "host": "mini4",
       "role": "bot-host",
       "profile": "mini4.json",
+      "collectorRemote": true,
       "instances": [
         {
           "name": "eh-bot",
           "expected": "always_on",
           "service": "com.whatsoup.eh-bot",
-          "primaryPhoneVerificationRequired": true,
-          "primaryPhoneOwner": "Lucas"
+          "healthPort": 9096
         }
-      ],
-      "collectorRemote": true
+      ]
     },
     {
       "host": "mini5",
       "role": "no-bot",
       "profile": "mini5.json",
-      "instances": [],
-      "collectorRemote": true
+      "collectorRemote": true,
+      "instances": []
     },
     {
       "host": "mini6",
       "role": "no-bot",
       "profile": "mini6.json",
-      "instances": [],
-      "collectorRemote": true
+      "collectorRemote": true,
+      "instances": []
     },
     {
       "host": "mini7",
       "role": "bot-host",
       "profile": "mini7.json",
+      "collectorRemote": true,
       "instances": [
         {
           "name": "rb-bot",
           "expected": "always_on",
           "service": "com.whatsoup.rb-bot",
-          "primaryPhoneVerificationRequired": true,
-          "primaryPhoneOwner": "Lucas"
+          "healthPort": 9095
         }
-      ],
-      "collectorRemote": true
+      ]
     },
     {
       "host": "mini8",
       "role": "bot-host",
       "profile": "mini8.json",
+      "collectorRemote": true,
       "instances": [
         {
           "name": "ml-bot",
           "expected": "always_on",
           "service": "com.whatsoup.ml-bot",
-          "primaryPhoneVerificationRequired": true,
-          "primaryPhoneOwner": "Lucas"
+          "healthPort": 9098
         }
-      ],
-      "collectorRemote": true
+      ]
     },
     {
       "host": "mini9",
       "role": "bot-host",
       "profile": "mini9.json",
+      "collectorRemote": true,
       "instances": [
         {
           "name": "ew-bot",
           "expected": "always_on",
           "service": "com.whatsoup.ew-bot",
-          "primaryPhoneVerificationRequired": true,
-          "primaryPhoneOwner": "Lucas"
+          "healthPort": 9099
         }
-      ],
-      "collectorRemote": true
+      ]
     },
     {
-      "host": "mwlab",
-      "role": "relay-only",
-      "profile": "mwlab.json",
-      "instances": [],
-      "collectorRemote": true
+      "host": "mini10",
+      "role": "bot-host",
+      "profile": "mini10.json",
+      "collectorRemote": true,
+      "instances": [
+        {
+          "name": "ad-bot",
+          "expected": "always_on",
+          "service": "com.whatsoup.ad-bot",
+          "healthPort": 9096
+        }
+      ]
     },
     {
-      "host": "nucles",
-      "role": "central",
-      "profile": "nucles.json",
+      "host": "mini11",
+      "role": "no-bot",
+      "profile": "mini11.json",
+      "collectorRemote": true,
       "instances": []
     }
   ]
