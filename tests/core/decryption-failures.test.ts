@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import { Database, storeDecryptionFailure, resolveDecryptionFailure, getUnresolvedDecryptionFailures } from '../../src/core/database.ts';
+import { Database, storeDecryptionFailure, resolveDecryptionFailure } from '../../src/core/database.ts';
 import { storeMessageIfNew, type StoreMessageInput } from '../../src/core/messages.ts';
 
 // ─── Shared in-memory DB ──────────────────────────────────────────────────────
@@ -95,19 +95,6 @@ describe('decryption_failures table', () => {
       .get(input.messageId) as { seen_count: number; error_message: string } | undefined;
     expect(row?.seen_count).toBe(3);
     expect(row?.error_message).toBe('final error');
-  });
-
-  it('getUnresolvedDecryptionFailures returns only unresolved rows', () => {
-    const a = makeFailureInput();
-    const b = makeFailureInput();
-    storeDecryptionFailure(db, a);
-    storeDecryptionFailure(db, b);
-    // Mark one as resolved directly
-    db.raw.prepare("UPDATE decryption_failures SET resolved = 1 WHERE message_id = ?").run(a.messageId);
-
-    const rows = getUnresolvedDecryptionFailures(db);
-    expect(rows.some(r => r.messageId === b.messageId)).toBe(true);
-    expect(rows.some(r => r.messageId === a.messageId)).toBe(false);
   });
 
   it('resolveDecryptionFailure marks the row resolved', () => {

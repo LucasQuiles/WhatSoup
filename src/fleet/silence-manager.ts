@@ -1,6 +1,9 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { createChildLogger } from '../logger.ts';
+
+const log = createChildLogger('silence-manager');
 
 const CONFIG_DIR = join(homedir(), '.config', 'whatsoup');
 const SILENCES_FILE = join(CONFIG_DIR, 'fleet-silences.json');
@@ -18,8 +21,21 @@ function loadRules(): SilenceRule[] {
     const raw = readFileSync(SILENCES_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) return parsed as SilenceRule[];
-  } catch {
-    // missing or corrupt — return empty
+    // File exists but is not an array — treat as corrupt
+    log.warn(
+      { file: SILENCES_FILE, err: 'silences file is not a JSON array' },
+      'silence file corrupt or invalid — returning empty rules',
+    );
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      // Missing file is normal on first run — silent
+    } else {
+      log.warn(
+        { file: SILENCES_FILE, err: err instanceof Error ? err.message : String(err) },
+        'failed to load silence file — returning empty rules',
+      );
+    }
   }
   return [];
 }

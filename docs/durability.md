@@ -16,7 +16,7 @@ WhatSoup addresses this with a write-ahead journal approach: every outbound send
 
 2. **Echo never arrives** — the message was delivered but the WebSocket echo was lost (e.g., brief disconnect). The 30-second sweep (`sweepStaleSubmitted`) and post-connect reconciliation against the messages table handle this.
 
-3. **Interrupted inbound processing** — an incoming message started a Claude agent turn but the process crashed before the agent replied. Pre-connect recovery marks such events `failed` so that they can be detected and re-queued by the runtime.
+3. **Interrupted inbound processing** — an incoming message started a Claude agent turn but the process crashed before the agent replied. Pre-connect recovery marks such events `failed`. There is currently no re-queue consumer: a message that was mid-processing at crash time is recorded as `failed` but is not retried or re-notified. Closing this gap is tracked by the bot-errors reliability workstream.
 
 ---
 
