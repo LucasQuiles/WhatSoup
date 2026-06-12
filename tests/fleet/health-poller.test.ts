@@ -327,6 +327,130 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('does not classify a backoff-zero reconnect hint as logged_out without disconnected corroboration', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'healthy',
+        whatsapp: {
+          connected: true,
+          account_jid: '15550001111@s.whatsapp.net',
+          connection: {
+            state: 'connected',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['mini4', makeInstance({ name: 'mini4', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('mini4');
+    expect(status).toMatchObject({
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+    });
+    expect(status!.statusEvidence).toEqual(expect.arrayContaining([
+      'health_status=healthy',
+      'whatsapp_connected=true',
+      'account_jid_status=present',
+      'connection_state=connected',
+      'reconnect_phase=backoff',
+      'reconnect_attempts=0',
+    ]));
+    expect(emitAlert).toHaveBeenCalledWith(
+      'mini4',
+      'instance_degraded',
+      'whatsoup@mini4 is degraded',
+      expect.stringContaining('confidence=ambiguous'),
+    );
+    expect(emitAlert).not.toHaveBeenCalledWith(
+      'mini4',
+      'instance_logged_out',
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+
+  it('classifies backoff-zero as logged_out only when disconnected evidence corroborates it', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        whatsapp: {
+          connected: false,
+          account_jid: 'not connected',
+          connection: {
+            state: 'reconnecting',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('remote-1');
+    expect(status).toMatchObject({
+      status: 'logged_out',
+      statusConfidence: 'inferred',
+      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+      error: null,
+    });
+    expect(emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('reason=whatsapp_backoff_zero_attempts_with_disconnect_corroboration'),
+    );
+  });
+
+  it('parses non-ok health JSON before falling back to generic HTTP failure', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          account_jid: 'not connected',
+          connection: {
+            state: 'disconnected',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'logged_out',
+      consecutiveFailures: 0,
+      error: null,
+      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+    });
+  });
+
   it('logs and continues when a status change listener throws', async () => {
     mockFetch.mockRejectedValue(new Error('connection refused'));
 

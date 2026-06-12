@@ -8,6 +8,7 @@ import type { MetricsRange } from '../types'
 import { getPreference, setPreference } from '../lib/preferences'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
+import { statusSeverity } from '../lib/status-severity'
 import ModeBadge from '../components/ModeBadge'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
@@ -115,6 +116,7 @@ export default function LineDetail() {
   }
 
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
+  const severity = statusSeverity(line.status)
 
   // MCP-dependent tabs only for modes with a global MCP socket:
   // - passive: always has socket in state dir
@@ -149,12 +151,12 @@ export default function LineDetail() {
         <span
           className={`inline-block rounded-full flex-shrink-0 w-[var(--dot-header)] h-[var(--dot-header)] ${
             line.status === 'online' ? 'bg-s-ok animate-breathe' :
-            line.status === 'degraded' ? 'bg-s-warn' : 'bg-s-crit'
+            severity === 'warn' ? 'bg-s-warn' : 'bg-s-crit'
           }`}
           style={{
             boxShadow: line.status === 'online'
               ? '0 0 12px var(--s-ok-glow)'
-              : line.status === 'degraded'
+              : severity === 'warn'
               ? '0 0 12px var(--s-warn-glow)'
               : '0 0 12px var(--s-crit-glow)',
           }}

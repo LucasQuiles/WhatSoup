@@ -36,6 +36,9 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     lastPollAt: '2026-04-01T00:00:00.000Z',
     consecutiveFailures: 0,
     status: 'online',
+    statusConfidence: 'confirmed',
+    statusReason: 'health_body_ok',
+    statusEvidence: ['health_status=healthy'],
     error: null,
     lastAlertAt: null,
     silencedUntil: null,
@@ -111,6 +114,9 @@ describe('handleGetLines', () => {
       name: 'alpha',
       mode: 'chat',
       status: 'online',
+      statusConfidence: 'confirmed',
+      statusReason: 'health_body_ok',
+      statusEvidence: ['health_status=healthy'],
       error: null,
     });
     // lastActive is derived from health runtime timestamps or last message time,
@@ -166,8 +172,55 @@ describe('handleGetLines', () => {
 
     const body = JSON.parse(res._body);
     expect(body[0].status).toBe('unknown');
+    expect(body[0].statusConfidence).toBeNull();
+    expect(body[0].statusReason).toBe('not_polled');
+    expect(body[0].statusEvidence).toEqual([]);
     // lastActive is null when no health runtime timestamps and no messages exist
     expect(body[0]).toHaveProperty('lastActive');
+  });
+
+  it('forwards ambiguous signal metadata for misleading health reads', () => {
+    const inst = fakeInstance({ name: 'mini4', type: 'agent' });
+    const status = fakeStatus({
+      name: 'mini4',
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      statusEvidence: [
+        'health_status=healthy',
+        'whatsapp_connected=true',
+        'reconnect_phase=backoff',
+        'reconnect_attempts=0',
+      ],
+    });
+
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['mini4', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['mini4', status]])),
+        getStatus: vi.fn(),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+
+    const body = JSON.parse(res._body);
+    expect(body[0]).toMatchObject({
+      name: 'mini4',
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      statusEvidence: [
+        'health_status=healthy',
+        'whatsapp_connected=true',
+        'reconnect_phase=backoff',
+        'reconnect_attempts=0',
+      ],
+    });
   });
 
   it('does not include dbStats in the list response', () => {

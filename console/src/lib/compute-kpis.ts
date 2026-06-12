@@ -1,4 +1,5 @@
 import type { LineInstance } from '../types';
+import { statusNeedsAttention } from './status-severity';
 
 export function computeKpis(lines: LineInstance[]): {
   connected: number;
@@ -19,7 +20,7 @@ export function computeKpis(lines: LineInstance[]): {
 
   for (const line of lines) {
     if (line.status === 'online') connected++;
-    if (line.status === 'degraded' || line.status === 'unreachable' || line.error) {
+    if (statusNeedsAttention(line.status) || line.error) {
       needAttention++;
     }
 

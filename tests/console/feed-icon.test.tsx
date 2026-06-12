@@ -50,6 +50,9 @@ const routes: Array<{
   { name: 'session', detail: { type: 'session', action: 'start' }, iconClass: 'lucide-terminal', colorClass: 'text-m-agt' },
   { name: 'health status="online"', detail: { type: 'health', status: 'online' }, iconClass: 'lucide-heart-pulse', colorClass: 'text-s-ok' },
   { name: 'health status="unreachable"', detail: { type: 'health', status: 'unreachable' }, iconClass: 'lucide-heart-pulse', colorClass: 'text-s-crit' },
+  { name: 'health status="logged_out"', detail: { type: 'health', status: 'logged_out' }, iconClass: 'lucide-heart-pulse', colorClass: 'text-s-crit' },
+  { name: 'health status="config_error"', detail: { type: 'health', status: 'config_error' }, iconClass: 'lucide-heart-pulse', colorClass: 'text-s-crit' },
+  { name: 'health status="unknown"', detail: { type: 'health', status: 'unknown' }, iconClass: 'lucide-heart-pulse', colorClass: 'text-s-warn' },
   { name: 'health non-online/non-unreachable status', detail: { type: 'health', status: 'degraded' }, iconClass: 'lucide-heart-pulse', colorClass: 'text-s-warn' },
   { name: 'import', detail: { type: 'import' }, iconClass: 'lucide-database', colorClass: 'text-t4' },
 ]

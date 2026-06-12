@@ -22,6 +22,7 @@ import LineTags from "../components/LineTags";
 import { formatRelative } from "../lib/format-time";
 import { formatPhone, displayInstanceName, formatCompact } from "../lib/text-utils";
 import { getProvider, getProviderColor } from "../lib/providers";
+import { statusAlertMessage, statusNeedsAttention, statusSeverity, statusWashClass } from "../lib/status-severity";
 
 
 const ease = [0.22, 1, 0.36, 1] as const;
@@ -119,13 +120,10 @@ const SoupKitchen: FC = () => {
   const alerts = useMemo(
     () =>
       lines
-        .filter((l) => l.status === "unreachable" || l.status === "degraded")
+        .filter((l) => statusNeedsAttention(l.status))
         .map((l) => ({
           line: l.name,
-          message:
-            l.status === "unreachable"
-              ? l.lastSessionStatus === "auth_expired" ? "auth expired" : "connection lost"
-              : "degraded",
+          message: statusAlertMessage(l.status, l.lastSessionStatus),
         })),
     [lines]
   );
@@ -151,7 +149,7 @@ const SoupKitchen: FC = () => {
       result = result.filter((l) => l.status === "online");
     else if (activeKpi === "attention")
       result = result.filter(
-        (l) => l.status === "unreachable" || l.status === "degraded" || l.error
+        (l) => statusNeedsAttention(l.status) || l.error
       );
     else if (activeKpi === "unread")
       result = result.filter((l) => (l.unread ?? 0) > 0);
@@ -454,15 +452,15 @@ const SoupKitchen: FC = () => {
               </thead>
               <tbody>
                 {filtered.map((line) => {
-                  const isError = line.status === "unreachable";
-                  const isDegraded = line.status === "degraded";
+                  const severity = statusSeverity(line.status);
+                  const isError = severity === "crit";
                   const sent = line.messageStats?.sent ?? 0;
                   const recv = line.messageStats?.received ?? 0;
                   return (
                     <tr
                       key={line.name}
                       onClick={() => navigate(`/lines/${line.name}`)}
-                      className={`cursor-pointer c-row-hover c-border-b ${isError ? "bg-[var(--s-crit-wash)]" : isDegraded ? "bg-[var(--s-warn-wash)]" : ""}`}
+                      className={`cursor-pointer c-row-hover c-border-b ${statusWashClass(line.status)}`}
                     >
                       <td className="c-cell"><ModeBadge mode={line.mode} /></td>
                       <td className="c-cell">

@@ -10,6 +10,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import ModeBadge from '../../console/src/components/ModeBadge.tsx';
 import StatusDot from '../../console/src/components/StatusDot.tsx';
+import type { Status } from '../../console/src/types.ts';
 
 afterEach(() => {
   cleanup();
@@ -72,7 +73,7 @@ describe('StatusDot', () => {
   });
 
   it('exposes status values through aria-labels', () => {
-    for (const status of ['online', 'degraded', 'unreachable'] as const) {
+    for (const status of ['online', 'degraded', 'unreachable', 'logged_out', 'config_error', 'unknown'] as const) {
       cleanup();
       render(<StatusDot status={status} />);
 
@@ -80,10 +81,13 @@ describe('StatusDot', () => {
     }
   });
 
-  const statusTokenCases: Array<['online' | 'degraded' | 'unreachable', string]> = [
+  const statusTokenCases: Array<[Status, string]> = [
     ['online', 'bg-s-ok'],
     ['degraded', 'bg-s-warn'],
     ['unreachable', 'bg-s-crit'],
+    ['logged_out', 'bg-s-crit'],
+    ['config_error', 'bg-s-crit'],
+    ['unknown', 'bg-s-warn'],
   ];
 
   for (const [status, colorToken] of statusTokenCases) {
@@ -108,5 +112,13 @@ describe('StatusDot', () => {
     cleanup();
     render(<StatusDot status="unreachable" />);
     expect(screen.getByLabelText('unreachable').querySelector('.animate-breathe-ring')).toBeNull();
+
+    cleanup();
+    render(<StatusDot status="logged_out" />);
+    expect(screen.getByLabelText('logged_out').querySelector('.animate-breathe-ring')).toBeNull();
+
+    cleanup();
+    render(<StatusDot status="unknown" />);
+    expect(screen.getByLabelText('unknown').querySelector('.animate-breathe-ring')).toBeNull();
   });
 });

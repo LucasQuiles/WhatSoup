@@ -721,18 +721,25 @@ export function run(argv: string[], cwd = process.cwd()): WorkIndexData | WorkIn
   return writeWorkIndex(cwd);
 }
 
+export function workIndexCheckSummary(result: WorkIndexCheckIssue): string {
+  if (result.ignoredCanonical.length > 0) {
+    return `work-index indexed artifacts clean; ignored canonical warnings=${result.ignoredCanonical.length}`;
+  }
+  return 'work-index clean';
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const result = run(process.argv.slice(2));
     if ('missing' in result && 'stale' in result && 'drift' in result) {
       // Warn-class (#640): ignored markdown under a canonical doc root is
-      // surfaced but never fails the gate — a clean checkout/CI has none, and
-      // a local-only draft must not block the operator's push.
+      // surfaced but never fails the gate. The summary names warning-bearing
+      // states explicitly so the CLI does not imply a fully clean tree.
       for (const filePath of result.ignoredCanonical) {
         console.warn(`warning: ignored markdown under canonical doc root (not indexed — \`git add -f\` to track, or confirm it is intentionally local): ${filePath}`);
       }
       if (result.missing.length === 0 && result.stale.length === 0 && result.drift.length === 0) {
-        console.log('work-index clean');
+        console.log(workIndexCheckSummary(result));
       } else {
         for (const filePath of result.missing) console.error(`missing work-index entry: ${filePath}`);
         for (const filePath of result.stale) console.error(`stale work-index entry: ${filePath}`);

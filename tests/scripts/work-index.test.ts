@@ -12,6 +12,7 @@ import {
   findIgnoredCanonicalDocs,
   findWorkIndexCheckIssues,
   findWorkIndexCoverageIssues,
+  workIndexCheckSummary,
   writeWorkIndex,
 } from '../../scripts/work-index.ts';
 
@@ -84,7 +85,16 @@ describe('work index scanner', () => {
 
   it('keeps the checked-in work-index artifacts clean', () => {
     expect(findWorkIndexCoverageIssues(repoRoot)).toEqual({ missing: [], stale: [] });
-    expect(findWorkIndexCheckIssues(repoRoot)).toEqual({ missing: [], stale: [], drift: [], ignoredCanonical: [] });
+    const issues = findWorkIndexCheckIssues(repoRoot);
+    expect(issues.missing).toEqual([]);
+    expect(issues.stale).toEqual([]);
+    expect(issues.drift).toEqual([]);
+    expect(issues.ignoredCanonical).toEqual([...new Set(issues.ignoredCanonical)].sort());
+    expect(workIndexCheckSummary(issues)).toMatch(
+      issues.ignoredCanonical.length > 0
+        ? /^work-index indexed artifacts clean; ignored canonical warnings=\d+$/
+        : /^work-index clean$/,
+    );
   }, WORK_INDEX_TEST_TIMEOUT_MS);
 
   it('surfaces ignored markdown under a canonical doc root, but not under a local-only root (#640)', () => {
@@ -117,6 +127,9 @@ describe('work index scanner', () => {
     // The check result carries it as a distinct, warn-class finding.
     writeWorkIndex(root);
     expect(findWorkIndexCheckIssues(root).ignoredCanonical).toContain('docs/specs/local-draft.md');
+    expect(workIndexCheckSummary(findWorkIndexCheckIssues(root))).toBe(
+      'work-index indexed artifacts clean; ignored canonical warnings=1',
+    );
   }, WORK_INDEX_TEST_TIMEOUT_MS);
 
   it('honors an explicit leading status before explanatory status words', () => {

@@ -4,6 +4,7 @@ import type { FeedEvent, Mode } from "../types";
 import FeedIcon from "./FeedIcon";
 import { formatWhatsAppText } from "../lib/format-wa-text";
 import { getProvider } from "../lib/providers";
+import { statusAlertMessage, statusSeverity } from "../lib/status-severity";
 
 // ---------------------------------------------------------------------------
 //  Constants
@@ -55,6 +56,26 @@ function optionalText(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
+function healthTone(event: FeedEvent, d: HealthDetail): BadgeTone {
+  if (event.isError) return "crit";
+  const severity = statusSeverity(d.status);
+  if (severity === "ok") return "ok";
+  if (severity === "crit") return "crit";
+  return "warn";
+}
+
+function healthEdgeColor(event: FeedEvent, d: HealthDetail): string {
+  const tone = healthTone(event, d);
+  if (tone === "ok") return "var(--color-s-ok)";
+  if (tone === "crit") return "var(--color-s-crit)";
+  return "var(--color-s-warn)";
+}
+
+function healthHeadline(d: HealthDetail): string {
+  if (d.status === "online") return "came online";
+  return statusAlertMessage(d.status);
+}
+
 function edgeColor(event: FeedEvent): string {
   const d = event.detail;
   if (!d) return "var(--b1)";
@@ -66,7 +87,7 @@ function edgeColor(event: FeedEvent): string {
       if (d.state === "disconnected" || d.statusCode) return "var(--color-s-crit)";
       return "var(--b2)";
     case "message": return d.direction === "inbound" ? "var(--color-m-cht)" : "var(--color-m-agt)";
-    case "health": return d.status === "online" ? "var(--color-s-ok)" : d.status === "unreachable" ? "var(--color-s-crit)" : "var(--color-s-warn)";
+    case "health": return healthEdgeColor(event, d);
     case "tool_error": return "var(--color-s-crit)";
     case "session": return "var(--color-m-agt)";
     default: return "var(--b1)";
@@ -114,7 +135,7 @@ function headlineTone(event: FeedEvent, d: FeedDetail): BadgeTone {
     case "session":
       return "agent";
     case "health":
-      return d.status === "online" ? "ok" : d.status === "unreachable" ? "crit" : "warn";
+      return healthTone(event, d);
     default:
       return "neutral";
   }
@@ -229,7 +250,7 @@ function healthPresentation(event: FeedEvent, d: HealthDetail): CardPresentation
   return {
     badge: "health",
     badgeTone: tone,
-    headline: d.status === "online" ? "came online" : d.status === "unreachable" ? "connection lost" : "degraded",
+    headline: healthHeadline(d),
     headlineTone: tone,
     context: d.error,
   };
@@ -357,7 +378,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
   // Restart — connection errors, health unreachable
   if (inst && onRestart) {
     const show = (d?.type === "connection" && event.isError)
-      || (d?.type === "health" && d.status === "unreachable");
+      || (d?.type === "health" && statusSeverity(d.status) === "crit");
     if (show) {
       actions.push(
         <button
@@ -377,7 +398,7 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
   // Stop line — connection errors, health unreachable
   if (inst && onStop) {
     const show = (d?.type === "connection" && event.isError)
-      || (d?.type === "health" && d.status === "unreachable");
+      || (d?.type === "health" && statusSeverity(d.status) === "crit");
     if (show) {
       actions.push(
         <button
@@ -415,7 +436,7 @@ function copyContent(event: FeedEvent): string {
     }
     case "health": {
       if (d.status === "online") return "came online";
-      if (d.status === "unreachable") return "connection lost";
+      if (statusSeverity(d.status) === "crit") return statusAlertMessage(d.status);
       return `degraded \u2014 ${d.error ?? "unknown"}`;
     }
     default: return displayText(event.text);

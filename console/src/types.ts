@@ -3,7 +3,8 @@
 // ---------------------------------------------------------------------------
 
 export type Mode = 'passive' | 'chat' | 'agent';
-export type Status = 'online' | 'degraded' | 'unreachable';
+export type Status = 'online' | 'degraded' | 'unreachable' | 'logged_out' | 'config_error' | 'unknown';
+export type StatusConfidence = 'confirmed' | 'inferred' | 'ambiguous';
 
 export interface LineInstance {
   name: string;
@@ -11,6 +12,9 @@ export interface LineInstance {
   mode: Mode;
   provider?: string;
   status: Status;
+  statusConfidence?: StatusConfidence | null;
+  statusReason?: string | null;
+  statusEvidence?: string[];
   accessMode: string;
   healthPort: number;
   uptime: string;
@@ -276,6 +280,12 @@ export interface ProviderStatus {
     activeEntry: { provider: string; model: string | null } | null;
     /** Ordered fallback chain; eligible is null when only static config is available. */
     chain: Array<{ provider: string; model: string | null; eligible: boolean | null }>;
+  };
+  signal?: {
+    status: 'online' | 'degraded' | 'unreachable' | 'logged_out' | null;
+    confidence: StatusConfidence | null;
+    reason: string | null;
+    evidence: string[];
   };
   /** True only when the latest poll reached the line's health endpoint. */
   lineReachable: boolean;
