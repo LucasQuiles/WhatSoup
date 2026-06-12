@@ -362,6 +362,36 @@ describe('bridge validation', () => {
   });
 });
 
+describe('handler rejection safety', () => {
+  it('responds ok:false instead of leaving the client hanging when the handler rejects', async () => {
+    const imgPath = join(allowedRoot, 'photo.png');
+    writeFileSync(imgPath, Buffer.from([137, 80, 78, 71]));
+
+    // An error whose property access throws poisons the catch block inside
+    // handleRequest (isBaileysEncryptedTmpEnoent reads err.code), so the
+    // returned promise REJECTS instead of resolving to a BridgeResponse.
+    // Without a rejection guard on the socket data path that is an
+    // unhandledRejection (fatal at the process level) and the agent-side
+    // client never receives a response line.
+    class PoisonedError extends Error {
+      get code(): never {
+        throw new Error('poisoned property access');
+      }
+    }
+    messenger = makeMessenger(async () => {
+      throw new PoisonedError('send blew up');
+    });
+    bridge();
+    bridge = startMediaBridge(socketPath, messenger, allowedRoot);
+    await waitListening(bridge);
+
+    setMediaBridgeChat(bridge, '15551234567@s.whatsapp.net');
+    const res = await sendRequest(socketPath, { path: imgPath });
+
+    expect(res).toEqual({ ok: false, error: 'internal error' });
+  });
+});
+
 describe('cleanup', () => {
   it('calling the bridge handle stops the server', async () => {
     // A fresh bridge so we can close it independently from the one in afterEach
