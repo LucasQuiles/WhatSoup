@@ -136,3 +136,9 @@ jobs:
 
       - name: Console design metrics
         run: npm --prefix console run design:metrics
+
+      - name: Install Playwright chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Browser test suite
+        run: npm run test:browser

@@ -24,7 +24,7 @@
 #   WVR-002 converted to PERMANENT per spec-section citation (lint-plan §4 third-party numeric API).
 #   WVR-011 scope re-pinned: line 174→176 (verified against current tree).
 #   WVR-012 expiration_phase re-pointed: D6→D-series-close (retirement triggers not yet fired).
-# Remaining: 9 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011, WVR-012).
+# Remaining: 11 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011..WVR-014).
 
 waivers:
   - id: WVR-001
@@ -181,6 +181,45 @@ waivers:
       second consumer. Next review: D-series close or C4.
       Retire if react-refresh capability changes or helper extraction happens.
     safer_alternative_considered: separate popover-keyboard.ts module — rejected as spec-orphan fragmentation.
+    status: temporary
+
+  - id: WVR-013
+    rule: design-regression check 17 (raw color values in component-tier CSS)
+    owner: console-maintainer
+    reason: >
+      composites.css .c-kpi-hover box-shadow carries rgba(0,0,0,0.3) as the drop
+      half of a layered shadow; no --shadow-float semantic token exists yet to
+      express a translucent black at component tier.
+    scope:
+      - console/src/styles/composites.css
+    expiry: 2026-12-31
+    replacement_plan: >
+      Define a --shadow-float (or extend the elevation ladder) in the semantic
+      tier during the C3 polish stage and migrate the literal; check 17 then
+      counts zero and can promote.
+    safer_alternative_considered: >
+      Reusing --shadow-inset alone — rejected: loses the elevation the hover
+      state encodes.
+    status: temporary
+
+  - id: WVR-014
+    rule: design-regression check 19 (runtime-injected custom property)
+    owner: console-maintainer
+    reason: >
+      --wizard-accent is injected at runtime by the AddLineWizard step machinery
+      (inline style), not defined in any CSS tier; static scanning cannot see
+      runtime definitions. CSS consumers now carry explicit fallbacks so a
+      missing injection degrades to the chat-mode accent instead of breaking.
+    scope:
+      - console/src/styles/composites.css
+      - console/src/components/wizard/
+    expiry: 2026-12-31
+    replacement_plan: >
+      The B3 wave-4 AddLineWizard migration retires the runtime injection in
+      favor of tokenized step accents; the waiver dies with the wizard rebuild.
+    safer_alternative_considered: >
+      Defining --wizard-accent statically in the component tier — rejected:
+      the value is step-dependent by design until the wizard migrates.
     status: temporary
     expiration_phase: D-series-close
     cleanup_trigger: react-refresh capability change or helper extraction

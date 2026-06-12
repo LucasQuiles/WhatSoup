@@ -320,7 +320,7 @@ if [ "$C12_COUNT" -gt 0 ]; then
   echo "$C12_ALL" | grep -v 'focus-visible:' | head -5 | sed 's/^/    /'
 fi
 echo "    Expectation: zero after P2"
-echo "    Current: Inbox.tsx:434, HistoryTab.tsx:206 (composers)"
+echo "    Current: HistoryTab.tsx:206 (composer; C-B4-6 — form-kit slice)"
 check_result "12" "$C12_COUNT" "zero after P2 (shadow baseline)" "WARN"
 
 # ---------------------------------------------------------------------------
@@ -451,7 +451,7 @@ CSS_TIER_SEMANTIC_FILE="$CONSOLE_SRC/styles/tokens.semantic.css"
 # Live-tree violations (1):
 #   composites.css:959  .c-kpi-hover:hover {
 #                         box-shadow: var(--shadow-inset), 0 4px 12px rgba(0,0,0,0.3); }
-#   WAIVER-PENDING CSS-C17-01: no semantic shadow token covers this elevation level.
+#   WVR-013 (filed): no semantic shadow token covers this elevation level.
 #   Burndown: migrate to var(--shadow-overlay) or add a new --shadow-float semantic
 #   token at P1 shadow token completion. Owner: console-maintainer.
 # ---------------------------------------------------------------------------
@@ -483,7 +483,7 @@ if [ "$C17_HEX_COUNT" -gt 0 ]; then
   printf '%s\n' "$C17_HEX_HITS" | head -5 | sed "s|$CONSOLE_SRC/||" | sed 's/^/    /'
 fi
 echo "    Spec: tokens-v3 §1 (component tier must not own raw color values)"
-echo "    WAIVER-PENDING CSS-C17-01: composites.css:959 rgba(0,0,0,0.3) in .c-kpi-hover"
+echo "    WVR-013 (eslint-waivers.yaml): composites.css rgba shadow literal in .c-kpi-hover"
 echo "    Lifecycle: REPORT-ONLY (shadow); promote after all raw colors migrate to semantic tokens"
 check_result "17" "$C17_TOTAL" "zero raw colors in component-tier CSS (report-only baseline)" "WARN"
 
@@ -558,10 +558,10 @@ check_result "18" "$C18_COUNT" "zero legacy aliases in primitive tier (report-on
 #   --type-body-st      not yet defined (§2.6 type ramp tokens not added to CSS yet)
 #   --wizard-accent     runtime inline custom property set from AddLineWizard.tsx:265
 #                       via style={{ '--wizard-accent': ... }} — never a CSS definition.
-#                       WAIVER-RUNTIME-VAR: intentional; TSX sets it before CSS consumes it.
+#                       WVR-014 (filed): runtime-injected; TSX sets it before CSS consumes it.
 # Burndown: add --r-1 (4px), --r-2 (6px) to tokens.primitive.css §2.3 radii block;
 #           add --type-label, --type-body-st to tokens.primitive.css §2.6 type ramp block.
-#           Document --wizard-accent with WAIVER-RUNTIME-VAR in eslint-waivers.yaml.
+#           --wizard-accent documented as WVR-014 in eslint-waivers.yaml (filed 2026-06-12).
 # ---------------------------------------------------------------------------
 check_start "19" "CSS tier-boundary: dangling var() refs without fallback in component-tier CSS"
 
