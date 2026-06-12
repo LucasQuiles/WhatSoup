@@ -119,13 +119,13 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:health.status` | `GET /health` | `src/core/health.ts:535` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
-| `http:health.send` | `POST /send` | `src/core/health.ts:154` | stable | active | Send a text message |
-| `http:health.access` | `POST /access` | `src/core/health.ts:372` | stable | active | Allow / block contact or group |
-| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:455` | stable | active | Zero unread + chatModify |
-| `http:health.typing` | `GET /typing` | `src/core/health.ts:520` | stable | active | Currently-composing JIDs from presence cache |
-| `http:health.heal` | `POST /heal` | `src/core/health.ts:297` | stable | active | Inject Type-3 repair report |
-| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:208` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
+| `http:health.status` | `GET /health` | `src/core/health.ts:787` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
+| `http:health.send` | `POST /send` | `src/core/health.ts:382` | stable | active | Send a text message |
+| `http:health.access` | `POST /access` | `src/core/health.ts:610` | stable | active | Allow / block contact or group |
+| `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:702` | stable | active | Zero unread + chatModify |
+| `http:health.typing` | `GET /typing` | `src/core/health.ts:772` | stable | active | Currently-composing JIDs from presence cache |
+| `http:health.heal` | `POST /heal` | `src/core/health.ts:525` | stable | active | Inject Type-3 repair report |
+| `http:health.agent-compact` | `POST /agent/compact` | `src/core/health.ts:436` | stable | active | Out-of-band compaction; requires `chatJid` for per-chat / shared scopes |
 
 ### WebSocket
 
