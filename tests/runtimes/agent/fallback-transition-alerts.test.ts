@@ -279,7 +279,11 @@ describe('AgentRuntime — fallback transition alerts', () => {
       mapKey: 'chat-key',
       oldSession: null,
     })).toBe(true);
-    // The replay alert reports a completed action — let the replay resolve.
+    // The alert reports a COMPLETED action: nothing may be emitted at
+    // dispatch time, only after the replay resolves (pins the timing — a
+    // revert to emit-before-await fails here).
+    expect(alertsFor('provider_fallback_replayed')).toHaveLength(0);
+    expect(v.getFallbackState().fallbackReplays).toBe(0);
     await vi.runAllTimersAsync();
 
     const replayed = alertsFor('provider_fallback_replayed');

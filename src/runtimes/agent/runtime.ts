@@ -1426,8 +1426,9 @@ export class AgentRuntime implements Runtime {
   private fallbackLastProbeAt: number | null = null;
   // Lifetime-of-process transition totals (countable report fields for the
   // expensive fallback paths — never just logs). Activations count first arms
-  // only (extensions excluded), reverts count deactivations of an active
-  // window, replays count successful continue-on-fallback replay dispatches.
+  // only (extensions and post-restart restores excluded), reverts count
+  // deactivations of an active window, replays count COMPLETED
+  // continue-on-fallback replays (failed replays count nothing here).
   private fallbackActivations = 0;
   private fallbackReverts = 0;
   private fallbackReplays = 0;
@@ -6388,6 +6389,10 @@ export class AgentRuntime implements Runtime {
     // counter + alert report a COMPLETED replay, so they fire only after the
     // dispatch resolves — emitting before the await meant a rejected replay
     // produced success AND failure telemetry for the same turn.
+    // Known limitation: sendTurnToSession swallows STDIN_WRITE_TIMEOUT
+    // (notifies the user, resolves normally), so that delivery failure still
+    // lands in the success branch here — fixing it means changing
+    // sendTurnToSession's contract for ALL callers, tracked separately.
     void this.replayTurnOnFallback({
       chatJid: args.chatJid,
       mapKey: args.mapKey,
