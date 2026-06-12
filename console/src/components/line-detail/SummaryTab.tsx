@@ -10,6 +10,7 @@ import { PipelineNode, PipelineArrow } from './PipelineTab'
 import { ProvidersKeysCard } from './ProvidersKeysCard'
 import { buildConfigEntries, TYPE_COLOR } from './config-helpers'
 import { getModeColor } from './types'
+import { resolveConnection } from '../../lib/status-map'
 import type { LineInstance } from './types'
 
 export function SummaryTab({
@@ -33,9 +34,13 @@ export function SummaryTab({
   const providerDisplay = getProvider(providerId)?.displayName ?? providerId
 
   // All instance KPIs in one row — health, runtime, identity, tokens
+  // Resolve connection state via the single-owner map (DD-11).
+  // Deliberate behavior change: disconnected is now text-s-crit (was text-t4) — a
+  // disconnected line IS a problem; spec-aligned (CONNECTION_MAP in status-map.ts).
+  const conn = resolveConnection(connectionState)
   const cards = [
     { label: 'STATUS', value: line.status, color: line.status === 'online' ? 'text-s-ok' : line.status === 'degraded' ? 'text-s-warn' : 'text-s-crit' },
-    { label: 'CONNECTION', value: connectionState, color: connectionState === 'connected' ? 'text-s-ok' : connectionState === 'connecting' ? 'text-s-warn' : 'text-t4' },
+    { label: 'CONNECTION', value: conn.label, color: conn.inkClass },
     ...(line.linkedStatus
       ? [{ label: 'LINK', value: line.linkedStatus, color: line.linkedStatus === 'linked' ? 'text-s-ok' : 'text-s-warn' }]
       : []),

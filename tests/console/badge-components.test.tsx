@@ -31,7 +31,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { StatusCell, ModeBadge as ModeBadgePrimitive } from '../../console/src/components/primitives/index.ts';
 import ModeBadge from '../../console/src/components/ModeBadge.tsx';
 import StatusDot from '../../console/src/components/StatusDot.tsx';
-import { STATUS_MAP, MODE_MAP, resolveStatus, resolveMode } from '../../console/src/lib/status-map.ts';
+import { STATUS_MAP, MODE_MAP, resolveStatus, resolveMode, CONNECTION_MAP, resolveConnection } from '../../console/src/lib/status-map.ts';
 
 afterEach(() => {
   cleanup();
@@ -259,5 +259,23 @@ describe('StatusDot wrapper (backward compat)', () => {
     // size="sm" is deprecated — accepted silently, does not affect rendering
     expect(() => render(<StatusDot status="online" size="sm" />)).not.toThrow();
     expect(screen.getByText('online')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CONNECTION_MAP — DD-11: connection-state taxonomy lives in status-map
+// ---------------------------------------------------------------------------
+
+describe('CONNECTION_MAP — connection-state taxonomy lives in status-map (DD-11)', () => {
+  it('maps each connection state to label + ink class, fail-visible for unknown values', () => {
+    expect(CONNECTION_MAP.connected.inkClass).toBe('text-s-ok');
+    expect(CONNECTION_MAP.connecting.inkClass).toBe('text-s-warn');
+    expect(CONNECTION_MAP.disconnected.inkClass).toBe('text-s-crit');
+    expect(CONNECTION_MAP.unknown.inkClass).toBe('text-t4');
+    expect(resolveConnection('connected').label).toBe('connected');
+    // Fail-visible: unrecognised state renders its raw value with neutral ink.
+    const odd = resolveConnection('half-open');
+    expect(odd.inkClass).toBe('text-t4');
+    expect(odd.label).toBe('half-open');
   });
 });

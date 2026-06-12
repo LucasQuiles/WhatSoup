@@ -136,3 +136,31 @@ export function resolveMode(value: string): ModeEntry | null {
   if (value in MODE_MAP) return MODE_MAP[value as Mode];
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Connection-state map (DD-11) — the WS/transport connection taxonomy is
+// adjacent to line status but distinct; it lives here so status-map stays the
+// single owner of status-ish rendering decisions.
+// ---------------------------------------------------------------------------
+
+export type ConnectionState = 'connected' | 'connecting' | 'disconnected' | 'unknown';
+
+export interface ConnectionEntry {
+  readonly label: string;
+  /** Ink utility class for the KPI value (legacy text-s-ok/text-t4 tier — these
+   *  surfaces migrate to semantic ink utilities with the legacy-token slice). */
+  readonly inkClass: string;
+}
+
+export const CONNECTION_MAP: Readonly<Record<ConnectionState, ConnectionEntry>> = {
+  connected:    { label: 'connected',    inkClass: 'text-s-ok' },
+  connecting:   { label: 'connecting',   inkClass: 'text-s-warn' },
+  disconnected: { label: 'disconnected', inkClass: 'text-s-crit' },
+  unknown:      { label: 'unknown',      inkClass: 'text-t4' },
+} as const;
+
+/** Fail-visible: unrecognised states render their raw value with neutral ink. */
+export function resolveConnection(value: string): ConnectionEntry {
+  if (value in CONNECTION_MAP) return CONNECTION_MAP[value as ConnectionState];
+  return { label: value, inkClass: 'text-t4' };
+}
