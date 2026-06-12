@@ -71,4 +71,15 @@ describe('auth-loss signal classification', () => {
       /TERMINAL_AUTH_FAILURE_CLASSES\s*=\s*\{([^}]+)\}/,
     )).toEqual([...TERMINAL_AUTH_FAILURE_CLASSES].sort());
   });
+
+  it('keeps heartbeat watchdog terminal auth classes aligned with the TypeScript classifier', () => {
+    const source = fs.readFileSync(
+      path.join(process.cwd(), 'deploy/scripts/bot-errors-heartbeat-watchdog.py'),
+      'utf8',
+    );
+    expect(pythonSetMembers(
+      source,
+      /TERMINAL_AUTH_FAILURE_CLASSES\s*=\s*\{([^}]+)\}/,
+    )).toEqual([...TERMINAL_AUTH_FAILURE_CLASSES].sort());
+  });
 });
