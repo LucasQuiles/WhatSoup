@@ -13,8 +13,10 @@
  *  5. contentType toggle is two explicit buttons ("Text"/"Media"), not a checkbox.
  *  6. recurrence is two buttons ("Recurring"/"One-shot") + preset buttons + a text input.
  *  7. cronToHuman preview appears only when recurring=true and cronExpr is non-empty.
- *  8. Backdrop click calls onClose; inner dialog click does NOT (stopPropagation).
- *  9. Escape key calls onClose when modal is open.
+ *  8. Backdrop pointerdown does NOT dismiss — dismissable=false (C-B3W2-2 inversion).
+ *     Previously backdrop click called onClose; now protected by the Modal primitive.
+ *  9. Escape key calls onClose when modal is open (stack-aware capture-phase handler
+ *     from useDismissable, replacing the legacy hand-rolled bubble-phase effect).
  * 10. mediaPath required for media content type; empty mediaPath blocks submit.
  * 11. caption is optional in media mode.
  * 12. body.scheduled_at uses snake_case (matching MCP backend convention).
@@ -196,6 +198,18 @@ describe('ScheduleComposerModal — closed state', () => {
 
     expect(createScheduledMock).not.toHaveBeenCalled()
     expect(updateScheduledMock).not.toHaveBeenCalled()
+  })
+
+  it('initial focus lands inside the dialog when opened (ChatPicker panel NOT auto-opened, §4.2)', () => {
+    // useDismissable default focus: header close X (no initialFocus passed).
+    // ChatPicker SearchInput onFocus auto-opens the panel — we must NOT land
+    // focus there on open. Verify focus is inside the dialog but NOT on a chat item.
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    // Chat picker panel must NOT be open (no listbox rendered)
+    expect(screen.queryByRole('listbox')).toBeNull()
   })
 })
 
@@ -500,6 +514,62 @@ describe('ScheduleComposerModal — field editing', () => {
 
     fireEvent.click(screen.getByTestId('clear-chat'))
     expect(screen.queryByTestId('selected-chat')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5a. ToolbarTimeRange segmented control pins (DD-15, C-B3W2-4)
+// ---------------------------------------------------------------------------
+
+describe('ScheduleComposerModal — segmented control aria contract', () => {
+  it('content-type seg: role="group" with accessible label "Content type"', () => {
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    const contentTypeGroup = screen.getByRole('group', { name: 'Content type' })
+    expect(contentTypeGroup).toBeDefined()
+  })
+
+  it('content-type seg: Text button is aria-pressed=true by default', () => {
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    const textBtn = screen.getByRole('button', { name: 'Text' })
+    expect(textBtn.getAttribute('aria-pressed')).toBe('true')
+    const mediaBtn = screen.getByRole('button', { name: 'Media' })
+    expect(mediaBtn.getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('content-type seg: exactly one button pressed after switching to Media', () => {
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Media' }))
+
+    expect(screen.getByRole('button', { name: 'Media' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Text' }).getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('recurrence-mode seg: role="group" with accessible label "Recurrence mode"', () => {
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    const recurGroup = screen.getByRole('group', { name: 'Recurrence mode' })
+    expect(recurGroup).toBeDefined()
+  })
+
+  it('recurrence-mode seg: One-shot is aria-pressed=true by default', () => {
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    const oneShotBtn = screen.getByRole('button', { name: 'One-shot' })
+    expect(oneShotBtn.getAttribute('aria-pressed')).toBe('true')
+    const recurBtn = screen.getByRole('button', { name: 'Recurring' })
+    expect(recurBtn.getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('recurrence-mode seg: exactly one button pressed after switching to Recurring', () => {
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Recurring' }))
+
+    expect(screen.getByRole('button', { name: 'Recurring' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: 'One-shot' }).getAttribute('aria-pressed')).toBe('false')
   })
 })
 
@@ -937,7 +1007,8 @@ describe('ScheduleComposerModal — cancel and close', () => {
     const onClose = vi.fn()
     render(withToast(<ScheduleComposerModal {...defaultProps({ onClose })} />))
 
-    fireEvent.click(screen.getByRole('button', { name: /Close/i }))
+    // ModalHeader renders the close button with label 'Close dialog'
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
@@ -957,22 +1028,26 @@ describe('ScheduleComposerModal — cancel and close', () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 
-  it('calls onClose when the backdrop is clicked', () => {
+  it('backdrop pointerdown does NOT dismiss (dismissable=false, C-B3W2-2)', () => {
+    // C-B3W2-2: inverted assertion — form dialogs use the protective default.
+    // Previously backdrop click destroyed eight fields of state (no recovery).
     const onClose = vi.fn()
     render(withToast(<ScheduleComposerModal {...defaultProps({ onClose })} />))
 
-    // Backdrop is the c-dialog-backdrop div wrapping the dialog
-    const backdrop = screen.getByRole('dialog').parentElement as HTMLElement
-    fireEvent.click(backdrop)
-    expect(onClose).toHaveBeenCalledTimes(1)
+    // Modal portals to body; backdrop is document.querySelector
+    const backdrop = document.querySelector('.soup-modal-backdrop')
+    expect(backdrop).not.toBeNull()
+    fireEvent.pointerDown(backdrop as Element)
+    expect(onClose).not.toHaveBeenCalled()
   })
 
-  it('does NOT call onClose when clicking inside the dialog panel (stopPropagation)', () => {
+  it('does NOT call onClose when pointerdown is inside the dialog panel', () => {
+    // stopPropagation mechanism replaced by useDismissable pointerdown semantics
     const onClose = vi.fn()
     render(withToast(<ScheduleComposerModal {...defaultProps({ onClose })} />))
 
     const dialog = screen.getByRole('dialog')
-    fireEvent.click(dialog)
+    fireEvent.pointerDown(dialog)
     expect(onClose).not.toHaveBeenCalled()
   })
 

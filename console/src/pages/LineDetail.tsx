@@ -301,8 +301,9 @@ export default function LineDetail() {
           onLinked={() => { setShowRelink(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success(`${line?.name} re-linked!`); }}
         />
       </Suspense>
-      {showConfigEditor && line.config && (
+      {line.config && (
         <ConfigEditDialog
+          open={showConfigEditor}
           config={line.config}
           lineName={line.name}
           adminPhonesDisplay={(line as unknown as { adminPhonesDisplay?: Record<string, string> }).adminPhonesDisplay}

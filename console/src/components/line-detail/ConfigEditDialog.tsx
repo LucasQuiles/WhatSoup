@@ -1,10 +1,31 @@
-import React, { useState, useCallback } from 'react'
+/**
+ * ConfigEditDialog — migrated to Modal primitive (B3 wave-2).
+ *
+ * Migration:
+ *   - Removes ad-hoc backdrop div, stopPropagation, and hand-wired aria attrs.
+ *   - dismissable=false: backdrop click was silently destroying the whole patch.
+ *     modal.md: explicit Save/Cancel verbs exist — protective default applied.
+ *   - NEW required `open` prop + LineDetail always-mounts while line.config
+ *     (C-B3W2-1): useDismissable restores focus only on the open→false transition,
+ *     never on unmount; always-mounted ensures focus-restoration works correctly.
+ *   - Restart-warning strip placed as a direct shell child between ModalHeader and
+ *     ModalBody to stay non-scrolling (C-B3W2-6 spec-tension item).
+ *   - GAINS: stacking-aware Escape (previously had NONE), focus trap, focus
+ *     restoration.
+ *   - Width: --panel-config-edit 560px → size="md" 560px (exact match, zero delta).
+ *   - Token deletions: --panel-config-edit and --modal-max-h-sm retired (last
+ *     consumers gone; verified zero remaining references).
+ *   - Title typography normalises to soup-modal-title; X import removed.
+ */
+import React, { useState, useCallback, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { X, AlertTriangle, Save } from 'lucide-react'
+import { AlertTriangle, Save } from 'lucide-react'
 import TagInput from '../TagInput'
 import { normalizePhoneInput, validatePhone } from '../../lib/validation'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
+import { Modal, ModalHeader, ModalBody, ModalFooter } from '../primitives'
+import { Button } from '../primitives/Button'
 import {
   CONFIG_EXCLUDE_KEYS,
   AGENT_OPTION_FIELDS,
@@ -21,11 +42,13 @@ import {
 } from './config-helpers'
 
 export function ConfigEditDialog({
+  open,
   config,
   lineName,
   adminPhonesDisplay,
   onClose,
 }: {
+  open: boolean
   config: Record<string, unknown>
   lineName: string
   adminPhonesDisplay?: Record<string, string>
@@ -36,6 +59,16 @@ export function ConfigEditDialog({
   const [patch, setPatch] = useState<Record<string, unknown>>({})
   const [saving, setSaving] = useState(false)
   const [customEnumFields, setCustomEnumFields] = useState<Record<string, true>>({})
+
+  // Reset patch and custom-enum state on each open (C-B3W2-1 — mirrors
+  // CreateGroupModal precedent; provides fresh-state-per-open semantics that
+  // mount-gating previously provided).
+  useEffect(() => {
+    if (open) {
+      setPatch({})
+      setCustomEnumFields({})
+    }
+  }, [open])
 
   const editableEntries: [string, unknown][] = React.useMemo(() => {
     const entries: [string, unknown][] = []
@@ -260,77 +293,59 @@ export function ConfigEditDialog({
   })
 
   return (
-    <div
-      className="c-dialog-backdrop"
-      onClick={onClose}
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="md"
+      dismissable={false}
     >
+      <ModalHeader title="Edit Configuration" onClose={onClose} />
+
+      {/* Restart warning — direct shell child between ModalHeader and ModalBody so it
+          does not scroll with the body (C-B3W2-6 non-scrolling anatomy region). */}
       <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="config-edit-dialog-title"
-        className="c-dialog flex flex-col w-[var(--panel-config-edit)] max-h-[var(--modal-max-h-sm)] max-w-[var(--panel-max-inline)]"
-        onClick={e => e.stopPropagation()}
+        className="flex items-center gap-2 flex-shrink-0 py-[var(--sp-3)] px-[var(--sp-5)] bg-[var(--s-warn-wash)] c-border-b text-s-warn text-sm"
       >
-        {/* Header */}
-        <div className="c-dialog-header flex-shrink-0">
-          <span id="config-edit-dialog-title" className="font-sans font-semibold text-lg">
-            Edit Configuration
-          </span>
-          <button type="button" onClick={onClose} className="c-btn c-btn-ghost c-btn-sm" aria-label="Close dialog">
-            <X size={18} strokeWidth={1.75} />
-          </button>
-        </div>
-
-        {/* Restart warning */}
-        <div
-          className="flex items-center gap-2 flex-shrink-0 py-[var(--sp-3)] px-[var(--sp-5)] bg-[var(--s-warn-wash)] c-border-b text-s-warn text-sm"
-        >
-          <AlertTriangle size={14} strokeWidth={1.75} />
-          <span>Some changes may require a restart to take effect.</span>
-        </div>
-
-        {/* Body — scrollable */}
-        <div className="flex-1 overflow-y-auto py-[var(--sp-4)] px-[var(--sp-5)]">
-          <div className="flex flex-col gap-[var(--sp-4)]">
-            {editableEntries.map(([key, originalValue]) => (
-              <div key={key}>
-                <label className="c-label block mb-[var(--sp-1)]">
-                  {key}
-                  {(key in patch || key in customEnumFields) && (
-                    <span
-                      className="font-mono ml-[var(--sp-2)] text-s-warn text-xs"
-                    >
-                      modified
-                    </span>
-                  )}
-                </label>
-                {renderField(key, originalValue)}
-                {(key in patch || key in customEnumFields) && getFieldError(key) && (
-                  <span className="font-mono block text-s-crit mt-[var(--sp-1)] text-xs">
-                    {getFieldError(key)}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="c-dialog-footer">
-          <button type="button" onClick={onClose} className="c-btn c-btn-ghost">
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving || !hasChanges || hasErrors}
-            className={`c-btn ${hasChanges ? 'c-btn-primary' : 'c-btn-ghost'}`}
-          >
-            <Save size={14} strokeWidth={1.75} />
-            {saving ? 'Saving...' : `Save${hasChanges ? ` (${Object.keys(patch).length})` : ''}`}
-          </button>
-        </div>
+        <AlertTriangle size={14} strokeWidth={1.75} />
+        <span>Some changes may require a restart to take effect.</span>
       </div>
-    </div>
+
+      <ModalBody>
+        {editableEntries.map(([key, originalValue]) => (
+          <div key={key}>
+            <label className="c-label block mb-[var(--sp-1)]">
+              {key}
+              {(key in patch || key in customEnumFields) && (
+                <span
+                  className="font-mono ml-[var(--sp-2)] text-s-warn text-xs"
+                >
+                  modified
+                </span>
+              )}
+            </label>
+            {renderField(key, originalValue)}
+            {(key in patch || key in customEnumFields) && getFieldError(key) && (
+              <span className="font-mono block text-s-crit mt-[var(--sp-1)] text-xs">
+                {getFieldError(key)}
+              </span>
+            )}
+          </div>
+        ))}
+      </ModalBody>
+
+      <ModalFooter>
+        <Button variant="ghost" onClick={onClose} disabled={saving}>
+          Cancel
+        </Button>
+        <Button
+          variant={hasChanges ? 'primary' : 'ghost'}
+          onClick={handleSave}
+          disabled={saving || !hasChanges || hasErrors}
+          icon={<Save size={14} strokeWidth={1.75} />}
+        >
+          {saving ? 'Saving...' : `Save${hasChanges ? ` (${Object.keys(patch).length})` : ''}`}
+        </Button>
+      </ModalFooter>
+    </Modal>
   )
 }

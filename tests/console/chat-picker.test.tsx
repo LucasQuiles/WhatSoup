@@ -229,17 +229,22 @@ describe('ChatPicker keyboard navigation', () => {
 // ---------------------------------------------------------------------------
 // Escape-layering defect fix (§6.3 / C-B2-6 ordering requirement)
 //
-// ChatPicker inside a legacy-style dialog that has its own bubble-phase Escape
-// handler. First Escape must close ONLY the panel; the dialog's handler must
-// NOT fire for that keydown.
+// ChatPicker inside a dialog (formerly legacy-style with a bubble-phase Escape
+// handler). First Escape must close ONLY the panel; any outer dialog handler
+// must NOT fire for that keydown.
+// NOTE (B3 wave 2): ScheduleComposerModal previously was the live example of the
+// legacy bubble-phase pattern; it was migrated to the Modal primitive in wave 2
+// and no longer uses a hand-rolled Escape handler. The stack-based ordering
+// protection (capture-phase + stopPropagation) remains relevant for any future
+// dialog that might re-introduce the anti-pattern.
 // ---------------------------------------------------------------------------
 
 describe('ChatPicker Escape-layering fix', () => {
   it('Escape closes panel only — legacy bubble-phase dialog handler does not fire', async () => {
     const dialogEscapeHandler = vi.fn()
 
-    // Mount a container div that mimics a legacy dialog with a bubble-phase
-    // document keydown listener (the pattern used by ScheduleComposerModal).
+    // Mount a container div that mimics a dialog with a bubble-phase document
+    // keydown listener (the former ScheduleComposerModal anti-pattern).
     const container = document.createElement('div')
     document.body.appendChild(container)
     document.addEventListener('keydown', (e) => {

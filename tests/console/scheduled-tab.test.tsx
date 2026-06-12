@@ -363,7 +363,7 @@ describe('ScheduledTab — composer open / close / edit / duplicate / new', () =
     fireEvent.click(screen.getByLabelText('Edit scheduled message'))
     expect(screen.getByRole('dialog', { name: 'Edit Scheduled Message' })).toBeDefined()
 
-    fireEvent.click(screen.getByLabelText('Close'))
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
 
     expect(screen.queryByRole('dialog')).toBeNull()
 

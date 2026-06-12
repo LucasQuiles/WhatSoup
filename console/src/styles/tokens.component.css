@@ -36,10 +36,7 @@
   --panel-confirm: 420px;    /* confirm dialog width */
   --panel-shortcuts: 340px;  /* keyboard shortcuts modal */
   --panel-wizard: 720px;     /* wizard dialog width */
-  --panel-composer: 540px;   /* schedule composer modal width */
-  --panel-config-edit: 560px; /* config edit dialog width */
   --panel-max-inline: 90%;   /* standard dialog max inline size */
-  --panel-max-inline-wide: 95vw; /* wide dialog max inline size */
   --tooltip-min-w: 220px;    /* message tooltip min width */
   --tooltip-val-max: 160px;  /* tooltip value truncation */
   --toast-max-w: 360px;      /* toast notification max width */
@@ -63,8 +60,6 @@
   --modal-w-lg: 720px;        /* modal width — lg/wizard size (tokens-v3 §6.12, DD-18r SSOT leg) */
   --modal-min-h: min(500px, 85dvh);      /* wizard minimum height */
   --modal-max-h: 85vh;       /* modal maximum height */
-  --modal-max-h-sm: 80vh;    /* compact modal maximum height */
-  --modal-max-h-lg: 90vh;    /* expanded modal maximum height */
   /* ═══ Z-index scale ═══ */
   --z-float: 10;             /* floating buttons, scroll indicators */
   --z-overlay: 100;          /* modal overlays, dialogs */

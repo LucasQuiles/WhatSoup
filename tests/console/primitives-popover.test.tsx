@@ -534,13 +534,19 @@ describe('Popover — outside-click', () => {
 //
 // Defect being fixed (packet §6.3):
 // Pre-B2: Escape with a picker panel (ChatPicker) open inside a legacy dialog
-// (ScheduleComposerModal, hand-rolled bubble-phase document keydown handler) fires
-// BOTH handlers — panel AND dialog close together.
+// (formerly ScheduleComposerModal, which used a hand-rolled bubble-phase document
+// keydown handler) would fire BOTH handlers — panel AND dialog close together.
+//
+// NOTE (B3 wave 2): ScheduleComposerModal was migrated to the Modal primitive and
+// no longer carries a hand-rolled Escape handler. The stack-based ordering protection
+// (capture-phase + stopPropagation) upgrades from phase-ordering to stack-membership
+// for all migrated dialogs. The fixture below uses an inline useEffect to simulate
+// the legacy anti-pattern, which remains relevant for dialogs not yet migrated.
 //
 // Fix mechanism: useDismissable registers its Escape handler on the CAPTURE phase
 // with stopPropagation. When the Popover is registered on the overlay stack,
 // its capture-phase handler fires, calls the topmost handler (popoverClose), then
-// calls stopPropagation — the bubble-phase handler on the legacy dialog never fires.
+// calls stopPropagation — the bubble-phase handler on any legacy dialog never fires.
 //
 // The test simulates this with an inline useEffect bubble-phase listener.
 //

@@ -50,12 +50,12 @@ const tw = (...parts) => parts.join('')
 // ║    200px→var(--dropdown-min-w)  256px→var(--panel-contact)      ║
 // ║    260px→var(--panel-actions)   288px→var(--panel-chat-list)    ║
 // ║    320px→var(--empty-max-w)     340px→var(--panel-shortcuts)    ║
-// ║    420px→var(--panel-confirm)   540px→var(--panel-composer)     ║
+// ║    420px→var(--panel-confirm)   560px→var(--modal-w-md)         ║
 // ║    720px→var(--panel-wizard)                                    ║
 // ║                                                                 ║
 // ║  MODAL HEIGHTS:                                                 ║
-// ║    80vh→var(--modal-max-h-sm)   85vh→var(--modal-max-h)        ║
-// ║    90vh→var(--modal-max-h-lg)   90vw→var(--panel-max-inline-wide) ║
+// ║    85vh→var(--modal-max-h)                                     ║
+// ║    90%→var(--panel-max-inline)                                 ║
 // ║                                                                 ║
 // ║  OPACITY:                                                       ║
 // ║    0.3→var(--opacity-soft)      0.4→var(--opacity-faint)       ║
@@ -418,7 +418,7 @@ const designSystemRestrictions = [
 
         {
           selector: 'Property[key.name=/^(maxHeight|maxWidth|minHeight|minWidth|height|width)$/][value.value=/^\\d+(vh|vw)$/]',
-          message: '⛔ Bare vh/vw unit. FIX: replace with CSS variable. 80vh→var(--modal-max-h-sm) 85vh→var(--modal-max-h) 90vh→var(--modal-max-h-lg) 90vw→var(--panel-max-inline-wide). Or use dvh for mobile safety.',
+          message: '⛔ Bare vh/vw unit. FIX: replace with CSS variable. 85vh→var(--modal-max-h) 90%→var(--panel-max-inline). Or use dvh for mobile safety.',
         },
 
         // ═══ INLINE TRANSITION ═══
@@ -603,7 +603,7 @@ const scheduledGroupsDesignSystemRestrictions = [
   // ═══ MAX-HEIGHT TOKEN IN STYLE ═══
   {
     selector: 'JSXAttribute[name.name="style"] Property[key.name="maxHeight"][value.value=/^var\\(--modal/]',
-    message: '⛔ Inline maxHeight modal token. FIX: remove from style, add max-h-[var(--modal-max-h)] to className. Variants: max-h-[var(--modal-max-h-sm)] or max-h-[var(--modal-max-h-lg)].',
+    message: '⛔ Inline maxHeight modal token. FIX: remove from style, add max-h-[var(--modal-max-h)] to className.',
   },
 
   // ═══ TOP/LEFT/RIGHT POSITIONING ═══

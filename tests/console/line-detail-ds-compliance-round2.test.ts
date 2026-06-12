@@ -47,21 +47,25 @@ describe('design system compliance — round 2 shared search inputs', () => {
     const groupCard = read('console/src/components/line-detail/GroupCard.tsx')
     const scheduledRow = read('console/src/components/line-detail/ScheduledMessageRow.tsx')
 
-    // B3 wave 1: CreateGroupModal migrated onto the Modal primitive — its pin
-    // flips from the legacy dialog classes to the primitive contract. The other
-    // two keep the legacy pins until their own waves (B3 waves 2-3) migrate them.
+    // B3 wave 1: CreateGroupModal migrated. B3 wave 2: ScheduleComposerModal migrated.
+    // GroupDetailModal keeps legacy pins until wave 3.
     expect(createGroup).toContain('Modal')
     expect(createGroup).toContain('ModalHeader')
     expect(createGroup).toContain('ModalFooter')
     expect(createGroup).not.toContain('c-dialog-backdrop')
 
-    for (const modal of [scheduleComposer, groupDetail]) {
+    // groupDetail still on legacy shell (wave 3)
+    for (const modal of [groupDetail]) {
       expect(modal).toContain('c-dialog-backdrop')
       expect(modal).toContain('c-dialog')
       expect(modal).toContain('c-dialog-header')
     }
 
-    expect(scheduleComposer).toContain('c-dialog-footer')
+    // scheduleComposer now on Modal primitive (B3 wave 2)
+    expect(scheduleComposer).toContain('Modal')
+    expect(scheduleComposer).toContain('ModalHeader')
+    expect(scheduleComposer).toContain('ModalFooter')
+    expect(scheduleComposer).not.toContain('c-dialog-backdrop')
     expect(createGroup).toContain('className="c-input font-mono text-t2"')
     expect(scheduleComposer).toContain('className="c-input font-mono text-t2')
     expect(groupDetail).toContain('className="c-tab"')
