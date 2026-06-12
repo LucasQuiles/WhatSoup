@@ -4,14 +4,19 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.whatsoup.reply-guarantee</string>
+  <string>com.whatsoup.harness-maintenance</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>${WHATSOUP_REPO_ROOT}/deploy/scripts/reply-guarantee-drain.sh</string>
+    <string>${WHATSOUP_REPO_ROOT}/deploy/scripts/harness-maintenance.sh</string>
   </array>
-  <key>StartInterval</key>
-  <integer>60</integer>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
   <key>RunAtLoad</key>
   <false/>
   <key>WorkingDirectory</key>
@@ -22,8 +27,8 @@
     <string>${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>StandardOutPath</key>
-  <string>${HOME}/Library/Logs/whatsoup/reply-guarantee.log</string>
+  <string>${HOME}/Library/Logs/whatsoup/harness-maintenance.log</string>
   <key>StandardErrorPath</key>
-  <string>${HOME}/Library/Logs/whatsoup/reply-guarantee.err.log</string>
+  <string>${HOME}/Library/Logs/whatsoup/harness-maintenance.err.log</string>
 </dict>
 </plist>

@@ -5,63 +5,40 @@ import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import type { PresenceCache } from '../../transport/presence-cache.ts';
+import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 
-const SendTypingSchema = z.object({
-  chatJid: z.string(),
-  type: z.enum(['composing', 'recording', 'paused']),
-});
-
-function makeSendTyping(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
-  return {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
+const presenceSockConfigs: SockToolConfig<any>[] = [
+  {
     name: 'send_typing',
     description:
       'Send a typing indicator to the current chat. Use composing, recording, or paused.',
-    schema: SendTypingSchema,
+    schema: z.object({
+      chatJid: z.string(),
+      type: z.enum(['composing', 'recording', 'paused']),
+    }),
     scope: 'chat',
     targetMode: 'injected',
     replayPolicy: 'safe',
-    handler: async (params) => {
-      const { chatJid, type } = SendTypingSchema.parse(params);
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
-      }
+    call: async ({ chatJid, type }, sock) => {
       await sock.sendPresenceUpdate(type, chatJid);
       return { success: true, type };
     },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// subscribe_presence
-// ---------------------------------------------------------------------------
-
-const SubscribePresenceSchema = z.object({
-  jid: z.string(),
-});
-
-function makeSubscribePresence(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
-  return {
+  },
+  {
     name: 'subscribe_presence',
     description:
       'Subscribe to presence updates for a WhatsApp contact or group JID (global). After subscribing, presence status will be available via get_presence.',
-    schema: SubscribePresenceSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    schema: z.object({
+      jid: z.string(),
+    }),
     replayPolicy: 'safe',
-    handler: async (params) => {
-      const { jid } = SubscribePresenceSchema.parse(params);
-
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
-      }
-
+    call: async ({ jid }, sock) => {
       await sock.presenceSubscribe(jid);
       return { success: true, jid };
     },
-  };
-}
+  },
+];
 
 // ---------------------------------------------------------------------------
 // get_presence
@@ -107,7 +84,6 @@ export function registerPresenceTools(
   presenceCache: PresenceCache,
   register: (tool: ToolDeclaration) => void,
 ): void {
-  register(makeSendTyping(getSock));
-  register(makeSubscribePresence(getSock));
+  registerSockTools(getSock, presenceSockConfigs, register);
   register(makeGetPresence(presenceCache));
 }

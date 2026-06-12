@@ -12,6 +12,7 @@ import { type MessageRow, rowToMessage } from '../../core/messages.ts';
 import { createChildLogger } from '../../logger.ts';
 import { nowUnixSec } from '../../fleet/time-utils.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 
 const log = createChildLogger('chat-management');
 const SQLITE_READ_LIMIT_MAX = 1000;
@@ -498,94 +499,49 @@ function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket |
 }
 
 // ---------------------------------------------------------------------------
-// archive_chat — archive or unarchive a chat (scope: global)
+// Sock-only tools: archive_chat, pin_chat, mute_chat, mark_messages_read,
+// star_message (all scope: global)
 // ---------------------------------------------------------------------------
 
-const ArchiveChatSchema = z.object({
-  jid: z.string(),
-  archive: z.boolean(),
-});
-
-function makeArchiveChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
-  return {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
+const chatManagementSockConfigs: SockToolConfig<any>[] = [
+  {
     name: 'archive_chat',
     description: 'Archive or unarchive a WhatsApp chat (global).',
-    schema: ArchiveChatSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    schema: z.object({
+      jid: z.string(),
+      archive: z.boolean(),
+    }),
     replayPolicy: 'safe',
-    handler: async (params) => {
-      const { jid, archive } = ArchiveChatSchema.parse(params);
-
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
-      }
-
+    call: async ({ jid, archive }, sock) => {
       await sock.chatModify({ archive, lastMessages: [] }, jid);
       return { success: true, jid, archive };
     },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// pin_chat — pin or unpin a chat (scope: global)
-// ---------------------------------------------------------------------------
-
-const PinChatSchema = z.object({
-  jid: z.string(),
-  pin: z.boolean(),
-});
-
-function makePinChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
-  return {
+  },
+  {
     name: 'pin_chat',
     description: 'Pin or unpin a WhatsApp chat (global).',
-    schema: PinChatSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    schema: z.object({
+      jid: z.string(),
+      pin: z.boolean(),
+    }),
     replayPolicy: 'safe',
-    handler: async (params) => {
-      const { jid, pin } = PinChatSchema.parse(params);
-
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
-      }
-
+    call: async ({ jid, pin }, sock) => {
       await sock.chatModify({ pin }, jid);
       return { success: true, jid, pin };
     },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// mute_chat — mute or unmute a chat (scope: global)
-// ---------------------------------------------------------------------------
-
-const MuteChatSchema = z.object({
-  jid: z.string(),
-  mute: z.boolean(),
-  /** Unix timestamp (seconds) until which to mute; 0 means unmute */
-  until: z.number().optional(),
-});
-
-function makeMuteChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
-  return {
+  },
+  {
     name: 'mute_chat',
     description: 'Mute or unmute a WhatsApp chat (global). Provide until (unix seconds) for timed mute.',
-    schema: MuteChatSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    schema: z.object({
+      jid: z.string(),
+      mute: z.boolean(),
+      /** Unix timestamp (seconds) until which to mute; 0 means unmute */
+      until: z.number().optional(),
+    }),
     replayPolicy: 'safe',
-    handler: async (params) => {
-      const { jid, mute, until } = MuteChatSchema.parse(params);
-
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
-      }
-
+    call: async ({ jid, mute, until }, sock) => {
       if (mute) {
         const muteEndTime = until ?? (nowUnixSec() + 8 * 3600); // default 8h
         await sock.chatModify({ mute: muteEndTime }, jid);
@@ -595,37 +551,19 @@ function makeMuteChat(getSock: () => ExtendedBaileysSocket | null): ToolDeclarat
 
       return { success: true, jid, mute };
     },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// mark_messages_read — send read receipts (blue ticks) (scope: global)
-// ---------------------------------------------------------------------------
-
-const MarkMessagesReadSchema = z.object({
-  jid: z.string(),
-  message_ids: z.array(z.string()),
-  from_me: z.boolean().optional(),
-});
-
-function makeMarkMessagesRead(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
-  return {
+  },
+  {
     name: 'mark_messages_read',
     description:
       'Mark WhatsApp messages as read (send blue ticks) for the given JID (global).',
-    schema: MarkMessagesReadSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    schema: z.object({
+      jid: z.string(),
+      message_ids: z.array(z.string()),
+      from_me: z.boolean().optional(),
+    }),
     replayPolicy: 'safe',
-    handler: async (params) => {
-      const { jid, message_ids, from_me = false } = MarkMessagesReadSchema.parse(params);
-
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
-      }
-
-      const keys = message_ids.map((id) => ({
+    call: async ({ jid, message_ids, from_me = false }, sock) => {
+      const keys = message_ids.map((id: string) => ({
         remoteJid: jid,
         id,
         fromMe: from_me,
@@ -634,42 +572,24 @@ function makeMarkMessagesRead(getSock: () => ExtendedBaileysSocket | null): Tool
       await sock.readMessages(keys);
       return { success: true, jid, count: message_ids.length };
     },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// star_message — star or unstar messages (scope: global)
-// ---------------------------------------------------------------------------
-
-const StarMessageSchema = z.object({
-  jid: z.string(),
-  message_ids: z.array(z.string()),
-  star: z.boolean(),
-  from_me: z.boolean().optional(),
-});
-
-function makeStarMessage(getSock: () => ExtendedBaileysSocket | null): ToolDeclaration {
-  return {
+  },
+  {
     name: 'star_message',
     description: 'Star or unstar WhatsApp messages (global).',
-    schema: StarMessageSchema,
-    scope: 'global',
-    targetMode: 'caller-supplied',
+    schema: z.object({
+      jid: z.string(),
+      message_ids: z.array(z.string()),
+      star: z.boolean(),
+      from_me: z.boolean().optional(),
+    }),
     replayPolicy: 'safe',
-    handler: async (params) => {
-      const { jid, message_ids, star, from_me = false } = StarMessageSchema.parse(params);
-
-      const sock = getSock();
-      if (!sock) {
-        throw new Error('WhatsApp is not connected');
-      }
-
-      const messages = message_ids.map((id) => ({ id, fromMe: from_me }));
+    call: async ({ jid, message_ids, star, from_me = false }, sock) => {
+      const messages = message_ids.map((id: string) => ({ id, fromMe: from_me }));
       await sock.star(jid, messages, star);
       return { success: true, jid, count: message_ids.length, star };
     },
-  };
-}
+  },
+];
 
 // ---------------------------------------------------------------------------
 // Export
@@ -685,9 +605,5 @@ export function registerChatManagementTools(
   register(makeListChats(db));
   register(makeGetChat(db));
   register(makeForwardMessage(db, getSock));
-  register(makeArchiveChat(getSock));
-  register(makePinChat(getSock));
-  register(makeMuteChat(getSock));
-  register(makeMarkMessagesRead(getSock));
-  register(makeStarMessage(getSock));
+  registerSockTools(getSock, chatManagementSockConfigs, register);
 }
