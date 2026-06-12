@@ -6,7 +6,12 @@ vi.mock('node:child_process', async () => {
   return childProcessMock();
 });
 
-import { lookupCredential, detectKeyringBackend, _resetBackendCache } from '../../src/lib/keyring.ts';
+import {
+  lookupCredential,
+  detectKeyringBackend,
+  resolveProviderKeyService,
+  _resetBackendCache,
+} from '../../src/lib/keyring.ts';
 import { execFileSync } from 'node:child_process';
 
 const mockedExecFileSync = vi.mocked(execFileSync);
@@ -118,6 +123,35 @@ describe('keyring', () => {
       mockedExecFileSync.mockReturnValueOnce(Buffer.from('custom-val'));
 
       expect(lookupCredential('some_custom_service')).toBe('custom-val');
+    });
+  });
+
+  describe('resolveProviderKeyService', () => {
+    it('maps opencode-cli models to the lower-cased provider prefix', () => {
+      expect(resolveProviderKeyService('opencode-cli', 'minimax/MiniMax-M2.7')).toBe('minimax');
+      expect(resolveProviderKeyService('opencode-cli', ' DeepSeek/deepseek-chat ')).toBe('deepseek');
+    });
+
+    it('maps HTTP API providers to their conventional services', () => {
+      expect(resolveProviderKeyService('openai-api', undefined)).toBe('openai');
+      expect(resolveProviderKeyService('anthropic-api', undefined)).toBe('anthropic');
+    });
+
+    it('honors providerConfig.apiKeyService for HTTP API providers', () => {
+      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: 'prod-openai' })).toBe('prod-openai');
+      expect(resolveProviderKeyService('anthropic-api', undefined, { apiKeyService: 'prod-anthropic' })).toBe('prod-anthropic');
+      expect(resolveProviderKeyService('openai-api', undefined, { apiKeyService: ' prod-openai ' })).toBe(' prod-openai ');
+      expect(resolveProviderKeyService('opencode-cli', 'minimax/x', { apiKeyService: 'ignored' })).toBe('minimax');
+    });
+
+    it('returns null for native-auth providers and opencode models without a prefix', () => {
+      expect(resolveProviderKeyService('claude-cli', undefined)).toBeNull();
+      expect(resolveProviderKeyService('codex-cli', undefined)).toBeNull();
+      expect(resolveProviderKeyService('gemini-cli', undefined)).toBeNull();
+      expect(resolveProviderKeyService('opencode-cli', undefined)).toBeNull();
+      expect(resolveProviderKeyService('opencode-cli', '   ')).toBeNull();
+      expect(resolveProviderKeyService('opencode-cli', 42)).toBeNull();
+      expect(resolveProviderKeyService(null, 'minimax/x')).toBeNull();
     });
   });
 });

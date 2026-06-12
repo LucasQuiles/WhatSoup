@@ -42,6 +42,23 @@ const CATALOG: ProviderCatalogEntry[] = [
   { id: 'anthropic-api', displayName: 'Anthropic', type: 'api', needsApiKey: true, providerConfig: ['model', 'baseUrl', 'apiKeyService'] },
 ]
 
+function fallbackStatus(
+  overrides: Partial<ProviderStatus['fallback']> = {},
+): ProviderStatus['fallback'] {
+  return {
+    provider: null,
+    model: null,
+    keyPresent: null,
+    active: false,
+    activeUntil: null,
+    effectiveProvider: null,
+    turnsServed: null,
+    turnsEmpty: null,
+    lastFallbackTurnAt: null,
+    ...overrides,
+  }
+}
+
 function withProviders(node: ReactElement) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return <QueryClientProvider client={client}>{node}</QueryClientProvider>
@@ -59,7 +76,8 @@ describe('ProvidersKeysCard — render + key tri-state', () => {
   it('renders the primary provider display name, model, and a "key set" badge when keyPresent is true', async () => {
     const status: ProviderStatus = {
       primary: { provider: 'openai-api', model: 'gpt-4o', keyPresent: true },
-      fallback: { provider: null, model: null, keyPresent: null, active: false, activeUntil: null },
+      fallback: fallbackStatus(),
+      lineReachable: true,
     }
     getProviderStatusMock.mockResolvedValue(status)
 
@@ -74,7 +92,8 @@ describe('ProvidersKeysCard — render + key tri-state', () => {
   it('renders a "no key" badge when keyPresent is false', async () => {
     const status: ProviderStatus = {
       primary: { provider: 'openai-api', model: 'gpt-4o', keyPresent: false },
-      fallback: { provider: null, model: null, keyPresent: null, active: false, activeUntil: null },
+      fallback: fallbackStatus(),
+      lineReachable: true,
     }
     getProviderStatusMock.mockResolvedValue(status)
 
@@ -86,7 +105,8 @@ describe('ProvidersKeysCard — render + key tri-state', () => {
   it('renders a native-auth badge when keyPresent is null', async () => {
     const status: ProviderStatus = {
       primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
-      fallback: { provider: null, model: null, keyPresent: null, active: false, activeUntil: null },
+      fallback: fallbackStatus(),
+      lineReachable: true,
     }
     getProviderStatusMock.mockResolvedValue(status)
 
@@ -106,7 +126,15 @@ describe('ProvidersKeysCard — fallback states', () => {
     const activeUntil = Date.now() + 90_000 // 90s out → "in 1m"
     const status: ProviderStatus = {
       primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
-      fallback: { provider: 'openai-api', model: 'gpt-4o', keyPresent: true, active: true, activeUntil },
+      fallback: fallbackStatus({
+        provider: 'openai-api',
+        model: 'gpt-4o',
+        keyPresent: true,
+        active: true,
+        activeUntil,
+        effectiveProvider: 'openai-api',
+      }),
+      lineReachable: true,
     }
     getProviderStatusMock.mockResolvedValue(status)
 
@@ -121,7 +149,12 @@ describe('ProvidersKeysCard — fallback states', () => {
   it('shows a muted "fallback configured" state when a fallback exists but is inactive', async () => {
     const status: ProviderStatus = {
       primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
-      fallback: { provider: 'anthropic-api', model: 'claude-sonnet-4-6', keyPresent: false, active: false, activeUntil: null },
+      fallback: fallbackStatus({
+        provider: 'anthropic-api',
+        model: 'claude-sonnet-4-6',
+        keyPresent: false,
+      }),
+      lineReachable: true,
     }
     getProviderStatusMock.mockResolvedValue(status)
 
@@ -134,7 +167,8 @@ describe('ProvidersKeysCard — fallback states', () => {
   it('shows "no fallback" when no fallback provider is configured', async () => {
     const status: ProviderStatus = {
       primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
-      fallback: { provider: null, model: null, keyPresent: null, active: false, activeUntil: null },
+      fallback: fallbackStatus(),
+      lineReachable: true,
     }
     getProviderStatusMock.mockResolvedValue(status)
 

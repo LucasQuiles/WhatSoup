@@ -20,7 +20,8 @@ interface ProviderCatalogMeta {
    *
    * NOTE: this is the catalog-level capability flag. It is distinct from the
    * per-instance keyring-service resolution used by the provider-status route,
-   * where WhatSoup's anthropic-api client resolves to native auth (no key).
+   * where model prefixes and providerConfig.apiKeyService can change which
+   * service is checked.
    */
   needsApiKey: boolean;
 }
