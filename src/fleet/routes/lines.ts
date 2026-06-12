@@ -451,6 +451,15 @@ function keyPresentFor(
   return lookupCredential(service) !== null;
 }
 
+function apiProviderConfigModel(
+  provider: string | null | undefined,
+  providerConfig: Record<string, unknown> | undefined,
+): string | undefined {
+  if (provider !== 'openai-api' && provider !== 'anthropic-api') return undefined;
+  const model = providerConfig?.['model'];
+  return typeof model === 'string' && model.trim() !== '' ? model : undefined;
+}
+
 function lineReachableFromPoll(poll: InstanceStatus | undefined): boolean {
   if (!poll) return false;
   if (poll.status === 'online' || poll.status === 'logged_out') return poll.health !== null;
@@ -482,11 +491,15 @@ export async function handleGetLineProviderStatus(
       parsedConfig = parsed as Record<string, unknown>;
       agentOptions = recordValue(parsedConfig.agentOptions) ?? {};
     }
-  } catch { /* config unreadable — treat as empty (provider defaults to null) */ }
+  } catch { /* config unreadable — treat as empty (provider defaults to runtime default) */ }
 
-  const primaryProvider = stringValue(agentOptions.provider);
-  const primaryModel = resolveAgentModel(parsedConfig) ?? stringValue(agentOptions.model);
+  const primaryProvider =
+    stringValue(agentOptions.provider) ?? (instance.type === 'agent' ? 'claude-cli' : null);
   const providerConfig = recordValue(agentOptions.providerConfig);
+  const primaryModel =
+    resolveAgentModel(parsedConfig) ??
+    apiProviderConfigModel(primaryProvider, providerConfig) ??
+    stringValue(agentOptions.model);
   const fallbackProvider = stringValue(agentOptions.fallbackProvider);
   const fallbackModel = stringValue(agentOptions.fallbackModel);
   const fallbackProviderConfig = fallbackProvider === primaryProvider ? providerConfig : undefined;

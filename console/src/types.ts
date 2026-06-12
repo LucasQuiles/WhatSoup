@@ -264,5 +264,15 @@ export interface ProviderStatus {
     active: boolean;
     /** Epoch ms the fallback window reverts, or null when inactive/unset. */
     activeUntil: number | null;
+    /** Provider currently serving turns according to the health snapshot. */
+    effectiveProvider: string | null;
+    /** Process-local count of turns served during the current fallback window. */
+    turnsServed: number | null;
+    /** Process-local count of fallback turns with no visible output. */
+    turnsEmpty: number | null;
+    /** Epoch ms of the most recent fallback-served turn, or null when absent. */
+    lastFallbackTurnAt: number | null;
   };
+  /** True only when the latest poll reached the line's health endpoint. */
+  lineReachable: boolean;
 }

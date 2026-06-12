@@ -5448,12 +5448,19 @@ export class AgentRuntime implements Runtime {
    *
    * Service mapping: opencode-cli → the model's provider prefix
    * (`minimax/...` → `minimax`); openai-api → `openai`;
-   * anthropic-api → `anthropic`. Never logs the value.
+   * anthropic-api → `anthropic`; same-provider API fallback honors the
+   * primary `providerConfig.apiKeyService`. Never logs the value.
    */
   private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
-    const service = resolveProviderKeyService(provider, model);
+    const service = resolveProviderKeyService(provider, model, this.fallbackProviderConfigFor(provider));
     if (!service) return null;
     return lookupCredential(service) !== null;
+  }
+
+  private fallbackProviderConfigFor(provider: string | undefined): Record<string, unknown> | undefined {
+    return provider !== undefined && provider === this.agentProvider
+      ? this.agentProviderConfig
+      : undefined;
   }
 
   /** User-facing notice for a usage-limit teardown. Asks the user to resend
@@ -5531,7 +5538,11 @@ export class AgentRuntime implements Runtime {
     }
     // Pre-flight: check key presence and probe validity; never blocks or reverts
     // the window — fail-open on anything except a definitive 401/403.
-    const service = resolveProviderKeyService(this.agentFallbackProvider, this.agentFallbackModel);
+    const service = resolveProviderKeyService(
+      this.agentFallbackProvider,
+      this.agentFallbackModel,
+      this.fallbackProviderConfigFor(this.agentFallbackProvider),
+    );
     if (service) {
       const key = lookupCredential(service);
       if (!key) {

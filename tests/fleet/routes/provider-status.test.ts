@@ -357,6 +357,61 @@ describe('handleGetLineProviderStatus', () => {
     });
   });
 
+  it('resolves primary.model from API providerConfig.model when no runtime model is set', async () => {
+    mockedReadFile.mockResolvedValue(
+      JSON.stringify({
+        agentOptions: {
+          provider: 'openai-api',
+          providerConfig: { model: 'gpt-4o', apiKeyService: 'prod-openai' },
+        },
+      }),
+    );
+    mockedLookup.mockImplementation((service) => service === 'prod-openai' ? 'prod-openai-key' : null);
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), fakeStatus()), { name: 'agent-line' });
+
+    const body = JSON.parse(res._body);
+    expect(body.primary).toEqual({
+      provider: 'openai-api',
+      model: 'gpt-4o',
+      keyPresent: true,
+    });
+  });
+
+  it('reports the runtime default primary provider when config omits agentOptions.provider', async () => {
+    mockedReadFile.mockResolvedValue(JSON.stringify({ agentOptions: {} }));
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, makeDeps(fakeInstance(), fakeStatus()), { name: 'agent-line' });
+
+    const body = JSON.parse(res._body);
+    expect(body.primary).toEqual({
+      provider: 'claude-cli',
+      model: null,
+      keyPresent: null,
+    });
+  });
+
+  it('does not report the agent runtime default for non-agent instances', async () => {
+    mockedReadFile.mockResolvedValue(JSON.stringify({}));
+
+    const res = mockRes();
+    await handleGetLineProviderStatus(
+      mockReq(),
+      res,
+      makeDeps(fakeInstance({ type: 'chat' }), fakeStatus()),
+      { name: 'agent-line' },
+    );
+
+    const body = JSON.parse(res._body);
+    expect(body.primary).toEqual({
+      provider: null,
+      model: null,
+      keyPresent: null,
+    });
+  });
+
   it('keeps existing provider-status fields and values additive-only', async () => {
     const activeUntil = Date.now() + 120_000;
     mockedReadFile.mockResolvedValue(

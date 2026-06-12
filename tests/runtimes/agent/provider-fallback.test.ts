@@ -122,6 +122,7 @@ function makeMessenger(): Messenger {
 
 interface RuntimeOverrides {
   agentProvider?: string;
+  agentProviderConfig?: Record<string, unknown>;
   agentFallbackProvider?: string;
   agentFallbackModel?: string;
   model?: string;
@@ -131,6 +132,7 @@ interface RuntimeOverrides {
 function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
   const config = mockConfigRef();
   config['agentProvider'] = overrides.agentProvider ?? 'claude-cli';
+  config['agentProviderConfig'] = overrides.agentProviderConfig;
   config['agentFallbackProvider'] = overrides.agentFallbackProvider;
   config['agentFallbackModel'] = overrides.agentFallbackModel;
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
@@ -369,6 +371,20 @@ describe('AgentRuntime — fallback key-presence guard', () => {
     const present = view(runtime).fallbackKeyPresent('openai-api', 'gpt-5');
     expect(present).toBe(true);
     expect(lookupCredentialMock).toHaveBeenCalledWith('openai');
+  });
+
+  it('uses providerConfig.apiKeyService for same-provider API fallback key presence', () => {
+    const runtime = makeRuntime({
+      agentProvider: 'openai-api',
+      agentProviderConfig: { apiKeyService: 'tenant-openai' },
+      agentFallbackProvider: 'openai-api',
+      agentFallbackModel: 'gpt-4o-mini',
+    });
+    lookupCredentialMock.mockImplementation((svc) => (svc === 'tenant-openai' ? 'tenant-key' : null));
+    const present = view(runtime).fallbackKeyPresent('openai-api', 'gpt-4o-mini');
+    expect(present).toBe(true);
+    expect(lookupCredentialMock).toHaveBeenCalledWith('tenant-openai');
+    expect(lookupCredentialMock).not.toHaveBeenCalledWith('openai');
   });
 
   it('maps anthropic-api to the anthropic service', () => {
