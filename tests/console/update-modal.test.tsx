@@ -277,6 +277,7 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     expect(screen.getByText('Installing console dependencies')).toBeDefined()
     expect(screen.getByText('Building console')).toBeDefined()
     expect(screen.getByText('Restarting fleet server')).toBeDefined()
+    expect(screen.queryByText('Preserving failed update state')).toBeNull()
   })
 
   it('hides confirm description text after clicking Update', async () => {
@@ -309,6 +310,16 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
     fireEvent.click(updateBtn)
     await waitFor(() => expect(screen.getByText('fetching...')).toBeDefined())
+  })
+
+  it('adds the preserve step only when SSE emits a preserve progress event', async () => {
+    const chunk = 'event: progress\ndata: {"step":"preserve","status":"done","message":"saved recovery patch"}\n\n'
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, body: makeStreamBody([chunk]) })))
+    render(<UpdateModal {...defaultProps()} />)
+    const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
+    fireEvent.click(updateBtn)
+    await waitFor(() => expect(screen.getByText('Preserving failed update state')).toBeDefined())
+    expect(screen.getByText('saved recovery patch')).toBeDefined()
   })
 })
 

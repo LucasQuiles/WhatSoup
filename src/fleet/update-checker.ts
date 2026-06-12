@@ -2,6 +2,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createChildLogger } from '../logger.ts';
 import { cleanGitEnv } from '../lib/git-env.ts';
+import {
+  DEFAULT_UPDATE_BRANCH,
+  githubPublicHttpsUrlFromRemote,
+  publicFetchArgs,
+  shouldRetryWithPublicHttps,
+} from '../lib/git-public-remote.ts';
 
 const execFileAsync = promisify(execFile);
 const log = createChildLogger('update-checker');
@@ -39,7 +45,7 @@ export class UpdateChecker {
       this.state.sha = localSha;
 
       try {
-        await this.execGit(['fetch', 'origin', 'main', '--quiet']);
+        await this.fetchOriginMain();
         const remoteSha = await this.execGit(['rev-parse', '--short', 'origin/main']);
         this.state.remoteSha = remoteSha;
         // Only flag update if remote has commits we don't have (remote is ahead).
@@ -81,5 +87,30 @@ export class UpdateChecker {
       env: cleanGitEnv(),
     });
     return stdout.trim();
+  }
+
+  private async fetchOriginMain(): Promise<void> {
+    try {
+      await this.execGit(['fetch', 'origin', DEFAULT_UPDATE_BRANCH, '--quiet']);
+      return;
+    } catch (err) {
+      if (!shouldRetryWithPublicHttps(err)) {
+        throw err;
+      }
+
+      let remoteUrl: string;
+      try {
+        remoteUrl = await this.execGit(['remote', 'get-url', 'origin']);
+      } catch {
+        throw err;
+      }
+      const publicUrl = githubPublicHttpsUrlFromRemote(remoteUrl);
+      if (!publicUrl) {
+        throw err;
+      }
+
+      await this.execGit(publicFetchArgs(publicUrl, DEFAULT_UPDATE_BRANCH));
+      log.warn({ publicUrl }, 'git SSH fetch failed; retried update check through public HTTPS');
+    }
   }
 }

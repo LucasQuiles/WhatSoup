@@ -42,7 +42,7 @@ function parseSSE(chunks: string[]) {
   });
 }
 
-describe('handleUpdate rollback with real git', () => {
+describe('handleUpdate post-update preservation with real git', () => {
   let tmpRoot: string | undefined;
   let patchPath: string | undefined;
   const originalPath = process.env.PATH;
@@ -60,7 +60,7 @@ describe('handleUpdate rollback with real git', () => {
     }
   });
 
-  it('preserves tracked rollback drift without stashing pre-existing untracked files', async () => {
+  it('preserves tracked update drift without stashing pre-existing untracked files or rewinding HEAD', async () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'whatsoup-update-real-git-'));
     const remote = join(tmpRoot, 'remote.git');
     const seed = join(tmpRoot, 'seed');
@@ -87,6 +87,7 @@ describe('handleUpdate rollback with real git', () => {
     writeFileSync(join(seed, 'package-lock.json'), 'remote lock\n');
     git(seed, ['add', 'package-lock.json']);
     git(seed, ['commit', '-m', 'remote lock update']);
+    const remoteUpdateSha = git(seed, ['rev-parse', 'HEAD']);
     git(seed, ['push', 'origin', 'main']);
 
     mkdirSync(fakeBin);
@@ -109,19 +110,20 @@ describe('handleUpdate rollback with real git', () => {
     await handleUpdate(req, res, { checkNow: async () => undefined, getState: () => ({}) } as any, repo);
 
     const events = parseSSE(res.chunks);
-    const rollbackEvent = events.find((entry) => (
+    const preserveEvent = events.find((entry) => (
       entry.event === 'progress'
-      && entry.data?.step === 'rollback'
+      && entry.data?.step === 'preserve'
       && entry.data?.status === 'done'
     ));
-    expect(rollbackEvent).toBeDefined();
-    expect(rollbackEvent!.data.preservedFiles).toEqual(['package-lock.json']);
-    expect(rollbackEvent!.data.patchPath).toMatch(/^\/tmp\/whatsoup-update-rollback-.*-.*\.patch$/);
-    expect(rollbackEvent!.data.stashRef).toBe('stash@{0}');
-    patchPath = rollbackEvent!.data.patchPath;
+    expect(preserveEvent).toBeDefined();
+    expect(preserveEvent!.data.previousSha).toBe(prePullSha);
+    expect(preserveEvent!.data.preservedFiles).toEqual(['package-lock.json']);
+    expect(preserveEvent!.data.patchPath).toMatch(/^\/tmp\/whatsoup-update-preserve-.*-.*\.patch$/);
+    expect(preserveEvent!.data.stashRef).toBe('stash@{0}');
+    patchPath = preserveEvent!.data.patchPath;
 
-    expect(git(repo, ['rev-parse', 'HEAD'])).toBe(prePullSha);
-    expect(readFileSync(join(repo, 'package-lock.json'), 'utf8')).toBe('base lock\n');
+    expect(git(repo, ['rev-parse', 'HEAD'])).toBe(remoteUpdateSha);
+    expect(readFileSync(join(repo, 'package-lock.json'), 'utf8')).toBe('remote lock\n');
     expect(readFileSync(join(repo, 'operator-note.txt'), 'utf8')).toBe('do not move\n');
 
     const status = git(repo, ['status', '--porcelain']);
@@ -130,7 +132,7 @@ describe('handleUpdate rollback with real git', () => {
 
     expect(readFileSync(patchPath!, 'utf8')).toContain('resolved during install');
     expect(statSync(patchPath!).mode & 0o777).toBe(0o600);
-    expect(git(repo, ['stash', 'list'])).toContain('whatsoup-update-rollback');
+    expect(git(repo, ['stash', 'list'])).toContain('whatsoup-update-preserve');
     expect(existsSync(join(repo, 'operator-note.txt'))).toBe(true);
   });
 });
