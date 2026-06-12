@@ -519,7 +519,7 @@ state that is itself shippable.
 - **C-B3W4-1 (BLOCKING, user decision):** the Stepper decision §7 — (a) new primitive +
   spec section, (b2) strip deletion, or (c) wizard-local composite (recommended). (b1)
   Tabs-as-stepper is rejected on contract evidence and is not offered. Until the operator
-  picks, this packet's verdict is Blocked(decision); every other section is
+  picks, this packet's verdict is Ready with Constraints — DECIDED 2026-06-12: operator approved option (c) wizard-local composite for the step strip and option α (save unlinked, link later) for the discard flow; deletion becomes an explicit separately-labeled destructive action. Original verdict was Blocked(decision); every other section is
   decision-independent.
 - **C-B3W4-2 (checkpoint, named behavior change):** discard-flow resolution §4 — recommend
   α (spec law: "save unlinked — link later, never silent deletion", interaction-patterns
