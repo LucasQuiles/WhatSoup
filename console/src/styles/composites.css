@@ -703,19 +703,6 @@ body::before {
   background: var(--overlay);
   z-index: var(--z-overlay);
 }
-.c-dialog {
-  overflow: hidden;
-  background: var(--color-d1);
-  border: var(--bw) solid var(--b1);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-}
-.c-dialog-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-  padding: var(--sp-5);
-}
 
 /* Canonical panel container border: use --b1 for c-card and c-section so all primary panels share the same boundary token. */
 .c-card {
@@ -888,25 +875,6 @@ body::before {
   padding: var(--sp-7);
 }
 
-/* ═══ Dialog header — consistent dialog title bar ═══ */
-.c-dialog-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--sp-4) var(--sp-5);
-  border-bottom: var(--bw) solid var(--b1);
-}
-
-/* ═══ Dialog footer — consistent dialog action bar ═══ */
-.c-dialog-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-5);
-  border-top: var(--bw) solid var(--b1);
-  background: var(--color-d1);
-  flex-shrink: 0;
-}
 
 /* ═══ Border utilities — replace inline border triplets ═══ */
 .c-border        { border: var(--bw) solid var(--b1); }

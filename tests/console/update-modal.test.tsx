@@ -165,13 +165,21 @@ describe('UpdateModal — confirm phase', () => {
     render(<UpdateModal {...defaultProps()} />)
     const dialog = screen.getByRole('dialog')
     expect(dialog.getAttribute('aria-modal')).toBe('true')
-    expect(dialog.getAttribute('aria-labelledby')).toBe('update-dialog-title')
+    // aria-labelledby points at the element whose text is the phase title
+    const labelledById = dialog.getAttribute('aria-labelledby')
+    expect(labelledById).toBeTruthy()
+    const titleEl = document.getElementById(labelledById!)
+    expect(titleEl).not.toBeNull()
+    expect(titleEl!.textContent).toBe('Update WhatSoup')
   })
 
   it('shows "Update WhatSoup" title in confirm phase', () => {
     render(<UpdateModal {...defaultProps()} />)
     const title = screen.getByText('Update WhatSoup')
-    expect(title.id).toBe('update-dialog-title')
+    // Resolution assertion: the title element's id is the aria-labelledby target
+    const dialog = screen.getByRole('dialog')
+    const labelledById = dialog.getAttribute('aria-labelledby')!
+    expect(title.id).toBe(labelledById)
   })
 
   it('renders the confirm phase description text', () => {
@@ -207,24 +215,26 @@ describe('UpdateModal — confirm phase', () => {
   it('calls onClose when the X (header close) button is clicked', () => {
     const onClose = vi.fn()
     render(<UpdateModal {...defaultProps({ onClose })} />)
-    // The header X button has aria-label="Close"
-    const closeButtons = screen.getAllByRole('button', { name: /close/i })
-    fireEvent.click(closeButtons[0]!)
+    // The header X ActionButton has label="Close dialog" (exact match per modal.md)
+    const closeBtn = screen.getByRole('button', { name: 'Close dialog' })
+    fireEvent.click(closeBtn)
     expect(onClose).toHaveBeenCalledOnce()
   })
 
-  it('calls onClose when backdrop is clicked', () => {
+  it('does NOT call onClose when backdrop is pointerdown-ed (dismissable=false, C-B3W3-1)', () => {
     const onClose = vi.fn()
     render(<UpdateModal {...defaultProps({ onClose })} />)
+    // dismissable=false: outside pointerdown must not close the modal
     const backdrop = screen.getByRole('dialog').parentElement!
-    fireEvent.click(backdrop)
-    expect(onClose).toHaveBeenCalledOnce()
+    fireEvent.pointerDown(backdrop)
+    expect(onClose).not.toHaveBeenCalled()
   })
 
-  it('does NOT call onClose when dialog body is clicked (stopPropagation)', () => {
+  it('does NOT call onClose when the dialog shell is pointerdown-ed', () => {
     const onClose = vi.fn()
     render(<UpdateModal {...defaultProps({ onClose })} />)
-    fireEvent.click(screen.getByRole('dialog'))
+    // The shell itself is inside the modal — pointerdown inside must not dismiss
+    fireEvent.pointerDown(screen.getByRole('dialog'))
     expect(onClose).not.toHaveBeenCalled()
   })
 
@@ -247,6 +257,14 @@ describe('UpdateModal — confirm phase', () => {
     render(<UpdateModal {...defaultProps({ open: false, onClose })} />)
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('focus lands inside the dialog on open', () => {
+    render(<UpdateModal {...defaultProps()} />)
+    const dialog = screen.getByRole('dialog')
+    // The close X ActionButton (first focusable in the shell) should be in the DOM
+    const closeBtn = screen.getByRole('button', { name: 'Close dialog' })
+    expect(dialog.contains(closeBtn)).toBe(true)
   })
 })
 
@@ -320,6 +338,23 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     fireEvent.click(updateBtn)
     await waitFor(() => expect(screen.getByText('Preserving failed update state')).toBeDefined())
     expect(screen.getByText('saved recovery patch')).toBeDefined()
+  })
+
+  it('Escape during updating phase calls onClose (abort cleanup — C-B3W3-8)', async () => {
+    let abortSignal: AbortSignal | null | undefined
+    vi.stubGlobal('fetch', vi.fn((url: string, opts: RequestInit) => {
+      abortSignal = opts.signal
+      return Promise.resolve({ ok: true, body: makeHangingStream() })
+    }))
+    const onClose = vi.fn()
+    render(<UpdateModal {...defaultProps({ onClose })} />)
+    const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
+    fireEvent.click(updateBtn)
+    await waitFor(() => expect(screen.getByText('Pulling latest code')).toBeDefined())
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledOnce()
+    // handleClose aborts the stream via the AbortController
+    expect(abortSignal?.aborted).toBe(true)
   })
 })
 
@@ -428,7 +463,10 @@ describe('UpdateModal — restart-instances phase', () => {
   it('shows "Update Complete" title when in restart-instances phase', async () => {
     await renderAndAdvanceToRestartInstances()
     const title = screen.getByText('Update Complete')
-    expect(title.id).toBe('update-dialog-title')
+    // Resolution assertion: title element id matches the dialog's aria-labelledby
+    const dialog = screen.getByRole('dialog')
+    const labelledById = dialog.getAttribute('aria-labelledby')!
+    expect(title.id).toBe(labelledById)
   })
 
   it('renders "Restart instances with update?" prompt', async () => {

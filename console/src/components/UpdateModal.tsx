@@ -1,7 +1,37 @@
+/**
+ * UpdateModal — migrated to Modal primitive (B3 wave-3).
+ *
+ * Migration:
+ *   - Removes ad-hoc backdrop div, stopPropagation, bubble-phase Escape effect,
+ *     and `if (!open) return null` gate.
+ *   - dismissable=false: constant across all six phases per C-B3W3-8.
+ *     Before update: destructive-confirm rule (modal.md). During update: prevents
+ *     silent stream abort mid-fleet-restart. After update: explicit verbs own
+ *     dismissal. Escape and header X remain available at every phase via the
+ *     useDismissable stack contract.
+ *   - Download header icon dropped per modal.md anatomy. Download icon KEPT on
+ *     the footer confirm-phase Update button (footer-icon precedent).
+ *   - Width: --panel-confirm 420px → size="sm" 480px (RelinkModal precedent;
+ *     tokens-v3 §6.12). --panel-confirm token deleted (last consumer gone).
+ *   - Actions moved to conditional ModalFooter (confirm/error/restart-instances
+ *     phases). Phases without actions (updating/restarting-fleet/done) omit the
+ *     footer region.
+ *   - Raw c-btn buttons → Button primitives (all six sites: header X, footer
+ *     Cancel, Update, Close, Skip, Restart Selected).
+ *   - GAINS: stacking-aware Escape, focus trap, focus restoration.
+ *   - handleClose is the single onClose target — wired through Modal's onClose
+ *     prop so Escape, header X, and any future path share the same cleanup.
+ *   - initialFocus: NONE — Modal default first-focusable (header close X).
+ *     modal.md forbids defaulting to the destructive Update button (C-B3W3-8).
+ *   - Public prop interface, reducer, SSE pipeline, refs, reset effect,
+ *     fleet-restart poller, and instance restart pipeline are UNCHANGED.
+ */
 import { type FC, useReducer, useEffect, useCallback, useRef } from 'react'
-import { X, Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
+import { Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, getApiTicket, isProductionConsole } from '../lib/api'
+import { Modal, ModalHeader, ModalBody, ModalFooter } from './primitives'
+import { Button } from './primitives/Button'
 import type { LineInstance } from '../types'
 
 interface UpdateModalProps {
@@ -140,14 +170,6 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
     }
     prevOpenRef.current = open
   }, [open, lines])
-
-  // Close on Escape key
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open, onClose])
 
   const waitForFleetRestart = useCallback(() => {
     // Guard: if already polling, don't spawn duplicate intervals (RES-002)
@@ -300,6 +322,10 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
     }
   }, [instanceToggles, onClose])
 
+  // handleClose aborts the in-flight fetch stream and clears any pending
+  // poll/timeout, then delegates to onClose. Wired as the single Modal onClose
+  // target so Escape, header X, and any footer Cancel/Close/Skip path all share
+  // the same cleanup (C-B3W3-8).
   const handleClose = () => {
     // Abort in-flight fetch stream (RES-006)
     abortRef.current?.abort()
@@ -309,8 +335,6 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
     if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
     onClose()
   }
-
-  if (!open) return null
 
   const stepIcon = (status: StepStatus) => {
     switch (status) {
@@ -323,159 +347,142 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   }
 
   return (
-    <div
-      className="c-dialog-backdrop"
-      onClick={handleClose}
+    <Modal
+      open={open}
+      onClose={handleClose}
+      size="sm"
+      dismissable={false}
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="update-dialog-title"
-        onClick={(e) => e.stopPropagation()}
-        className="w-[var(--panel-confirm)] max-w-[90%] bg-d2 c-border rounded-lg shadow-[var(--shadow-lg)] overflow-hidden"
-      >
-        {/* Header */}
-        <div
-          className="flex items-center justify-between py-[var(--sp-4)] px-[var(--sp-5)] c-border-b"
-        >
-          <div className="flex items-center gap-[var(--sp-2)]">
-            <Download size={16} className="text-m-cht" />
-            <span id="update-dialog-title" className="font-sans font-semibold text-lg">
-              {phase === 'restart-instances' || phase === 'done' ? 'Update Complete' : 'Update WhatSoup'}
+      <ModalHeader
+        title={phase === 'restart-instances' || phase === 'done' ? 'Update Complete' : 'Update WhatSoup'}
+        onClose={handleClose}
+      />
+
+      <ModalBody>
+        {/* Phase: confirm */}
+        {phase === 'confirm' && (
+          <p className="text-t3 text-body">
+            Pull latest code, rebuild, and restart the fleet server?
+          </p>
+        )}
+
+        {/* Phase: updating / restarting-fleet */}
+        {(phase === 'updating' || phase === 'restarting-fleet') && (
+          <div className="flex flex-col gap-[var(--sp-2)]">
+            {steps.map(s => (
+              <div key={s.step} className="flex items-center gap-[var(--sp-2)] py-[var(--sp-1)] px-0">
+                {stepIcon(s.status)}
+                <span className={`font-mono text-data ${s.status === 'skip' ? 'text-t5' : 'text-t2'}`}>
+                  {STEP_LABELS[s.step] ?? s.step}
+                </span>
+                {s.message && s.status !== 'error' && (
+                  <span className="text-t5 font-mono text-label">
+                    {s.message}
+                  </span>
+                )}
+              </div>
+            ))}
+            {phase === 'restarting-fleet' && (
+              <div className="flex items-center gap-[var(--sp-2)] py-[var(--sp-2)] px-0">
+                <Loader2 size={16} className="text-m-cht animate-spin" />
+                <span className="text-t3 font-mono text-data">
+                  Waiting for fleet server...
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Phase: error */}
+        {phase === 'error' && error && (
+          <div className="flex items-start gap-[var(--sp-2)] p-[var(--sp-3)] bg-[var(--s-crit-soft)] rounded-md">
+            <AlertCircle size={16} className="text-s-crit flex-shrink-0 mt-[var(--bw-accent)]" />
+            <span className="text-t2 font-mono text-data">{error}</span>
+          </div>
+        )}
+
+        {/* Phase: restart-instances */}
+        {phase === 'restart-instances' && (
+          <div className="flex flex-col gap-[var(--sp-2)]">
+            <p className="text-t3 font-medium text-body">
+              Restart instances with update?
+            </p>
+            <div className="flex flex-col gap-[var(--sp-1)]">
+              {lines.map(line => {
+                const isRestarting = instanceStatus[line.name] === 'restarting'
+                const isDone = instanceStatus[line.name] === 'done'
+                const isError = instanceStatus[line.name] === 'error'
+                const disabled = line.status !== 'online' || isRestarting || isDone
+                return (
+                  <label
+                    key={line.name}
+                    className={`flex items-center cursor-pointer gap-[var(--sp-2)] py-[var(--sp-1h)] px-[var(--sp-2)] rounded-sm${disabled && !isDone ? ' opacity-50' : ''}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={instanceToggles[line.name] ?? false}
+                      disabled={disabled}
+                      onChange={(e) => dispatch({ type: 'toggleInstance', name: line.name, on: e.target.checked })}
+                      className="accent-[var(--color-m-cht)]"
+                    />
+                    <span className="font-mono text-t2 flex-1 text-data">
+                      {line.name}
+                    </span>
+                    <span className="font-mono text-t5 text-xs">
+                      {isRestarting ? (
+                        <Loader2 size={12} strokeWidth={1.75} className="text-m-cht animate-spin" />
+                      ) : isDone ? (
+                        <Check size={12} strokeWidth={1.75} className="text-s-ok" />
+                      ) : isError ? (
+                        <AlertCircle size={12} strokeWidth={1.75} className="text-s-crit" />
+                      ) : (
+                        line.status
+                      )}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Phase: done */}
+        {phase === 'done' && (
+          <div className="flex items-center justify-center gap-[var(--sp-2)] py-[var(--sp-4)] px-0">
+            <Check size={20} className="text-s-ok" />
+            <span className="text-t2 font-medium text-body">
+              All instances restarted
             </span>
           </div>
-          <button type="button" onClick={handleClose} aria-label="Close" className="c-btn c-btn-ghost">
-            <X size={16} />
-          </button>
-        </div>
+        )}
+      </ModalBody>
 
-        {/* Body */}
-        <div className="py-[var(--sp-4)] px-[var(--sp-5)]">
-          {/* Phase: confirm */}
-          {phase === 'confirm' && (
-            <div className="flex flex-col gap-[var(--sp-4)]">
-              <p className="text-t3 text-body">
-                Pull latest code, rebuild, and restart the fleet server?
-              </p>
-              <div className="flex justify-end gap-[var(--sp-2)]">
-                <button type="button" onClick={handleClose} className="c-btn c-btn-ghost">Cancel</button>
-                <button type="button" onClick={startUpdate} className="c-btn c-btn-primary">
-                  <Download size={14} />
-                  Update
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Phase: updating / restarting-fleet */}
-          {(phase === 'updating' || phase === 'restarting-fleet') && (
-            <div className="flex flex-col gap-[var(--sp-2)]">
-              {steps.map(s => (
-                <div key={s.step} className="flex items-center gap-[var(--sp-2)] py-[var(--sp-1)] px-0">
-                  {stepIcon(s.status)}
-                  <span className={`font-mono text-data ${s.status === 'skip' ? 'text-t5' : 'text-t2'}`}>
-                    {STEP_LABELS[s.step] ?? s.step}
-                  </span>
-                  {s.message && s.status !== 'error' && (
-                    <span className="text-t5 font-mono text-label">
-                      {s.message}
-                    </span>
-                  )}
-                </div>
-              ))}
-              {phase === 'restarting-fleet' && (
-                <div className="flex items-center gap-[var(--sp-2)] py-[var(--sp-2)] px-0">
-                  <Loader2 size={16} className="text-m-cht animate-spin" />
-                  <span className="text-t3 font-mono text-data">
-                    Waiting for fleet server...
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Phase: error */}
-          {phase === 'error' && error && (
-            <div className="flex flex-col gap-[var(--sp-3)]">
-              <div className="flex items-start gap-[var(--sp-2)] p-[var(--sp-3)] bg-[var(--s-crit-soft)] rounded-md">
-                <AlertCircle size={16} className="text-s-crit flex-shrink-0 mt-[var(--bw-accent)]" />
-                <span className="text-t2 font-mono text-data">{error}</span>
-              </div>
-              <div className="flex justify-end">
-                <button type="button" onClick={handleClose} className="c-btn c-btn-ghost">Close</button>
-              </div>
-            </div>
-          )}
-
-          {/* Phase: restart-instances */}
-          {phase === 'restart-instances' && (
-            <div className="flex flex-col gap-[var(--sp-3)]">
-              <p className="text-t3 font-medium text-body">
-                Restart instances with update?
-              </p>
-              <div className="flex flex-col gap-[var(--sp-1)]">
-                {lines.map(line => {
-                  const isRestarting = instanceStatus[line.name] === 'restarting'
-                  const isDone = instanceStatus[line.name] === 'done'
-                  const isError = instanceStatus[line.name] === 'error'
-                  const disabled = line.status !== 'online' || isRestarting || isDone
-                  return (
-                    <label
-                      key={line.name}
-                      className={`flex items-center cursor-pointer gap-[var(--sp-2)] py-[var(--sp-1h)] px-[var(--sp-2)] rounded-sm${disabled && !isDone ? ' opacity-50' : ''}`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={instanceToggles[line.name] ?? false}
-                        disabled={disabled}
-                        onChange={(e) => dispatch({ type: 'toggleInstance', name: line.name, on: e.target.checked })}
-                        className="accent-[var(--color-m-cht)]"
-                      />
-                      <span className="font-mono text-t2 flex-1 text-data">
-                        {line.name}
-                      </span>
-                      <span className="font-mono text-t5 text-xs">
-                        {isRestarting ? (
-                          <Loader2 size={12} strokeWidth={1.75} className="text-m-cht animate-spin" />
-                        ) : isDone ? (
-                          <Check size={12} strokeWidth={1.75} className="text-s-ok" />
-                        ) : isError ? (
-                          <AlertCircle size={12} strokeWidth={1.75} className="text-s-crit" />
-                        ) : (
-                          line.status
-                        )}
-                      </span>
-                    </label>
-                  )
-                })}
-              </div>
-              <div className="flex justify-end gap-[var(--sp-2)] pt-[var(--sp-2)]">
-                <button type="button" onClick={handleClose} className="c-btn c-btn-ghost">Skip</button>
-                <button
-                  type="button"
-                  onClick={restartSelectedInstances}
-                  className="c-btn c-btn-primary"
-                  disabled={!Object.values(instanceToggles).some(Boolean)}
-                >
-                  <RotateCcw size={14} />
-                  Restart Selected
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Phase: done */}
-          {phase === 'done' && (
-            <div className="flex items-center justify-center gap-[var(--sp-2)] py-[var(--sp-4)] px-0">
-              <Check size={20} className="text-s-ok" />
-              <span className="text-t2 font-medium text-body">
-                All instances restarted
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+      {/* Footer — only in action-bearing phases; updating/restarting-fleet/done omit it */}
+      {phase === 'confirm' && (
+        <ModalFooter>
+          <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+          <Button variant="primary" onClick={startUpdate} icon={<Download size={14} />}>Update</Button>
+        </ModalFooter>
+      )}
+      {phase === 'error' && (
+        <ModalFooter>
+          <Button variant="ghost" onClick={handleClose}>Close</Button>
+        </ModalFooter>
+      )}
+      {phase === 'restart-instances' && (
+        <ModalFooter>
+          <Button variant="ghost" onClick={handleClose}>Skip</Button>
+          <Button
+            variant="primary"
+            onClick={restartSelectedInstances}
+            disabled={!Object.values(instanceToggles).some(Boolean)}
+            icon={<RotateCcw size={14} />}
+          >
+            Restart Selected
+          </Button>
+        </ModalFooter>
+      )}
+    </Modal>
   )
 }
 

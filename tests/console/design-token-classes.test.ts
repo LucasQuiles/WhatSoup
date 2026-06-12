@@ -21,8 +21,6 @@ describe('design token component classes', () => {
       '.c-input',
       '.c-input-search',
       '.c-dialog-backdrop',
-      '.c-dialog',
-      '.c-dialog-body',
       '.c-card',
       '.c-card--detail',
     ]) {

@@ -1,3 +1,34 @@
+/**
+ * GroupDetailModal — migrated to Modal primitive (B3 wave-3).
+ *
+ * Migration:
+ *   - Removes ad-hoc backdrop div, stopPropagation, and bubble-phase Escape effect
+ *     (the console's LAST hand-rolled document.addEventListener('keydown', …) Escape
+ *     copy outside hooks/primitives — both UpdateModal's and this one die in wave 3).
+ *   - dismissable=false: scrim click was silently discarding unsaved InfoTab edits
+ *     (subject, desc) and any in-progress participant selection. modal.md protective
+ *     default applied. Escape and X remain available for explicit cancel.
+ *   - Shell: Modal size="lg" (720px exact match to --panel-wizard, tokens-v3 §6.12);
+ *     labelledById="group-detail-dialog-title" wires the custom header title element
+ *     to aria-labelledby without ceding control to ModalHeader (C-B3W3-4).
+ *   - Header: custom direct shell child with className="soup-modal-header"; avatar
+ *     KEPT (identity-bearing content, not decoration); subject span retains id
+ *     "group-detail-dialog-title" and adopts soup-modal-title; X → ActionButton
+ *     label="Close dialog".
+ *   - Hand-rolled tablist → Tabs primitive (roving tabindex, Arrow/Home/End, MANUAL
+ *     activation). Tab ids unchanged: info/participants/settings. aria contract wired.
+ *   - Four settings binary toggle pairs → ToolbarTimeRange segs with disabled prop
+ *     (C-B3W3-2): announce (Messaging), locked (Edit group info), memberAddMode
+ *     (Who can add members), joinApproval (Join approval). Preserves double-fire
+ *     protection from disabled={saving === key}.
+ *   - Per-tab padding wrappers die; ModalBody provides padding (wave-2 pattern).
+ *   - `if (!group) return null` guard STAYS; Modal owns the open gate.
+ *   - Token deletions: --panel-max-inline retired (last consumer gone; verified).
+ *   - GAINS: stacking-aware Escape, pointerdown outside-click semantics, focus trap,
+ *     focus restoration, keyboard tablist contract.
+ *   - Public prop interface, tab-reset derivation, query, admin resolution, API
+ *     handlers, toasts, nested ConfirmDialogs unchanged.
+ */
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { X, Copy, Link, LogOut, UserMinus, ShieldCheck, ShieldOff, UserPlus } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -16,6 +47,10 @@ import {
 } from './groups-utils.js'
 import { getInitials, capitalize } from '../../lib/text-utils.js'
 import type { GroupInfo, GroupDetail, GroupParticipant } from '../../types.js'
+import { Modal, ModalBody } from '../primitives'
+import { ActionButton } from '../primitives/ActionButton'
+import { Tabs, Tab } from '../primitives/Tabs'
+import { ToolbarTimeRange } from '../primitives/Toolbar'
 
 type TabId = 'info' | 'participants' | 'settings'
 
@@ -118,7 +153,7 @@ function InfoTab({
   const owner = detail.participants.find(p => p.admin === 'superadmin')
 
   return (
-    <div className="flex flex-col gap-[var(--sp-4)] py-[var(--sp-4)] px-[var(--sp-5)]">
+    <div className="flex flex-col gap-[var(--sp-4)]">
 
       {/* Subject */}
       <div>
@@ -313,7 +348,7 @@ function ParticipantsTab({
   }
 
   return (
-    <div className="flex flex-col gap-[var(--sp-3)] py-[var(--sp-4)] px-[var(--sp-5)]">
+    <div className="flex flex-col gap-[var(--sp-3)]">
 
       {/* Add participants (admin only) */}
       {isAdmin && (
@@ -447,6 +482,26 @@ function ParticipantsTab({
 
 // ── Settings Tab ──────────────────────────────────────────────────────────────
 
+const ANNOUNCE_OPTIONS = [
+  { label: 'All', value: 'not_announcement' },
+  { label: 'Admins only', value: 'announcement' },
+]
+
+const LOCKED_OPTIONS = [
+  { label: 'All', value: 'unlocked' },
+  { label: 'Admins only', value: 'locked' },
+]
+
+const MEMBER_ADD_OPTIONS = [
+  { label: 'All', value: 'all_member_add' },
+  { label: 'Admins only', value: 'admin_add' },
+]
+
+const JOIN_APPROVAL_OPTIONS = [
+  { label: 'Off', value: 'off' },
+  { label: 'On', value: 'on' },
+]
+
 function SettingsTab({
   detail,
   lineName,
@@ -542,9 +597,9 @@ function SettingsTab({
   }
 
   return (
-    <div className="flex flex-col py-[var(--sp-4)] px-[var(--sp-5)] gap-[var(--sp-1)]">
+    <div className="flex flex-col gap-[var(--sp-1)]">
 
-      {/* Messaging — announce */}
+      {/* Messaging — announce (DD-15 closure) */}
       <div style={rowStyle}>
         <div>
           <div className="c-body">Messaging</div>
@@ -553,28 +608,17 @@ function SettingsTab({
           </div>
         </div>
         {isAdmin && (
-          <div className="flex gap-1">
-            <button
-              type="button"
-              disabled={saving === 'announce'}
-              onClick={() => handleSetting('not_announcement', 'announce')}
-              className={`c-btn c-btn-xs font-mono ${!detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            >
-              All
-            </button>
-            <button
-              type="button"
-              disabled={saving === 'announce'}
-              onClick={() => handleSetting('announcement', 'announce')}
-              className={`c-btn c-btn-xs font-mono ${detail.announce ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            >
-              Admins only
-            </button>
-          </div>
+          <ToolbarTimeRange
+            label="Messaging"
+            options={ANNOUNCE_OPTIONS}
+            value={detail.announce ? 'announcement' : 'not_announcement'}
+            disabled={saving === 'announce'}
+            onChange={(v) => handleSetting(v, 'announce')}
+          />
         )}
       </div>
 
-      {/* Edit info — locked */}
+      {/* Edit info — locked (DD-15 closure) */}
       <div style={rowStyle}>
         <div>
           <div className="c-body">Edit group info</div>
@@ -583,28 +627,17 @@ function SettingsTab({
           </div>
         </div>
         {isAdmin && (
-          <div className="flex gap-1">
-            <button
-              type="button"
-              disabled={saving === 'locked'}
-              onClick={() => handleSetting('unlocked', 'locked')}
-              className={`c-btn c-btn-xs font-mono ${!detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            >
-              All
-            </button>
-            <button
-              type="button"
-              disabled={saving === 'locked'}
-              onClick={() => handleSetting('locked', 'locked')}
-              className={`c-btn c-btn-xs font-mono ${detail.locked ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            >
-              Admins only
-            </button>
-          </div>
+          <ToolbarTimeRange
+            label="Edit group info"
+            options={LOCKED_OPTIONS}
+            value={detail.locked ? 'locked' : 'unlocked'}
+            disabled={saving === 'locked'}
+            onChange={(v) => handleSetting(v, 'locked')}
+          />
         )}
       </div>
 
-      {/* Member add mode */}
+      {/* Member add mode (DD-15 closure) */}
       {isAdmin && (
         <div style={rowStyle}>
           <div>
@@ -613,28 +646,17 @@ function SettingsTab({
               {detail.memberAddMode === 'admin_add' ? 'Admins only' : 'All members'}
             </div>
           </div>
-          <div className="flex gap-1">
-            <button
-              type="button"
-              disabled={saving === 'memberAddMode'}
-              onClick={() => handleMemberAddMode('all_member_add')}
-              className={`c-btn c-btn-xs font-mono ${detail.memberAddMode !== 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            >
-              All
-            </button>
-            <button
-              type="button"
-              disabled={saving === 'memberAddMode'}
-              onClick={() => handleMemberAddMode('admin_add')}
-              className={`c-btn c-btn-xs font-mono ${detail.memberAddMode === 'admin_add' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            >
-              Admins only
-            </button>
-          </div>
+          <ToolbarTimeRange
+            label="Who can add members"
+            options={MEMBER_ADD_OPTIONS}
+            value={detail.memberAddMode ?? 'all_member_add'}
+            disabled={saving === 'memberAddMode'}
+            onChange={(v) => handleMemberAddMode(v as 'all_member_add' | 'admin_add')}
+          />
         </div>
       )}
 
-      {/* Join approval */}
+      {/* Join approval (DD-15 closure) */}
       {isAdmin && (
         <div style={rowStyle}>
           <div>
@@ -643,24 +665,13 @@ function SettingsTab({
               {detail.joinApprovalMode === 'on' ? 'Admin approval required' : 'No approval required'}
             </div>
           </div>
-          <div className="flex gap-1">
-            <button
-              type="button"
-              disabled={saving === 'joinApproval'}
-              onClick={() => handleJoinApproval('off')}
-              className={`c-btn c-btn-xs font-mono ${detail.joinApprovalMode !== 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            >
-              Off
-            </button>
-            <button
-              type="button"
-              disabled={saving === 'joinApproval'}
-              onClick={() => handleJoinApproval('on')}
-              className={`c-btn c-btn-xs font-mono ${detail.joinApprovalMode === 'on' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            >
-              On
-            </button>
-          </div>
+          <ToolbarTimeRange
+            label="Join approval"
+            options={JOIN_APPROVAL_OPTIONS}
+            value={detail.joinApprovalMode ?? 'off'}
+            disabled={saving === 'joinApproval'}
+            onChange={(v) => handleJoinApproval(v as 'on' | 'off')}
+          />
         </div>
       )}
 
@@ -725,21 +736,15 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
     staleTime: 30_000,
   })
 
-  // Escape key handler
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open, onClose])
-
   // Reset tab when group changes — render-time derivation avoids setState-in-effect
   if (group?.id !== prevGroupId.current) {
     prevGroupId.current = group?.id
     if (activeTab !== 'info') setActiveTab('info')
   }
 
-  if (!open || !group) return null
+  // `if (!group) return null` guard stays — header/body cannot render without group.
+  // Modal owns the open gate (the `open` half of the legacy guard dies).
+  if (!group) return null
 
   // Determine admin status — use detail if available, fall back to group from list
   const source = detail ?? group
@@ -753,76 +758,79 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
   const initials = getInitials(group.subject)
 
   return (
-    <div className="c-dialog-backdrop" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="group-detail-dialog-title"
-        className="c-dialog flex flex-col w-[var(--panel-wizard)] max-w-[var(--panel-max-inline)] max-h-[var(--modal-max-h)]"
-        onClick={e => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="c-dialog-header gap-3 flex-shrink-0">
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="lg"
+      dismissable={false}
+      labelledById="group-detail-dialog-title"
+    >
+      {/* Custom header region — avatar (identity-bearing, kept) + two-line title block
+          + close X. Direct shell child with soup-modal-header class, title wired via
+          labelledById (C-B3W3-4). */}
+      <div className="soup-modal-header gap-3 shrink-0">
         <div
-          className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-sm)] h-[var(--avatar-sm)] rounded-full text-t1 text-sm"
+          className="shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-sm)] h-[var(--avatar-sm)] rounded-full text-t1 text-sm"
           style={{ background: color }}
         >
           {initials}
         </div>
-          <div className="flex-1 min-w-0">
-            <div id="group-detail-dialog-title" className="c-heading-lg truncate">
-              {group.subject}
-            </div>
-            <div className="c-label">
-              {group.participants.length} participant{group.participants.length !== 1 ? 's' : ''}
-            </div>
+        <div className="flex-1 min-w-0">
+          <div id="group-detail-dialog-title" className="soup-modal-title truncate">
+            {group.subject}
           </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="c-btn c-btn-ghost c-btn-sm flex-shrink-0">
-            <X size={18} strokeWidth={1.75} />
-          </button>
+          <div className="c-label">
+            {group.participants.length} participant{group.participants.length !== 1 ? 's' : ''}
+          </div>
         </div>
+        <ActionButton
+          label="Close dialog"
+          icon={<X size={18} strokeWidth={1.75} />}
+          onClick={onClose}
+          className="shrink-0"
+        />
+      </div>
 
-        {/* Tab bar */}
-        <div
-          className="flex gap-1 flex-shrink-0 py-[var(--sp-2)] px-[var(--sp-4)] c-border-b"
-          role="tablist"
-        >
-          {(['info', 'participants', 'settings'] as const).map(tab => (
-            <button
-              key={tab}
-              type="button"
-              role="tab"
-              onClick={() => setActiveTab(tab)}
-              className="c-tab"
-              aria-selected={activeTab === tab}
-            >
-              {capitalize(tab)}
-            </button>
-          ))}
-        </div>
+      {/* Tab strip — direct shell child between header and body (C-B3W3-4, wave-2
+          fourth-region precedent). Tabs primitive: roving tabindex, Arrow/Home/End,
+          MANUAL activation. Tab ids unchanged: info/participants/settings. */}
+      <Tabs
+        label="Group detail sections"
+        value={activeTab}
+        onChange={(id) => setActiveTab(id as TabId)}
+        inset
+      >
+        <Tab id="info">{capitalize('info')}</Tab>
+        <Tab id="participants">{capitalize('participants')}</Tab>
+        <Tab id="settings">{capitalize('settings')}</Tab>
+      </Tabs>
 
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto">
-          {isLoading && (
-            <EmptyState title="Loading group details..." description="Fetching from MCP socket." />
-          )}
-          {error && (
-            <EmptyState
-              variant="error"
-              title="Failed to load group"
-              description={(error as Error).message}
-              onRetry={() => refetch()}
-            />
-          )}
-          {detail && activeTab === 'info' && (
+      {/* Body — conditional-mount pattern (Tabs header 11-13 sanctions it).
+          Per-tab padding wrappers die; ModalBody provides padding (wave-2 pattern). */}
+      <ModalBody>
+        {isLoading && (
+          <EmptyState title="Loading group details..." description="Fetching from MCP socket." />
+        )}
+        {error && (
+          <EmptyState
+            variant="error"
+            title="Failed to load group"
+            description={(error as Error).message}
+            onRetry={() => refetch()}
+          />
+        )}
+        {detail && activeTab === 'info' && (
+          <div role="tabpanel" id="tabpanel-info" aria-labelledby="tab-info">
             <InfoTab
               detail={detail}
               lineName={lineName}
               isAdmin={isAdmin}
               onRefresh={() => refetch()}
             />
-          )}
-          {detail && activeTab === 'participants' && (
+          </div>
+        )}
+        {detail && activeTab === 'participants' && (
+          <div role="tabpanel" id="tabpanel-participants" aria-labelledby="tab-participants">
             <ParticipantsTab
               detail={detail}
               lineName={lineName}
@@ -830,8 +838,10 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
               myJid={myJid}
               onRefresh={() => refetch()}
             />
-          )}
-          {detail && activeTab === 'settings' && (
+          </div>
+        )}
+        {detail && activeTab === 'settings' && (
+          <div role="tabpanel" id="tabpanel-settings" aria-labelledby="tab-settings">
             <SettingsTab
               detail={detail}
               lineName={lineName}
@@ -839,9 +849,9 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
               onRefresh={() => refetch()}
               onClose={onClose}
             />
-          )}
-        </div>
-      </div>
-    </div>
+          </div>
+        )}
+      </ModalBody>
+    </Modal>
   )
 }

@@ -60,9 +60,9 @@ describe('scheduled/groups design-system primitives', () => {
     expect(scheduleComposer).toContain('ModalFooter')
     expect(scheduleComposer).not.toContain('c-dialog-backdrop')
     expect(scheduleComposer).toContain('className="c-input font-mono text-t2"')
-    expect(groupDetail).toContain('className="c-tab"')
-    expect(groupDetail).toContain('role="tablist"')
-    expect(groupDetail).toContain('role="tab"')
+    expect(groupDetail).toContain('<Tabs')
+    expect(groupDetail).toContain('<Tab')
+    expect(groupDetail).not.toContain('className="c-tab"')
   })
 
   it('extends eslint custom rules for hardcoded dimension and color literals', () => {

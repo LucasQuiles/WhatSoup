@@ -54,12 +54,9 @@ describe('design system compliance — round 2 shared search inputs', () => {
     expect(createGroup).toContain('ModalFooter')
     expect(createGroup).not.toContain('c-dialog-backdrop')
 
-    // groupDetail still on legacy shell (wave 3)
-    for (const modal of [groupDetail]) {
-      expect(modal).toContain('c-dialog-backdrop')
-      expect(modal).toContain('c-dialog')
-      expect(modal).toContain('c-dialog-header')
-    }
+    // groupDetail migrated to Modal primitive (wave 3)
+    expect(groupDetail).toContain('<Modal')
+    expect(groupDetail).not.toContain('c-dialog-backdrop')
 
     // scheduleComposer now on Modal primitive (B3 wave 2)
     expect(scheduleComposer).toContain('Modal')
@@ -68,7 +65,8 @@ describe('design system compliance — round 2 shared search inputs', () => {
     expect(scheduleComposer).not.toContain('c-dialog-backdrop')
     expect(createGroup).toContain('className="c-input font-mono text-t2"')
     expect(scheduleComposer).toContain('className="c-input font-mono text-t2')
-    expect(groupDetail).toContain('className="c-tab"')
+    expect(groupDetail).toContain('<Tabs')
+    expect(groupDetail).not.toContain('className="c-tab"')
     expect(groupDetail).toContain('<SearchInput')
     expect(groupCard).toContain('className="c-card')
     expect(scheduledRow).toContain('className="c-card')
@@ -145,7 +143,7 @@ describe('design system compliance — round 2 token cleanup', () => {
     ]) {
       expect(groupDetail).not.toContain(literal)
     }
-    expect(groupDetail).toContain('max-h-[var(--modal-max-h)]')
+    expect(groupDetail).not.toContain('max-h-[var(--modal-max-h)]')
 
     for (const literal of [
       "maxWidth: '90%'",
