@@ -167,6 +167,42 @@ describe('GET /health', () => {
     expect(typeof json.uptime_seconds).toBe('number');
   });
 
+  it('suppresses stale disconnect metadata when the current connection is connected', async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      connectionManager: {
+        botJid: '15555550123@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'connected',
+          connected: true,
+          reconnectAttempts: 0,
+          reconnectPhase: null,
+          stateChangedAt: '2026-04-05T12:00:00.000Z',
+          firstFailureAt: null,
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: 'loggedOut',
+          lastStatusCode: 401,
+        }),
+      } as unknown as ConnectionManager,
+    })));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('healthy');
+    expect(json.whatsapp.connection).toMatchObject({
+      state: 'connected',
+      last_disconnect_reason: null,
+      last_status_code: null,
+    });
+  });
+
   it('reports pending_polls_total reflecting live rows in the pending_polls table', async () => {
     // Empty table → 0
     const empty = await httpReq(port, '/health', 'GET');

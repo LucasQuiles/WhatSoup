@@ -977,6 +977,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.reconnectAttempts = 0;
       this.reconnectPhase = 'backoff';
       this.firstFailureAt = null;
+      this.lastStatusCode = null;
+      this.lastDisconnectReason = null;
       this.gracefulReconnectInFlight = false;
       if (this.cooldownTimer !== null) {
         clearTimeout(this.cooldownTimer);
