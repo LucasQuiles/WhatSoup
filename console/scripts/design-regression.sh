@@ -352,6 +352,24 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Check 16: Legacy fixed table/log lane vars (removed in C2.3)
+# ---------------------------------------------------------------------------
+check_start "16" "Legacy --sk-col-* / --log-col-* lane vars"
+C16_HITS=$(rg -n -- "--sk-col-|--log-col-" "$CONSOLE_SRC" 2>/dev/null || true)
+C16_COUNT=$(printf '%s' "$C16_HITS" | grep -c -- "-col-" || true)
+C16_COUNT=${C16_COUNT:-0}
+echo "    Legacy lane var references: $C16_COUNT"
+if [ -n "$C16_HITS" ] && [ "$C16_COUNT" -gt 0 ]; then
+  echo "$C16_HITS" | head -5 | sed 's/^/    /'
+fi
+echo "    Expectation: zero (Table squeeze + LogStream lane tokens own geometry)"
+if [ "$C16_COUNT" -eq 0 ]; then
+  check_result "16" "0" "no legacy lane vars" "OK"
+else
+  check_result "16" "$C16_COUNT" "legacy lane vars reintroduced (shadow: non-blocking)" "WARN"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "----------------------------------------"

@@ -25,10 +25,6 @@
   --panel-contact: 256px;    /* inbox right panel */
   --panel-actions: 260px;    /* line detail actions panel */
   --panel-history: 288px;    /* line detail history chat list */
-  /* ═══ Log column widths ═══ */
-  --log-col-time: 90px;      /* timestamp column */
-  --log-col-level: 56px;     /* level badge column */
-  --log-col-source: 100px;   /* source module column */
   --dropdown-min-w: 200px;   /* dropdown minimum width */
   /* ═══ Text constraints ═══ */
   --empty-max-w: 320px;      /* empty state description max */

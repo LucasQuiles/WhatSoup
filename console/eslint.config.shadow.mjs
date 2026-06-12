@@ -135,6 +135,39 @@ const shadowSyntaxRules = [
       'Non-blocking baseline counter — rule is PROPOSED, enabled at P2-complete.',
   },
 
+  // ── soup/no-raw-sortable-header (shadow) ─────────────────────────────────
+  // Raw <th onClick> sorting. Sortable headers must be real buttons rendered
+  // by TableHeaderCell (table.md) so they are keyboard-operable with aria-sort.
+  {
+    selector: 'JSXOpeningElement[name.name="th"]:has(JSXAttribute[name.name="onClick"])',
+    message:
+      '[soup/no-raw-sortable-header SHADOW] Raw <th onClick> sort handler. ' +
+      'Render sortable headers through TableHeaderCell (sort button + aria-sort). ' +
+      'Non-blocking baseline counter.',
+  },
+
+  // ── soup/no-raw-table (shadow) ───────────────────────────────────────────
+  // Raw <table> outside the primitives dir. Migrated surfaces render through
+  // the Table primitive; remaining sites burn down via this counter.
+  {
+    selector: 'JSXOpeningElement[name.name="table"]',
+    message:
+      '[soup/no-raw-table SHADOW] Raw <table> element. ' +
+      'Render data tables through the Table primitive (components/primitives/). ' +
+      'Non-blocking baseline counter.',
+  },
+
+  // ── soup/no-legacy-log-lanes (shadow) ────────────────────────────────────
+  // Legacy --log-col-* lane vars. LogStream owns log lane geometry via
+  // --log-time-w/--log-level-w/--log-source-w component tokens.
+  {
+    selector: 'Literal[value=/var\\(--log-col-/]',
+    message:
+      '[soup/no-legacy-log-lanes SHADOW] Legacy --log-col-* lane reference. ' +
+      'Log surfaces render through the LogStream primitive (its lane tokens own geometry). ' +
+      'Non-blocking baseline counter.',
+  },
+
   // ── soup/no-utility-smell (shadow) ───────────────────────────────────────
   // Arbitrary-value utility whose payload is NOT a var() reference.
   // Generalises the existing px-only rule to all non-token payloads (rem, %, calc with raw values).
