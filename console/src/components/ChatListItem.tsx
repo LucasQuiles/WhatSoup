@@ -7,16 +7,20 @@ interface ChatListItemProps {
   chat: ChatItem
   isSelected: boolean
   onClick: () => void
+  /** Roving-tabindex stop: 0 when this row is the current stop, -1 otherwise.
+   *  Owned by ChatList; ChatListItem is a pure presentation row. */
+  tabIndex?: number
   isTyping?: boolean
 }
 
-const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTyping }) => {
+const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabIndex = 0, isTyping }) => {
   const displayName = resolveDisplayName(chat.name)
 
   return (
     <div
       role="option"
-      tabIndex={0}
+      tabIndex={tabIndex}
+      data-conv-key={chat.conversationKey}
       onClick={onClick}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       aria-label={`Open conversation with ${displayName}`}

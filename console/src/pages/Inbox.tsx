@@ -12,7 +12,7 @@ import { selectVirtualMessageRows, toChronologicalMessages } from '../lib/inbox-
 import type { Message, ChatItem } from '../types'
 import EmptyState from '../components/EmptyState'
 import { SaveContactDialog } from '../components/SaveContactDialog'
-import ChatListItem from '../components/ChatListItem'
+import ChatList from '../components/ChatList'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
 import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X, CheckCheck } from 'lucide-react'
@@ -224,22 +224,12 @@ export default function Inbox() {
         />
 
         {/* Chat list */}
-        <div className="flex-1 overflow-auto scrollbar-hide" role="listbox" aria-label="Chat conversations">
-          {chats?.map(chat => (
-            <ChatListItem
-              key={chat.conversationKey}
-              chat={chat}
-              isSelected={selectedChat === chat.conversationKey}
-              onClick={() => setSelectedChat(chat.conversationKey)}
-              isTyping={typingJids.has(chat.conversationKey)}
-            />
-          ))}
-          {(!chats || chats.length === 0) && (
-            <div className="text-center text-t4 py-[var(--sp-8)] px-[var(--sp-4)]">
-              <span className="text-body">No chats found</span>
-            </div>
-          )}
-        </div>
+        <ChatList
+          chats={chats ?? []}
+          selectedChat={selectedChat}
+          onSelect={setSelectedChat}
+          typingKeys={typingJids}
+        />
       </div>
 
       {/* ═══ Center: Messages ═══ */}
