@@ -2,7 +2,7 @@
  * CreateGroupModal — open/close, subject input, participants via ContactSearchPicker, submit pipeline, Escape, validation.
  * @vitest-environment jsdom
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
@@ -27,12 +27,12 @@ import { CreateGroupModal } from '../../console/src/components/line-detail/Creat
 // ---- Helpers ----
 
 interface ToastSpies extends ToastContextValue {
-  success: ReturnType<typeof vi.fn>
-  error: ReturnType<typeof vi.fn>
-  info: ReturnType<typeof vi.fn>
-  toast: ReturnType<typeof vi.fn>
-  dismiss: ReturnType<typeof vi.fn>
-  clear: ReturnType<typeof vi.fn>
+  success: Mock<ToastContextValue['success']>
+  error: Mock<ToastContextValue['error']>
+  info: Mock<ToastContextValue['info']>
+  toast: Mock<ToastContextValue['toast']>
+  dismiss: Mock<ToastContextValue['dismiss']>
+  clear: Mock<ToastContextValue['clear']>
 }
 
 const alice: ContactResult = {
@@ -51,12 +51,12 @@ const bob: ContactResult = {
 
 function makeToast(): ToastSpies {
   return {
-    success: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    toast: vi.fn(),
-    dismiss: vi.fn(),
-    clear: vi.fn(),
+    success: vi.fn<ToastContextValue['success']>(),
+    error: vi.fn<ToastContextValue['error']>(),
+    info: vi.fn<ToastContextValue['info']>(),
+    toast: vi.fn<ToastContextValue['toast']>(),
+    dismiss: vi.fn<ToastContextValue['dismiss']>(),
+    clear: vi.fn<ToastContextValue['clear']>(),
   }
 }
 
