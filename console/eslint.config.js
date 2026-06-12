@@ -4,6 +4,13 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
+import {
+  structuralSelectors,
+  focusSuppressionSelectors,
+  migratedSurfaceSelectors,
+  legacyTokenSelectors,
+  utilitySmellSelectors,
+} from './eslint-rules/design-selectors.mjs'
 
 // Keep copyable Tailwind class examples in ESLint output without exposing
 // those examples as raw content for Tailwind/Vite class extraction.
@@ -191,7 +198,7 @@ const designSystemRestrictions = [
           message: '⛔ Raw numeric spacing value (becomes px). FIX: replace N with string var(--sp-*). E.g. 2→"var(--bw-accent)" 4→"var(--sp-1)" 8→"var(--sp-2)" 12→"var(--sp-3)" 16→"var(--sp-4)".',
         },
 
-        // ══��� SIMPLE TEXT COLOR IN STYLE ═���═
+        // ═══ SIMPLE TEXT COLOR IN STYLE ═══
         // color: 'var(--color-tN)' should be a Tailwind text-tN class
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="color"][value.value=/^var\\(--color-t\\d\\)$/]',
@@ -657,6 +664,13 @@ const scheduledGroupsDesignSystemRestrictions = [
 
 export default defineConfig([
   globalIgnores(['dist']),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 1 — Base rule set for all TS/TSX.
+  // Includes: designSystemRestrictions (existing wall) + Group S (structural,
+  // zero-violation console-wide) + Group F (focus suppression, console-wide).
+  // Last-match-wins: files matched by a later block get that block's full array.
+  // ─────────────────────────────────────────────────────────────────────────
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
@@ -682,15 +696,50 @@ export default defineConfig([
       // the information in the error message + the cheat sheet above.
       // ═══════════════════════════════════════════════════════════════
 
-      'no-restricted-syntax': ['error', ...designSystemRestrictions],
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        // Group S: structural (console-wide, excludes primitives/**):
+        ...structuralSelectors,
+        // Group F: focus suppression (console-wide, excludes Inbox + HistoryTab):
+        ...focusSuppressionSelectors,
+      ],
     },
   },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 2 — Composer carve-out for Group F (focus suppression).
+  // Inbox.tsx and HistoryTab.tsx are the two chat composers that carry the
+  // two known outline-none violations; they are carved out of the focus rule
+  // until their migration wave lands. They still get the full base wall and
+  // Group S structural selectors.
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    files: [
+      'src/pages/Inbox.tsx',
+      'src/components/line-detail/HistoryTab.tsx',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        // Group S carried (no focus — carve-out):
+        ...structuralSelectors,
+      ],
+    },
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 3 — Scheduled/groups ratchet (existing strict set, re-carried).
+  // Must re-carry the full base array PLUS Group S + Group F because flat-config
+  // last-match-wins replaces, not merges, the no-restricted-syntax rule.
+  // CreateGroupModal is also in the M list — it gets the full union in Block 4b.
+  // ─────────────────────────────────────────────────────────────────────────
   {
     files: [
       'src/components/shared/SearchInput.tsx',
       'src/components/shared/ContactSearchPicker.tsx',
       'src/components/shared/ChatPicker.tsx',
-      'src/components/line-detail/CreateGroupModal.tsx',
       'src/components/line-detail/ScheduleComposerModal.tsx',
       'src/components/line-detail/GroupDetailModal.tsx',
       'src/components/line-detail/GroupCard.tsx',
@@ -701,7 +750,91 @@ export default defineConfig([
       'src/components/line-detail/groups-utils.ts',
     ],
     rules: {
-      'no-restricted-syntax': ['error', ...designSystemRestrictions, ...scheduledGroupsDesignSystemRestrictions],
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        ...scheduledGroupsDesignSystemRestrictions,
+        // Re-carry Group S and Group F so they aren't silently dropped for these files:
+        ...structuralSelectors,
+        ...focusSuppressionSelectors,
+      ],
+    },
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 4a — Migrated surfaces (M list, excluding CreateGroupModal).
+  // These files have zero no-raw-button and no-adhoc-modal violations in the
+  // shadow baseline. Promoting to scoped-error prevents re-introduction.
+  // Full array: base + structural + focus + migrated selectors.
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    files: [
+      'src/pages/LineDetail.tsx',
+      'src/pages/SoupKitchen.tsx',
+      'src/components/TagInput.tsx',
+      'src/components/CardSelector.tsx',
+      'src/components/ConfirmDialog.tsx',
+      'src/components/RelinkModal.tsx',
+      'src/components/SaveContactDialog.tsx',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        // Group S, F, and M:
+        ...structuralSelectors,
+        ...focusSuppressionSelectors,
+        ...migratedSurfaceSelectors,
+      ],
+    },
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 4b — CreateGroupModal full union.
+  // CreateGroupModal is in BOTH the scheduled/groups list AND the M list.
+  // It must carry the union of all: base + scheduled + structural + focus + migrated.
+  // Placing it in 4a alone would silently strip the scheduled ratchet (flat-config
+  // replace semantics — last match wins). Constraint §3 in d6-investigation.md.
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    files: [
+      'src/components/line-detail/CreateGroupModal.tsx',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        ...scheduledGroupsDesignSystemRestrictions,
+        // Full union — Group S, F, M:
+        ...structuralSelectors,
+        ...focusSuppressionSelectors,
+        ...migratedSurfaceSelectors,
+      ],
+    },
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 5 — Primitives strict tier (Group P).
+  // components/primitives/** is born-clean: grep-verified zero legacy tokens and
+  // utility smells (d6-investigation.md §3). Error here prevents any re-entry.
+  // Deliberately NO structural or migrated selectors (Table/LogStream/Button/Modal
+  // ARE the canonical renderers; they must render the raw elements).
+  // Carries base + focus + legacyToken + utilitySmell only.
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    files: [
+      'src/components/primitives/**/*.{ts,tsx}',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        // Group F (focus suppression applies in primitives):
+        ...focusSuppressionSelectors,
+        // Group P: legacy tokens and utility smell (primitives-only):
+        ...legacyTokenSelectors,
+        ...utilitySmellSelectors,
+      ],
     },
   },
 ])

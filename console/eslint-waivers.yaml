@@ -18,8 +18,13 @@
 # Lint-plan section 4: no permanent waivers without spec-section citation.
 # All suppressions in source must carry "waiver:<id>" tag in their comment.
 #
-# P6 seeds: WVR-001..WVR-002 from existing inline suppressions (chart-utils, QrDisplay).
-# Adds: WVR-003 (chart-utils hex), WVR-004 (QrDisplay hex), WVR-005 (shimmer), WVR-006 (typing-bounce).
+# D6 changes (2026-06-12):
+#   WVR-003 RETIRED — zero hex literals remain in chart-utils.ts (grep-verified).
+#   WVR-004 RETIRED — QrDisplay hex eliminated via getComputedStyle resolution (7a592488).
+#   WVR-002 converted to PERMANENT per spec-section citation (lint-plan §4 third-party numeric API).
+#   WVR-011 scope re-pinned: line 174→176 (verified against current tree).
+#   WVR-012 expiration_phase re-pointed: D6→D-series-close (retirement triggers not yet fired).
+# Remaining: 9 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011, WVR-012).
 
 waivers:
   - id: WVR-001
@@ -51,62 +56,22 @@ waivers:
     reason: >
       QRCode library margin option counts QR cells (integer), not CSS px values.
       The value 2 means "2 QR modules of quiet zone" and cannot be expressed
-      as a CSS token.
+      as a CSS token. This is a third-party numeric API with no CSS alternative.
     scope:
       - console/src/components/QrDisplay.tsx
     expiry: 2026-12-31
     replacement_plan: >
-      Investigate whether the rule can gain a named-option-object exemption
-      for QRCode at P6. If not, this waiver becomes permanent with the
-      spec-section citation: lint-plan section 4 "third-party numeric API".
+      No migration path exists. This waiver is permanent per lint-plan section 4
+      "third-party numeric API" exception. The QRCode library margin parameter
+      is an integer cell count; CSS token indirection is architecturally impossible.
+      Re-evaluate only if the library gains CSS-based margin support.
     safer_alternative_considered: >
       none exists — this is a third-party numeric API with no CSS alternative.
-    status: temporary
-    expiration_phase: C2
-    cleanup_trigger: QR/link surface migration slice
-    user_approval_required: no
-
-  - id: WVR-003
-    rule: soup/no-raw-color (hex)
-    owner: console-maintainer
-    reason: >
-      chart-utils.ts contains recharts Tooltip contentStyle and CartesianGrid
-      stroke values that require raw hex at point of use. These are existing
-      suppressions migrated from the inline disable registry.
-    scope:
-      - console/src/lib/chart-utils.ts
-    expiry: 2026-12-31
-    replacement_plan: >
-      Same adapter work as WVR-001: a CHART_MARGIN + CHART_COLORS token
-      adapter at P3 will replace these raw values with token lookups.
-    safer_alternative_considered: >
-      CSS custom properties in the recharts style prop — rejected: recharts
-      does not interpolate CSS variables in its inline style objects.
-    status: temporary
-    expiration_phase: C3
-    cleanup_trigger: chart surface migration slice
-    user_approval_required: no
-
-  - id: WVR-004
-    rule: soup/no-raw-color (hex)
-    owner: console-maintainer
-    reason: >
-      QrDisplay.tsx uses a hex color for the QR code module color (#000000)
-      via the QRCode library's color option. The library does not accept
-      CSS variables.
-    scope:
-      - console/src/components/QrDisplay.tsx
-    expiry: 2026-12-31
-    replacement_plan: >
-      Investigate runtime getComputedStyle shim at P3. If the QRCode library
-      can accept a resolved CSS color value, use a wrapper that reads
-      var(--text-1) at render time.
-    safer_alternative_considered: >
-      CSS custom property in the color option — rejected: QRCode library
-      renders to canvas/SVG and does not support CSS variable syntax.
-    status: temporary
-    expiration_phase: C2
-    cleanup_trigger: QR/link surface migration slice
+      Investigated runtime getComputedStyle shim at D6 — library renders to canvas/SVG
+      before CSS layout, so the shim cannot resolve at the required time.
+    status: permanent
+    expiration_phase: D-series-close
+    cleanup_trigger: QRCode library gains CSS margin support (track upstream)
     user_approval_required: no
 
   - id: WVR-005
@@ -192,27 +157,31 @@ waivers:
     expiration_phase: C4
     cleanup_trigger: react-hooks plugin/library compatibility update
     user_approval_required: no
-  - id: WVR-012
-    rule: react-refresh/only-export-components
-    owner: console-maintainer
-    reason: popoverOptionId + usePopoverKeyboard are co-located with Popover — the three are one combobox aria contract; splitting creates a spec-orphan module (same HMR-only limitation as WVR-008).
-    scope: console/src/components/primitives/Popover.tsx
-    expiry: 2026-12-31
-    replacement_plan: revisit if react-refresh gains mixed-export support or the helpers grow a second consumer worth a module.
-    safer_alternative_considered: separate popover-keyboard.ts module — rejected as spec-orphan fragmentation.
-    status: temporary
-    expiration_phase: D6
-    cleanup_trigger: react-refresh capability change or helper extraction
-    user_approval_required: no
   - id: WVR-011
     rule: react-hooks/exhaustive-deps
     owner: console-maintainer
     reason: intentional mount-only effect (wizard default seeding must not re-run on dep changes).
-    scope: console/src/components/wizard/ConfigStep.tsx:174
+    scope: console/src/components/wizard/ConfigStep.tsx:176
     expiry: 2026-12-31
     replacement_plan: re-express with useRef-guarded init or React 19 idiom during the wizard C2/C3 migration.
     safer_alternative_considered: adding deps — rejected, would re-seed user-edited wizard state.
     status: temporary
     expiration_phase: C3
     cleanup_trigger: wizard migration slice
+    user_approval_required: no
+  - id: WVR-012
+    rule: react-refresh/only-export-components
+    owner: console-maintainer
+    reason: popoverOptionId + usePopoverKeyboard are co-located with Popover — the three are one combobox aria contract; splitting creates a spec-orphan module (same HMR-only limitation as WVR-008).
+    scope: console/src/components/primitives/Popover.tsx
+    expiry: 2026-12-31
+    replacement_plan: >
+      Re-evaluated at D6 (2026-06-12): neither retirement trigger has occurred —
+      react-refresh has not gained mixed-export support and the helpers have no
+      second consumer. Next review: D-series close or C4.
+      Retire if react-refresh capability changes or helper extraction happens.
+    safer_alternative_considered: separate popover-keyboard.ts module — rejected as spec-orphan fragmentation.
+    status: temporary
+    expiration_phase: D-series-close
+    cleanup_trigger: react-refresh capability change or helper extraction
     user_approval_required: no

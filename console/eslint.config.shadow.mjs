@@ -14,19 +14,28 @@
  *
  * Shadow rule batch covers (lint-plan section 3, shadow entry state):
  *   soup/no-brand-regression   — custom rule (implemented in eslint-rules/index.mjs)
- *   soup/no-raw-button         — raw <button> outside primitives dir
  *   soup/no-raw-form-control   — raw <input>/<select>/<textarea> outside primitives dir
- *   soup/no-adhoc-modal        — ad-hoc dialog backdrops / role="dialog" outside primitives
- *   soup/no-focus-suppression  — outline-none without focus-visible: pairing
  *   soup/no-infinite-animation — TSX-side inline animation: ... infinite
- *   soup/no-utility-smell      — arbitrary-value utilities with non-var() payloads
  *   soup/no-raw-color          — hex/rgb/hsl literals (selector extension; already error
  *                                in default config, kept here for shadow baseline parity)
- *   Legacy-token class usage   — bg-d* / text-t* / border-t* in className strings
- *                                (soup/no-legacy-tokens is PROPOSED; covered here via
- *                                 no-restricted-syntax selector as a forward baseline counter)
  *   soup/no-duplicate-shell    — advisory stub (warn-ceiling, never error)
  *   Other stub rules           — zero-fire stubs from eslint-rules/index.mjs
+ *
+ * PROMOTED (no longer in shadowSyntaxRules — now flow via baseSyntaxSelectors):
+ *   Group S: soup/no-raw-table, soup/no-raw-sortable-header, soup/no-legacy-log-lanes
+ *            — promoted to global-error in Block 1 of eslint.config.js
+ *   Group F: soup/no-focus-suppression
+ *            — promoted to scoped-error (console-wide minus composer carve-out)
+ *   Group M: soup/no-raw-button, soup/no-adhoc-modal (both prongs)
+ *            — promoted to scoped-error for the 8 migrated-surface files
+ *   Group P: soup/no-legacy-tokens (3 selectors), soup/no-utility-smell
+ *            — promoted to scoped-error for components/primitives/**
+ *
+ * These promoted selectors are still counted in the shadow run for all not-yet-flipped
+ * files because baseSyntaxSelectors flat-maps them out of EVERY base block (ignoring
+ * files scoping) into the final warn-severity shadow block. Leaving the old copies in
+ * shadowSyntaxRules would double-count violations for unflipped files (the error-message
+ * text differs, so dedupeSelectors cannot collapse the pair and the ratchet would inflate).
  *
  * NOT included (already at error severity in default config):
  *   soup/no-transition-all, soup/no-raw-color selectors already in eslint.config.js
@@ -37,64 +46,22 @@ import baseConfig from './eslint.config.js'
 import soupPlugin from './eslint-rules/index.mjs'
 
 // ---------------------------------------------------------------------------
-// Shadow-stage no-restricted-syntax selectors.
+// Shadow-stage no-restricted-syntax selectors (REMAINING — not yet promoted).
 // All 'warn' severity — never block anything.
 // ---------------------------------------------------------------------------
 
 const shadowSyntaxRules = [
 
-  // ── soup/no-raw-button (shadow) ──────────────────────────────────────────
-  // Flag raw <button> usage outside the primitives dir.
-  // Permanent exemption: console/src/components/primitives/ — the primitive
-  // IS the canonical <button> renderer so it must be exempt.
-  {
-    selector: 'JSXOpeningElement[name.name="button"]',
-    message:
-      '[soup/no-raw-button SHADOW] Raw <button> element. ' +
-      'P2 goal: render all buttons through the Button primitive (components/primitives/). ' +
-      'This is a baseline counter — shadow stage, non-blocking.',
-  },
-
   // ── soup/no-raw-form-control (shadow) ────────────────────────────────────
   // Flag raw <input>/<select>/<textarea>. Baseline: 27 inputs, 3 selects, 5+ textareas.
   // type="file" sites get a named waiver at P6.
+  // NOT promoted: form kit not yet landed; TagInput/SaveContact carry their own input.
   {
     selector: 'JSXOpeningElement[name.name=/^(input|select|textarea)$/]',
     message:
       '[soup/no-raw-form-control SHADOW] Raw form control element. ' +
       'P2 goal: render through promoted form kit or Select primitive. ' +
       'This is a baseline counter — shadow stage, non-blocking.',
-  },
-
-  // ── soup/no-adhoc-modal (shadow) ─────────────────────────────────────────
-  // Prong (a): c-dialog-backdrop class outside Modal primitive
-  {
-    selector: 'Literal[value=/c-dialog-backdrop/]',
-    message:
-      '[soup/no-adhoc-modal SHADOW] Ad-hoc dialog backdrop class "c-dialog-backdrop". ' +
-      'P2 goal: render all dialog surfaces through the Modal primitive. ' +
-      'Non-blocking baseline counter.',
-  },
-  // Prong (b): role="dialog" attribute outside primitives
-  {
-    selector: 'JSXAttribute[name.name="role"][value.value="dialog"]',
-    message:
-      '[soup/no-adhoc-modal SHADOW] role="dialog" outside the Modal primitive. ' +
-      'P2 goal: render all dialog surfaces through the Modal primitive. ' +
-      'Non-blocking baseline counter.',
-  },
-
-  // ── soup/no-focus-suppression (shadow) ───────────────────────────────────
-  // outline-none without a focus-visible: treatment in the same class string.
-  // The selector catches Literals containing "outline-none" but not "focus-visible:".
-  // Known violations: Inbox.tsx:434, HistoryTab.tsx:206 (chat composers).
-  {
-    selector:
-      'Literal[value=/\\boutline-none\\b/][value!=/focus-visible:/]',
-    message:
-      '[soup/no-focus-suppression SHADOW] outline-none without focus-visible: replacement. ' +
-      'FIX (P2): add focus-visible:ring-[var(--focus-ring)] or rely on global ring by not suppressing. ' +
-      'Non-blocking baseline counter.',
   },
 
   // ── soup/no-infinite-animation (shadow, TSX side) ────────────────────────
@@ -108,77 +75,24 @@ const shadowSyntaxRules = [
       'Non-blocking baseline counter.',
   },
 
-  // ── Legacy token class usage (no-legacy-tokens forward counter) ──────────
-  // The rule is PROPOSED (enabled at P2-complete). This selector counts current
-  // usage so the baseline is frozen before the alias layer lands.
-  // Covers bg-d* and text-t* utilities in className string literals.
-  {
-    selector: 'Literal[value=/\\b(bg-d[0-6]|text-t[1-5]|border-t[1-5])\\b/]',
-    message:
-      '[soup/no-legacy-tokens SHADOW COUNTER] Legacy dark-mode-only utility class. ' +
-      'P2+ goal: replace with v2 semantic vocabulary (surface-*, text-1/2/3, border-hairline/subtle/strong). ' +
-      'Non-blocking baseline counter — rule is PROPOSED, enabled at P2-complete.',
-  },
-  // Also cover var(--color-d*), var(--color-t*), var(--b1..b4) token refs in literals
-  {
-    selector: 'Literal[value=/var\\(--color-[dt]\\d\\)/]',
-    message:
-      '[soup/no-legacy-tokens SHADOW COUNTER] Legacy --color-d*/--color-t* token ref. ' +
-      'P2+ goal: replace with v2 semantic token (--surface-base, --text-1, etc.). ' +
-      'Non-blocking baseline counter — rule is PROPOSED, enabled at P2-complete.',
-  },
-  {
-    selector: 'Literal[value=/var\\(--b[1-4]\\)/]',
-    message:
-      '[soup/no-legacy-tokens SHADOW COUNTER] Legacy --b1..b4 border token ref. ' +
-      'P2+ goal: replace with --border-hairline/subtle/strong. ' +
-      'Non-blocking baseline counter — rule is PROPOSED, enabled at P2-complete.',
-  },
-
-  // ── soup/no-raw-sortable-header (shadow) ─────────────────────────────────
-  // Raw <th onClick> sorting. Sortable headers must be real buttons rendered
-  // by TableHeaderCell (table.md) so they are keyboard-operable with aria-sort.
-  {
-    selector: 'JSXOpeningElement[name.name="th"]:has(JSXAttribute[name.name="onClick"])',
-    message:
-      '[soup/no-raw-sortable-header SHADOW] Raw <th onClick> sort handler. ' +
-      'Render sortable headers through TableHeaderCell (sort button + aria-sort). ' +
-      'Non-blocking baseline counter.',
-  },
-
-  // ── soup/no-raw-table (shadow) ───────────────────────────────────────────
-  // Raw <table> outside the primitives dir. Migrated surfaces render through
-  // the Table primitive; remaining sites burn down via this counter.
-  {
-    selector: 'JSXOpeningElement[name.name="table"]',
-    message:
-      '[soup/no-raw-table SHADOW] Raw <table> element. ' +
-      'Render data tables through the Table primitive (components/primitives/). ' +
-      'Non-blocking baseline counter.',
-  },
-
-  // ── soup/no-legacy-log-lanes (shadow) ────────────────────────────────────
-  // Legacy --log-col-* lane vars. LogStream owns log lane geometry via
-  // --log-time-w/--log-level-w/--log-source-w component tokens.
-  {
-    selector: 'Literal[value=/var\\(--log-col-/]',
-    message:
-      '[soup/no-legacy-log-lanes SHADOW] Legacy --log-col-* lane reference. ' +
-      'Log surfaces render through the LogStream primitive (its lane tokens own geometry). ' +
-      'Non-blocking baseline counter.',
-  },
-
-  // ── soup/no-utility-smell (shadow) ───────────────────────────────────────
-  // Arbitrary-value utility whose payload is NOT a var() reference.
-  // Generalises the existing px-only rule to all non-token payloads (rem, %, calc with raw values).
-  {
-    selector:
-      'Literal[value=/\\b(w|h|mt|mb|ml|mr|px|py|p|m|gap|min-w|max-w|min-h|max-h|top|bottom|left|right)-\\[(?!var\\()[^\\]]+\\]/]',
-    message:
-      '[soup/no-utility-smell SHADOW] Arbitrary-value utility with non-var() payload. ' +
-      'FIX: replace [Npx/rem/%] with [var(--token)]. Define new tokens in index.css if needed. ' +
-      'Non-blocking baseline counter.',
-  },
+  // NOTE: The following selectors are intentionally ABSENT from this array.
+  // They were promoted to scoped-error in eslint.config.js (D6 flip groups S/F/M/P)
+  // and now flow into the shadow run automatically via baseSyntaxSelectors (which
+  // flat-maps every base-block no-restricted-syntax entry). Keeping them here would
+  // produce duplicate selector entries with different message text, inflating the
+  // ratchet counts for unflipped files.
+  //
+  // Removed (Group S): JSXOpeningElement[name.name="table"],
+  //                    JSXOpeningElement[name.name="th"]:has(onClick),
+  //                    Literal[value=/var\(--log-col-/]
+  // Removed (Group F): Literal[value=/\boutline-none\b/][value!=/focus-visible:/]
+  // Removed (Group M): JSXOpeningElement[name.name="button"],
+  //                    Literal[value=/c-dialog-backdrop/],
+  //                    JSXAttribute[name.name="role"][value.value="dialog"]
+  // Removed (Group P): Literal[value=/\b(bg-d[0-6]|text-t[1-5]|border-t[1-5])\b/],
+  //                    Literal[value=/var\(--color-[dt]\d\)/],
+  //                    Literal[value=/var\(--b[1-4]\)/],
+  //                    Literal[value=/\b(w|h|...) -\[(?!var\()[^\]]+\]/]
 ]
 
 // ---------------------------------------------------------------------------
@@ -235,10 +149,15 @@ const shadowConfig = [
       // no-restricted-syntax shadow selectors PLUS the base config's selectors.
       // Flat-config semantics: for files matched by multiple config objects, the LAST
       // object's entry for a rule key replaces earlier ones. So this block must carry
-      // the base selectors too, or the shadow run would silently drop the 106
+      // the base selectors too, or the shadow run would silently drop the promoted
       // error-severity design selectors for every non-primitive file. Severity is warn
       // here because the shadow run is report-only by design; the default `npm run lint`
       // (base config alone) remains the error-severity enforcement gate.
+      //
+      // baseSyntaxSelectors includes ALL promoted selectors (S/F/M/P groups) because
+      // it flat-maps from EVERY base block regardless of files scoping. This means
+      // the promoted selectors continue firing at warn for not-yet-promoted files,
+      // keeping the ratchet counts continuous across the promotion wave.
       'no-restricted-syntax': ['warn', ...dedupeSelectors([...baseSyntaxSelectors, ...shadowSyntaxRules])],
     },
   },

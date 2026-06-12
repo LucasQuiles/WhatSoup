@@ -500,3 +500,258 @@ describe('soup/no-brand-regression', () => {
     expect(hasWarning(messages, 'no-brand-regression')).toBe(false)
   })
 })
+
+// ===========================================================================
+// PROMOTED-PATH PROBES (D6 flip groups S, F, M, P)
+//
+// These probes use the DEFAULT config (eslint.config.js) via lintText and
+// assert severity 2 (error) to prove each promoted rule actually fires on
+// a violating fragment at its target path, and is silent at a non-promoted
+// path (not yet error-severity for that rule).
+//
+// Fixture paths:
+//   FIXTURE_PATH (pages/__fixture__.tsx)      — base scope, gets S + F + (not M, not P)
+//   LINEDETAIL_PATH (pages/LineDetail.tsx)    — M list: gets S + F + M
+//   PRIMITIVES_FIXTURE_PATH (primitives/__fixture__.tsx) — P scope: gets F + P, NOT S/M
+//   INBOX_PATH (pages/Inbox.tsx)              — carve-out: gets S, NOT F
+//   LINEPICKER_PATH (components/LinePicker.tsx) — NOT in M list: no M rules at error
+//
+// All assertions filter severity === 2 (error) to isolate promoted rules.
+// ===========================================================================
+
+describe('promoted-path probes (D6 flip groups)', () => {
+  // Fixture paths for promoted-config probes
+  const LINEDETAIL_PATH = resolve(REPO_ROOT, 'console/src/pages/LineDetail.tsx')
+  const INBOX_PATH = resolve(REPO_ROOT, 'console/src/pages/Inbox.tsx')
+  const LINEPICKER_PATH = resolve(REPO_ROOT, 'console/src/components/LinePicker.tsx')
+  const DEFAULT_CONFIG = resolve(REPO_ROOT, 'console/eslint.config.js')
+
+  let eslintDefault: ESLintType
+  let eslintDefaultPrimitives: ESLintType
+
+  beforeAll(async () => {
+    const { ESLint } = await import('eslint')
+    eslintDefault = new ESLint({
+      overrideConfigFile: DEFAULT_CONFIG,
+      cwd: CONSOLE_CWD,
+    })
+    eslintDefaultPrimitives = new ESLint({
+      overrideConfigFile: DEFAULT_CONFIG,
+      cwd: CONSOLE_CWD,
+    })
+  })
+
+  /** Lint with DEFAULT config; return severity-2 (error) messages only. */
+  async function lintErrors(src: string, filePath = FIXTURE_PATH): Promise<string[]> {
+    const results = await eslintDefault.lintText(src, { filePath })
+    return results[0].messages
+      .filter((m) => m.severity === 2)
+      .map((m) => m.message)
+  }
+
+  async function lintErrorsPrimitives(src: string): Promise<string[]> {
+    const results = await eslintDefaultPrimitives.lintText(src, { filePath: PRIMITIVES_FIXTURE_PATH })
+    return results[0].messages
+      .filter((m) => m.severity === 2)
+      .map((m) => m.message)
+  }
+
+  function hasError(messages: string[], keyword: string): boolean {
+    return messages.some((m) => m.includes(keyword))
+  }
+
+  // ─── Group S: structural, console-wide (pages/__fixture__.tsx) ────────────
+
+  describe('Group S — structural rules fire at error in base scope', () => {
+    it('no-raw-table fires as error at a pages path', async () => {
+      const messages = await lintErrors(
+        '<table><tbody><tr><td>data</td></tr></tbody></table>',
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-raw-table')).toBe(true)
+    })
+
+    it('no-raw-table is silent inside components/primitives (canonical renderer exemption)', async () => {
+      const messages = await lintErrorsPrimitives(
+        '<table className="w-full"><tbody>{children}</tbody></table>'
+      )
+      expect(hasError(messages, 'no-raw-table')).toBe(false)
+    })
+
+    it('no-raw-sortable-header fires as error at a pages path', async () => {
+      const messages = await lintErrors(
+        'const x = <th onClick={() => setSort("name")}>Name</th>',
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-raw-sortable-header')).toBe(true)
+    })
+
+    it('no-legacy-log-lanes fires as error at a pages path', async () => {
+      const messages = await lintErrors(
+        'const style = { width: "var(--log-col-time)" }',
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-legacy-log-lanes')).toBe(true)
+    })
+  })
+
+  // ─── Group F: focus suppression (console-wide with carve-out) ─────────────
+
+  describe('Group F — focus suppression fires at error in base scope', () => {
+    it('no-focus-suppression fires as error at SoupKitchen (base scope)', async () => {
+      const messages = await lintErrors(
+        'const x = <button className="outline-none px-4 py-2">Click</button>',
+        resolve(REPO_ROOT, 'console/src/pages/SoupKitchen.tsx')
+      )
+      expect(hasError(messages, 'no-focus-suppression')).toBe(true)
+    })
+
+    it('no-focus-suppression is silent at Inbox.tsx (composer carve-out)', async () => {
+      const messages = await lintErrors(
+        'const x = <button className="outline-none px-4 py-2">Click</button>',
+        INBOX_PATH
+      )
+      expect(hasError(messages, 'no-focus-suppression')).toBe(false)
+    })
+
+    it('no-focus-suppression is silent when focus-visible: is paired', async () => {
+      const messages = await lintErrors(
+        'const x = <button className="outline-none focus-visible:ring-2">Click</button>',
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-focus-suppression')).toBe(false)
+    })
+  })
+
+  // ─── Group M: migrated surfaces ────────────────────────────────────────────
+
+  describe('Group M — migrated surface rules fire at error for M-list paths', () => {
+    it('no-raw-button fires as error at LineDetail.tsx (M list)', async () => {
+      const messages = await lintErrors(
+        'const x = <button type="button">Click</button>',
+        LINEDETAIL_PATH
+      )
+      expect(hasError(messages, 'no-raw-button')).toBe(true)
+    })
+
+    it('no-raw-button is silent at LinePicker.tsx (NOT in M list — not yet error)', async () => {
+      const messages = await lintErrors(
+        'const x = <button type="button">Click</button>',
+        LINEPICKER_PATH
+      )
+      expect(hasError(messages, 'no-raw-button')).toBe(false)
+    })
+
+    it('no-adhoc-modal (c-dialog-backdrop) fires as error at RelinkModal.tsx (M list)', async () => {
+      const messages = await lintErrors(
+        'const x = <div className="c-dialog-backdrop fixed inset-0" />',
+        resolve(REPO_ROOT, 'console/src/components/RelinkModal.tsx')
+      )
+      expect(hasError(messages, 'no-adhoc-modal')).toBe(true)
+    })
+
+    it('no-adhoc-modal (role=dialog) fires as error at RelinkModal.tsx (M list)', async () => {
+      const messages = await lintErrors(
+        'const x = <div role="dialog" aria-modal="true"><p>Content</p></div>',
+        resolve(REPO_ROOT, 'console/src/components/RelinkModal.tsx')
+      )
+      expect(hasError(messages, 'no-adhoc-modal')).toBe(true)
+    })
+
+    it('no-raw-button is silent inside components/primitives (canonical renderer exemption)', async () => {
+      const messages = await lintErrorsPrimitives(
+        'const x = <button type="button" className="btn-base">{children}</button>'
+      )
+      expect(hasError(messages, 'no-raw-button')).toBe(false)
+    })
+  })
+
+  // ─── Group P: primitives strict tier ───────────────────────────────────────
+
+  describe('Group P — primitives tier rules fire at error inside primitives/', () => {
+    it('no-legacy-tokens (bg-d3) fires as error inside primitives/', async () => {
+      const messages = await lintErrorsPrimitives(
+        'const x = <div className="bg-d3 p-4 rounded" />'
+      )
+      expect(hasError(messages, 'no-legacy-tokens')).toBe(true)
+    })
+
+    it('no-legacy-tokens (var(--color-d4)) fires as error inside primitives/', async () => {
+      const messages = await lintErrorsPrimitives(
+        'const style = { background: "var(--color-d4)" }'
+      )
+      expect(hasError(messages, 'no-legacy-tokens')).toBe(true)
+    })
+
+    it('no-legacy-tokens (var(--b2)) fires as error inside primitives/', async () => {
+      const messages = await lintErrorsPrimitives(
+        'const style = { borderColor: "var(--b2)" }'
+      )
+      expect(hasError(messages, 'no-legacy-tokens')).toBe(true)
+    })
+
+    it('no-utility-smell (w-[40%]) fires as error inside primitives/', async () => {
+      const messages = await lintErrorsPrimitives(
+        'const x = <div className="w-[40%] flex-shrink-0" />'
+      )
+      expect(hasError(messages, 'no-utility-smell')).toBe(true)
+    })
+
+    it('no-legacy-tokens is silent at a pages path (not in P scope)', async () => {
+      const messages = await lintErrors(
+        'const x = <div className="bg-d3 p-4 rounded" />',
+        FIXTURE_PATH
+      )
+      // bg-d3 does NOT fire at error in pages/ — only in primitives/
+      expect(hasError(messages, 'no-legacy-tokens')).toBe(false)
+    })
+
+    it('no-utility-smell is silent at a pages path (not in P scope)', async () => {
+      const messages = await lintErrors(
+        'const x = <div className="w-[40%] flex-shrink-0" />',
+        FIXTURE_PATH
+      )
+      // no-utility-smell does NOT fire at error in pages/ — only in primitives/
+      expect(hasError(messages, 'no-utility-smell')).toBe(false)
+    })
+
+    it('no-legacy-tokens is silent for v2 semantic tokens inside primitives/', async () => {
+      const messages = await lintErrorsPrimitives(
+        'const x = <div className="bg-surface-base text-1 border-hairline p-4" />'
+      )
+      expect(hasError(messages, 'no-legacy-tokens')).toBe(false)
+    })
+
+    it('no-utility-smell is silent for var() payloads inside primitives/', async () => {
+      const messages = await lintErrorsPrimitives(
+        'const x = <div className="w-[var(--avatar-sm)] flex-shrink-0" />'
+      )
+      expect(hasError(messages, 'no-utility-smell')).toBe(false)
+    })
+  })
+
+  // ─── CreateGroupModal union block (block 4b sanity check) ──────────────────
+
+  describe('CreateGroupModal full-union block', () => {
+    const CREATEGROUP_PATH = resolve(
+      REPO_ROOT,
+      'console/src/components/line-detail/CreateGroupModal.tsx'
+    )
+
+    it('no-raw-button fires as error at CreateGroupModal (M list + scheduled union)', async () => {
+      const messages = await lintErrors(
+        'const x = <button type="button">Add</button>',
+        CREATEGROUP_PATH
+      )
+      expect(hasError(messages, 'no-raw-button')).toBe(true)
+    })
+
+    it('no-focus-suppression fires as error at CreateGroupModal (union block includes F)', async () => {
+      const messages = await lintErrors(
+        'const x = <div className="outline-none" />',
+        CREATEGROUP_PATH
+      )
+      expect(hasError(messages, 'no-focus-suppression')).toBe(true)
+    })
+  })
+})
