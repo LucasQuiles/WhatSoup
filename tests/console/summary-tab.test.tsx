@@ -77,6 +77,7 @@ interface LineOverrides {
   activeSessions?: number
   status?: LineInstance['status']
   models?: LineInstance['models']
+  linkedStatus?: LineInstance['linkedStatus']
 }
 
 function makeLine(overrides: LineOverrides = {}): LineInstance {
@@ -101,6 +102,7 @@ function makeLine(overrides: LineOverrides = {}): LineInstance {
     heartbeat: ['up', 'up', 'up'],
     lastActive: 'just now',
     error: null,
+    linkedStatus: overrides.linkedStatus,
     activeSessions: overrides.activeSessions,
     config: overrides.config,
     models: overrides.models,
@@ -262,6 +264,17 @@ describe('SummaryTab — KPI row structural contract', () => {
 
     const modelCard = screen.getByText('MODEL').closest('div.c-card') as HTMLElement
     expect(within(modelCard).getByText('gpt-4o')).toBeDefined()
+  })
+
+  it('renders unknown linkage as a neutral KPI instead of a confirmed re-link signal', () => {
+    const line = makeLine({ mode: 'agent', linkedStatus: 'unknown' })
+
+    render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
+
+    const linkCard = screen.getByText('LINK').closest('div.c-card') as HTMLElement
+    const value = within(linkCard).getByText('unknown')
+    expect(value).toBeDefined()
+    expect(value.className).toContain('text-t4')
   })
 
   it('renders the action buttons (Restart, Change Mode, Stop) on every mode', () => {
