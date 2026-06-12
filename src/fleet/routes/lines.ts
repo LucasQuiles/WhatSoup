@@ -575,6 +575,8 @@ export async function handleGetLineProviderStatus(
   const turnsServedRaw = dig(health, 'instance', 'fallbackTurnsServed');
   const turnsEmptyRaw = dig(health, 'instance', 'fallbackTurnsEmpty');
   const lastFallbackTurnAtRaw = dig(health, 'instance', 'lastFallbackTurnAt');
+  const probeAttemptsRaw = dig(health, 'instance', 'probeAttempts');
+  const lastProbeAtRaw = dig(health, 'instance', 'lastProbeAt');
   const fallbackResetAt = typeof fallbackResetAtRaw === 'number' ? fallbackResetAtRaw : null;
   const activeEntry = fallbackEntryFromHealth(dig(health, 'instance', 'activeFallbackEntry'));
   const chainFromHealth = fallbackChainFromHealth(dig(health, 'instance', 'fallbackChain'));
@@ -603,6 +605,8 @@ export async function handleGetLineProviderStatus(
       turnsServed: typeof turnsServedRaw === 'number' ? turnsServedRaw : null,
       turnsEmpty: typeof turnsEmptyRaw === 'number' ? turnsEmptyRaw : null,
       lastFallbackTurnAt: typeof lastFallbackTurnAtRaw === 'number' ? lastFallbackTurnAtRaw : null,
+      probeAttempts: typeof probeAttemptsRaw === 'number' ? probeAttemptsRaw : null,
+      lastProbeAt: typeof lastProbeAtRaw === 'number' ? lastProbeAtRaw : null,
       activeEntry,
       chain: fallbackChain,
     },
