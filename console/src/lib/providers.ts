@@ -1,20 +1,21 @@
 // ---------------------------------------------------------------------------
-//  Provider constants — kept in lockstep with the backend registry.
+//  Provider constants — ID list shared with the backend registry.
 //
-//  Single source of truth (backend):
-//    src/runtimes/agent/providers/index.ts → PROVIDER_IDS (#447)
+//  Single source of truth for provider IDs (shared JSON, imported here AND
+//  by the backend registry src/runtimes/agent/providers/index.ts, #447):
+//    src/runtimes/agent/providers/provider-ids.json
 //
 //  Backend descriptor shape:
 //    src/runtimes/agent/providers/types.ts → ProviderDescriptor
 //
-//  DRIFT NOTE: This file cannot directly import from the backend module
-//  because the console is bundled separately (Vite root differs). Whenever
-//  PROVIDER_IDS changes, mirror the entry HERE and add the matching display
-//  metadata. The console build is fast; a missing/stale entry surfaces as
-//  a "Unknown provider" tile in the UI, not as a silent runtime alias —
-//  the backend validator (agent-config-validator.ts) is the enforcement
-//  point that rejects unknown IDs.
+//  Display metadata (names, colors, placeholders) stays console-local in
+//  PROVIDER_META below. A backend ID without metadata still renders (the ID
+//  doubles as its display name) so the console can never *omit* a provider
+//  the backend accepts — the drift guard
+//  tests/console/provider-catalog-drift.test.ts pins the ID lists together.
 // ---------------------------------------------------------------------------
+
+import PROVIDER_IDS from '../../../src/runtimes/agent/providers/provider-ids.json';
 
 export interface ProviderDef {
   id: string;
@@ -32,7 +33,8 @@ export interface ConfigFieldDef {
 
 export const DEFAULT_PROVIDER_ID = 'claude-cli';
 
-export const PROVIDERS: ProviderDef[] = [
+/** Console-local display metadata; membership and order come from the JSON. */
+const PROVIDER_META: ProviderDef[] = [
   { id: 'claude-cli',    displayName: 'Claude Code',    shortName: 'Claude',    type: 'cli' },
   { id: 'codex-cli',     displayName: 'Codex',          shortName: 'CDX',       type: 'cli' },
   { id: 'gemini-cli',    displayName: 'Gemini',         shortName: 'Gemini',    type: 'cli' },
@@ -40,6 +42,22 @@ export const PROVIDERS: ProviderDef[] = [
   { id: 'openai-api',    displayName: 'OpenAI',         shortName: 'OAI',       type: 'api' },
   { id: 'anthropic-api', displayName: 'Anthropic',      shortName: 'Anth',      type: 'api' },
 ];
+
+const _metaById = new Map<string, ProviderDef>(PROVIDER_META.map((p) => [p.id, p]));
+
+export const PROVIDERS: ProviderDef[] = PROVIDER_IDS.map(
+  (id) =>
+    _metaById.get(id) ?? {
+      // New backend ID without console metadata yet: degrade gracefully
+      // rather than hide a provider the backend accepts. The `-api` suffix
+      // convention is part of the canonical ID format (see backend registry
+      // header).
+      id,
+      displayName: id,
+      shortName: id,
+      type: id.endsWith('-api') ? 'api' : 'cli',
+    },
+);
 
 // Precomputed maps for O(1) lookups and stable references
 const _providerMap = new Map<string, ProviderDef>(PROVIDERS.map(p => [p.id, p]));
