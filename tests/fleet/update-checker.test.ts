@@ -70,4 +70,32 @@ describe('UpdateChecker', () => {
     expect(state.remoteSha).toBe('unknown');
     expect(state.updateAvailable).toBe(false);
   });
+
+  it('falls back to public HTTPS when SSH origin fetch requires a key', async () => {
+    const sshErr: any = new Error('fatal: could not read from remote repository.');
+    sshErr.stderr = 'git@github.com: Permission denied (publickey).';
+
+    const checker = new UpdateChecker('/tmp/fake-repo');
+    const execGit = vi.fn()
+      .mockResolvedValueOnce('abc1234')
+      .mockRejectedValueOnce(sshErr)
+      .mockResolvedValueOnce('git@github.com:LucasQuiles/WhatSoup.git')
+      .mockResolvedValueOnce('')
+      .mockResolvedValueOnce('def5678')
+      .mockResolvedValueOnce('2');
+    (checker as any).execGit = execGit;
+
+    await checker.checkNow();
+
+    expect(execGit.mock.calls.map(([args]) => args)).toEqual([
+      ['rev-parse', '--short', 'HEAD'],
+      ['fetch', 'origin', 'main', '--quiet'],
+      ['remote', 'get-url', 'origin'],
+      ['fetch', 'https://github.com/LucasQuiles/WhatSoup.git', 'main:refs/remotes/origin/main', '--quiet'],
+      ['rev-parse', '--short', 'origin/main'],
+      ['rev-list', '--count', 'HEAD..origin/main'],
+    ]);
+    expect(checker.getState().remoteSha).toBe('def5678');
+    expect(checker.getState().updateAvailable).toBe(true);
+  });
 });

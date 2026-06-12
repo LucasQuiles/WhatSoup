@@ -474,6 +474,47 @@ describe('handleUpdate — git pull failure', () => {
       { event: 'error', step: 'pull' },
     ]);
   });
+
+  it('falls back to public HTTPS when SSH origin pull requires a key', async () => {
+    const sshErr: any = new Error('fatal: could not read from remote repository.');
+    sshErr.stderr = 'git@github.com: Permission denied (publickey).';
+
+    execFileAsyncSpy
+      .mockResolvedValueOnce({ stdout: 'abc1234\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockRejectedValueOnce(sshErr)
+      .mockResolvedValueOnce({ stdout: 'git@github.com:LucasQuiles/WhatSoup.git\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'Updating abc..def\nFast-forward\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'src/foo.ts\n', stderr: '' });
+    execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
+
+    const { req, res } = makeReqRes();
+    await handleUpdate(req, res, makeChecker(), '/repo');
+
+    const events = parseSSE(res.chunks);
+    expect(events[1].data).toMatchObject({
+      step: 'pull',
+      status: 'done',
+      publicHttpsFallback: true,
+    });
+    expect(execFileAsyncCalls()).toEqual([
+      { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['remote', 'get-url', 'origin'], cwd: '/repo', timeout: 5_000 },
+      {
+        cmd: 'git',
+        args: ['fetch', 'https://github.com/LucasQuiles/WhatSoup.git', 'main:refs/remotes/origin/main', '--quiet'],
+        cwd: '/repo',
+        timeout: 60_000,
+      },
+      { cmd: 'git', args: ['merge', '--ff-only', 'origin/main'], cwd: '/repo', timeout: 60_000 },
+      { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
+      { cmd: 'git', args: ['diff', 'abc1234', '--name-only'], cwd: '/repo', timeout: 10_000 },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -492,8 +533,7 @@ describe('handleUpdate — vite build failure', () => {
     const buildErr: any = new Error('build failed');
     buildErr.stderr = 'error: [vite] Transform failed with 3 errors.';
     execFileAsyncSpy.mockRejectedValueOnce(buildErr);                         // vite build
-    execFileAsyncSpy.mockResolvedValueOnce({ stdout: '', stderr: '' });      // rollback: git status (clean)
-    execFileAsyncSpy.mockResolvedValueOnce({ stdout: '', stderr: '' });      // rollback: git reset --hard
+    execFileAsyncSpy.mockResolvedValueOnce({ stdout: '', stderr: '' });      // preserve: git status (clean)
 
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
@@ -511,7 +551,7 @@ describe('handleUpdate — vite build failure', () => {
       { event: 'progress', step: 'console-install', status: 'skip' },
       { event: 'progress', step: 'console-build', status: 'running' },
       { event: 'error', step: 'console-build' },
-      { event: 'progress', step: 'rollback', status: 'done' },
+      { event: 'progress', step: 'preserve', status: 'done' },
     ]);
     expect(events[7].data).toEqual({
       step: 'console-build',
@@ -525,7 +565,6 @@ describe('handleUpdate — vite build failure', () => {
       { cmd: 'git', args: ['diff', 'abc1234', '--name-only'], cwd: '/repo', timeout: 10_000 },
       { cmd: 'npx', args: ['vite', 'build'], cwd: '/repo/console', timeout: 120_000 },
       { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
-      { cmd: 'git', args: ['reset', '--hard', 'abc1234'], cwd: '/repo', timeout: 15_000 },
     ]);
   });
 
@@ -538,8 +577,7 @@ describe('handleUpdate — vite build failure', () => {
       .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })  // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }) // diff
       .mockRejectedValueOnce(err2)                                  // vite build fails
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })            // rollback: git status (clean)
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });           // rollback: git reset
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });           // preserve: git status (clean)
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
@@ -554,7 +592,7 @@ describe('handleUpdate — vite build failure', () => {
       { event: 'progress', step: 'console-install', status: 'skip' },
       { event: 'progress', step: 'console-build', status: 'running' },
       { event: 'error', step: 'console-build' },
-      { event: 'progress', step: 'rollback', status: 'done' },
+      { event: 'progress', step: 'preserve', status: 'done' },
     ]);
     expect(res.end).toHaveBeenCalledTimes(1);
   });
@@ -568,8 +606,7 @@ describe('handleUpdate — vite build failure', () => {
       .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })  // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'console/src/foo.ts\n', stderr: '' }) // diff
       .mockRejectedValueOnce(err3)                                  // vite build fails
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })            // rollback: git status (clean)
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });           // rollback: git reset
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });           // preserve: git status (clean)
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
@@ -584,18 +621,18 @@ describe('handleUpdate — vite build failure', () => {
       { event: 'progress', step: 'console-install', status: 'skip' },
       { event: 'progress', step: 'console-build', status: 'running' },
       { event: 'error', step: 'console-build' },
-      { event: 'progress', step: 'rollback', status: 'done' },
+      { event: 'progress', step: 'preserve', status: 'done' },
     ]);
     expect(serviceManagerRestartSpy).not.toHaveBeenCalled();
   });
 });
 
 // ---------------------------------------------------------------------------
-// Rollback on post-pull failure
+// Preservation on post-pull failure
 // ---------------------------------------------------------------------------
 
-describe('handleUpdate — rollback', () => {
-  it('calls git reset --hard prePullSha after npm install fails (clean working tree)', async () => {
+describe('handleUpdate — post-update preservation', () => {
+  it('does not rewind the repo after npm install fails with a clean tracked tree', async () => {
     const installErr: any = new Error('npm ERR! missing dep');
     installErr.stderr = 'npm ERR! peer dep missing';
     execFileAsyncSpy
@@ -605,8 +642,7 @@ describe('handleUpdate — rollback', () => {
       .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                                    // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'package-lock.json\n', stderr: '' })                          // diff
       .mockRejectedValueOnce(installErr)                                                              // npm install fails
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                              // rollback: git status (clean)
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                             // git reset --hard (rollback)
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                             // preserve: git status (clean)
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
@@ -618,17 +654,17 @@ describe('handleUpdate — rollback', () => {
       { event: 'progress', step: 'pull', status: 'done' },
       { event: 'progress', step: 'install', status: 'running' },
       { event: 'error', step: 'install' },
-      { event: 'progress', step: 'rollback', status: 'done' },
+      { event: 'progress', step: 'preserve', status: 'done' },
     ]);
     expect(events[3].data).toEqual({
       step: 'install',
       message: 'npm ERR! peer dep missing',
     });
     expect(events[4].data).toEqual({
-      step: 'rollback',
+      step: 'preserve',
       status: 'done',
-      sha: 'abc1234abc1234abc1234abc1234abc1234abc1234',
-      message: 'Rolled back to abc1234',
+      previousSha: 'abc1234abc1234abc1234abc1234abc1234abc1234',
+      message: 'Update validation failed. No tracked drift to preserve; fleet server was not restarted.',
       preservedFiles: [],
     });
     expect(writeFileSyncSpy).not.toHaveBeenCalled();
@@ -645,16 +681,10 @@ describe('handleUpdate — rollback', () => {
       },
       { cmd: 'npm', args: ['install'], cwd: '/repo', timeout: 120_000 },
       { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
-      {
-        cmd: 'git',
-        args: ['reset', '--hard', 'abc1234abc1234abc1234abc1234abc1234abc1234'],
-        cwd: '/repo',
-        timeout: 15_000,
-      },
     ]);
   });
 
-  it('preserves post-pull lockfile drift via patch + stash before reset', async () => {
+  it('preserves post-pull lockfile drift via patch + stash without resetting HEAD', async () => {
     const installErr: any = new Error('npm ERR!');
     installErr.stderr = 'install failed';
     execFileAsyncSpy
@@ -664,49 +694,44 @@ describe('handleUpdate — rollback', () => {
       .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                                    // rev-parse --short HEAD
       .mockResolvedValueOnce({ stdout: 'package-lock.json\n', stderr: '' })                          // diff
       .mockRejectedValueOnce(installErr)                                                              // npm install fails
-      .mockResolvedValueOnce({ stdout: ' M package-lock.json\n', stderr: '' })                      // rollback: git status (drift)
+      .mockResolvedValueOnce({ stdout: ' M package-lock.json\n', stderr: '' })                      // preserve: git status (drift)
       .mockResolvedValueOnce({ stdout: 'diff --git a/package-lock.json b/package-lock.json\n', stderr: '' }) // git diff HEAD
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                              // git stash push
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                             // git reset --hard
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });                                             // git stash push
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
     await handleUpdate(req, res, makeChecker(), '/repo');
 
     const events = parseSSE(res.chunks);
-    const rollbackEvent = events[events.length - 1];
-    expect(rollbackEvent.event).toBe('progress');
-    expect(rollbackEvent.data.step).toBe('rollback');
-    expect(rollbackEvent.data.status).toBe('done');
-    expect(rollbackEvent.data.preservedFiles).toEqual(['package-lock.json']);
-    expect(rollbackEvent.data.patchPath).toMatch(/^\/tmp\/whatsoup-update-rollback-.*-abc1234\.patch$/);
-    expect(rollbackEvent.data.stashRef).toBe('stash@{0}');
+    const preserveEvent = events[events.length - 1];
+    expect(preserveEvent.event).toBe('progress');
+    expect(preserveEvent.data.step).toBe('preserve');
+    expect(preserveEvent.data.status).toBe('done');
+    expect(preserveEvent.data.previousSha).toBe('abc1234abc1234abc1234abc1234abc1234abc1234');
+    expect(preserveEvent.data.preservedFiles).toEqual(['package-lock.json']);
+    expect(preserveEvent.data.patchPath).toMatch(/^\/tmp\/whatsoup-update-preserve-.*-abc1234\.patch$/);
+    expect(preserveEvent.data.stashRef).toBe('stash@{0}');
 
-    // Patch was written before the destructive reset.
+    // Patch is written before stashing generated tracked drift.
     expect(writeFileSyncSpy).toHaveBeenCalledTimes(1);
     const [patchPathArg, patchBodyArg, patchOptionsArg] = writeFileSyncSpy.mock.calls[0];
-    expect(patchPathArg).toMatch(/^\/tmp\/whatsoup-update-rollback-.*-abc1234\.patch$/);
+    expect(patchPathArg).toMatch(/^\/tmp\/whatsoup-update-preserve-.*-abc1234\.patch$/);
     expect(patchBodyArg).toContain('diff --git a/package-lock.json');
     expect(patchOptionsArg).toEqual({ encoding: 'utf8', mode: 0o600, flag: 'wx' });
 
-    // Ordering: status -> diff -> stash push -> reset.
+    // Ordering: status -> diff -> stash push. No reset is allowed.
     const calls = execFileAsyncCalls();
-    const rollbackSlice = calls.slice(-4);
-    expect(rollbackSlice[0]).toEqual({ cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 });
-    expect(rollbackSlice[1]).toEqual({ cmd: 'git', args: ['diff', 'HEAD'], cwd: '/repo', timeout: 10_000 });
-    expect(rollbackSlice[2].cmd).toBe('git');
-    expect(rollbackSlice[2].args.slice(0, 3)).toEqual(['stash', 'push', '--message']);
-    expect(rollbackSlice[2].args[3]).toMatch(/^whatsoup-update-rollback /);
-    expect(rollbackSlice[2].args.slice(4)).toEqual(['--', 'package-lock.json']);
-    expect(rollbackSlice[3]).toEqual({
-      cmd: 'git',
-      args: ['reset', '--hard', 'abc1234abc1234abc1234abc1234abc1234abc1234'],
-      cwd: '/repo',
-      timeout: 15_000,
-    });
+    const preserveSlice = calls.slice(-3);
+    expect(preserveSlice[0]).toEqual({ cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 });
+    expect(preserveSlice[1]).toEqual({ cmd: 'git', args: ['diff', 'HEAD'], cwd: '/repo', timeout: 10_000 });
+    expect(preserveSlice[2].cmd).toBe('git');
+    expect(preserveSlice[2].args.slice(0, 3)).toEqual(['stash', 'push', '--message']);
+    expect(preserveSlice[2].args[3]).toMatch(/^whatsoup-update-preserve /);
+    expect(preserveSlice[2].args.slice(4)).toEqual(['--', 'package-lock.json']);
+    expect(calls.some((c) => c.cmd === 'git' && c.args[0] === 'reset')).toBe(false);
   });
 
-  it('skips reset and emits status=skipped when patch write fails', async () => {
+  it('skips preservation and leaves the tree untouched when patch write fails', async () => {
     const installErr: any = new Error('npm ERR!');
     installErr.stderr = 'install failed';
     const writeErr: any = new Error('ENOSPC: no space left on device');
@@ -720,7 +745,7 @@ describe('handleUpdate — rollback', () => {
       .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                                    // rev-parse --short HEAD
       .mockResolvedValueOnce({ stdout: 'package-lock.json\n', stderr: '' })                          // diff
       .mockRejectedValueOnce(installErr)                                                              // npm install fails
-      .mockResolvedValueOnce({ stdout: ' M package-lock.json\n', stderr: '' })                      // rollback: status (drift)
+      .mockResolvedValueOnce({ stdout: ' M package-lock.json\n', stderr: '' })                      // preserve: status (drift)
       .mockResolvedValueOnce({ stdout: 'diff --git ...\n', stderr: '' });                           // git diff HEAD
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
@@ -728,26 +753,27 @@ describe('handleUpdate — rollback', () => {
     await handleUpdate(req, res, makeChecker(), '/repo');
 
     const events = parseSSE(res.chunks);
-    const rollbackEvent = events[events.length - 1];
-    expect(rollbackEvent.event).toBe('progress');
-    expect(rollbackEvent.data).toEqual({
-      step: 'rollback',
+    const preserveEvent = events[events.length - 1];
+    expect(preserveEvent.event).toBe('progress');
+    expect(preserveEvent.data).toEqual({
+      step: 'preserve',
       status: 'skipped',
       reason: 'patch-write-failed',
+      previousSha: 'abc1234abc1234abc1234abc1234abc1234abc1234',
       files: ['package-lock.json'],
+      message: 'Update validation failed. Unable to write a recovery patch; fleet server was not restarted.',
     });
 
-    // CRITICAL: git reset --hard MUST NOT have been called.
     const resetCalls = execFileAsyncCalls().filter(
       (c) => c.cmd === 'git' && Array.isArray(c.args) && c.args[0] === 'reset',
     );
     expect(resetCalls).toEqual([]);
   });
 
-  it('emits rollback:error when git reset --hard fails', async () => {
+  it('emits preserve:skipped when git status cannot inspect the tree', async () => {
     const installErr: any = new Error('npm ERR!');
     installErr.stderr = 'install failed';
-    const resetErr = new Error('git reset failed: permission denied');
+    const statusErr = new Error('git status failed: permission denied');
     execFileAsyncSpy
       .mockResolvedValueOnce({ stdout: 'abc1234abc1234abc1234abc1234abc1234abc1234\n', stderr: '' }) // rev-parse HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' })                                              // git status --porcelain
@@ -755,8 +781,7 @@ describe('handleUpdate — rollback', () => {
       .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' })                                    // rev-parse --short HEAD (post-pull)
       .mockResolvedValueOnce({ stdout: 'package-lock.json\n', stderr: '' })                          // diff
       .mockRejectedValueOnce(installErr)                                                              // npm install fails
-      .mockResolvedValueOnce({ stdout: '', stderr: '' })                                              // rollback: git status (clean)
-      .mockRejectedValueOnce(resetErr);                                                               // git reset fails too
+      .mockRejectedValueOnce(statusErr);                                                              // preserve: git status fails
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
@@ -768,16 +793,19 @@ describe('handleUpdate — rollback', () => {
       { event: 'progress', step: 'pull', status: 'done' },
       { event: 'progress', step: 'install', status: 'running' },
       { event: 'error', step: 'install' },
-      { event: 'error', step: 'rollback' },
+      { event: 'progress', step: 'preserve', status: 'skipped' },
     ]);
     expect(events[4].data).toEqual({
-      step: 'rollback',
-      message: 'Rollback failed: git reset failed: permission denied',
+      step: 'preserve',
+      status: 'skipped',
+      reason: 'status-failed',
+      previousSha: 'abc1234abc1234abc1234abc1234abc1234abc1234',
+      message: 'Update validation failed. Unable to inspect local changes; fleet server was not restarted.',
     });
   });
 
-  it('skips rollback when prePullSha is unavailable', async () => {
-    // rev-parse fails → prePullSha = null → no rollback attempted
+  it('still preserves when prePullSha is unavailable', async () => {
+    // rev-parse fails -> prePullSha = null, but generated drift can still be preserved.
     const installErr: any = new Error('npm ERR!');
     installErr.stderr = 'install failed';
     execFileAsyncSpy
@@ -785,7 +813,8 @@ describe('handleUpdate — rollback', () => {
       .mockResolvedValueOnce({ stdout: '', stderr: '' })      // git status --porcelain
       .mockResolvedValueOnce({ stdout: 'OK\n', stderr: '' }) // pull succeeds
       .mockResolvedValueOnce({ stdout: 'def5678\n', stderr: '' }) // rev-parse --short HEAD (post-pull)
-      .mockRejectedValueOnce(installErr);                     // npm install fails (no diff — runs unconditionally)
+      .mockRejectedValueOnce(installErr)                      // npm install fails (no diff - runs unconditionally)
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });     // preserve: git status (clean)
     execFileCbSpy.mockImplementation((_cmd: any, _args: any, cb: any) => { cb(null); return {} as any; });
 
     const { req, res } = makeReqRes();
@@ -796,13 +825,17 @@ describe('handleUpdate — rollback', () => {
       { event: 'progress', step: 'pull', status: 'done' },
       { event: 'progress', step: 'install', status: 'running' },
       { event: 'error', step: 'install' },
+      { event: 'progress', step: 'preserve', status: 'done' },
     ]);
+    const events = parseSSE(res.chunks);
+    expect(events[4].data.previousSha).toBeNull();
     expect(execFileAsyncCalls()).toEqual([
       { cmd: 'git', args: ['rev-parse', 'HEAD'], cwd: '/repo', timeout: 5_000 },
       { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
       { cmd: 'git', args: ['pull', 'origin', 'main'], cwd: '/repo', timeout: 60_000 },
       { cmd: 'git', args: ['rev-parse', '--short', 'HEAD'], cwd: '/repo', timeout: 5_000 },
       { cmd: 'npm', args: ['install'], cwd: '/repo', timeout: 120_000 },
+      { cmd: 'git', args: ['status', '--porcelain'], cwd: '/repo', timeout: 5_000 },
     ]);
   });
 });
