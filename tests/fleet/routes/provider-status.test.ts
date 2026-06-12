@@ -125,6 +125,9 @@ describe('handleGetLineProviderStatus', () => {
         lastFallbackTurnAt: null,
         probeAttempts: null,
         lastProbeAt: null,
+        activations: null,
+        reverts: null,
+        replays: null,
         activeEntry: null,
         chain: [],
       },
@@ -240,6 +243,9 @@ describe('handleGetLineProviderStatus', () => {
           lastFallbackTurnAt: 1_781_087_200_000,
           probeAttempts: 4,
           lastProbeAt: 1_781_087_300_000,
+          fallbackActivations: 2,
+          fallbackReverts: 1,
+          fallbackReplays: 1,
           activeFallbackEntry: { provider: 'openai-api', model: 'gpt-4o' },
           fallbackChain: [{ provider: 'openai-api', model: 'gpt-4o', eligible: true }],
         },
@@ -265,6 +271,9 @@ describe('handleGetLineProviderStatus', () => {
       lastFallbackTurnAt: 1_781_087_200_000,
       probeAttempts: 4,
       lastProbeAt: 1_781_087_300_000,
+      activations: 2,
+      reverts: 1,
+      replays: 1,
       activeEntry: { provider: 'openai-api', model: 'gpt-4o' },
       chain: [{ provider: 'openai-api', model: 'gpt-4o', eligible: true }],
     });
@@ -384,6 +393,9 @@ describe('handleGetLineProviderStatus', () => {
       lastFallbackTurnAt: null,
       probeAttempts: null,
       lastProbeAt: null,
+      activations: null,
+      reverts: null,
+      replays: null,
       activeEntry: null,
       chain: [{ provider: 'openai-api', model: 'gpt-4o', eligible: null }],
     });
@@ -576,6 +588,9 @@ describe('handleGetLineProviderStatus', () => {
       lastFallbackTurnAt,
       probeAttempts,
       lastProbeAt,
+      activations,
+      reverts,
+      replays,
       activeEntry,
       chain,
       ...existingFallback
@@ -598,6 +613,12 @@ describe('handleGetLineProviderStatus', () => {
       // Health omits the probe-cap fields here — the route tolerates absence (null).
       probeAttempts: null,
       lastProbeAt: null,
+    });
+    // Old-instance tolerance: health predating the transition counters → null.
+    expect({ activations, reverts, replays }).toEqual({
+      activations: null,
+      reverts: null,
+      replays: null,
     });
     expect(activeEntry).toBeNull();
     expect(chain).toEqual([{ provider: 'opencode-cli', model: 'minimax/minimax-m2', eligible: null }]);
