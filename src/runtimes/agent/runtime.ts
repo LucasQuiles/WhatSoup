@@ -71,7 +71,7 @@ import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { createProviderMcpBridge, writeProviderMcpConfig, writeProviderMcpConfigTarget } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
-import { probeFallbackBinary } from './providers/binary-preflight.ts';
+import { probeFallbackBinary, probeModelCatalog } from './providers/binary-preflight.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -5592,11 +5592,41 @@ export class AgentRuntime implements Runtime {
             'Fallback provider binary not found on this host',
             `binary=${fallbackBinary} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
           );
-        } else if (r.status === 'present' && r.version) {
-          log.info(
-            { fallbackProvider: this.agentFallbackProvider, binary: fallbackBinary, version: r.version },
-            'fallback provider binary present',
-          );
+        } else if (r.status === 'present') {
+          if (r.version) {
+            log.info(
+              { fallbackProvider: this.agentFallbackProvider, binary: fallbackBinary, version: r.version },
+              'fallback provider binary present',
+            );
+          }
+          // Pre-flight: check the configured model against the provider's model
+          // catalog. Model ids are case-sensitive on the provider side and a
+          // wrong-case id fails every session with an opaque error, so warn the
+          // operator now instead of at first-turn failure. opencode-cli only —
+          // it is the one CLI provider whose `models` output we parse.
+          // Fire-and-forget, fail-open: never blocks or reverts the window.
+          if (this.agentFallbackModel && this.agentFallbackProvider === 'opencode-cli') {
+            const fallbackModel = this.agentFallbackModel;
+            void probeModelCatalog(fallbackBinary, fallbackModel).then((catalog) => {
+              if (catalog.status !== 'not_found') return;
+              log.error(
+                {
+                  fallbackProvider: this.agentFallbackProvider,
+                  fallbackModel,
+                  catalogSuggestion: catalog.suggestion,
+                },
+                'fallback model not found in provider catalog — sessions will fail until corrected',
+              );
+              emitAlert(
+                this.instanceName,
+                'fallback_model_unknown',
+                'Fallback model not found in provider catalog',
+                `model=${fallbackModel}`
+                  + (catalog.suggestion ? ` suggestion=${catalog.suggestion}` : '')
+                  + ` provider=${this.agentFallbackProvider}`,
+              );
+            });
+          }
         }
       });
     }

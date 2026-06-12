@@ -182,6 +182,7 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
 }));
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
   probeFallbackBinary: vi.fn(() => ({ ok: true, version: 'test' })),
+  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
 }));
 vi.mock('../../../src/runtimes/chat/providers/elevenlabs.ts', () => ({
   synthesizeSpeech: vi.fn(),

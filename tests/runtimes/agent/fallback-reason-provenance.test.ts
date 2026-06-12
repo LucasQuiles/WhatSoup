@@ -69,6 +69,7 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
 // safe fail-open value (no alert, no version log).
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
   probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
 }));
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
