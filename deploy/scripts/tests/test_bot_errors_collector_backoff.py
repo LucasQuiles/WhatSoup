@@ -4,7 +4,7 @@ TDD: written BEFORE implementation. Verifies:
 - consecutiveFailures threshold triggers backoff after 3 failures
 - SSH attempts are spaced per 5m/15m/60m schedule (not called inside window)
 - relay_host_down emitted exactly once at state ENTRY (across many cycles)
-- relay_host_recovered emitted exactly once on first success after down
+- relay_host_recovered emitted after consecutive successes, not after one flapping success
 - backoff state persists across save_state/load_state (no re-emit on restart)
 - per-attempt enqueue_meta_alert NOT called while host is in down state
 - live host alongside dead host keeps polling every cycle
@@ -341,7 +341,17 @@ def test_relay_host_recovered_and_reset(tmp_state):
         failing[0] = False
 
         _run_once_defaults(mod, [remote])
-        # relay_host_recovered should be emitted
+        # First success is only recovery evidence; do not clear a flapping host yet.
+        evs = _outbox_by_source(outbox_dir)
+        assert len(evs.get("relay_host_recovered", [])) == 0
+        state = mod.load_state()
+        rr = state["remotes"][remote]
+        assert rr.get("downEventEmitted") is True
+        assert rr.get("outboxRecoveryConsecutiveSuccesses") == 1
+
+        clock[0] += 30
+        _run_once_defaults(mod, [remote])
+        # relay_host_recovered should be emitted after the configured threshold.
         evs = _outbox_by_source(outbox_dir)
         assert len(evs.get("relay_host_recovered", [])) == 1
 
@@ -351,6 +361,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
         assert rr.get("consecutiveFailures", 0) == 0
         assert rr.get("backoffScheduleIndex", 0) == 0
         assert rr.get("downEventEmitted", False) is False
+        assert rr.get("outboxRecoveryConsecutiveSuccesses", 0) == 0
         next_at = rr.get("nextAttemptAt")
         assert next_at is None or next_at == 0
 
@@ -595,11 +606,17 @@ def test_event_severities(tmp_state):
         assert len(down_evs) == 1
         assert down_evs[0]["severity"] == "warning"
 
-        # Advance past window, recover
+        # Advance past window; first success is evidence, second clears recovery.
         state = mod.load_state()
         next_attempt = state["remotes"][remote].get("nextAttemptAt", 0)
         clock[0] = next_attempt + 1
         failing[0] = False
+        _run_once_defaults(mod, [remote])
+
+        rec_evs = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
+        assert len(rec_evs) == 0
+
+        clock[0] += 30
         _run_once_defaults(mod, [remote])
 
         rec_evs = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
@@ -656,9 +673,19 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
         phase[0] = "split"
         _run_once_defaults(mod, [remote])
 
-        # Recovery MUST fire even though the writefail harvest failed.
+        # First split-success is not enough to clear a flapping host.
         rec = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
-        assert len(rec) == 1, "outbox-claim success must emit relay_host_recovered"
+        assert len(rec) == 0
+        rr_pending = mod.load_state()["remotes"][remote]
+        assert rr_pending.get("downEventEmitted") is True
+        assert rr_pending.get("outboxRecoveryConsecutiveSuccesses") == 1
+
+        clock[0] += 30
+        _run_once_defaults(mod, [remote])
+
+        # Recovery MUST fire after the threshold even though the writefail harvest failed.
+        rec = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
+        assert len(rec) == 1, "outbox-claim success streak must emit relay_host_recovered"
 
         # Backoff state fully reset (no livelock): consecutiveFailures back to 0,
         # down flag cleared, so a healthy outbox no longer triggers the skip path.
@@ -666,6 +693,7 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
         assert rr2.get("consecutiveFailures", 0) == 0
         assert rr2.get("downEventEmitted", False) is False
         assert rr2.get("backoffScheduleIndex", 0) == 0
+        assert rr2.get("outboxRecoveryConsecutiveSuccesses", 0) == 0
 
         # Running more split-success cycles must NOT re-down or re-storm:
         # consecutiveFailures stays 0 (writefail failure alone does not re-arm backoff)
