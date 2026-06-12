@@ -257,9 +257,17 @@ export class HealthPoller {
 
     const promises = Array.from(instances.entries()).map(async ([name, inst]) => {
       if (name === this.selfName) {
-        // Self-instance: use callback, no HTTP
+        // Self-instance: use callback, no HTTP. The snapshot is classified
+        // with the SAME semantics as a remote payload — forcing 'online'
+        // here hid degraded/logged-out states the instance reported about
+        // itself.
         try {
           const health = this.getSelfHealth();
+          const classification = classifyHealthSnapshot(health);
+          if (isNonOnlineClassification(classification)) {
+            this.updateFromHealthSnapshot(name, health, classification);
+            return;
+          }
           const existing = this.statuses.get(name);
           this.statuses.set(name, {
             name,

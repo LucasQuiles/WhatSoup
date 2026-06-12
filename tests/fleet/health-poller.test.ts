@@ -103,6 +103,39 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  // Self-instance health must be CLASSIFIED with the same semantics as a
+  // remote payload — a degraded/logged-out self snapshot was previously
+  // forced to status 'online' with confirmed confidence.
+  it('self-instance with a non-online health snapshot is classified, not forced online', async () => {
+    const loggedOutSelf = {
+      status: 'unhealthy',
+      whatsapp: {
+        connected: false,
+        account_jid: 'not connected',
+        connection: {
+          state: 'logged_out',
+          auth_failure_class: 'logged_out',
+          last_disconnect_reason: 'loggedOut',
+          last_status_code: 401,
+        },
+      },
+    };
+    const getSelfHealth = vi.fn().mockReturnValue(loggedOutSelf);
+    const instances = makeInstances(['self', makeInstance({ name: 'self' })]);
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const status = poller.getStatus('self');
+    expect(status).toBeDefined();
+    expect(status!.status).not.toBe('online');
+    expect(status!.health).toEqual(loggedOutSelf);
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
   // Test 2: remote instance polled via fetch
   it('remote instance polled via fetch', async () => {
     const remoteHealth = { status: 'healthy', uptime_seconds: 100 };
