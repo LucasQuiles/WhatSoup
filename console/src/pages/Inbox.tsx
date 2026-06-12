@@ -11,6 +11,7 @@ import { resolveCurrentChat } from '../lib/inbox-chat-selection'
 import { selectVirtualMessageRows, toChronologicalMessages } from '../lib/inbox-virtualization'
 import type { Message, ChatItem } from '../types'
 import EmptyState from '../components/EmptyState'
+import { SaveContactDialog } from '../components/SaveContactDialog'
 import ChatListItem from '../components/ChatListItem'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
@@ -30,7 +31,6 @@ export default function Inbox() {
   const [actionBusy, setActionBusy] = useState(false)
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [saveContactChat, setSaveContactChat] = useState<string | null>(null)
-  const [contactName, setContactName] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const searchScrollRef = useRef<HTMLDivElement>(null)
   const queryClient = useQueryClient()
@@ -179,10 +179,10 @@ export default function Inbox() {
     }
   }
 
-  const handleSaveContact = async () => {
-    if (!saveContactChat || !contactName.trim()) return
+  const handleSaveContact = async (name: string) => {
+    if (!saveContactChat || !name) return
     setActionBusy(true)
-    const parts = contactName.trim().split(/\s+/)
+    const parts = name.split(/\s+/)
     const firstName = parts[0]
     const lastName = parts.slice(1).join(' ') || undefined
     const jid = saveContactChat.includes('@')
@@ -190,9 +190,8 @@ export default function Inbox() {
       : saveContactChat + '@s.whatsapp.net'
     try {
       await api.saveContact(activeLine, { jid, firstName, lastName })
-      toast.success(`Saved contact: ${contactName.trim()}`)
+      toast.success(`Saved contact: ${name}`)
       setSaveContactChat(null)
-      setContactName('')
     } catch (err) {
       toast.error(`Failed to save: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
@@ -200,12 +199,7 @@ export default function Inbox() {
     }
   }
 
-  useEffect(() => {
-    if (!saveContactChat) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setSaveContactChat(null) }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [saveContactChat])
+
 
   const ease = [0.22, 1, 0.36, 1] as const
 
@@ -596,7 +590,6 @@ export default function Inbox() {
                       className="c-btn w-full justify-center border-[var(--b2)] text-t2"
                       disabled={actionBusy}
                       onClick={() => {
-                        setContactName('')
                         setSaveContactChat(currentChat.conversationKey)
                       }}
                     >
@@ -616,48 +609,13 @@ export default function Inbox() {
           </div>
         )}
       </div>
-      {saveContactChat && (
-        <div className="c-dialog-backdrop" onClick={() => setSaveContactChat(null)}>
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="save-contact-title"
-            className="overflow-hidden bg-d2 rounded-lg shadow-[var(--shadow-lg)] w-[var(--panel-confirm)] max-w-[90%] c-border"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between c-border-b py-[var(--sp-4)] px-[var(--sp-5)]">
-              <span id="save-contact-title" className="font-sans font-semibold text-lg">Save Contact</span>
-              <button type="button" onClick={() => setSaveContactChat(null)} aria-label="Close dialog" className="c-btn c-btn-ghost c-btn-sm">
-                <X size={18} strokeWidth={1.75} />
-              </button>
-            </div>
-            <div className="p-[var(--sp-5)]">
-              <label htmlFor="contact-name-input" className="c-field-label block mb-[var(--sp-2)]">Contact name</label>
-              <input
-                id="contact-name-input"
-                type="text"
-                className="c-input font-mono w-full"
-                placeholder="First Last"
-                value={contactName}
-                onChange={e => setContactName(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && contactName.trim()) handleSaveContact() }}
-                autoFocus
-              />
-            </div>
-            <div className="flex justify-end gap-2 c-border-t bg-d1 py-[var(--sp-3)] px-[var(--sp-5)]">
-              <button type="button" onClick={() => setSaveContactChat(null)} className="c-btn c-btn-ghost">Cancel</button>
-              <button
-                type="button"
-                onClick={handleSaveContact}
-                disabled={!contactName.trim() || actionBusy}
-                className="c-btn c-btn-primary"
-              >
-                <UserPlus size={14} strokeWidth={1.75} /> Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <SaveContactDialog
+        key={saveContactChat ?? 'none'}
+        open={saveContactChat !== null}
+        busy={actionBusy}
+        onSave={handleSaveContact}
+        onClose={() => setSaveContactChat(null)}
+      />
     </motion.div>
   )
 }
