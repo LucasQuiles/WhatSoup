@@ -1,7 +1,9 @@
 // tests/lib/emit-alert-exit.test.ts
 // Verifies that emitAlert and clearAlertSource warn on non-zero exit or signal.
 import { spawn } from 'node:child_process';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const BOT_ERRORS_JID = '120363555555555000@g.us';
 
 const loggerWarn = vi.hoisted(() => vi.fn());
 const existsSyncMock = vi.hoisted(() => vi.fn(() => true));
@@ -34,6 +36,16 @@ describe('emitAlert exit handler', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     existsSyncMock.mockReturnValue(true);
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
+    delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
+  });
+
+  afterEach(() => {
+    delete process.env['BOT_ERRORS_OUTBOX_DIR'];
+    delete process.env['BOT_ERRORS_JID'];
+    delete process.env['BOT_ERRORS_EXPECTED_JID'];
   });
 
   it('warns when the child exits with a non-zero exit code', () => {
@@ -44,7 +56,7 @@ describe('emitAlert exit handler', () => {
 
     expect(loggerWarn).toHaveBeenCalledWith(
       expect.objectContaining({ source: 'agent_crash', exitCode: 1, signal: null }),
-      expect.stringContaining('alert script exited'),
+      expect.stringContaining('legacy helper exited'),
     );
   });
 
@@ -56,7 +68,7 @@ describe('emitAlert exit handler', () => {
 
     expect(loggerWarn).toHaveBeenCalledWith(
       expect.objectContaining({ source: 'agent_crash', exitCode: null, signal: 'SIGTERM' }),
-      expect.stringContaining('alert script exited'),
+      expect.stringContaining('legacy helper exited'),
     );
   });
 
@@ -64,8 +76,8 @@ describe('emitAlert exit handler', () => {
     emitAlert('primary-line', 'agent_crash', 'summary text', 'evidence text');
 
     const child = spawnedChild();
+    loggerWarn.mockClear();
     child?.emit('exit', 0, null);
-
     expect(loggerWarn).not.toHaveBeenCalled();
   });
 
@@ -94,6 +106,16 @@ describe('clearAlertSource exit handler', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     existsSyncMock.mockReturnValue(true);
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
+    delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
+  });
+
+  afterEach(() => {
+    delete process.env['BOT_ERRORS_OUTBOX_DIR'];
+    delete process.env['BOT_ERRORS_JID'];
+    delete process.env['BOT_ERRORS_EXPECTED_JID'];
   });
 
   it('warns when the clear script exits with a non-zero code', () => {
@@ -104,7 +126,7 @@ describe('clearAlertSource exit handler', () => {
 
     expect(loggerWarn).toHaveBeenCalledWith(
       expect.objectContaining({ source: 'agent_crash', exitCode: 1, signal: null }),
-      expect.stringContaining('alert script exited'),
+      expect.stringContaining('legacy helper exited'),
     );
   });
 
@@ -112,8 +134,8 @@ describe('clearAlertSource exit handler', () => {
     clearAlertSource('primary-line', 'agent_crash');
 
     const child = spawnedChild();
+    loggerWarn.mockClear();
     child?.emit('exit', 0, null);
-
     expect(loggerWarn).not.toHaveBeenCalled();
   });
 });

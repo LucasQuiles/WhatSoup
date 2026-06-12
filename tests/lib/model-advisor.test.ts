@@ -215,6 +215,7 @@ describe('notifyModelAdvisories', () => {
       'model-currency-live-scan',
       expect.stringContaining('anthropic=HTTP 401'),
       expect.stringContaining('"mode":"degraded"'),
+      'warning',
     );
     expect(getModelAdvisories().liveScan).toMatchObject({ mode: 'degraded' });
   });

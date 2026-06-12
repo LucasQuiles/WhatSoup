@@ -18,7 +18,16 @@ import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.
 
 // ─── Mocks (declared before importing the runtime, hoisted by vitest) ──────────
 
-vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  const clearAlertSource = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+    clearAlertSource,
+    clearAlertSourceChecked: clearAlertSource,
+  };
+});
 
 // Config object stashed on globalThis so the test body can mutate the same
 // reference without the factory closing over a not-yet-initialized variable.

@@ -49,6 +49,10 @@ vi.mock('../../src/config.ts', () => ({
   },
 }));
 
+vi.mock('../../src/transport/third-party-console-redaction.ts', () => ({
+  installThirdPartyConsoleRedaction: vi.fn(),
+}));
+
 function restartRequiredClose() {
   return {
     connection: 'close',
