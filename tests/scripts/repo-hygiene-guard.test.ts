@@ -145,10 +145,37 @@ describe('repo hygiene guard', () => {
     expect(issues[0].filePath).toBe('commit:abc123def456');
   });
 
+  it('flags public-hygiene violations in branch commit messages', () => {
+    const issues = scanCommitAuthors([
+      {
+        sha: 'abc123def4567890',
+        name: 'Lucas Quiles',
+        email: '180208450+LucasQuiles@users.noreply.github.com',
+        subject: 'feat: publishable guard update',
+        message: `feat: publishable guard update
+
+Generated with GPT.
+Co-Authored-By: Person <person@example.com>
+`,
+      },
+    ]);
+
+    expect(issues.map((issue) => issue.code)).toEqual([
+      'model-attribution',
+      'commit-coauthor-trailer',
+      'personal-email',
+    ]);
+    expect(issues.map((issue) => `${issue.filePath}:${issue.line}`)).toEqual([
+      'commit:abc123def456:3',
+      'commit:abc123def456:4',
+      'commit:abc123def456:4',
+    ]);
+  });
+
   it('parses git author logs for commit-author scanning', () => {
     const commits = parseCommitAuthorLog(
       'abc123\x00WhatSoup Test\x00whatsoup-test.invalid\x00docs: one\x1e\n'
-      + 'def456\x00Lucas Quiles\x00180208450+LucasQuiles@users.noreply.github.com\x00fix: two\x1e\n',
+      + 'def456\x00Lucas Quiles\x00180208450+LucasQuiles@users.noreply.github.com\x00fix: two\x00fix: two\n\nBody.\x1e\n',
     );
 
     expect(commits).toEqual([
@@ -163,6 +190,7 @@ describe('repo hygiene guard', () => {
         name: 'Lucas Quiles',
         email: '180208450+LucasQuiles@users.noreply.github.com',
         subject: 'fix: two',
+        message: 'fix: two\n\nBody.',
       },
     ]);
   });

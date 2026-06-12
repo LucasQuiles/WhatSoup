@@ -38,6 +38,7 @@ export interface CommitAuthor {
   name: string;
   email: string;
   subject: string;
+  message?: string;
 }
 
 interface GuardPattern {
@@ -621,12 +622,13 @@ export function parseCommitAuthorLog(log: string): CommitAuthor[] {
     .map((record) => record.trim())
     .filter(Boolean)
     .map((record) => {
-      const [sha, name, email, subject] = record.split('\x00');
+      const [sha, name, email, subject, message] = record.split('\x00');
       return {
         sha: sha ?? '',
         name: name ?? '',
         email: email ?? '',
         subject: subject ?? '',
+        ...(message === undefined ? {} : { message }),
       };
     })
     .filter((commit) => commit.sha !== '');
@@ -646,6 +648,14 @@ export function scanCommitAuthors(commits: CommitAuthor[]): GuardIssue[] {
         });
         break;
       }
+    }
+
+    for (const issue of scanCommitMessage(commit.message ?? commit.subject)) {
+      issues.push({
+        ...issue,
+        message: `${issue.message} (${commit.subject || 'no subject'})`,
+        filePath: `commit:${commit.sha.slice(0, 12)}`,
+      });
     }
   }
 
@@ -683,7 +693,7 @@ function commitAuthorBaseRef(cwd: string): string | null {
 function readCommitAuthors(cwd: string): CommitAuthor[] {
   const baseRef = commitAuthorBaseRef(cwd);
   const rangeArgs = baseRef ? [`${baseRef}..HEAD`] : ['-1', 'HEAD'];
-  const log = git(['log', '--format=%H%x00%an%x00%ae%x00%s%x1e', ...rangeArgs], cwd);
+  const log = git(['log', '--format=%H%x00%an%x00%ae%x00%s%x00%B%x1e', ...rangeArgs], cwd);
   return parseCommitAuthorLog(log);
 }
 
@@ -705,7 +715,8 @@ function printHelp(): void {
 Modes:
   --staged              Scan staged added lines. This is the default.
   --release-hygiene     Scan tracked release-hygiene files.
-  --commit-authors      Scan commits in the branch/PR range for placeholder authors.
+  --commit-authors      Scan commits in the branch/PR range for placeholder authors
+                        and public commit-message hygiene violations.
   --scan-history [N]    Advisory: scan added lines of the last N commits (default 50)
                         for leaked secret shapes. Report-only; exit code stays 0.
   --commit-msg <file>   Scan a commit message file.

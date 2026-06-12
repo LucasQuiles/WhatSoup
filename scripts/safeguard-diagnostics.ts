@@ -152,6 +152,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'private-key',
       'Co-Authored-By:',
       '--commit-authors',
+      'scanCommitMessage(commit.message',
     ],
     remediation: 'Restore repo-hygiene patterns before publishing changes.',
   },

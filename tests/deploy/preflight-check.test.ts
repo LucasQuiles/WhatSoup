@@ -34,10 +34,13 @@ const REPO_ROOT = resolve(__dirname, '../..');
 const PREFLIGHT = join(REPO_ROOT, 'deploy/preflight-check.sh');
 const WRAPPER = join(REPO_ROOT, 'deploy/whatsoup');
 
-// The pinned interpreter under test. Tests run under the same Node that runs the
-// suite (must be a strip-types-capable >=24 <26 per the repo pin), so reuse it
-// as WHATSOUP_NODE rather than depending on a host nvm install.
+// The pinned interpreter under test. The fixture repo is generated to match the
+// same Node that runs this suite, so the preflight behavior stays portable across
+// fleet hosts instead of depending on a host nvm install.
 const PINNED_NODE = process.execPath;
+const PINNED_NODE_VERSION = process.versions.node;
+const PINNED_NODE_MAJOR = Number(PINNED_NODE_VERSION.split('.')[0]);
+const FIXTURE_NODE_RANGE = `>=${PINNED_NODE_MAJOR}.0.0 <${PINNED_NODE_MAJOR + 1}`;
 
 const tmpDirs: string[] = [];
 
@@ -68,10 +71,10 @@ function makeFixtureTree(
 ): string {
   const root = makeTmpDir();
   mkdirSync(join(root, 'src'), { recursive: true });
-  writeFileSync(join(root, '.nvmrc'), '24.15.0\n', 'utf8');
+  writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
     join(root, 'package.json'),
-    JSON.stringify({ name: 'fixture', engines: { node: '>=24.0.0 <26' } }),
+    JSON.stringify({ name: 'fixture', engines: { node: FIXTURE_NODE_RANGE } }),
     'utf8',
   );
   writeFileSync(join(root, 'src', 'main.ts'), mainTs, 'utf8');
