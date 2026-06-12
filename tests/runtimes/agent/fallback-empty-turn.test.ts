@@ -246,7 +246,8 @@ describe('zero-text fallback turn signal', () => {
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(1);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
-    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
+    expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
     expect(queue.enqueueText).not.toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
     );
@@ -292,7 +293,8 @@ describe('zero-text fallback turn signal', () => {
     );
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
-    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
+    expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
     expect(queue.enqueueText).not.toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
     );
@@ -360,7 +362,8 @@ describe('zero-text fallback turn signal', () => {
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
-    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
+    expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
   });
 
   it('handleEvent path: system-result turn is not counted', () => {
@@ -381,6 +384,7 @@ describe('zero-text fallback turn signal', () => {
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
-    expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
+    // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
+    expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
   });
 });
