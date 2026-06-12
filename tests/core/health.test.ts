@@ -163,6 +163,9 @@ function makeAuthBond(overrides: Record<string, unknown> = {}): Record<string, u
       lastCaptureAt: '2026-06-09T12:00:00.000Z',
       lastCaptureReason: 'connection-open',
       lastCaptureError: null,
+      lastCaptureDeferredAt: null,
+      lastCaptureDeferredReason: null,
+      lastCaptureDeferredAgeMs: null,
       lastRestoreAt: null,
       lastRestoreSource: null,
       lastRestoreError: null,
@@ -883,6 +886,73 @@ describe('GET /health', () => {
       },
     });
     db2.close();
+  });
+
+  it('does not classify a connected fresh credential rewrite window as auth corruption', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-09T12:00:05Z'));
+    try {
+      db.close();
+      const db2 = makeDb();
+      const connectionManager = {
+        botJid: '15550199000@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'connected',
+          connected: true,
+          reconnectAttempts: 0,
+          reconnectPhase: null,
+          stateChangedAt: '2026-06-09T12:00:00.000Z',
+          firstFailureAt: null,
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: null,
+          lastStatusCode: null,
+          authBond: makeAuthBond({
+            status: 'invalid',
+            issues: ['creds_json_empty'],
+            creds: {
+              path: '/auth/creds.json',
+              exists: true,
+              mode: '600',
+              size: 0,
+              mtime: '2026-06-09T12:00:04.000Z',
+              sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+            },
+            treeHash: null,
+            backup: {
+              lastCaptureDeferredAt: '2026-06-09T12:00:05.000Z',
+              lastCaptureDeferredReason: 'creds-update',
+              lastCaptureDeferredAgeMs: 1000,
+            },
+          }),
+        }),
+      };
+      const deps = makeDeps(db2, { connectionManager } as any);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      ({ server, port } = await buildTestServer(deps));
+
+      const response = await httpReq(port, '/health', 'GET');
+      const json = JSON.parse(response.body);
+
+      expect(response.status).toBe(200);
+      expect(json.status).toBe('healthy');
+      expect(json.whatsapp.connection.auth_failure_class).toBe('none');
+      expect(json.whatsapp.auth_bond).toMatchObject({
+        status: 'invalid',
+        backup: {
+          last_capture_deferred_reason: 'creds-update',
+          last_capture_deferred_age_ms: 1000,
+        },
+      });
+      db2.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('classifies present-but-risky auth bonds as degraded instead of healthy', async () => {

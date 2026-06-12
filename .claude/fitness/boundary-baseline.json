@@ -29,17 +29,10 @@
   },
   {
     "file": "src/core/health.ts",
-    "line": 4,
-    "specifier": "../fleet/safe-compare.ts",
+    "line": 31,
+    "specifier": "../runtimes/types.ts",
     "fromLayer": "core",
-    "toLayer": "fleet"
-  },
-  {
-    "file": "src/core/health.ts",
-    "line": 9,
-    "specifier": "../transport/runtime-connection.ts",
-    "fromLayer": "core",
-    "toLayer": "transport"
+    "toLayer": "runtimes"
   },
   {
     "file": "src/core/health.ts",
@@ -50,15 +43,15 @@
   },
   {
     "file": "src/core/health.ts",
-    "line": 29,
-    "specifier": "../runtimes/types.ts",
+    "line": 32,
+    "specifier": "../transport/connection.ts",
     "fromLayer": "core",
-    "toLayer": "runtimes"
+    "toLayer": "transport"
   },
   {
     "file": "src/core/health.ts",
-    "line": 30,
-    "specifier": "../transport/connection.ts",
+    "line": 9,
+    "specifier": "../transport/runtime-connection.ts",
     "fromLayer": "core",
     "toLayer": "transport"
   },
@@ -106,17 +99,17 @@
   },
   {
     "file": "src/core/scheduler.ts",
-    "line": 6,
-    "specifier": "../transport/runtime-connection.ts",
-    "fromLayer": "core",
-    "toLayer": "transport"
-  },
-  {
-    "file": "src/core/scheduler.ts",
     "line": 8,
     "specifier": "../fleet/time-utils.ts",
     "fromLayer": "core",
     "toLayer": "fleet"
+  },
+  {
+    "file": "src/core/scheduler.ts",
+    "line": 6,
+    "specifier": "../transport/runtime-connection.ts",
+    "fromLayer": "core",
+    "toLayer": "transport"
   },
   {
     "file": "src/core/substrate/time.ts",
@@ -218,7 +211,7 @@
   },
   {
     "file": "src/transport/connection.ts",
-    "line": 25,
+    "line": 40,
     "specifier": "../fleet/time-utils.ts",
     "fromLayer": "transport",
     "toLayer": "fleet"

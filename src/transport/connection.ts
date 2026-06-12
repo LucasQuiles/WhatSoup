@@ -192,6 +192,9 @@ export interface CredentialLifecycleEvent {
   latestBackupAt?: string | null;
   latestBackupReason?: string | null;
   lastCaptureError?: string | null;
+  lastCaptureDeferredAt?: string | null;
+  lastCaptureDeferredReason?: string | null;
+  lastCaptureDeferredAgeMs?: number | null;
   lastRestoreError?: string | null;
   note?: string;
 }
@@ -238,6 +241,9 @@ export interface CredentialLifecycleAuthBondDigest {
     | 'lastCaptureAt'
     | 'lastCaptureReason'
     | 'lastCaptureError'
+    | 'lastCaptureDeferredAt'
+    | 'lastCaptureDeferredReason'
+    | 'lastCaptureDeferredAgeMs'
     | 'lastRestoreAt'
     | 'lastRestoreSource'
     | 'lastRestoreError'
@@ -1025,6 +1031,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       entry.latestBackupAt = authBond.backup.latestAt;
       entry.latestBackupReason = authBond.backup.latestReason;
       entry.lastCaptureError = authBond.backup.lastCaptureError;
+      entry.lastCaptureDeferredAt = authBond.backup.lastCaptureDeferredAt;
+      entry.lastCaptureDeferredReason = authBond.backup.lastCaptureDeferredReason;
+      entry.lastCaptureDeferredAgeMs = authBond.backup.lastCaptureDeferredAgeMs;
       entry.lastRestoreError = authBond.backup.lastRestoreError;
     }
 
@@ -1092,6 +1101,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         lastCaptureAt: snapshot.backup.lastCaptureAt,
         lastCaptureReason: snapshot.backup.lastCaptureReason,
         lastCaptureError: snapshot.backup.lastCaptureError,
+        lastCaptureDeferredAt: snapshot.backup.lastCaptureDeferredAt,
+        lastCaptureDeferredReason: snapshot.backup.lastCaptureDeferredReason,
+        lastCaptureDeferredAgeMs: snapshot.backup.lastCaptureDeferredAgeMs,
         lastRestoreAt: snapshot.backup.lastRestoreAt,
         lastRestoreSource: snapshot.backup.lastRestoreSource,
         lastRestoreError: snapshot.backup.lastRestoreError,
@@ -1244,6 +1256,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         lastCaptureAt: authBond.backup.lastCaptureAt,
         lastCaptureReason: authBond.backup.lastCaptureReason,
         lastCaptureError: authBond.backup.lastCaptureError,
+        lastCaptureDeferredAt: authBond.backup.lastCaptureDeferredAt,
+        lastCaptureDeferredReason: authBond.backup.lastCaptureDeferredReason,
+        lastCaptureDeferredAgeMs: authBond.backup.lastCaptureDeferredAgeMs,
         lastRestoreAt: authBond.backup.lastRestoreAt,
         lastRestoreError: authBond.backup.lastRestoreError,
       },
@@ -1868,6 +1883,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
       return;
     }
+    if (result.deferred) {
+      this.recordCredentialLifecycle('auth_snapshot_skipped', {
+        authBond: result.snapshot,
+        note: result.error ?? 'credential-write-in-flight',
+      });
+      this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred while credential write settles');
+      return;
+    }
     this.lastAuthSnapshotFailedAt = Date.now();
     this.authSnapshotFailureCount += 1;
     this.recordCredentialLifecycle('auth_snapshot_failed', {
@@ -2034,6 +2057,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       `latestBackup: ${snapshot.backup.latest ?? 'none'}`,
       `latestBackupAt: ${snapshot.backup.latestAt ?? 'none'}`,
       `lastCaptureError: ${snapshot.backup.lastCaptureError ?? 'none'}`,
+      `lastCaptureDeferredAt: ${snapshot.backup.lastCaptureDeferredAt ?? 'none'}`,
+      `lastCaptureDeferredReason: ${snapshot.backup.lastCaptureDeferredReason ?? 'none'}`,
+      `lastCaptureDeferredAgeMs: ${snapshot.backup.lastCaptureDeferredAgeMs ?? 'none'}`,
       `lastRestoreError: ${snapshot.backup.lastRestoreError ?? 'none'}`,
       'operator_note: local auto-restore can repair missing/corrupt auth files from protected snapshots; it cannot reverse a WhatsApp server-side device_removed/logout.',
       'q_action: inspect auth directory permissions, recent credential writes, backup availability, duplicate auth hashes, and service overlap before re-pairing or deleting auth material.',

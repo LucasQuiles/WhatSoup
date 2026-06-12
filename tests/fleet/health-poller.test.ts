@@ -1989,6 +1989,9 @@ describe('HealthPoller', () => {
               last_capture_at: '2026-06-11T04:12:05.000Z',
               last_capture_reason: 'creds_update',
               last_capture_error: 'copy failed token=capture-secret for 14155551234',
+              last_capture_deferred_at: '2026-06-11T04:12:06.000Z',
+              last_capture_deferred_reason: 'creds_update token=deferred-secret',
+              last_capture_deferred_age_ms: 402,
               last_restore_at: '2026-06-11T04:20:00.000Z',
               last_restore_source: '/home/testuser/.local/state/whatsoup/auth-bond-backups/agent-alpha/latest',
               last_restore_error: 'restore failed secret=restore-secret',
@@ -2024,6 +2027,8 @@ describe('HealthPoller', () => {
     expect(evidence).toContain('auth_bond_identity_hash=mehash123');
     expect(evidence).toContain('auth_bond_tree_hash=treehash123');
     expect(evidence).toContain('auth_bond_backup_latest_present=true');
+    expect(evidence).toContain('auth_bond_backup_last_capture_deferred_at=2026-06-11T04:12:06.000Z');
+    expect(evidence).toContain('auth_bond_backup_last_capture_deferred_age_ms=402');
     expect(evidence).toContain('auth_bond_backup_last_restore_source_present=true');
     expect(evidence).toContain('token=[REDACTED]');
     expect(evidence).toContain('secret=[REDACTED]');
@@ -2036,6 +2041,7 @@ describe('HealthPoller', () => {
     expect(evidence).not.toContain('event-secret');
     expect(evidence).not.toContain('issue-secret');
     expect(evidence).not.toContain('capture-secret');
+    expect(evidence).not.toContain('deferred-secret');
     expect(evidence).not.toContain('restore-secret');
     expect(evidence).not.toContain('/home/testuser/.local/share/whatsoup/instances/agent-alpha/auth');
     expect(evidence).not.toContain('/home/testuser/.local/state/whatsoup/auth-bond-backups/agent-alpha/latest');

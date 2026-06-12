@@ -172,7 +172,7 @@ describe('bot-errors-health-check', () => {
   });
 
   it('records a recoverable writefail breadcrumb when daily health outbox is unwritable', () => {
-    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    tmpRoot = mkdtempSync('/tmp/bot-errors-health-');
     const blocked = join(tmpRoot, 'blocked-outbox-parent');
     const writefail = join(tmpRoot, 'writefail');
     writeFileSync(blocked, 'not a directory');
@@ -181,6 +181,7 @@ describe('bot-errors-health-check', () => {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        TMPDIR: '/tmp',
         HOME: tmpRoot,
           BOT_ERRORS_STATE_DIR: tmpRoot,
           BOT_ERRORS_OUTBOX_DIR: join(blocked, 'outbox'),
@@ -228,6 +229,7 @@ describe('bot-errors-health-check', () => {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        TMPDIR: '/tmp',
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_WRITEFAIL_DIR: writefail,
         BOT_ERRORS_DRY_SEND_CAPTURE: capture,
@@ -3581,6 +3583,174 @@ print(m.probe_health(9092))
     expect(event.evidence).toContain('health primary-bot: FAIL 200 http://127.0.0.1:9090/health auth_bond_at_risk');
     expect(event.evidence).toContain('auth_failure_class=local_corruption_restorable');
     expect(event.evidence).toContain('auth_bond_backup_latest=none');
+  });
+
+  it('does not alert on a fresh auth-bond credential write window', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'primary-bot');
+    const authDir = join(configDir, 'auth');
+    mkdirSync(configDir, { recursive: true });
+    const configPath = join(configDir, 'config.json');
+    writeFileSync(configPath, JSON.stringify({
+      type: 'agent',
+      enabled: true,
+      healthPort: 9090,
+    }));
+    chmodSync(configPath, 0o600);
+    writeSecureCreds(authDir, {
+      me: { id: 'agent-alpha@s.whatsapp.net', lid: 'agent-alpha@lid' },
+      registrationId: 2,
+    });
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_NOW_EPOCH: '1780995605',
+        BOT_ERRORS_AUTH_BOND_WRITE_INFLIGHT_GRACE_SECONDS: '10',
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_DRY_HEALTH_STATUS: '200',
+        BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
+          status: 'healthy',
+          whatsapp: {
+            connected: true,
+            connection: {
+              state: 'connected',
+              reconnect_attempts: 0,
+              auth_failure_class: 'none',
+            },
+            auth_bond: {
+              status: 'invalid',
+              issues: ['creds_json_empty'],
+              creds: {
+                exists: true,
+                mode: '600',
+                size: 0,
+                mtime: '2026-06-09T09:00:04.000Z',
+                hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+                empty_hash: true,
+              },
+              backup: {
+                latest: '/tmp/auth-bond/latest',
+                latest_at: '2026-06-09T08:59:00.000Z',
+                latest_reason: 'connection-open',
+                last_capture_deferred_at: '2026-06-09T09:00:05.000Z',
+                last_capture_deferred_reason: 'creds-update',
+                last_capture_deferred_age_ms: 1000,
+              },
+            },
+          },
+        }),
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'bot-host',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectPluginInventory: false,
+          instances: [{ name: 'primary-bot', expected: 'always_on', healthPort: 9090 }],
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+      eventType: string;
+      severity: string;
+      evidence: string;
+    };
+    expect(event.eventType).toBe('clear');
+    expect(event.severity).toBe('info');
+    expect(event.evidence).toContain('auth_bond_credential_write_inflight=true');
+    expect(event.evidence).not.toContain('auth_bond_at_risk');
+    expect(event.evidence).not.toContain('physical_intervention_required');
+  });
+
+  it('alerts when an auth-bond credential write window becomes stale', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
+    const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'primary-bot');
+    const authDir = join(configDir, 'auth');
+    mkdirSync(configDir, { recursive: true });
+    const configPath = join(configDir, 'config.json');
+    writeFileSync(configPath, JSON.stringify({
+      type: 'agent',
+      enabled: true,
+      healthPort: 9090,
+    }));
+    chmodSync(configPath, 0o600);
+    writeSecureCreds(authDir, {
+      me: { id: 'agent-alpha@s.whatsapp.net', lid: 'agent-alpha@lid' },
+      registrationId: 2,
+    });
+
+    execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: tmpRoot,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_NOW_EPOCH: '1780995665',
+        BOT_ERRORS_AUTH_BOND_WRITE_INFLIGHT_GRACE_SECONDS: '10',
+        BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
+        BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
+        BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
+        BOT_ERRORS_DRY_HEALTH_STATUS: '200',
+        BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON: JSON.stringify({
+          status: 'healthy',
+          whatsapp: {
+            connected: true,
+            connection: {
+              state: 'connected',
+              reconnect_attempts: 0,
+              auth_failure_class: 'none',
+            },
+            auth_bond: {
+              status: 'invalid',
+              issues: ['creds_json_empty'],
+              creds: {
+                exists: true,
+                mode: '600',
+                size: 0,
+                mtime: '2026-06-09T09:00:04.000Z',
+                hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+                empty_hash: true,
+              },
+              backup: {
+                latest: '/tmp/auth-bond/latest',
+                latest_at: '2026-06-09T08:59:00.000Z',
+                latest_reason: 'connection-open',
+              },
+            },
+          },
+        }),
+        BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
+          role: 'bot-host',
+          expectDispatcher: false,
+          expectQLoop: false,
+          expectPersonalSocket: false,
+          expectPersonalTools: false,
+          expectPluginInventory: false,
+          instances: [{ name: 'primary-bot', expected: 'always_on', healthPort: 9090 }],
+        }),
+      },
+    });
+
+    const outbox = join(tmpRoot, 'outbox');
+    const files = readdirSync(outbox);
+    expect(files).toHaveLength(1);
+    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as { evidence: string };
+    expect(event.evidence).toContain('auth_bond_at_risk');
+    expect(event.evidence).toContain('auth_bond_status=invalid');
+    expect(event.evidence).toContain('auth_bond_issues=creds_json_empty');
+    expect(event.evidence).not.toContain('auth_bond_credential_write_inflight=true');
   });
 
   it('fails daily health when a configured port answers for a different instance', () => {

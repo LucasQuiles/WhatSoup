@@ -8,6 +8,7 @@ import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
+import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
@@ -215,6 +216,9 @@ function getConnectionState(connectionManager: HealthDeps['connectionManager']):
           lastCaptureAt: null,
           lastCaptureReason: null,
           lastCaptureError: null,
+          lastCaptureDeferredAt: null,
+          lastCaptureDeferredReason: null,
+          lastCaptureDeferredAgeMs: null,
           lastRestoreAt: null,
           lastRestoreSource: null,
           lastRestoreError: null,
@@ -270,11 +274,28 @@ function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string
       last_capture_at: authBond.backup.lastCaptureAt,
       last_capture_reason: authBond.backup.lastCaptureReason,
       last_capture_error: authBond.backup.lastCaptureError,
+      last_capture_deferred_at: authBond.backup.lastCaptureDeferredAt,
+      last_capture_deferred_reason: authBond.backup.lastCaptureDeferredReason,
+      last_capture_deferred_age_ms: authBond.backup.lastCaptureDeferredAgeMs,
       last_restore_at: authBond.backup.lastRestoreAt,
       last_restore_source: authBond.backup.lastRestoreSource,
       last_restore_error: authBond.backup.lastRestoreError,
     },
   };
+}
+
+function isFreshInvalidCredentialWriteInFlight(connectionState: ConnectionStateSnapshot): boolean {
+  const authBond = connectionState.authBond;
+  if (!authBond || !connectionState.connected) return false;
+  if (authBond.status === 'present') return false;
+  if (!authBond.creds.exists || !authBond.creds.mtime) return false;
+  if (!authBond.issues.some(issue => issue === 'creds_json_empty' || issue === 'creds_json_invalid_json')) {
+    return false;
+  }
+  const mtime = Date.parse(authBond.creds.mtime);
+  if (!Number.isFinite(mtime)) return false;
+  const ageMs = Date.now() - mtime;
+  return ageMs >= 0 && ageMs < DEFAULT_FRESH_INVALID_GRACE_MS;
 }
 
 function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFailureClass {
@@ -303,6 +324,8 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
 
   const authBond = connectionState.authBond;
   if (!authBond) return 'none';
+
+  if (isFreshInvalidCredentialWriteInFlight(connectionState)) return 'none';
 
   const hasBackup = typeof authBond.backup.latest === 'string' && authBond.backup.latest.length > 0;
   if (authBond.status !== 'present') {

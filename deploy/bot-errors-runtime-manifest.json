@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-12T22:10:00Z",
+  "generatedAt": "2026-06-12T22:26:50Z",
   "scope": "bot-errors-runtime-scripts",
   "files": [
     {
@@ -17,7 +17,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "fffde09b653aea8c923783a75939f3661c70909a660aa3e163046f83dafbbe21",
+      "sha256": "7e26bcee23e9cccfc112b824def5893a09727aa180823808afb817eaf11c6ca5",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -59,7 +59,9 @@
         "credential_present",
         "runtime_agent_fallback_active",
         "instance_fallback_reason",
-        "runtime_agent_fallback_recovery_probe_required"
+        "runtime_agent_fallback_recovery_probe_required",
+        "auth_bond_credential_write_inflight",
+        "BOT_ERRORS_AUTH_BOND_WRITE_INFLIGHT_GRACE_SECONDS"
       ]
     },
     {

@@ -1,12 +1,13 @@
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthBondGuard } from '../../src/transport/auth-bond.ts';
 
 let tmpRoot = '';
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
 });
@@ -246,6 +247,7 @@ describe('AuthBondGuard', () => {
       stateRoot,
       instanceName: 'corrupt-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
+      freshInvalidGraceMs: 0,
     });
 
     const good = guard.capture('connection-open');
@@ -287,6 +289,7 @@ describe('AuthBondGuard', () => {
       stateRoot,
       instanceName: 'zero-byte-bot',
       now: () => new Date('2026-06-09T12:00:00Z'),
+      freshInvalidGraceMs: 0,
     });
 
     const good = guard.capture('connection-open');
@@ -316,6 +319,93 @@ describe('AuthBondGuard', () => {
       me?: { id?: string };
     };
     expect(protectedCreds.me?.id).toBe('15550100010:1@s.whatsapp.net');
+  });
+
+  it('retries a fresh zero-byte credential read and captures after the write settles', () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    mkdirSync(authDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(authDir, 'creds.json'), '');
+
+    vi.spyOn(Atomics, 'wait').mockImplementation(() => {
+      writeAuth(authDir, '15550100030:1@s.whatsapp.net');
+      return 'ok';
+    });
+
+    const guard = new AuthBondGuard({
+      authDir,
+      stateRoot: join(root, 'state'),
+      instanceName: 'settling-retry-bot',
+      captureAttempts: 2,
+      captureRetryDelayMs: 1,
+      freshInvalidGraceMs: 60_000,
+    });
+
+    const result = guard.capture('creds-update');
+
+    expect(result).toMatchObject({ ok: true, captured: true, deferred: false, error: null });
+    expect(result.path).toEqual(expect.any(String));
+    expect(guard.inspect().backup.lastCaptureError).toBeNull();
+  });
+
+  it('defers fresh zero-byte credential reads without recording a hard capture failure', () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    mkdirSync(authDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(authDir, 'creds.json'), '');
+
+    const guard = new AuthBondGuard({
+      authDir,
+      stateRoot: join(root, 'state'),
+      instanceName: 'settling-bot',
+      captureAttempts: 1,
+      freshInvalidGraceMs: 60_000,
+    });
+
+    const result = guard.capture('creds-update');
+
+    expect(result).toMatchObject({
+      ok: false,
+      captured: false,
+      deferred: true,
+      path: null,
+      snapshot: {
+        status: 'invalid',
+        issues: expect.arrayContaining(['creds_json_empty']),
+        backup: {
+          lastCaptureError: null,
+          lastCaptureDeferredReason: 'creds-update',
+        },
+      },
+    });
+    expect(result.error).toContain('credential write still in flight');
+    expect(guard.inspect().backup.lastCaptureDeferredAgeMs).toEqual(expect.any(Number));
+  });
+
+  it('fails stale zero-byte credential reads after the write grace expires', () => {
+    const root = makeRoot();
+    const authDir = join(root, 'auth');
+    mkdirSync(authDir, { recursive: true, mode: 0o700 });
+    const credsPath = join(authDir, 'creds.json');
+    writeFileSync(credsPath, '');
+    const stale = new Date('2026-06-09T12:00:00Z');
+    utimesSync(credsPath, stale, stale);
+
+    const guard = new AuthBondGuard({
+      authDir,
+      stateRoot: join(root, 'state'),
+      instanceName: 'stale-zero-byte-bot',
+      captureAttempts: 1,
+      freshInvalidGraceMs: 5_000,
+      now: () => new Date('2026-06-09T12:00:10Z'),
+    });
+
+    const result = guard.capture('creds-update');
+
+    expect(result).toMatchObject({ ok: false, captured: false, deferred: false, path: null });
+    expect(result.error).toContain('auth bond is invalid');
+    expect(guard.inspect().backup.lastCaptureError).toContain('creds_json_empty');
+    expect(guard.inspect().backup.lastCaptureDeferredAt).toBeNull();
   });
 
   it('refuses captures without a stable WhatsApp identity and preserves the previous protected snapshot', () => {

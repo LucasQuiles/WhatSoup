@@ -1473,6 +1473,40 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     await manager.shutdown();
   });
 
+  it('does not emit a local auth-bond alert for a fresh credential write window', async () => {
+    writeValidTestAuth();
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+    emitAlertMock.mockClear();
+
+    writeFileSync(join('/tmp/wa-test-auth', 'creds.json'), '');
+    (manager as any).captureAuthBondSnapshot('creds-update');
+
+    expect(emitAlertMock).not.toHaveBeenCalledWith(
+      'WhatSoup',
+      'whatsapp_auth_bond_local_failure',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      expect.any(Object),
+    );
+    expect((manager as any).authSnapshotFailureCount).toBe(0);
+    expect(manager.getConnectionState().credentialLifecycle.recentEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: 'auth_snapshot_skipped',
+          note: expect.stringContaining('credential write still in flight'),
+        }),
+      ]),
+    );
+
+    await manager.shutdown();
+  });
+
   it('creds.update preserves previous creds when the protected writer refuses an unsafe target', async () => {
     writeValidTestAuth('18455940001:1@s.whatsapp.net');
     const credsPath = join('/tmp/wa-test-auth', 'creds.json');
