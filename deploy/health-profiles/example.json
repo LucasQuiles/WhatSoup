@@ -1,0 +1,10 @@
+{
+  "role": "bot-host",
+  "expectDispatcher": false,
+  "expectQLoop": false,
+  "expectPersonalSocket": false,
+  "expectPersonalTools": false,
+  "expectConfigInventory": true,
+  "requiredCredentialFiles": [],
+  "instances": []
+}
