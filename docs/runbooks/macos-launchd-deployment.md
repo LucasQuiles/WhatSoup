@@ -60,14 +60,14 @@ newly generated instance plists preserve it.
 Current compatibility is `>=24.0.0 <26`; Node 24 and 25 are accepted, Node 26+
 is rejected by the wrappers.
 
-Operator maintenance is not installed by the Linux/systemd setup script on macOS.
-Install the same convenience command explicitly if this host should run the
-harness-maintenance probe:
-
-```bash
-mkdir -p ~/.local/bin
-ln -sf ~/LAB/WhatSoup/deploy/scripts/harness-maintenance.sh ~/.local/bin/whatsoup-harness-maintenance
-```
+Operator maintenance is packaged for launchd: `deploy/setup.sh` installs the
+`whatsoup-harness-maintenance` wrapper symlink (step 3) and renders the
+`com.whatsoup.harness-maintenance` / `com.whatsoup.reply-guarantee` timer
+plists into `~/Library/LaunchAgents` (step 4). Setup never loads the jobs —
+load them as a deployment step and verify with `launchctl print`; see the
+"macOS (launchd) Maintenance Timers" section of
+[docs/runbook.md](../runbook.md#2-service-management) for the load, verify,
+and uninstall (`deploy/setup.sh --remove-timers`) commands.
 
 ## Services
 

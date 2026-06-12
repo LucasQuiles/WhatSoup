@@ -6,6 +6,10 @@ import { isInstanceSilenced } from './silence-manager.ts';
 const log = createChildLogger('fleet:health-poller');
 
 const MIN_ALERT_INTERVAL_MS = ALERT_THROTTLE_INTERVAL_MS;
+const TERMINAL_AUTH_FAILURE_CLASSES = new Set([
+  'pairing_required',
+  'serverside_logout_irreversible',
+]);
 
 export interface InstanceHealth {
   name: string;
@@ -74,6 +78,7 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
   const reconnectAttempts = numberValue(connection?.reconnect_attempts);
   const lastDisconnectReason = stringValue(connection?.last_disconnect_reason);
   const lastStatusCode = numberValue(connection?.last_status_code);
+  const authFailureClass = stringValue(connection?.auth_failure_class);
   const recentDisconnects = recordValue(connection?.recent_disconnects);
   const recentDisconnectCount = numberValue(recentDisconnects?.count);
   const recentDisconnectThreshold = numberValue(recentDisconnects?.degraded_threshold);
@@ -96,6 +101,7 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
     evidenceField('reconnect_attempts', reconnectAttempts),
     evidenceField('last_disconnect_reason', lastDisconnectReason),
     evidenceField('last_status_code', lastStatusCode),
+    evidenceField('auth_failure_class', authFailureClass),
     evidenceField('recent_disconnect_count', recentDisconnectCount),
     evidenceField('recent_disconnect_threshold', recentDisconnectThreshold),
     evidenceField('recent_disconnect_window_ms', recentDisconnectWindowMs),
@@ -110,12 +116,25 @@ function classifyHealthSnapshot(health: Record<string, unknown>): HealthSnapshot
     accountJid === 'not connected' ||
     connectionState === 'disconnected' ||
     healthStatus === 'unhealthy';
+  const explicitAuthLossSignal =
+    lastStatusCode === 401 ||
+    lastDisconnectReason === 'loggedOut' ||
+    (authFailureClass !== null && TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass));
+
+  if (loggedOutHeuristic && disconnectedCorroboration && explicitAuthLossSignal) {
+    return {
+      status: 'logged_out',
+      confidence: 'confirmed',
+      reason: 'whatsapp_auth_loss_with_disconnect_corroboration',
+      evidence: baseEvidence,
+    };
+  }
 
   if (loggedOutHeuristic && disconnectedCorroboration) {
     return {
-      status: 'logged_out',
-      confidence: 'inferred',
-      reason: 'whatsapp_backoff_zero_attempts_with_disconnect_corroboration',
+      status: 'degraded',
+      confidence: 'ambiguous',
+      reason: 'whatsapp_backoff_zero_attempts_with_disconnect_without_auth_loss_signal',
       evidence: baseEvidence,
     };
   }

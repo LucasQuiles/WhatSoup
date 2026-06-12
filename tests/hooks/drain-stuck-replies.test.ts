@@ -202,7 +202,10 @@ describe('reply guarantee daemon deployment artifacts', () => {
     expect(plist).toContain('com.whatsoup.reply-guarantee');
     expect(plist).toContain('<key>StartInterval</key>');
     expect(plist).toContain('<integer>60</integer>');
-    expect(plist).toContain('drain-stuck-replies.mjs');
+    // The plist execs the drain wrapper script (which resolves Node itself and
+    // chains to drain-stuck-replies.mjs), matching the systemd unit's entrypoint.
+    expect(plist).toContain('deploy/scripts/reply-guarantee-drain.sh');
+    expect(plist).toMatch(/<key>RunAtLoad<\/key>\s*<false\/>/);
     expect(service).toContain('Description=WhatSoup Reply Guarantee queue drain');
     expect(service).toContain('ExecStart=%h/.local/bin/whatsoup-reply-guarantee-drain');
     expect(service).not.toContain('WHATSOUP_REPO_ROOT');
