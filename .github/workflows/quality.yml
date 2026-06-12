@@ -124,3 +124,15 @@ jobs:
 
       - name: Console build
         run: npm --prefix console run build
+
+      - name: Console design theme parity
+        run: npm --prefix console run design:theme-parity
+
+      - name: Console design shadow baseline
+        run: npm --prefix console run lint:shadow:baseline
+
+      - name: Console design regression
+        run: npm --prefix console run design:regression
+
+      - name: Console design metrics
+        run: npm --prefix console run design:metrics
