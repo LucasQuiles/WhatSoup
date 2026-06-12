@@ -172,7 +172,7 @@ type FallbackView = {
   } | null;
   deactivateProviderFallback(reason: string): void;
   fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null;
-  probePrimaryProviderRecovered(): boolean;
+  probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   scheduleFallbackReplay(args: {
     activation: NonNullable<ReturnType<FallbackView['activateProviderFallback']>>;
     chatJid: string;
@@ -324,7 +324,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
   });
 
-  it('keeps auth-required fallback armed until a primary recovery probe succeeds', () => {
+  it('keeps auth-required fallback armed until a primary recovery probe succeeds', async () => {
     const runtime = makeRuntime({
       agentFallbackProvider: 'opencode-cli',
       agentFallbackModel: 'minimax/MiniMax-M2.7',
@@ -336,12 +336,12 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(v.effectiveProvider).toBe('opencode-cli');
     expect(v.getFallbackState().fallbackRecoveryProbeRequired).toBe(true);
 
-    vi.advanceTimersByTime(5 * 60 * 60 * 1000 + 1);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000 + 1);
     expect(v.effectiveProvider).toBe('opencode-cli');
     expect(v.fallbackActiveUntil).not.toBeNull();
 
     v.probePrimaryProviderRecovered = vi.fn(() => true);
-    vi.advanceTimersByTime(5 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     expect(v.fallbackActiveUntil).toBeNull();
     expect(v.effectiveProvider).toBe('claude-cli');
   });
@@ -837,6 +837,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeUntil,
       activatedAt: originalActivatedAt,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const saveSpy = vi
@@ -876,6 +877,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeUntil: now - 1000,
       activatedAt: now - 10_000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const clearSpy = vi
@@ -900,6 +902,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const clearSpy = vi
@@ -960,6 +963,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeUntil: farFuture,
       activatedAt: now - 1000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const saveSpy = vi

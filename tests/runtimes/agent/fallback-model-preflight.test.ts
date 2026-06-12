@@ -418,4 +418,32 @@ describe('armFallbackWindow — model-catalog pre-flight', () => {
     const alertSources = vi.mocked(emitAlert).mock.calls.map((c) => c[1]);
     expect(alertSources).not.toContain('fallback_model_unknown');
   });
+
+  // ── extension re-arm (window already active) ────────────────────────────────
+
+  it('does NOT re-probe the model catalog when an extension re-arms the active window', async () => {
+    probeModelCatalogMock.mockResolvedValue({ status: 'not_found', suggestion: null });
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    // First arm: the catalog probe spawns once and alerts once.
+    fbView(runtime).activateProviderFallback(null);
+    await vi.waitFor(() => {
+      expect(probeModelCatalogMock).toHaveBeenCalledTimes(1);
+    }, { interval: 0 });
+
+    // Extension: a second usage-limit hit while the window is active must not
+    // re-spawn the catalog probe nor re-fire fallback_model_unknown.
+    fbView(runtime).activateProviderFallback(null);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(probeModelCatalogMock).toHaveBeenCalledTimes(1);
+    const unknownAlerts = vi.mocked(emitAlert).mock.calls.filter(
+      (c) => c[1] === 'fallback_model_unknown',
+    );
+    expect(unknownAlerts).toHaveLength(1);
+  });
 });

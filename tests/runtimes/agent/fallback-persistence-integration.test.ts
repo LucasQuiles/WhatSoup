@@ -51,6 +51,15 @@ vi.mock('../../../src/mcp/register-all.ts', () => ({
   registerAllTools: vi.fn(),
 }));
 
+// Alerts must never leave the test process.
+vi.mock('../../../src/lib/emit-alert.ts', () => {
+  const emitAlert = vi.fn(() => true);
+  return {
+    emitAlert,
+    emitAlertChecked: emitAlert,
+  };
+});
+
 // Unit tests must never spawn the real fallback binary; 'unknown' is the
 // safe fail-open value (no alert, no version log).
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
@@ -103,8 +112,13 @@ function makeRuntime(db: Database): AgentRuntime {
 
 type FallbackView = {
   fallbackActiveUntil: number | null;
+  fallbackProbeAttempts: number;
   effectiveProvider: string;
-  activateProviderFallback(resetAt: Date | null): void;
+  probePrimaryProviderRecovered(): boolean | Promise<boolean>;
+  activateProviderFallback(
+    resetAt: Date | null,
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
+  ): void;
   restorePersistedFallbackWindow(): void;
 };
 
@@ -170,5 +184,38 @@ describe('fallback persistence — real-DB integration', () => {
         .get() as { n: number }
     ).n;
     expect(rowCount).toBe(0);
+  });
+
+  it('probe attempts survive a restart mid-stall — the stall clock resumes instead of resetting', async () => {
+    const RECHECK_MS = 5 * 60 * 1000; // WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS default
+
+    // Runtime A: auth-required window at the MIN clamp (1 min) with a dead
+    // primary. Expiry enters the extension phase; two failed probes accrue.
+    const runtimeA = makeRuntime(db);
+    const vA = fbView(runtimeA);
+    vA.probePrimaryProviderRecovered = vi.fn(() => false);
+    vA.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required');
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1); // attempt 1
+    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 2
+    expect(vA.fallbackProbeAttempts).toBe(2);
+
+    // The attempts must be IN THE ROW — a process-local counter dies with
+    // the process and silently resets the stall clock on every restart.
+    const row = db.raw
+      .prepare(`SELECT probe_attempts AS probeAttempts FROM agent_fallback_state WHERE id = 1`)
+      .get() as { probeAttempts: number } | undefined;
+    expect(row?.probeAttempts).toBe(2);
+
+    // Runtime B over the same DB (the restarted process) resumes the count.
+    const runtimeB = makeRuntime(db);
+    const vB = fbView(runtimeB);
+    vB.probePrimaryProviderRecovered = vi.fn(() => false);
+    vB.restorePersistedFallbackWindow();
+    expect(vB.fallbackProbeAttempts).toBe(2);
+    expect(vB.effectiveProvider).toBe('opencode-cli');
+
+    // The next failed extension probe continues the SAME stall episode.
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    expect(vB.fallbackProbeAttempts).toBe(3);
   });
 });

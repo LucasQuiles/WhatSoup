@@ -88,7 +88,7 @@ const RECHECK_MS = 5 * 60 * 1000;
 
 type FallbackView = {
   fallbackProbeAttempts: number;
-  probePrimaryProviderRecovered(): boolean;
+  probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   activateProviderFallback(
     resetAt: Date | null,
     reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
@@ -120,24 +120,24 @@ describe('AgentRuntime — probe stall threshold env clamping', () => {
     vi.useRealTimers();
   });
 
-  it('clamps a sub-floor env value (1) up to 3: alert at attempt 3, not at 1 or 2', () => {
+  it('clamps a sub-floor env value (1) up to 3: alert at attempt 3, not at 1 or 2', async () => {
     const runtime = makeRuntime();
     const v = runtime as unknown as FallbackView;
     v.probePrimaryProviderRecovered = vi.fn(() => false);
     v.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required'); // clamps to +1 min
 
-    vi.advanceTimersByTime(60 * 1000 + 1); // attempt 1
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1); // attempt 1
     expect(v.fallbackProbeAttempts).toBe(1);
     expect(stallAlerts()).toHaveLength(0);
 
-    vi.advanceTimersByTime(RECHECK_MS); // attempt 2
+    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 2
     expect(stallAlerts()).toHaveLength(0);
 
-    vi.advanceTimersByTime(RECHECK_MS); // attempt 3 → clamped threshold reached
+    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 3 → clamped threshold reached
     expect(v.fallbackProbeAttempts).toBe(3);
     expect(stallAlerts()).toHaveLength(1);
 
-    vi.advanceTimersByTime(RECHECK_MS); // attempt 4 → no re-alert
+    await vi.advanceTimersByTimeAsync(RECHECK_MS); // attempt 4 → no re-alert
     expect(stallAlerts()).toHaveLength(1);
   });
 });

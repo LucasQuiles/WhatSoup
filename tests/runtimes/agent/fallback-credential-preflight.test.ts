@@ -379,6 +379,7 @@ describe('armFallbackWindow — credential pre-flight', () => {
       activeUntil: now + 60 * 60_000,
       activatedAt: now - 1000,
       reason: 'usage-limit',
+      probeAttempts: 0,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
@@ -413,5 +414,35 @@ describe('armFallbackWindow — credential pre-flight', () => {
     const alertSources = vi.mocked(emitAlert).mock.calls.map((c) => c[1]);
     expect(alertSources).not.toContain('fallback_credential_missing');
     expect(alertSources).not.toContain('fallback_credential_invalid');
+  });
+
+  // ── extension re-arm (window already active) ────────────────────────────────
+
+  it('does NOT re-run the credential pre-flight when an extension re-arms the active window', async () => {
+    lookupCredentialMock.mockReturnValue('some-key');
+    verifyFallbackCredentialMock.mockResolvedValue('invalid');
+
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+
+    // First arm: the pre-flight verify probe runs once and alerts once.
+    fbView(runtime).activateProviderFallback(null);
+    await vi.waitFor(() => {
+      expect(verifyFallbackCredentialMock).toHaveBeenCalledTimes(1);
+    }, { interval: 0 });
+
+    // Extension: a second usage-limit hit while the window is active. Without
+    // the first-arm gate every per-turn usage-limit re-spawned the probe and
+    // re-fired the alert — an unthrottled storm under load.
+    fbView(runtime).activateProviderFallback(null);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(verifyFallbackCredentialMock).toHaveBeenCalledTimes(1);
+    const invalidAlerts = vi.mocked(emitAlert).mock.calls.filter(
+      (c) => c[1] === 'fallback_credential_invalid',
+    );
+    expect(invalidAlerts).toHaveLength(1);
   });
 });
