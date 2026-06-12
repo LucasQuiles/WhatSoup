@@ -126,6 +126,7 @@ describe('handleGetLineProviderStatus', () => {
         lastFallbackTurnAt: null,
         probeAttempts: null,
         lastProbeAt: null,
+        windowCostUsd: null,
         activations: null,
         reverts: null,
         replays: null,
@@ -244,6 +245,7 @@ describe('handleGetLineProviderStatus', () => {
           lastFallbackTurnAt: 1_781_087_200_000,
           probeAttempts: 4,
           lastProbeAt: 1_781_087_300_000,
+          fallbackWindowCostUsd: 0.0042,
           fallbackActivations: 2,
           fallbackReverts: 1,
           fallbackReplays: 1,
@@ -272,6 +274,7 @@ describe('handleGetLineProviderStatus', () => {
       lastFallbackTurnAt: 1_781_087_200_000,
       probeAttempts: 4,
       lastProbeAt: 1_781_087_300_000,
+      windowCostUsd: 0.0042,
       activations: 2,
       reverts: 1,
       replays: 1,
@@ -394,6 +397,7 @@ describe('handleGetLineProviderStatus', () => {
       lastFallbackTurnAt: null,
       probeAttempts: null,
       lastProbeAt: null,
+      windowCostUsd: null,
       activations: null,
       reverts: null,
       replays: null,
@@ -589,6 +593,7 @@ describe('handleGetLineProviderStatus', () => {
       lastFallbackTurnAt,
       probeAttempts,
       lastProbeAt,
+      windowCostUsd,
       activations,
       reverts,
       replays,
@@ -603,7 +608,7 @@ describe('handleGetLineProviderStatus', () => {
       active: true,
       activeUntil,
     });
-    expect({ effectiveProvider, reason, resetAt, recoveryProbeRequired, turnsServed, turnsEmpty, lastFallbackTurnAt, probeAttempts, lastProbeAt }).toEqual({
+    expect({ effectiveProvider, reason, resetAt, recoveryProbeRequired, turnsServed, turnsEmpty, lastFallbackTurnAt, probeAttempts, lastProbeAt, windowCostUsd }).toEqual({
       effectiveProvider: 'opencode-cli',
       reason: 'auth-required',
       resetAt: activeUntil,
@@ -611,9 +616,10 @@ describe('handleGetLineProviderStatus', () => {
       turnsServed: 3,
       turnsEmpty: 1,
       lastFallbackTurnAt: 1_781_087_200_000,
-      // Health omits the probe-cap fields here — the route tolerates absence (null).
+      // Health omits the probe-cap and cost fields here — the route tolerates absence (null).
       probeAttempts: null,
       lastProbeAt: null,
+      windowCostUsd: null,
     });
     // Old-instance tolerance: health predating the transition counters → null.
     expect({ activations, reverts, replays }).toEqual({

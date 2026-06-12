@@ -10,6 +10,7 @@
  * - the key check covers the fallback-provider services on both platforms
  */
 import { describe, it, expect } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -110,5 +111,110 @@ describe('deploy/setup.sh platform portability', () => {
     expect(setupSource).toContain('ln -sf "$REPO_ROOT/deploy/whatsoup" "$BIN_DIR/whatsoup"');
     expect(setupSource).toContain('ln -sf "$REPO_ROOT/deploy/whatsoup-auth" "$BIN_DIR/whatsoup-auth"');
     expect(setupSource).toContain('ln -sf "$REPO_ROOT/deploy/whatsoup-fleet" "$BIN_DIR/whatsoup-fleet"');
+  });
+});
+
+describe('deploy/setup.sh launchd timer packaging (macOS)', () => {
+  const darwinTimerAnchor = '# --- darwin (macos launchd) timer install ---';
+  const linuxUnitAnchor = '# --- linux (systemd) unit install ---';
+
+  it('step 4 Darwin branch installs both maintenance timer plists to ~/Library/LaunchAgents', () => {
+    const darwinTimerBlock = sliceBetween(setupSource, darwinTimerAnchor, linuxUnitAnchor);
+    expect(darwinTimerBlock).toContain('com.whatsoup.harness-maintenance');
+    expect(darwinTimerBlock).toContain('com.whatsoup.reply-guarantee');
+    expect(darwinTimerBlock).toContain('Library/LaunchAgents');
+  });
+
+  it('duplicate-timer guard checks both an already-loaded launchd label and a cron twin', () => {
+    const darwinTimerBlock = sliceBetween(setupSource, darwinTimerAnchor, linuxUnitAnchor);
+    expect(darwinTimerBlock).toContain('launchctl list');
+    expect(darwinTimerBlock).toContain('crontab -l');
+  });
+
+  it('backs up a differing pre-existing plist before overwriting (idempotent install)', () => {
+    const darwinTimerBlock = sliceBetween(setupSource, darwinTimerAnchor, linuxUnitAnchor);
+    expect(darwinTimerBlock).toContain('whatsoup-backup-');
+    expect(darwinTimerBlock).toContain('cmp -s');
+  });
+
+  it('never executes launchd mutations — bootstrap/load guidance appears only in echoed output', () => {
+    const mutation = /launchctl\s+(bootstrap|bootout|load|unload|enable|disable|kickstart|start|stop)\b/;
+    for (const line of setupSource.split('\n')) {
+      if (mutation.test(line)) {
+        expect(
+          /^\s*(echo|#)/.test(line),
+          `launchctl mutation outside echo/comment: ${JSON.stringify(line)}`,
+        ).toBe(true);
+      }
+    }
+    // The deployment-step guidance itself must exist.
+    expect(setupSource).toContain('launchctl bootstrap gui/');
+  });
+
+  it('the incomplete-packaging warning is replaced by the install', () => {
+    expect(setupSource).not.toContain('not yet packaged');
+  });
+
+  it('documents and implements a --remove-timers uninstall flag', () => {
+    const usageBlock = sliceBetween(setupSource, 'Usage: deploy/setup.sh', 'USAGE');
+    expect(usageBlock).toContain('--remove-timers');
+    expect(setupSource).toContain('"--remove-timers"');
+    // Uninstall guidance must name the unload deployment step rather than run it.
+    expect(setupSource).toContain('launchctl bootout gui/');
+  });
+});
+
+describe('deploy launchd timer plists', () => {
+  const harnessPlist = path.join(repoRoot, 'deploy', 'com.whatsoup.harness-maintenance.plist');
+  const replyPlist = path.join(repoRoot, 'deploy', 'com.whatsoup.reply-guarantee.plist');
+
+  it('harness-maintenance plist fires daily at the systemd timer\'s OnCalendar time', () => {
+    const plist = fs.readFileSync(harnessPlist, 'utf8');
+    const timer = fs.readFileSync(path.join(repoRoot, 'deploy', 'harness-maintenance.timer'), 'utf8');
+    const onCalendar = timer.match(/OnCalendar=\*-\*-\* (\d{2}):(\d{2}):\d{2}/);
+    expect(onCalendar, 'harness-maintenance.timer OnCalendar must be parseable').not.toBeNull();
+    const hour = Number(onCalendar![1]);
+    const minute = Number(onCalendar![2]);
+    expect(plist).toContain('<string>com.whatsoup.harness-maintenance</string>');
+    expect(plist).toContain('<key>StartCalendarInterval</key>');
+    expect(plist).toMatch(new RegExp(`<key>Hour</key>\\s*<integer>${hour}</integer>`));
+    expect(plist).toMatch(new RegExp(`<key>Minute</key>\\s*<integer>${minute}</integer>`));
+    expect(plist).toContain('deploy/scripts/harness-maintenance.sh');
+  });
+
+  it('reply-guarantee plist interval matches its systemd twin and execs the drain script', () => {
+    const plist = fs.readFileSync(replyPlist, 'utf8');
+    const timer = fs.readFileSync(path.join(repoRoot, 'deploy', 'whatsoup-reply-guarantee.timer'), 'utf8');
+    const onActive = timer.match(/OnUnitActiveSec=(\d+)/);
+    expect(onActive, 'whatsoup-reply-guarantee.timer OnUnitActiveSec must be parseable').not.toBeNull();
+    expect(plist).toMatch(
+      new RegExp(`<key>StartInterval</key>\\s*<integer>${onActive![1]}</integer>`),
+    );
+    expect(plist).toContain('deploy/scripts/reply-guarantee-drain.sh');
+  });
+
+  it('pins RunAtLoad=false on both plists — no immediate fire on load', () => {
+    for (const file of [harnessPlist, replyPlist]) {
+      const plist = fs.readFileSync(file, 'utf8');
+      expect(plist, `${path.basename(file)} must pin RunAtLoad=false`).toMatch(
+        /<key>RunAtLoad<\/key>\s*<false\/>/,
+      );
+    }
+  });
+
+  it('plists use install-time placeholders, never machine-specific absolute paths', () => {
+    for (const file of [harnessPlist, replyPlist]) {
+      const plist = fs.readFileSync(file, 'utf8');
+      expect(plist).toContain('${WHATSOUP_REPO_ROOT}');
+      expect(plist).not.toMatch(/\/Users\/[^<\s]+|mwlab|anabot|nucles/i);
+    }
+  });
+
+  // @skip-env plutil ships with macOS only; the ubuntu CI runner has no plist linter.
+  it.skipIf(process.platform !== 'darwin')('both plists pass plutil -lint', () => {
+    for (const file of [harnessPlist, replyPlist]) {
+      const out = execFileSync('plutil', ['-lint', file], { encoding: 'utf8' });
+      expect(out, `${path.basename(file)} failed plutil -lint`).toContain(': OK');
+    }
   });
 });
