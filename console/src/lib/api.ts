@@ -54,7 +54,7 @@ const API_BASE = '';
  * minting with an HttpOnly session cookie set by POST /api/console-session
  * after the operator unlocks the console with the root token.
  */
-export function getConsoleAuthMode(): string | null {
+function getConsoleAuthMode(): string | null {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="fleet-auth-mode"]');
   return meta?.content || null;
 }

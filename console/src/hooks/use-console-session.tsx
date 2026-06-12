@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getApiTicket, isProductionConsole } from '../lib/api'
+import { getApiTicket, isProductionConsole, lockConsole } from '../lib/api'
 
 export type ConsoleSessionState = 'checking' | 'locked' | 'unlocked' | 'dev'
 
@@ -8,7 +8,11 @@ export type ConsoleSessionState = 'checking' | 'locked' | 'unlocked' | 'dev'
  * locked; we probe by minting a ticket against the session cookie. In dev
  * (no fleet-auth-mode meta) the Vite proxy owns auth and the gate is open.
  */
-export function useConsoleSession(): { state: ConsoleSessionState; onUnlocked: () => void } {
+export function useConsoleSession(): {
+  state: ConsoleSessionState
+  onUnlocked: () => void
+  onLock: () => Promise<void>
+} {
   const [state, setState] = useState<ConsoleSessionState>(
     isProductionConsole() ? 'checking' : 'dev',
   )
@@ -32,5 +36,19 @@ export function useConsoleSession(): { state: ConsoleSessionState; onUnlocked: (
 
   const onUnlocked = useCallback(() => setState('unlocked'), [])
 
-  return { state, onUnlocked }
+  // Logout: revoke the server session, then relock the gate so the
+  // UnlockScreen is shown again. Best-effort — relock even if the network
+  // call fails so the operator is never stuck "logged in" locally.
+  const onLock = useCallback(async () => {
+    // Best-effort revoke; never reject to the click handler. Relock the gate
+    // regardless so the operator is never stuck "logged in" locally.
+    try {
+      await lockConsole()
+    } catch {
+      // network/server error — local relock below is the safe fallback
+    }
+    setState('locked')
+  }, [])
+
+  return { state, onUnlocked, onLock }
 }
