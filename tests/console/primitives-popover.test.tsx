@@ -229,7 +229,7 @@ describe('Popover — open/close gate', () => {
       />,
     );
     const listbox = screen.getByRole('listbox', { name: 'Pick a fruit' });
-    expect(listbox).toBeDefined();
+    expect(listbox.getAttribute('aria-label')).toBe('Pick a fruit');
   });
 });
 

@@ -47,13 +47,20 @@ describe('design system compliance — round 2 shared search inputs', () => {
     const groupCard = read('console/src/components/line-detail/GroupCard.tsx')
     const scheduledRow = read('console/src/components/line-detail/ScheduledMessageRow.tsx')
 
-    for (const modal of [createGroup, scheduleComposer, groupDetail]) {
+    // B3 wave 1: CreateGroupModal migrated onto the Modal primitive — its pin
+    // flips from the legacy dialog classes to the primitive contract. The other
+    // two keep the legacy pins until their own waves (B3 waves 2-3) migrate them.
+    expect(createGroup).toContain('Modal')
+    expect(createGroup).toContain('ModalHeader')
+    expect(createGroup).toContain('ModalFooter')
+    expect(createGroup).not.toContain('c-dialog-backdrop')
+
+    for (const modal of [scheduleComposer, groupDetail]) {
       expect(modal).toContain('c-dialog-backdrop')
       expect(modal).toContain('c-dialog')
       expect(modal).toContain('c-dialog-header')
     }
 
-    expect(createGroup).toContain('c-dialog-footer')
     expect(scheduleComposer).toContain('c-dialog-footer')
     expect(createGroup).toContain('className="c-input font-mono text-t2"')
     expect(scheduleComposer).toContain('className="c-input font-mono text-t2')

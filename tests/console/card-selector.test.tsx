@@ -57,7 +57,7 @@ describe('CardSelector rendering', () => {
   it('renders a radiogroup with the provided accessible label', () => {
     render(<CardSelector label="Card type" options={makeOptions()} selected={null} onChange={vi.fn()} />)
     const group = screen.getByRole('radiogroup', { name: 'Card type' })
-    expect(group).toBeDefined()
+    expect(group.getAttribute('aria-label')).toBe('Card type')
   })
 
   it('renders one radio per option with label, description, and icon', () => {

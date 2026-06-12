@@ -1081,7 +1081,7 @@ describe('SoupKitchen chart-range ToolbarTimeRange contract', () => {
   it('renders the chart-range seg as role=group with accessible label "Chart range"', () => {
     renderPage({ lines: [] });
     const seg = screen.getByRole('group', { name: 'Chart range' });
-    expect(seg).toBeDefined();
+    expect(seg.getAttribute('aria-label')).toBe('Chart range');
   });
 
   it('marks exactly one range button aria-pressed=true after a range change', () => {

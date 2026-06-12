@@ -229,7 +229,9 @@ describe('LineDetail preferences integration', () => {
     render(createElement(LineDetail));
     fireEvent.click(screen.getByRole('tab', { name: 'Metrics' }));
 
-    expect(screen.getByRole('button', { name: '30d' }).className).toContain('c-btn-primary');
+    // DD-15: range seg is now ToolbarTimeRange — pressed state is the semantic
+    // contract, not a class toggle.
+    expect(screen.getByRole('button', { name: '30d' }).getAttribute('aria-pressed')).toBe('true');
 
     fireEvent.click(screen.getByRole('button', { name: '7d' }));
     expect(localStorage.getItem('whatsoup:metricsRange')).toBe('7d');
