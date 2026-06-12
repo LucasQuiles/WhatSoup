@@ -33,8 +33,7 @@ export function resolveProviderKeyService(
   if (providerConfig && typeof providerConfig === 'object' && !Array.isArray(providerConfig)) {
     const service = (providerConfig as Record<string, unknown>)['apiKeyService'];
     if ((provider === 'openai-api' || provider === 'anthropic-api') && typeof service === 'string') {
-      const trimmed = service.trim();
-      if (trimmed !== '') return trimmed;
+      if (service.length > 0) return service;
     }
   }
   if (provider === 'opencode-cli') {

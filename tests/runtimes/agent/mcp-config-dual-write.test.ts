@@ -61,6 +61,12 @@ vi.mock('../../../src/lib/emit-alert.ts', () => ({
 }));
 vi.mock('../../../src/lib/keyring.ts', () => ({
   lookupCredential: vi.fn(() => null),
+  resolveProviderKeyService: vi.fn((provider: unknown, model: unknown) => {
+    if (provider === 'opencode-cli' && typeof model === 'string') return model.split('/')[0]?.trim().toLowerCase() || null;
+    if (provider === 'openai-api') return 'openai';
+    if (provider === 'anthropic-api') return 'anthropic';
+    return null;
+  }),
 }));
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   ensureAgentSchema: vi.fn(),

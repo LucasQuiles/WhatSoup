@@ -5442,12 +5442,13 @@ export class AgentRuntime implements Runtime {
    * Returns:
    *  - `true`  — a key is present for the resolved service.
    *  - `false` — a key is expected but absent (opencode sessions would fail auth).
-   *  - `null`  — not applicable: CLI/native-auth providers (claude-cli, codex-cli,
-   *              gemini-cli, anthropic-api) authenticate via subscription/login,
+   *  - `null`  — not applicable: native-auth CLI providers (claude-cli,
+   *              codex-cli, gemini-cli) authenticate via subscription/login,
    *              so no keyring key is checked.
    *
    * Service mapping: opencode-cli → the model's provider prefix
-   * (`minimax/...` → `minimax`); openai-api → `openai`. Never logs the value.
+   * (`minimax/...` → `minimax`); openai-api → `openai`;
+   * anthropic-api → `anthropic`. Never logs the value.
    */
   private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
     const service = resolveProviderKeyService(provider, model);
