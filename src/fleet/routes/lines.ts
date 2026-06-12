@@ -303,6 +303,7 @@ function enrichInstance(inst: DiscoveredInstance, poll: InstanceStatus | undefin
     status: isConfigError ? 'config_error' : (poll?.status ?? 'unknown'),
     error: inst.configError ?? poll?.error ?? null,
     configError: inst.configError ?? null,
+    sharedCwdWith: inst.sharedCwdWith ?? null,
 
     // Derived from health snapshot
     phone: phoneFromJid(accountJid),
