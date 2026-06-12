@@ -490,3 +490,91 @@ describe('Drawer — restoreFocus override (retarget contract, QA finding D3)', 
     expect(document.activeElement).not.toBe(opener);
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// B5: Exit presence — jsdom instant path and closing-phase contracts
+// ---------------------------------------------------------------------------
+
+describe('Drawer — exit presence: jsdom instant path (C-B5-1)', () => {
+  it('open→false removes the drawer synchronously when no animation duration resolves (jsdom path)', async () => {
+    const { rerender } = render(
+      <Drawer open onClose={() => {}} aria-label="inspector">
+        <DrawerBody><span>content</span></DrawerBody>
+      </Drawer>
+    )
+    expect(document.querySelector('.soup-drawer')).not.toBeNull()
+
+    rerender(
+      <Drawer open={false} onClose={() => {}} aria-label="inspector">
+        <DrawerBody><span>content</span></DrawerBody>
+      </Drawer>
+    )
+
+    await act(async () => {})
+    // In jsdom: no stylesheet → instant unmount (C-B5-1).
+    expect(document.querySelector('.soup-drawer')).toBeNull()
+  })
+})
+
+describe('Drawer — exit presence: closing phase with stubbed duration', () => {
+  it('animationend on the shell with matching animationName → unmounts drawer', async () => {
+    const { rerender } = render(
+      <Drawer open onClose={() => {}} aria-label="inspector">
+        <DrawerBody><span>content</span></DrawerBody>
+      </Drawer>
+    )
+
+    const shell = document.querySelector('.soup-drawer') as HTMLElement
+    expect(shell).not.toBeNull()
+    shell.style.animationDuration = '180ms'
+
+    rerender(
+      <Drawer open={false} onClose={() => {}} aria-label="inspector">
+        <DrawerBody><span>content</span></DrawerBody>
+      </Drawer>
+    )
+
+    await act(async () => {})
+
+    await act(async () => {
+      const closingShell = document.querySelector('.soup-drawer')
+      if (closingShell) {
+        fireEvent.animationEnd(closingShell, { animationName: 'soup-drawer-out' })
+      }
+    })
+
+    await act(async () => {})
+    expect(document.querySelector('.soup-drawer')).toBeNull()
+  })
+
+  it('re-open during closing: shell returns to data-state="open"', async () => {
+    const { rerender } = render(
+      <Drawer open onClose={() => {}} aria-label="inspector">
+        <DrawerBody><span>content</span></DrawerBody>
+      </Drawer>
+    )
+
+    const shell = document.querySelector('.soup-drawer') as HTMLElement
+    shell.style.animationDuration = '180ms'
+
+    rerender(
+      <Drawer open={false} onClose={() => {}} aria-label="inspector">
+        <DrawerBody><span>content</span></DrawerBody>
+      </Drawer>
+    )
+    await act(async () => {})
+
+    // Re-open
+    rerender(
+      <Drawer open onClose={() => {}} aria-label="inspector">
+        <DrawerBody><span>content</span></DrawerBody>
+      </Drawer>
+    )
+    await act(async () => {})
+
+    const drawerEl = document.querySelector('.soup-drawer')
+    expect(drawerEl).not.toBeNull()
+    expect(drawerEl?.getAttribute('data-state')).toBe('open')
+  })
+})

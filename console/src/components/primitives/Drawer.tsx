@@ -15,13 +15,20 @@
  * content keeps ≥~540px). The mode flip is CSS-only; jsdom cannot prove the
  * squeeze flip — marked INCONCLUSIVE in tests, manual QA covers D7.
  *
- * Motion: enter translateX(100%→0) at --dur-slow --ease-enter; exit at
- * --dur-base --ease-exit. The global prefers-reduced-motion block neutralizes
- * all CSS transitions (motion.md §9) — no JS check needed here.
+ * Motion: enter translateX(100%→0) at --dur-slow --ease-enter; exit
+ * translateX(0→100%) at --dur-base --ease-exit (180ms). The global
+ * prefers-reduced-motion block neutralizes all CSS animations — no JS check.
+ * Exit motion uses use-exit-presence (deferred unmount while CSS -out plays).
+ * In jsdom (no stylesheet) the dwell is instant — all existing suites stable
+ * (C-B5-1).
  *
- * Exit motion: Drawer unmounts on close (open=false returns null), so the CSS
- * exit transition does not play — effectively instant on close, matching
- * Modal's approach. DD-19 covers paired enter/exit motion with deferred unmount.
+ * Background inert exception (C-B5-2, DD-19):
+ *   The Drawer does NOT get background inert. It is non-modal by spec (drawer.md
+ *   §Accessibility: role="complementary"; squeeze mode keeps table interaction live).
+ *   It also renders inline inside #root (not portaled) — inert on #root would inert
+ *   the Drawer itself. This is the DD-19-sanctioned documented exception recorded
+ *   in the design-debt-register closing row. The drawer's existing containment
+ *   (focus trap, Escape stack, scrim in overlay mode) is unchanged.
  *
  * Content retarget: callers swap children/props while open=true. The Drawer
  * does NOT remount or re-animate on content change — key stability is the
@@ -46,6 +53,7 @@ import {
 } from 'react';
 import { X } from 'lucide-react';
 import { useDismissable } from '../../hooks/use-dismissable';
+import { useExitPresence } from '../../hooks/use-exit-presence';
 
 // ---------------------------------------------------------------------------
 // DrawerCloseRefContext — thread the close button ref to DrawerHeader
@@ -88,6 +96,9 @@ export const DrawerLayout: FC<DrawerLayoutProps> = ({
 // ---------------------------------------------------------------------------
 // Drawer (shell)
 // ---------------------------------------------------------------------------
+
+/** CSS animation name for the drawer exit keyframe (B5 §4.2 guard, C-B5-6). */
+const DRAWER_OUT_ANIM = 'soup-drawer-out';
 
 export interface DrawerProps {
   /** Controls visibility. */
@@ -132,6 +143,8 @@ export const Drawer: FC<DrawerProps> = ({
   // registers its close button into, then pass it as initialFocus.
   const closeButtonRef = useRef<HTMLElement | null>(null);
 
+  // useDismissable receives the REAL open prop: Escape deregisters and focus
+  // restores at close-start; the closing shell never captures input.
   useDismissable(shellRef, {
     onClose,
     open,
@@ -142,15 +155,23 @@ export const Drawer: FC<DrawerProps> = ({
     restoreFocus,
   });
 
-  if (!open) return null;
+  // Exit presence: deferred unmount while soup-drawer-out keyframe plays (B5 §4.2).
+  const { mounted, phase } = useExitPresence(open, shellRef, DRAWER_OUT_ANIM);
+
+  if (!mounted) return null;
 
   const drawerClass = ['soup-drawer', className].filter(Boolean).join(' ');
 
   return (
     <>
       {/* Scrim — only rendered in overlay mode (<900px container).
-          The container query in soup-drawer-layout hides it at ≥900px. */}
-      <div className="soup-drawer-scrim" aria-hidden="true" />
+          The container query in soup-drawer-layout hides it at ≥900px.
+          Carries data-state so it fades out in parallel with the drawer shell. */}
+      <div
+        className="soup-drawer-scrim"
+        aria-hidden="true"
+        data-state={phase}
+      />
 
       <div
         ref={shellRef}
@@ -158,7 +179,7 @@ export const Drawer: FC<DrawerProps> = ({
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledBy}
         className={drawerClass}
-        data-state="open"
+        data-state={phase}
         tabIndex={-1}
       >
         <DrawerCloseRefContext value={closeButtonRef}>

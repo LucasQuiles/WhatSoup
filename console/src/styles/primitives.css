@@ -346,8 +346,20 @@
   outline-offset: var(--bw-accent);
 }
 
-/* Exit animation — applied via class when closing (future enhancement);
-   for now exits are instant (open=false returns null). */
+/* Exit animation — applied via data-state="closing" when the presence hook
+   sets the closing phase. The -out keyframes are the reverse of -in.
+   modal.md §States: --dur-fast (120ms) --ease-exit, scrim linear out in parallel. */
+
+/* Closing backdrop: pointer-events off so the next click lands instantly (motion.md §10) */
+.soup-modal-backdrop[data-state="closing"] {
+  animation: soup-modal-backdrop-out var(--dur-fast) var(--ease-linear) forwards;
+  pointer-events: none;
+}
+
+/* Closing shell */
+.soup-modal-shell[data-state="closing"] {
+  animation: soup-modal-shell-out var(--dur-fast) var(--ease-exit) forwards;
+}
 
 /* Size modifiers (modal.md: sm/md/lg) — width consumed from --modal-w-* (DD-18r SSOT) */
 .soup-modal-shell--sm {
@@ -428,10 +440,30 @@
   }
 }
 
-/* Reduced motion: appear instantly (off-and-instant, motion.md §9) */
+/* Exit keyframes — reverse of enter (B5 DD-19): fade + 8px drop + scale 0.985 */
+@keyframes soup-modal-backdrop-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+@keyframes soup-modal-shell-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+
+/* Reduced motion: appear/disappear instantly (off-and-instant, motion.md §9).
+   Covers both enter and exit animations — open state and closing state. */
 @media (prefers-reduced-motion: reduce) {
   .soup-modal-backdrop,
-  .soup-modal-shell {
+  .soup-modal-backdrop[data-state="closing"],
+  .soup-modal-shell,
+  .soup-modal-shell[data-state="closing"] {
     animation: none;
   }
 }
@@ -1191,7 +1223,7 @@ button.soup-pill[aria-disabled="true"] {
    Width: --drawer-w = min(360px, 86%) (component token).
    Anatomy: head (status shape + title + mode badge + spring + close X) · body (scrolls) · footer.
    Enter: translateX(100%→0) at --dur-slow --ease-enter.
-   Exit: effectively instant (unmount-on-close; DD-19 covers paired exit motion).
+   Exit: translateX(0→100%) at --dur-base --ease-exit (180ms, DD-19 closed).
    Squeeze mode (≥900px container): flex sibling, no scrim, role="complementary".
    Overlay mode (<900px container): absolute right-0, scrim covers content.
    Squeeze proof is INCONCLUSIVE in jsdom — manual QA + D7 viewport tests cover it.
@@ -1238,6 +1270,17 @@ button.soup-pill[aria-disabled="true"] {
   outline: none;
 }
 
+/* Closing drawer shell: slide back out to the right (B5 DD-19) */
+.soup-drawer[data-state="closing"] {
+  animation: soup-drawer-out var(--dur-base) var(--ease-exit) forwards;
+}
+
+/* Closing scrim: fades out in parallel — overlay mode only (hidden in squeeze via container query) */
+.soup-drawer-scrim[data-state="closing"] {
+  animation: soup-drawer-scrim-out var(--dur-base) var(--ease-linear) forwards;
+  pointer-events: none;
+}
+
 .soup-drawer:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: var(--bw-accent);
@@ -1265,9 +1308,24 @@ button.soup-pill[aria-disabled="true"] {
   to   { transform: translateX(0); }
 }
 
-/* Reduced motion: appear instantly (off-and-instant, motion.md §9) */
+/* Exit keyframe — translateX 0→100% (B5 DD-19 closed) */
+@keyframes soup-drawer-out {
+  from { transform: translateX(0); }
+  to   { transform: translateX(100%); }
+}
+
+/* Scrim fade-out keyframe (overlay mode) */
+@keyframes soup-drawer-scrim-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* Reduced motion: appear/disappear instantly (off-and-instant, motion.md §9).
+   Covers both enter and exit animations — open state and closing state. */
 @media (prefers-reduced-motion: reduce) {
-  .soup-drawer {
+  .soup-drawer,
+  .soup-drawer[data-state="closing"],
+  .soup-drawer-scrim[data-state="closing"] {
     animation: none;
   }
 }

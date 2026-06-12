@@ -8,12 +8,20 @@
  *   - size prop: sm / md / lg — maps to --panel-* width tokens.
  *   - useDismissable: Escape (stacking-aware), outside-click (dismissable prop),
  *     focus trap, focus restoration.
- *   - Enter/exit CSS classes; exit faster than enter (motion.md §5).
- *   - Reduced motion: backdrop + shell appear/disappear instantly via the global
- *     prefers-reduced-motion CSS rule (no JS check needed — CSS handles it).
- * Background inert/aria-hidden management is NOT implemented yet (DD-19) — the modal
- * portals to body and relies on the focus trap for containment.
- *     own app root ref if needed (inert attribute delegation is caller-side).
+ *   - Enter/exit CSS keyframes; exit faster than enter (motion.md §5).
+ *     Exit: --dur-fast --ease-exit (120ms); enter: --dur-base --ease-enter (180ms).
+ *     data-state="open|closing" drives the CSS keyframe switch.
+ *     Reduced motion: both enter and exit instant via the global
+ *     prefers-reduced-motion CSS block (no JS matchMedia check needed).
+ *   - Background inert: #root receives inert while any modal is open (DD-19).
+ *     Refcounted (use-background-inert) so stacked modals are safe.
+ *     Inert is released (effect cleanup) BEFORE focus restoration runs (C-B5-4).
+ *   - Exit presence: deferred unmount via use-exit-presence; the closing dwell
+ *     keeps the component mounted for ≤120ms while the CSS -out keyframe plays.
+ *     In jsdom (no stylesheet) the dwell is instant — all existing suites stable
+ *     (C-B5-1). useDismissable receives the REAL open prop so Escape de-registers,
+ *     the trap disarms, and focus restores at close-start — the dying shell never
+ *     captures input.
  *
  * Sub-components exported from this module:
  *   Modal, ModalHeader, ModalBody, ModalFooter
@@ -30,6 +38,8 @@ import {
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { useDismissable } from '../../hooks/use-dismissable';
+import { useExitPresence } from '../../hooks/use-exit-presence';
+import { useBackgroundInert } from '../../hooks/use-background-inert';
 import { ActionButton } from './ActionButton';
 
 // ---------------------------------------------------------------------------
@@ -78,6 +88,9 @@ const ModalTitleIdContext = createContext<string | undefined>(undefined);
 // Modal (shell + backdrop composite)
 // ---------------------------------------------------------------------------
 
+/** CSS animation name for the modal shell exit keyframe (B5 §4.2 guard, C-B5-6). */
+const MODAL_SHELL_OUT_ANIM = 'soup-modal-shell-out';
+
 export const Modal: FC<ModalProps> = ({
   open,
   onClose,
@@ -91,9 +104,18 @@ export const Modal: FC<ModalProps> = ({
   const autoId = useId();
   const titleId = labelledById ?? `soup-modal-title-${autoId}`;
 
+  // useDismissable receives the REAL open prop: Escape deregisters, trap disarms,
+  // and focus restores at close-start. The closing shell never captures input.
   useDismissable(shellRef, { onClose, open, dismissable, initialFocus });
 
-  if (!open) return null;
+  // Background inert: acquires on open, releases in cleanup (C-B5-4 ordering).
+  useBackgroundInert(open);
+
+  // Exit presence: deferred unmount while the -out keyframe plays (B5 §4.2).
+  // In jsdom (no stylesheet) mounted→false is synchronous (C-B5-1).
+  const { mounted, phase } = useExitPresence(open, shellRef, MODAL_SHELL_OUT_ANIM);
+
+  if (!mounted) return null;
 
   const sizeClass =
     size === 'sm'
@@ -106,7 +128,11 @@ export const Modal: FC<ModalProps> = ({
   // handler — no backdrop onClick, so a real browser sequence (pointerdown -> pointerup
   // -> click) can never double-fire onClose.
   return createPortal(
-    <div className="soup-modal-backdrop" data-soup-backdrop>
+    <div
+      className="soup-modal-backdrop"
+      data-soup-backdrop
+      data-state={phase}
+    >
       <div
         ref={shellRef}
         role="dialog"
@@ -114,6 +140,7 @@ export const Modal: FC<ModalProps> = ({
         aria-labelledby={titleId}
         tabIndex={-1}
         className={`soup-modal-shell ${sizeClass}`}
+        data-state={phase}
         data-soup-modal-title-id={titleId}
       >
         <ModalTitleIdContext.Provider value={titleId}>
