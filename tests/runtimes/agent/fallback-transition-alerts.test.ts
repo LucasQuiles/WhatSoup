@@ -8,8 +8,12 @@
  *     arm only (fallbackArmReason null-guard) — never on extensions
  *   - provider_fallback_reverted fires on deactivation with reason, turn
  *     counters, and window duration in the evidence — never when idle
- *   - provider_fallback_replayed fires on a successful replay dispatch only —
+ *   - provider_fallback_replayed fires only after the replay COMPLETES —
  *     never on gate-rejected replays (extended / key-absent / tool activity)
+ *     and never for a replay that fails (the failure alert covers that turn)
+ *   - restoring a persisted window after a restart re-arms WITHOUT re-counting
+ *     or re-emitting activation (the pre-restart arm already did; the
+ *     once-per-window contract spans restarts)
  *   - fallbackActivations / fallbackReverts / fallbackReplays count
  *     lifetime-of-process totals and surface via getFallbackState
  *
@@ -19,6 +23,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitAlert: vi.fn() }));
+
+// Overridable persisted-window source for the restore-path tests; all other
+// fallback-state-db functions keep their real implementations (they are
+// harmless against the mocked db).
+const { loadFallbackStateMock } = vi.hoisted(() => ({
+  loadFallbackStateMock: vi.fn<() => unknown>(() => null),
+}));
+vi.mock('../../../src/runtimes/agent/fallback-state-db.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/fallback-state-db.ts')>();
+  return {
+    ...actual,
+    loadFallbackState: () => loadFallbackStateMock(),
+  };
+});
 
 // ─── Mocks (declared before importing the runtime) ────────────────────────────
 
@@ -154,6 +172,7 @@ type FallbackView = {
     hadToolActivity?: boolean;
   }): boolean;
   replayTurnOnFallback(args: unknown): Promise<void>;
+  restorePersistedFallbackWindow(): void;
   getFallbackState(): {
     fallbackActiveUntil: number | null;
     fallbackActivations: number;
@@ -245,7 +264,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(0);
   });
 
-  it('emits provider_fallback_replayed on a successful replay dispatch with reason and target entry', () => {
+  it('emits provider_fallback_replayed after a successful replay with reason and target entry', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
@@ -260,6 +279,12 @@ describe('AgentRuntime — fallback transition alerts', () => {
       mapKey: 'chat-key',
       oldSession: null,
     })).toBe(true);
+    // The alert reports a COMPLETED action: nothing may be emitted at
+    // dispatch time, only after the replay resolves (pins the timing — a
+    // revert to emit-before-await fails here).
+    expect(alertsFor('provider_fallback_replayed')).toHaveLength(0);
+    expect(v.getFallbackState().fallbackReplays).toBe(0);
+    await vi.runAllTimersAsync();
 
     const replayed = alertsFor('provider_fallback_replayed');
     expect(replayed).toHaveLength(1);
@@ -268,6 +293,34 @@ describe('AgentRuntime — fallback transition alerts', () => {
     expect(evidence).toContain('reason=usage-limit');
     expect(evidence).toContain('provider=opencode-cli');
     expect(evidence).toContain('model=minimax/MiniMax-M2.7');
+    expect(v.getFallbackState().fallbackReplays).toBe(1);
+  });
+
+  it('a FAILED replay emits only the failure alert — never provider_fallback_replayed, never the counter', async () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+
+    const activation = v.activateProviderFallback(null, 'usage-limit')!;
+    v.pendingTurnText.set('chat-key', 'please continue the task');
+    v.pendingTurnActorJid.set('chat-key', 'sender@s.whatsapp.net');
+    v.replayTurnOnFallback = vi.fn(async () => {
+      throw new Error('fallback provider refused the turn');
+    });
+
+    // Dispatch still happens (the gates passed), so schedule returns true...
+    expect(v.scheduleFallbackReplay({
+      activation,
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+    })).toBe(true);
+    await vi.runAllTimersAsync();
+
+    // ...but the telemetry must not claim a replay happened: success-and-
+    // failure for the same turn is contradictory.
+    expect(alertsFor('provider_fallback_replayed')).toHaveLength(0);
+    expect(v.getFallbackState().fallbackReplays).toBe(0);
+    expect(alertsFor('runtime_provider_fallback_replay_failed')).toHaveLength(1);
   });
 
   it('does NOT emit provider_fallback_replayed on gate-rejected replays', () => {
@@ -354,7 +407,7 @@ describe('AgentRuntime — fallback transition counters', () => {
     expect(v.getFallbackState().fallbackReverts).toBe(2);
   });
 
-  it('counts replays on successful dispatch only', () => {
+  it('counts completed replays only', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
@@ -369,6 +422,7 @@ describe('AgentRuntime — fallback transition counters', () => {
       mapKey: 'chat-key',
       oldSession: null,
     });
+    await vi.runAllTimersAsync();
     expect(v.getFallbackState().fallbackReplays).toBe(0);
     v.scheduleFallbackReplay({
       activation,
@@ -376,6 +430,65 @@ describe('AgentRuntime — fallback transition counters', () => {
       mapKey: 'chat-key',
       oldSession: null,
     });
+    await vi.runAllTimersAsync();
     expect(v.getFallbackState().fallbackReplays).toBe(1);
+  });
+});
+
+// ─── Restore-path telemetry (restart resumes a persisted window) ──────────────
+
+describe('AgentRuntime — fallback window restore telemetry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    lookupCredentialMock.mockReturnValue('present-key');
+    loadFallbackStateMock.mockReturnValue(null);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    loadFallbackStateMock.mockReturnValue(null);
+  });
+
+  it('restoring a persisted window re-arms WITHOUT re-counting or re-emitting activation', () => {
+    const until = Date.now() + 60 * 60 * 1000;
+    loadFallbackStateMock.mockReturnValue({
+      activeUntil: until,
+      activatedAt: Date.now() - 30 * 60 * 1000,
+      reason: 'usage-limit',
+    });
+    const runtime = makeRuntime();
+    const v = view(runtime);
+
+    v.restorePersistedFallbackWindow();
+
+    // The window IS restored and armed...
+    expect(v.fallbackActiveUntil).toBe(until);
+    // ...but the activation alert + counter belong to the pre-restart arm:
+    // "exactly once per window" spans restarts.
+    expect(alertsFor('provider_fallback_activated')).toHaveLength(0);
+    expect(v.getFallbackState().fallbackActivations).toBe(0);
+  });
+
+  it('a fresh window after the restored one reverts still counts and emits once', () => {
+    const until = Date.now() + 60 * 60 * 1000;
+    loadFallbackStateMock.mockReturnValue({
+      activeUntil: until,
+      activatedAt: Date.now() - 30 * 60 * 1000,
+      reason: 'usage-limit',
+    });
+    const runtime = makeRuntime();
+    const v = view(runtime);
+    v.restorePersistedFallbackWindow();
+
+    // Restored window expires → reverts (and clears fallbackArmReason).
+    vi.advanceTimersByTime(60 * 60 * 1000 + 1);
+    expect(v.fallbackActiveUntil).toBeNull();
+
+    // A genuinely new window must still alert + count exactly once — the
+    // restore suppression must not over-suppress future activations.
+    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'rate-limit');
+    expect(alertsFor('provider_fallback_activated')).toHaveLength(1);
+    expect(v.getFallbackState().fallbackActivations).toBe(1);
   });
 });
