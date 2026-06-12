@@ -36,6 +36,20 @@
   },
   {
     "file": "src/core/health.ts",
+    "line": 9,
+    "specifier": "../transport/runtime-connection.ts",
+    "fromLayer": "core",
+    "toLayer": "transport"
+  },
+  {
+    "file": "src/core/health.ts",
+    "line": 10,
+    "specifier": "../transport/auth-disconnect-policy.ts",
+    "fromLayer": "core",
+    "toLayer": "transport"
+  },
+  {
+    "file": "src/core/health.ts",
     "line": 29,
     "specifier": "../runtimes/types.ts",
     "fromLayer": "core",
@@ -45,13 +59,6 @@
     "file": "src/core/health.ts",
     "line": 30,
     "specifier": "../transport/connection.ts",
-    "fromLayer": "core",
-    "toLayer": "transport"
-  },
-  {
-    "file": "src/core/health.ts",
-    "line": 9,
-    "specifier": "../transport/runtime-connection.ts",
     "fromLayer": "core",
     "toLayer": "transport"
   },
@@ -99,17 +106,17 @@
   },
   {
     "file": "src/core/scheduler.ts",
-    "line": 8,
-    "specifier": "../fleet/time-utils.ts",
-    "fromLayer": "core",
-    "toLayer": "fleet"
-  },
-  {
-    "file": "src/core/scheduler.ts",
     "line": 6,
     "specifier": "../transport/runtime-connection.ts",
     "fromLayer": "core",
     "toLayer": "transport"
+  },
+  {
+    "file": "src/core/scheduler.ts",
+    "line": 8,
+    "specifier": "../fleet/time-utils.ts",
+    "fromLayer": "core",
+    "toLayer": "fleet"
   },
   {
     "file": "src/core/substrate/time.ts",
