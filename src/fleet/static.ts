@@ -22,7 +22,7 @@ const MIME_TYPES: Record<string, string> = {
  * @param getVersion — function returning current version (called per-request so it stays fresh
  *   after git pull updates the code without restarting the fleet server).
  */
-export function createStaticHandler(distDir: string, fleetToken?: string | (() => string), getVersion?: () => string) {
+export function createStaticHandler(distDir: string, getVersion?: () => string) {
   return (req: IncomingMessage, res: ServerResponse): boolean => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
 
@@ -32,27 +32,24 @@ export function createStaticHandler(distDir: string, fleetToken?: string | (() =
     const safePath = path.normalize(url).replace(/^(\.\.[/\\])+/, '');
     let filePath = path.join(distDir, safePath);
 
-    // Helper: serve HTML with token injection when applicable.
-    // Token/version resolution is deferred into this branch so that JS/CSS/404
-    // paths never invoke the (possibly throwing) lazy token lookup. A corrupt
-    // fleet-tokens.json must not break static asset delivery (issue #316).
+    // Helper: serve HTML with public metadata injection (version + auth
+    // mode). SECURITY (B1): served HTML must never contain the fleet root
+    // token — the console unlocks via POST /api/console-session instead.
     const serveHtml = (htmlPath: string) => {
-      let token: string | undefined;
       let version: string | undefined;
       try {
-        token = typeof fleetToken === 'function' ? fleetToken() : fleetToken;
         version = getVersion?.();
       } catch {
-        // Lazy token lookup failed (e.g. corrupt token file). Serve the HTML
-        // without meta injection — degraded but functional.
+        // Version lookup failed. Serve the HTML without meta injection —
+        // degraded but functional (issue #316 class).
         return serveFile(htmlPath, res);
       }
-      return (token && version) ? serveHtmlWithMeta(htmlPath, token, version, res) : serveFile(htmlPath, res);
+      return version ? serveHtmlWithMeta(htmlPath, version, res) : serveFile(htmlPath, res);
     };
 
     // Try exact file first
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-      // Inject token into any HTML file (index.html at root or nested)
+      // Serve HTML with public metadata (version + auth mode) — no secrets injected
       if (path.extname(filePath) === '.html') return serveHtml(filePath);
       return serveFile(filePath, res);
     }
@@ -76,13 +73,13 @@ export function createStaticHandler(distDir: string, fleetToken?: string | (() =
   };
 }
 
-function serveHtmlWithMeta(filePath: string, token: string, version: string, res: ServerResponse): boolean {
+function serveHtmlWithMeta(filePath: string, version: string, res: ServerResponse): boolean {
   try {
     let html = fs.readFileSync(filePath, 'utf-8');
-    // Inject fleet token and version meta tags before </head> — sanitize to prevent XSS
-    const safeToken = token.replace(/[^0-9a-zA-Z_\-]/g, '');
+    // Inject public metadata before </head> — sanitize to prevent XSS.
+    // Never inject secrets here: this HTML is served unauthenticated.
     const safeVersion = version.replace(/[^0-9a-zA-Z_\-]/g, '');
-    const meta = `<meta name="fleet-token" content="${safeToken}">\n<meta name="fleet-version" content="${safeVersion}">`;
+    const meta = `<meta name="fleet-version" content="${safeVersion}">\n<meta name="fleet-auth-mode" content="session">`;
     html = html.replace('</head>', `${meta}\n</head>`);
     const buf = Buffer.from(html, 'utf-8');
     res.writeHead(200, {

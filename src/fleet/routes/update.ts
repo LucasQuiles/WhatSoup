@@ -166,7 +166,9 @@ export function handleGetVersion(
   res: ServerResponse,
   checker: UpdateChecker,
 ): void {
-  jsonResponse(res, 200, checker.getState());
+  // B1 observability: non-secret console auth posture rides the version
+  // payload so operators can verify the closure from the API.
+  jsonResponse(res, 200, { ...checker.getState(), consoleAuthMode: 'session', rootTokenInHtml: false });
 }
 
 export async function handleUpdate(

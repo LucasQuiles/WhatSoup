@@ -182,7 +182,7 @@ deploy/
 
 ## Fleet API
 
-The fleet server exposes a REST API on `127.0.0.1:9099`. Most routes accept the root fleet token as a Bearer token, legacy `?token=`, or a short-lived API/SSE ticket; ticket-minting routes require the root fleet token as a Bearer token.
+The fleet server exposes a REST API on `127.0.0.1:9099`. Most routes accept the root fleet token as a Bearer token, legacy `?token=`, or a short-lived API/SSE ticket. Ticket-minting routes accept the root fleet token as a Bearer (external scripts) or a console session cookie with same-origin proof (browsers — see `POST /api/console-session`).
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -192,8 +192,10 @@ The fleet server exposes a REST API on `127.0.0.1:9099`. Most routes accept the 
 | `DELETE` | `/api/lines/:name` | Delete an instance (stop + cleanup) |
 | `PATCH` | `/api/lines/:name/config` | Update instance configuration |
 | `GET` | `/api/lines/:name/auth` | SSE stream for QR code authentication |
-| `POST` | `/api/auth-ticket` | Mint a short-lived API or SSE auth ticket from the root bearer token |
-| `POST` | `/api/ws-ticket` | Mint a short-lived WebSocket ticket from the root bearer token |
+| `POST` | `/api/console-session` | Console unlock: exchange the root token for an HttpOnly session cookie (browser never holds the token) |
+| `DELETE` | `/api/console-session` | Console logout: revoke the presented session and clear the cookie |
+| `POST` | `/api/auth-ticket` | Mint a short-lived API or SSE auth ticket (root Bearer, or session cookie + same-origin proof) |
+| `POST` | `/api/ws-ticket` | Mint a short-lived WebSocket ticket (root Bearer, or session cookie + same-origin proof) |
 | `POST` | `/api/lines/:name/restart` | Restart service/unit |
 | `POST` | `/api/lines/:name/stop` | Stop service/unit |
 | `POST` | `/api/lines/:name/send` | Send a message through the instance |

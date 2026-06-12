@@ -8,7 +8,7 @@
  *  - `@tanstack/react-query` useQueryClient stubbed so invalidateQueries never
  *    fires real network calls.
  *  - `../lib/api` stubbed with vi.fn() for `api.restart` and `api.getVersion`.
- *  - `getFleetToken` returns null (no-auth dev path) by default.
+ *  - `isProductionConsole` returns false (no-auth dev path) by default.
  *  - Native `fetch` is mocked per-test for the /api/update SSE stream.
  *  - restart-instances phase is reached via real timers + immediate getVersion
  *    resolution rather than fake timers (fake timers + waitFor deadlock).
@@ -43,7 +43,7 @@ vi.mock('../../console/src/lib/api', () => ({
     restart: (...args: unknown[]) => mockApiRestart(...args),
     getVersion: (...args: unknown[]) => mockApiGetVersion(...args),
   },
-  getFleetToken: () => null,
+  isProductionConsole: () => false,
   getApiTicket: vi.fn(),
 }))
 
@@ -288,7 +288,7 @@ describe('UpdateModal — updating phase (fetch-based SSE)', () => {
     expect(screen.queryByText(/Pull latest code, rebuild/)).toBeNull()
   })
 
-  it('POSTs to /api/update without Authorization header when getFleetToken returns null', async () => {
+  it('POSTs to /api/update without Authorization header in the dev (non-production) path', async () => {
     const fetchMock = vi.fn(() => Promise.resolve({ ok: true, body: makeHangingStream() }))
     vi.stubGlobal('fetch', fetchMock)
     render(<UpdateModal {...defaultProps()} />)

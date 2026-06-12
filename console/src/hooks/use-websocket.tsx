@@ -18,7 +18,7 @@ import {
   type WsTypingEvent,
   type TypingEntry,
 } from '../lib/realtime-events';
-import { api, getFleetToken } from '../lib/api';
+import { api, isProductionConsole } from '../lib/api';
 
 // ---------------------------------------------------------------------------
 // Context
@@ -51,9 +51,9 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     async function connect() {
-      // The HTTP API still relies on the meta-tag Bearer token; if it's
-      // missing we can't mint a ticket anyway, so bail out early.
-      if (!getFleetToken()) return;
+      // Ticket minting needs the production session flow (fleet-auth-mode
+      // meta); in dev there is nothing to mint against, so bail out early.
+      if (!isProductionConsole()) return;
       const url = await getFleetWebSocketUrl(window.location, () => api.getWsTicket());
       if (cancelled) return;
       if (!url) {

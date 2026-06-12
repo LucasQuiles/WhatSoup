@@ -131,7 +131,7 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
 | `WHATSOUP_DOCKER` | string | (unset) | Set to `1` to enable Docker platform detection. The Dockerfile sets this automatically. |
 | `WHATSOUP_MODE` | string | `supervisor` | Entrypoint mode: `supervisor` (fleet + instances), `fleet` (fleet only), `instance` (single instance), `auth` (QR code pairing). |
 | `WHATSOUP_INSTANCES` | string | (empty) | Comma-separated instance names to start in supervisor mode. Example: `my-bot,chat-bot`. |
-| `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Non-loopback values are refused at startup unless `WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE=1` is set, because the console HTML currently serves the root fleet token without authentication. For Docker (`0.0.0.0`) or tailnet binds, set the override only on trusted private networks. |
+| `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Non-loopback values are refused at startup unless `WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE=1` is set. The console HTML no longer carries the root fleet token (the console unlocks via `POST /api/console-session`, which sets an HttpOnly session cookie); the guard remains because a remote plain-HTTP bind would still transmit the operator-entered token and session cookie unencrypted. For Docker (`0.0.0.0`) or tailnet binds, set the override only on trusted private networks, and front the port with TLS: the console session cookie intentionally omits `Secure` (the supported default is loopback HTTP), so on a plain-HTTP remote bind both the unlock token and the cookie travel unencrypted. |
 
 ### Docker Volume Layout
 

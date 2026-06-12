@@ -1,14 +1,15 @@
 /**
- * Tests for createStaticHandler with fleetToken and version parameters.
+ * Tests for createStaticHandler metadata injection (B1 closure).
  *
  * Coverage:
- *  - fleet-token meta tag injected into index.html
- *  - fleet-version meta tag injected into index.html
- *  - Both tags appear before </head>
- *  - Token/version sanitization (XSS characters stripped)
- *  - No injection when fleetToken or version is undefined
- *  - Injection works for nested HTML files, not just index.html
- *  - Content-Length header updated to match injected content
+ *  - fleet-version and fleet-auth-mode meta tags injected into HTML
+ *  - SECURITY PIN: served HTML never contains a fleet-token meta tag — the
+ *    root token must not appear in unauthenticated responses (the console
+ *    unlocks via POST /api/console-session instead)
+ *  - Version sanitization (XSS characters stripped)
+ *  - No injection when version is unavailable or the getter throws
+ *  - Injection works for nested HTML files and the SPA fallback
+ *  - Content-Length header matches injected content
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -18,10 +19,6 @@ import * as os from 'node:os';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createStaticHandler } from '../../src/fleet/static.ts';
 
-// ---------------------------------------------------------------------------
-// Fixture: temp dist directory with HTML files
-// ---------------------------------------------------------------------------
-
 let distDir: string;
 let serverWithMeta: Server;
 let portWithMeta: number;
@@ -29,7 +26,6 @@ let portWithMeta: number;
 let serverWithoutMeta: Server;
 let portWithoutMeta: number;
 
-const FLEET_TOKEN = 'abc123defsafetoken';
 const VERSION = 'a1b2c3d';
 const EVIL_INPUT = 'x<script>alert(1)</script>y';
 
@@ -54,17 +50,14 @@ async function startServer(handler: ReturnType<typeof createStaticHandler>): Pro
 beforeAll(async () => {
   distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'static-meta-test-'));
   fs.mkdirSync(path.join(distDir, 'sub'), { recursive: true });
-
   fs.writeFileSync(path.join(distDir, 'index.html'), HTML_CONTENT);
   fs.writeFileSync(path.join(distDir, 'sub', 'index.html'), HTML_CONTENT);
   fs.writeFileSync(path.join(distDir, 'page.html'), HTML_CONTENT);
   fs.writeFileSync(path.join(distDir, 'script.js'), 'console.log(1);');
 
-  // Server WITH token + version injection (getVersion is a getter function)
-  const handlerWithMeta = createStaticHandler(distDir, FLEET_TOKEN, () => VERSION);
+  const handlerWithMeta = createStaticHandler(distDir, () => VERSION);
   ({ server: serverWithMeta, port: portWithMeta } = await startServer(handlerWithMeta));
 
-  // Server WITHOUT token/version (no injection)
   const handlerWithoutMeta = createStaticHandler(distDir);
   ({ server: serverWithoutMeta, port: portWithoutMeta } = await startServer(handlerWithoutMeta));
 });
@@ -75,69 +68,49 @@ afterAll(async () => {
   fs.rmSync(distDir, { recursive: true, force: true });
 });
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe('createStaticHandler — meta tag injection', () => {
-  it('injects fleet-token meta tag into index.html', async () => {
-    const res = await fetch(`http://127.0.0.1:${portWithMeta}/`);
-    const body = await res.text();
-    expect(body).toContain(`<meta name="fleet-token" content="${FLEET_TOKEN}">`);
-  });
-
-  it('injects fleet-version meta tag into index.html', async () => {
-    const res = await fetch(`http://127.0.0.1:${portWithMeta}/`);
-    const body = await res.text();
-    expect(body).toContain(`<meta name="fleet-version" content="${VERSION}">`);
-  });
-
-  it('both meta tags appear before </head>', async () => {
-    const res = await fetch(`http://127.0.0.1:${portWithMeta}/`);
-    const body = await res.text();
+describe('createStaticHandler — metadata injection (no secrets)', () => {
+  it('injects fleet-version and fleet-auth-mode meta tags before </head>', async () => {
+    const body = await fetch(`http://127.0.0.1:${portWithMeta}/`).then((r) => r.text());
     const headClose = body.indexOf('</head>');
-    const tokenIdx = body.indexOf('fleet-token');
-    const versionIdx = body.indexOf('fleet-version');
-    expect(tokenIdx).toBeGreaterThan(-1);
-    expect(versionIdx).toBeGreaterThan(-1);
-    expect(tokenIdx).toBeLessThan(headClose);
-    expect(versionIdx).toBeLessThan(headClose);
+    expect(body).toContain(`<meta name="fleet-version" content="${VERSION}">`);
+    expect(body).toContain('<meta name="fleet-auth-mode" content="session">');
+    expect(body.indexOf('fleet-version')).toBeLessThan(headClose);
+    expect(body.indexOf('fleet-auth-mode')).toBeLessThan(headClose);
   });
 
-  it('does NOT inject when no token/version provided', async () => {
-    const res = await fetch(`http://127.0.0.1:${portWithoutMeta}/`);
-    const body = await res.text();
-    expect(body).not.toContain('fleet-token');
+  it('SECURITY: never serves a fleet-token meta tag in any HTML path', async () => {
+    for (const p of ['/', '/sub/', '/page.html', '/dashboard']) {
+      const body = await fetch(`http://127.0.0.1:${portWithMeta}${p}`).then((r) => r.text());
+      expect(body).not.toContain('fleet-token');
+    }
+  });
+
+  it('does NOT inject when no version getter is provided', async () => {
+    const body = await fetch(`http://127.0.0.1:${portWithoutMeta}/`).then((r) => r.text());
     expect(body).not.toContain('fleet-version');
-    // Original HTML served unchanged
+    expect(body).not.toContain('fleet-auth-mode');
     expect(body).toBe(HTML_CONTENT);
   });
 
-  it('sanitizes dangerous characters in token (XSS prevention)', async () => {
-    // Create a one-shot handler with evil input
-    const evilHandler = createStaticHandler(distDir, EVIL_INPUT, () => VERSION);
-    const { server, port } = await startServer(evilHandler);
+  it('serves HTML without metadata when the version getter throws', async () => {
+    const { server, port } = await startServer(
+      createStaticHandler(distDir, () => { throw new Error('boom'); }),
+    );
     try {
       const res = await fetch(`http://127.0.0.1:${port}/`);
-      const body = await res.text();
-      // The injected content should not contain raw < or > from the evil input
-      // The sanitized version strips non-alphanumeric/dash/underscore chars
-      expect(body).not.toContain('<script>');
-      expect(body).not.toContain('alert(1)');
-      // But the safe characters (x, y) should remain
-      expect(body).toContain('fleet-token');
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(HTML_CONTENT);
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
   });
 
-  it('sanitizes dangerous characters in version', async () => {
-    const evilHandler = createStaticHandler(distDir, FLEET_TOKEN, () => EVIL_INPUT);
-    const { server, port } = await startServer(evilHandler);
+  it('sanitizes dangerous characters in version (XSS prevention)', async () => {
+    const { server, port } = await startServer(createStaticHandler(distDir, () => EVIL_INPUT));
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/`);
-      const body = await res.text();
+      const body = await fetch(`http://127.0.0.1:${port}/`).then((r) => r.text());
       expect(body).not.toContain('<script>');
+      expect(body).not.toContain('alert(1)');
       expect(body).toContain('fleet-version');
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
@@ -145,23 +118,18 @@ describe('createStaticHandler — meta tag injection', () => {
   });
 
   it('injects into nested HTML file (sub/index.html)', async () => {
-    const res = await fetch(`http://127.0.0.1:${portWithMeta}/sub/`);
-    const body = await res.text();
-    expect(body).toContain('fleet-token');
+    const body = await fetch(`http://127.0.0.1:${portWithMeta}/sub/`).then((r) => r.text());
     expect(body).toContain('fleet-version');
   });
 
   it('injects into non-index HTML files (page.html)', async () => {
-    const res = await fetch(`http://127.0.0.1:${portWithMeta}/page.html`);
-    const body = await res.text();
-    expect(body).toContain('fleet-token');
+    const body = await fetch(`http://127.0.0.1:${portWithMeta}/page.html`).then((r) => r.text());
     expect(body).toContain('fleet-version');
   });
 
   it('does NOT inject into JS files', async () => {
-    const res = await fetch(`http://127.0.0.1:${portWithMeta}/script.js`);
-    const body = await res.text();
-    expect(body).not.toContain('fleet-token');
+    const body = await fetch(`http://127.0.0.1:${portWithMeta}/script.js`).then((r) => r.text());
+    expect(body).not.toContain('fleet-version');
     expect(body).toBe('console.log(1);');
   });
 
@@ -175,19 +143,16 @@ describe('createStaticHandler — meta tag injection', () => {
     const body = await res.text();
     const contentLength = res.headers.get('content-length');
     if (contentLength !== null) {
-      // Content-Length must match the byte length of the actual body returned
       expect(parseInt(contentLength, 10)).toBe(Buffer.byteLength(body, 'utf-8'));
     }
-    // If no Content-Length header (chunked transfer), that's acceptable too —
-    // but the body must still contain the injection
-    expect(body).toContain('fleet-token');
+    expect(body).toContain('fleet-version');
   });
 
-  it('SPA fallback HTML gets injection too', async () => {
+  it('SPA fallback HTML gets metadata too', async () => {
     const res = await fetch(`http://127.0.0.1:${portWithMeta}/dashboard`);
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain('fleet-token');
     expect(body).toContain('fleet-version');
+    expect(body).toContain('fleet-auth-mode');
   });
 });
