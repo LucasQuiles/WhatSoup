@@ -526,6 +526,24 @@ describe('handleGetLogs', () => {
     expect(JSON.parse(res._body)).toEqual([]);
   });
 
+  it('returns an explicit degraded response when the log path cannot be scanned', () => {
+    const notADir = path.join(tmpDir, 'not-a-dir');
+    fs.writeFileSync(notADir, 'not a directory');
+    const inst = fakeInstance({ logDir: notADir });
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(503);
+    expect(JSON.parse(res._body)).toMatchObject({
+      error: 'log evidence unavailable',
+      code: 'ENOTDIR',
+    });
+  });
+
   it('parses NDJSON log lines and returns them', () => {
     const inst = fakeInstance({ logDir: tmpDir });
     const logLines = [

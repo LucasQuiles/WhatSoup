@@ -8,7 +8,7 @@ import type { FleetDbReader, MessageRow } from '../db-reader.ts';
 import { proxyToInstance } from '../http-proxy.ts';
 import { configRoot } from '../paths.ts';
 
-import { findLatestLogFile, readTailLines } from '../log-utils.ts';
+import { inspectLatestLogFile, readTailLinesDetailed } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
@@ -336,15 +336,32 @@ export function handleGetLogs(
   const levelFilter = qs.level ?? null;
   const limit = parseIntParam(qs, 'limit', 200, 1, 2000);
 
-  const logResult = findLatestLogFile(instance.logDir);
-  if (!logResult) {
+  const logResult = inspectLatestLogFile(instance.logDir);
+  if (!logResult.ok) {
+    jsonResponse(res, 503, {
+      error: 'log evidence unavailable',
+      code: logResult.code ?? 'UNKNOWN',
+      detail: logResult.error,
+    });
+    return;
+  }
+  if (!logResult.file) {
     jsonResponse(res, 200, []);
     return;
   }
-  const logFile = logResult.path;
+  const logFile = logResult.file.path;
 
   // readTailLines reads last 64KB and returns up to maxLines — same logic that was inlined here
-  const lines = readTailLines(logFile, 2000);
+  const tailResult = readTailLinesDetailed(logFile, 2000);
+  if (!tailResult.ok) {
+    jsonResponse(res, 503, {
+      error: 'log evidence unavailable',
+      code: tailResult.code ?? 'UNKNOWN',
+      detail: tailResult.error,
+    });
+    return;
+  }
+  const lines = tailResult.lines;
 
   // Map pino numeric level → LogEntry label
   const pinoLevelMap: Record<number, 'debug' | 'info' | 'warn' | 'error'> = {
