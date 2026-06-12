@@ -17,6 +17,7 @@
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
+import { resolveAgentModel } from './agent-model.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
 import { ACCOUNT_RE } from './transport-refs.ts';
 import { E164_RE } from '../transport/twilio/types.ts';
@@ -35,6 +36,10 @@ export const VALID_SESSION_SCOPES: ReadonlySet<string> = new Set([
   'shared',
   'per_chat',
 ]);
+
+// Managed-loop API providers (no CLI binary; the runtime drives the HTTP API
+// directly). A fallbackProvider of this type needs an explicit fallbackModel.
+const API_PROVIDER_IDS: ReadonlySet<string> = new Set(['openai-api', 'anthropic-api']);
 
 export interface ValidationError {
   /** Dotted path of the offending field (e.g. "agentOptions.sessionScope"). */
@@ -360,23 +365,17 @@ function validateAgentOptions(
   }
   const opts = agentOpts as Record<string, unknown>;
 
-  // sessionScope is required on load/discovery; optional-but-validated on CREATE/PATCH.
+  // sessionScope is optional on every path — the agent runtime defaults a
+  // missing value to 'single' (src/runtimes/agent/runtime.ts AgentRuntime
+  // constructor: `options?.sessionScope ?? (options?.shared ? 'shared' :
+  // 'single')`), so a config the runtime boots happily must not surface
+  // config_error at load or discovery time. Invalid VALUES are still rejected.
   const scope = opts['sessionScope'];
-  if (ctx.mode === 'load' || ctx.mode === 'discovery') {
-    if (!VALID_SESSION_SCOPES.has(String(scope ?? ''))) {
-      return err(
-        'agentOptions.sessionScope',
-        `agentOptions.sessionScope is required and must be one of ${[...VALID_SESSION_SCOPES].join(', ')}`,
-      );
-    }
-  } else {
-    if (scope !== undefined && !VALID_SESSION_SCOPES.has(String(scope))) {
-      // Match the CREATE-path string for back-compat with tests / existing UI.
-      return err(
-        'agentOptions.sessionScope',
-        'agentOptions.sessionScope must be single, shared, or per_chat',
-      );
-    }
+  if (scope !== undefined && !VALID_SESSION_SCOPES.has(String(scope))) {
+    return err(
+      'agentOptions.sessionScope',
+      'agentOptions.sessionScope must be single, shared, or per_chat',
+    );
   }
 
   // cwd must be a string when provided.
@@ -479,6 +478,23 @@ function validateAgentOptions(
     }
   }
 
+  // Cross-field: an API-type fallbackProvider requires an explicit
+  // fallbackModel. The managed-loop providers (openai-api / anthropic-api)
+  // take their model from fallbackModel during a fallback window; without it
+  // the window would silently run on a provider-internal default the operator
+  // never chose. CLI fallback providers keep their own default model and stay
+  // valid without one.
+  if (
+    typeof opts['fallbackProvider'] === 'string' &&
+    API_PROVIDER_IDS.has(opts['fallbackProvider']) &&
+    opts['fallbackModel'] === undefined
+  ) {
+    return err(
+      'agentOptions.fallbackModel',
+      `agentOptions.fallbackProvider "${opts['fallbackProvider']}" is an API provider and requires agentOptions.fallbackModel to be set`,
+    );
+  }
+
   // providerConfig: plain object when present.
   if (opts['providerConfig'] !== undefined) {
     if (
@@ -516,12 +532,32 @@ function validateAgentOptions(
           'agentOptions.providerConfig.baseUrl must be a non-empty string when provided',
         );
       }
+      let baseUrl: URL;
       try {
-        void new URL(pc['baseUrl'] as string);
+        baseUrl = new URL(pc['baseUrl'] as string);
       } catch {
         return err(
           'agentOptions.providerConfig.baseUrl',
           'agentOptions.providerConfig.baseUrl must be a valid URL when provided',
+        );
+      }
+      if (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') {
+        return err(
+          'agentOptions.providerConfig.baseUrl',
+          'agentOptions.providerConfig.baseUrl must use http or https',
+        );
+      }
+      // Cross-field: for opencode-cli, baseUrl is written into opencode.json
+      // as a custom provider block that is only exercised when the instance's
+      // resolved model (top-level `model`, else `models.conversation`) routes
+      // to it. Without a resolvable model the block would never be used —
+      // reject instead of shipping a silently inert endpoint. API providers
+      // (openai-api / anthropic-api) consume baseUrl directly as an endpoint
+      // override with their own model defaults, so they are exempt.
+      if (opts['provider'] === 'opencode-cli' && resolveAgentModel(raw) === undefined) {
+        return err(
+          'agentOptions.providerConfig.baseUrl',
+          'agentOptions.providerConfig.baseUrl is set but no model is configured — without a top-level "model" or "models.conversation" the custom endpoint would never be used; set one that routes to it',
         );
       }
     }
