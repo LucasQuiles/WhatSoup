@@ -477,6 +477,10 @@ export class HealthPoller {
       }
     }
 
+    // Capture before the save below may clear it: THIS alert's suppression
+    // decision ran against the failed load, so it still carries the flag.
+    const throttleLoadErrorCode = this.alertThrottleLoadErrorCode;
+
     // Set lastAlertAt BEFORE emitting to prevent races
     if (existing) {
       const now = new Date().toISOString();
@@ -484,13 +488,17 @@ export class HealthPoller {
       this.persistedAlertThrottle.set(name, now);
       try {
         recordAlertThrottle(name, now);
+        // First successful save rewrites the throttle file (self-heal); the
+        // construction-time load error no longer describes on-disk state, so
+        // stop appending it to every future alert for the process lifetime.
+        this.alertThrottleLoadErrorCode = null;
       } catch (err) {
         log.warn({ err, name, source }, 'failed to persist alert throttle');
       }
     }
 
-    const throttleEvidence = this.alertThrottleLoadErrorCode
-      ? `${evidence} alert_throttle_load_error=true alert_throttle_load_error_code=${this.alertThrottleLoadErrorCode}`
+    const throttleEvidence = throttleLoadErrorCode
+      ? `${evidence} alert_throttle_load_error=true alert_throttle_load_error_code=${throttleLoadErrorCode}`
       : evidence;
     emitAlert(name, source, summary, throttleEvidence);
   }
