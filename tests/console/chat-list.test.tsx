@@ -39,7 +39,7 @@ describe('ChatList — listbox role', () => {
     render(<ChatList chats={makeChats(3)} selectedChat={null} onSelect={() => {}} />)
     const listbox = screen.getByRole('listbox', { name: 'Chat conversations' })
 
-    expect(listbox).toBeDefined()
+    expect(listbox.getAttribute('aria-label')).toBe('Chat conversations')
   })
 
   it('renders each chat as a listbox option', () => {
@@ -64,12 +64,16 @@ describe('ChatList — empty state', () => {
   })
 
   it('arrow keys no-op on an empty list', () => {
-    render(<ChatList chats={[]} selectedChat={null} onSelect={() => {}} />)
+    const onSelect = vi.fn()
+    render(<ChatList chats={[]} selectedChat={null} onSelect={onSelect} />)
     const listbox = screen.getByRole('listbox')
 
-    // Should not throw
     fireEvent.keyDown(listbox, { key: 'ArrowDown' })
     fireEvent.keyDown(listbox, { key: 'ArrowUp' })
+
+    // The no-op contract: nothing selected, list still empty.
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(screen.queryAllByRole('option').length).toBe(0)
   })
 })
 
