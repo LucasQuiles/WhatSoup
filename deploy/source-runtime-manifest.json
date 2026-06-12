@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "scope": "whatsoup-source-runtime",
+  "description": "Critical source entrypoints whose import graphs must be tracked, committed, and clean before deploy/restart. Hashes are from the blessed committed source, never from a dirty working tree.",
+  "entrypoints": [
+    {
+      "path": "src/main.ts",
+      "sha256": "fcc98be602cddeb11557731622c1644cdbf5c1840007d10ca06317254db1127f",
+      "mustContain": [
+        "startHealthServer",
+        "createConnection"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/bootstrap.ts",
+      "sha256": "75fae25e395cf2ecbb73cdb1b17f2473543b3adcfe6d87e39cc92c9405068278",
+      "mustContain": [
+        "bootstrapCommon"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/transport/factory.ts",
+      "sha256": "e4f81559c617d07dd9c4c7698bb9c5ca66371207aabe7dbd8a1cc9b7c1be2cc0",
+      "mustContain": [
+        "createConnection",
+        "ConnectionManager",
+        "assertNeverTransport"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/transport/connection.ts",
+      "sha256": "1c3df3cfaf407b079c1b0c3549afa9bcfaecc3ea6fec8a3f1c42c26a064b5bfb",
+      "mustContain": [
+        "decideDisconnectAction",
+        "QR code received",
+        "Logged out"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/transport/auth.ts",
+      "sha256": "87ba65f9c4a7888360b6d917d63ac10204291f60dac13f22d5dcf64c9e56ca70",
+      "mustContain": [
+        "useMultiFileAuthState",
+        "decideDisconnectAction"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/transport/auth-disconnect-policy.ts",
+      "sha256": "fd94295cd05d2ee5e2c120d88c18457cea9efa579b72e2f015586f73859c52a4",
+      "mustContain": [
+        "decideDisconnectAction",
+        "logged-out",
+        "restart-required-flapping"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/runtimes/agent/session.ts",
+      "sha256": "a873f4acc708c89452b044dd277a0bd7e331435de7d00c68cde9977077c8a6e3",
+      "mustContain": [
+        "composeWithExactLineDedup"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/runtimes/agent/session-db.ts",
+      "sha256": "aa3936fb7a50b996180bad55f93cdacebbbdc851102b6ecf8f677aa9947861d0",
+      "mustContain": [
+        "getSessionTokenSnapshot"
+      ],
+      "importGraph": true
+    },
+    {
+      "path": "src/runtimes/agent/prompt-compose.ts",
+      "sha256": "8edabbbc670aa79a9ae91a806db296f9ea6d32d3d7aaffa07da70f20c0b20f43",
+      "mustContain": [
+        "composeWithExactLineDedup"
+      ],
+      "importGraph": true
+    }
+  ]
+}
