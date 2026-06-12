@@ -67,6 +67,14 @@ export default defineConfig({
       'react',
       'react-dom',
       'react/jsx-runtime',
+      // Additional deps discovered during viewport-matrix tests.
+      // Without these, Vite restarts mid-test causing double-React-instance
+      // "Invalid hook call" errors and QueryClient context failures.
+      'recharts',
+      '@tanstack/react-virtual',
+      '@tanstack/react-query',
+      'react-router-dom',
+      'framer-motion',
     ],
   },
 

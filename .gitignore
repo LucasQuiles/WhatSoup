@@ -86,3 +86,7 @@ __pycache__/
 output.txt
 bead-output.md
 codex-exec-deep-dive.md
+
+# Browser test failure screenshots (vitest browser screenshotFailures: true)
+# Never commit — CI artifacts are uploaded separately; local screenshots are noise.
+tests/browser/__screenshots__/
