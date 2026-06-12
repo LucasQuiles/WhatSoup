@@ -19,6 +19,8 @@
  *   - Options mutation while open (active option tracks value, not index)
  *   - Zero-options no-op for Up/Down
  *   - max-height/scroll class contract (class-level, noted)
+ *     Computed-box/trusted-event proof lives in the browser lane:
+ *     tests/browser/target-size.test.tsx Popover option-row height cases.
  *   - Focus STAYS on trigger — no trap, no steal
  *   - No-trap proof (Tab does NOT cycle within panel)
  *   - useDismissable opt-out pinning: trapFocus=false/autoFocus=false keep defaults
@@ -723,6 +725,8 @@ describe('Popover — listener lifecycle', () => {
 
 // ---------------------------------------------------------------------------
 // Class contract — max-height + list overflow
+// Computed-box/trusted-event proof lives in the browser lane:
+// tests/browser/target-size.test.tsx Popover option-row height cases.
 // ---------------------------------------------------------------------------
 
 describe('Popover — class contract', () => {

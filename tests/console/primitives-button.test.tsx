@@ -69,6 +69,8 @@ describe('Button sizes', () => {
   // DD-10: deterministic target-size floor via CSS class contract.
   // xs must carry soup-btn--xs (which maps to --btn-h-xs = 24px via primitives.css).
   // We assert the class contract since jsdom does not compute CSS custom property heights.
+  // Computed-box/trusted-event proof lives in the browser lane:
+  // tests/browser/target-size.test.tsx Button size cases.
   it('xs button carries the xs class that maps to 24px floor (DD-10 class contract)', () => {
     render(<Button size="xs">Floor</Button>);
     const btn = screen.getByRole('button');

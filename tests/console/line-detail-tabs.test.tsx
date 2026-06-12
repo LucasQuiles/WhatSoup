@@ -217,6 +217,8 @@ describe('LineDetail tablist (Tabs primitive)', () => {
   });
 
   it('the tab row is a governed x-scroll region (soup-tabs class contract)', async () => {
+    // Class contract only; scrollWidth overflow proof lives in the browser lane:
+    // tests/browser/viewport-matrix.test.tsx LineDetail 9-tab x-scroll cases.
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat' }) });
     });
@@ -244,6 +246,8 @@ describe('LineDetail header — primitive buttons + overflow contract', () => {
   });
 
   it('the line name carries the truncation contract (class-only; box metrics are D7)', async () => {
+    // Computed-box/trusted-event proof lives in the browser lane:
+    // tests/browser/viewport-matrix.test.tsx LineDetail h1 truncation cases.
     await act(async () => {
       renderLineDetail({ line: makeLine({ name: 'a-very-long-line-name-that-should-not-blow-out-the-header-row' }) });
     });

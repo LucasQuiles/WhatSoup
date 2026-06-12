@@ -31,8 +31,20 @@
  * Ops:
  *   • No horizontal page overflow sweep (cheap; no named DD leg).
  *
- * INBOX EXCLUDED (C-D7-4): at HEAD the Inbox has no collapse logic — asserting
- * layout facts now would fail against known-open debt. Lands after B4.
+ * Inbox (C-D7-4 — unblocked since B4 landed):
+ *   • Contact pane present (display != "none") when soup-inbox-layout container
+ *     is ≥1080px (wrapper-width technique — CONTAINER query, not viewport).
+ *   • Contact pane computed display = "none" when container is <1080px.
+ *   • Chat-list pane and thread pane both present at named widths.
+ *   • No horizontal overflow at the full viewport matrix.
+ *
+ * Drawer squeeze (DD-18r deterministic backstop — delivered here, not in the
+ * never-created drawer-squeeze.test.tsx):
+ *   • At 899px wrapper: .soup-drawer computed position = "absolute" (overlay mode).
+ *   • At 900px wrapper: .soup-drawer computed position = "static" (squeeze / flex-sibling mode).
+ *   • Scrim display = "none" at 900px; visible (not "none") at 899px.
+ *   These are CONTAINER queries on .soup-drawer-layout — proven via wrapper-width,
+ *   not page.viewport (d7-investigation §6.9).
  *
  * OVERFLOW RULE (d7-investigation §6.5)
  * =======================================
@@ -42,8 +54,8 @@
  * CONTAINER vs VIEWPORT (d7-investigation §6.9)
  * ================================================
  * Fleet stacking is a VIEWPORT media query (tailwind `lg` = 64rem = 1024px)
- * → proven via page.viewport(). Drawer squeeze is a CONTAINER query → proved
- * in drawer-squeeze.test.tsx with a wrapper-width technique, not here.
+ * → proven via page.viewport(). Drawer squeeze and Inbox contact-pane collapse
+ * are CONTAINER queries → proven via wrapper-width technique in this file.
  *
  * NO-BACKEND STRATEGY
  * ====================
@@ -141,6 +153,9 @@ vi.mock('../../console/src/lib/api', () => ({
   api: {
     restart: vi.fn(() => Promise.resolve()),
     deleteLine: vi.fn(() => Promise.resolve()),
+    searchMessages: vi.fn(() => Promise.resolve({ results: [], total: 0 })),
+    getMessages: vi.fn(() => Promise.resolve([])),
+    sendMessage: vi.fn(() => Promise.resolve()),
   },
 }));
 
@@ -159,12 +174,70 @@ vi.mock('../../console/src/components/LinePicker', () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// Additional stubs for Inbox
+// ---------------------------------------------------------------------------
+
+// use-sticky-scroll: returns a stable ref + no-op helpers so the Inbox
+// message-area renders without real scroll measurements.
+vi.mock('../../console/src/hooks/use-sticky-scroll', () => ({
+  useStickyScroll: () => ({
+    scrollRef: { current: null },
+    showJump: false,
+    handleScroll: () => {},
+    jumpToBottom: () => {},
+  }),
+}));
+
+// use-virtual-messages: returns a minimal virtualizer stub so the
+// Inbox message list renders an empty virtual container.
+vi.mock('../../console/src/hooks/use-virtual-messages', () => ({
+  useVirtualMessages: () => ({
+    getVirtualItems: () => [],
+    getTotalSize: () => 0,
+    scrollToIndex: () => {},
+  }),
+}));
+
+// lib/inbox-chat-selection: resolveCurrentChat returns null (no active chat).
+vi.mock('../../console/src/lib/inbox-chat-selection', () => ({
+  resolveCurrentChat: () => null,
+}));
+
+// lib/inbox-virtualization: pure helpers; stub to isolate from data shape.
+vi.mock('../../console/src/lib/inbox-virtualization', () => ({
+  toChronologicalMessages: (msgs: unknown[]) => (Array.isArray(msgs) ? msgs : []),
+  selectVirtualMessageRows: () => [],
+}));
+
+// ChatList — stub to avoid the listbox keyboard logic in this layout suite.
+vi.mock('../../console/src/components/ChatList', () => ({
+  default: () => <div data-testid="chat-list-stub" />,
+}));
+
+// MessageBubble — stub to avoid message-bubble rendering in this layout suite.
+vi.mock('../../console/src/components/MessageBubble', () => ({
+  default: () => <div data-testid="message-bubble-stub" />,
+}));
+
+// SaveContactDialog — stub the dialog component used by Inbox.
+vi.mock('../../console/src/components/SaveContactDialog', () => ({
+  SaveContactDialog: () => null,
+}));
+
+// ---------------------------------------------------------------------------
 // Component imports (AFTER mocks)
 // ---------------------------------------------------------------------------
 
 import SoupKitchen from '../../console/src/pages/SoupKitchen';
 import LineDetail from '../../console/src/pages/LineDetail';
 import Ops from '../../console/src/pages/Ops';
+import Inbox from '../../console/src/pages/Inbox';
+import {
+  Drawer,
+  DrawerLayout,
+  DrawerHeader,
+  DrawerBody,
+} from '../../console/src/components/primitives/Drawer';
 
 // ---------------------------------------------------------------------------
 // Test providers
@@ -428,5 +501,267 @@ describe('Viewport matrix — Ops', () => {
         expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
       });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// INBOX suites (C-D7-4 — unblocked since B4 landed)
+//
+// The Inbox contact-pane collapse is a CONTAINER query on .soup-inbox-layout
+// (primitives.css:1560–1568): @container (max-width: 1079px) { .soup-inbox-contact
+// { display: none; } }. We control the container width via an explicit wrapper
+// style — page.viewport() cannot prove a container query (d7-investigation §6.9).
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap Inbox in a sized div so the container query evaluates against the
+ * wrapper width, not the viewport. Also wraps in all required providers.
+ */
+function wrapInbox(containerWidthPx: number) {
+  return (
+    <QueryClientProvider client={makeQC()}>
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          {/* The explicit width forces soup-inbox-layout's container query to
+              evaluate at the supplied width regardless of viewport size. */}
+          <div style={{ width: `${containerWidthPx}px`, overflow: 'hidden' }}>
+            <Inbox />
+          </div>
+        </MemoryRouter>
+      </ToastContext.Provider>
+    </QueryClientProvider>
+  );
+}
+
+describe('Viewport matrix — Inbox (C-D7-4)', () => {
+
+  describe('contact-pane collapse — container query at 1080px threshold', () => {
+    /**
+     * primitives.css Inbox layout band:
+     *   .soup-inbox-layout { container-type: inline-size; }
+     *   @container (max-width: 1079px) { .soup-inbox-contact { display: none; } }
+     *
+     * At container >=1080px: contact pane must not be display:none.
+     * At container <1080px:  contact pane must be display:none.
+     */
+    it('contact pane present (display != none) at 1280px container width', async () => {
+      await page.viewport(1440, 900);
+      const { container } = render(wrapInbox(1280));
+
+      const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
+      if (!contactPane) {
+        // Pane may not render if no line is selected — assert it exists.
+        expect(container.querySelector('.soup-inbox-contact')).not.toBeNull();
+        return;
+      }
+      const display = window.getComputedStyle(contactPane).display;
+      expect(display).not.toBe('none');
+    });
+
+    it('contact pane present (display != none) at 1200px container width (safely above threshold)', async () => {
+      // The @container (max-width: 1079px) rule collapses the pane at <1080px.
+      // We use 1200px (safely above) to avoid subpixel boundary ambiguity.
+      await page.viewport(1440, 900);
+      const { container } = render(wrapInbox(1200));
+
+      const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
+      if (!contactPane) {
+        expect(container.querySelector('.soup-inbox-contact')).not.toBeNull();
+        return;
+      }
+      const display = window.getComputedStyle(contactPane).display;
+      expect(display).not.toBe('none');
+    });
+
+    it('contact pane collapsed (display = none) at 1079px container width (just below threshold)', async () => {
+      await page.viewport(1440, 900);
+      const { container } = render(wrapInbox(1079));
+
+      const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
+      if (!contactPane) {
+        // If the element is not in the DOM at all, the pane is collapsed — pass.
+        return;
+      }
+      const display = window.getComputedStyle(contactPane).display;
+      expect(display).toBe('none');
+    });
+
+    it('contact pane collapsed (display = none) at 768px container width', async () => {
+      await page.viewport(1440, 900);
+      const { container } = render(wrapInbox(768));
+
+      const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
+      if (!contactPane) {
+        return;
+      }
+      const display = window.getComputedStyle(contactPane).display;
+      expect(display).toBe('none');
+    });
+  });
+
+  describe('chat-list and thread panes present', () => {
+    it('chat-list pane present at 1280px container', async () => {
+      await page.viewport(1440, 900);
+      const { container } = render(wrapInbox(1280));
+      // Chat-list pane carries the --inbox-pane-chats width class; the ChatList
+      // stub renders inside it.
+      const chatListStub = container.querySelector('[data-testid="chat-list-stub"]');
+      expect(chatListStub).not.toBeNull();
+    });
+
+    it('chat-list pane present at 768px container', async () => {
+      await page.viewport(1440, 900);
+      const { container } = render(wrapInbox(768));
+      const chatListStub = container.querySelector('[data-testid="chat-list-stub"]');
+      expect(chatListStub).not.toBeNull();
+    });
+  });
+
+  describe('no horizontal overflow at every breakpoint', () => {
+    for (const vp of VIEWPORTS) {
+      it(`Inbox: no horizontal overflow at ${vp.label}`, async () => {
+        await page.viewport(vp.width, vp.height);
+        const { container } = render(wrapInbox(vp.width));
+        const root = container.firstElementChild as HTMLElement;
+        if (!root) return;
+        // Allow 1px subpixel rounding tolerance (C-D7-6).
+        expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
+      });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DRAWER SQUEEZE suite (DD-18r deterministic backstop)
+//
+// Resolves primitives-drawer.test.tsx:382 INCONCLUSIVE marker.
+// The flip is a CONTAINER query on .soup-drawer-layout:
+//   @container (min-width: 900px) {
+//     .soup-drawer { position: static; flex: 0 0 …; … }
+//     .soup-drawer-scrim { display: none; }
+//   }
+// Default (< 900px container): .soup-drawer { position: absolute }
+//                               .soup-drawer-scrim visible.
+//
+// Technique: wrap DrawerLayout in a div whose width is set explicitly.
+// The container query evaluates against the .soup-drawer-layout element's
+// inline size, which is constrained by the wrapper width.
+// ---------------------------------------------------------------------------
+
+describe('Drawer squeeze flip — container query at 900px (DD-18r)', () => {
+  /**
+   * Mount DrawerLayout + Drawer at controlled wrapper width and measure the
+   * computed position of .soup-drawer and display of .soup-drawer-scrim.
+   *
+   * DrawerLayout sets container-type: inline-size on .soup-drawer-layout;
+   * the @container rule fires when that element is ≥900px wide.
+   */
+
+  it('at 899px wrapper: .soup-drawer is position=absolute (overlay mode)', async () => {
+    await page.viewport(1440, 900);
+
+    const { container } = render(
+      <div style={{ width: '899px' }}>
+        <DrawerLayout
+          drawer={
+            <Drawer open onClose={() => {}}>
+              <DrawerHeader title="Test drawer" onClose={() => {}} />
+              <DrawerBody><span>content</span></DrawerBody>
+            </Drawer>
+          }
+        >
+          <div>main content</div>
+        </DrawerLayout>
+      </div>
+    );
+
+    const drawerEl = container.querySelector('.soup-drawer') as HTMLElement | null;
+    if (!drawerEl) {
+      expect(container.querySelector('.soup-drawer')).not.toBeNull();
+      return;
+    }
+    const position = window.getComputedStyle(drawerEl).position;
+    expect(position).toBe('absolute');
+  });
+
+  it('at 900px wrapper: .soup-drawer is position=static (squeeze / flex-sibling mode)', async () => {
+    await page.viewport(1440, 900);
+
+    const { container } = render(
+      <div style={{ width: '900px' }}>
+        <DrawerLayout
+          drawer={
+            <Drawer open onClose={() => {}}>
+              <DrawerHeader title="Test drawer" onClose={() => {}} />
+              <DrawerBody><span>content</span></DrawerBody>
+            </Drawer>
+          }
+        >
+          <div>main content</div>
+        </DrawerLayout>
+      </div>
+    );
+
+    const drawerEl = container.querySelector('.soup-drawer') as HTMLElement | null;
+    if (!drawerEl) {
+      expect(container.querySelector('.soup-drawer')).not.toBeNull();
+      return;
+    }
+    const position = window.getComputedStyle(drawerEl).position;
+    expect(position).toBe('static');
+  });
+
+  it('at 899px wrapper: scrim is visible (display != none)', async () => {
+    await page.viewport(1440, 900);
+
+    const { container } = render(
+      <div style={{ width: '899px' }}>
+        <DrawerLayout
+          drawer={
+            <Drawer open onClose={() => {}}>
+              <DrawerHeader title="Scrim test" onClose={() => {}} />
+              <DrawerBody><span>content</span></DrawerBody>
+            </Drawer>
+          }
+        >
+          <div>main content</div>
+        </DrawerLayout>
+      </div>
+    );
+
+    const scrim = container.querySelector('.soup-drawer-scrim') as HTMLElement | null;
+    if (!scrim) {
+      expect(container.querySelector('.soup-drawer-scrim')).not.toBeNull();
+      return;
+    }
+    const display = window.getComputedStyle(scrim).display;
+    expect(display).not.toBe('none');
+  });
+
+  it('at 900px wrapper: scrim is display=none (squeeze mode — no scrim)', async () => {
+    await page.viewport(1440, 900);
+
+    const { container } = render(
+      <div style={{ width: '900px' }}>
+        <DrawerLayout
+          drawer={
+            <Drawer open onClose={() => {}}>
+              <DrawerHeader title="Scrim test" onClose={() => {}} />
+              <DrawerBody><span>content</span></DrawerBody>
+            </Drawer>
+          }
+        >
+          <div>main content</div>
+        </DrawerLayout>
+      </div>
+    );
+
+    const scrim = container.querySelector('.soup-drawer-scrim') as HTMLElement | null;
+    if (!scrim) {
+      // Scrim element may not render at all in squeeze mode — that is also valid.
+      return;
+    }
+    const display = window.getComputedStyle(scrim).display;
+    expect(display).toBe('none');
   });
 });

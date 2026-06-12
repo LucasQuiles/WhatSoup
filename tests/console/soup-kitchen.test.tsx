@@ -1070,7 +1070,9 @@ describe('SoupKitchen drawer', () => {
 describe('SoupKitchen long-value fixture', () => {
   it('renders a line with a 40+ char name without layout errors', () => {
     // This test pins the rendering contract for long names. It does NOT prove
-    // CSS truncation (jsdom computes no box metrics) — that requires visual QA.
+    // CSS truncation (jsdom computes no box metrics).
+    // Computed-box/trusted-event proof lives in the browser lane:
+    // tests/browser/viewport-matrix.test.tsx Fleet no-overflow and LineDetail truncation cases.
     const longName = 'this-is-a-very-long-line-name-exceeding-40chars';
     const longLine = makeLine({
       name: longName,

@@ -17,7 +17,9 @@
  * jsdom limits:
  *   - Container-query squeeze flip (≥900px → flex sibling, <900px → overlay) is NOT
  *     provable in jsdom — jsdom does not implement CSS container queries. Tests assert
- *     class/structure contracts only. INCONCLUSIVE — manual QA + D7 viewport tests.
+ *     class/structure contracts only.
+ *     Computed-box/trusted-event proof lives in the browser lane:
+ *     tests/browser/viewport-matrix.test.tsx "Drawer squeeze flip" suite.
  *   - Computed CSS (animation, transforms) not verifiable in jsdom.
  *   - Real focus ring visual appearance not verifiable.
  */
@@ -379,7 +381,8 @@ describe('DrawerLayout — structure', () => {
 
   // Container-query squeeze flip (≥900px → no scrim, flex sibling) is NOT
   // provable in jsdom — jsdom does not implement CSS container queries.
-  // INCONCLUSIVE — manual QA + D7 viewport tests cover the squeeze behaviour.
+  // Computed-box/trusted-event proof lives in the browser lane:
+  // tests/browser/viewport-matrix.test.tsx "Drawer squeeze flip" suite.
   it('INCONCLUSIVE: container-query squeeze flip cannot be tested in jsdom (manual QA required)', () => {
     // Structural assertion only: soup-drawer-layout has container-type via CSS.
     // The actual flip (position:static vs position:absolute) cannot be asserted

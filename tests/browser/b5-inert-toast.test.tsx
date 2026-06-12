@@ -27,7 +27,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Modal, ModalHeader, ModalBody } from '../../console/src/components/primitives/Modal';
 import { ToastProvider } from '../../console/src/hooks/use-toast.tsx';
 import { useToast } from '../../console/src/hooks/toast-context.ts';
@@ -129,27 +129,27 @@ describe('B5 — background inert: #root inert while modal open', () => {
 // ---------------------------------------------------------------------------
 
 describe('B5 — toast liveness: toast outside inert subtree while modal is open', () => {
-  it('toast dismiss button is clickable while a modal is open', async () => {
+  it('toast stack portals to body (outside inert #root) while a modal is open', async () => {
+    // This test verifies the portal location of the toast stack, not dismiss-button
+    // clickability. The toast fires via useEffect on mount (before the inert
+    // attribute is set by the Modal), ensuring the .fixed portal container exists.
+    // Computed-box/trusted-event proof lives in the browser lane (this file).
     const { root, cleanup: cleanRoot } = createRoot();
 
     try {
-      // ToastProvider fires a toast from a Consumer child.
-      const ToastConsumer = () => {
+      // Fire a toast on mount so the toast stack is populated immediately.
+      const ToastAutoFire = () => {
         const { info } = useToast();
-        return (
-          <button
-            type="button"
-            data-testid="fire-toast"
-            onClick={() => info('Test toast while modal open')}
-          >
-            Fire toast
-          </button>
-        );
+        useEffect(() => {
+          info('Test toast while modal open');
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional fire-once-on-mount test harness; expires 2026-12-31
+        }, []);
+        return null;
       };
 
-      const { getByTestId, getByRole } = render(
+      render(
         <ToastProvider>
-          <ToastConsumer />
+          <ToastAutoFire />
           <Modal open onClose={() => {}}>
             <ModalHeader title="Modal with toast" />
             <ModalBody><span>content</span></ModalBody>
@@ -160,17 +160,14 @@ describe('B5 — toast liveness: toast outside inert subtree while modal is open
       // Modal is open → #root is inert.
       expect(root.hasAttribute('inert')).toBe(true);
 
-      // Fire a toast — the stack portals to body (outside #root).
-      const fireBtn = getByTestId('fire-toast');
-      // The fireBtn is inside #root so it's inerted — we click it programmatically
-      // by temporarily removing inert to simulate the external toast trigger path.
-      // In real usage, toasts are fired via API calls (not button clicks inside root).
-      // We verify the toast element renders OUTSIDE #root.
-      const toastStack = document.body.querySelector('.fixed');
-      // The portal target (body-level fixed container) must exist outside #root.
-      if (toastStack) {
-        expect(root.contains(toastStack)).toBe(false);
-      }
+      // The toast stack portals to document.body (outside #root).
+      // ToastProvider renders: createPortal(toastStack, document.body)
+      // The stack div carries className="fixed z-[110] ..."
+      const toastPortal = document.body.querySelector('.fixed');
+      // The portal must exist (toast was fired on mount).
+      expect(toastPortal).not.toBeNull();
+      // The portal must be outside #root — not contained by the inert subtree.
+      expect(root.contains(toastPortal)).toBe(false);
     } finally {
       cleanup();
       cleanRoot();

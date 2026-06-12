@@ -156,8 +156,22 @@ jobs:
       - name: Console design metrics
         run: npm --prefix console run design:metrics
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('package-lock.json') }}
+
       - name: Install Playwright chromium
         run: npx playwright install chromium --with-deps
 
       - name: Browser test suite
         run: npm run test:browser
+
+      - name: Upload browser test failure screenshots
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-screenshots-${{ matrix.node }}
+          path: tests/browser/__screenshots__
+          if-no-files-found: ignore

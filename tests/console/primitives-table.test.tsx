@@ -22,6 +22,9 @@
  * INCONCLUSIVE (jsdom limits, noted per spec §8):
  *   - Visual focus ring (computed box model not testable in jsdom)
  *   - Computed overflow/ellipsis (CSS not applied in jsdom)
+ *   Computed-box/trusted-event proof lives in the browser lane:
+ *   tests/browser/viewport-matrix.test.tsx (LineDetail truncation cases) and
+ *   tests/browser/target-size.test.tsx (sort-button height measurement).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -353,7 +356,8 @@ describe('Table — numeric cells', () => {
       </Table>,
     );
     // Truncation is CSS-driven; this asserts the class contract is in place.
-    // INCONCLUSIVE: computed overflow/ellipsis is not testable in jsdom.
+    // Computed-box/trusted-event proof lives in the browser lane:
+    // tests/browser/viewport-matrix.test.tsx LineDetail h1 truncation cases.
     const td = document.querySelector('.soup-table-td')!;
     expect(td).not.toBeNull();
     expect(td.textContent).toBe(LONG_NAME);
