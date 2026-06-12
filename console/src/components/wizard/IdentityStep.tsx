@@ -99,6 +99,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
           Type
         </label>
         <CardSelector
+          label="Line Type"
           options={TYPE_OPTIONS}
           selected={type}
           onChange={(value) => onChange({ type: value })}

@@ -1,4 +1,4 @@
-import { type FC, type ReactNode } from 'react'
+import { type FC, type ReactNode, type KeyboardEvent, useRef } from 'react'
 
 interface CardOption {
   value: string
@@ -9,6 +9,8 @@ interface CardOption {
 }
 
 interface CardSelectorProps {
+  /** Accessible name for the radiogroup (required by DD-14 / WAI radiogroup pattern). */
+  label: string
   options: CardOption[]
   selected: string | null
   onChange: (value: string) => void
@@ -27,15 +29,60 @@ function colorToWash(color: string): string {
   return map[color] ?? 'var(--color-d4)'
 }
 
-const CardSelector: FC<CardSelectorProps> = ({ options, selected, onChange }) => {
+const CardSelector: FC<CardSelectorProps> = ({ label, options, selected, onChange }) => {
+  const groupRef = useRef<HTMLDivElement | null>(null)
+
+  // WAI radiogroup: Arrow keys move focus AND select (selection follows focus).
+  // Space selects the currently focused option (handles Tab-then-Space entry).
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', ' '].includes(e.key)) return
+    const radios = Array.from(
+      groupRef.current?.querySelectorAll<HTMLElement>('[role="radio"]') ?? [],
+    )
+    if (radios.length === 0) return
+    const focusedIndex = radios.indexOf(document.activeElement as HTMLElement)
+
+    if (e.key === ' ') {
+      // Select the currently focused radio.
+      e.preventDefault()
+      if (focusedIndex >= 0) {
+        onChange(options[focusedIndex]!.value)
+      }
+      return
+    }
+
+    e.preventDefault()
+    let next = focusedIndex
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      next = focusedIndex < 0 ? 0 : (focusedIndex + 1) % radios.length
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      next = focusedIndex < 0 ? radios.length - 1 : (focusedIndex - 1 + radios.length) % radios.length
+    }
+
+    radios[next]?.focus()
+    // WAI radiogroup: selection follows focus (differs from Tabs manual activation)
+    onChange(options[next]!.value)
+  }
+
   return (
-    <div className="flex flex-wrap gap-[var(--sp-3)]">
-      {options.map(opt => {
+    <div
+      ref={groupRef}
+      role="radiogroup"
+      aria-label={label}
+      className="flex flex-wrap gap-[var(--sp-3)]"
+      onKeyDown={handleKeyDown}
+    >
+      {options.map((opt, index) => {
         const isSelected = opt.value === selected
+        // Roving tabindex: selected option is tabbable; when nothing is selected,
+        // the first option is tabbable (WAI radio pattern, none-selected fallback).
+        const tabIndex = isSelected ? 0 : (selected === null && index === 0 ? 0 : -1)
         return (
-          <button
+          <div
             key={opt.value}
-            type="button"
+            role="radio"
+            aria-checked={isSelected}
+            tabIndex={tabIndex}
             onClick={() => onChange(opt.value)}
             className="cursor-pointer c-hover flex flex-col items-center text-center flex-1 rounded-lg p-[var(--sp-4)] min-w-0 min-h-[var(--sp-12)]"
             style={{
@@ -54,7 +101,7 @@ const CardSelector: FC<CardSelectorProps> = ({ options, selected, onChange }) =>
             <div className="text-t3 text-data">
               {opt.description}
             </div>
-          </button>
+          </div>
         )
       })}
     </div>

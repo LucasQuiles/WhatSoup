@@ -354,6 +354,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               </span>
             </label>
             <CardSelector
+              label="Access Mode"
               options={ACCESS_OPTIONS}
               selected={accessMode}
               onChange={(value) => onChange({ accessMode: value })}

@@ -1,5 +1,18 @@
 /**
- * CardSelector — radio-style card picker behaviour and wash-color regressions.
+ * CardSelector — radiogroup semantics, roving tabindex, arrow-key selection,
+ * and wash-color regressions.
+ *
+ * Change justification:
+ * - DD-14 (WAI radiogroup pattern): elements are now role="radio" not role="button".
+ *   All existing queries updated from getAllByRole('button') to getAllByRole('radio').
+ * - Arrow keys move AND select (WAI radio: selection follows focus) — new cases.
+ * - roving tabindex: checked=0, others=-1; when none checked, first is 0 — new cases.
+ * - aria-checked reflects selected state — new asserts added to style cases.
+ * - radiogroup/aria-label contract — new case.
+ * - Space selects the focused option — new case.
+ * - Wrap-around navigation (end→first, first→end) — new cases.
+ * - Visual styling logic (background/border) unchanged; style asserts preserved.
+ *
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -36,13 +49,21 @@ function makeOptions() {
   ]
 }
 
-describe('CardSelector', () => {
-  it('renders one button per option with label, description, and icon', () => {
-    const options = makeOptions()
-    render(<CardSelector options={options} selected={null} onChange={vi.fn()} />)
+// ---------------------------------------------------------------------------
+// Rendering and roles
+// ---------------------------------------------------------------------------
 
-    const buttons = screen.getAllByRole('button')
-    expect(buttons).toHaveLength(3)
+describe('CardSelector rendering', () => {
+  it('renders a radiogroup with the provided accessible label', () => {
+    render(<CardSelector label="Card type" options={makeOptions()} selected={null} onChange={vi.fn()} />)
+    const group = screen.getByRole('radiogroup', { name: 'Card type' })
+    expect(group).toBeDefined()
+  })
+
+  it('renders one radio per option with label, description, and icon', () => {
+    render(<CardSelector label="Card type" options={makeOptions()} selected={null} onChange={vi.fn()} />)
+    const radios = screen.getAllByRole('radio')
+    expect(radios).toHaveLength(3)
     expect(screen.getByText('Passive Line')).toBeDefined()
     expect(screen.getByText('Manual oversight only')).toBeDefined()
     expect(screen.getByText('Agent Line')).toBeDefined()
@@ -53,70 +74,242 @@ describe('CardSelector', () => {
     expect(screen.getByTestId(`${ICON_TEST_ID}-cht`)).toBeDefined()
   })
 
+  it('renders nothing actionable for an empty options array', () => {
+    const { container } = render(
+      <CardSelector label="Empty" options={[]} selected={null} onChange={vi.fn()} />,
+    )
+    expect(screen.queryAllByRole('radio')).toHaveLength(0)
+    // The radiogroup wrapper should still exist so layout remains stable
+    expect(container.firstElementChild?.getAttribute('role')).toBe('radiogroup')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// aria-checked state
+// ---------------------------------------------------------------------------
+
+describe('aria-checked', () => {
+  it('marks the selected option aria-checked=true and others aria-checked=false', () => {
+    render(<CardSelector label="Card type" options={makeOptions()} selected="pas" onChange={vi.fn()} />)
+    const radios = screen.getAllByRole('radio')
+    expect(radios[0]?.getAttribute('aria-checked')).toBe('true')
+    expect(radios[1]?.getAttribute('aria-checked')).toBe('false')
+    expect(radios[2]?.getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('marks all radios aria-checked=false when selected is null', () => {
+    render(<CardSelector label="Card type" options={makeOptions()} selected={null} onChange={vi.fn()} />)
+    const radios = screen.getAllByRole('radio')
+    radios.forEach(r => expect(r.getAttribute('aria-checked')).toBe('false'))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Click selection
+// ---------------------------------------------------------------------------
+
+describe('click selection', () => {
   it('forwards the clicked option value to onChange', () => {
     const onChange = vi.fn()
-    const options = makeOptions()
-    render(<CardSelector options={options} selected={null} onChange={onChange} />)
+    render(<CardSelector label="Card type" options={makeOptions()} selected={null} onChange={onChange} />)
 
-    fireEvent.click(screen.getByRole('button', { name: /Agent Line/ }))
+    fireEvent.click(screen.getByRole('radio', { name: /Agent Line/ }))
 
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith('agt')
   })
 
-  it('visually distinguishes the selected option with its color border and wash background', () => {
-    const options = makeOptions()
-    render(<CardSelector options={options} selected="pas" onChange={vi.fn()} />)
-
-    const buttons = screen.getAllByRole('button')
-    const [pasBtn, agtBtn] = buttons
-    expect(pasBtn).toBeDefined()
-    expect(agtBtn).toBeDefined()
-    // Selected uses the mapped wash variable and color border
-    expect(pasBtn!.style.background).toBe('var(--m-pas-wash)')
-    expect(pasBtn!.style.border).toContain('var(--color-m-pas)')
-    // Unselected falls back to neutral surface and default border
-    expect(agtBtn!.style.background).toBe('var(--color-d3)')
-    expect(agtBtn!.style.border).toContain('var(--b2)')
-  })
-
-  it('falls back to the default wash for unmapped colors when selected', () => {
-    const options = makeOptions()
-    render(<CardSelector options={options} selected="cht" onChange={vi.fn()} />)
-
-    const chtBtn = screen.getByRole('button', { name: /Chat Bot/ })
-    expect(chtBtn.style.background).toBe('var(--color-d4)')
-    expect(chtBtn.style.border).toContain('var(--color-unknown)')
-  })
-
-  it('switches selection only when onChange is wired by the parent', () => {
+  it('switches selection only when onChange is wired by the parent (controlled)', () => {
     const onChange = vi.fn()
     const options = makeOptions()
     const { rerender } = render(
-      <CardSelector options={options} selected="pas" onChange={onChange} />,
+      <CardSelector label="Card type" options={options} selected="pas" onChange={onChange} />,
     )
 
-    const initialSelected = screen.getByRole('button', { name: /Passive Line/ })
+    const initialSelected = screen.getByRole('radio', { name: /Passive Line/ })
     expect(initialSelected.style.background).toBe('var(--m-pas-wash)')
 
-    fireEvent.click(screen.getByRole('button', { name: /Chat Bot/ }))
+    fireEvent.click(screen.getByRole('radio', { name: /Chat Bot/ }))
     expect(onChange).toHaveBeenCalledWith('cht')
 
     // Selection is controlled by the parent — until rerender, pas stays styled-selected
     expect(initialSelected.style.background).toBe('var(--m-pas-wash)')
 
-    rerender(<CardSelector options={options} selected="cht" onChange={onChange} />)
-    const newSelected = screen.getByRole('button', { name: /Chat Bot/ })
+    rerender(<CardSelector label="Card type" options={options} selected="cht" onChange={onChange} />)
+    const newSelected = screen.getByRole('radio', { name: /Chat Bot/ })
     expect(newSelected.style.background).toBe('var(--color-d4)')
   })
+})
 
-  it('renders nothing actionable for an empty options array', () => {
-    const { container } = render(
-      <CardSelector options={[]} selected={null} onChange={vi.fn()} />,
-    )
+// ---------------------------------------------------------------------------
+// Visual styling (regression: wash/border unchanged by the semantic addition)
+// ---------------------------------------------------------------------------
 
-    expect(screen.queryAllByRole('button')).toHaveLength(0)
-    // The flex wrapper should still exist so layout remains stable
-    expect(container.firstElementChild?.tagName).toBe('DIV')
+describe('visual styling', () => {
+  it('visually distinguishes the selected option with its color border and wash background', () => {
+    render(<CardSelector label="Card type" options={makeOptions()} selected="pas" onChange={vi.fn()} />)
+
+    const radios = screen.getAllByRole('radio')
+    const [pasCard, agtCard] = radios
+    // Selected uses the mapped wash variable and color border
+    expect(pasCard!.style.background).toBe('var(--m-pas-wash)')
+    expect(pasCard!.style.border).toContain('var(--color-m-pas)')
+    // Unselected falls back to neutral surface and default border
+    expect(agtCard!.style.background).toBe('var(--color-d3)')
+    expect(agtCard!.style.border).toContain('var(--b2)')
+  })
+
+  it('falls back to the default wash for unmapped colors when selected', () => {
+    render(<CardSelector label="Card type" options={makeOptions()} selected="cht" onChange={vi.fn()} />)
+
+    const chtCard = screen.getByRole('radio', { name: /Chat Bot/ })
+    expect(chtCard.style.background).toBe('var(--color-d4)')
+    expect(chtCard.style.border).toContain('var(--color-unknown)')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Roving tabindex
+// ---------------------------------------------------------------------------
+
+describe('roving tabindex', () => {
+  it('gives tabIndex=0 to the selected option and -1 to others', () => {
+    render(<CardSelector label="Card type" options={makeOptions()} selected="agt" onChange={vi.fn()} />)
+    const radios = screen.getAllByRole('radio')
+    expect(radios[0]?.tabIndex).toBe(-1) // pas — not selected
+    expect(radios[1]?.tabIndex).toBe(0)  // agt — selected
+    expect(radios[2]?.tabIndex).toBe(-1) // cht — not selected
+  })
+
+  it('gives tabIndex=0 to the first option when nothing is selected', () => {
+    render(<CardSelector label="Card type" options={makeOptions()} selected={null} onChange={vi.fn()} />)
+    const radios = screen.getAllByRole('radio')
+    expect(radios[0]?.tabIndex).toBe(0)  // first — tabbable fallback
+    expect(radios[1]?.tabIndex).toBe(-1)
+    expect(radios[2]?.tabIndex).toBe(-1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Arrow-key navigation (WAI radiogroup: selection follows focus)
+// ---------------------------------------------------------------------------
+
+describe('arrow-key navigation', () => {
+  it('ArrowRight moves focus and selects the next option', () => {
+    const onChange = vi.fn()
+    render(<CardSelector label="Card type" options={makeOptions()} selected="pas" onChange={onChange} />)
+    const group = screen.getByRole('radiogroup')
+    const radios = screen.getAllByRole('radio')
+
+    radios[0]!.focus()
+    fireEvent.keyDown(group, { key: 'ArrowRight' })
+
+    expect(onChange).toHaveBeenCalledWith('agt')
+  })
+
+  it('ArrowDown moves focus and selects the next option', () => {
+    const onChange = vi.fn()
+    render(<CardSelector label="Card type" options={makeOptions()} selected="pas" onChange={onChange} />)
+    const group = screen.getByRole('radiogroup')
+    const radios = screen.getAllByRole('radio')
+
+    radios[0]!.focus()
+    fireEvent.keyDown(group, { key: 'ArrowDown' })
+
+    expect(onChange).toHaveBeenCalledWith('agt')
+  })
+
+  it('ArrowLeft moves focus and selects the previous option', () => {
+    const onChange = vi.fn()
+    render(<CardSelector label="Card type" options={makeOptions()} selected="agt" onChange={onChange} />)
+    const group = screen.getByRole('radiogroup')
+    const radios = screen.getAllByRole('radio')
+
+    radios[1]!.focus()
+    fireEvent.keyDown(group, { key: 'ArrowLeft' })
+
+    expect(onChange).toHaveBeenCalledWith('pas')
+  })
+
+  it('ArrowUp moves focus and selects the previous option', () => {
+    const onChange = vi.fn()
+    render(<CardSelector label="Card type" options={makeOptions()} selected="agt" onChange={onChange} />)
+    const group = screen.getByRole('radiogroup')
+    const radios = screen.getAllByRole('radio')
+
+    radios[1]!.focus()
+    fireEvent.keyDown(group, { key: 'ArrowUp' })
+
+    expect(onChange).toHaveBeenCalledWith('pas')
+  })
+
+  it('ArrowRight wraps from last to first', () => {
+    const onChange = vi.fn()
+    render(<CardSelector label="Card type" options={makeOptions()} selected="cht" onChange={onChange} />)
+    const group = screen.getByRole('radiogroup')
+    const radios = screen.getAllByRole('radio')
+
+    radios[2]!.focus()
+    fireEvent.keyDown(group, { key: 'ArrowRight' })
+
+    expect(onChange).toHaveBeenCalledWith('pas')
+  })
+
+  it('ArrowLeft wraps from first to last', () => {
+    const onChange = vi.fn()
+    render(<CardSelector label="Card type" options={makeOptions()} selected="pas" onChange={onChange} />)
+    const group = screen.getByRole('radiogroup')
+    const radios = screen.getAllByRole('radio')
+
+    radios[0]!.focus()
+    fireEvent.keyDown(group, { key: 'ArrowLeft' })
+
+    expect(onChange).toHaveBeenCalledWith('cht')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Space key selects focused option
+// ---------------------------------------------------------------------------
+
+describe('Space key', () => {
+  it('selects the currently focused option via Space', () => {
+    const onChange = vi.fn()
+    render(<CardSelector label="Card type" options={makeOptions()} selected="pas" onChange={onChange} />)
+    const group = screen.getByRole('radiogroup')
+    const radios = screen.getAllByRole('radio')
+
+    radios[1]!.focus()
+    fireEvent.keyDown(group, { key: ' ' })
+
+    expect(onChange).toHaveBeenCalledWith('agt')
+  })
+
+  it('does not call onChange when Space is pressed with no focused option', () => {
+    const onChange = vi.fn()
+    render(<CardSelector label="Card type" options={makeOptions()} selected="pas" onChange={onChange} />)
+    const group = screen.getByRole('radiogroup')
+
+    // Dispatch Space without first focusing a radio (focusedIndex will be -1)
+    fireEvent.keyDown(group, { key: ' ' })
+
+    expect(onChange).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unrecognised keys are not intercepted
+// ---------------------------------------------------------------------------
+
+describe('unrelated keys', () => {
+  it('does not call onChange for non-navigation keys (e.g. Tab)', () => {
+    const onChange = vi.fn()
+    render(<CardSelector label="Card type" options={makeOptions()} selected="pas" onChange={onChange} />)
+    const group = screen.getByRole('radiogroup')
+
+    fireEvent.keyDown(group, { key: 'Tab' })
+    fireEvent.keyDown(group, { key: 'Enter' })
+
+    expect(onChange).not.toHaveBeenCalled()
   })
 })
