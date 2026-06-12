@@ -11,7 +11,7 @@ evidence visible without turning chat history into the source of truth.
 | GitHub pull requests and issues | Live queue truth | `gh pr list --state open`, `gh issue list --state open` |
 | Work index | Generated index of scoped planning, SDLC, and superpowers artifacts | `npm run guard:work-index` |
 | Current program narrative | Human synthesis over the generated index | `docs/current-program.md` |
-| Artifact sweep dry run | Report-only scan for scattered plans, specs, tasks, beads, and sessions | `bash ~/.claude/plugins/artifact-sweep/scripts/run-sweep.sh --project "$PWD" --format json` |
+| Artifact sweep dry run | Report-only scan for scattered plans, specs, tasks, beads, and sessions | Operators with the artifact-sweep plugin can invoke its `run-sweep.sh` script; otherwise enumerate the plans directory manually. |
 | Verification gates | Evidence that a change is ready to publish | `npm run verify:push:branch` for branch work; `npm run verify:release` for release work |
 
 Static docs must not be treated as live queue truth. Re-query GitHub for open
@@ -66,7 +66,7 @@ Weekly maintenance review:
 Monthly maintenance review:
 
 1. Triage unknown and pending rows from `docs/work-index.md`.
-2. Convert still-actionable loose plans into GitHub issues or SDLC artifacts.
+2. Convert still-actionable loose plans into GitHub issues (with explicit operator approval; external posting is never autonomous) or SDLC artifacts.
 3. Archive or mark superseded artifacts only when the replacement and evidence
    are explicit.
 4. Remove stale operational notes from always-read docs when they no longer
