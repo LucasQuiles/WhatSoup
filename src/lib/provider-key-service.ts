@@ -6,7 +6,13 @@
  * keyring.ts re-exports both names — runtime callers keep importing from there.
  */
 
-// Probe URLs for fallback credential pre-flight live in src/runtimes/agent/providers/credential-verify.ts (PROBE_ENDPOINTS) — keep services in sync.
+// Validity-probe coverage: PROBE_ENDPOINTS in
+// src/runtimes/agent/providers/credential-verify.ts only covers deepseek,
+// minimax, and openai (endpoints proven to 401/403 on a bad key). Every other
+// service below degrades to a presence-only check — the pre-flight returns
+// 'unknown' for them, so fallback_credential_invalid can never fire. Adding a
+// probe endpoint requires per-provider verification; do not assume parity with
+// this map.
 /**
  * Map service names to their conventional env var names.
  *

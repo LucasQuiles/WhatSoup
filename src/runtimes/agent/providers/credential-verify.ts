@@ -15,7 +15,10 @@ export type CredentialVerifyResult = 'valid' | 'invalid' | 'unknown';
 // WhatSoup never configures opencode provider baseUrls (opencode resolves its
 // own endpoints), so probe targets are hardcoded. Only endpoints PROVEN to
 // return 401/403 on a bad key belong here (a mute probe fails open forever).
-// Keep services in sync with SERVICE_ENV_MAP in src/lib/keyring.ts.
+// This is deliberately a SUBSET of SERVICE_ENV_MAP in
+// src/lib/provider-key-service.ts (re-exported by src/lib/keyring.ts):
+// services without an entry here get no validity probe — verifyFallbackCredential
+// returns 'unknown' and the pre-flight degrades to a presence-only check.
 const PROBE_ENDPOINTS: Record<string, string> = {
   deepseek: 'https://api.deepseek.com/models',
   minimax: 'https://api.minimax.io/v1/models',
