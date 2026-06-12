@@ -19,7 +19,7 @@ const log = createChildLogger('admin');
 const MAX_REPLAYED_IDS = 10_000;
 const replayedIds = new Set<string>();
 
-function rememberReplayedId(messageId: string): void {
+export function rememberReplayedId(messageId: string): void {
   replayedIds.add(messageId);
   if (replayedIds.size > MAX_REPLAYED_IDS) {
     const oldest = replayedIds.values().next().value;
@@ -47,6 +47,33 @@ export function __getReplayedIdsSizeForTests(): number {
 /** Test-only helpers for LEAK-10 coverage. */
 export function __hasReplayedIdForTests(messageId: string): boolean {
   return replayedIds.has(messageId);
+}
+
+/**
+ * Select which stored messages should be replayed for a newly-allowed sender.
+ *
+ * Filters out:
+ *   - group-chat messages (chatJid ending in @g.us): group mentions are
+ *     dispatched at ingest; unmentioned group messages must not re-enter
+ *     dispatch as pseudo-DMs.
+ *   - already-replayed message IDs (module-level replayedIds set).
+ *
+ * Then sorts ascending by timestamp and applies the cap (.slice(-cap)).
+ *
+ * Callers are responsible for calling rememberReplayedId() per dispatched
+ * message so the dedup set is armed after the replay loop.
+ */
+export function selectReplayableDms(
+  stored: StoredMessage[],
+  cap: number,
+): { toReplay: StoredMessage[]; groupSkipped: number } {
+  const dmStored = stored.filter(m => !isGroupJid(m.chatJid));
+  const groupSkipped = stored.length - dmStored.length;
+  const toReplay = dmStored
+    .filter(m => !replayedIds.has(m.messageId))
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-cap);
+  return { toReplay, groupSkipped };
 }
 
 export async function handleAdminCommand(
@@ -87,29 +114,26 @@ export async function handleAdminCommand(
         }
       }
 
-      // Collect all stored messages across JID formats, deduplicate, take most recent N
+      // Collect all stored messages across JID formats
       const allStored: StoredMessage[] = [];
       for (const senderJid of jidFormats) {
         allStored.push(...getMessagesBySender(db, senderJid));
       }
-      const totalQueued = allStored.length;
 
-      // Exclude group-chat messages before applying the cap:
-      // group messages never replay — mentioned ones dispatched at ingest; unmentioned ones must not re-enter as pseudo-DMs.
-      const dmStored = allStored.filter(m => !isGroupJid(m.chatJid));
-      const groupSkipped = allStored.length - dmStored.length;
+      // Select replayable DMs: excludes group messages and already-replayed IDs, applies cap.
+      const { toReplay, groupSkipped } = selectReplayableDms(allStored, config.adminReplayMax);
       if (groupSkipped > 0) {
         log.info({ subjectId, groupSkipped }, 'replay: skipped group messages');
       }
 
-      // Filter already-replayed, sort by timestamp ascending, take most recent N
-      const toReplay = dmStored
-        .filter(m => !replayedIds.has(m.messageId))
-        .sort((a, b) => a.timestamp - b.timestamp)
-        .slice(-config.adminReplayMax);
-
       const replayCount = toReplay.length;
-      await sendTracked(messenger, adminChatJid, `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued messages`, durability, { replayPolicy: 'safe', isTerminal: true });
+      // totalQueued is the DM-only count; group rows are excluded from the denominator
+      // so the admin sees an accurate N of M without an unexplained gap.
+      const totalQueued = allStored.length - groupSkipped;
+      const noticeText = groupSkipped > 0
+        ? `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued DM messages (${groupSkipped} group message${groupSkipped === 1 ? '' : 's'} skipped)`
+        : `Allowed +${subjectId} — replaying ${replayCount} of ${totalQueued} queued messages`;
+      await sendTracked(messenger, adminChatJid, noticeText, durability, { replayPolicy: 'safe', isTerminal: true });
 
       for (const msg of toReplay) {
         rememberReplayedId(msg.messageId);

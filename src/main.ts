@@ -23,7 +23,8 @@ import { startHealthServer } from './core/health.ts';
 import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
-import { toPersonalJid, toLidJid, isGroupJid } from './core/jid-constants.ts';
+import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
+import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
@@ -596,19 +597,18 @@ const healthServer = startHealthServer({
   accessMode: config.accessMode,
   handleAccessDecision: async (subjectType, subjectId, action) => {
     if (action === 'allow' && subjectType === 'phone') {
-      // Replay queued messages — mirrors admin.ts allow path
+      // Replay queued DM messages — uses shared selectReplayableDms helper from admin.ts
+      // so group exclusion, dedup (replayedIds), and adminReplayMax cap are all applied consistently.
       log.info({ subjectType, subjectId }, 'access: allowed via POST /access — replaying queued messages');
       const jidFormats = [toPersonalJid(subjectId), toLidJid(subjectId)];
       for (const senderJid of jidFormats) {
         const stored = getMessagesBySender(db, senderJid);
-        // Exclude group-chat messages before replay:
-        // group messages never replay — mentioned ones dispatched at ingest; unmentioned ones must not re-enter as pseudo-DMs.
-        const dmStored = stored.filter(m => !isGroupJid(m.chatJid));
-        const groupSkipped = stored.length - dmStored.length;
+        const { toReplay, groupSkipped } = selectReplayableDms(stored, config.adminReplayMax);
         if (groupSkipped > 0) {
           log.info({ subjectId, senderJid, groupSkipped }, 'access replay: skipped group messages');
         }
-        for (const msg of dmStored) {
+        for (const msg of toReplay) {
+          rememberReplayedId(msg.messageId);
           await runtime.handleMessage({
             messageId: msg.messageId,
             chatJid: msg.chatJid,

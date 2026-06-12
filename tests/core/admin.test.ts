@@ -36,7 +36,7 @@ vi.mock('../../src/logger.ts', () => ({
 // Imports
 // ---------------------------------------------------------------------------
 import { Database } from '../../src/core/database.ts';
-import { storeMessageIfNew } from '../../src/core/messages.ts';
+import { storeMessageIfNew, type StoredMessage } from '../../src/core/messages.ts';
 import { insertPending, lookupAccess } from '../../src/core/access-list.ts';
 import {
   handleAdminCommand,
@@ -488,5 +488,193 @@ describe('handleAdminCommand ALLOW — DM-scope replay (group exclusion)', () =>
     // Group must never be dispatched
     expect(replayedMsgIds).not.toContain('cap-group-msg-001');
     expect(handleMessageFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectReplayableDms helper
+// ---------------------------------------------------------------------------
+
+describe('selectReplayableDms', () => {
+  it('excludes an already-replayed messageId', () => {
+    const { selectReplayableDms, __resetReplayedIdsForTests, __rememberReplayedIdForTests } = adminModule as any;
+
+    __resetReplayedIdsForTests();
+    __rememberReplayedIdForTests('already-seen-001');
+
+    const stored: StoredMessage[] = [
+      {
+        pk: 1,
+        chatJid: '15559001001@s.whatsapp.net',
+        conversationKey: '15559001001',
+        senderJid: '15559001001@s.whatsapp.net',
+        senderName: 'TestUser',
+        messageId: 'already-seen-001',
+        content: 'already replayed',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700010000,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2023-01-01T00:00:00.000Z',
+        mediaPath: null,
+        contentText: null,
+      },
+      {
+        pk: 2,
+        chatJid: '15559001001@s.whatsapp.net',
+        conversationKey: '15559001001',
+        senderJid: '15559001001@s.whatsapp.net',
+        senderName: 'TestUser',
+        messageId: 'fresh-msg-001',
+        content: 'not yet replayed',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700010001,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2023-01-01T00:00:01.000Z',
+        mediaPath: null,
+        contentText: null,
+      },
+    ];
+
+    const result = selectReplayableDms(stored, 10);
+    const ids = result.toReplay.map((m: any) => m.messageId as string);
+    expect(ids).not.toContain('already-seen-001');
+    expect(ids).toContain('fresh-msg-001');
+    expect(result.groupSkipped).toBe(0);
+  });
+
+  it('reports groupSkipped count for group chatJids', () => {
+    const { selectReplayableDms, __resetReplayedIdsForTests } = adminModule as any;
+
+    __resetReplayedIdsForTests();
+
+    const stored: StoredMessage[] = [
+      {
+        pk: 3,
+        chatJid: '15559002001@s.whatsapp.net',
+        conversationKey: '15559002001',
+        senderJid: '15559002001@s.whatsapp.net',
+        senderName: 'TestUser2',
+        messageId: 'dm-helper-001',
+        content: 'dm content',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700020000,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2023-01-01T00:00:00.000Z',
+        mediaPath: null,
+        contentText: null,
+      },
+      {
+        pk: 4,
+        chatJid: '120363555555555000@g.us',
+        conversationKey: '120363555555555000',
+        senderJid: '15559002001@s.whatsapp.net',
+        senderName: 'TestUser2',
+        messageId: 'group-helper-001',
+        content: 'group content',
+        contentType: 'text',
+        isFromMe: false,
+        timestamp: 1700020001,
+        quotedMessageId: null,
+        enrichmentProcessedAt: null,
+        enrichmentRetries: 0,
+        createdAt: '2023-01-01T00:00:01.000Z',
+        mediaPath: null,
+        contentText: null,
+      },
+    ];
+
+    const result = selectReplayableDms(stored, 10);
+    const ids = result.toReplay.map((m: any) => m.messageId as string);
+    expect(ids).toContain('dm-helper-001');
+    expect(ids).not.toContain('group-helper-001');
+    expect(result.groupSkipped).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admin notice wording — groupSkipped>0 path
+// ---------------------------------------------------------------------------
+
+describe('handleAdminCommand ALLOW — admin notice wording', () => {
+  it('appends group-skipped suffix to the notice when group messages are present', async () => {
+    const { config } = await import('../../src/config.ts');
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 0;
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    // One DM
+    storeMessageIfNew(db, {
+      chatJid: '15558880001@s.whatsapp.net',
+      conversationKey: '15558880001',
+      senderJid: '15558880001@s.whatsapp.net',
+      senderName: 'NoticeUser',
+      messageId: 'notice-dm-001',
+      content: 'dm',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700030000,
+    });
+
+    // One group message from same sender
+    storeMessageIfNew(db, {
+      chatJid: '120363555555555000@g.us',
+      conversationKey: '120363555555555000',
+      senderJid: '15558880001@s.whatsapp.net',
+      senderName: 'NoticeUser',
+      messageId: 'notice-group-001',
+      content: 'group',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700030001,
+    });
+
+    const handleMessageFn = vi.fn().mockResolvedValue(undefined);
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15558880001', ADMIN_CHAT_JID, handleMessageFn);
+
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    // Should say "1 of 1 queued DM messages" (totalQueued = DM count after filter)
+    expect(sentText).toContain('replaying 1 of 1 queued DM messages');
+    // Must include the group-skipped annotation
+    expect(sentText).toContain('1 group message');
+  });
+
+  it('keeps original notice wording when no group messages are present', async () => {
+    const { config } = await import('../../src/config.ts');
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 0;
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    storeMessageIfNew(db, {
+      chatJid: '15558880002@s.whatsapp.net',
+      conversationKey: '15558880002',
+      senderJid: '15558880002@s.whatsapp.net',
+      senderName: 'NoGroupUser',
+      messageId: 'notice-dm-only-001',
+      content: 'dm only',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700031000,
+    });
+
+    const handleMessageFn = vi.fn().mockResolvedValue(undefined);
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15558880002', ADMIN_CHAT_JID, handleMessageFn);
+
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('replaying 1 of 1 queued messages');
+    // Must NOT include the group suffix
+    expect(sentText).not.toContain('group message');
   });
 });
