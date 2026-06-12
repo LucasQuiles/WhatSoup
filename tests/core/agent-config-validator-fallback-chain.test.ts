@@ -88,6 +88,31 @@ describe('validateInstanceConfig — ordered fallback chain', () => {
     expect(err?.message).toContain('primary');
   });
 
+  it('allows a model-less entry on the primary provider when the primary pins an explicit model', () => {
+    // A model-less entry targets the provider default model, which differs
+    // from a primary that pins an explicit model — a real fallback target.
+    expect(
+      validateInstanceConfig(
+        agentRaw(
+          { fallbacks: [{ provider: 'claude-cli' }] },
+          { model: 'claude-opus-4-8' },
+        ),
+        createCtx,
+      ),
+    ).toBeNull();
+  });
+
+  it('rejects a model-less entry on the primary provider when the primary has no explicit model', () => {
+    // Both the entry and the primary would use the provider default model —
+    // the entry is not a distinct fallback target.
+    const err = validateInstanceConfig(
+      agentRaw({ fallbacks: [{ provider: 'claude-cli' }] }),
+      createCtx,
+    );
+    expect(err?.field).toBe('agentOptions.fallbacks[0]');
+    expect(err?.message).toContain('primary');
+  });
+
   it('applies API-provider model requirements per fallback entry', () => {
     const err = validateInstanceConfig(
       agentRaw({ fallbacks: [{ provider: 'openai-api' }] }),

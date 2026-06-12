@@ -56,5 +56,12 @@ export function isSameAsPrimaryFallbackEntry(
   const opts = record(rawConfig['agentOptions']) ?? {};
   const primaryProvider = stringOrUndefined(opts['provider']) ?? 'claude-cli';
   if (entry.provider !== primaryProvider) return false;
-  return (entry.model ?? resolveAgentModel(rawConfig) ?? '') === (resolveAgentModel(rawConfig) ?? '');
+  const primaryModel = resolveAgentModel(rawConfig);
+  if (entry.model === undefined) {
+    // A model-less entry targets the provider default model. It collides with
+    // the primary only when the primary would also use the provider default —
+    // a primary that pins an explicit model is a distinct target.
+    return primaryModel === undefined;
+  }
+  return entry.model === primaryModel;
 }

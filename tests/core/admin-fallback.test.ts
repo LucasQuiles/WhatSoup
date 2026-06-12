@@ -231,14 +231,14 @@ describe('handleFallbackCommand -- FALLBACK ON', () => {
   it('replies with error reason when forceFallback returns ok:false', async () => {
     const messenger = makeMockMessenger() as unknown as Messenger;
     const runtime = makeAgentRuntime({
-      forceResult: { ok: false, reason: 'no fallbackProvider configured for this instance' },
+      forceResult: { ok: false, reason: 'no fallback provider or chain configured for this instance' },
     });
 
     await handleFallbackCommand(runtime, messenger, onCmd(), ADMIN_CHAT_JID);
 
     const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
     expect(reply).toContain('Cannot force fallback');
-    expect(reply).toContain('no fallbackProvider');
+    expect(reply).toContain('no fallback provider or chain');
   });
 
   it('replies "not supported" for a chat-mode runtime (no forceFallback)', async () => {
