@@ -31,6 +31,7 @@ import { TwilioConnection } from '../../../src/transport/twilio/connection-bridg
 import { TwilioSmsAdapter } from '../../../src/transport/twilio/adapter.ts';
 import { MockTwilioSmsPort } from '../../../src/transport/twilio/testing/mock-port.ts';
 import { makeTwilioConfig } from './helpers.ts';
+import { makeChannelId } from '../../../src/core/transport-refs.ts';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -73,15 +74,14 @@ describe('TwilioConnection error-channel log completeness', () => {
   });
 
   it('logs hint and idempotencyKey when present in the payload', async () => {
-    vi.useFakeTimers({ now: 0 });
     const { bridge, adapter } = makeBridge();
     await bridge.connect();
 
-    // Build a TransportError with hint and idempotencyKey, then emit directly
-    // through the adapter's error channel (same path the bridge subscribes to).
+    // Build a TransportError with hint and idempotencyKey, then deliver it to
+    // the bridge's registered error listeners (same path the adapter uses).
     const { TransientProviderError } = await import('../../../src/transport/contract/errors.ts');
     const err = new TransientProviderError({
-      channelId: 'sms' as const,
+      channelId: makeChannelId('sms', 'ml-bot'),
       operation: 'poll',
       correlationId: 'corr-abc',
       message: 'upstream 503',
@@ -91,33 +91,29 @@ describe('TwilioConnection error-channel log completeness', () => {
       idempotencyKey: 'idem-xyz',
     });
 
-    // Emit directly on adapter's error listeners
-    (adapter as unknown as { safeEmit: (s: Set<(e: unknown) => void>, e: unknown) => void })
-      .safeEmit?.((adapter as unknown as { listeners: { error: Set<(e: unknown) => void> } }).listeners.error, err);
+    const errorListeners = (adapter as unknown as { listeners: { error: Set<(e: unknown) => void> } })
+      .listeners.error;
+    expect(errorListeners.size).toBeGreaterThan(0);
+    for (const listener of errorListeners) listener(err);
 
-    // If safeEmit is private/unavailable, fall back to emitting via the listeners directly
-    await vi.advanceTimersByTimeAsync(0);
-
-    if (bridgeLogError.mock.calls.length > 0) {
-      const [fields] = bridgeLogError.mock.calls[0] as [Record<string, unknown>, string];
-      expect(fields).toMatchObject({
-        providerCode: 'TWILIO_503',
-        channelId: 'sms',
-        hint: 'retry after backoff',
-        scope: 'provider',
-        idempotencyKey: 'idem-xyz',
-      });
-    }
+    expect(bridgeLogError).toHaveBeenCalledOnce();
+    const [fields] = bridgeLogError.mock.calls[0] as [Record<string, unknown>, string];
+    expect(fields).toMatchObject({
+      providerCode: 'TWILIO_503',
+      channelId: 'sms:ml-bot',
+      hint: 'retry after backoff',
+      scope: 'provider',
+      idempotencyKey: 'idem-xyz',
+    });
   });
 
   it('logs phase when present in the payload', async () => {
-    vi.useFakeTimers({ now: 0 });
     const { bridge, adapter } = makeBridge();
     await bridge.connect();
 
     const { SendAmbiguousError } = await import('../../../src/transport/contract/errors.ts');
     const err = new SendAmbiguousError({
-      channelId: 'sms' as const,
+      channelId: makeChannelId('sms', 'ml-bot'),
       operation: 'sendText',
       correlationId: 'corr-def',
       message: 'send ambiguous',
@@ -125,14 +121,13 @@ describe('TwilioConnection error-channel log completeness', () => {
       phase: 'provider_call_started',
     });
 
-    (adapter as unknown as { safeEmit: (s: Set<(e: unknown) => void>, e: unknown) => void })
-      .safeEmit?.((adapter as unknown as { listeners: { error: Set<(e: unknown) => void> } }).listeners.error, err);
+    const errorListeners = (adapter as unknown as { listeners: { error: Set<(e: unknown) => void> } })
+      .listeners.error;
+    expect(errorListeners.size).toBeGreaterThan(0);
+    for (const listener of errorListeners) listener(err);
 
-    await vi.advanceTimersByTimeAsync(0);
-
-    if (bridgeLogError.mock.calls.length > 0) {
-      const [fields] = bridgeLogError.mock.calls[0] as [Record<string, unknown>, string];
-      expect(fields).toMatchObject({ phase: 'provider_call_started' });
-    }
+    expect(bridgeLogError).toHaveBeenCalledOnce();
+    const [fields] = bridgeLogError.mock.calls[0] as [Record<string, unknown>, string];
+    expect(fields).toMatchObject({ phase: 'provider_call_started' });
   });
 });
