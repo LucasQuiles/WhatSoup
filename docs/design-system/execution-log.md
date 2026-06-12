@@ -402,3 +402,18 @@ Wave-7 quick fixes: wizard min-w bug, h-dvh, transition:all removal. Responsive 
 (per-surface, status INCONCLUSIVE until landed). 1,736/1,736 tests; baseline 635->614.
 DD-12..18 opened. Stale agent worktrees removed (operator-approved, zero unique commits verified).
 Packet: `06-implementation/c2-2-evidence.md`.
+
+---
+
+## C2.2b — Oversight Wave 8 — 2026-06-11
+
+**Verdict: Pass.** Three P1s fixed: backdrop double-close (single owner = useDismissable pointerdown;
+backdrop onClick removed; regression test pins pointerdown->pointerup->click = exactly one onClose);
+#root 100vh -> 100dvh (viewport contract aligned with App h-dvh); --modal-min-h -> min(500px, 85dvh)
+(short-window wizard). Modal comments now truthful (instant exit + no background inert = DD-19).
+Schema-compliant SSOT debt register created (`06-implementation/design-debt-register.md`, DD-4..21
+full qa-hardening fields; DD-19/20/21 newly opened from waves 7-8: modal exit/inert, Framer
+reduced-motion path, table/tablist keyboard). FilterPill suffix rule documented (decorative-only).
+origin/main merged (+6, console untouched). 1,753/1,753 tests.
+"Modal law live" scope clarified: migrated surfaces only; remaining 8 ad-hoc dialogs tracked by
+ratchet buckets and their migration slices (W8-4 acknowledged).
