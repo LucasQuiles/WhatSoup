@@ -5815,6 +5815,28 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * providerConfig handed to a new SessionManager.
+   *
+   * The custom-endpoint fields (`baseUrl`/`apiKeyService`) belong to the
+   * PRIMARY provider+model: an opencode session serving a fallback entry must
+   * not inherit them, or the custom-endpoint argv contract (omit `-m` when a
+   * baseUrl is configured) would drop the entry's model and re-route the turn
+   * to the primary's endpoint block — or to opencode's default model when no
+   * block was written for the entry. Every other providerConfig key (budget,
+   * model, …) keeps applying to all sessions, and managed-loop API fallback
+   * sessions keep full inheritance (same-provider API fallback deliberately
+   * honors the primary's endpoint and apiKeyService).
+   */
+  private sessionProviderConfig(): Record<string, unknown> | undefined {
+    if (!this.agentProviderConfig) return undefined;
+    if (this.effectiveFallbackEntry === null || this.effectiveProvider !== 'opencode-cli') {
+      return this.agentProviderConfig;
+    }
+    const { baseUrl: _baseUrl, apiKeyService: _apiKeyService, ...rest } = this.agentProviderConfig;
+    return rest;
+  }
+
+  /**
    * Construct a SessionManager with all instance-level fields pre-filled.
    * Callers supply only the variable parts: chatJid, cwd, and the three callbacks.
    */
@@ -5860,7 +5882,7 @@ export class AgentRuntime implements Runtime {
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
       provider: this.effectiveProvider,
-      providerConfig: this.agentProviderConfig,
+      providerConfig: this.sessionProviderConfig(),
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
