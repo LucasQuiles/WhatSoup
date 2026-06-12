@@ -163,7 +163,13 @@ describe('deploy/preflight-check.sh — restart-safety gate', () => {
       { 'src/helper.ts': 'export const ok = true;\n' },
     );
     // Make it a git repo with an uncommitted file so the advisory fires.
-    spawnSync('git', ['init', '-q'], { cwd: root });
+    // Strip hook-injected git env so init targets the fixture, not the repo
+    // whose hook may be running this suite (pre-push exports GIT_DIR).
+    const gitEnv = { ...process.env };
+    delete gitEnv['GIT_DIR'];
+    delete gitEnv['GIT_WORK_TREE'];
+    delete gitEnv['GIT_INDEX_FILE'];
+    spawnSync('git', ['init', '-q'], { cwd: root, env: gitEnv });
     writeFileSync(join(root, 'untracked.txt'), 'dirty\n', 'utf8');
     const { status, stderr } = runPreflight(root);
 

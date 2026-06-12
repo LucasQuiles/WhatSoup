@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Hook-environment safety: when invoked from inside a git hook (pre-push,
+# post-merge, ...) the parent git process exports GIT_DIR/GIT_WORK_TREE/
+# GIT_INDEX_FILE, which would silently redirect this script's `git -C` calls
+# at the target tree to the HOOK's repository instead. Drop them.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
 # WhatSoup — restart-safety pre-flight gate.
 #
 # Verifies that the on-disk tree is SAFE TO START before the wrapper exec's the
