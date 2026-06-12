@@ -36,8 +36,13 @@ export interface NodePinOptions {
 const HARDCODED_NODE_PATH_PATTERN =
   /\/\.nvm\/versions\/node\/v(\d+\.\d+\.\d+)\/bin\/node/;
 // Match any shell-level read of "$REPO_ROOT/.nvmrc" — `cat "$REPO_ROOT/.nvmrc"`,
-// `tr ... < "$REPO_ROOT/.nvmrc"`, `<"$REPO_ROOT/.nvmrc"`, etc.
-const NVMRC_REFERENCE_PATTERN = /\$\{?REPO_ROOT\}?\/\.nvmrc/;
+// `tr ... < "$REPO_ROOT/.nvmrc"`, `<"$REPO_ROOT/.nvmrc"`, etc. The lib variant
+// uses a lowercase `$repo_root` argument, so accept either casing.
+const NVMRC_REFERENCE_PATTERN = /\$\{?(?:REPO_ROOT|repo_root)\}?\/\.nvmrc/;
+// A wrapper may delegate Node-pin resolution (and the .nvmrc read) to the shared
+// resolver library. Sourcing it counts as reading .nvmrc, because the library is
+// the single source of truth that performs the read (DRY).
+const RESOLVE_NODE_LIB_REFERENCE_PATTERN = /lib\/resolve-node\.sh/;
 
 const WRAPPER_SOURCES: { source: NodePinSource; relPath: string }[] = [
   { source: 'deploy/whatsoup', relPath: 'deploy/whatsoup' },
@@ -118,6 +123,20 @@ function readWrapperPin(
   const text = readFileSync(filePath, 'utf8');
   if (NVMRC_REFERENCE_PATTERN.test(text)) {
     return { source, filePath, version: null, raw: 'reads .nvmrc' };
+  }
+  // Delegation to the shared resolver lib is a valid .nvmrc read, provided the
+  // lib itself reads .nvmrc (verified to keep the delegation honest).
+  if (RESOLVE_NODE_LIB_REFERENCE_PATTERN.test(text)) {
+    const libPath = path.join(cwd, 'deploy/lib/resolve-node.sh');
+    let libText = '';
+    try {
+      libText = readFileSync(libPath, 'utf8');
+    } catch {
+      libText = '';
+    }
+    if (NVMRC_REFERENCE_PATTERN.test(libText)) {
+      return { source, filePath, version: null, raw: 'reads .nvmrc' };
+    }
   }
   const m = text.match(HARDCODED_NODE_PATH_PATTERN);
   if (m) {
