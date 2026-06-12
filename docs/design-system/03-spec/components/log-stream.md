@@ -13,7 +13,9 @@ log (--surface-inset bed, 1px --border-hairline, flush-joins its toolbar, --type
 └─ log__row (grid: time 72px · level 24px · component 96px · 1fr message — the three column
              widths are LogStream component tokens; 24px min row height, hairline rules,
              role="listitem", tabindex 0)
-   ├─ time — --type-data-sm, --text-3
+   ├─ time — --type-data-sm, --text-2 (DD-8 decision: time is an essential scan
+   │         anchor and carries AA ink in both themes; it recedes via the 11px
+   │         data-sm size and mono weight, never via sub-AA color)
    ├─ lvl — bordered LETTER tag: 18×16px chip, 600 9px mono, E/W/I/D
    ├─ component — --type-data-sm, --text-2, ellipsis
    ├─ message — --type-data-sm, --text-1 (warn rows: warn fg; error rows: crit fg), ellipsis
