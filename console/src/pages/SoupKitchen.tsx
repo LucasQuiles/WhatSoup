@@ -715,10 +715,10 @@ const SoupKitchen: FC = () => {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ duration: 0.5, delay: 0.1, ease }}
-        className="flex flex-col lg:flex-row flex-1 min-h-0 gap-[var(--sp-3)]"
+        className="flex flex-col lg:flex-row flex-1 min-h-[var(--fleet-pane-min-h)] gap-[var(--sp-3)]"
       >
         {/* Connection Table */}
-        <div className="c-card flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:min-h-0 lg:basis-0 lg:grow-[3]">
+        <div className="c-card flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:grow-[3]">
           {/* Instances heading — layout hierarchy: above the toolbar anatomy */}
           <h2 className="c-heading-lg flex-shrink-0 px-[var(--sp-3)] pt-[var(--sp-2)]">
             Instances
@@ -1015,7 +1015,7 @@ const SoupKitchen: FC = () => {
         </div>
 
         {/* Activity Feed */}
-        <div className="c-card flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:min-h-0 lg:basis-0 lg:flex-1 lg:min-w-[var(--feed-min-w)]">
+        <div className="c-card flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:flex-1 lg:min-w-[var(--feed-min-w)]">
           <ActivityFeed events={feed} />
         </div>
       </motion.div>
