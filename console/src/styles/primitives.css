@@ -1314,3 +1314,49 @@ button.soup-pill[aria-disabled="true"] {
   border-top: var(--bw) solid var(--border-hairline);
   flex: none;
 }
+
+/* ───────────────────────── soup-tabs (tabs.md) ─────────────────────────
+   Tablist with hairline baseline rule; selected = 2px accent underline flush
+   to the rule. Switches are instant — no indicator transition by design. */
+.soup-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--border-hairline);
+  overflow-x: auto;            /* governed overflow valve — tabs never wrap */
+  scrollbar-width: none;
+}
+.soup-tabs::-webkit-scrollbar { display: none; }
+.soup-tabs--inset { padding: 0 var(--sp-4); }
+.soup-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  color: var(--text-2);
+  border-radius: var(--r-1, var(--radius-sm)) var(--r-1, var(--radius-sm)) 0 0;
+  position: relative;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.soup-tab:hover { color: var(--text-1); }
+.soup-tab--selected { color: var(--text-1); }
+.soup-tab--selected::after {
+  content: '';
+  position: absolute;
+  left: var(--sp-2);
+  right: var(--sp-2);
+  bottom: -1px;                /* flush over the baseline rule */
+  height: 2px;
+  background: var(--accent);
+}
+.soup-tab--disabled { color: var(--text-3); cursor: not-allowed; }
+.soup-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.soup-tab__reason {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.soup-tabpanel { padding: var(--sp-3) 0; }
