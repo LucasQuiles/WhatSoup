@@ -4699,15 +4699,21 @@ export class AgentRuntime implements Runtime {
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
             const activation = this.activateProviderFallback(extractUsageLimitResetTime(event.text), 'usage-limit');
-            if (activation) this.notifyProviderFallbackActivated(queue, activation);
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
                   chatJid: queue.targetChatJid,
                   mapKey,
                   oldSession: session,
+                  hadToolActivity: turnHadToolWork,
                 })
               : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
@@ -4732,15 +4738,21 @@ export class AgentRuntime implements Runtime {
           if (isProviderAuthRequiredMessage(event.text)) {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
             const activation = this.activateProviderFallback(null, 'auth-required');
-            if (activation) this.notifyProviderFallbackActivated(queue, activation);
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
                   chatJid: queue.targetChatJid,
                   mapKey,
                   oldSession: session,
+                  hadToolActivity: turnHadToolWork,
                 })
               : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
@@ -4752,15 +4764,21 @@ export class AgentRuntime implements Runtime {
           if (isRateLimitResultMessage(event.text)) {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
             const activation = this.activateProviderFallback(null, 'rate-limit');
-            if (activation) this.notifyProviderFallbackActivated(queue, activation);
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
                   chatJid: queue.targetChatJid,
                   mapKey,
                   oldSession: session,
+                  hadToolActivity: turnHadToolWork,
                 })
               : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
@@ -6144,7 +6162,11 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private notifyProviderFallbackActivated(queue: IOutboundQueue, activation: ProviderFallbackActivation): void {
+  private notifyProviderFallbackActivated(
+    queue: IOutboundQueue,
+    activation: ProviderFallbackActivation,
+    replay: { replayScheduled: boolean; blockedByToolActivity?: boolean } = { replayScheduled: false },
+  ): void {
     const now = Date.now();
     for (const [key, recordedAt] of this.recentProviderFallbackNotices) {
       if (now - recordedAt > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) {
@@ -6163,7 +6185,11 @@ export class AgentRuntime implements Runtime {
     const card = modelCardLabel(activation.fallbackProvider, activation.fallbackModel);
     const suffix = activation.keyPresent === false
       ? ' Backup credentials look missing; an operator has been notified.'
-      : ' I will continue here.';
+      : replay.blockedByToolActivity
+        ? ' The first attempt already started an action, so I will not replay it automatically. Please confirm or resend the next step.'
+        : replay.replayScheduled
+          ? ' I will continue here.'
+          : ' Please resend the last message here.';
     queue.enqueueText(`Primary model ${fallbackReasonForUser(activation.reason, activation.activeUntil)}. Backup: ${card}.${suffix}`);
   }
 
@@ -6244,8 +6270,9 @@ export class AgentRuntime implements Runtime {
     chatJid: string;
     mapKey?: string;
     oldSession: SessionManager | null;
+    hadToolActivity?: boolean;
   }): boolean {
-    if (args.activation.extended || args.activation.keyPresent === false) return false;
+    if (args.activation.extended || args.activation.keyPresent === false || args.hadToolActivity) return false;
     const replayText = args.mapKey !== undefined
       ? this.pendingTurnText.get(args.mapKey)
       : this.currentTurnReplayText;
@@ -7148,6 +7175,7 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        const turnHadToolWork = this.singleTurnHadToolActivity;
         this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
 
         // System-turn results (auto-compact /compact, manual /compact) must not
@@ -7178,14 +7206,20 @@ export class AgentRuntime implements Runtime {
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
             const activation = this.activateProviderFallback(extractUsageLimitResetTime(event.text), 'usage-limit');
-            if (activation) this.notifyProviderFallbackActivated(queue, activation);
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
                   chatJid: queue.targetChatJid,
                   oldSession: this.session,
+                  hadToolActivity: turnHadToolWork,
                 })
               : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),
@@ -7195,6 +7229,7 @@ export class AgentRuntime implements Runtime {
               if (!activation) queue.enqueueText(this.usageLimitNotice());
               this.session?.shutdown();
             }
+            this.singleTurnHadToolActivity = false;
             break;
           }
           if (isProviderPolicyBlockMessage(event.text)) {
@@ -7210,39 +7245,53 @@ export class AgentRuntime implements Runtime {
           if (isProviderAuthRequiredMessage(event.text)) {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
             const activation = this.activateProviderFallback(null, 'auth-required');
-            if (activation) this.notifyProviderFallbackActivated(queue, activation);
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
                   chatJid: queue.targetChatJid,
                   oldSession: this.session,
+                  hadToolActivity: turnHadToolWork,
                 })
               : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),
               clearCurrentInboundSeq: true,
             });
             if (!replayScheduled) this.session?.shutdown();
+            this.singleTurnHadToolActivity = false;
             break;
           }
           if (isRateLimitResultMessage(event.text)) {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
             const activation = this.activateProviderFallback(null, 'rate-limit');
-            if (activation) this.notifyProviderFallbackActivated(queue, activation);
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
                   chatJid: queue.targetChatJid,
                   oldSession: this.session,
+                  hadToolActivity: turnHadToolWork,
                 })
               : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),
               clearCurrentInboundSeq: true,
             });
             if (!replayScheduled) this.session?.shutdown();
+            this.singleTurnHadToolActivity = false;
             break;
           }
           // Context overflow — session is unsalvageable, kill and let next message respawn
@@ -7268,7 +7317,7 @@ export class AgentRuntime implements Runtime {
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
         if (!wasSilentCompact && !isSystemResult) {
-          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, this.singleTurnHadToolActivity);
+          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, turnHadToolWork);
         }
         this.singleTurnHadToolActivity = false;
         // If nothing visible was emitted this turn, send an explicit fallback

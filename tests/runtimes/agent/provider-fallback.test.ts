@@ -169,6 +169,7 @@ type FallbackView = {
     chatJid: string;
     mapKey?: string;
     oldSession: unknown;
+    hadToolActivity?: boolean;
   }): boolean;
   replayTurnOnFallback(args: unknown): Promise<void>;
   getFallbackState(): {
@@ -375,6 +376,14 @@ describe('AgentRuntime — provider fallback state machine', () => {
       chatJid: 'chat@s.whatsapp.net',
       mapKey: 'chat-key',
       oldSession: null,
+    })).toBe(false);
+
+    expect(v.scheduleFallbackReplay({
+      activation,
+      chatJid: 'chat@s.whatsapp.net',
+      mapKey: 'chat-key',
+      oldSession: null,
+      hadToolActivity: true,
     })).toBe(false);
   });
 
@@ -625,6 +634,43 @@ describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
     expect(view(runtime).effectiveModel).toBe('minimax/MiniMax-M2.7');
   });
 
+  it('does not silently replay a turn after tool activity started', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2.7',
+    });
+    const v = view(runtime);
+    v.pendingTurnText.set('chat-key', 'change the customer record');
+    v.replayTurnOnFallback = vi.fn(async () => {});
+    const queue = makeFakeQueue();
+
+    fullView(runtime).handleEventWithContext(
+      { type: 'tool_use', toolId: 'tool-1', toolName: 'whatsoup_add_or_edit_contact', toolInput: {} },
+      queue,
+      null,
+      'conversation',
+      123,
+      'chat-key',
+      'tool-scope',
+      false,
+    );
+    fullView(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      null,
+      'conversation',
+      123,
+      'chat-key',
+      'tool-scope',
+      false,
+    );
+
+    expect(v.replayTurnOnFallback).not.toHaveBeenCalled();
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('already started an action'),
+    );
+  });
+
   it('assistant_text then result: fallback stays null until the result fires', () => {
     const runtime = makeRuntime({
       agentFallbackProvider: 'opencode-cli',
@@ -667,11 +713,17 @@ describe('usage-limit user notice', () => {
       agentFallbackProvider: 'opencode-cli',
       agentFallbackModel: 'minimax/minimax-m2',
     });
+    const v = view(runtime);
+    v.pendingTurnText.set('notice-key', 'continue this request');
+    v.replayTurnOnFallback = vi.fn(async () => {});
     const queue = makeFakeQueue();
     driveView(runtime).handleEventWithContext(
       { type: 'result', text: USAGE_LIMIT_TEXT },
       queue,
       null,
+      undefined,
+      undefined,
+      'notice-key',
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('Primary model hit a token/quota limit'),
