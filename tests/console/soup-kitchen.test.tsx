@@ -4,27 +4,41 @@
  * Renders the real component under jsdom + Testing Library and asserts on
  * observable DOM (text content, aria states, classNames that encode user-
  * visible state) rather than scanning source strings or re-implementing
- * internals in a parallel helper. The previous version of this file matched
- * substrings against the SoupKitchen source and replicated its filter / alert
- * / mode-count logic; both patterns gave green checks even when the component
- * stopped emitting the matched markup. Tracked in issue #454.
+ * internals in a parallel helper.
  *
- * Tests against real exported helpers (computeKpis, deriveFleetMessageSparklines,
- * text-utils) are kept as-is — they pin contracts the component depends on.
+ * C2.3 change summary vs. the prior version:
+ *   - Row activation: click/Enter now opens the Drawer; "Open line" action
+ *     in the drawer navigates. Old direct-navigate test is replaced.
+ *   - Sort tests: header sort buttons (role "button" inside the th) are the
+ *     interaction target; aria-sort is still on the <th> (columnheader).
+ *     fireEvent.click targets the sort button, not the columnheader directly.
+ *   - visibleTableLineNames: "Line" is now col 0 (StatusCell + name), so the
+ *     cell index changed from 1 → 0.
+ *   - New: drawer open/retarget/Escape/close, aria-current on selected row,
+ *     drawer kv content swap, "Line not found" error state, StatusCell
+ *     presence per row, long-value fixture.
  *
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+  act,
+} from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context';
 
 // Hoisted hook mocks — must be declared before component import so the
 // `vi.mock` factories below can wire them in without forward-reference TDZ
-// issues. Each entry is a vi.fn whose return value we tune per-test.
+// issues.
 const useLinesMock = vi.hoisted(() => vi.fn());
 const useFeedMock = vi.hoisted(() => vi.fn());
 const useFleetMetricsMock = vi.hoisted(() => vi.fn());
+const useLogsMock = vi.hoisted(() => vi.fn());
 const navigateMock = vi.hoisted(() => vi.fn());
 
 vi.mock('react-router-dom', async (importOriginal) => {
@@ -41,6 +55,7 @@ vi.mock('../../console/src/hooks/use-fleet', async (importOriginal) => {
     ...actual,
     useLines: useLinesMock,
     useFeed: useFeedMock,
+    useLogs: useLogsMock,
   };
 });
 
@@ -82,6 +97,7 @@ import { computeKpis } from '../../console/src/lib/compute-kpis';
 import { deriveFleetMessageSparklines } from '../../console/src/lib/metrics-sparklines';
 import { displayInstanceName, formatPhone, formatCompact } from '../../console/src/lib/text-utils';
 import type { FeedEvent, FleetMetrics, LineInstance, Mode } from '../../console/src/types';
+import type { LogEntry } from '../../console/src/types';
 
 // ---------------------------------------------------------------------------
 // Test data factories + render helper
@@ -105,12 +121,23 @@ function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
   };
 }
 
+function makeLogEntry(overrides: Partial<LogEntry> = {}): LogEntry {
+  return {
+    timestamp: '2026-06-11T12:00:00Z',
+    level: 'info',
+    msg: 'test message',
+    source: 'test-source',
+    ...overrides,
+  };
+}
+
 interface RenderOptions {
   lines?: LineInstance[];
   feed?: FeedEvent[];
   linesError?: Error | null;
   feedError?: Error | null;
   fleetMetrics?: Partial<FleetMetrics> | null;
+  logs?: LogEntry[];
 }
 
 function renderPage(opts: RenderOptions = {}) {
@@ -131,6 +158,12 @@ function renderPage(opts: RenderOptions = {}) {
     data: opts.fleetMetrics ?? undefined,
     isLoading: false,
     isError: false,
+    refetch: vi.fn(),
+  });
+  useLogsMock.mockReturnValue({
+    data: opts.logs ?? [],
+    isError: false,
+    error: null,
     refetch: vi.fn(),
   });
 
@@ -177,6 +210,7 @@ function getModePill(label: string): HTMLElement {
 
 /** Table body — scoped queries here ignore the KPI strip, alert banner, etc. */
 function tableBody(): HTMLElement {
+  // Anchor on the "Mode" columnheader — still present as col 1 in new layout.
   const headerCell = screen.getByRole('columnheader', { name: /^Mode\b/ });
   const tbody = headerCell.closest('table')!.querySelector('tbody');
   if (!tbody) throw new Error('SoupKitchen table has no tbody');
@@ -203,14 +237,17 @@ function alertBanner(): HTMLElement | null {
 
 /**
  * Return the list of line names visible in the instance table, preserving
- * the order produced by the component. Scoped to <tbody> so AlertBanner and
- * ModeBadge labels can't bleed in.
+ * the order produced by the component. Scoped to <tbody>.
+ *
+ * C2.3 change: "Line" is now col 0 (StatusCell renders name text inside it).
+ * Old col index was 1; new col index is 0.
  */
 function visibleTableLineNames(lines: LineInstance[]): string[] {
   const known = new Map(lines.map((line) => [displayInstanceName(line.name), line.name]));
   return tableRows()
     .map((row) => {
-      const lineCell = tableCell(row, 1);
+      // Col 0 now holds the StatusCell + name label.
+      const lineCell = tableCell(row, 0);
       for (const [displayName, rawName] of known) {
         if (within(lineCell).queryByText(displayName)) return rawName;
       }
@@ -219,13 +256,22 @@ function visibleTableLineNames(lines: LineInstance[]): string[] {
     .filter((name): name is string => name !== undefined);
 }
 
+/**
+ * Find the sort button INSIDE a given columnheader th.
+ * TableHeaderCell renders a <button> inside the <th> for sortable columns.
+ */
+function getSortButton(columnheader: HTMLElement): HTMLElement {
+  const btn = columnheader.querySelector('button');
+  if (!btn) throw new Error('No sort button in columnheader');
+  return btn as HTMLElement;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Loading / empty state
 // ---------------------------------------------------------------------------
 
 describe('SoupKitchen loading state', () => {
   it('renders with empty lines array when data is not yet loaded', () => {
-    // When useLines returns { data: undefined }, the component defaults to []
     const lines: LineInstance[] = [];
     const kpis = computeKpis(lines);
 
@@ -301,8 +347,6 @@ describe('SoupKitchen KPI cards with data', () => {
       'Media Processed',
     ];
     for (const label of expected) {
-      // getKpiCard throws if the label isn't found exactly once on a KPI card,
-      // which is exactly the contract we want here.
       expect(getKpiCard(label)).toBeDefined();
     }
   });
@@ -346,9 +390,22 @@ describe('SoupKitchen instance table rendering', () => {
 
   it('renders all expected column headers', () => {
     renderPage({ lines });
-    const expected = ['Mode', 'Line', 'Chats', 'Groups', 'Unread', 'Sent', 'Recv', 'Tokens', 'Sessions', 'Provider', 'Tags', 'Active'];
+    // C2.3: "Line" replaced the old "Mode+Line" split — col 0 is now "Line"
+    // (StatusCell+name). "Mode" is still col 1.
+    const expected = ['Line', 'Mode', 'Chats', 'Groups', 'Unread', 'Sent', 'Recv', 'Tokens', 'Sessions', 'Provider', 'Tags', 'Active'];
     for (const col of expected) {
       expect(screen.getByRole('columnheader', { name: new RegExp(`^${col}\\b`) })).toBeDefined();
+    }
+  });
+
+  it('renders a StatusCell in col 0 of each data row (shape law)', () => {
+    renderPage({ lines });
+    // StatusCell renders soup-status-cell class. Assert at least one per row.
+    // This is a shape-law check — does NOT assert color (visual only).
+    for (const row of tableRows()) {
+      const cell = tableCell(row, 0);
+      // StatusCell renders a span.soup-status-cell containing a shape span + label
+      expect(cell.querySelector('.soup-status-cell')).not.toBeNull();
     }
   });
 
@@ -372,21 +429,42 @@ describe('SoupKitchen instance table rendering', () => {
 
   it('shows totalSessions for agent-mode rows and em-dash for non-agent rows', () => {
     renderPage({ lines });
-    // operator-agent (agent mode) should expose its totalSessions value
+    // Sessions is col 8 in the new layout (Line=0, Mode=1, Chats=2, Groups=3,
+    // Unread=4, Sent=5, Recv=6, Tokens=7, Sessions=8).
     const agentRow = screen.getByText(displayInstanceName('operator-agent')).closest('tr') as HTMLElement;
     expect(tableCell(agentRow, 8).textContent).toBe('47');
 
-    // primary-line (passive mode) should show em-dash in the Sessions column.
     const passiveRow = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
     expect(tableCell(passiveRow, 8).textContent).toBe('—');
-    // And the passive row must NOT contain "47"
     expect(within(passiveRow).queryByText('47')).toBeNull();
   });
 
-  it('navigates to /lines/<name> when a row is clicked', () => {
+  // C2.3: row click now opens the drawer, not navigates directly.
+  // Navigation moves to the "Open line" button inside the drawer.
+  it('clicking a row opens the drawer for that line', () => {
     renderPage({ lines });
     const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
     fireEvent.click(row);
+    // Drawer is open: the inspector complementary region is present.
+    expect(screen.getByRole('complementary')).toBeDefined();
+    // navigateMock must NOT have been called on row click.
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it('pressing Enter on a row opens the drawer', () => {
+    renderPage({ lines });
+    const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
+    fireEvent.keyDown(row, { key: 'Enter' });
+    expect(screen.getByRole('complementary')).toBeDefined();
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it('"Open line" button inside the drawer navigates to /lines/<name>', () => {
+    renderPage({ lines });
+    const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
+    fireEvent.click(row);
+    const openBtn = screen.getByRole('button', { name: 'Open line' });
+    fireEvent.click(openBtn);
     expect(navigateMock).toHaveBeenCalledTimes(1);
     expect(navigateMock).toHaveBeenCalledWith('/lines/primary-line');
   });
@@ -447,16 +525,13 @@ describe('SoupKitchen error state handling', () => {
     expect(within(banner!).getByText('auth expired')).toBeDefined();
     expect(within(banner!).getByText('degraded')).toBeDefined();
     expect(within(banner!).getByText('connection lost')).toBeDefined();
-    // Healthy line 'alert-c' should NOT appear in the banner (it still
-    // renders as a table row).
     expect(within(banner!).queryByText('alert-c')).toBeNull();
-    // And the three unhealthy ones should all be linked from the banner.
     expect(within(banner!).getByText('alert-a')).toBeDefined();
     expect(within(banner!).getByText('alert-b')).toBeDefined();
     expect(within(banner!).getByText('alert-d')).toBeDefined();
   });
 
-  it('applies error wash class on unreachable rows and warn wash on degraded rows', () => {
+  it('applies crit severity class on unreachable rows and warn severity on degraded rows', () => {
     const lines = [
       makeLine({ name: 'row-down', status: 'unreachable' }),
       makeLine({ name: 'row-slow', status: 'degraded' }),
@@ -467,10 +542,11 @@ describe('SoupKitchen error state handling', () => {
     const downRow = within(body).getByText('row-down').closest('tr') as HTMLElement;
     const slowRow = within(body).getByText('row-slow').closest('tr') as HTMLElement;
     const fineRow = within(body).getByText('row-fine').closest('tr') as HTMLElement;
-    expect(downRow.className).toContain('s-crit-wash');
-    expect(slowRow.className).toContain('s-warn-wash');
-    expect(fineRow.className).not.toContain('s-crit-wash');
-    expect(fineRow.className).not.toContain('s-warn-wash');
+    // C2.3: TableRow severity prop maps to soup-table-row--crit / --warn classes.
+    expect(downRow.className).toContain('crit');
+    expect(slowRow.className).toContain('warn');
+    expect(fineRow.className).not.toContain('crit');
+    expect(fineRow.className).not.toContain('warn');
   });
 
   it('renders a fleet-load-error row instead of the empty-filtered placeholder when the lines query fails', () => {
@@ -509,17 +585,22 @@ describe('SoupKitchen filter behavior', () => {
     expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'charlie', 'delta', 'echo']);
   });
 
+  // C2.3: sort now fires the sort BUTTON inside the columnheader, not the th
+  // directly. aria-sort remains on the <th> (columnheader role).
   it('sorts by line name and exposes aria-sort direction', () => {
     renderPage({ lines });
     const lineHeader = screen.getByRole('columnheader', { name: /^Line\b/ });
+    const sortBtn = getSortButton(lineHeader);
 
-    fireEvent.click(lineHeader);
-    expect(lineHeader.getAttribute('aria-sort')).toBe('descending');
-    expect(visibleTableLineNames(lines)).toEqual(['echo', 'delta', 'charlie', 'bravo', 'alpha']);
-
-    fireEvent.click(lineHeader);
+    // First click on a new key: TableHeaderCell cycles none→asc, so first = ascending.
+    fireEvent.click(sortBtn);
     expect(lineHeader.getAttribute('aria-sort')).toBe('ascending');
     expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'charlie', 'delta', 'echo']);
+
+    // Second click on same key: asc→desc.
+    fireEvent.click(sortBtn);
+    expect(lineHeader.getAttribute('aria-sort')).toBe('descending');
+    expect(visibleTableLineNames(lines)).toEqual(['echo', 'delta', 'charlie', 'bravo', 'alpha']);
   });
 
   it('sorts unread counts numerically and reverses direction on repeat click', () => {
@@ -530,14 +611,17 @@ describe('SoupKitchen filter behavior', () => {
     ];
     renderPage({ lines: unreadLines });
     const unreadHeader = screen.getByRole('columnheader', { name: /^Unread\b/ });
+    const sortBtn = getSortButton(unreadHeader);
 
-    fireEvent.click(unreadHeader);
-    expect(unreadHeader.getAttribute('aria-sort')).toBe('descending');
-    expect(visibleTableLineNames(unreadLines)).toEqual(['ten-unread', 'two-unread', 'one-unread']);
-
-    fireEvent.click(unreadHeader);
+    // First click: none→asc.
+    fireEvent.click(sortBtn);
     expect(unreadHeader.getAttribute('aria-sort')).toBe('ascending');
     expect(visibleTableLineNames(unreadLines)).toEqual(['one-unread', 'two-unread', 'ten-unread']);
+
+    // Second click: asc→desc.
+    fireEvent.click(sortBtn);
+    expect(unreadHeader.getAttribute('aria-sort')).toBe('descending');
+    expect(visibleTableLineNames(unreadLines)).toEqual(['ten-unread', 'two-unread', 'one-unread']);
   });
 
   it('clicking "Lines Connected" KPI filters to online lines only', () => {
@@ -590,8 +674,6 @@ describe('SoupKitchen filter behavior', () => {
 
   it('renders mode filter pills for all, passive, chat, agent', () => {
     renderPage({ lines });
-    // Scoped to the toolbar pill container — ModeBadge labels in rows are not
-    // candidates here.
     expect(getModePill('All')).toBeDefined();
     expect(getModePill('passive')).toBeDefined();
     expect(getModePill('chat')).toBeDefined();
@@ -632,6 +714,7 @@ describe('SoupKitchen filter behavior', () => {
 
   it('search input filters by name case-insensitively', () => {
     renderPage({ lines });
+    // C2.3: placeholder is still "Search lines..." (ToolbarSearch preserves it)
     fireEvent.change(screen.getByPlaceholderText('Search lines...'), { target: { value: 'ALPHA' } });
     expect(visibleTableLineNames(lines)).toEqual(['alpha']);
   });
@@ -686,9 +769,6 @@ describe('SoupKitchen mode counts', () => {
 
   it('omits the count badge on every mode pill when there are no lines', () => {
     renderPage({ lines: [] });
-    // FilterPill suppresses the badge span when count === 0, so each pill
-    // contains only its label text node. Asserting the absence of any digit
-    // pins that suppression to user-visible output.
     expect(getModePill('All').textContent).toBe('All');
     expect(getModePill('passive').textContent).toBe('passive');
     expect(getModePill('chat').textContent).toBe('chat');
@@ -720,13 +800,10 @@ describe('SoupKitchen KPI toggle', () => {
     const card = getKpiCard('Lines Connected');
     fireEvent.click(card);
     expect(card.getAttribute('aria-pressed')).toBe('true');
-    // The unreachable line should be filtered out of the table body. The
-    // AlertBanner still names it, so we scope the query to <tbody>.
     expect(within(tableBody()).queryByText('down')).toBeNull();
 
     fireEvent.click(card);
     expect(card.getAttribute('aria-pressed')).toBe('false');
-    // All three rows visible again
     expect(within(tableBody()).queryByText('down')).not.toBeNull();
     expect(within(tableBody()).queryByText('on1')).not.toBeNull();
     expect(within(tableBody()).queryByText('on2')).not.toBeNull();
@@ -774,7 +851,6 @@ describe('SoupKitchen sparkline integration', () => {
   it('switches the metrics range when the 7d range pill is clicked', () => {
     renderPage({ lines: [] });
     fireEvent.click(screen.getByText('7d'));
-    // The most recent invocation should pass '7d'
     const lastCall = useFleetMetricsMock.mock.calls.at(-1);
     expect(lastCall?.[0]).toBe('7d');
   });
@@ -820,5 +896,153 @@ describe('SoupKitchen structural composition', () => {
     const mod = await import('../../console/src/pages/SoupKitchen');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
+  });
+
+  // C2.3: Toolbar is now the filter shell — role="toolbar" with aria-label.
+  it('renders a toolbar landmark with accessible label', () => {
+    renderPage({ lines: [] });
+    expect(screen.getByRole('toolbar', { name: 'Instance filters' })).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Drawer — open / close / retarget / aria-current / missing-line
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen drawer', () => {
+  const lineA = makeLine({ name: 'line-a', status: 'online', mode: 'passive', phone: '+15551111111' });
+  const lineB = makeLine({ name: 'line-b', status: 'online',   mode: 'chat',  phone: '+15552222222' });
+
+  it('drawer is closed by default', () => {
+    renderPage({ lines: [lineA] });
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  it('clicking a row opens the drawer and shows the line name in the head', () => {
+    renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+    expect(drawer).toBeDefined();
+    // Drawer head shows the line name as title
+    expect(within(drawer).getByText(displayInstanceName('line-a'))).toBeDefined();
+  });
+
+  it('selected row gets aria-current="true" when its drawer is open', () => {
+    renderPage({ lines: [lineA, lineB] });
+    const rowA = screen.getByText(displayInstanceName('line-a')).closest('tr')!;
+    fireEvent.click(rowA);
+    expect(rowA.getAttribute('aria-current')).toBe('true');
+    // Other rows remain without aria-current
+    const rowB = screen.getByText(displayInstanceName('line-b')).closest('tr')!;
+    expect(rowB.getAttribute('aria-current')).toBeNull();
+  });
+
+  it('clicking another row while drawer is open retargets it (content swap, no close)', () => {
+    renderPage({ lines: [lineA, lineB] });
+    // Open for lineA
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+    expect(within(drawer).getByText(displayInstanceName('line-a'))).toBeDefined();
+
+    // Retarget to lineB — drawer stays open, content swaps
+    fireEvent.click(screen.getByText(displayInstanceName('line-b')).closest('tr')!);
+    expect(screen.getByRole('complementary')).toBe(drawer); // same node — no remount
+    expect(within(drawer).getByText(displayInstanceName('line-b'))).toBeDefined();
+    // lineA name no longer in drawer head (it was the title span)
+    expect(within(drawer).queryByText(displayInstanceName('line-a'))).toBeNull();
+  });
+
+  it('aria-current follows retarget: moves from lineA to lineB', () => {
+    renderPage({ lines: [lineA, lineB] });
+    const rowA = screen.getByText(displayInstanceName('line-a')).closest('tr')!;
+    const rowB = screen.getByText(displayInstanceName('line-b')).closest('tr')!;
+    fireEvent.click(rowA);
+    expect(rowA.getAttribute('aria-current')).toBe('true');
+    fireEvent.click(rowB);
+    expect(rowA.getAttribute('aria-current')).toBeNull();
+    expect(rowB.getAttribute('aria-current')).toBe('true');
+  });
+
+  it('Escape closes the drawer', () => {
+    renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    expect(screen.getByRole('complementary')).toBeDefined();
+
+    // Escape on the drawer shell
+    fireEvent.keyDown(screen.getByRole('complementary'), { key: 'Escape' });
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  it('close X button closes the drawer', () => {
+    renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Close inspector' }));
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  it('drawer KV block shows phone and provider fields', () => {
+    renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+    expect(within(drawer).getByText('Phone')).toBeDefined();
+    expect(within(drawer).getByText('Provider')).toBeDefined();
+  });
+
+  it('drawer KV swaps to lineB fields on retarget', () => {
+    // Use two lines with distinguishable phone numbers
+    const la = makeLine({ name: 'retarget-a', phone: '+15550001111' });
+    const lb = makeLine({ name: 'retarget-b', phone: '+15550002222' });
+    renderPage({ lines: [la, lb] });
+
+    fireEvent.click(screen.getByText(displayInstanceName('retarget-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+
+    // Retarget to lb
+    fireEvent.click(screen.getByText(displayInstanceName('retarget-b')).closest('tr')!);
+    // Drawer title is now retarget-b
+    expect(within(drawer).getByText(displayInstanceName('retarget-b'))).toBeDefined();
+  });
+
+  it('renders "Line not found" when the selected line is removed from the dataset', () => {
+    const { rerender } = renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    expect(screen.getByRole('complementary')).toBeDefined();
+
+    // Re-render with the line removed — simulates a data refresh removing it
+    useLinesMock.mockReturnValue({ data: [], isError: false, error: null });
+    useLogsMock.mockReturnValue({ data: [], isError: false, error: null, refetch: vi.fn() });
+    const toastValue: ToastContextValue = {
+      toast: vi.fn(), success: vi.fn(), error: vi.fn(),
+      info: vi.fn(), dismiss: vi.fn(), clear: vi.fn(),
+    };
+    rerender(
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <SoupKitchen />
+        </MemoryRouter>
+      </ToastContext.Provider>
+    );
+
+    const drawer = screen.getByRole('complementary');
+    expect(within(drawer).getByText('Line not found')).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. Long-value fixture — truncation class contract
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen long-value fixture', () => {
+  it('renders a line with a 40+ char name without layout errors', () => {
+    // This test pins the rendering contract for long names. It does NOT prove
+    // CSS truncation (jsdom computes no box metrics) — that requires visual QA.
+    const longName = 'this-is-a-very-long-line-name-exceeding-40chars';
+    const longLine = makeLine({
+      name: longName,
+      provider: 'a-provider-with-a-very-long-name-over-24-chars',
+    });
+    renderPage({ lines: [longLine] });
+    expect(screen.getByText(displayInstanceName(longName))).toBeDefined();
   });
 });

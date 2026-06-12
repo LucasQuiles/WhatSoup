@@ -105,7 +105,8 @@ describe('design system compliance — Shannon slice', () => {
 
     expect((ops.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
     expect((soupKitchen.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
-    expect(soupKitchen).toContain('aria-label="Search lines"')
+    // C2.3: ToolbarSearch primitive generates aria-label from the label prop.
+    expect(soupKitchen).toContain('label="Search lines"')
   })
 
   it('KpiCard uses aria-pressed and useId for gradient IDs', () => {

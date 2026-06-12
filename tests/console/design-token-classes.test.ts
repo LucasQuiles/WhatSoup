@@ -34,7 +34,8 @@ describe('design token component classes', () => {
     const soupKitchen = read('console/src/pages/SoupKitchen.tsx')
     const inbox = read('console/src/pages/Inbox.tsx')
 
-    expect(soupKitchen).toContain('c-input c-input-search')
+    // C2.3: SoupKitchen migrated to ToolbarSearch primitive; no longer uses c-input c-input-search.
+    expect(soupKitchen).toContain('ToolbarSearch')
     expect(inbox).toContain('c-input c-input-search')
   })
 
