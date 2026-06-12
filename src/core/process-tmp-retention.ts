@@ -74,6 +74,8 @@ export class ProcessTmpRetentionTimer {
   }
 
   start(intervalMs: number = this.retention.intervalMs): void {
+    if (this.timer) return;
+
     this.runCleanup();
     this.timer = setInterval(() => {
       this.runCleanup();

@@ -83,6 +83,26 @@ describe('runProcessTmpCleanup', () => {
 });
 
 describe('ProcessTmpRetentionTimer', () => {
+  it('start() is a no-op when already started — no second interval is created', () => {
+    vi.useFakeTimers();
+    const root = makeRoot();
+    const timer = new ProcessTmpRetentionTimer(root);
+    const runSpy = vi.spyOn(timer, 'runCleanup');
+
+    timer.start(1000);
+    expect(runSpy).toHaveBeenCalledTimes(1); // immediate run
+
+    timer.start(1000); // second start must be a no-op
+    expect(runSpy).toHaveBeenCalledTimes(1); // no second immediate run
+
+    vi.advanceTimersByTime(1000);
+    expect(runSpy).toHaveBeenCalledTimes(2); // one interval tick, not two
+
+    timer.stop();
+    vi.advanceTimersByTime(5000);
+    expect(runSpy).toHaveBeenCalledTimes(2); // stop() cleared the only interval
+  });
+
   it('runs cleanup immediately and schedules later cleanup', () => {
     vi.useFakeTimers();
     const root = makeRoot();
