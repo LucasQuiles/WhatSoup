@@ -868,6 +868,10 @@ export const config = {
   // 'minimal' (suppress most updates — only critical status shown)
   toolUpdateMode: ((instance?.toolUpdateMode as string | undefined) ?? 'full') as 'full' | 'friendly' | 'minimal',
   toolUpdateRedirectJid: stringProp(instance ?? undefined, 'toolUpdateRedirectJid') ?? null,
+  // Gate the agent restart/back-online notification. Default true preserves existing behavior.
+  startupNotifications: booleanProp(instance ?? undefined, 'startupNotifications', true),
+  // Gate proactive per_chat session resume on startup. Default true preserves existing behavior.
+  proactiveResumeOnStartup: booleanProp(instance ?? undefined, 'proactiveResumeOnStartup', true),
   textAggregateDelayMs: positiveIntValue(instance?.textAggregateDelayMs, 2_000),
 
   // Operation tracker: per-tool progress reporting & stall detection

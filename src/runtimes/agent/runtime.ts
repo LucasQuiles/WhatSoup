@@ -2469,7 +2469,7 @@ export class AgentRuntime implements Runtime {
     // (graceful shutdown) when we last ran. This lets agents pick up mid-conversation instead
     // of waiting for the user to send a message after a service restart.
     // sandboxPerChat is excluded — its resume path requires workspace provisioning which happens lazily.
-    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability) {
+    if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability && config.proactiveResumeOnStartup) {
       const resumableCheckpoints = this.durability.getResumableCheckpoints();
       for (const cp of resumableCheckpoints) {
         const full = this.durability.getSessionCheckpoint(cp.conversation_key);
