@@ -108,7 +108,13 @@ export class FleetDiscovery {
               break;
             }
           }
-        } catch { /* no tokens.env — health token stays null */ }
+        } catch (err) {
+          // ENOENT is the normal no-token case; anything else (perms, encoding)
+          // would silently strand the instance behind 401s downstream.
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+            log.warn({ err, tokensPath }, 'tokens.env unreadable; instance polled without a health token');
+          }
+        }
 
         // Determine socket path based on instance type
         let socketPath: string | null = null;

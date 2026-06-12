@@ -7,9 +7,10 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { createFleetServer } from './index.ts';
+import { DEFAULT_FLEET_PORT } from './constants.ts';
 import { loadOrCreateFleetTokens } from './token-storage.ts';
 
-const port = parseInt(process.argv[2] ?? '9099', 10);
+const port = parseInt(process.argv[2] ?? String(DEFAULT_FLEET_PORT), 10);
 
 // Open a throwaway in-memory DB — the standalone server doesn't have a "self" instance
 const db = new DatabaseSync(':memory:');

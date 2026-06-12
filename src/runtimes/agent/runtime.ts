@@ -2777,7 +2777,10 @@ export class AgentRuntime implements Runtime {
             this.db.raw.prepare(
               "UPDATE pending_heal_reports SET state = 'resolved' WHERE report_id = ?",
             ).run(parsed.reportId);
-          } catch { /* best-effort */ }
+          } catch (err) {
+            // best-effort, but visible: a stuck-pending row re-fires stale-open re-notify
+            log.warn({ err, reportId: parsed.reportId }, 'failed to mark heal report resolved; row stays pending');
+          }
 
           // Clear hard timeout (normal completion path)
           if (this.controlSessionTimeout) {

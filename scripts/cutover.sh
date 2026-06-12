@@ -432,7 +432,7 @@ main() {
   echo "  1. Complete the manual config edits printed above (CUT-08, CUT-09)"
   echo "  2. Restart the agent client (CUT-10)"
   echo "  3. Run smoke verification from the new session (CUT-11)"
-  echo "  4. Run scripts/soak-check.sh daily for the 48-hour soak period"
+  echo "  4. Monitor /health and instance logs daily for the 48-hour soak period"
   echo ""
 }
 

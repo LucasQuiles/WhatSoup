@@ -253,8 +253,9 @@ export function writePermissionsSettings(
     if (existsSync(settingsPath)) {
       try {
         existing = JSON.parse(readFileSync(settingsPath, 'utf8'));
-      } catch {
-        // Corrupt file — overwrite entirely
+      } catch (err) {
+        // Corrupt file — overwrite entirely (destructive: customizations are lost)
+        log.warn({ err, settingsPath }, 'settings.json unreadable; overwriting with generated settings');
       }
     }
 
@@ -318,8 +319,9 @@ export function ensurePermissionsSettings(
         // Has settings (e.g. hooks) but no permissions — add them
         const merged = { ...existing, permissions: defaults.permissions };
         writePrivateFileSync(settingsPath, JSON.stringify(merged, null, 2));
-      } catch {
-        // Corrupt file — overwrite with defaults
+      } catch (err) {
+        // Corrupt file — overwrite with defaults (destructive: customizations are lost)
+        log.warn({ err, settingsPath }, 'settings.json unreadable; overwriting with default permissions');
         const out: Record<string, unknown> = { ...defaults };
         if (enabledPlugins) out.enabledPlugins = enabledPlugins;
         writePrivateFileSync(settingsPath, JSON.stringify(out, null, 2));
