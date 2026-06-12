@@ -855,3 +855,106 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     expect(secondCall[1].activeUntil).toBeGreaterThan(firstActiveUntil);
   });
 });
+
+// ─── Custom-endpoint providerConfig scoping for sessions ─────────────────────
+// The custom-endpoint fields (baseUrl/apiKeyService) belong to the PRIMARY
+// provider+model: an opencode session serving a fallback entry must not
+// inherit them, or the custom-endpoint argv contract would suppress the
+// entry's `-m <model>` and re-route the turn to the primary's endpoint block
+// (or opencode's default model when no block was written). Other
+// providerConfig keys (budget, …) keep applying to every session, and
+// managed-loop API fallback sessions keep today's full inheritance.
+
+describe('createSessionManager — custom-endpoint providerConfig scoping', () => {
+  type SessionView = { providerConfig: Record<string, unknown> | undefined };
+  type RuntimeWithFactory = {
+    createSessionManager(opts: {
+      chatJid: string;
+      cwd: string | undefined;
+      onEvent: () => void;
+      onCrash: () => void;
+      notifyUser: () => void;
+    }): unknown;
+  };
+
+  function buildSession(runtime: AgentRuntime): SessionView {
+    return (runtime as unknown as RuntimeWithFactory).createSessionManager({
+      chatJid: 'scope-test@s.whatsapp.net',
+      cwd: undefined,
+      onEvent: vi.fn(),
+      onCrash: vi.fn(),
+      notifyUser: vi.fn(),
+    }) as unknown as SessionView;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    lookupCredentialMock.mockReturnValue(null);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('passes the full providerConfig (baseUrl + apiKeyService) to primary opencode sessions', () => {
+    const runtime = makeRuntime({
+      agentProvider: 'opencode-cli',
+      agentProviderConfig: {
+        baseUrl: 'https://api.cloud.example/v1',
+        apiKeyService: 'minimax',
+        budget: { requestsPerMinute: 10 },
+      },
+      model: 'MiniMax-M2',
+    });
+    const session = buildSession(runtime);
+    expect(session.providerConfig).toEqual({
+      baseUrl: 'https://api.cloud.example/v1',
+      apiKeyService: 'minimax',
+      budget: { requestsPerMinute: 10 },
+    });
+  });
+
+  it('strips the custom-endpoint fields but keeps the rest for an opencode session serving a fallback entry', () => {
+    const runtime = makeRuntime({
+      agentProvider: 'openai-api',
+      agentProviderConfig: {
+        baseUrl: 'https://api.openai.example/v1',
+        apiKeyService: 'openai',
+        budget: { requestsPerMinute: 10 },
+      },
+      model: 'gpt-5.2',
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/MiniMax-M2',
+    });
+    view(runtime).activateProviderFallback(null);
+    expect(view(runtime).effectiveProvider).toBe('opencode-cli');
+
+    const session = buildSession(runtime);
+    expect(session.providerConfig).toEqual({ budget: { requestsPerMinute: 10 } });
+
+    view(runtime).deactivateProviderFallback('test cleanup');
+  });
+
+  it('keeps the full providerConfig for a managed API fallback session (existing inheritance pinned)', () => {
+    const runtime = makeRuntime({
+      agentProvider: 'openai-api',
+      agentProviderConfig: {
+        baseUrl: 'https://api.openai.example/v1',
+        apiKeyService: 'deepseek',
+      },
+      model: 'gpt-5.2',
+      agentFallbackProvider: 'anthropic-api',
+      agentFallbackModel: 'claude-opus-4-8[1m]',
+    });
+    view(runtime).activateProviderFallback(null);
+    expect(view(runtime).effectiveProvider).toBe('anthropic-api');
+
+    const session = buildSession(runtime);
+    expect(session.providerConfig).toEqual({
+      baseUrl: 'https://api.openai.example/v1',
+      apiKeyService: 'deepseek',
+    });
+
+    view(runtime).deactivateProviderFallback('test cleanup');
+  });
+});

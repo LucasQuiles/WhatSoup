@@ -200,3 +200,83 @@ describe('validateInstanceConfig — opencode-cli baseUrl requires a resolvable 
     expect(err?.field).toBe('agentOptions.providerConfig.baseUrl');
   });
 });
+
+describe('validateInstanceConfig — providerConfig.apiKeyService', () => {
+  const opencodeEndpoint = (apiKeyService: unknown, extra: Record<string, unknown> = {}) =>
+    agentRaw(
+      {
+        provider: 'opencode-cli',
+        providerConfig: { baseUrl: 'https://api.example.com/v1', apiKeyService, ...extra },
+      },
+      { model: 'MiniMax-M2' },
+    );
+
+  it('accepts a known keyring service alongside baseUrl (opencode-cli)', () => {
+    expect(
+      validateInstanceConfig(opencodeEndpoint('minimax'), createCtx),
+      'a SERVICE_ENV_MAP service with baseUrl must validate clean',
+    ).toBeNull();
+    // Control: the identical config with an unknown service is rejected, so
+    // the accept proves the membership rule rather than a vacuous pass.
+    const bad = validateInstanceConfig(opencodeEndpoint('not-a-service'), createCtx);
+    expect(bad?.field).toBe('agentOptions.providerConfig.apiKeyService');
+  });
+
+  it('accepts apiKeyService with baseUrl on API providers too', () => {
+    expect(
+      validateInstanceConfig(
+        agentRaw({
+          provider: 'openai-api',
+          providerConfig: { baseUrl: 'https://api.deepseek.example/v1', apiKeyService: 'deepseek' },
+        }),
+        createCtx,
+      ),
+    ).toBeNull();
+    // Control: dropping baseUrl from the identical config is rejected.
+    const bad = validateInstanceConfig(
+      agentRaw({ provider: 'openai-api', providerConfig: { apiKeyService: 'deepseek' } }),
+      createCtx,
+    );
+    expect(bad?.field).toBe('agentOptions.providerConfig.apiKeyService');
+  });
+
+  it('rejects a non-string apiKeyService', () => {
+    const err = validateInstanceConfig(opencodeEndpoint(42), createCtx);
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('agentOptions.providerConfig.apiKeyService');
+    expect(err?.message).toMatch(/non-empty string/);
+  });
+
+  it('rejects an empty apiKeyService', () => {
+    const err = validateInstanceConfig(opencodeEndpoint('   '), createCtx);
+    expect(err?.field).toBe('agentOptions.providerConfig.apiKeyService');
+    expect(err?.message).toMatch(/non-empty string/);
+  });
+
+  it('rejects an apiKeyService that is not a known keyring service, listing the valid ones', () => {
+    const err = validateInstanceConfig(opencodeEndpoint('grokcloud'), createCtx);
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('agentOptions.providerConfig.apiKeyService');
+    expect(err?.message).toContain('grokcloud');
+    expect(err?.message).toContain('minimax');
+    expect(err?.message).toContain('deepseek');
+  });
+
+  it('rejects apiKeyService without baseUrl (the key service would be inert)', () => {
+    const err = validateInstanceConfig(
+      agentRaw({ provider: 'opencode-cli', providerConfig: { apiKeyService: 'minimax' } }),
+      createCtx,
+    );
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('agentOptions.providerConfig.apiKeyService');
+    expect(err?.message).toMatch(/baseUrl/);
+  });
+
+  it('fires on the load path too', () => {
+    const err = validateInstanceConfig(opencodeEndpoint('not-a-service'), {
+      name: 'test-line',
+      mode: 'load',
+    });
+    expect(err?.field).toBe('agentOptions.providerConfig.apiKeyService');
+  });
+});

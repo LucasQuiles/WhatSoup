@@ -17,6 +17,7 @@
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
+import { SERVICE_ENV_MAP } from '../lib/provider-key-service.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
@@ -614,6 +615,32 @@ function validateAgentOptions(
         return err(
           'agentOptions.providerConfig.baseUrl',
           'agentOptions.providerConfig.baseUrl is set but no model is configured — without a top-level "model" or "models.conversation" the custom endpoint would never be used; set one that routes to it',
+        );
+      }
+    }
+    // apiKeyService: names the keyring service whose key authenticates a
+    // custom endpoint. It must be a service SERVICE_ENV_MAP knows — the
+    // generated provider block references the key as `{env:<ENVVAR>}` and an
+    // unknown service has no env var to interpolate. It is only meaningful
+    // alongside baseUrl: without one there is no endpoint for the key to
+    // authenticate, so the setting would be silently inert — reject instead.
+    if (pc['apiKeyService'] !== undefined) {
+      if (typeof pc['apiKeyService'] !== 'string' || pc['apiKeyService'].trim() === '') {
+        return err(
+          'agentOptions.providerConfig.apiKeyService',
+          'agentOptions.providerConfig.apiKeyService must be a non-empty string when provided',
+        );
+      }
+      if (SERVICE_ENV_MAP[pc['apiKeyService']] === undefined) {
+        return err(
+          'agentOptions.providerConfig.apiKeyService',
+          `agentOptions.providerConfig.apiKeyService ${JSON.stringify(pc['apiKeyService'])} is not a known keyring service — valid services: ${Object.keys(SERVICE_ENV_MAP).join(', ')}`,
+        );
+      }
+      if (pc['baseUrl'] === undefined) {
+        return err(
+          'agentOptions.providerConfig.apiKeyService',
+          'agentOptions.providerConfig.apiKeyService is set but providerConfig.baseUrl is not — the key service only authenticates a custom endpoint, so without one it would be silently inert; set baseUrl or remove apiKeyService',
         );
       }
     }
