@@ -637,8 +637,91 @@ describe('managed tool loop kill behavior', () => {
       parts: [{ kind: 'text', text: 'Run both tools.' }],
     });
 
-    // Parity with openai-api (`if (!this.active) break;`): once kill() lands
-    // mid-loop, queued tool calls must not execute against the dead session.
+    // Once kill() lands mid-loop, queued tool calls must not execute against
+    // the dead session...
     expect(afterToolHandler).not.toHaveBeenCalled();
+    // ...and the outer loop must not re-enter callApi with orphaned history
+    // (assistant tool_use blocks without matching tool_result entries draw a
+    // hard 400 from the Anthropic API, surfacing a spurious error after kill).
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('openai-api stops the managed loop after kill() without a follow-up API call', async () => {
+    const registry = new ToolRegistry();
+    const provider = new OpenAIApiProvider();
+    const afterToolHandler = vi.fn(async () => ({ echoed: 'must not run' }));
+
+    registry.register({
+      name: 'kill_tool',
+      description: 'Kills the session mid-turn',
+      schema: z.object({}),
+      scope: 'chat',
+      targetMode: 'caller-supplied',
+      handler: async () => {
+        provider.kill();
+        return { done: true };
+      },
+    });
+    registry.register({
+      name: 'after_tool',
+      description: 'Queued behind kill_tool in the same turn',
+      schema: z.object({}),
+      scope: 'chat',
+      targetMode: 'caller-supplied',
+      handler: afterToolHandler,
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(makeSseResponse([
+        {
+          choices: [{
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_kill',
+                  type: 'function',
+                  function: { name: 'kill_tool', arguments: '{}' },
+                },
+                {
+                  index: 1,
+                  id: 'call_after',
+                  type: 'function',
+                  function: { name: 'after_tool', arguments: '{}' },
+                },
+              ],
+            },
+          }],
+        },
+        { usage: { prompt_tokens: 11, completion_tokens: 4 } },
+        '[DONE]',
+      ]))
+      .mockResolvedValue(makeSseResponse([
+        { choices: [{ delta: { content: 'done' } }] },
+        { usage: { prompt_tokens: 14, completion_tokens: 5 } },
+        '[DONE]',
+      ]));
+
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: () => {},
+      onCrash,
+      mcpBridge: createProviderMcpBridge(registry, {
+        tier: 'chat-scoped',
+        conversationKey: 'chat-key',
+        deliveryJid: '456@s.whatsapp.net',
+      }),
+    });
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Run both tools.' }],
+    });
+
+    expect(afterToolHandler).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
