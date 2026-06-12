@@ -70,6 +70,13 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
   verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')),
 }));
 
+// Keep arm-time pre-flight probes from spawning real child processes; both
+// fail open so no binary/model alerts interfere with the alerts under test.
+vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
+  probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
+}));
+
 // ─── Imports ──────────────────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';

@@ -150,7 +150,7 @@ export function getInvalidationKeys(event: WsInvalidationEvent): QueryKey[] {
 
   switch (type) {
     case 'instance_status':
-      return [['lines'], ['lines', instance]];
+      return [['lines'], ['lines', instance], ['provider-status', instance]];
     case 'message_received':
       return [['messages', instance], ['chats', instance], ['search', instance]];
     case 'chat_updated':

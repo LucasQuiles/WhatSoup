@@ -6,17 +6,17 @@ import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
 import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
+import { DEFAULT_FLEET_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 
 const APP_NAME = 'whatsoup';
 
 // Name of the Pinecone index used for the memory/chat search mode.
 // This is an index name (data), not a project reference.
-export const DEFAULT_PINECONE_INDEX = 'whatsapp-bot';
-export const DEFAULT_PINECONE_API_KEY_ENV = 'PINECONE_API_KEY';
-export const DEFAULT_PINECONE_RERANK_MODEL = 'pinecone-rerank-v0';
-export const DEFAULT_KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:8799/embed';
-export const DEFAULT_MW_MIND_EMBED_URL = DEFAULT_KNOWLEDGE_EMBED_URL;
+const DEFAULT_PINECONE_INDEX = 'whatsapp-bot';
+const DEFAULT_PINECONE_API_KEY_ENV = 'PINECONE_API_KEY';
+const DEFAULT_PINECONE_RERANK_MODEL = 'pinecone-rerank-v0';
+const DEFAULT_KNOWLEDGE_EMBED_URL = 'http://127.0.0.1:8799/embed';
 
 export type { AccessMode } from './instance-loader.ts';
 export type PineconeSearchMode = 'memory' | 'entity';
@@ -886,7 +886,7 @@ export const config = {
 
   // GUI
   gui: (instance?.gui as boolean | undefined) ?? false,
-  guiPort: (instance?.guiPort as number | undefined) ?? intEnv('WHATSOUP_GUI_PORT', 9099),
+  guiPort: (instance?.guiPort as number | undefined) ?? intEnv('WHATSOUP_GUI_PORT', DEFAULT_FLEET_PORT),
 
   // API
   // P3.6 review D-2: env-var override for operator-actionable timeout

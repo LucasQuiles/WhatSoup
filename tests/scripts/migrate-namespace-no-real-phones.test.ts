@@ -7,7 +7,6 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const scriptPath = path.join(repoRoot, 'scripts', 'migrate-namespace.sh');
 const productionFiles = [
   'scripts/migrate-namespace.sh',
-  'scripts/test-provider-agent.sh',
   'src/core/access-list.ts',
   'src/core/lid-resolver.ts',
   'src/core/mentions.ts',

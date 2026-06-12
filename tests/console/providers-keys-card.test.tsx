@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import type { ProviderCatalogEntry, ProviderStatus } from '../../console/src/types'
@@ -64,13 +64,27 @@ function withProviders(node: ReactElement) {
   return <QueryClientProvider client={client}>{node}</QueryClientProvider>
 }
 
+function withSeededProviderStatus(lineName: string, status: ProviderStatus) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } } })
+  client.setQueryData(['providers'], CATALOG)
+  client.setQueryData(['provider-status', lineName], status)
+  return (
+    <QueryClientProvider client={client}>
+      <ProvidersKeysCard lineName={lineName} />
+    </QueryClientProvider>
+  )
+}
+
 beforeEach(() => {
   getProvidersMock.mockReset()
   getProviderStatusMock.mockReset()
   getProvidersMock.mockResolvedValue(CATALOG)
 })
 
-afterEach(() => cleanup())
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
 
 describe('ProvidersKeysCard — render + key tri-state', () => {
   it('renders the primary provider display name, model, and a "key set" badge when keyPresent is true', async () => {
@@ -146,6 +160,191 @@ describe('ProvidersKeysCard — fallback states', () => {
     expect(screen.getByText('key set')).toBeDefined()
   })
 
+  it('renders fallback counters and the last fallback turn timestamp when present', async () => {
+    const now = Date.now()
+
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'openai-api',
+        model: 'gpt-4o',
+        keyPresent: true,
+        turnsServed: 3,
+        turnsEmpty: 1,
+        lastFallbackTurnAt: now - 120_000,
+      }),
+      lineReachable: true,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    render(withProviders(<ProvidersKeysCard lineName="line-h" />))
+
+    expect(await screen.findByText('fallback configured')).toBeDefined()
+    expect(screen.getByText('3 served')).toBeDefined()
+    expect(screen.getByText('1 empty')).toBeDefined()
+    expect(screen.getByText('last turn 2m ago')).toBeDefined()
+  })
+
+  it('suppresses fallback counters when older payloads omit the metric fields', async () => {
+    const {
+      turnsServed: _turnsServed,
+      turnsEmpty: _turnsEmpty,
+      ...fallbackWithoutMetrics
+    } = fallbackStatus({
+      provider: 'openai-api',
+      model: 'gpt-4o',
+      keyPresent: true,
+    })
+
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackWithoutMetrics as ProviderStatus['fallback'],
+      lineReachable: true,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    render(withProviders(<ProvidersKeysCard lineName="line-m" />))
+
+    expect(await screen.findByText('fallback configured')).toBeDefined()
+    expect(screen.queryByText(/undefined served/)).toBeNull()
+    expect(screen.queryByText(/undefined empty/)).toBeNull()
+  })
+
+  it('updates the active fallback countdown on the 30s timer when the line is reachable', async () => {
+    const now = new Date('2026-06-12T12:00:00Z')
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'openai-api',
+        model: 'gpt-4o',
+        keyPresent: true,
+        active: true,
+        activeUntil: now.getTime() + 89_000,
+        effectiveProvider: 'openai-api',
+      }),
+      lineReachable: true,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    render(withSeededProviderStatus('line-i', status))
+
+    const initialIndicator = screen.getByText(/Fallback active/)
+    expect(initialIndicator.textContent).toContain('reverts in 1m')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(29_000)
+    })
+    expect(screen.getByText(/Fallback active/).textContent).toContain('reverts in 1m')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(screen.getByText(/Fallback active/).textContent).toContain('reverts in 59s')
+  })
+
+  it('stops showing the active fallback banner when the local window expires before the next poll', async () => {
+    const now = new Date('2026-06-12T12:00:00Z')
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'openai-api',
+        model: 'gpt-4o',
+        keyPresent: true,
+        active: true,
+        activeUntil: now.getTime() + 45_000,
+        effectiveProvider: 'openai-api',
+      }),
+      lineReachable: true,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    render(withSeededProviderStatus('line-l', status))
+
+    expect(screen.getByText(/Fallback active/).textContent).toContain('reverts in 45s')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(45_000)
+    })
+    expect(screen.queryByText(/Fallback active/)).toBeNull()
+    expect(screen.getByText('fallback configured')).toBeDefined()
+  })
+
+  it('refreshes the countdown immediately when provider-status data changes', async () => {
+    const now = new Date('2026-06-12T12:00:00Z')
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } } })
+    client.setQueryData(['providers'], CATALOG)
+    client.setQueryData(['provider-status', 'line-k'], {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'openai-api',
+        model: 'gpt-4o',
+        keyPresent: true,
+        active: true,
+        activeUntil: now.getTime() + 90_000,
+        effectiveProvider: 'openai-api',
+      }),
+      lineReachable: true,
+    } satisfies ProviderStatus)
+
+    render(
+      <QueryClientProvider client={client}>
+        <ProvidersKeysCard lineName="line-k" />
+      </QueryClientProvider>,
+    )
+    expect(screen.getByText(/Fallback active/).textContent).toContain('reverts in 1m')
+
+    vi.setSystemTime(now.getTime() + 60_000)
+    act(() => {
+      client.setQueryData(['provider-status', 'line-k'], {
+        primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+        fallback: fallbackStatus({
+          provider: 'openai-api',
+          model: 'gpt-4o',
+          keyPresent: true,
+          active: true,
+          activeUntil: now.getTime() + 150_000,
+          effectiveProvider: 'openai-api',
+        }),
+        lineReachable: true,
+      } satisfies ProviderStatus)
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(screen.getByText(/Fallback active/).textContent).toContain('reverts in 1m')
+  })
+
+  it('does not show the active countdown while the line health endpoint is unreachable', async () => {
+    const status: ProviderStatus = {
+      primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
+      fallback: fallbackStatus({
+        provider: 'openai-api',
+        model: 'gpt-4o',
+        keyPresent: true,
+        active: true,
+        activeUntil: Date.now() + 90_000,
+        effectiveProvider: 'openai-api',
+      }),
+      lineReachable: false,
+    }
+    getProviderStatusMock.mockResolvedValue(status)
+
+    render(withProviders(<ProvidersKeysCard lineName="line-j" />))
+
+    expect(await screen.findByText('fallback configured')).toBeDefined()
+    expect(screen.queryByText(/Fallback active/)).toBeNull()
+  })
+
   it('shows a muted "fallback configured" state when a fallback exists but is inactive', async () => {
     const status: ProviderStatus = {
       primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
@@ -167,7 +366,7 @@ describe('ProvidersKeysCard — fallback states', () => {
   it('shows "no fallback" when no fallback provider is configured', async () => {
     const status: ProviderStatus = {
       primary: { provider: 'claude-cli', model: 'claude-opus-4-6', keyPresent: null },
-      fallback: fallbackStatus(),
+      fallback: fallbackStatus({ turnsServed: 0, turnsEmpty: 0 }),
       lineReachable: true,
     }
     getProviderStatusMock.mockResolvedValue(status)
@@ -176,6 +375,8 @@ describe('ProvidersKeysCard — fallback states', () => {
 
     expect(await screen.findByText('no fallback')).toBeDefined()
     expect(screen.queryByText('fallback configured')).toBeNull()
+    expect(screen.queryByText('0 served')).toBeNull()
+    expect(screen.queryByText('0 empty')).toBeNull()
   })
 })
 

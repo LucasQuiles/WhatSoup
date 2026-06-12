@@ -4,6 +4,10 @@ import { createChildLogger } from '../logger.ts';
 
 const log = createChildLogger('process-tmp:retention');
 
+// One-shot per directory: the cleanup runs on an interval and a permissions
+// regression would otherwise warn every tick.
+const warnedUnreadable = new Set<string>();
+
 export interface ProcessTmpRetentionConfig {
   intervalMs: number;
   maxAgeMs: number;
@@ -26,7 +30,11 @@ export function runProcessTmpCleanup(dir: string, maxAgeMs: number): ProcessTmpC
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    if (!warnedUnreadable.has(dir)) {
+      warnedUnreadable.add(dir);
+      log.warn({ err, dir }, 'tmp dir unreadable; cleanup disabled for this directory until restart');
+    }
     return result;
   }
 

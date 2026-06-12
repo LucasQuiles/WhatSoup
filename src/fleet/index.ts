@@ -52,6 +52,8 @@ const log = createChildLogger('fleet');
 
 export const HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE = '2026-06-30';
 
+export { DEFAULT_FLEET_PORT } from './constants.ts';
+
 export interface FleetDeps {
   db: DatabaseSync;
   selfName: string;

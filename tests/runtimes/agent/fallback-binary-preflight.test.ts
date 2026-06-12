@@ -81,6 +81,9 @@ const probeFallbackBinaryMock = vi.fn<
 
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
   probeFallbackBinary: (binary: string) => probeFallbackBinaryMock(binary),
+  // Fail-open stub: model-catalog behavior is covered in
+  // fallback-model-preflight.test.ts; here it must simply never alert.
+  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
 }));
 
 // Stub out credential validity probe (never invalid here — credential tests
