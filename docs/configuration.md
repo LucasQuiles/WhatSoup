@@ -131,7 +131,7 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
 | `WHATSOUP_DOCKER` | string | (unset) | Set to `1` to enable Docker platform detection. The Dockerfile sets this automatically. |
 | `WHATSOUP_MODE` | string | `supervisor` | Entrypoint mode: `supervisor` (fleet + instances), `fleet` (fleet only), `instance` (single instance), `auth` (QR code pairing). |
 | `WHATSOUP_INSTANCES` | string | (empty) | Comma-separated instance names to start in supervisor mode. Example: `my-bot,chat-bot`. |
-| `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Set to `0.0.0.0` in Docker. |
+| `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Non-loopback values are refused at startup unless `WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE=1` is set, because the console HTML currently serves the root fleet token without authentication. For Docker (`0.0.0.0`) or tailnet binds, set the override only on trusted private networks. |
 
 ### Docker Volume Layout
 
