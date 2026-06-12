@@ -233,6 +233,9 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
               }
 
               if (event === 'progress') {
+                // The server always sends step/status on progress events; skip
+                // any malformed block rather than dispatching undefined fields.
+                if (!data.step || !data.status) continue
                 dispatch({ type: 'stepProgress', step: data.step, status: data.status as StepStatus, message: data.message })
                 if (data.step === 'restart' && data.status === 'running') {
                   dispatch({ type: 'setPhase', phase: 'restarting-fleet' })
@@ -241,7 +244,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 // Set ref before dispatch so the done-branch check (F-058) sees
                 // the flag synchronously in the same microtask.
                 hasErroredRef.current = true
-                dispatch({ type: 'setError', message: data.message, step: data.step })
+                dispatch({ type: 'setError', message: data.message ?? 'update stream error', step: data.step })
               }
             }
             await read()
