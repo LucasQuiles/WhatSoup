@@ -10,6 +10,7 @@
 import godClass from './god-class.mjs';
 import categorizedSkips from './categorized-skips.mjs';
 import failClosedScanner from './fail-closed-scanner.mjs';
+import outboxDirectWrite from './outbox-direct-write.mjs';
 
 /** @type {import('eslint').ESLint.Plugin} */
 const plugin = {
@@ -18,6 +19,7 @@ const plugin = {
     'god-class': godClass,
     'categorized-skips': categorizedSkips,
     'fail-closed-scanner': failClosedScanner,
+    'outbox-direct-write': outboxDirectWrite,
   },
 };
 

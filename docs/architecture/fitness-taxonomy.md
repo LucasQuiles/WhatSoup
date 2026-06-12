@@ -33,6 +33,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 |----|--------|----------|-------|---------|
 | `invariant.seq-locality` | mechanical | warn | guard | Keep user inbound sequence and system-result state mutation in one owner module. |
 | `invariant.fail-closed-scanner` | ast | warn | eslint, sdlc | Ensure scanner parse failures raise findings instead of returning clean results. |
+| `invariant.outbox-env-gated` | ast | warn | eslint | Bot-errors outbox writes must derive their path from `resolveBotErrorsOutbox()` so the test-redirect applies; a hardcoded outbox path literal lands in the PROD outbox even under VITEST. |
 | `invariant.fail-closed-gate` | mechanical | block | guard, hook | Prevent shell gates from masking command failures as successful readiness checks. |
 
 ## Process
@@ -97,6 +98,7 @@ rules whose `rings` include `eslint`.
 | `arch.file-size` | built-in `max-lines` (max 2000) | advisory mirror only |
 | `arch.god-class` | `fitness/god-class` (maxClassLines 1200 **and** maxMethods 80) | composite — both thresholds must trip |
 | `invariant.fail-closed-scanner` | `fitness/fail-closed-scanner` | catch returning empty without rethrow/exitCode/emit |
+| `invariant.outbox-env-gated` | `fitness/outbox-direct-write` | fs write whose path literal names the bot-errors outbox/state dir without referencing the resolver |
 | `test.skip-categorization` | `fitness/categorized-skips` | skip/`skipIf` must carry `@skip-env` or `@skip-timing` |
 
 **Every eslint-ring rule reports at `warn` severity, so `guard:lint:src` exits 0

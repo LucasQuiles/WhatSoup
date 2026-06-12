@@ -123,6 +123,17 @@ export const fitnessRules = [
     source: ['feedback:audit_scanners_fail_closed'],
   },
   {
+    id: 'invariant.outbox-env-gated',
+    title: 'Bot-errors outbox writes go through the env-aware resolver',
+    category: 'invariant',
+    rationale:
+      'A write to the bot-errors outbox via a hardcoded path literal bypasses resolveBotErrorsOutbox() and lands in the PROD outbox even under VITEST/NODE_ENV=test. Outbox writes must derive their path from the resolver so the test-redirect applies.',
+    detect: 'ast',
+    rings: ['eslint'],
+    severity: 'warn',
+    source: ['audit:detector-misconceptions#alert-emitter-not-env-gated', 'feedback:dry_run_purity_run_level_test'],
+  },
+  {
     id: 'invariant.fail-closed-gate',
     title: 'Shell gates fail closed',
     category: 'invariant',
