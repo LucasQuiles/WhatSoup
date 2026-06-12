@@ -15,6 +15,7 @@ const hasLocalProvider = (
 );
 
 describe('transcription integration', () => {
+  // @skip-env requires local ffmpeg/whisper tooling and the real audio fixture.
   it.skipIf(!hasLocalProvider || !existsSync(FIXTURE_PATH))('transcribes a real audio fixture through the shared chain', async () => {
     delete process.env.OPENAI_API_KEY;
     const buffer = await readFile(FIXTURE_PATH);
