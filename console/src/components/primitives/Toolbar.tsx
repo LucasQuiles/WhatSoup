@@ -84,6 +84,13 @@ export interface ToolbarTimeRangeProps {
   value: string;
   /** Called with the new value when a segment button is activated. */
   onChange: (value: string) => void;
+  /**
+   * When true, all segment buttons are disabled and onChange is not called.
+   * Default undefined — existing consumers are byte-identical (C-B3W3-2).
+   * Used by GroupDetailModal settings pairs during in-flight saves to preserve
+   * the legacy double-fire protection while gaining the disabled AT affordance.
+   */
+  disabled?: boolean;
 }
 
 export const ToolbarTimeRange: FC<ToolbarTimeRangeProps> = ({
@@ -91,6 +98,7 @@ export const ToolbarTimeRange: FC<ToolbarTimeRangeProps> = ({
   options,
   value,
   onChange,
+  disabled,
 }) => (
   <div role="group" aria-label={label} className="soup-toolbar-seg">
     {options.map((opt) => (
@@ -99,7 +107,8 @@ export const ToolbarTimeRange: FC<ToolbarTimeRangeProps> = ({
         type="button"
         className="soup-toolbar-seg__btn"
         aria-pressed={value === opt.value}
-        onClick={() => onChange(opt.value)}
+        disabled={disabled}
+        onClick={() => { if (!disabled) onChange(opt.value); }}
       >
         {opt.label}
       </button>

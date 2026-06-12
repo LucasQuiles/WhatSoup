@@ -353,3 +353,47 @@ describe('Toolbar — DOM order', () => {
     expect(primaryBtn.getAttribute('type')).toBe('button');
   });
 });
+
+// ---------------------------------------------------------------------------
+// ToolbarTimeRange — disabled prop (C-B3W3-2)
+// ---------------------------------------------------------------------------
+
+describe('ToolbarTimeRange — disabled prop', () => {
+  it('all buttons have disabled attribute when disabled=true', () => {
+    render(
+      <Toolbar aria-label="test">
+        <ToolbarTimeRange label="Time range" options={TIME_OPTIONS} value="24h" onChange={() => {}} disabled={true} />
+      </Toolbar>,
+    );
+    const btns = screen.getAllByRole('button') as HTMLButtonElement[];
+    for (const btn of btns) {
+      expect(btn.disabled).toBe(true);
+    }
+  });
+
+  it('onChange is NOT called when disabled=true and a button is clicked', () => {
+    const onChange = vi.fn();
+    render(
+      <Toolbar aria-label="test">
+        <ToolbarTimeRange label="Time range" options={TIME_OPTIONS} value="24h" onChange={onChange} disabled={true} />
+      </Toolbar>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '7d' }));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('disabled=undefined (default) leaves existing behavior unchanged', () => {
+    const onChange = vi.fn();
+    render(
+      <Toolbar aria-label="test">
+        <ToolbarTimeRange label="Time range" options={TIME_OPTIONS} value="24h" onChange={onChange} />
+      </Toolbar>,
+    );
+    const btns = screen.getAllByRole('button') as HTMLButtonElement[];
+    for (const btn of btns) {
+      expect(btn.disabled).toBe(false);
+    }
+    fireEvent.click(screen.getByRole('button', { name: '30d' }));
+    expect(onChange).toHaveBeenCalledWith('30d');
+  });
+});
