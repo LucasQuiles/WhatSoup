@@ -138,6 +138,26 @@ describe('public surface drift check', () => {
     expect(issues).toHaveLength(2);
   });
 
+  it('fails closed on malformed package.json without fabricating missing script drift', () => {
+    const { root, registryPath } = makeFakeRepo();
+    writeFileSync(path.join(root, 'package.json'), '{', 'utf8');
+    writeFileSync(registryPath, happyRegistry, 'utf8');
+
+    const issues = findPublicSurfaceDrift({ cwd: root });
+
+    expect(issues).toEqual([
+      expect.objectContaining({
+        filePath: 'package.json',
+        line: 1,
+        kind: 'package-json-unreadable',
+        identifier: 'package.json#scripts',
+        sourcePath: 'package.json',
+      }),
+    ]);
+    expect(issues.some((issue) => issue.kind === 'missing-npm-script')).toBe(false);
+    expect(issues.some((issue) => issue.kind === 'missing-registry-row')).toBe(false);
+  });
+
   it('flags a docs/tools.md MCP module that is missing from the registry', () => {
     const { root, registryPath } = makeFakeRepo();
     writeFileSync(
