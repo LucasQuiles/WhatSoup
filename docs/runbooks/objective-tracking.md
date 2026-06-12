@@ -66,7 +66,7 @@ Weekly maintenance review:
 Monthly maintenance review:
 
 1. Triage unknown and pending rows from `docs/work-index.md`.
-2. Convert still-actionable loose plans into GitHub issues (with explicit operator approval — external posting is never autonomous) or SDLC artifacts.
+2. Convert still-actionable loose plans into GitHub issues (with explicit operator approval; external posting is never autonomous) or SDLC artifacts.
 3. Archive or mark superseded artifacts only when the replacement and evidence
    are explicit.
 4. Remove stale operational notes from always-read docs when they no longer
