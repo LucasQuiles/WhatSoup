@@ -154,7 +154,13 @@ export interface ProviderSessionOptions {
   /** Callback invoked for every event emitted by the provider. */
   onEvent: (event: AgentEvent) => void;
   /** Callback invoked when the provider crashes. */
-  onCrash: (info: { exitCode: number | null; signal: string | null }) => void;
+  onCrash: (info: {
+    exitCode: number | null;
+    signal: string | null;
+    provider?: string;
+    crashClass?: string;
+    stderrPreview?: string;
+  }) => void;
   /** Optional native MCP bridge for HTTP providers with function/tool calling. */
   mcpBridge?: ProviderMcpBridge;
 }

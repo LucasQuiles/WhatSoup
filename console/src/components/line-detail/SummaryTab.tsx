@@ -44,7 +44,11 @@ export function SummaryTab({
     { label: 'STATUS', value: line.status, color: statusTextClass(line.status) },
     { label: 'CONNECTION', value: conn.label, color: conn.inkClass },
     ...(line.linkedStatus
-      ? [{ label: 'LINK', value: line.linkedStatus, color: line.linkedStatus === 'linked' ? 'text-s-ok' : 'text-s-warn' }]
+      ? [{
+          label: 'LINK',
+          value: line.linkedStatus,
+          color: line.linkedStatus === 'linked' ? 'text-s-ok' : line.linkedStatus === 'unlinked' ? 'text-s-warn' : 'text-t4',
+        }]
       : []),
     // Mode-specific runtime metrics
     ...(line.mode === 'passive' ? [

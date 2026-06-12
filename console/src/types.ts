@@ -60,7 +60,10 @@ export interface LineInstance {
   };
   group?: string;
   config?: Record<string, unknown>;
-  linkedStatus?: 'linked' | 'unlinked';
+  linkedStatus?: 'linked' | 'unlinked' | 'unknown';
+  linkedStatusConfidence?: StatusConfidence | null;
+  linkedStatusReason?: string | null;
+  linkedStatusEvidence?: string[];
   totalSessions?: number;
   models?: {
     conversation?: string;
