@@ -208,6 +208,11 @@ export class OpenAIApiProvider implements ProviderSession {
         });
       }
 
+      // Killed mid-loop: do not re-enter callApi. The history now has
+      // tool_calls without matching tool messages (the inner loop broke
+      // early) and the session is dead anyway.
+      if (!this.active) break;
+
       if (i === MAX_TOOL_ITERATIONS - 1) {
         log.warn({ model: turnModel, toolCallCount: result.toolCalls.length }, 'managed tool loop exhausted');
         this.opts.onEvent({

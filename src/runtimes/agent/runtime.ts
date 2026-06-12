@@ -8,7 +8,7 @@ import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
-import { dequeueNextReport, emitHealReport } from '../../core/heal.ts';
+import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
 import {
   normalizeFallbackEntriesFromAgentOptions,
@@ -2948,7 +2948,7 @@ export class AgentRuntime implements Runtime {
           // Dequeue next report if any
           const next = dequeueNextReport(this.db);
           if (next) {
-            const context = next.context ? JSON.parse(next.context) : {};
+            const context = parseHealContext(next.context);
             void this.handleControlTurn(next.report_id, JSON.stringify({
               ...context,
               reportId: next.report_id,
@@ -5157,7 +5157,7 @@ export class AgentRuntime implements Runtime {
         // Dequeue next report if any
         const next = dequeueNextReport(this.db);
         if (next) {
-          const context = next.context ? JSON.parse(next.context) : {};
+          const context = parseHealContext(next.context);
           void this.handleControlTurn(next.report_id, JSON.stringify({
             ...context,
             reportId: next.report_id,

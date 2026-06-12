@@ -138,13 +138,21 @@ export function startMediaBridge(
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        handleRequest(trimmed, messenger, allowedRoot, bridge).then((response) => {
-          try {
-            socket.write(JSON.stringify(response) + '\n');
-          } catch (err) {
-            log.error({ err }, 'failed to write response to socket');
-          }
-        });
+        handleRequest(trimmed, messenger, allowedRoot, bridge)
+          .catch((err): BridgeResponse => {
+            // A rejection here would otherwise escape as an unhandledRejection
+            // (fatal at the process level) and leave the agent-side client
+            // waiting on the socket forever.
+            log.error({ err }, 'media bridge request handler failed');
+            return { ok: false, error: 'internal error' };
+          })
+          .then((response) => {
+            try {
+              socket.write(JSON.stringify(response) + '\n');
+            } catch (err) {
+              log.error({ err }, 'failed to write response to socket');
+            }
+          });
       }
     });
 
