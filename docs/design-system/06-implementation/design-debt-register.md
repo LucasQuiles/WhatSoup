@@ -5,7 +5,6 @@ Lint waivers (WVR-*) live in `console/eslint-waivers.yaml` and are not duplicate
 
 | ID | Title | Area | Type | Sev | Reason | Workaround | Owner / next step | Cleanup phase | Expiration condition | Blocks final acceptance? |
 |---|---|---|---|---|---|---|---|---|---|---|
-| DD-4 | Geist via Google Fonts runtime import | typography | token | P2 | font files unavailable offline at C1 | CDN import + full fallback stacks | impl agent / self-host woff2 under console/public/fonts | C2 | self-hosted before any deploy; hard 2026-07-31 | YES (deploy gate) |
 | DD-5 | Theme toggle minimal ghost button | component | component | P3 | final nav treatment belongs with nameplate work | functional toggle shipped | C3 nav slice | C3 | nameplate slice merged | no |
 | DD-8 | text-3/ghost-tier essential-use audit | color | accessibility | P2 | ghost tier intentionally sub-AA for decorative metadata; some call sites may carry essential text | spec restricts tier usage | per-screen C3 checklists | C3 | every screen migration confirms no essential text on ghost tier | YES |
 | DD-9 | Legacy half-step spacing aliases (--sp-0h/1h/2h, 14px/7px) | layout | token | P3 | consumed by composites pending migration | tokens-v3 disposition mapped | per-directory C2/C3 | C3 | composites absorbed into primitives | no |
@@ -28,6 +27,7 @@ Lint waivers (WVR-*) live in `console/eslint-waivers.yaml` and are not duplicate
 |---|---|---|---|
 | DD-6 | Status shape law not rendered | C2.1 `fb67b43f` | c2-1-evidence.md |
 | DD-7 | No modal focus-restoration primitive | C2.2 `59ceeb4f` | c2-2-evidence.md |
+| DD-4 | Geist via Google Fonts runtime import | self-hosted woff2 (vercel/geist-font v1.7.2, SIL OFL 1.1; sha256 provenance in console/public/fonts/README.md); CDN import removed | fonts.css + public/fonts on feat/soup-v3-foundation |
 | DD-18 (Fleet legs) | Fleet KPI/chart/table stacking + squeeze, chart-expand layout animation, log wrap policy, fixed side-panel law for Fleet (drawer squeeze 900px container), Fleet pane stacking below lg + short-window page scroll | C2.3 `1f9bde39` + `682558f7` + stacking fix | c2-3-evidence.md (live QA rounds 1–3, both themes, 390/768/1024/1280/1440 + 1440×500) |
 | DD-21 (Fleet table half) | Fleet table mouse-first th/tr onClick, no keyboard | C2.3 `1f9bde39` (TableHeaderCell sort buttons + aria-sort; row Enter activation; tested) | c2-3-evidence.md |
 | DD-11 | SummaryTab connection-health map outside status-map | B1 `048a26f7` (CONNECTION_MAP/resolveConnection, fail-visible, tested) | b1-evidence.md |
