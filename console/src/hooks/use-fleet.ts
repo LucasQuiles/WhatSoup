@@ -138,3 +138,23 @@ export function useFeed() {
     refetchInterval: connected ? false : POLL_FEED,
   });
 }
+
+/** Provider catalog (display names + capability flags). Static — long stale time. */
+export function useProviders() {
+  return useQuery({
+    queryKey: ['providers'],
+    queryFn: () => api.getProviders(),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** Per-instance provider / key / fallback status. */
+export function useProviderStatus(name: string) {
+  const { connected } = useRealtime();
+  return useQuery({
+    queryKey: ['provider-status', name],
+    queryFn: () => api.getProviderStatus(name),
+    refetchInterval: connected ? false : POLL_LINES,
+    enabled: !!name,
+  });
+}

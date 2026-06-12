@@ -72,6 +72,16 @@ vi.mock('../../console/src/hooks/use-fleet', () => ({
   useAccess: () => ({ data: [] }),
   useLogs: () => ({ data: [] }),
   useTyping: () => ({ data: [] }),
+  // Agent-mode SummaryTab embeds ProvidersKeysCard, which reads these hooks.
+  useProviders: () => ({ data: [] }),
+  useProviderStatus: () => ({
+    data: {
+      primary: { provider: 'codex-cli', model: null, keyPresent: null },
+      fallback: { provider: null, model: null, keyPresent: null, active: false, activeUntil: null },
+    },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 vi.mock('../../console/src/hooks/use-metrics', () => ({
