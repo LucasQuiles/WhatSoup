@@ -1432,6 +1432,13 @@ export class AgentRuntime implements Runtime {
   private fallbackActivations = 0;
   private fallbackReverts = 0;
   private fallbackReplays = 0;
+  // Lifetime-of-process USD cost of turns served while a fallback window was
+  // active (provider-reported costUsd on result events; opencode-only today).
+  // Mirrors fallbackTurnsServed semantics: accumulates only during windows,
+  // never resets on deactivation, resets on restart. The expensive fallback
+  // path must be countable — a silent expensive fallback is a billing
+  // surprise waiting to be found on the invoice instead of in /health.
+  private fallbackWindowCostUsd = 0;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -4700,6 +4707,9 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(compactScopeKey);
         session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        // Provider-reported turn cost: log it beside the token counts and
+        // accumulate it while a fallback window is active.
+        this.recordTurnCostUsd(event);
         // Capture before clearToolNames so the empty-turn check can read it.
         const turnHadToolWork = this.turnHadToolActivity.has(toolScopeKey);
         this.turnHadToolActivity.delete(toolScopeKey);
@@ -5716,6 +5726,7 @@ export class AgentRuntime implements Runtime {
     fallbackActivations: number;
     fallbackReverts: number;
     fallbackReplays: number;
+    fallbackWindowCostUsd: number;
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   } {
@@ -5736,9 +5747,34 @@ export class AgentRuntime implements Runtime {
       fallbackActivations: this.fallbackActivations,
       fallbackReverts: this.fallbackReverts,
       fallbackReplays: this.fallbackReplays,
+      fallbackWindowCostUsd: this.fallbackWindowCostUsd,
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
     };
+  }
+
+  /**
+   * Record a provider-reported turn cost from a result event. Always logged
+   * alongside the token counts; accumulated into {@link fallbackWindowCostUsd}
+   * only while a fallback window is active (the field answers "what has
+   * fallback serving cost this process"). Non-finite values are ignored —
+   * the opencode parser validates finite ≥ 0, but the handler stays defensive
+   * for other providers that may grow a cost field.
+   */
+  private recordTurnCostUsd(event: { costUsd?: number; inputTokens?: number; outputTokens?: number }): void {
+    if (typeof event.costUsd !== 'number' || !Number.isFinite(event.costUsd)) return;
+    const onFallback = this.isFallbackWindowActive;
+    log.info({
+      instanceName: this.instanceName,
+      costUsd: event.costUsd,
+      inputTokens: event.inputTokens,
+      outputTokens: event.outputTokens,
+      provider: this.effectiveProvider,
+      onFallback,
+    }, 'provider reported turn cost');
+    if (onFallback) {
+      this.fallbackWindowCostUsd += event.costUsd;
+    }
   }
 
   /**
@@ -7383,6 +7419,9 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(GLOBAL_TOOL_SCOPE_KEY);
         this.session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        // Provider-reported turn cost: log it beside the token counts and
+        // accumulate it while a fallback window is active.
+        this.recordTurnCostUsd(event);
         const turnHadToolWork = this.singleTurnHadToolActivity;
         this.clearToolNames(GLOBAL_TOOL_SCOPE_KEY);
 

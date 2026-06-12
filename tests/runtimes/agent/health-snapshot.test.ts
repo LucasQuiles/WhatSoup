@@ -234,6 +234,7 @@ function expectedFallbackDetails(): Record<string, unknown> {
     fallbackActivations: 0,
     fallbackReverts: 0,
     fallbackReplays: 0,
+    fallbackWindowCostUsd: 0,
     activeFallbackEntry: null,
     fallbackChain: [],
   };
