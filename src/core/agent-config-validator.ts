@@ -18,6 +18,7 @@
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { SERVICE_ENV_MAP } from '../lib/provider-key-service.ts';
+import { isRecord } from '../lib/type-guards.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import { fallbackEntryKey, isSameAsPrimaryFallbackEntry, type AgentFallbackEntry } from './fallback-chain.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, TRANSPORT_IDS } from '../transport/registry.ts';
@@ -74,10 +75,6 @@ export interface ValidatorContext {
 
 function err(field: string, message: string, status = 400): ValidationError {
   return { field, message, status };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function nonBlankString(value: unknown): boolean {

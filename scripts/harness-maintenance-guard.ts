@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { isRecord } from '../src/lib/type-guards.ts';
 
 export const DEFAULT_COOLDOWN_MINUTES = 7 * 24 * 60;
 export const DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS = 7;
@@ -40,10 +41,6 @@ export interface ManifestValidation {
 }
 
 type JsonRecord = Record<string, unknown>;
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function asRecord(value: unknown, label: string): JsonRecord {
   if (!isRecord(value)) throw new Error(`${label} must be an object`);
