@@ -50,7 +50,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-05-12 |
 | `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
-| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | bot-errors-tool-call-audit | 2026-05-31 |
+| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | bot-errors-tool-call-audit | 2026-06-12 |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | colony-orchestration-design | 2026-04-04 |
 | `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | scheduled-groups-tabs-design | 2026-04-06 |
 | `docs/superpowers/specs/2026-04-25-console-test-jsx-runtime-fix.md` | spec | console-test-jsx-runtime-fix | 2026-04-25 |
@@ -313,8 +313,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md` | doc | active | state-md-status | bot-errors-reliability | 2026-05-31 |  |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md` | state | active | state-md-status | bot-errors-reliability | 2026-05-31 |  |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md` | doc | active | state-md-status | bot-errors-reliability | 2026-06-12 |  |
+| `docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md` | state | active | state-md-status | bot-errors-reliability | 2026-06-12 |  |
 
 ### docs/superpowers/handoffs  _(4 entries)_
 
@@ -351,7 +351,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | completed | body-marker | anti-echo-review-handoff | 2026-05-12 |  |
-| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | unknown | fallback | bot-errors-tool-call-audit | 2026-05-31 |  |
+| `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | unknown | fallback | bot-errors-tool-call-audit | 2026-06-12 |  |
 
 ### docs/superpowers/specs  _(13 entries)_
 
@@ -374,4 +374,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-12T20:06:32Z from commit `d61132528c8400f6d6fda77e46c95ec8960ceef3`
+- Generated at 2026-06-12T21:34:06Z from commit `ad783f4b368e22ffb8e5c5bcfea0e0e7ce99bcb8`

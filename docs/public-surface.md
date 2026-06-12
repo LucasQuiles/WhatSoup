@@ -271,6 +271,11 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-node-pin-consistency` | `npm run guard:node-pin-consistency` | `package.json` | stable | active | Verify Node version pin is consistent across configs |
 | `cli:npm.guard-service-units` | `npm run guard:service-units` | `package.json` | stable | active | Validate launchd plists / systemd units (label==stem, no bare/env node, no unexpanded ${VAR}, node-pin, absolute paths, plist structure) |
 | `cli:npm.guard-instance-config` | `npm run guard:instance-config` | `package.json` | stable | active | Verify instance config.json files for memory-config integrity and health-port map integrity |
+| `cli:npm.guard-boundaries` | `npm run guard:boundaries` | `package.json` | stable | active | Deterministic ring import-boundary check with grandfathered baseline (new cross-ring violations block) |
+| `cli:npm.guard-ring-boundaries` | `npm run guard:ring-boundaries` | `package.json` | stable | active | Alias for guard:boundaries |
+| `cli:npm.guard-fail-closed-gate` | `npm run guard:fail-closed-gate` | `package.json` | stable | active | Reject fail-open gate shapes (env-gated paths must fail closed when the gate variable is unset) |
+| `cli:npm.guard-restart-preflight` | `npm run guard:restart-preflight` | `package.json` | stable | active | Deploy-time import-closure probe: refuses service start when the on-disk import graph cannot link |
+| `cli:npm.guard-repo-scan-history` | `npm run guard:repo:scan-history` | `package.json` | stable | active | Scan recent git history for secret-pattern leaks using the shared hygiene pattern set |
 | `cli:npm.guard-claude-settings` | `npm run guard:claude-settings` | `package.json` | stable | active | Verify tracked `.claude/settings.json` matches generated agent defaults |
 | `cli:npm.guard-agent-decision-polls` | `npm run guard:agent-decision-polls` | `package.json` | stable | active | Verify AskUser poll protocol wiring across prompts, MCP schema, sandbox diagnostics, docs, and release gates |
 | `cli:npm.guard-safeguard-diagnostics` | `npm run guard:safeguard-diagnostics` | `package.json` | stable | active | Deterministic diagnostic map for guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers |
