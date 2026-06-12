@@ -1,7 +1,8 @@
 /**
- * B1 mitigation: while the console HTML still carries the root fleet token,
- * a non-loopback bind exposes that token to any browser that can reach the
- * port. Startup must fail loud unless the operator explicitly opts in.
+ * B1 bind guard: a non-loopback bind exposes the console unlock endpoint to
+ * the network and sends the operator-entered root token / session cookie
+ * over plain HTTP unless fronted by TLS. Startup must fail loud unless the
+ * operator explicitly opts in.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 

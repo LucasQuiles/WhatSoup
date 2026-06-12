@@ -1,7 +1,7 @@
 import { type FC, useReducer, useEffect, useCallback, useRef } from 'react'
 import { X, Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, getApiTicket, getFleetToken } from '../lib/api'
+import { api, getApiTicket, isProductionConsole } from '../lib/api'
 import type { LineInstance } from '../types'
 
 interface UpdateModalProps {
@@ -172,12 +172,12 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
     const controller = new AbortController()
     abortRef.current = controller
 
-    // Audience-scoped ticket (#313): mint an api-audience ticket rather than
-    // sending the root meta-tag token directly. In dev (no meta-tag) skip
-    // the header and let the proxy handle auth.
+    // Audience-scoped ticket (#313): mint an api-audience ticket via the
+    // console session (B1). In dev (no fleet-auth-mode meta) skip the
+    // header and let the proxy handle auth.
     void (async () => {
       let headers: Record<string, string> = {}
-      if (getFleetToken()) {
+      if (isProductionConsole()) {
         try {
           const ticket = await getApiTicket('api')
           headers = { 'Authorization': `Bearer ${ticket}` }

@@ -2,7 +2,7 @@ import { type FC, useState, useEffect, useCallback, useRef } from 'react'
 import { CheckCircle2, XCircle, Loader2, Clock } from 'lucide-react'
 import QrDisplay from '../QrDisplay'
 import { parseAuthErrorMessage, parseQrPayload } from './link-step-events'
-import { getApiTicket, getFleetToken } from '../../lib/api'
+import { getApiTicket, isProductionConsole } from '../../lib/api'
 
 interface LinkStepProps {
   lineName: string
@@ -26,7 +26,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
 
     async function openEventSource(): Promise<void> {
       let url = `/api/lines/${encodeURIComponent(lineName)}/auth`
-      if (getFleetToken()) {
+      if (isProductionConsole()) {
         try {
           const ticket = await getApiTicket('sse')
           url += `?ticket=${encodeURIComponent(ticket)}`

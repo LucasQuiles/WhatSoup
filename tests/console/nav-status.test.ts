@@ -57,13 +57,15 @@ describe('WS URL construction', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Fleet token helper (requires DOM — structural check only)
+// Console auth bootstrap (requires DOM — structural check only)
 // ---------------------------------------------------------------------------
 
-describe('getFleetToken', () => {
-  it('is exported from api module', async () => {
+describe('console auth bootstrap exports (B1)', () => {
+  it('exposes the session-model helpers and not the removed token getter', async () => {
     const mod = await import('../../console/src/lib/api');
-    expect(mod.getFleetToken).toBeDefined();
-    expect(typeof mod.getFleetToken).toBe('function');
+    expect(typeof mod.isProductionConsole).toBe('function');
+    expect(typeof mod.unlockConsole).toBe('function');
+    expect(typeof mod.lockConsole).toBe('function');
+    expect((mod as Record<string, unknown>).getFleetToken).toBeUndefined();
   });
 });

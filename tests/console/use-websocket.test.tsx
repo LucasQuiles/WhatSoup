@@ -5,7 +5,7 @@
  *
  * Architecture (from source):
  *  - RealtimeProvider wraps children in RealtimeContext.Provider
- *  - On mount: reads fleet-token meta tag via getFleetToken(); if absent, bails
+ *  - On mount: checks production mode via isProductionConsole(); if dev, bails
  *  - Mints a WS ticket via api.getWsTicket() → getFleetWebSocketUrl()
  *  - Opens `new WebSocket(url)`
  *  - onopen  → setConnected(true), resets backoff to RECONNECT_BASE_MS (1000)
@@ -24,7 +24,7 @@
  *   .simulateOpen() / .simulateMessage(data) / .simulateClose() / .simulateError()
  *
  * Source surprises:
- *  1. getFleetToken() is imported from '../../console/src/lib/api', not the DOM
+ *  1. isProductionConsole() is imported from '../../console/src/lib/api', not the DOM
  *     directly — must be mocked via vi.mock on that module.
  *  2. Ticket null-path: when getFleetWebSocketUrl returns null (ticket mint fails),
  *     the hook retries on the SAME exponential backoff curve used for close events.
@@ -54,10 +54,10 @@ vi.mock('../../console/src/lib/api', () => ({
   api: {
     getWsTicket: vi.fn(),
   },
-  getFleetToken: vi.fn(),
+  isProductionConsole: vi.fn(),
 }));
 
-const mockedGetFleetToken = vi.mocked(apiModule.getFleetToken);
+const mockedIsProduction = vi.mocked(apiModule.isProductionConsole);
 const mockedGetWsTicket = vi.mocked(apiModule.api.getWsTicket);
 
 // ---------------------------------------------------------------------------
@@ -118,15 +118,15 @@ class FakeWebSocket {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function addFleetToken(token = 'test-fleet-token'): void {
+function addProductionAuthMode(): void {
   const meta = document.createElement('meta');
-  meta.name = 'fleet-token';
-  meta.content = token;
+  meta.name = 'fleet-auth-mode';
+  meta.content = 'session';
   document.head.appendChild(meta);
 }
 
 function removeFleetToken(): void {
-  document.querySelectorAll('meta[name="fleet-token"]').forEach((el) => el.remove());
+  document.querySelectorAll('meta[name="fleet-auth-mode"]').forEach((el) => el.remove());
 }
 
 function buildQueryClient(): QueryClient {
@@ -177,8 +177,8 @@ beforeEach(() => {
   wsRegistry.length = 0;
   vi.useFakeTimers();
   vi.stubGlobal('WebSocket', FakeWebSocket);
-  addFleetToken('root-token');
-  mockedGetFleetToken.mockReturnValue('root-token');
+  addProductionAuthMode();
+  mockedIsProduction.mockReturnValue(true);
   mockedGetWsTicket.mockResolvedValue({ ticket: 'ws-ticket-1', expiresIn: 60 });
 });
 
@@ -238,7 +238,7 @@ describe('RealtimeProvider — mount and connect', () => {
 describe('RealtimeProvider — no fleet token', () => {
   it('does not open a WebSocket when fleet token is absent', async () => {
     removeFleetToken();
-    mockedGetFleetToken.mockReturnValue(null);
+    mockedIsProduction.mockReturnValue(false);
 
     await renderProvider(buildQueryClient());
     await flush();
@@ -248,7 +248,7 @@ describe('RealtimeProvider — no fleet token', () => {
 
   it('reports disconnected when fleet token is absent', async () => {
     removeFleetToken();
-    mockedGetFleetToken.mockReturnValue(null);
+    mockedIsProduction.mockReturnValue(false);
 
     const { getConnected } = await renderProvider(buildQueryClient());
     await flush();

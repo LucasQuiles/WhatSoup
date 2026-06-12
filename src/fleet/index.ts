@@ -54,6 +54,13 @@ export const HTTP_LEGACY_QUERY_TOKEN_REMOVAL_DATE = '2026-06-30';
 
 export { DEFAULT_FLEET_PORT } from './constants.ts';
 import { assertSafeFleetBind } from './bind-guard.ts';
+import {
+  createConsoleSessionStore,
+  buildSessionCookie,
+  buildSessionClearCookie,
+  parseSessionCookie,
+  isSameOriginRequest,
+} from './console-session.ts';
 
 export interface FleetDeps {
   db: DatabaseSync;
@@ -702,7 +709,7 @@ export function createFleetServer(deps: FleetDeps) {
     return deps.getFleetTokens?.() ?? { active: deps.fleetToken, accept: deps.acceptTokens ?? [] };
   }
 
-  const staticHandler = createStaticHandler(distDir, () => getTokenSet().active, getVersion);
+  const staticHandler = createStaticHandler(distDir, getVersion);
   // Realtime publisher is wired after wsServer creation — use a deferred reference
   let realtimePublish: (event: import('./websocket-server.ts').WsEvent) => void = () => {};
   const realtime: FleetRealtimePublisher = { publish: (event) => realtimePublish(event) };
@@ -746,6 +753,33 @@ export function createFleetServer(deps: FleetDeps) {
     return apiTicketStore.redeem(candidate, audience, validKeys);
   }
 
+  // Console sessions (B1 closure): the browser unlocks once with the root
+  // token and thereafter authenticates ticket vending with an HttpOnly
+  // cookie + same-origin proof. In-memory by design — restart relocks.
+  const consoleSessions = createConsoleSessionStore();
+
+  function verifyConsoleSession(req: IncomingMessage): boolean {
+    const sessionId = parseSessionCookie(req.headers.cookie);
+    if (!sessionId) return false;
+    if (!consoleSessions.validate(sessionId)) {
+      // Distinguishable from a plain unauthenticated 401: a cookie was
+      // presented but the session is expired/revoked/unknown.
+      log.warn(
+        { event: 'console_token_missing_or_invalid', reason: 'session-invalid-or-expired', path: (req.url ?? '').split('?')[0] },
+        'console session cookie presented but not valid',
+      );
+      return false;
+    }
+    if (!isSameOriginRequest(req)) {
+      log.warn(
+        { event: 'console_csrf_rejected', origin: req.headers.origin ?? null, method: req.method, path: (req.url ?? '').split('?')[0] },
+        'console session presented without same-origin proof',
+      );
+      return false;
+    }
+    return true;
+  }
+
   // Deprecation warning state for legacy `?token=<root>` HTTP API auth.
   // Mirrors `ws_legacy_token_path` on the WebSocket path (#393): one-shot
   // per server lifetime so a misbehaving caller hitting many endpoints does
@@ -765,11 +799,46 @@ export function createFleetServer(deps: FleetDeps) {
       const queryTicket = query.ticket ?? '';
       const bearer = extractBearer(req);
 
-      // Bootstrap ticket endpoints accept ONLY the root fleet token via
-      // Authorization. They intentionally do not accept `?token=` because
-      // these POST routes do not have EventSource's header limitation.
-      if (method === 'POST' && pathname === '/api/auth-ticket') {
+      // Console unlock (B1): the operator presents the root token once;
+      // the browser receives an HttpOnly session cookie, never the token.
+      if (method === 'POST' && pathname === '/api/console-session') {
         if (!verifyToken(bearer)) {
+          log.warn({ event: 'console_session_rejected', reason: 'invalid-root-token', origin: req.headers.origin ?? null }, 'console unlock rejected');
+          jsonResponse(res, 401, { error: 'unauthorized' });
+          return;
+        }
+        if (!isSameOriginRequest(req)) {
+          log.warn({ event: 'console_session_rejected', reason: 'origin-mismatch', origin: req.headers.origin ?? null }, 'console unlock rejected');
+          jsonResponse(res, 403, { error: 'origin not allowed' });
+          return;
+        }
+        const { sessionId, expiresIn } = consoleSessions.issue();
+        log.info({ event: 'console_session_bootstrap', expiresIn, liveSessions: consoleSessions.size() }, 'console session issued');
+        res.setHeader('Set-Cookie', buildSessionCookie(sessionId));
+        jsonResponse(res, 200, { expiresIn });
+        return;
+      }
+
+      // Console lock / logout — revokes the presented session. Deliberately
+      // requires nothing beyond cookie possession (no Origin proof): a caller
+      // holding the cookie can already use the session, so letting them
+      // revoke it is strictly risk-reducing, and CLI operators can log out
+      // without header ceremony.
+      if (method === 'DELETE' && pathname === '/api/console-session') {
+        const sessionId = parseSessionCookie(req.headers.cookie);
+        if (sessionId) consoleSessions.revoke(sessionId);
+        log.info({ event: 'console_session_revoked', hadSession: sessionId !== null }, 'console session revoked');
+        res.setHeader('Set-Cookie', buildSessionClearCookie());
+        jsonResponse(res, 200, { ok: true });
+        return;
+      }
+
+      // Bootstrap ticket endpoints accept the root fleet token via
+      // Authorization, or (for browsers) a valid console session cookie
+      // with same-origin proof. They intentionally do not accept `?token=`
+      // because these POST routes do not have EventSource's header limitation.
+      if (method === 'POST' && pathname === '/api/auth-ticket') {
+        if (!verifyToken(bearer) && !verifyConsoleSession(req)) {
           jsonResponse(res, 401, { error: 'unauthorized' });
           return;
         }
@@ -795,7 +864,7 @@ export function createFleetServer(deps: FleetDeps) {
       // this before the generic API ticket gate so an `api`-audience ticket
       // cannot be exchanged for WebSocket capability.
       if (method === 'POST' && pathname === '/api/ws-ticket') {
-        if (!verifyToken(bearer)) {
+        if (!verifyToken(bearer) && !verifyConsoleSession(req)) {
           jsonResponse(res, 401, { error: 'unauthorized' });
           return;
         }

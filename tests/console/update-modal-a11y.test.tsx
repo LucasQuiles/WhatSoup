@@ -14,7 +14,7 @@ vi.mock('../../console/src/lib/api', () => ({
     restart: vi.fn(),
   },
   getApiTicket: vi.fn(),
-  getFleetToken: vi.fn(() => null),
+  isProductionConsole: vi.fn(() => false),
 }))
 
 const getVersionMock = api.getVersion as unknown as ReturnType<typeof vi.fn>

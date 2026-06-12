@@ -1,5 +1,7 @@
 /**
- * Tests for createStaticHandler token deferral behavior (Issue #316).
+ * Tests for createStaticHandler version-getter deferral behavior (Issue #316;
+ * post-B1 the static handler resolves only the VERSION lazily — HTML never
+ * carries the fleet token).
  *
  * When fleetToken is supplied as a function (lazy lookup), it must only be
  * invoked on HTML-serving paths — never on JS/CSS/asset/404 paths. This
@@ -51,12 +53,12 @@ afterAll(() => {
   fs.rmSync(distDir, { recursive: true, force: true });
 });
 
-describe('createStaticHandler — token resolution deferred to HTML branch', () => {
+describe('createStaticHandler — version resolution deferred to HTML branch', () => {
   it('serves /assets/main.js even when token function throws (corrupt token file)', async () => {
-    const throwingToken = () => {
+    const throwingVersion = () => {
       throw new Error('fleet-tokens.json corrupt');
     };
-    const handler = createStaticHandler(distDir, throwingToken, () => 'v1');
+    const handler = createStaticHandler(distDir, throwingVersion);
     const { server, port } = await startServer(handler);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/assets/main.js`);
@@ -70,10 +72,10 @@ describe('createStaticHandler — token resolution deferred to HTML branch', () 
   });
 
   it('returns 404 (not 500) for missing asset when token function throws', async () => {
-    const throwingToken = () => {
+    const throwingVersion = () => {
       throw new Error('fleet-tokens.json corrupt');
     };
-    const handler = createStaticHandler(distDir, throwingToken, () => 'v1');
+    const handler = createStaticHandler(distDir, throwingVersion);
     const { server, port } = await startServer(handler);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/assets/nope.js`);
@@ -84,13 +86,13 @@ describe('createStaticHandler — token resolution deferred to HTML branch', () 
     }
   });
 
-  it('does NOT invoke token function for JS asset requests', async () => {
+  it('does NOT invoke the version getter for JS asset requests', async () => {
     let calls = 0;
-    const spyToken = () => {
+    const spyVersion = () => {
       calls += 1;
       return 'tok123';
     };
-    const handler = createStaticHandler(distDir, spyToken, () => 'v1');
+    const handler = createStaticHandler(distDir, spyVersion);
     const { server, port } = await startServer(handler);
     try {
       await fetch(`http://127.0.0.1:${port}/assets/main.js`);
@@ -100,19 +102,22 @@ describe('createStaticHandler — token resolution deferred to HTML branch', () 
     }
   });
 
-  it('DOES invoke token function for HTML requests (meta injection)', async () => {
+  it('DOES invoke the version getter for HTML requests (meta injection)', async () => {
     let calls = 0;
-    const spyToken = () => {
+    const spyVersion = () => {
       calls += 1;
       return 'tok123';
     };
-    const handler = createStaticHandler(distDir, spyToken, () => 'v1');
+    const handler = createStaticHandler(distDir, spyVersion);
     const { server, port } = await startServer(handler);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/`);
       const body = await res.text();
       expect(calls).toBeGreaterThanOrEqual(1);
-      expect(body).toContain('fleet-token');
+      // B1 pin: HTML carries version + auth-mode metadata, never the token.
+      expect(body).not.toContain('fleet-token');
+      expect(body).toContain('fleet-version');
+      expect(body).toContain('fleet-auth-mode');
       expect(body).toContain('tok123');
     } finally {
       await new Promise<void>((r) => server.close(() => r()));

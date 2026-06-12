@@ -16,7 +16,7 @@ vi.mock('../../console/src/lib/api', () => ({
     restart: (...args: unknown[]) => mockApiRestart(...args),
     getVersion: (...args: unknown[]) => mockApiGetVersion(...args),
   },
-  getFleetToken: () => null,
+  isProductionConsole: () => false,
   getApiTicket: vi.fn(),
 }))
 

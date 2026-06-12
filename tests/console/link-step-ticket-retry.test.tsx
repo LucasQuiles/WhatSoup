@@ -12,10 +12,10 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-function addFleetToken(token: string): void {
+function addProductionAuthMode(): void {
   const meta = document.createElement('meta')
-  meta.name = 'fleet-token'
-  meta.content = token
+  meta.name = 'fleet-auth-mode'
+  meta.content = 'session'
   document.head.appendChild(meta)
 }
 
@@ -54,7 +54,7 @@ function ticketResponse(ticket: string): Response {
 
 describe('LinkStep SSE ticket reconnects', () => {
   it('mints a fresh sse ticket after a native EventSource error', async () => {
-    addFleetToken('root-token')
+    addProductionAuthMode()
     sources.length = 0
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(ticketResponse('sse-ticket-1'))

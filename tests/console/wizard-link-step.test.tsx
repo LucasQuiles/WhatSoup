@@ -91,15 +91,15 @@ function latestSource(): FakeEventSource {
   return registry[registry.length - 1]
 }
 
-function addFleetToken(token = 'fleet-tok-test'): void {
-  const meta = document.createElement('meta')
-  meta.name = 'fleet-token'
-  meta.content = token
-  document.head.appendChild(meta)
+function addProductionAuthMode(): void {
+  const meta = document.createElement('meta');
+  meta.name = 'fleet-auth-mode';
+  meta.content = 'session';
+  document.head.appendChild(meta);
 }
 
 function removeFleetTokenMeta(): void {
-  const metas = document.head.querySelectorAll('meta[name="fleet-token"]')
+  const metas = document.head.querySelectorAll('meta[name="fleet-auth-mode"]')
   metas.forEach((m) => m.parentNode?.removeChild(m))
 }
 
@@ -170,7 +170,7 @@ describe('LinkStep — initial render (waiting, no QR)', () => {
 // ─── Fleet-token path ────────────────────────────────────────────────────────
 describe('LinkStep — fleet-token path', () => {
   it('mints an sse ticket and threads it into the EventSource URL', async () => {
-    addFleetToken('root-tok')
+    addProductionAuthMode()
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValueOnce(ticketResponse('sse-ticket-abc')),
@@ -182,7 +182,7 @@ describe('LinkStep — fleet-token path', () => {
   })
 
   it('sets error state when the ticket fetch rejects (no EventSource opened)', async () => {
-    addFleetToken('root-tok')
+    addProductionAuthMode()
     vi.stubGlobal(
       'fetch',
       vi.fn().mockRejectedValueOnce(new Error('network down')),
