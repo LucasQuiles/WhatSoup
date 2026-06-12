@@ -150,10 +150,10 @@ describe('AgentRuntime.forceFallback', () => {
     vi.useRealTimers();
   });
 
-  it('returns {ok:false} when no fallbackProvider is configured', () => {
+  it('returns {ok:false} when no fallback provider or chain is configured', () => {
     const runtime = makeRuntime();
     const result = runtime.forceFallback();
-    expect(result).toEqual({ ok: false, reason: 'no fallbackProvider configured for this instance' });
+    expect(result).toEqual({ ok: false, reason: 'no fallback provider or chain configured for this instance' });
     expect(view(runtime).fallbackActiveUntil).toBeNull();
   });
 
