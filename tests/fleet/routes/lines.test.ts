@@ -289,3 +289,44 @@ describe('handleGetLine', () => {
     expect(JSON.parse(res._body).dbStats).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// sharedCwdWith surfacing
+// ---------------------------------------------------------------------------
+
+describe('handleGetLines sharedCwdWith', () => {
+  it('forwards sharedCwdWith from discovery to the line shape', () => {
+    const inst = fakeInstance({ name: 'alpha', type: 'agent', sharedCwdWith: ['beta'] });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['alpha', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map()),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    const body = JSON.parse(res._body);
+    expect(body[0].sharedCwdWith).toEqual(['beta']);
+  });
+
+  it('emits null when no cwd collision exists', () => {
+    const inst = fakeInstance({ name: 'alpha', type: 'agent' });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['alpha', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map()),
+        getStatus: vi.fn(),
+      } as any,
+    });
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+    expect(JSON.parse(res._body)[0].sharedCwdWith).toBeNull();
+  });
+});
