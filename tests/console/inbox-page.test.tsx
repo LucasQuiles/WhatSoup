@@ -197,18 +197,24 @@ describe('Inbox — pane token width classes', () => {
     expect(contactPane).not.toBeNull()
   })
 
-  it('legacy --panel-chat-list token reference is absent', () => {
+  it('chat-list pane carries the v3 width token and no legacy token', () => {
     const { container } = renderInbox()
-    const legacyChats = container.querySelector('.w-\\[var\\(--panel-chat-list\\)\\]')
+    // Positive control: locate the pane via the v3 token class, so the
+    // legacy-absence assert below cannot pass via a broken selector.
+    const chatsPane = container.querySelector('.w-\\[var\\(--inbox-pane-chats\\)\\]')
+    expect(chatsPane).not.toBeNull()
 
-    expect(legacyChats).toBeNull()
+    expect((chatsPane as Element).className).toContain('w-[var(--inbox-pane-chats)]')
+    expect(container.innerHTML).not.toContain('panel-chat-list')
   })
 
-  it('legacy --panel-contact token reference is absent', () => {
+  it('contact pane carries the v3 width token and no legacy token', () => {
     const { container } = renderInbox()
-    const legacyContact = container.querySelector('.w-\\[var\\(--panel-contact\\)\\]')
+    const contactPane = container.querySelector('.w-\\[var\\(--inbox-pane-contact\\)\\]')
+    expect(contactPane).not.toBeNull()
 
-    expect(legacyContact).toBeNull()
+    expect((contactPane as Element).className).toContain('w-[var(--inbox-pane-contact)]')
+    expect(container.innerHTML).not.toContain('panel-contact')
   })
 })
 

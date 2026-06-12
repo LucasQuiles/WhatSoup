@@ -25,7 +25,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
 
 // ---------------------------------------------------------------------------
@@ -526,7 +526,8 @@ describe('ScheduleComposerModal — segmented control aria contract', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
     const contentTypeGroup = screen.getByRole('group', { name: 'Content type' })
-    expect(contentTypeGroup).toBeDefined()
+    const buttons = within(contentTypeGroup).getAllByRole('button')
+    expect(buttons.map((b) => b.textContent)).toEqual(['Text', 'Media'])
   })
 
   it('content-type seg: Text button is aria-pressed=true by default', () => {
@@ -551,7 +552,8 @@ describe('ScheduleComposerModal — segmented control aria contract', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
     const recurGroup = screen.getByRole('group', { name: 'Recurrence mode' })
-    expect(recurGroup).toBeDefined()
+    const buttons = within(recurGroup).getAllByRole('button')
+    expect(buttons.map((b) => b.textContent)).toEqual(['Recurring', 'One-shot'])
   })
 
   it('recurrence-mode seg: One-shot is aria-pressed=true by default', () => {
