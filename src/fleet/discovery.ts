@@ -37,7 +37,24 @@ export interface DiscoveredInstance {
   sandboxPerChat?: boolean;
   provider?: string;
   configError?: string | null;
+  /**
+   * Names of other agent instances whose effective working directory resolves
+   * to the same path as this one. A shared cwd is a misconfiguration: each
+   * agent runtime writes MCP config files (opencode.json / .mcp.json) into its
+   * cwd at startup via read-merge-write, so concurrent instances interleave
+   * those writes. Discovery surfaces the collision; it does not lock.
+   * Absent when the cwd is unique (or for non-agent instances).
+   */
+  sharedCwdWith?: string[];
 }
+
+/**
+ * Grouping marker for agent instances without an explicit agentOptions.cwd.
+ * The agent runtime falls back to os.homedir(), so two defaulting instances
+ * collide regardless of what homedir resolves to at runtime — group on the
+ * marker rather than resolving homedir here.
+ */
+const HOME_DEFAULT_CWD = '<home-default>';
 
 // ---------------------------------------------------------------------------
 // FleetDiscovery
@@ -55,6 +72,10 @@ export class FleetDiscovery {
   /** Synchronous filesystem scan of instances directory */
   scan(): Map<string, DiscoveredInstance> {
     this.instances.clear();
+
+    // Effective working directory per agent-type instance, used to detect
+    // shared-cwd misconfigurations after the scan loop.
+    const agentCwds = new Map<string, string>();
 
     let entries: string[];
     try {
@@ -128,6 +149,16 @@ export class FleetDiscovery {
           const rawCwd = typeof agentOpts.cwd === 'string' ? agentOpts.cwd : os.homedir();
           const agentCwd = expandHomePath(rawCwd);
           socketPath = path.join(agentCwd, '.claude', 'whatsoup.sock');
+          // Record the effective cwd for shared-cwd collision detection. An
+          // explicit non-empty cwd groups on its expanded path; otherwise the
+          // instance defaults to homedir at runtime, so it groups on the
+          // home-default marker.
+          agentCwds.set(
+            name,
+            typeof agentOpts.cwd === 'string' && agentOpts.cwd.trim() !== ''
+              ? expandHomePath(agentOpts.cwd)
+              : HOME_DEFAULT_CWD,
+          );
         }
 
         this.instances.set(name, {
@@ -160,8 +191,40 @@ export class FleetDiscovery {
       }
     }
 
+    this.flagSharedAgentCwds(agentCwds);
+
     log.info({ count: this.instances.size }, 'fleet scan complete');
     return this.instances;
+  }
+
+  /**
+   * Warn once per group of agent instances that resolve the same effective
+   * working directory, and mark each member with the names of its peers.
+   * Non-fatal: the collision is surfaced (log + sharedCwdWith), never locked.
+   */
+  private flagSharedAgentCwds(agentCwds: Map<string, string>): void {
+    const groups = new Map<string, string[]>();
+    for (const [name, cwd] of agentCwds) {
+      const group = groups.get(cwd);
+      if (group) {
+        group.push(name);
+      } else {
+        groups.set(cwd, [name]);
+      }
+    }
+
+    for (const [cwd, names] of groups) {
+      if (names.length < 2) continue;
+      const instances = [...names].sort();
+      log.warn(
+        { cwd, instances },
+        'fleet scan: agent instances share a working directory',
+      );
+      for (const name of instances) {
+        const inst = this.instances.get(name);
+        if (inst) inst.sharedCwdWith = instances.filter((peer) => peer !== name);
+      }
+    }
   }
 
   /** Start 60-second refresh interval */

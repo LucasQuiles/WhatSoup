@@ -37,10 +37,10 @@ export default function App() {
   if (session.state === 'checking') {
     return <PageLoader />
   }
-  return <UnlockedApp />
+  return <UnlockedApp onLogout={session.onLock} showLogout={session.state === 'unlocked'} />
 }
 
-function UnlockedApp() {
+function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogout: boolean }) {
   const { data: lines } = useLines()
   const alertCount = lines?.filter(l => l.status !== 'online').length ?? 0
   const unreadCount = lines?.reduce((sum, l) => sum + (l.unread ?? 0), 0) ?? 0
@@ -65,6 +65,7 @@ function UnlockedApp() {
           updateAvailable={update.data?.updateAvailable}
           remoteSha={update.data?.remoteSha}
           onUpdateClick={update.openUpdateModal}
+          onLogout={showLogout ? onLogout : undefined}
         />
         <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
           <Suspense fallback={<PageLoader />}>

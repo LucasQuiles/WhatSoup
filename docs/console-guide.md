@@ -12,8 +12,10 @@ credentials — enter the fleet token on the lock screen to start a session:
   cookie (24-hour fixed lifetime).
 - All API/WebSocket access then rides short-lived audience tickets minted
   against that session. A fleet-server restart relocks the console.
-- To log out early, call `DELETE /api/console-session` (the cookie is also
-  cleared); there is currently no logout button in the UI.
+- To log out, click **Lock** in the top-right of the nav bar — it revokes the
+  session server-side (`DELETE /api/console-session`), clears the cookie, and
+  returns to the lock screen. (`DELETE /api/console-session` can also be called
+  directly.)
 - The fleet token lives in `~/.config/whatsoup/fleet-tokens.json` on the
   fleet host.
 - Dev mode (Vite proxy) bypasses the lock screen — the proxy injects auth
