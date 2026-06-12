@@ -29,7 +29,7 @@ import {
   type ProviderId,
 } from './providers/index.ts';
 import { composeWithExactLineDedup } from './prompt-compose.ts';
-import { lookupCredential, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
+import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '../../lib/keyring.ts';
 
 const log = createChildLogger('session-manager');
 
@@ -108,9 +108,14 @@ export interface SessionManagerOptions {
  * Extend this function when adding new providers: each provider should only receive
  * its own credentials plus the system essentials below.
  */
+// Services whose model prefix resolved to no SERVICE_ENV_MAP entry — warned
+// once per service per process so spawn-per-turn providers don't spam logs.
+const warnedUnmappedKeyServices = new Set<string>();
+
 export function buildChildEnv(
   provider: string = 'claude-cli',
   baseOpts?: BuildBaseChildEnvOptions,
+  model?: string,
 ): NodeJS.ProcessEnv {
   if (!isProviderId(provider)) {
     throw new Error(
@@ -135,19 +140,37 @@ export function buildChildEnv(
       if (process.env.GEMINI_API_KEY) env.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
       if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
       break;
-    case 'opencode-cli':
+    case 'opencode-cli': {
       // OpenCode reads from its own config or standard API keys
       if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
       if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
       // Forward the standard fleet keys (deepseek/minimax) from the standard
-      // keychain so `opencode run -m minimax/...` / `deepseek/...` can auth.
+      // keychain so `opencode run -m minimax/...` / `deepseek/...` can auth —
+      // opencode's own catalog lets other models be invoked mid-session — PLUS
+      // the key for the session's configured model prefix (resolved via the
+      // shared resolver) so a primary/fallback model outside that pair (e.g.
+      // openai/gpt-4o) can auth too. The Set dedupes overlapping services.
       // lookupCredential resolves env → keychain; SERVICE_ENV_MAP is the single
       // source of truth for the service→env-var mapping (no second copy).
-      for (const svc of ['deepseek', 'minimax'] as const) {
+      const services = new Set<string>(['deepseek', 'minimax']);
+      const modelService = resolveProviderKeyService(provider, model);
+      if (modelService) {
+        if (SERVICE_ENV_MAP[modelService]) {
+          services.add(modelService);
+        } else if (!warnedUnmappedKeyServices.has(modelService)) {
+          warnedUnmappedKeyServices.add(modelService);
+          log.warn(
+            { provider, model, service: modelService },
+            `[session-manager:buildChildEnv] model prefix resolves to key service "${modelService}" but SERVICE_ENV_MAP has no entry for it — no API key env var will be forwarded to the child. Register the service in SERVICE_ENV_MAP (src/lib/keyring.ts) to enable forwarding.`,
+          );
+        }
+      }
+      for (const svc of services) {
         const key = lookupCredential(svc);
         if (key) env[SERVICE_ENV_MAP[svc]!] = key;
       }
       break;
+    }
     case 'openai-api':
     case 'anthropic-api':
       throw new Error(
@@ -925,11 +948,15 @@ export class SessionManager {
       // Without this, Node.js inherits process.env in full — meaning ALL secrets
       // (PINECONE_API_KEY, WHATSOUP_HEALTH_TOKEN, etc.) would flow into every subprocess.
       // Each provider only receives the credentials it actually needs.
-      env: buildChildEnv(this.provider, {
-        allowM365Mutations: this.allowM365Mutations,
-        whatsoupInstance: this.whatsoupInstance,
-        whatsoupMcpSocket: this.whatsoupMcpSocket,
-      }),
+      env: buildChildEnv(
+        this.provider,
+        {
+          allowM365Mutations: this.allowM365Mutations,
+          whatsoupInstance: this.whatsoupInstance,
+          whatsoupMcpSocket: this.whatsoupMcpSocket,
+        },
+        this.model,
+      ),
     });
 
     this.child = child;
@@ -1463,11 +1490,15 @@ export class SessionManager {
       const child = spawn(binary, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: buildChildEnv(this.provider, {
-          allowM365Mutations: this.allowM365Mutations,
-          whatsoupInstance: this.whatsoupInstance,
-          whatsoupMcpSocket: this.whatsoupMcpSocket,
-        }),
+        env: buildChildEnv(
+          this.provider,
+          {
+            allowM365Mutations: this.allowM365Mutations,
+            whatsoupInstance: this.whatsoupInstance,
+            whatsoupMcpSocket: this.whatsoupMcpSocket,
+          },
+          this.model,
+        ),
       });
 
       this.child = child;
