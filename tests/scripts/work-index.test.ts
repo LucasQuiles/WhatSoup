@@ -9,6 +9,7 @@ import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
   buildWorkIndex,
   compareWorkIndexCoverage,
+  findIgnoredCanonicalDocs,
   findWorkIndexCheckIssues,
   findWorkIndexCoverageIssues,
   writeWorkIndex,
@@ -83,7 +84,39 @@ describe('work index scanner', () => {
 
   it('keeps the checked-in work-index artifacts clean', () => {
     expect(findWorkIndexCoverageIssues(repoRoot)).toEqual({ missing: [], stale: [] });
-    expect(findWorkIndexCheckIssues(repoRoot)).toEqual({ missing: [], stale: [], drift: [] });
+    expect(findWorkIndexCheckIssues(repoRoot)).toEqual({ missing: [], stale: [], drift: [], ignoredCanonical: [] });
+  }, WORK_INDEX_TEST_TIMEOUT_MS);
+
+  it('surfaces ignored markdown under a canonical doc root, but not under a local-only root (#640)', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-work-index-ignored-canonical-'));
+    // docs/specs holds a tracked canonical doc → it is a "canonical root".
+    const trackedSpec = path.join(root, 'docs/specs/2026-01-01-design.md');
+    // An ignored sibling under the SAME canonical root must be surfaced.
+    const ignoredSpec = path.join(root, 'docs/specs/local-draft.md');
+    // docs/plans holds NO tracked docs → purely local; ignored content stays silent.
+    const ignoredPlan = path.join(root, 'docs/plans/scratch.md');
+
+    mkdirSync(path.dirname(trackedSpec), { recursive: true });
+    mkdirSync(path.dirname(ignoredPlan), { recursive: true });
+    writeFileSync(path.join(root, '.gitignore'), 'docs/specs/\ndocs/plans/\n', 'utf8');
+    writeFileSync(trackedSpec, '# Design\n', 'utf8');
+    writeFileSync(ignoredSpec, '# Local Draft\n', 'utf8');
+    writeFileSync(ignoredPlan, '# Scratch\n', 'utf8');
+    git(root, ['init']);
+    git(root, ['config', 'user.name', 'Work Index Test']);
+    git(root, ['config', 'user.email', 'work-index-test@users.noreply.github.com']);
+    // Force-add the canonical spec past gitignore; leave the drafts ignored.
+    git(root, ['add', '.gitignore']);
+    git(root, ['add', '-f', 'docs/specs/2026-01-01-design.md']);
+    git(root, ['commit', '-m', 'seed canonical spec']);
+
+    const ignored = findIgnoredCanonicalDocs(root);
+
+    expect(ignored).toContain('docs/specs/local-draft.md');
+    expect(ignored).not.toContain('docs/plans/scratch.md');
+    // The check result carries it as a distinct, warn-class finding.
+    writeWorkIndex(root);
+    expect(findWorkIndexCheckIssues(root).ignoredCanonical).toContain('docs/specs/local-draft.md');
   }, WORK_INDEX_TEST_TIMEOUT_MS);
 
   it('honors an explicit leading status before explanatory status words', () => {
@@ -121,7 +154,7 @@ describe('work index scanner', () => {
     git(root, ['commit', '-m', 'seed docs']);
 
     writeWorkIndex(root);
-    expect(findWorkIndexCheckIssues(root)).toEqual({ missing: [], stale: [], drift: [] });
+    expect(findWorkIndexCheckIssues(root)).toEqual({ missing: [], stale: [], drift: [], ignoredCanonical: [] });
 
     writeFileSync(planFile, '# Example\n**Status:** active\n', 'utf8');
 
@@ -132,6 +165,7 @@ describe('work index scanner', () => {
         { path: 'docs/work-index.json', reason: 'generated JSON differs from scanner output' },
         { path: 'docs/work-index.md', reason: 'generated Markdown differs from scanner output' },
       ],
+      ignoredCanonical: [],
     });
   }, WORK_INDEX_TEST_TIMEOUT_MS);
 });
