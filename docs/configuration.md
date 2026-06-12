@@ -564,13 +564,25 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
 2. **Provision the provider API key** via one of three portable routes. The lookup order is: environment variable first (when no per-user scoping is requested), then platform keyring (`src/lib/keyring.ts:82`).
 
    **Route A — environment variable (universal).**
-   Set the variable named in `SERVICE_ENV_MAP` (`src/lib/keyring.ts:16–25`):
+   Set the variable named in `SERVICE_ENV_MAP` (`src/lib/provider-key-service.ts`, re-exported from `src/lib/keyring.ts`):
 
    | Provider service | Environment variable |
    |-----------------|---------------------|
    | `minimax`       | `MINIMAX_API_KEY`   |
    | `deepseek`      | `DEEPSEEK_API_KEY`  |
    | `openai`        | `OPENAI_API_KEY`    |
+   | `xai`           | `XAI_API_KEY`       |
+   | `groq`          | `GROQ_API_KEY`      |
+   | `mistral`       | `MISTRAL_API_KEY`   |
+   | `openrouter`    | `OPENROUTER_API_KEY` |
+   | `google`        | `GOOGLE_API_KEY`    |
+   | `fireworks-ai`  | `FIREWORKS_API_KEY` |
+   | `togetherai`    | `TOGETHER_API_KEY`  |
+
+   Service names are opencode's models.dev provider ids — the prefix of the
+   configured fallback model (`xai/grok-4` → `xai`). Note the catalog spells
+   them `fireworks-ai` and `togetherai` (not `fireworks` / `together`). The
+   same service name is the keychain service for Routes B and C below.
 
    For **systemd** managed instances, add a drop-in or `EnvironmentFile`:
    ```ini
