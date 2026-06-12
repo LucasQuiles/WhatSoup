@@ -57,7 +57,7 @@ server binds to `127.0.0.1:9099` by default and is gated by the root fleet token
 | `http:fleet.lines.get` | `GET /api/lines/:name` | `src/fleet/index.ts:316` | stable | active | Instance detail + config |
 | `http:fleet.lines.delete` | `DELETE /api/lines/:name` | `src/fleet/index.ts:315` | stable | active | Stop + cleanup |
 | `http:fleet.lines.exists` | `GET /api/lines/:name/exists` | `src/fleet/index.ts:313` | stable | active | Registration probe |
-| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:314` | beta | active | Per-instance primary/fallback provider, key presence (boolean), resolved primary model, fallback window/counter state, effective provider, active fallback-chain entry, chain eligibility, and line reachability |
+| `http:fleet.lines.provider-status` | `GET /api/lines/:name/provider-status` | `src/fleet/index.ts:314` | beta | active | Per-instance primary/fallback provider, key presence (boolean), resolved primary model, fallback reason/model/reset/probe state, fallback window/counter state, effective provider, active fallback-chain entry, chain eligibility, and line reachability |
 | `http:fleet.lines.config-update` | `PATCH /api/lines/:name/config` | `src/fleet/index.ts:330` | stable | active | Update `config.json` |
 | `http:fleet.lines.auth-sse` | `GET /api/lines/:name/auth` | `src/fleet/index.ts:331` | stable | active | QR-code SSE stream |
 | `http:fleet.lines.restart` | `POST /api/lines/:name/restart` | `src/fleet/index.ts:328` | stable | active | Restart unit |
@@ -119,7 +119,7 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:health.status` | `GET /health` | `src/core/health.ts:522` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
+| `http:health.status` | `GET /health` | `src/core/health.ts:522` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
 | `http:health.send` | `POST /send` | `src/core/health.ts:140` | stable | active | Send a text message |
 | `http:health.access` | `POST /access` | `src/core/health.ts:358` | stable | active | Allow / block contact or group |
 | `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:441` | stable | active | Zero unread + chatModify |
