@@ -275,6 +275,14 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
       lastPongAt: null,
       lastDisconnectReason: health.reasonCode ?? null,
       lastStatusCode: null,
+      recentDisconnects: {
+        windowMs: 10 * 60 * 1000,
+        count: 0,
+        lastAt: null,
+        lastReason: null,
+        lastStatusCode: null,
+        byReason: {},
+      },
     };
   }
 

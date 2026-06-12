@@ -356,6 +356,13 @@ describe('ConnectionManager — phase transitions', () => {
       reconnectPhase: null,
       lastDisconnectReason: null,
       lastStatusCode: null,
+      recentDisconnects: {
+        windowMs: 10 * 60 * 1000,
+        count: 1,
+        lastReason: 'Unknown',
+        lastStatusCode: 428,
+        byReason: { Unknown: 1 },
+      },
     });
 
     await manager.shutdown();
