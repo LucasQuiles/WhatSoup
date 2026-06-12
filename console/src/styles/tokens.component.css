@@ -26,6 +26,9 @@
   --panel-actions: 260px;    /* line detail actions panel */
   --panel-history: 288px;    /* line detail history chat list */
   --dropdown-min-w: 200px;   /* dropdown minimum width */
+  /* ═══ Popover tokens (select.md § Anatomy — Popover primitive, B2) ═══ */
+  --popover-min-w: 200px;    /* popover panel minimum width (demotes --dropdown-min-w) */
+  --popover-max-h: 200px;    /* popover panel max height (~5 compressed rows + padding) */
   /* ═══ Text constraints ═══ */
   --empty-max-w: 320px;      /* empty state description max */
   --panel-access-col: 280px; /* access tab two-column min width */

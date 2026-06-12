@@ -192,6 +192,18 @@ waivers:
     expiration_phase: C4
     cleanup_trigger: react-hooks plugin/library compatibility update
     user_approval_required: no
+  - id: WVR-012
+    rule: react-refresh/only-export-components
+    owner: console-maintainer
+    reason: popoverOptionId + usePopoverKeyboard are co-located with Popover — the three are one combobox aria contract; splitting creates a spec-orphan module (same HMR-only limitation as WVR-008).
+    scope: console/src/components/primitives/Popover.tsx
+    expiry: 2026-12-31
+    replacement_plan: revisit if react-refresh gains mixed-export support or the helpers grow a second consumer worth a module.
+    safer_alternative_considered: separate popover-keyboard.ts module — rejected as spec-orphan fragmentation.
+    status: temporary
+    expiration_phase: D6
+    cleanup_trigger: react-refresh capability change or helper extraction
+    user_approval_required: no
   - id: WVR-011
     rule: react-hooks/exhaustive-deps
     owner: console-maintainer

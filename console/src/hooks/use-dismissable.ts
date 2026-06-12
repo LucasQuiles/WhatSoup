@@ -3,8 +3,9 @@
  *
  * Implements the full useDismissable contract:
  *   - Focus trap: Tab cycles within the overlay; Shift+Tab reverses.
+ *     Opt-out via `trapFocus: false` for combobox surfaces (C-B2-1).
  *   - Initial focus: shifts to the container (or caller-provided initialFocus ref)
- *     on mount.
+ *     on mount. Opt-out via `autoFocus: false` for combobox surfaces (C-B2-1).
  *   - Focus restoration: captures document.activeElement at mount time; restores
  *     it to that element on close. Fixes the "cursor lands nowhere" bug.
  *   - Escape closes exactly one layer: stacking-aware single-fire via a module-level
@@ -16,6 +17,10 @@
  *     close-on-outside-click behavior.
  *   - SSR-safe: all DOM access is gated behind typeof document checks.
  *   - Reduced-motion neutral: no motion logic here; this hook is purely behavioural.
+ *
+ * C-B2-1 additive amendment: `trapFocus` and `autoFocus` default true so all
+ * existing Modal/Drawer consumers are byte-identical. Popover opts both to false,
+ * preserving focus on the combobox trigger/input per select.md accessibility contract.
  *
  * Usage:
  *   const ref = useRef<HTMLDivElement>(null);
@@ -91,6 +96,19 @@ export interface UseDismissableOptions {
    * is the CURRENT originating row, not the one that first opened the overlay.
    */
   restoreFocus?: RefObject<HTMLElement | null>;
+  /**
+   * When false, the focus trap (Tab/Shift+Tab cycling) is disabled.
+   * Default true — Modal/Drawer keep the trap; combobox Popover opts out so
+   * focus stays on the trigger/input and the user can type while navigating
+   * options via arrow keys (C-B2-1 additive amendment, select.md combobox contract).
+   */
+  trapFocus?: boolean;
+  /**
+   * When false, initial focus is NOT shifted into the container on open.
+   * Default true — Modal/Drawer steal focus on mount; combobox Popover opts out
+   * so the trigger/input retains focus while the panel is visible (C-B2-1).
+   */
+  autoFocus?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +119,15 @@ export function useDismissable(
   containerRef: RefObject<HTMLElement | null>,
   options: UseDismissableOptions,
 ): void {
-  const { onClose, open, dismissable = false, initialFocus, restoreFocus } = options;
+  const {
+    onClose,
+    open,
+    dismissable = false,
+    initialFocus,
+    restoreFocus,
+    trapFocus = true,
+    autoFocus = true,
+  } = options;
 
   // Stable ref to onClose so effects don't re-run on every render closure change.
   const onCloseRef = useRef(onClose);
@@ -124,14 +150,19 @@ export function useDismissable(
     const container = containerRef.current;
     if (!container) return;
 
-    // Set initial focus
-    const firstFocusable = getFocusableElements(container)[0];
-    const initialTarget =
-      (initialFocus?.current ?? null) !== null &&
-      container.contains(initialFocus!.current)
-        ? initialFocus!.current!
-        : firstFocusable ?? container;
-    (initialTarget as HTMLElement).focus({ preventScroll: true });
+    // Set initial focus (opt-out via autoFocus: false for combobox surfaces)
+    if (autoFocus) {
+      const firstFocusable = getFocusableElements(container)[0];
+      const initialTarget =
+        (initialFocus?.current ?? null) !== null &&
+        container.contains(initialFocus!.current)
+          ? initialFocus!.current!
+          : firstFocusable ?? container;
+      (initialTarget as HTMLElement).focus({ preventScroll: true });
+    }
+
+    // Focus trap (opt-out via trapFocus: false for combobox surfaces)
+    if (!trapFocus) return;
 
     function handleTab(e: KeyboardEvent) {
       if (e.key !== 'Tab') return;
@@ -157,7 +188,7 @@ export function useDismissable(
 
     document.addEventListener('keydown', handleTab);
     return () => document.removeEventListener('keydown', handleTab);
-  }, [open, containerRef, initialFocus]);
+  }, [open, containerRef, initialFocus, trapFocus, autoFocus]);
 
   // Escape handler — stacking-aware single-fire
   const stableClose = useCallback(() => onCloseRef.current(), []);

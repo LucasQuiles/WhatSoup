@@ -1360,3 +1360,113 @@ button.soup-pill[aria-disabled="true"] {
   white-space: nowrap;
 }
 .soup-tabpanel { padding: var(--sp-3) 0; }
+
+/* ───────────────────────── soup-popover (select.md § Anatomy) ──────────────
+   Anchored panel for custom combobox picker surfaces (B2 Popover primitive).
+   Panel: --surface-overlay fill, 1px --border-subtle, --r-2, --shadow-overlay.
+   min-width governed by --popover-min-w token or by trigger width (span variant).
+   max-height + overflow-y: auto — governed scroll valve (~5 rows visible).
+   Option rows: 28px compressed density (--row-compressed), hover --row-hover,
+   selected --accent-wash + leading check mark.
+   Motion: fade+scale enter at --dur-fast; exit = instant on unmount (DD-19 pattern).
+   Reduced-motion: both instant via the global @media prefers-reduced-motion block. */
+
+.soup-popover {
+  position: absolute;
+  z-index: var(--z-overlay, 100);
+  background: var(--surface-overlay);
+  border: var(--bw) solid var(--border-subtle);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-overlay);
+  min-width: var(--popover-min-w, 200px);
+  max-height: var(--popover-max-h, 200px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  animation: soup-popover-in var(--dur-fast) var(--ease-enter) forwards;
+}
+
+@keyframes soup-popover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-popover {
+    animation: none;
+  }
+}
+
+.soup-popover__list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+/* Option row — 28px compressed row (select.md § Anatomy) */
+.soup-popover__option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--row-compressed, 28px);
+  padding: 0 var(--sp-3);
+  cursor: pointer;
+  user-select: none;
+  font: var(--type-label);
+  color: var(--text-1);
+  position: relative;
+}
+
+.soup-popover__option:hover,
+.soup-popover__option--active {
+  background: var(--row-hover);
+}
+
+/* Selected row: accent-wash fill */
+.soup-popover__option--selected {
+  background: var(--accent-wash);
+  color: var(--text-1);
+}
+
+.soup-popover__option--selected:hover,
+.soup-popover__option--selected.soup-popover__option--active {
+  background: var(--accent-wash);
+}
+
+/* Leading 16px check mark (select.md § Anatomy) */
+.soup-popover__check {
+  display: inline-block;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  position: relative;
+}
+
+.soup-popover__check::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 2px;
+  width: 6px;
+  height: 10px;
+  border-right: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  transform: rotate(45deg);
+}
+
+/* Option label — truncate long names; no panel widening */
+.soup-popover__option-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
