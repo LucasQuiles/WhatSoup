@@ -686,6 +686,7 @@ export async function handleGetLineProviderStatus(
   const lastFallbackTurnAtRaw = dig(health, 'instance', 'lastFallbackTurnAt');
   const probeAttemptsRaw = dig(health, 'instance', 'probeAttempts');
   const lastProbeAtRaw = dig(health, 'instance', 'lastProbeAt');
+  const windowCostUsdRaw = dig(health, 'instance', 'fallbackWindowCostUsd');
   const activationsRaw = dig(health, 'instance', 'fallbackActivations');
   const revertsRaw = dig(health, 'instance', 'fallbackReverts');
   const replaysRaw = dig(health, 'instance', 'fallbackReplays');
@@ -719,6 +720,7 @@ export async function handleGetLineProviderStatus(
       lastFallbackTurnAt: typeof lastFallbackTurnAtRaw === 'number' ? lastFallbackTurnAtRaw : null,
       probeAttempts: typeof probeAttemptsRaw === 'number' ? probeAttemptsRaw : null,
       lastProbeAt: typeof lastProbeAtRaw === 'number' ? lastProbeAtRaw : null,
+      windowCostUsd: typeof windowCostUsdRaw === 'number' ? windowCostUsdRaw : null,
       activations: typeof activationsRaw === 'number' ? activationsRaw : null,
       reverts: typeof revertsRaw === 'number' ? revertsRaw : null,
       replays: typeof replaysRaw === 'number' ? replaysRaw : null,

@@ -91,6 +91,103 @@ export async function probeFallbackBinary(
   });
 }
 
+export interface BinaryAuthStatusResult {
+  /** 'ok' = exited 0 within the timeout; 'failed' = non-zero exit, spawn
+   *  error, or timeout. */
+  status: 'ok' | 'failed';
+  /** Combined stdout+stderr captured before settling ('' when nothing was
+   *  produced — spawn error or silent timeout). */
+  output: string;
+}
+
+/** Grace period between the timeout kill (SIGTERM) and the SIGKILL escalation. */
+const KILL_ESCALATION_GRACE_MS = 2_000;
+
+/**
+ * Probe a provider binary's auth status without blocking the event loop.
+ *
+ * Spawns `binary args` (e.g. `claude ['auth','status','--json']`) with piped
+ * stdout+stderr, a caller-scrubbed env, and the same 5 s kill-timer discipline
+ * as the other probes — plus SIGKILL escalation: if the child ignores the
+ * timeout kill for {@link KILL_ESCALATION_GRACE_MS}, it is SIGKILLed so a
+ * wedged probe can never accumulate zombie children across recheck cadences.
+ *
+ * - exit code 0 before the timeout → `{ status: 'ok', output }`
+ * - non-zero exit, spawn error, or timeout → `{ status: 'failed', output }`
+ *
+ * Auth-message classification is the caller's job — this function only answers
+ * "did the probe command complete cleanly, and what did it say".
+ *
+ * Injectable `spawnImpl` for unit tests. Never throws, never rejects.
+ */
+export async function probeBinaryAuthStatus(
+  binary: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  spawnImpl: typeof spawn = spawn,
+): Promise<BinaryAuthStatusResult> {
+  return new Promise<BinaryAuthStatusResult>((resolve) => {
+    let settled = false;
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
+    // Declared before settle() captures them so a synchronous spawn throw
+    // cannot hit a TDZ (same hazard as probeFallbackBinary above).
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let killEscalationTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const combinedOutput = (): string => `${stdoutBuffer}\n${stderrBuffer}`.trim();
+
+    const settle = (result: BinaryAuthStatusResult): void => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    let child: ReturnType<typeof spawnImpl>;
+    try {
+      child = spawnImpl(binary, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env,
+        windowsHide: true,
+      });
+    } catch {
+      settle({ status: 'failed', output: '' });
+      return;
+    }
+
+    killTimer = setTimeout(() => {
+      try { child.kill(); } catch { /* ignore kill errors */ }
+      // Escalate if the child ignores the polite kill. The probe result is
+      // already settled below — escalation is pure child-cleanup.
+      killEscalationTimer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* ignore kill errors */ }
+      }, KILL_ESCALATION_GRACE_MS);
+      killEscalationTimer.unref?.();
+      settle({ status: 'failed', output: combinedOutput() });
+    }, PROBE_TIMEOUT_MS);
+    killTimer.unref?.();
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdoutBuffer += chunk.toString('utf8');
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderrBuffer += chunk.toString('utf8');
+    });
+
+    child.on('error', () => {
+      clearTimeout(killTimer);
+      clearTimeout(killEscalationTimer);
+      settle({ status: 'failed', output: combinedOutput() });
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(killTimer);
+      clearTimeout(killEscalationTimer);
+      settle({ status: code === 0 ? 'ok' : 'failed', output: combinedOutput() });
+    });
+  });
+}
+
 export type ModelCatalogResult = {
   status: 'found' | 'not_found' | 'unknown';
   /** Catalog id with the provider's exact casing when the configured model
