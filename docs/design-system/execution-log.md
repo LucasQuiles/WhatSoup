@@ -440,3 +440,25 @@ ratchet 614→602; verify:push:branch PASS (5 weak assertions strengthened). DD-
 DD-21 table half CLOSED (register split into DD-18r/DD-21r); DD-22 opened (log virtualization
 deferred until a streaming source exists). origin/main merged ×3 mid-slice, zero conflicts.
 Packet: `06-implementation/c2-3-evidence.md`.
+
+---
+
+## B1 — LineDetail: Tabs / header buttons / overflow / DD-11 — 2026-06-12
+
+**Verdict: Pass.** Subagent-driven plan execution (one commit per task, A0 gate first):
+`048a26f7` CONNECTION_MAP fold (DD-11 closed; disconnected ink neutral→crit, deliberate, pinned),
+`d7feb2a4` Tabs primitive (roving tabindex, arrows+wrap, Home/End, MANUAL activation,
+disabled-with-reason; accent underline — the mode-colored treatment was the tabs.md anti-pattern),
+`3f4e4d0b` LineDetail adoption (bar 38→10 lines; first page-level LineDetail test harness; real
+MCP-tab condition = passive OR agent-without-sandboxPerChat), `92deece2` header (ActionButton back,
+ghost actions, danger Delete per button.md — live design review confirmed it "sits calmly"),
+`883a13b4` live-QA fixes (meta hidden through lg — Tailwind md fires AT 768; header wraps below md;
+heartbeat meta-tier hidden; name-row wrap + tokenized 160px identity floor after a three-stage
+flex-collapse chase that only live measurement could catch — truncation classes were asserted green
+the whole time the name rendered at 12px), `2121ad34` ratchet 602→594 (LineDetail raw-button bucket
+ELIMINATED; status-map +2 = relocated ternary literals, documented interim). 1,904/1,904 tests
+(+16); verify:push:branch PASS; four browser QA rounds, both themes. DD-11 + LineDetail legs of
+DD-18r/DD-21r closed; remainders re-scoped to B2/B3. SummaryTab ACTIONS sidebar c-btn = D3,
+already ratchet-tracked, burns down with its surface slice.
+Packet: `06-implementation/b1-evidence.md`. Pre-staged for next slices: `b2-survey.md`,
+`b3-survey.md`, `conformance-manifest.md` (12 PASS / 9 INCONCLUSIVE / 3 PENDING).
