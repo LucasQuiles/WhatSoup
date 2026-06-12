@@ -58,3 +58,42 @@ describe('useConsoleSession onLock', () => {
     expect(mockGetApiTicket).not.toHaveBeenCalled()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Probe-failure catch branch (lines 27–32): 401 / network errors map to locked
+// ---------------------------------------------------------------------------
+
+describe('useConsoleSession probe-failure → locked (lines 27–32)', () => {
+  beforeEach(() => {
+    mockIsProductionConsole.mockReturnValue(true)
+    mockLockConsole.mockResolvedValue(undefined)
+  })
+
+  it('401-style rejection during initial probe maps to locked state', async () => {
+    mockGetApiTicket.mockRejectedValue(new Error('401 Unauthorized'))
+    const { result } = renderHook(() => useConsoleSession())
+
+    await waitFor(() => expect(result.current.state).toBe('locked'))
+    // probe was attempted
+    expect(mockGetApiTicket).toHaveBeenCalledOnce()
+  })
+
+  it('network-level rejection during initial probe also maps to locked state', async () => {
+    mockGetApiTicket.mockRejectedValue(new Error('Network Error'))
+    const { result } = renderHook(() => useConsoleSession())
+
+    await waitFor(() => expect(result.current.state).toBe('locked'))
+    expect(mockGetApiTicket).toHaveBeenCalledOnce()
+  })
+
+  it('onUnlocked transitions from locked to unlocked without re-probing', async () => {
+    // Start with a failed probe → locked
+    mockGetApiTicket.mockRejectedValue(new Error('401'))
+    const { result } = renderHook(() => useConsoleSession())
+    await waitFor(() => expect(result.current.state).toBe('locked'))
+
+    await act(async () => { result.current.onUnlocked() })
+
+    expect(result.current.state).toBe('unlocked')
+  })
+})

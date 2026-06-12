@@ -121,3 +121,247 @@ describe('FeedCard malformed payload rendering', () => {
     expect(screen.queryByRole('button', { name: 'Stop line-a instance' })).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Degraded-state mapper tests (FeedCard.tsx lines 116–263)
+// One case per mapper, one per representative tone, asserting rendered
+// status text and severity class — not just presence.
+// ---------------------------------------------------------------------------
+
+describe('FeedCard — connectionTone / connectionPresentation (lines 116–201)', () => {
+  it('connected state renders "conn" badge with ok tone and "connected" headline', () => {
+    render(
+      <FeedCard
+        event={event({
+          detail: { type: 'connection', state: 'connected' },
+          text: 'line-a: connected',
+        })}
+      />,
+    )
+
+    expect(screen.getByText('conn')).toBeDefined()
+    const headline = screen.getByText('connected')
+    expect(headline.className).toContain('fc-headline--ok')
+  })
+
+  it('reconnecting flag (without connected/connecting state) renders "reconnecting" headline with warn tone', () => {
+    // reconnecting=true without state='connecting' or state='connected' hits the
+    // `else if (d.reconnecting)` branch in connectionPresentation
+    render(
+      <FeedCard
+        event={event({
+          detail: { type: 'connection', reconnecting: true, reason: 'connectionLost' },
+          text: 'line-a: reconnecting',
+        })}
+      />,
+    )
+
+    const headline = screen.getByText('reconnecting')
+    expect(headline.className).toContain('fc-headline--warn')
+    // reason label is shown as context
+    expect(screen.getByText('connection lost')).toBeDefined()
+  })
+
+  it('disconnected state renders "disconnected" headline with crit tone', () => {
+    render(
+      <FeedCard
+        event={event({
+          detail: { type: 'connection', state: 'disconnected' },
+          text: 'line-a: disconnected',
+        })}
+      />,
+    )
+
+    const headline = screen.getByText('disconnected')
+    expect(headline.className).toContain('fc-headline--crit')
+  })
+
+  it('connection with isError flag renders crit tone on both badge and headline', () => {
+    render(
+      <FeedCard
+        event={event({
+          isError: true,
+          detail: { type: 'connection', state: 'disconnected', reason: 'timedOut' },
+          text: 'line-a: timed out',
+        })}
+      />,
+    )
+
+    const badge = screen.getByText('conn')
+    expect(badge.className).toContain('fc-badge--crit')
+    const headline = screen.getByText('disconnected')
+    expect(headline.className).toContain('fc-headline--crit')
+  })
+
+  it('reconnected path (connected + statusCode) renders "reconnected" headline', () => {
+    render(
+      <FeedCard
+        event={event({
+          detail: { type: 'connection', state: 'connected', statusCode: 411 },
+          text: 'line-a: reconnected',
+        })}
+      />,
+    )
+
+    expect(screen.getByText('reconnected')).toBeDefined()
+    expect(screen.getByText('411')).toBeDefined()
+  })
+})
+
+describe('FeedCard — toolErrorPresentation (line 223)', () => {
+  it('renders badge with toolName, "tool failed" headline in crit tone, and error detail', () => {
+    render(
+      <FeedCard
+        event={event({
+          detail: {
+            type: 'tool_error',
+            toolName: 'send_message',
+            error: 'socket timeout',
+          },
+          text: 'line-a: tool failed',
+        })}
+      />,
+    )
+
+    // badge = toolName
+    const badge = screen.getByText('send_message')
+    expect(badge.className).toContain('fc-badge--crit')
+
+    // headline
+    const headline = screen.getByText('tool failed')
+    expect(headline.className).toContain('fc-headline--crit')
+
+    // error detail text
+    expect(screen.getByText('socket timeout')).toBeDefined()
+  })
+
+  it('falls back to "tool" badge when toolName is empty string', () => {
+    render(
+      <FeedCard
+        event={event({
+          detail: {
+            type: 'tool_error',
+            toolName: '',
+            error: 'some error',
+          },
+          text: 'line-a: tool failed',
+        })}
+      />,
+    )
+
+    expect(screen.getByText('tool')).toBeDefined()
+  })
+})
+
+describe('FeedCard — sessionPresentation (line 234)', () => {
+  it('renders "session" badge with agent tone and action as headline', () => {
+    render(
+      <FeedCard
+        event={event({
+          detail: {
+            type: 'session',
+            action: 'started',
+            sessionId: 'abc12345-0000-0000-0000-000000000000',
+          },
+          text: 'line-a: session started',
+        })}
+      />,
+    )
+
+    const badge = screen.getByText('session')
+    expect(badge.className).toContain('fc-badge--agent')
+    expect(screen.getByText('started')).toBeDefined()
+    // context = first 8 chars of sessionId prefixed with #
+    expect(screen.getByText('#abc12345')).toBeDefined()
+  })
+
+  it('renders crit headline tone when session event has isError=true', () => {
+    render(
+      <FeedCard
+        event={event({
+          isError: true,
+          detail: {
+            type: 'session',
+            action: 'crashed',
+            reason: 'OOM',
+          },
+          text: 'line-a: session crashed',
+        })}
+      />,
+    )
+
+    const headline = screen.getByText('crashed')
+    expect(headline.className).toContain('fc-headline--crit')
+    // reason appears as detail
+    expect(screen.getByText('— OOM')).toBeDefined()
+  })
+
+  it('renders no context span when sessionId is absent', () => {
+    const { container } = render(
+      <FeedCard
+        event={event({
+          detail: {
+            type: 'session',
+            action: 'ended',
+          },
+          text: 'line-a: session ended',
+        })}
+      />,
+    )
+
+    expect(screen.getByText('ended')).toBeDefined()
+    expect(container.querySelector('.fc-context')).toBeNull()
+  })
+})
+
+describe('FeedCard — importPresentation (line 257)', () => {
+  it('renders "import" badge, table name as headline, and row count as context', () => {
+    render(
+      <FeedCard
+        event={event({
+          detail: {
+            type: 'import',
+            table: 'messages',
+            count: 1024,
+          },
+          text: 'line-a: import done',
+        })}
+      />,
+    )
+
+    expect(screen.getByText('import')).toBeDefined()
+    expect(screen.getByText('messages')).toBeDefined()
+    expect(screen.getByText('1024 rows')).toBeDefined()
+  })
+
+  it('renders "skipped" context when import.skipped is true', () => {
+    render(
+      <FeedCard
+        event={event({
+          detail: {
+            type: 'import',
+            table: 'contacts',
+            skipped: true,
+          },
+          text: 'line-a: import skipped',
+        })}
+      />,
+    )
+
+    expect(screen.getByText('contacts')).toBeDefined()
+    expect(screen.getByText('skipped')).toBeDefined()
+  })
+
+  it('renders "data" headline when table is absent', () => {
+    render(
+      <FeedCard
+        event={event({
+          detail: { type: 'import' },
+          text: 'line-a: import',
+        })}
+      />,
+    )
+
+    expect(screen.getByText('data')).toBeDefined()
+  })
+})

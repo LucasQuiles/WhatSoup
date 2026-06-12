@@ -1131,3 +1131,238 @@ describe('SoupKitchen chart-range ToolbarTimeRange contract', () => {
     expect(pressedButtons[0].textContent).toBe('7d');
   });
 });
+
+// ---------------------------------------------------------------------------
+// ChartPanel error-state retry lane (SoupKitchen.tsx lines 647–701)
+// Gap 4 from test-coverage-audit.md: error panel renders and onRetry refetches
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen — chart error panel renders on metrics query error', () => {
+  function renderPageWithMetricsError(metricsRefetch: ReturnType<typeof vi.fn>) {
+    useLinesMock.mockReturnValue({ data: [], isError: false, error: null });
+    useFeedMock.mockReturnValue({ data: [], isError: false, error: null });
+    useFleetMetricsMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      refetch: metricsRefetch,
+    });
+    useLogsMock.mockReturnValue({ data: [], isError: false, error: null, refetch: vi.fn() });
+
+    const toastValue: ToastContextValue = {
+      toast: vi.fn(),
+      success: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      dismiss: vi.fn(),
+      clear: vi.fn(),
+    };
+
+    return render(
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <SoupKitchen />
+        </MemoryRouter>
+      </ToastContext.Provider>,
+    );
+  }
+
+  it('renders "Failed to load" text in all three chart panels when metrics query errors', () => {
+    renderPageWithMetricsError(vi.fn());
+
+    const failedTexts = screen.getAllByText('Failed to load');
+    expect(failedTexts.length).toBe(3);
+  });
+
+  it('each chart panel renders a Retry button when metrics query errors', () => {
+    renderPageWithMetricsError(vi.fn());
+
+    const retryBtns = screen.getAllByRole('button', { name: 'Retry' });
+    expect(retryBtns.length).toBe(3);
+  });
+
+  it('clicking Retry on any chart panel calls metricsRefetch', () => {
+    const metricsRefetch = vi.fn();
+    renderPageWithMetricsError(metricsRefetch);
+
+    const retryBtns = screen.getAllByRole('button', { name: 'Retry' });
+    fireEvent.click(retryBtns[0]);
+    expect(metricsRefetch).toHaveBeenCalledOnce();
+  });
+
+  it('clicking all three Retry buttons each fire metricsRefetch once each', () => {
+    const metricsRefetch = vi.fn();
+    renderPageWithMetricsError(metricsRefetch);
+
+    const retryBtns = screen.getAllByRole('button', { name: 'Retry' });
+    retryBtns.forEach((btn) => fireEvent.click(btn));
+    expect(metricsRefetch).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('SoupKitchen — chart panel degraded block (lines 472–516)', () => {
+  function renderPageWithMetricsOpts(opts: {
+    isError?: boolean;
+    isLoading?: boolean;
+    hasMessageData?: boolean;
+    hasTokenData?: boolean;
+    hasSessionData?: boolean;
+    refetch?: ReturnType<typeof vi.fn>;
+  } = {}) {
+    useLinesMock.mockReturnValue({ data: [], isError: false, error: null });
+    useFeedMock.mockReturnValue({ data: [], isError: false, error: null });
+    useLogsMock.mockReturnValue({ data: [], isError: false, error: null, refetch: vi.fn() });
+    useFleetMetricsMock.mockReturnValue({
+      data: opts.isError ? undefined : {
+        meta: {
+          instancesQueried: 1,
+          instancesFailed: 0,
+          hasMessageData: opts.hasMessageData ?? false,
+          hasTokenData: opts.hasTokenData ?? false,
+          hasSessionData: opts.hasSessionData ?? false,
+          providers: [],
+        },
+        messageVolume: [],
+        tokenUsage: [],
+        sessionActivity: [],
+        tokenUsageByProvider: {},
+        sessionActivityByProvider: {},
+        range: '24h' as const,
+      },
+      isLoading: opts.isLoading ?? false,
+      isError: opts.isError ?? false,
+      refetch: opts.refetch ?? vi.fn(),
+    });
+
+    const toastValue: ToastContextValue = {
+      toast: vi.fn(),
+      success: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      dismiss: vi.fn(),
+      clear: vi.fn(),
+    };
+
+    return render(
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <SoupKitchen />
+        </MemoryRouter>
+      </ToastContext.Provider>,
+    );
+  }
+
+  it('renders chart shimmer placeholders while metrics are loading', () => {
+    renderPageWithMetricsOpts({ isLoading: true });
+
+    const shimmers = document.querySelectorAll('[data-testid="chart-shimmer"]');
+    expect(shimmers.length).toBe(3);
+  });
+
+  it('no shimmer or "Failed to load" when metrics loaded successfully with data', () => {
+    renderPageWithMetricsOpts({ hasMessageData: true, hasTokenData: true, hasSessionData: true });
+
+    expect(screen.queryAllByText('Failed to load').length).toBe(0);
+    expect(document.querySelectorAll('[data-testid="chart-shimmer"]').length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ActivityFeed handler gaps (ActivityFeed.tsx lines 108–139)
+// Gap 4 sibling: restart / stop confirm handlers in the ActivityFeed
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen ActivityFeed — restart and stop-confirm handlers', () => {
+  function renderWithFeed(feed: FeedEvent[]) {
+    useLinesMock.mockReturnValue({ data: [], isError: false, error: null });
+    useFeedMock.mockReturnValue({ data: feed, isError: false, error: null });
+    useLogsMock.mockReturnValue({ data: [], isError: false, error: null, refetch: vi.fn() });
+    useFleetMetricsMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+
+    const toastValue: ToastContextValue = {
+      toast: vi.fn(),
+      success: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      dismiss: vi.fn(),
+      clear: vi.fn(),
+    };
+
+    return render(
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <SoupKitchen />
+        </MemoryRouter>
+      </ToastContext.Provider>,
+    );
+  }
+
+  it('renders a restart action button for an actionable connection-error event', () => {
+    const feed: FeedEvent[] = [
+      {
+        time: '12:00',
+        mode: 'agent',
+        text: 'alpha: connection error',
+        instance: 'alpha',
+        isError: true,
+        detail: { type: 'connection', state: 'disconnected' },
+      },
+    ];
+    renderWithFeed(feed);
+
+    expect(screen.getByRole('button', { name: 'Restart alpha' })).toBeDefined();
+  });
+
+  it('renders a stop action button for an actionable connection-error event', () => {
+    const feed: FeedEvent[] = [
+      {
+        time: '12:00',
+        mode: 'agent',
+        text: 'alpha: connection error',
+        instance: 'alpha',
+        isError: true,
+        detail: { type: 'connection', state: 'disconnected' },
+      },
+    ];
+    renderWithFeed(feed);
+
+    expect(screen.getByRole('button', { name: 'Stop alpha instance' })).toBeDefined();
+  });
+
+  it('clicking the Stop button opens the ActivityFeed ConfirmDialog', () => {
+    const feed: FeedEvent[] = [
+      {
+        time: '12:00',
+        mode: 'agent',
+        text: 'alpha: connection error',
+        instance: 'alpha',
+        isError: true,
+        detail: { type: 'connection', state: 'disconnected' },
+      },
+    ];
+    renderWithFeed(feed);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop alpha instance' }));
+
+    // ConfirmDialog title is a span not a heading element
+    expect(screen.getByText(/Stop alpha\?/)).toBeDefined();
+  });
+
+  it('ActivityFeed pause/resume toggle button is present and toggles pressed state', () => {
+    const feed: FeedEvent[] = [
+      { time: '12:00', mode: 'passive', text: 'feed-event' },
+    ];
+    renderWithFeed(feed);
+
+    const pauseBtn = screen.getByRole('button', { name: /pause/i });
+    expect(pauseBtn.getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.click(pauseBtn);
+    expect(screen.getByRole('button', { name: /resume/i }).getAttribute('aria-pressed')).toBe('true');
+  });
+});
