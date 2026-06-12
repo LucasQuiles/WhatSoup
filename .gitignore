@@ -86,3 +86,7 @@ __pycache__/
 output.txt
 bead-output.md
 codex-exec-deep-dive.md
+
+# Instance-specific health profiles are host-local, never tracked (safeguard: no-tracked-instance-health-profiles)
+deploy/health-profiles/*.json
+!deploy/health-profiles/example.json

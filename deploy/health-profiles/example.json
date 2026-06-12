@@ -5,8 +5,6 @@
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
   "expectConfigInventory": true,
-  "requiredCredentialFiles": ["fleet-tokens.json"],
-  "instances": [
-    { "name": "ad-bot", "expected": "always_on", "service": "com.whatsoup.ad-bot" }
-  ]
+  "requiredCredentialFiles": [],
+  "instances": []
 }

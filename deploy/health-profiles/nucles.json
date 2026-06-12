@@ -1,8 +1,0 @@
-{
-  "role": "central",
-  "expectDispatcher": true,
-  "expectQLoop": true,
-  "expectPersonalSocket": true,
-  "expectPersonalTools": true,
-  "expectConfigInventory": true
-}

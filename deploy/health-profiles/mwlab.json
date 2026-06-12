@@ -1,9 +1,0 @@
-{
-  "role": "relay-only",
-  "expectDispatcher": false,
-  "expectQLoop": false,
-  "expectPersonalSocket": false,
-  "expectPersonalTools": false,
-  "expectConfigInventory": false,
-  "requiredCredentialFiles": ["fleet-token"]
-}
