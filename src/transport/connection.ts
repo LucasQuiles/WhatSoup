@@ -2,14 +2,28 @@
 // ConnectionManager — Baileys-backed WhatsApp connection with typed event emission.
 
 import { EventEmitter } from 'node:events';
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { arch, freemem, hostname, loadavg, platform, release, totalmem, uptime as osUptime } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import type { Readable } from 'node:stream';
 
 import {
   makeWASocket,
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   DisconnectReason,
   type WAMessage,
@@ -20,7 +34,8 @@ import { createHash } from 'node:crypto';
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
-import { emitAlert } from '../lib/emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from '../lib/emit-alert.ts';
+import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
 import { WhatSoupError } from '../errors.ts';
 import { nowUnixSec } from '../fleet/time-utils.ts';
 import type { Messenger, IncomingMessage, OutboundMedia, SubmissionReceipt, TypingState } from '../core/types.ts';
@@ -31,6 +46,73 @@ import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
 import { decideDisconnectAction } from './auth-disconnect-policy.ts';
 import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
+import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
+import { createAtomicCredsSaver } from './atomic-auth-save.ts';
+import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
+
+function connectionWriteError(message: string, code: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
+
+function assertWritableMarkerTarget(path: string): void {
+  if (!existsSync(path)) return;
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) {
+    throw connectionWriteError('refusing to write exhaustion marker through symlink', 'ELOOP');
+  }
+  if (!stat.isFile()) {
+    throw connectionWriteError('refusing to write exhaustion marker over non-regular path', 'EINVAL');
+  }
+}
+
+function assertPrivateMarkerDirectory(path: string): void {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) {
+    throw connectionWriteError('refusing to use marker directory through symlink', 'ELOOP');
+  }
+  if (!stat.isDirectory()) {
+    throw connectionWriteError('refusing to use marker directory over non-directory path', 'EINVAL');
+  }
+}
+
+function writePrivateJsonMarker(path: string, value: unknown): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  assertPrivateMarkerDirectory(dir);
+  chmodSync(dir, 0o700);
+  assertWritableMarkerTarget(path);
+
+  const tmpPath = join(dir, `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
+  let fd: number | null = null;
+  try {
+    fd = openSync(tmpPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    writeFileSync(fd, JSON.stringify(value, null, 2) + '\n', 'utf-8');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    assertWritableMarkerTarget(path);
+    renameSync(tmpPath, path);
+    chmodSync(path, 0o600);
+    try {
+      const dirFd = openSync(dir, constants.O_RDONLY);
+      try {
+        fsyncSync(dirFd);
+      } finally {
+        closeSync(dirFd);
+      }
+    } catch {
+      // Some filesystems reject directory fsync; the file was fsynced before rename.
+    }
+  } catch (err) {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+    try { unlinkSync(tmpPath); } catch { /* best effort */ }
+    throw err;
+  }
+}
 
 export type { IncomingMessage } from '../core/types.ts';
 
@@ -64,6 +146,125 @@ export interface ConnectionStateSnapshot {
   lastDisconnectReason: string | null;
   lastStatusCode: number | null;
   recentDisconnects: ConnectionRecentDisconnects;
+  authBond?: AuthBondSnapshot;
+  credentialLifecycle: CredentialLifecycleSnapshot;
+}
+
+export type CredentialLifecycleEventName =
+  | 'connect_start'
+  | 'auth_restore_succeeded'
+  | 'auth_restore_failed'
+  | 'auth_preflight_invalid'
+  | 'baileys_version'
+  | 'socket_created'
+  | 'qr_required'
+  | 'connection_open'
+  | 'connection_close'
+  | 'creds_update_saved'
+  | 'creds_update_failed'
+  | 'auth_snapshot_scheduled'
+  | 'auth_snapshot_skipped'
+  | 'auth_snapshot_captured'
+  | 'auth_snapshot_failed'
+  | 'device_bond_lost';
+
+export interface CredentialLifecycleEvent {
+  at: string;
+  event: CredentialLifecycleEventName;
+  state: ConnectionLifecycleState;
+  reconnectAttempts: number;
+  reconnectPhase: 'backoff' | 'cooldown' | 'retry';
+  statusCode?: number;
+  reason?: string;
+  baileysVersion?: string;
+  authBondStatus?: AuthBondSnapshot['status'];
+  authBondIssues?: string[];
+  authDirMode?: string | null;
+  authDirMtime?: string | null;
+  credsMode?: string | null;
+  credsMtime?: string | null;
+  credsSize?: number | null;
+  credsHash?: string | null;
+  identityHash?: string | null;
+  treeHash?: string | null;
+  latestBackup?: string | null;
+  latestBackupAt?: string | null;
+  latestBackupReason?: string | null;
+  lastCaptureError?: string | null;
+  lastRestoreError?: string | null;
+  note?: string;
+}
+
+export interface CredentialLifecycleEnvironment {
+  instance: string;
+  host: string;
+  pid: number;
+  nodeVersion: string;
+  platform: string;
+  arch: string;
+  release: string;
+  processUptimeSeconds: number;
+  osUptimeSeconds: number;
+  loadavg: number[];
+  memory: {
+    freeBytes: number;
+    totalBytes: number;
+  };
+  authDir: string;
+  stateRoot: string | null;
+  dataRoot: string | null;
+  lockPath: string;
+  healthPort: number;
+  provider: string;
+}
+
+export interface CredentialLifecycleAuthBondDigest {
+  status: AuthBondSnapshot['status'];
+  issues: string[];
+  authDir: Pick<AuthBondSnapshot['authDir'], 'path' | 'exists' | 'mode' | 'size' | 'mtime'>;
+  creds: Pick<AuthBondSnapshot['creds'], 'path' | 'exists' | 'mode' | 'size' | 'mtime'> & {
+    hash: string | null;
+    identityHash: string | null;
+  };
+  treeHash: string | null;
+  backup: Pick<
+    AuthBondSnapshot['backup'],
+    | 'root'
+    | 'latest'
+    | 'latestAt'
+    | 'latestReason'
+    | 'latestTreeHash'
+    | 'lastCaptureAt'
+    | 'lastCaptureReason'
+    | 'lastCaptureError'
+    | 'lastRestoreAt'
+    | 'lastRestoreSource'
+    | 'lastRestoreError'
+  >;
+}
+
+export interface CredentialLifecycleSnapshot {
+  version: 1;
+  redaction: {
+    version: 1;
+    policy: string;
+  };
+  environment: CredentialLifecycleEnvironment;
+  currentAuthBond: CredentialLifecycleAuthBondDigest;
+  latestBaileysVersion: string | null;
+  connectStartedAt: string | null;
+  lastOpenAt: string | null;
+  lastCloseAt: string | null;
+  lastQrAt: string | null;
+  lastCredsUpdateAt: string | null;
+  lastCredsUpdateFailedAt: string | null;
+  lastAuthSnapshotAt: string | null;
+  lastAuthSnapshotFailedAt: string | null;
+  credsUpdateCount: number;
+  authSnapshotCaptureCount: number;
+  authSnapshotFailureCount: number;
+  lastDisconnectDiagnostic: unknown | null;
+  recentEvents: CredentialLifecycleEvent[];
 }
 
 /** Maximum time to wait for a send operation before aborting. */
@@ -100,6 +301,98 @@ function mediaUpload(media: OutboundMedia): Buffer | { stream: Readable } | { ur
 function canReplayMediaSend(media: OutboundMedia): boolean {
   return media.buffer !== undefined;
 }
+
+function summarizePath(path: string): string {
+  try {
+    const st = statSync(path);
+    return [
+      `exists=true`,
+      `mode=${(st.mode & 0o777).toString(8)}`,
+      `size=${st.size}`,
+      `mtime=${st.mtime.toISOString()}`,
+    ].join(' ');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'unknown';
+    return `exists=false error=${code}`;
+  }
+}
+
+function compactJson(value: unknown): string {
+  try {
+    const encoded = JSON.stringify(value);
+    if (!encoded) return 'null';
+    return encoded.length > 1600 ? `${encoded.slice(0, 1600)}...<truncated>` : encoded;
+  } catch {
+    return '<unserializable>';
+  }
+}
+
+function shortDiagnosticHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 20);
+}
+
+function shortHashOrNull(value: string | null | undefined): string | null {
+  return value ? value.slice(0, 20) : null;
+}
+
+function shortHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 20);
+}
+
+function isSensitiveDiagnosticKey(key: string): boolean {
+  return /(?:token|secret|password|passphrase|pairing|customcode|authorization|bearer|cookie|apikey|api_key|privatekey|private_key|clientsecret|client_secret|accesstoken|access_token|refreshtoken|refresh_token|credential|creds|authstate|auth_state|keydata|advsecretkey|signedidentitykey|noisekey|signalkeys|sessionrecord|senderkey|senderkeymemory|appstatesynckey)/i.test(key);
+}
+
+function redactDiagnosticString(value: string): string {
+  return value
+    .replace(/\b\d{5,}(?::\d+)?@(s\.whatsapp\.net|lid|g\.us)\b/g, (match) => `<jid:${shortDiagnosticHash(match)}>`)
+    .replace(/\b\d{10,16}\b/g, (match) => `<number:${shortDiagnosticHash(match)}>`);
+}
+
+function redactDiagnosticValue(value: unknown, key = '', depth = 0): unknown {
+  if (key && isSensitiveDiagnosticKey(key)) return '<redacted>';
+  if (typeof value === 'string') return redactDiagnosticString(value);
+  if (typeof value !== 'object' || value === null) return value;
+  if (depth >= 6) return '<max-depth>';
+  if (value instanceof Error) {
+    const out: Record<string, unknown> = {
+      name: value.name,
+      message: redactDiagnosticString(value.message),
+      stack: value.stack ? redactDiagnosticString(value.stack) : undefined,
+    };
+    for (const childKey of Object.getOwnPropertyNames(value)) {
+      if (childKey === 'name' || childKey === 'message' || childKey === 'stack') continue;
+      out[childKey] = redactDiagnosticValue((value as unknown as Record<string, unknown>)[childKey], childKey, depth + 1);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) {
+    const redacted = value.slice(0, 30).map(item => redactDiagnosticValue(item, '', depth + 1));
+    if (value.length > redacted.length) redacted.push(`<truncated:${value.length - redacted.length}>`);
+    return redacted;
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>).slice(0, 80)) {
+    out[childKey] = redactDiagnosticValue(childValue, childKey, depth + 1);
+  }
+  const entryCount = Object.keys(value as Record<string, unknown>).length;
+  if (entryCount > 80) out['<truncated_keys>'] = entryCount - 80;
+  return out;
+}
+
+type AuthBondClearCandidate = {
+  operation: string;
+  messageId: string;
+  submittedAt: number;
+};
+
+type AuthBondSendProof = {
+  source: 'receipt_update' | 'own_message_echo';
+  messageId: string;
+  confirmedAt: number;
+  recipientJid?: string;
+};
 
 // ---------------------------------------------------------------------------
 // Poll vote decryption — loaded from Baileys at runtime via dynamic import.
@@ -219,13 +512,45 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private lastDisconnectReason: string | null = null;
   private lastStatusCode: number | null = null;
   private recentDisconnects: Array<{ at: number; reason: string; statusCode: number | null }> = [];
+  private lastDisconnectDiagnostic: unknown | null = null;
+  private loggedOutAlertEmitted = false;
+  private localAuthAlertEmitted = false;
+  private pendingAuthBondClearSends = new Map<string, AuthBondClearCandidate>();
+  private confirmedAuthBondSendProofs = new Map<string, AuthBondSendProof>();
   private connectionState: ConnectionLifecycleState = 'disconnected';
   private stateChangedAt = Date.now();
+  private latestBaileysVersion: string | null = null;
+  private connectStartedAt: number | null = null;
+  private lastOpenAt: number | null = null;
+  private lastCloseAt: number | null = null;
+  private lastQrAt: number | null = null;
+  private lastCredsUpdateAt: number | null = null;
+  private lastCredsUpdateFailedAt: number | null = null;
+  private lastAuthSnapshotAt: number | null = null;
+  private lastAuthSnapshotFailedAt: number | null = null;
+  private credsUpdateCount = 0;
+  private authSnapshotCaptureCount = 0;
+  private authSnapshotFailureCount = 0;
+  private authSnapshotSettledTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastSettledAuthSnapshotAttemptAt: number | null = null;
+  private credentialLifecycleEvents: CredentialLifecycleEvent[] = [];
+  private readonly authBond = new AuthBondGuard({
+    authDir: config.authDir,
+    stateRoot: config.stateRoot,
+    instanceName: config.botName,
+    captureBlockReason: () => this.loggedOutAlertEmitted
+      ? 'loggedOut/device-bond-lost state active; refusing to snapshot possibly poisoned credentials'
+      : null,
+  });
   private static readonly RECENT_DISCONNECT_WINDOW_MS = 10 * 60 * 1000;
   private static readonly MAX_FAILURE_DURATION_MS = 30 * 60 * 1000;
   private static readonly COOLDOWN_MS = 5 * 60 * 1000;
   private static readonly KEEPALIVE_INTERVAL_MS = 30_000;
   private static readonly KEEPALIVE_TIMEOUT_MS = 10_000;
+  private static readonly AUTH_BOND_CLEAR_PROOF_TTL_MS = 10 * 60 * 1000;
+  private static readonly AUTH_BOND_SETTLED_SNAPSHOT_DELAY_MS = 60_000;
+  private static readonly AUTH_BOND_SETTLED_SNAPSHOT_MIN_INTERVAL_MS = 5 * 60_000;
+  private static readonly CREDENTIAL_LIFECYCLE_EVENT_LIMIT = 40;
 
   private readonly log = createChildLogger('connection');
 
@@ -324,18 +649,50 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
 
     this.setConnectionState('connecting');
+    this.connectStartedAt = Date.now();
+    this.recordCredentialLifecycle('connect_start');
+    this.persistConnectionRuntimeState('connect_start');
     this.log.info('Connecting to WhatsApp');
 
     try {
-      const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
-      const { version } = await fetchLatestBaileysVersion();
+      const restore = this.authBond.restoreLatestIfNeeded();
+      if (restore.restored) {
+        this.recordCredentialLifecycle('auth_restore_succeeded', {
+          authBond: restore.snapshot,
+          note: restore.source ?? 'unknown',
+        });
+        this.log.warn({ source: restore.source }, 'auth bond restored from protected local snapshot');
+      } else if (restore.attempted && restore.error) {
+        this.recordCredentialLifecycle('auth_restore_failed', {
+          authBond: restore.snapshot,
+          note: restore.error,
+        });
+        this.log.error({ error: restore.error, source: restore.source }, 'auth bond restore failed');
+      }
+
+      const preflight = this.authBond.inspect();
+      if (preflight.status !== 'present') {
+        this.recordCredentialLifecycle('auth_preflight_invalid', { authBond: preflight });
+      }
+      if (preflight.status === 'invalid') {
+        this.emitLocalAuthBondFailureAlert('connect-preflight', preflight);
+      }
+
+      const { state } = await useMultiFileAuthState(config.authDir);
+      const saveCredsAtomically = createAtomicCredsSaver(config.authDir, () => state.creds);
+      const resolvedVersion = await resolveBaileysVersion();
+      this.latestBaileysVersion = baileysVersionLabel(resolvedVersion.version);
+      this.recordCredentialLifecycle('baileys_version', {
+        baileysVersion: this.latestBaileysVersion,
+        note: `source=${resolvedVersion.source}`,
+      });
 
       // Suppress Baileys internals (handshake material, signal keys, etc.)
       const baileysLogger = this.log.child({ component: 'baileys' });
       (baileysLogger as any).level = 'error';
 
       const sock = makeWASocket({
-        version,
+        version: resolvedVersion.version,
         logger: baileysLogger as any,
         auth: {
           creds: state.creds,
@@ -345,7 +702,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       });
 
       this.sock = sock;
-      this.registerEventHandlers(sock, saveCreds);
+      this.recordCredentialLifecycle('socket_created', { baileysVersion: this.latestBaileysVersion });
+      this.registerEventHandlers(sock, async () => {
+        await saveCredsAtomically();
+        this.captureAuthBondSnapshot('creds-update');
+      });
     } catch (err) {
       this.log.error({ err }, 'Failed to create WhatsApp connection');
       if (!this.shuttingDown) {
@@ -412,6 +773,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
     }
     this.log.info({ chatJid, messageId: result?.key?.id }, 'Sending message');
+    this.queueLocalAuthBondClearCandidate('sendMessage', result?.key?.id ?? null);
+    this.scheduleSettledAuthBondSnapshot('outbound-send-settled');
     return { waMessageId: result?.key?.id ?? null };
   }
 
@@ -440,6 +803,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         await this.setTyping(chatJid, 'paused');
       }
     }
+    this.queueLocalAuthBondClearCandidate('sendRaw', result?.key?.id ?? null);
+    this.scheduleSettledAuthBondSnapshot('outbound-send-settled');
     return { waMessageId: result?.key?.id ?? null };
   }
 
@@ -497,10 +862,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       });
 
       this.log.info({ chatJid, waMessageId, optionCount: values.length, secretLen: messageSecret.length }, 'poll sent and tracked for vote decryption');
+      this.queueLocalAuthBondClearCandidate('sendPollMessage', waMessageId);
+      this.scheduleSettledAuthBondSnapshot('outbound-send-settled');
       return { waMessageId, hasSecret: true };
     }
 
     this.log.warn({ chatJid, waMessageId }, 'poll sent but messageSecret unavailable — vote decryption disabled');
+    this.queueLocalAuthBondClearCandidate('sendPollMessage', waMessageId);
+    this.scheduleSettledAuthBondSnapshot('outbound-send-settled');
     return { waMessageId, hasSecret: false };
   }
 
@@ -577,6 +946,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             }), 'sendMedia:sticker');
             break;
         }
+        this.queueLocalAuthBondClearCandidate('sendMedia', result?.key?.id ?? null);
+        this.scheduleSettledAuthBondSnapshot('outbound-send-settled');
         return { waMessageId: result?.key?.id ?? null };
       } catch (err) {
         if (attempt > 0 || !canReplayMediaSend(media) || !isBaileysEncryptedTmpEnoent(err)) {
@@ -593,7 +964,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     this.setConnectionState('shutting_down');
+    this.persistConnectionRuntimeState('shutdown');
     this.clearReconnectTimers();
+    this.clearAuthSnapshotSettledTimer();
     this.stopKeepalive();
     // Clear poll vote grace timers to prevent post-shutdown emissions
     for (const [id, grace] of this.voteGraceTimers) {
@@ -611,7 +984,146 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.clearIdentity();
   }
 
+  private recordCredentialLifecycle(
+    event: CredentialLifecycleEventName,
+    options: {
+      statusCode?: number;
+      reason?: string;
+      note?: string;
+      baileysVersion?: string;
+      authBond?: AuthBondSnapshot;
+    } = {},
+  ): void {
+    const authBond = options.authBond;
+    const entry: CredentialLifecycleEvent = {
+      at: new Date().toISOString(),
+      event,
+      state: this.connectionState,
+      reconnectAttempts: this.reconnectAttempts,
+      reconnectPhase: this.reconnectPhase,
+    };
+
+    if (options.statusCode !== undefined) entry.statusCode = options.statusCode;
+    if (options.reason !== undefined) entry.reason = options.reason;
+    if (options.note !== undefined) entry.note = options.note;
+    if (options.baileysVersion !== undefined) entry.baileysVersion = options.baileysVersion;
+    if (authBond) {
+      entry.authBondStatus = authBond.status;
+      entry.authBondIssues = [...authBond.issues];
+      entry.authDirMode = authBond.authDir.mode;
+      entry.authDirMtime = authBond.authDir.mtime;
+      entry.credsMode = authBond.creds.mode;
+      entry.credsMtime = authBond.creds.mtime;
+      entry.credsSize = authBond.creds.size;
+      entry.credsHash = authBond.creds.sha256?.slice(0, 20) ?? null;
+      entry.identityHash = authBond.meHash;
+      entry.treeHash = authBond.treeHash?.slice(0, 20) ?? null;
+      entry.latestBackup = authBond.backup.latest;
+      entry.latestBackupAt = authBond.backup.latestAt;
+      entry.latestBackupReason = authBond.backup.latestReason;
+      entry.lastCaptureError = authBond.backup.lastCaptureError;
+      entry.lastRestoreError = authBond.backup.lastRestoreError;
+    }
+
+    this.credentialLifecycleEvents.push(entry);
+    if (this.credentialLifecycleEvents.length > ConnectionManager.CREDENTIAL_LIFECYCLE_EVENT_LIMIT) {
+      this.credentialLifecycleEvents.splice(
+        0,
+        this.credentialLifecycleEvents.length - ConnectionManager.CREDENTIAL_LIFECYCLE_EVENT_LIMIT,
+      );
+    }
+  }
+
+  private getCredentialLifecycleEnvironment(): CredentialLifecycleEnvironment {
+    return {
+      instance: config.botName,
+      host: hostname(),
+      pid: process.pid,
+      nodeVersion: process.version,
+      platform: platform(),
+      arch: arch(),
+      release: release(),
+      processUptimeSeconds: Math.floor(process.uptime()),
+      osUptimeSeconds: Math.floor(osUptime()),
+      loadavg: loadavg(),
+      memory: {
+        freeBytes: freemem(),
+        totalBytes: totalmem(),
+      },
+      authDir: config.authDir,
+      stateRoot: config.stateRoot ?? null,
+      dataRoot: config.dataRoot ?? null,
+      lockPath: config.lockPath ?? 'unknown',
+      healthPort: config.healthPort,
+      provider: config.agentProvider,
+    };
+  }
+
+  private authBondDigest(snapshot: AuthBondSnapshot): CredentialLifecycleAuthBondDigest {
+    return {
+      status: snapshot.status,
+      issues: [...snapshot.issues],
+      authDir: {
+        path: snapshot.authDir.path,
+        exists: snapshot.authDir.exists,
+        mode: snapshot.authDir.mode,
+        size: snapshot.authDir.size,
+        mtime: snapshot.authDir.mtime,
+      },
+      creds: {
+        path: snapshot.creds.path,
+        exists: snapshot.creds.exists,
+        mode: snapshot.creds.mode,
+        size: snapshot.creds.size,
+        mtime: snapshot.creds.mtime,
+        hash: shortHashOrNull(snapshot.creds.sha256),
+        identityHash: snapshot.meHash,
+      },
+      treeHash: shortHashOrNull(snapshot.treeHash),
+      backup: {
+        root: snapshot.backup.root,
+        latest: snapshot.backup.latest,
+        latestAt: snapshot.backup.latestAt,
+        latestReason: snapshot.backup.latestReason,
+        latestTreeHash: shortHashOrNull(snapshot.backup.latestTreeHash),
+        lastCaptureAt: snapshot.backup.lastCaptureAt,
+        lastCaptureReason: snapshot.backup.lastCaptureReason,
+        lastCaptureError: snapshot.backup.lastCaptureError,
+        lastRestoreAt: snapshot.backup.lastRestoreAt,
+        lastRestoreSource: snapshot.backup.lastRestoreSource,
+        lastRestoreError: snapshot.backup.lastRestoreError,
+      },
+    };
+  }
+
+  private getCredentialLifecycleSnapshot(authBond = this.authBond.inspect()): CredentialLifecycleSnapshot {
+    return {
+      version: 1,
+      redaction: {
+        version: 1,
+        policy: 'credential material, tokens, pairing codes, full JIDs, and full phone numbers are blocked; identity fields use short hashes only',
+      },
+      environment: this.getCredentialLifecycleEnvironment(),
+      currentAuthBond: this.authBondDigest(authBond),
+      latestBaileysVersion: this.latestBaileysVersion,
+      connectStartedAt: toIso(this.connectStartedAt),
+      lastOpenAt: toIso(this.lastOpenAt),
+      lastCloseAt: toIso(this.lastCloseAt),
+      lastQrAt: toIso(this.lastQrAt),
+      lastCredsUpdateAt: toIso(this.lastCredsUpdateAt),
+      lastCredsUpdateFailedAt: toIso(this.lastCredsUpdateFailedAt),
+      lastAuthSnapshotAt: toIso(this.lastAuthSnapshotAt),
+      lastAuthSnapshotFailedAt: toIso(this.lastAuthSnapshotFailedAt),
+      credsUpdateCount: this.credsUpdateCount,
+      authSnapshotCaptureCount: this.authSnapshotCaptureCount,
+      authSnapshotFailureCount: this.authSnapshotFailureCount,
+      lastDisconnectDiagnostic: this.lastDisconnectDiagnostic,
+      recentEvents: this.credentialLifecycleEvents.map(event => ({ ...event })),
+    };
+  }
+
   getConnectionState(): ConnectionStateSnapshot {
+    const authBond = this.authBond.inspect();
     return {
       state: this.connectionState,
       connected: this.connectionState === 'connected' && this.botJid !== null,
@@ -624,8 +1136,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastDisconnectReason: this.lastDisconnectReason,
       lastStatusCode: this.lastStatusCode,
       recentDisconnects: this.getRecentDisconnectStats(),
+      authBond,
+      credentialLifecycle: this.getCredentialLifecycleSnapshot(authBond),
     };
   }
+
 
   private recordDisconnect(statusCode: number | null, reason: string): void {
     const now = Date.now();
@@ -655,6 +1170,93 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
+  private persistConnectionRuntimeState(
+    event: string,
+    planning: {
+      backoffMs?: number;
+      nextReconnectAt?: number;
+      cooldownMs?: number;
+      cooldownUntil?: number;
+    } = {},
+  ): void {
+    if (!config.dataRoot) return;
+
+    const authBond = this.authBond.inspect();
+    const payload = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      event,
+      redaction: {
+        version: 1,
+        policy: 'no raw JIDs, phone numbers, credential paths, backup paths, tokens, or auth key material',
+      },
+      environment: {
+        instance: config.botName,
+        host: hostname(),
+        pid: process.pid,
+        nodeVersion: process.version,
+        platform: platform(),
+        arch: arch(),
+        release: release(),
+        healthPort: config.healthPort,
+        provider: config.agentProvider,
+      },
+      connection: {
+        state: this.connectionState,
+        connected: this.connectionState === 'connected' && this.botJid !== null,
+        stateChangedAt: new Date(this.stateChangedAt).toISOString(),
+        reconnectAttempts: this.reconnectAttempts,
+        reconnectPhase: this.connectionState === 'connected' ? null : this.reconnectPhase,
+        firstFailureAt: toIso(this.firstFailureAt),
+        lastPingAt: toIso(this.lastPingAt),
+        lastPongAt: toIso(this.lastPongAt),
+        lastDisconnectReason: this.lastDisconnectReason,
+        lastStatusCode: this.lastStatusCode,
+        recentDisconnects: this.getRecentDisconnectStats(),
+        connectStartedAt: toIso(this.connectStartedAt),
+        lastOpenAt: toIso(this.lastOpenAt),
+        lastCloseAt: toIso(this.lastCloseAt),
+        lastQrAt: toIso(this.lastQrAt),
+        lastCredsUpdateAt: toIso(this.lastCredsUpdateAt),
+        lastCredsUpdateFailedAt: toIso(this.lastCredsUpdateFailedAt),
+        credsUpdateCount: this.credsUpdateCount,
+        authSnapshotCaptureCount: this.authSnapshotCaptureCount,
+        authSnapshotFailureCount: this.authSnapshotFailureCount,
+        backoffMs: planning.backoffMs ?? null,
+        nextReconnectAt: toIso(planning.nextReconnectAt ?? null),
+        cooldownMs: planning.cooldownMs ?? null,
+        cooldownUntil: toIso(planning.cooldownUntil ?? null),
+      },
+      authBond: {
+        status: authBond.status,
+        issues: [...authBond.issues],
+        credsExists: authBond.creds.exists,
+        credsMode: authBond.creds.mode,
+        credsSize: authBond.creds.size,
+        credsHash: shortHashOrNull(authBond.creds.sha256),
+        identityHash: authBond.meHash,
+        treeHash: shortHashOrNull(authBond.treeHash),
+        latestBackupAt: authBond.backup.latestAt,
+        latestBackupReason: authBond.backup.latestReason,
+        lastCaptureAt: authBond.backup.lastCaptureAt,
+        lastCaptureReason: authBond.backup.lastCaptureReason,
+        lastCaptureError: authBond.backup.lastCaptureError,
+        lastRestoreAt: authBond.backup.lastRestoreAt,
+        lastRestoreError: authBond.backup.lastRestoreError,
+      },
+      diagnostics: {
+        stateFile: 'connection-state.json',
+        stateFileFingerprint: shortHash(join(config.dataRoot, 'connection-state.json')),
+      },
+    };
+
+    try {
+      writePrivateJsonMarker(join(config.dataRoot, 'connection-state.json'), payload);
+    } catch (err) {
+      this.log.warn({ err }, 'failed to persist connection runtime state');
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Event registration
   // -------------------------------------------------------------------------
@@ -671,10 +1273,25 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (events['creds.update']) {
         try {
           await saveCreds();
+          this.clearAuthSnapshotSettledTimer();
+          this.lastCredsUpdateAt = Date.now();
+          this.credsUpdateCount += 1;
+          this.recordCredentialLifecycle('creds_update_saved', { authBond: this.authBond.inspect() });
+          this.persistConnectionRuntimeState('creds_update_saved');
           this.log.info('Credentials saved');
         } catch (err) {
+          this.lastCredsUpdateFailedAt = Date.now();
+          this.recordCredentialLifecycle('creds_update_failed', {
+            authBond: this.authBond.inspect(),
+            note: err instanceof Error ? err.message : String(err),
+          });
+          this.persistConnectionRuntimeState('creds_update_failed');
           this.log.error({ err }, 'Failed to save credentials');
         }
+      }
+
+      if (this.hasAuthKeyMaterialChurnSignal(events)) {
+        this.scheduleSettledAuthBondSnapshot('baileys-key-material-settled');
       }
 
       if (events['messages.upsert']) {
@@ -782,6 +1399,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             const messageId = r.key.id;
             const recipientJid = r.receipt?.userJid;
             if (!messageId || !recipientJid) continue;
+            this.confirmLocalAuthBondSendProof(messageId, 'receipt_update', recipientJid);
             // Determine receipt type from which timestamp fields are present
             let type = 'server'; // default: server acknowledgement (single tick)
             if (r.receipt.playedTimestamp) type = 'played';
@@ -1010,6 +1628,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     if (qr) {
       // QR code means auth state is missing — the auth CLI must be run separately
+      this.lastQrAt = Date.now();
+      const snapshot = this.authBond.inspect();
+      this.recordCredentialLifecycle('qr_required', { authBond: snapshot });
+      this.emitLocalAuthBondFailureAlert('qr-required', snapshot);
+      this.persistConnectionRuntimeState('qr_required');
       this.log.warn('QR code received — run the auth CLI to pair this device');
       return;
     }
@@ -1020,6 +1643,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.firstFailureAt = null;
       this.lastStatusCode = null;
       this.lastDisconnectReason = null;
+      this.loggedOutAlertEmitted = false;
+      this.localAuthAlertEmitted = false;
       this.gracefulReconnectInFlight = false;
       if (this.cooldownTimer !== null) {
         clearTimeout(this.cooldownTimer);
@@ -1036,7 +1661,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const lidBare = this.botLid ? bareNumber(this.botLid) : undefined;
       this.selfMentionRegexLid = (lidBare && lidBare !== bare) ? new RegExp(`@${lidBare}\\b`, 'g') : null;
       this.setConnectionState('connected');
+      this.lastOpenAt = Date.now();
       this.startKeepalive(sock);
+      this.captureAuthBondSnapshot('connection-open');
+      this.recordCredentialLifecycle('connection_open', { authBond: this.authBond.inspect() });
+      this.persistConnectionRuntimeState('connection_open');
       this.log.info({ botJid: this.botJid, botLid: this.botLid }, 'WhatsApp connected');
       return;
     }
@@ -1048,11 +1677,20 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.lastStatusCode = statusCode ?? null;
       this.lastDisconnectReason = reason;
       this.recordDisconnect(statusCode ?? null, reason);
+      this.lastCloseAt = Date.now();
+      this.lastDisconnectDiagnostic = redactDiagnosticValue(lastDisconnect);
+      this.recordCredentialLifecycle('connection_close', {
+        statusCode,
+        reason,
+        authBond: this.authBond.inspect(),
+      });
+      this.persistConnectionRuntimeState('connection_close');
 
       this.log.warn({ statusCode, reason }, 'WhatsApp connection closed');
 
       // Invalidate the stale socket before deciding whether to reconnect
       this.stopKeepalive();
+      this.clearAuthSnapshotSettledTimer();
       try { sock.end(undefined); } catch { /* best-effort */ }
       this.sock = null;
       this.clearIdentity();
@@ -1069,6 +1707,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
       if (action.type === 'exit') {
         this.setConnectionState('disconnected');
+        this.emitDeviceBondLostAlert(statusCode, reason, lastDisconnect);
+        this.persistConnectionRuntimeState('disconnect_exit_logged_out');
         this.log.error('Logged out — re-authenticate with the auth CLI');
         return;
       }
@@ -1089,6 +1729,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (action.reason === 'restart-required') {
         if (!this.shuttingDown) {
           this.setConnectionState('reconnecting');
+          this.persistConnectionRuntimeState('restart_required_reconnect');
           void this.connect();
         }
         return;
@@ -1098,6 +1739,388 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.scheduleReconnect();
       }
     }
+  }
+
+  private emitDeviceBondLostAlert(
+    statusCode: number | undefined,
+    reason: string,
+    lastDisconnect: unknown,
+  ): void {
+    if (this.loggedOutAlertEmitted) return;
+
+    const authBond = this.authBond.inspect();
+    this.recordCredentialLifecycle('device_bond_lost', { statusCode, reason, authBond });
+    const lifecycle = this.getCredentialLifecycleSnapshot(authBond);
+    const credsPath = join(config.authDir, 'creds.json');
+    const lockPath = config.lockPath ?? 'unknown';
+    const evidence = [
+      'classification: physical_intervention_required',
+      'failure: WhatsApp linked-device bond lost or removed by server',
+      `instance: ${config.botName}`,
+      `host: ${lifecycle.environment.host}`,
+      `pid: ${lifecycle.environment.pid}`,
+      `healthPort: ${config.healthPort}`,
+      `statusCode: ${statusCode ?? 'unknown'}`,
+      `reason: ${reason}`,
+      `connectionState: ${this.connectionState}`,
+      `latestBaileysVersion: ${lifecycle.latestBaileysVersion ?? 'unknown'}`,
+      `connectStartedAt: ${lifecycle.connectStartedAt ?? 'unknown'}`,
+      `lastOpenAt: ${lifecycle.lastOpenAt ?? 'unknown'}`,
+      `lastCloseAt: ${lifecycle.lastCloseAt ?? 'unknown'}`,
+      `lastQrAt: ${lifecycle.lastQrAt ?? 'none'}`,
+      `lastCredsUpdateAt: ${lifecycle.lastCredsUpdateAt ?? 'unknown'}`,
+      `lastCredsUpdateFailedAt: ${lifecycle.lastCredsUpdateFailedAt ?? 'none'}`,
+      `lastAuthSnapshotAt: ${lifecycle.lastAuthSnapshotAt ?? 'unknown'}`,
+      `lastAuthSnapshotFailedAt: ${lifecycle.lastAuthSnapshotFailedAt ?? 'none'}`,
+      `credsUpdateCount: ${lifecycle.credsUpdateCount}`,
+      `authSnapshotCaptureCount: ${lifecycle.authSnapshotCaptureCount}`,
+      `authSnapshotFailureCount: ${lifecycle.authSnapshotFailureCount}`,
+      `authBondStatus: ${lifecycle.currentAuthBond.status}`,
+      `authBondIssues: ${lifecycle.currentAuthBond.issues.length > 0 ? lifecycle.currentAuthBond.issues.join(',') : 'none'}`,
+      `credsMode: ${lifecycle.currentAuthBond.creds.mode ?? 'unknown'}`,
+      `credsSize: ${lifecycle.currentAuthBond.creds.size ?? 'unknown'}`,
+      `credsMtime: ${lifecycle.currentAuthBond.creds.mtime ?? 'unknown'}`,
+      `credsHash: ${lifecycle.currentAuthBond.creds.hash ?? 'unknown'}`,
+      `identityHash: ${lifecycle.currentAuthBond.creds.identityHash ?? 'unknown'}`,
+      `treeHash: ${lifecycle.currentAuthBond.treeHash ?? 'unknown'}`,
+      `latestBackup: ${lifecycle.currentAuthBond.backup.latest ?? 'none'}`,
+      `latestBackupAt: ${lifecycle.currentAuthBond.backup.latestAt ?? 'none'}`,
+      `latestBackupReason: ${lifecycle.currentAuthBond.backup.latestReason ?? 'none'}`,
+      `authDir: ${config.authDir} ${summarizePath(config.authDir)}`,
+      `creds: ${credsPath} ${summarizePath(credsPath)}`,
+      `lockPath: ${lockPath} ${lockPath === 'unknown' ? 'unknown' : summarizePath(lockPath)}`,
+      `dataRoot: ${config.dataRoot ?? 'unknown'}`,
+      `stateRoot: ${config.stateRoot ?? 'unknown'}`,
+      `lastDisconnectSanitized: ${compactJson(this.lastDisconnectDiagnostic ?? redactDiagnosticValue(lastDisconnect))}`,
+      `recentCredentialLifecycle: ${compactJson(lifecycle.recentEvents)}`,
+      `redaction: ${lifecycle.redaction.policy}`,
+      'operator_note: local auth restore can repair disk/config loss only; a server-side 401 device_removed requires verified WhatsApp re-link approval.',
+      'q_action: investigate duplicate auth material, recent restarts, auth directory mutation, launchd/service overlap, and preserve auth backups before any destructive auth cleanup.',
+    ].join('\n');
+
+    try {
+      this.loggedOutAlertEmitted = emitAlertChecked(
+        config.botName,
+        'whatsapp_device_bond_lost',
+        `PHYSICAL INTERVENTION REQUIRED: whatsoup@${config.botName} lost WhatsApp linked-device bond`,
+        evidence,
+        'critical',
+        this.deviceBondLostCriticalAsset(statusCode, reason),
+      );
+    } catch (err) {
+      this.log.error({ err }, 'failed to enqueue WhatsApp device bond lost alert');
+    }
+  }
+
+  private deviceBondLostCriticalAsset(
+    statusCode: number | undefined,
+    reason: string,
+  ): BotErrorsCriticalAssetDiagnostic {
+    const lifecycle = this.getCredentialLifecycleSnapshot();
+    return {
+      asset: {
+        kind: 'whatsapp_linked_device',
+        instance: config.botName,
+        owner: 'whatsoup',
+        path: config.authDir,
+      },
+      failure: {
+        code: 'WA_AUTH_BOND_SERVER_REVOKED',
+        domain: 'account_linkage',
+        recoverability: 'manual_relink_required',
+        confidence: statusCode === DisconnectReason.loggedOut || reason === 'loggedOut' ? 'confirmed' : 'probable',
+        operatorAction: 'Preserve auth material and backups, investigate duplicate sessions/service overlap, and use phone-side WhatsApp relink only after non-physical recovery evidence is exhausted.',
+        clearRequirement: 'clear only after WhatsApp is connected with a non-empty auth bond and a successful outbound send after the relinked creds mtime and after the incident',
+      },
+      evidenceRefs: [
+        `status_code=${statusCode ?? 'unknown'}`,
+        `disconnect_reason=${reason}`,
+        `auth_dir=${config.authDir}`,
+        `host=${lifecycle.environment.host}`,
+        `latest_baileys_version=${lifecycle.latestBaileysVersion ?? 'unknown'}`,
+        `last_open_at=${lifecycle.lastOpenAt ?? 'unknown'}`,
+        `last_close_at=${lifecycle.lastCloseAt ?? 'unknown'}`,
+        `last_creds_update_at=${lifecycle.lastCredsUpdateAt ?? 'unknown'}`,
+        `creds_update_count=${lifecycle.credsUpdateCount}`,
+        `auth_snapshot_count=${lifecycle.authSnapshotCaptureCount}`,
+        `auth_bond_status=${lifecycle.currentAuthBond.status}`,
+        `auth_bond_issues=${lifecycle.currentAuthBond.issues.join(',') || 'none'}`,
+        `creds_hash=${lifecycle.currentAuthBond.creds.hash ?? 'unknown'}`,
+        `tree_hash=${lifecycle.currentAuthBond.treeHash ?? 'unknown'}`,
+      ],
+    };
+  }
+
+  private captureAuthBondSnapshot(reason: string): void {
+    const result = this.authBond.capture(reason);
+    if (result.ok) {
+      this.lastAuthSnapshotAt = Date.now();
+      this.authSnapshotCaptureCount += 1;
+      this.recordCredentialLifecycle('auth_snapshot_captured', {
+        authBond: result.snapshot,
+        note: result.captured ? result.path ?? 'captured' : result.path ? `reused:${result.path}` : 'unchanged',
+      });
+      if (result.captured) {
+        this.log.info({ backupPath: result.path, reason }, 'auth bond snapshot captured');
+      }
+      return;
+    }
+    this.lastAuthSnapshotFailedAt = Date.now();
+    this.authSnapshotFailureCount += 1;
+    this.recordCredentialLifecycle('auth_snapshot_failed', {
+      authBond: result.snapshot,
+      note: result.error ?? 'unknown',
+    });
+    this.log.error({ error: result.error, reason }, 'auth bond snapshot failed');
+    this.emitLocalAuthBondFailureAlert(reason, result.snapshot);
+  }
+
+  private hasAuthKeyMaterialChurnSignal(events: Record<string, unknown>): boolean {
+    return [
+      'messages.upsert',
+      'messages.update',
+      'message-receipt.update',
+      'messages.reaction',
+      'messages.media-update',
+      'group-participants.update',
+      'groups.upsert',
+      'groups.update',
+      'messaging-history.set',
+      'lid-mapping.update',
+    ].some(eventName => events[eventName] !== undefined);
+  }
+
+  private scheduleSettledAuthBondSnapshot(reason: string): void {
+    if (this.authSnapshotSettledTimer !== null) return;
+    if (this.shuttingDown || this.loggedOutAlertEmitted) return;
+    if (this.connectionState !== 'connected' || !this.sock) return;
+
+    this.recordCredentialLifecycle('auth_snapshot_scheduled', {
+      authBond: this.authBond.inspect(),
+      note: reason,
+    });
+
+    this.authSnapshotSettledTimer = setTimeout(() => {
+      this.authSnapshotSettledTimer = null;
+      if (this.shuttingDown || this.loggedOutAlertEmitted) return;
+      if (this.connectionState !== 'connected' || !this.sock) return;
+
+      const now = Date.now();
+      if (
+        this.lastSettledAuthSnapshotAttemptAt !== null
+        && now - this.lastSettledAuthSnapshotAttemptAt < ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_MIN_INTERVAL_MS
+      ) {
+        this.recordCredentialLifecycle('auth_snapshot_skipped', {
+          authBond: this.authBond.inspect(),
+          note: 'settled-snapshot-min-interval',
+        });
+        return;
+      }
+
+      this.lastSettledAuthSnapshotAttemptAt = now;
+      this.captureAuthBondSnapshot(reason);
+      this.persistConnectionRuntimeState('auth_snapshot_settled');
+    }, ConnectionManager.AUTH_BOND_SETTLED_SNAPSHOT_DELAY_MS);
+    this.authSnapshotSettledTimer.unref?.();
+  }
+
+  private clearAuthSnapshotSettledTimer(): void {
+    if (this.authSnapshotSettledTimer === null) return;
+    clearTimeout(this.authSnapshotSettledTimer);
+    this.authSnapshotSettledTimer = null;
+  }
+
+  private pruneAuthBondSendProofs(now = Date.now()): void {
+    const cutoff = now - ConnectionManager.AUTH_BOND_CLEAR_PROOF_TTL_MS;
+    for (const [messageId, candidate] of this.pendingAuthBondClearSends.entries()) {
+      if (candidate.submittedAt < cutoff) this.pendingAuthBondClearSends.delete(messageId);
+    }
+    for (const [messageId, proof] of this.confirmedAuthBondSendProofs.entries()) {
+      if (proof.confirmedAt < cutoff) this.confirmedAuthBondSendProofs.delete(messageId);
+    }
+  }
+
+  private queueLocalAuthBondClearCandidate(operation: string, messageId: string | null): void {
+    if (!this.localAuthAlertEmitted || !messageId) return;
+    const now = Date.now();
+    this.pruneAuthBondSendProofs(now);
+    const candidate: AuthBondClearCandidate = { operation, messageId, submittedAt: now };
+    this.pendingAuthBondClearSends.set(messageId, candidate);
+    const proof = this.confirmedAuthBondSendProofs.get(messageId);
+    if (proof) this.clearLocalAuthBondFailureAfterVerifiedSend(candidate, proof);
+  }
+
+  private confirmLocalAuthBondSendProof(
+    messageId: string,
+    source: AuthBondSendProof['source'],
+    recipientJid?: string,
+  ): void {
+    const now = Date.now();
+    this.pruneAuthBondSendProofs(now);
+    const proof: AuthBondSendProof = { source, messageId, recipientJid, confirmedAt: now };
+    this.confirmedAuthBondSendProofs.set(messageId, proof);
+    const candidate = this.pendingAuthBondClearSends.get(messageId);
+    if (candidate) this.clearLocalAuthBondFailureAfterVerifiedSend(candidate, proof);
+  }
+
+  private clearLocalAuthBondFailureAfterVerifiedSend(
+    candidate: AuthBondClearCandidate,
+    proof: AuthBondSendProof,
+  ): void {
+    if (!this.localAuthAlertEmitted) return;
+    if (this.connectionState !== 'connected' || this.botJid === null) return;
+
+    const snapshot = this.authBond.inspect();
+    if (!this.isVerifiedLocalAuthSnapshot(snapshot)) return;
+
+    const evidence = [
+      `repair_lane:${config.botName}`,
+      `confirmed_send_operation=${candidate.operation}`,
+      `confirmed_send_message_id=${candidate.messageId}`,
+      `confirmed_send_proof=${proof.source}`,
+      `confirmed_send_recipient=${proof.recipientJid ?? 'unknown'}`,
+      `confirmed_send_submitted_at=${new Date(candidate.submittedAt).toISOString()}`,
+      `confirmed_send_at=${new Date(proof.confirmedAt).toISOString()}`,
+      `status=${snapshot.status}`,
+      `issues=${snapshot.issues.length > 0 ? snapshot.issues.join(',') : 'none'}`,
+      `creds_size=${snapshot.creds.size ?? 'unknown'}`,
+      `creds_hash=${snapshot.creds.sha256?.slice(0, 20) ?? 'unknown'}`,
+      `tree_hash=${snapshot.treeHash?.slice(0, 20) ?? 'unknown'}`,
+      `latest_backup=${snapshot.backup.latest ?? 'none'}`,
+      `latest_backup_at=${snapshot.backup.latestAt ?? 'none'}`,
+    ].join('\n');
+    if (clearAlertSourceChecked(
+      config.botName,
+      'whatsapp_auth_bond_local_failure',
+      evidence,
+      this.localAuthBondClearCriticalAsset(snapshot),
+    )) {
+      this.localAuthAlertEmitted = false;
+    }
+    this.pendingAuthBondClearSends.delete(candidate.messageId);
+    this.confirmedAuthBondSendProofs.delete(candidate.messageId);
+  }
+
+  private isVerifiedLocalAuthSnapshot(snapshot: AuthBondSnapshot): boolean {
+    if (snapshot.status !== 'present') return false;
+    if (snapshot.creds.exists !== true) return false;
+    if ((snapshot.creds.size ?? 0) <= 0) return false;
+    if (!snapshot.creds.sha256 || snapshot.creds.sha256 === 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') return false;
+    if (!snapshot.treeHash) return false;
+    if (!snapshot.backup.latest) return false;
+    return true;
+  }
+
+  private emitLocalAuthBondFailureAlert(reason: string, snapshot: AuthBondSnapshot): void {
+    if (this.localAuthAlertEmitted) return;
+
+    const evidence = [
+      'classification: physical_intervention_risk',
+      'failure: local WhatsApp auth bond is missing, invalid, or cannot be snapshotted',
+      `instance: ${config.botName}`,
+      `healthPort: ${config.healthPort}`,
+      `reason: ${reason}`,
+      `status: ${snapshot.status}`,
+      `issues: ${snapshot.issues.length > 0 ? snapshot.issues.join(',') : 'none'}`,
+      `authDir: ${snapshot.authDir.path} exists=${snapshot.authDir.exists} mode=${snapshot.authDir.mode ?? 'unknown'} mtime=${snapshot.authDir.mtime ?? 'unknown'}`,
+      `creds: ${snapshot.creds.path} exists=${snapshot.creds.exists} mode=${snapshot.creds.mode ?? 'unknown'} size=${snapshot.creds.size ?? 'unknown'} mtime=${snapshot.creds.mtime ?? 'unknown'}`,
+      `credsHash: ${snapshot.creds.sha256?.slice(0, 20) ?? 'unknown'}`,
+      `meHash: ${snapshot.meHash ?? 'unknown'}`,
+      `treeHash: ${snapshot.treeHash?.slice(0, 20) ?? 'unknown'}`,
+      `backupRoot: ${snapshot.backup.root}`,
+      `latestBackup: ${snapshot.backup.latest ?? 'none'}`,
+      `latestBackupAt: ${snapshot.backup.latestAt ?? 'none'}`,
+      `lastCaptureError: ${snapshot.backup.lastCaptureError ?? 'none'}`,
+      `lastRestoreError: ${snapshot.backup.lastRestoreError ?? 'none'}`,
+      'operator_note: local auto-restore can repair missing/corrupt auth files from protected snapshots; it cannot reverse a WhatsApp server-side device_removed/logout.',
+      'q_action: inspect auth directory permissions, recent credential writes, backup availability, duplicate auth hashes, and service overlap before re-pairing or deleting auth material.',
+    ].join('\n');
+
+    try {
+      this.localAuthAlertEmitted = emitAlertChecked(
+        config.botName,
+        'whatsapp_auth_bond_local_failure',
+        `LOCAL AUTH BOND FAILURE: whatsoup@${config.botName} WhatsApp credentials are at risk`,
+        evidence,
+        'critical',
+        this.localAuthBondFailureCriticalAsset(reason, snapshot),
+      );
+    } catch (err) {
+      this.log.error({ err }, 'failed to enqueue local auth bond failure alert');
+    }
+  }
+
+  private localAuthBondFailureCriticalAsset(
+    reason: string,
+    snapshot: AuthBondSnapshot,
+  ): BotErrorsCriticalAssetDiagnostic {
+    const hasBackup = typeof snapshot.backup.latest === 'string' && snapshot.backup.latest.length > 0;
+    const issueText = snapshot.issues.join(',');
+    let code = 'WA_AUTH_BOND_LOCAL_INVALID';
+    let recoverability: BotErrorsCriticalAssetDiagnostic['failure']['recoverability'] = hasBackup
+      ? 'auto_recoverable'
+      : 'manual_repair_required';
+    if (snapshot.status === 'missing') {
+      code = hasBackup ? 'WA_AUTH_BOND_LOCAL_MISSING_RESTORABLE' : 'WA_AUTH_BOND_LOCAL_MISSING_UNRESTORABLE';
+    } else if (reason.includes('creds-update') || snapshot.backup.lastCaptureError) {
+      code = 'WA_AUTH_BOND_SNAPSHOT_CAPTURE_FAILED';
+      recoverability = 'manual_repair_required';
+    } else if (issueText.includes('mode') || issueText.includes('permission')) {
+      code = 'WA_AUTH_BOND_PERMISSION_DRIFT';
+    } else if (hasBackup) {
+      code = 'WA_AUTH_BOND_LOCAL_CORRUPT_RESTORABLE';
+    } else {
+      code = 'WA_AUTH_BOND_LOCAL_CORRUPT_UNRESTORABLE';
+    }
+
+    return {
+      asset: {
+        kind: 'whatsapp_auth_bond',
+        instance: config.botName,
+        owner: 'whatsoup',
+        path: config.authDir,
+        fingerprint: snapshot.meHash ?? snapshot.creds.sha256?.slice(0, 20) ?? undefined,
+      },
+      failure: {
+        code,
+        domain: 'credential_integrity',
+        recoverability,
+        confidence: snapshot.status === 'present' && snapshot.issues.length === 0 ? 'suspected' : 'confirmed',
+        operatorAction: 'Preserve current auth tree and protected snapshots, inspect permissions/corruption/service overlap, and prefer verified local restore before any phone-side relink.',
+        clearRequirement: 'clear only after auth bond is present, non-empty, backed up, and a post-repair WhatsApp send is confirmed by receipt or echo proof',
+      },
+      evidenceRefs: [
+        `reason=${reason}`,
+        `status=${snapshot.status}`,
+        `issues=${snapshot.issues.join(',') || 'none'}`,
+        `latest_backup=${snapshot.backup.latest ?? 'none'}`,
+      ],
+    };
+  }
+
+  private localAuthBondClearCriticalAsset(snapshot: AuthBondSnapshot): BotErrorsCriticalAssetDiagnostic {
+    return {
+      asset: {
+        kind: 'whatsapp_auth_bond',
+        instance: config.botName,
+        owner: 'whatsoup',
+        path: config.authDir,
+        fingerprint: snapshot.meHash ?? snapshot.creds.sha256?.slice(0, 20) ?? undefined,
+      },
+      failure: {
+        code: 'WA_AUTH_BOND_LOCAL_REPAIR_VERIFIED',
+        domain: 'credential_integrity',
+        recoverability: 'operator_recoverable',
+        confidence: 'confirmed',
+        operatorAction: 'No further action for this local auth-bond incident unless the same source reopens.',
+        clearRequirement: 'auth bond present, non-empty, backed by latest snapshot, connected socket, and confirmed outbound send proof',
+      },
+      evidenceRefs: [
+        `status=${snapshot.status}`,
+        `issues=${snapshot.issues.join(',') || 'none'}`,
+        `latest_backup=${snapshot.backup.latest ?? 'none'}`,
+      ],
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1117,7 +2140,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     const elapsedMs = Date.now() - this.firstFailureAt;
     if (elapsedMs > ConnectionManager.MAX_FAILURE_DURATION_MS) {
       this.log.fatal({ elapsedMs }, 'Connection failed for over 30 minutes — emitting exhausted');
-      emitAlert(
+      this.persistConnectionRuntimeState('connection_exhausted');
+      emitAlertChecked(
         config.botName,
         'connection_exhausted',
         `whatsoup@${config.botName} connection exhausted after ${Math.round(elapsedMs / 60_000)}min`,
@@ -1136,11 +2160,17 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         );
         this.reconnectPhase = 'cooldown';
         this.setConnectionState('cooldown');
+        const cooldownUntil = Date.now() + ConnectionManager.COOLDOWN_MS;
+        this.persistConnectionRuntimeState('reconnect_cooldown_entered', {
+          cooldownMs: ConnectionManager.COOLDOWN_MS,
+          cooldownUntil,
+        });
         this.cooldownTimer = setTimeout(() => {
           this.cooldownTimer = null;
           this.reconnectAttempts = 0;
           this.reconnectPhase = 'retry';
           this.setConnectionState('reconnecting');
+          this.persistConnectionRuntimeState('reconnect_cooldown_elapsed');
           void this.connect();
         }, ConnectionManager.COOLDOWN_MS);
         this.cooldownTimer.unref?.();
@@ -1159,10 +2189,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         'Scheduling reconnect',
       );
       this.setConnectionState('reconnecting');
+      const nextReconnectAt = Date.now() + backoffMs;
+      this.persistConnectionRuntimeState('reconnect_scheduled', { backoffMs, nextReconnectAt });
 
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = null;
         this.setConnectionState('connecting');
+        this.persistConnectionRuntimeState('reconnect_timer_elapsed');
         void this.connect();
       }, backoffMs);
       this.reconnectTimer.unref?.();
@@ -1182,6 +2215,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages as WAMessage[]) {
+      if (msg.key.id && msg.key.fromMe === true) {
+        this.confirmLocalAuthBondSendProof(msg.key.id, 'own_message_echo', msg.key.remoteJid ?? undefined);
+      }
+
       // Detect CIPHERTEXT stubs — decryption failed
       if ((msg as any).messageStubType === 2 && !msg.message) {
         const senderJid = msg.key.participant ?? msg.key.remoteJid ?? '';
@@ -1573,7 +2610,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (config.dataRoot) {
         const markerPath = join(config.dataRoot, 'exhausted.marker');
         try {
-          writeFileSync(markerPath, JSON.stringify(marker, null, 2) + '\n', 'utf-8');
+          writePrivateJsonMarker(markerPath, marker);
         } catch (err) {
           this.log.error({ err }, 'failed to write exhaustion marker');
         }
@@ -1592,6 +2629,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.reconnectPhase = 'backoff';
     this.firstFailureAt = null;
     this.setConnectionState('reconnecting');
+    this.persistConnectionRuntimeState('exhaustion_cycle_retry');
 
     try {
       await this.connect();
@@ -1616,6 +2654,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.reconnectPhase = 'backoff';
     this.firstFailureAt = null;
     this.setConnectionState('reconnecting');
+    this.persistConnectionRuntimeState(`graceful_reconnect_${reason}`);
 
     try {
       sock.end(undefined);

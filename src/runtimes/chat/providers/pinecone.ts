@@ -4,7 +4,7 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { WhatSoupError as AppError } from '../../../errors.ts';
 import { truncateForRerank } from '../../../lib/text-utils.ts';
-import { emitAlert, clearAlertSource } from '../../../lib/emit-alert.ts';
+import { emitAlertChecked, clearAlertSourceChecked } from '../../../lib/emit-alert.ts';
 import { CircuitBreaker } from '../../../core/circuit-breaker.ts';
 import { sleep } from '../../../core/retry.ts';
 import {
@@ -49,7 +49,7 @@ function trackFailure(operation: string, err: unknown): void {
 
   if (breaker.isOpen()) {
     alertedOperations.add(operation);
-    emitAlert(
+    emitAlertChecked(
       config.botName,
       'pinecone_degraded',
       `Pinecone ${operation} circuit breaker tripped`,
@@ -65,7 +65,7 @@ function trackSuccess(operation: string): void {
   getBreaker(operation).recordSuccess();
   if (alertedOperations.has(operation)) {
     alertedOperations.delete(operation);
-    clearAlertSource(config.botName, 'pinecone_degraded');
+    clearAlertSourceChecked(config.botName, 'pinecone_degraded');
   }
 }
 

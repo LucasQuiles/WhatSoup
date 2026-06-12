@@ -32,7 +32,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "1c3df3cfaf407b079c1b0c3549afa9bcfaecc3ea6fec8a3f1c42c26a064b5bfb",
+      "sha256": "7e767c8b9ed50c35052db17780817caf09f06a7ba1ee6f97436aec49b0276389",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -42,7 +42,7 @@
     },
     {
       "path": "src/transport/auth.ts",
-      "sha256": "87ba65f9c4a7888360b6d917d63ac10204291f60dac13f22d5dcf64c9e56ca70",
+      "sha256": "35c9626503da9327d7dd0bfe104e498e49b948d75d757e6df05f8208050abc09",
       "mustContain": [
         "useMultiFileAuthState",
         "decideDisconnectAction"
@@ -51,7 +51,7 @@
     },
     {
       "path": "src/transport/auth-disconnect-policy.ts",
-      "sha256": "fd94295cd05d2ee5e2c120d88c18457cea9efa579b72e2f015586f73859c52a4",
+      "sha256": "c3bbf053b0ee1082183ac5a0ce84c23e0ba3b4de1ada6768e75cad74710e3452",
       "mustContain": [
         "decideDisconnectAction",
         "logged-out",

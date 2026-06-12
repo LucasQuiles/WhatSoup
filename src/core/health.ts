@@ -1,12 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.ts';
-import { safeStringEqual } from '../fleet/safe-compare.ts';
+import { safeStringEqual } from '../lib/safe-compare.ts';
 import { createChildLogger } from '../logger.ts';
-import type { Database } from './database.ts';
+import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
+import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
@@ -31,6 +32,7 @@ import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../tr
 import { readBody } from '../lib/http.ts';
 
 const log = createChildLogger('health');
+const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 /**
  * Timing-safe bearer token comparison to prevent timing attacks.
@@ -76,8 +78,55 @@ function safeDbQuery<T>(fn: () => T, fallback: T, warnMsg: string): T {
   }
 }
 
+interface LatestSuccessfulOutboundSend {
+  latest_successful_send_at: string | null;
+  latest_successful_transport_id: string | null;
+}
+
+function latestSuccessfulOutboundSend(deps: HealthDeps): LatestSuccessfulOutboundSend {
+  return safeDbQuery(
+    () => {
+      const row = deps.db.raw.prepare(`
+        SELECT
+          completed_at AS sent_at,
+          transport_message_id AS transport_id
+        FROM outbound_sends
+        WHERE status = 'sent'
+          AND completed_at IS NOT NULL
+        ORDER BY completed_at DESC, id DESC
+        LIMIT 1
+      `).get() as { sent_at: string | null; transport_id: string | null } | undefined;
+      return {
+        latest_successful_send_at: row?.sent_at ?? null,
+        latest_successful_transport_id: row?.transport_id ?? null,
+      };
+    },
+    { latest_successful_send_at: null, latest_successful_transport_id: null },
+    'failed to read latest successful outbound send',
+  );
+}
+
 export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
 export const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
+
+type AuthFailureClass =
+  | 'none'
+  | 'pairing_required'
+  | 'serverside_logout_irreversible'
+  | 'local_corruption_restorable'
+  | 'local_corruption_unrestorable'
+  | 'auth_bond_at_risk';
+
+type DisconnectClass =
+  | 'none'
+  | 'serverside_logout_irreversible'
+  | 'duplicate_session_replaced'
+  | 'multidevice_mismatch'
+  | 'restart_required'
+  | 'restart_required_flapping'
+  | 'transient_reconnect'
+  | 'unknown_reconnect';
+
 
 function emptyRecentDisconnects(): ConnectionRecentDisconnects {
   return {
@@ -96,6 +145,13 @@ function getConnectionState(connectionManager: HealthDeps['connectionManager']):
   }
 
   const connected = connectionManager.botJid !== null;
+  const cfg = config as typeof config & {
+    authDir?: string;
+    stateRoot?: string;
+    dataRoot?: string;
+    lockPath?: string;
+    agentProvider?: string;
+  };
   return {
     state: connected ? 'connected' : 'disconnected',
     connected,
@@ -108,7 +164,179 @@ function getConnectionState(connectionManager: HealthDeps['connectionManager']):
     lastDisconnectReason: null,
     lastStatusCode: null,
     recentDisconnects: emptyRecentDisconnects(),
+    credentialLifecycle: {
+      version: 1,
+      redaction: {
+        version: 1,
+        policy: 'credential material, tokens, pairing codes, full JIDs, and full phone numbers are blocked; identity fields use short hashes only',
+      },
+      environment: {
+        instance: config.botName,
+        host: process.env['HOSTNAME'] ?? 'unknown',
+        pid: process.pid,
+        nodeVersion: process.version,
+        platform: process.platform,
+        arch: process.arch,
+        release: 'unknown',
+        processUptimeSeconds: Math.floor(process.uptime()),
+        osUptimeSeconds: 0,
+        loadavg: [],
+        memory: {
+          freeBytes: 0,
+          totalBytes: 0,
+        },
+        authDir: cfg.authDir ?? 'unknown',
+        stateRoot: cfg.stateRoot ?? null,
+        dataRoot: cfg.dataRoot ?? null,
+        lockPath: cfg.lockPath ?? 'unknown',
+        healthPort: config.healthPort,
+        provider: cfg.agentProvider ?? 'unknown',
+      },
+      currentAuthBond: {
+        status: 'missing',
+        issues: ['connection_manager_does_not_expose_auth_bond'],
+        authDir: { path: cfg.authDir ?? 'unknown', exists: false, mode: null, size: null, mtime: null },
+        creds: {
+          path: cfg.authDir ? `${cfg.authDir}/creds.json` : 'unknown',
+          exists: false,
+          mode: null,
+          size: null,
+          mtime: null,
+          hash: null,
+          identityHash: null,
+        },
+        treeHash: null,
+        backup: {
+          root: cfg.stateRoot ?? 'unknown',
+          latest: null,
+          latestAt: null,
+          latestReason: null,
+          latestTreeHash: null,
+          lastCaptureAt: null,
+          lastCaptureReason: null,
+          lastCaptureError: null,
+          lastRestoreAt: null,
+          lastRestoreSource: null,
+          lastRestoreError: null,
+        },
+      },
+      latestBaileysVersion: null,
+      connectStartedAt: null,
+      lastOpenAt: null,
+      lastCloseAt: null,
+      lastQrAt: null,
+      lastCredsUpdateAt: null,
+      lastCredsUpdateFailedAt: null,
+      lastAuthSnapshotAt: null,
+      lastAuthSnapshotFailedAt: null,
+      credsUpdateCount: 0,
+      authSnapshotCaptureCount: 0,
+      authSnapshotFailureCount: 0,
+      lastDisconnectDiagnostic: null,
+      recentEvents: [],
+    },
   };
+}
+
+function formatAuthBond(connectionState: ConnectionStateSnapshot): Record<string, unknown> | null {
+  const authBond = connectionState.authBond;
+  if (!authBond) return null;
+  return {
+    status: authBond.status,
+    issues: authBond.issues,
+    auth_dir: {
+      path: authBond.authDir.path,
+      exists: authBond.authDir.exists,
+      mode: authBond.authDir.mode,
+      mtime: authBond.authDir.mtime,
+    },
+    creds: {
+      path: authBond.creds.path,
+      exists: authBond.creds.exists,
+      mode: authBond.creds.mode,
+      size: authBond.creds.size,
+      mtime: authBond.creds.mtime,
+      hash: authBond.creds.sha256?.slice(0, 20) ?? null,
+      empty_hash: authBond.creds.sha256 === EMPTY_SHA256,
+    },
+    me_hash: authBond.meHash,
+    tree_hash: authBond.treeHash?.slice(0, 20) ?? null,
+    backup: {
+      root: authBond.backup.root,
+      latest: authBond.backup.latest,
+      latest_at: authBond.backup.latestAt,
+      latest_reason: authBond.backup.latestReason,
+      latest_tree_hash: authBond.backup.latestTreeHash?.slice(0, 20) ?? null,
+      last_capture_at: authBond.backup.lastCaptureAt,
+      last_capture_reason: authBond.backup.lastCaptureReason,
+      last_capture_error: authBond.backup.lastCaptureError,
+      last_restore_at: authBond.backup.lastRestoreAt,
+      last_restore_source: authBond.backup.lastRestoreSource,
+      last_restore_error: authBond.backup.lastRestoreError,
+    },
+  };
+}
+
+function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFailureClass {
+  const reason = connectionState.lastDisconnectReason ?? '';
+  if (
+    !connectionState.connected
+    && (
+      connectionState.lastStatusCode === 401
+      || reason === 'loggedOut'
+      || reason.includes('device_removed')
+    )
+  ) {
+    return 'serverside_logout_irreversible';
+  }
+
+  const lifecycle = connectionState.credentialLifecycle as Partial<ConnectionStateSnapshot['credentialLifecycle']> | undefined;
+  const lastQrAt = lifecycle?.lastQrAt ? Date.parse(lifecycle.lastQrAt) : NaN;
+  const lastOpenAt = lifecycle?.lastOpenAt ? Date.parse(lifecycle.lastOpenAt) : NaN;
+  const qrRequiresPairing =
+    !connectionState.connected
+    && Number.isFinite(lastQrAt)
+    && (!Number.isFinite(lastOpenAt) || lastQrAt >= lastOpenAt);
+  if (qrRequiresPairing) {
+    return 'pairing_required';
+  }
+
+  const authBond = connectionState.authBond;
+  if (!authBond) return 'none';
+
+  const hasBackup = typeof authBond.backup.latest === 'string' && authBond.backup.latest.length > 0;
+  if (authBond.status !== 'present') {
+    return hasBackup ? 'local_corruption_restorable' : 'local_corruption_unrestorable';
+  }
+
+  if (
+    authBond.issues.length > 0
+    || authBond.backup.lastCaptureError !== null
+    || authBond.backup.lastRestoreError !== null
+  ) {
+    return 'auth_bond_at_risk';
+  }
+
+  return 'none';
+}
+
+function classifyDisconnect(connectionState: ConnectionStateSnapshot): DisconnectClass {
+  if (connectionState.connected && connectionState.state === 'connected') return 'none';
+  const statusCode = connectionState.lastStatusCode ?? undefined;
+  if (statusCode === undefined) return 'none';
+
+  const action = decideDisconnectAction(statusCode);
+  if (action.type === 'exit' && action.reason === 'logged-out') {
+    return 'serverside_logout_irreversible';
+  }
+  if (action.type === 'reconnect') {
+    if (action.reason === 'connection-replaced') return 'duplicate_session_replaced';
+    if (action.reason === 'multidevice-mismatch') return 'multidevice_mismatch';
+    if (action.reason === 'restart-required') return 'restart_required';
+    if (action.reason === 'restart-required-flapping') return 'restart_required_flapping';
+    if (action.reason === 'transient') return 'transient_reconnect';
+  }
+  return 'unknown_reconnect';
 }
 
 function requireAuth(req: IncomingMessage, res: ServerResponse): boolean {
@@ -309,12 +537,17 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           return;
         }
 
-        let data: Record<string, unknown>;
+        let data: unknown;
         try {
-          data = JSON.parse(rawBody) as Record<string, unknown>;
+          data = JSON.parse(rawBody);
         } catch {
           res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ error: 'invalid JSON' }));
+          return;
+        }
+        if (!isRecord(data)) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'request body must be a JSON object' }));
           return;
         }
 
@@ -323,10 +556,15 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           res.end(JSON.stringify({ error: 'missing type field' }));
           return;
         }
+        if (typeof data['type'] !== 'string') {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'type must be a string' }));
+          return;
+        }
 
-        const reportId = (data['reportId'] as string | undefined) ?? randomUUID();
+        const reportId = typeof data['reportId'] === 'string' ? data['reportId'] : randomUUID();
         const errorClass = normalizeErrorClass(
-          data['type'] as string,
+          data['type'],
           (data['errorHint'] as string | undefined) ?? (data['context'] as string | undefined) ?? 'unknown',
         );
 
@@ -398,20 +636,29 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         });
         if (destroyed) return;
 
-        let data: Record<string, unknown>;
+        let data: unknown;
         try {
-          data = JSON.parse(rawBody) as Record<string, unknown>;
+          data = JSON.parse(rawBody);
         } catch {
           res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ error: 'invalid JSON' }));
           return;
         }
+        if (!isRecord(data)) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'request body must be a JSON object' }));
+          return;
+        }
 
-        const subjectType = data['subjectType'] as string | undefined;
-        const subjectId = data['subjectId'] as string | undefined;
-        const action = data['action'] as string | undefined;
+        const subjectType = data['subjectType'];
+        const subjectId = data['subjectId'];
+        const action = data['action'];
 
-        if (!subjectType || !subjectId || !action) {
+        if (
+          typeof subjectType !== 'string' || !subjectType ||
+          typeof subjectId !== 'string' || !subjectId ||
+          typeof action !== 'string' || !action
+        ) {
           res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ error: 'subjectType, subjectId, and action are required' }));
           return;
@@ -481,17 +728,22 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         });
         if (destroyed) return;
 
-        let data: Record<string, unknown>;
+        let data: unknown;
         try {
-          data = JSON.parse(rawBody) as Record<string, unknown>;
+          data = JSON.parse(rawBody);
         } catch {
           res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ error: 'invalid JSON' }));
           return;
         }
+        if (!isRecord(data)) {
+          res.writeHead(400, jsonHeaders);
+          res.end(JSON.stringify({ error: 'request body must be a JSON object' }));
+          return;
+        }
 
-        const conversation_key = data['conversation_key'] as string | undefined;
-        if (!conversation_key) {
+        const conversation_key = data['conversation_key'];
+        if (typeof conversation_key !== 'string' || !conversation_key) {
           res.writeHead(400, jsonHeaders);
           res.end(JSON.stringify({ error: 'conversation_key is required' }));
           return;
@@ -541,16 +793,19 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
     try {
       const enrichmentStats = deps.getEnrichmentStats();
       const connectionState = getConnectionState(deps.connectionManager);
+      const authBond = formatAuthBond(connectionState);
+      const authFailureClass = classifyAuthFailure(connectionState);
+      const disconnectClass = classifyDisconnect(connectionState);
 
-      const isConnected = connectionState.connected;
+      const isConnected = connectionState.connected && connectionState.state === 'connected';
+      const exposeDisconnectMetadata = !isConnected;
+      const recentDisconnects = connectionState.recentDisconnects ?? emptyRecentDisconnects();
+      const connectionChurnIsDegraded =
+        isConnected && recentDisconnects.count >= RECENT_DISCONNECT_DEGRADED_THRESHOLD;
       const isRecoveringConnection =
         connectionState.state === 'connecting'
         || connectionState.state === 'reconnecting'
         || connectionState.state === 'cooldown';
-      const exposeDisconnectMetadata = !(isConnected && connectionState.state === 'connected');
-      const recentDisconnects = connectionState.recentDisconnects ?? emptyRecentDisconnects();
-      const connectionChurnIsDegraded =
-        isConnected && recentDisconnects.count >= RECENT_DISCONNECT_DEGRADED_THRESHOLD;
       const enrichmentStaleness = enrichmentStats.lastRun
         ? Date.now() - new Date(enrichmentStats.lastRun).getTime()
         : null;
@@ -559,9 +814,18 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // Enrichment staleness only matters if enrichment has actually run before
       // (instances without RAG/Pinecone never run enrichment — that's not degraded).
       const enrichmentIsStale = enrichmentStaleness !== null && enrichmentStaleness > ENRICHMENT_STALE_MS;
+      const authFailureIsUnhealthy =
+        authFailureClass === 'pairing_required'
+        || authFailureClass === 'serverside_logout_irreversible'
+        || authFailureClass === 'local_corruption_unrestorable';
+      const authFailureIsDegraded = authFailureClass !== 'none';
       let status: 'healthy' | 'degraded' | 'unhealthy';
-      if (!isConnected) {
+      if (authFailureIsUnhealthy) {
+        status = 'unhealthy';
+      } else if (!isConnected) {
         status = isRecoveringConnection ? 'degraded' : 'unhealthy';
+      } else if (authFailureIsDegraded) {
+        status = 'degraded';
       } else if (enrichmentIsStale || enrichmentStats.runtimeDegraded || connectionChurnIsDegraded) {
         status = 'degraded';
       } else {
@@ -580,6 +844,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count pending access-list entries',
       );
 
+      const outboundSends = latestSuccessfulOutboundSend(deps);
+
       const schemaVersion = safeDbQuery(
         () => {
           const row = deps.db.raw.prepare('PRAGMA schema_version').get() as { schema_version: number } | undefined;
@@ -589,14 +855,31 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to read sqlite schema_version',
       );
 
-      const pendingPollsTotal = safeDbQuery(
+      const schemaMigrationLatest = safeDbQuery(
         () => {
-          const row = deps.db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number } | undefined;
-          return row?.cnt ?? 0;
+          const row = deps.db.raw
+            .prepare('SELECT COALESCE(MAX(version), 0) AS latest FROM schema_migrations')
+            .get() as { latest: number } | undefined;
+          return row?.latest ?? 0;
         },
         0,
-        'failed to count pending polls',
+        'failed to read sqlite schema migration version',
       );
+      const schemaReady = schemaMigrationLatest >= CURRENT_SCHEMA_MIGRATION;
+
+      let pendingPollsTotal = 0;
+      let pendingPollsReadable = true;
+      try {
+        const row = deps.db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number } | undefined;
+        pendingPollsTotal = row?.cnt ?? 0;
+      } catch (err) {
+        pendingPollsReadable = false;
+        log.error({ err }, 'failed to count pending polls');
+      }
+
+      if (status === 'healthy' && (!schemaReady || !pendingPollsReadable)) {
+        status = 'degraded';
+      }
 
       // Provider-fallback observability (agent runtimes only). Surfaced in the
       // instance block so operators can see when a bot is running on its
@@ -632,7 +915,18 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           accessMode: deps.accessMode,
           socketPath: deps.socketPath ?? null,
           provider: config.agentProvider,
-          ...(fallbackState ? { ...fallbackState } : {}),
+          pid: process.pid,
+          ...(fallbackState
+            ? {
+                ...fallbackState,
+                effectiveProvider: fallbackState.effectiveProvider,
+                fallbackActiveUntil: fallbackState.fallbackActiveUntil,
+                fallbackReason: fallbackState.fallbackReason ?? null,
+                fallbackModel: fallbackState.fallbackModel ?? null,
+                fallbackResetAt: fallbackState.fallbackResetAt ?? null,
+                fallbackRecoveryProbeRequired: fallbackState.fallbackRecoveryProbeRequired ?? false,
+              }
+            : {}),
         },
         whatsapp: {
           connected: isConnected,
@@ -656,17 +950,26 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
               last_status_code: recentDisconnects.lastStatusCode,
               by_reason: recentDisconnects.byReason,
             },
+            disconnect_class: disconnectClass,
+            auth_failure_class: authFailureClass,
           },
+          auth_bond: authBond,
+          credential_lifecycle: connectionState.credentialLifecycle ?? null,
         },
         sqlite: {
           schema_version: schemaVersion,
+          schema_migration_latest: schemaMigrationLatest,
+          schema_migration_required: CURRENT_SCHEMA_MIGRATION,
+          schema_ready: schemaReady,
           messages_total: messagesTotal,
           unprocessed: enrichmentStats.unprocessed,
           pending_polls_total: pendingPollsTotal,
+          pending_polls_readable: pendingPollsReadable,
         },
         access_control: {
           pending_count: pendingCount,
         },
+        outbound_sends: outboundSends,
         enrichment: {
           last_run: enrichmentStats.lastRun,
         },

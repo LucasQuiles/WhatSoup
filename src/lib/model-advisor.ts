@@ -14,7 +14,7 @@
  * (emit-alert.ts) so operators see them where every other incident lands.
  */
 import { createChildLogger } from '../logger.ts';
-import { emitAlert, clearAlertSource } from './emit-alert.ts';
+import { clearAlertSourceChecked, emitAlertChecked } from './emit-alert.ts';
 import { adviseModel, type ModelAdvisory } from './model-catalog.ts';
 
 const log = createChildLogger('model-advisor');
@@ -125,7 +125,7 @@ export function notifyModelAdvisories(instance: string, advisories: ModelAdvisor
 
   if (advisories.length === 0) {
     if (lastNotifiedKey !== null && lastNotifiedKey !== '') {
-      clearAlertSource(instance, ALERT_SOURCE);
+      clearAlertSourceChecked(instance, ALERT_SOURCE);
     }
     lastNotifiedKey = '';
     log.info({}, 'model currency check: all configured models current');
@@ -145,7 +145,7 @@ export function notifyModelAdvisories(instance: string, advisories: ModelAdvisor
   const summary = `[${severity}] model updates available (${advisories.length}): ` + advisories
     .map((a) => `${a.role}=${a.model} → ${a.recommended ?? '?'} [${a.level}]`)
     .join('; ');
-  emitAlert(instance, ALERT_SOURCE, summary, JSON.stringify(advisories));
+  emitAlertChecked(instance, ALERT_SOURCE, summary, JSON.stringify(advisories), severity);
 }
 
 /**

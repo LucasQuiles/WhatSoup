@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { FleetDiscovery, DiscoveredInstance } from '../fleet/discovery.ts';
+import { safeStringEqual } from './safe-compare.ts';
 
 /** Stream request body with size guard. Rejects with 413 if exceeded. */
 export function readBody(req: IncomingMessage, maxBytes = 64 * 1024): Promise<string> {
@@ -38,8 +39,9 @@ export function jsonResponse(res: ServerResponse, status: number, body: unknown)
 
 /** Check Bearer token authorization. Returns true if authorized. */
 export function checkBearerAuth(req: IncomingMessage, expectedToken: string): boolean {
+  if (!expectedToken) return false;
   const header = req.headers['authorization'];
-  return header === `Bearer ${expectedToken}`;
+  return safeStringEqual(header, `Bearer ${expectedToken}`);
 }
 
 /** Extract the Bearer credential without comparing it to a known token. */

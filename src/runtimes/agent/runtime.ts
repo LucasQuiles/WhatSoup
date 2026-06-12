@@ -19,7 +19,7 @@ import {
   DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS,
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
-import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
+import { emitAlertChecked, clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import { lookupCredential, resolveProviderKeyService } from '../../lib/keyring.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
@@ -1604,7 +1604,7 @@ export class AgentRuntime implements Runtime {
     ].join('\n');
 
     try {
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         source,
         `Agent tool failure: ${args.toolName}`,
@@ -3141,7 +3141,7 @@ export class AgentRuntime implements Runtime {
           { err, messageId: msg.messageId, code: codeStr || 'unknown' },
           'inline extractor hook hit unrecoverable DB error — surfacing to operator',
         );
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'substrate-inline-hook',
           `Unrecoverable DB error in inline extractor: ${msgText}`,
@@ -5750,7 +5750,7 @@ export class AgentRuntime implements Runtime {
         firstEligibleIndex = i;
       }
       if (!eligible) {
-        emitAlert(
+        emitAlertChecked(
           this.instanceName,
           'fallback_credential_missing',
           'Fallback provider key not found in keyring',
@@ -5913,7 +5913,7 @@ export class AgentRuntime implements Runtime {
       served: this.fallbackTurnsServed,
       empty: this.fallbackTurnsEmpty,
     }, 'fallback turn completed with zero visible output');
-    emitAlert(
+    emitAlertChecked(
       this.instanceName,
       'fallback_empty_turn',
       'Fallback turn produced no visible output',
@@ -5955,7 +5955,7 @@ export class AgentRuntime implements Runtime {
       saveFallbackState(this.db, { activeUntil: until, activatedAt, reason: persistReason });
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'fallback_persist_failed',
         'Failed to persist fallback window — will not survive restart',
@@ -5978,7 +5978,7 @@ export class AgentRuntime implements Runtime {
           fallbackModel: fallbackEntry.model,
         }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
         if (!selection.selectedHadMissingCredential) {
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_credential_missing',
             'Fallback provider key not found in keyring',
@@ -5989,7 +5989,7 @@ export class AgentRuntime implements Runtime {
         void verifyFallbackCredential(service, key).then((result) => {
           if (result !== 'invalid') return;
           log.error({ service, fallbackProvider: fallbackEntry.provider }, 'fallback credential rejected by provider (401/403)');
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_credential_invalid',
             'Fallback API key rejected by provider',
@@ -6009,7 +6009,7 @@ export class AgentRuntime implements Runtime {
             { fallbackProvider: fallbackEntry.provider, binary: fallbackBinary },
             'fallback provider binary not found on this host',
           );
-          emitAlert(
+          emitAlertChecked(
             this.instanceName,
             'fallback_binary_missing',
             'Fallback provider binary not found on this host',
@@ -6040,7 +6040,7 @@ export class AgentRuntime implements Runtime {
                 },
                 'fallback model not found in provider catalog — sessions will fail until corrected',
               );
-              emitAlert(
+              emitAlertChecked(
                 this.instanceName,
                 'fallback_model_unknown',
                 'Fallback model not found in provider catalog',
@@ -6401,7 +6401,7 @@ export class AgentRuntime implements Runtime {
         mapKey: args.mapKey,
         fallbackProvider: args.activation.fallbackProvider,
       }, 'failed to replay turn on fallback provider');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'runtime_provider_fallback_replay_failed',
         'Provider fallback replay failed',
@@ -6866,7 +6866,7 @@ export class AgentRuntime implements Runtime {
           session.spawnSession(sessionId, dbRowId ?? undefined).then(async () => {
             await new Promise(r => setTimeout(r, 1_000));
             if (!session.getStatus().active) return;
-            clearAlertSource(this.instanceName, 'agent_respawn_failed');
+            clearAlertSourceChecked(this.instanceName, 'agent_respawn_failed');
             try {
               // Inject messages that arrived during the crash window
               if (chatJid) {
@@ -6889,7 +6889,7 @@ export class AgentRuntime implements Runtime {
       }
     } else if (crashCount > AUTO_RESPAWN_MAX_CRASHES) {
       log.error({ mapKey, crashes: crashCount }, 'auto-respawn exhausted — emitting alert');
-      emitAlert(
+      emitAlertChecked(
         this.instanceName,
         'agent_respawn_failed',
         `whatsoup@${this.instanceName} agent respawn exhausted (${crashCount} crashes)`,
