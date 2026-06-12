@@ -226,10 +226,10 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
 
       {/* Timestamp + delivery status + type badge */}
       <div
-        className={`text-xs flex items-center font-mono text-t5 mt-[var(--bw-accent)] py-0 px-[var(--sp-1)] gap-[var(--sp-2)] ${msg.fromMe ? 'justify-end' : ''}`}
+        className={`text-xs flex items-center font-mono text-t2 mt-[var(--bw-accent)] py-0 px-[var(--sp-1)] gap-[var(--sp-2)] ${msg.fromMe ? 'justify-end' : ''}`}
       >
         {isMedia && (
-          <span className="text-xs text-t5">
+          <span className="text-xs text-t2">
             {msg.type}
           </span>
         )}

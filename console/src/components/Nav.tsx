@@ -150,7 +150,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
             <span className="hidden md:inline">Live</span>
           </span>
         ) : (
-          <span className="flex items-center gap-1 text-t5" title="Polling (WebSocket disconnected)">
+          <span className="flex items-center gap-1 text-t2" title="Polling (WebSocket disconnected)">
             <WifiOff size={12} strokeWidth={1.75} />
             <span className="hidden md:inline">Polling</span>
           </span>

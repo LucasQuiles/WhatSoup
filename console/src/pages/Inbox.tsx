@@ -253,7 +253,7 @@ export default function Inbox() {
               </div>
               <div className="flex-1">
                 <div className="text-t1 font-medium text-body">{resolveDisplayName(currentChat.name)}</div>
-                <div className="text-t5 font-mono text-label">
+                <div className="text-t2 font-mono text-label">
                   {activeLine} · {currentChat.isGroup ? 'group' : 'direct'}
                 </div>
               </div>
