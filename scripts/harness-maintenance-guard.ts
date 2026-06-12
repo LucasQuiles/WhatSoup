@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { isRecord } from '../src/lib/type-guards.ts';
 
 export const DEFAULT_COOLDOWN_MINUTES = 7 * 24 * 60;
 export const DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS = 7;
@@ -47,10 +48,6 @@ export interface ManifestValidation {
 }
 
 type JsonRecord = Record<string, unknown>;
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function asRecord(value: unknown, label: string): JsonRecord {
   if (!isRecord(value)) throw new Error(`${label} must be an object`);
@@ -180,12 +177,11 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
   // Paths matching ^tier1\[\d+\]\.(update|rollback) are intentional update/rollback
   // channels (e.g. "claude install latest") and are expected to contain floating refs.
   const allowedFloatingPattern = /^tier1\[\d+\]\.(update|rollback)(?:[.\[]|$)/;
-  const allowedFloatingReferences = floatingReferences.filter((ref) =>
-    allowedFloatingPattern.test(ref.path),
-  );
-  const unexpectedFloatingReferences = floatingReferences.filter(
-    (ref) => !allowedFloatingPattern.test(ref.path),
-  );
+  const allowedFloatingReferences: typeof floatingReferences = [];
+  const unexpectedFloatingReferences: typeof floatingReferences = [];
+  for (const ref of floatingReferences) {
+    (allowedFloatingPattern.test(ref.path) ? allowedFloatingReferences : unexpectedFloatingReferences).push(ref);
+  }
 
   const warnings: string[] = [];
   if (allowedFloatingReferences.length > 0) {
