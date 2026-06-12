@@ -38,6 +38,7 @@
     "guard:claude-settings": "node --experimental-strip-types scripts/claude-settings-guard.ts --check",
     "guard:agent-decision-polls": "node --experimental-strip-types scripts/agent-decision-polls-guard.ts",
     "guard:test-integrity": "bash scripts/test-integrity-ci.sh",
+    "guard:lint:src": "node --experimental-strip-types scripts/eslint-fitness-check.ts",
     "migrate-memory-config": "node --experimental-strip-types scripts/migrate-memory-config.ts",
     "fleet:rotate-token": "node --experimental-strip-types scripts/fleet-rotate-token.ts",
     "leaks:anonymize": "node --experimental-strip-types scripts/anonymize-private-literals.ts",
@@ -47,8 +48,8 @@
     "typecheck": "tsc --noEmit",
     "typecheck:all": "tsc --noEmit -p tsconfig.test.json",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
-    "verify:push:branch": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK && npm run guard:repo:staged && npm run guard:repo:commit-authors && npm run guard:publication:staged && npm run guard:doc-drift && npm run guard:public-surface-drift && npm run guard:work-index && npm run guard:node-pin-consistency && npm run guard:claude-settings && npm run guard:agent-decision-polls && npm run guard:test-integrity && npm run typecheck:all && npm test -- tests/scripts/repo-hygiene-guard.test.ts tests/scripts/pre-push-guard.test.ts tests/scripts/claude-settings-guard.test.ts tests/scripts/agent-decision-polls-guard.test.ts tests/scripts/doc-drift-check.test.ts tests/scripts/public-surface-drift-check.test.ts tests/scripts/drift-skip-ci-gating.test.ts tests/scripts/work-index.test.ts tests/scripts/node-pin-consistency.test.ts --pool=forks",
-    "verify:release": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK && npm run guard:repo:release-hygiene && npm run guard:repo:commit-authors && npm run guard:publication:all && npm run guard:doc-drift && npm run guard:public-surface-drift && npm run guard:work-index && npm run guard:node-pin-consistency && npm run guard:claude-settings && npm run guard:agent-decision-polls && npm run guard:test-integrity && npm run test:tokenomics && npm --prefix tools/whatsoup_guard ci && npm --prefix tools/whatsoup_guard run typecheck && npm --prefix tools/whatsoup_guard test && npm --prefix console ci && npm run typecheck:all && npm test -- --pool=forks --fileParallelism=false && npm --prefix console run build",
+    "verify:push:branch": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK && npm run guard:repo:staged && npm run guard:repo:commit-authors && npm run guard:publication:staged && npm run guard:doc-drift && npm run guard:public-surface-drift && npm run guard:work-index && npm run guard:node-pin-consistency && npm run guard:claude-settings && npm run guard:agent-decision-polls && npm run guard:test-integrity && npm run guard:lint:src && npm run typecheck:all && npm test -- tests/scripts/repo-hygiene-guard.test.ts tests/scripts/pre-push-guard.test.ts tests/scripts/claude-settings-guard.test.ts tests/scripts/agent-decision-polls-guard.test.ts tests/scripts/doc-drift-check.test.ts tests/scripts/public-surface-drift-check.test.ts tests/scripts/drift-skip-ci-gating.test.ts tests/scripts/work-index.test.ts tests/scripts/node-pin-consistency.test.ts --pool=forks",
+    "verify:release": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK && npm run guard:repo:release-hygiene && npm run guard:repo:commit-authors && npm run guard:publication:all && npm run guard:doc-drift && npm run guard:public-surface-drift && npm run guard:work-index && npm run guard:node-pin-consistency && npm run guard:claude-settings && npm run guard:agent-decision-polls && npm run guard:test-integrity && npm run guard:lint:src && npm run test:tokenomics && npm --prefix tools/whatsoup_guard ci && npm --prefix tools/whatsoup_guard run typecheck && npm --prefix tools/whatsoup_guard test && npm --prefix console ci && npm run typecheck:all && npm test -- --pool=forks --fileParallelism=false && npm --prefix console run build",
     "verify:publish": "unset WHATSOUP_SKIP_DOC_DRIFT WHATSOUP_SKIP_PUBLIC_SURFACE_DRIFT WHATSOUP_SKIP_NODE_PIN_CHECK && npm run guard:claude-settings && npm run guard:agent-decision-polls && npm run guard:publication:release && npm run verify:release",
     "test": "vitest run",
     "test:tokenomics": "bash scripts/run-tokenomics-pytests.sh",
@@ -74,6 +75,7 @@
     "zod": "3.25.76"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.4",
     "@tanstack/react-query": "^5.96.2",
     "@tanstack/react-virtual": "^3.13.24",
     "@testing-library/dom": "^10.4.1",
@@ -86,8 +88,12 @@
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@types/ws": "^8.18.1",
+    "@typescript-eslint/rule-tester": "8.58.0",
+    "@typescript-eslint/utils": "8.58.0",
     "@vitest/coverage-v8": "3.2.4",
+    "eslint": "9.39.4",
     "framer-motion": "^12.38.0",
+    "globals": "17.4.0",
     "jsdom": "^29.0.1",
     "lucide-react": "^1.7.0",
     "qrcode": "^1.5.4",
@@ -97,6 +103,7 @@
     "react-router-dom": "^7.13.2",
     "recharts": "^3.8.1",
     "typescript": "5.9.3",
+    "typescript-eslint": "8.58.0",
     "vitest": "3.2.4"
   },
   "overrides": {

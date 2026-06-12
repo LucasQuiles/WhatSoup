@@ -77,6 +77,9 @@ jobs:
           WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'
         run: npm run guard:test-integrity
 
+      - name: ESLint fitness ring
+        run: npm run guard:lint:src
+
       - name: Tokenomics Python tests
         run: npm run test:tokenomics
 
