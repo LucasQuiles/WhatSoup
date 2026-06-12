@@ -9,7 +9,7 @@ import { getPreference, setPreference } from '../lib/preferences'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
-import { StatusCell, Tabs, Tab } from '../components/primitives'
+import { StatusCell, Tabs, Tab, Button, ActionButton } from '../components/primitives'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -138,21 +138,19 @@ export default function LineDetail() {
       <div
         className="flex items-center gap-4 c-toolbar flex-shrink-0 bg-d2 c-border rounded-lg"
       >
-        <button
-          type="button"
+        <ActionButton
+          label="Back"
+          icon={<ArrowLeft size={18} strokeWidth={1.75} />}
           onClick={() => navigate('/')}
-          className="text-t4 hover:text-t1 c-hover cursor-pointer"
-        >
-          <ArrowLeft size={18} strokeWidth={1.75} />
-        </button>
+        />
 
         {/* Status — shape law: disc/diamond/square/outline + label */}
         <StatusCell status={line.status} live={line.status === 'online'} />
 
         {/* Identity */}
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <h1 className="text-t1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl">
+            <h1 className="text-t1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl truncate">
               {line.name}
             </h1>
             <ModeBadge mode={line.mode} />
@@ -164,7 +162,7 @@ export default function LineDetail() {
         </div>
 
         {/* Meta */}
-        <div className="flex gap-4 font-mono text-t4 text-sm">
+        <div className="hidden md:flex gap-4 font-mono text-t4 text-sm">
           <span>uptime: {line.uptime ?? '—'}</span>
           <span>port: {line.healthPort}</span>
           <span>msgs: {(line.messagesTotal ?? 0).toLocaleString()}</span>
@@ -174,30 +172,18 @@ export default function LineDetail() {
         <HeartbeatStrip beats={line.heartbeat} />
         <div className="flex items-center gap-[var(--sp-2)]">
           {line.linkedStatus === 'unlinked' && (
-            <button
-              type="button"
-              onClick={() => setShowRelink(true)}
-              className="c-btn c-btn-ghost text-label"
-            >
-              <Link2 size={15} strokeWidth={1.75} /> Re-link
-            </button>
+            <Button variant="ghost" size="sm" icon={<Link2 size={15} strokeWidth={1.75} />} onClick={() => setShowRelink(true)}>
+              Re-link
+            </Button>
           )}
           {line.linkedStatus !== 'unlinked' && (
-            <button
-              type="button"
-              onClick={() => { toast.info(`Restarting ${line.name}...`); api.restart(line.name).then(() => toast.success(`${line.name} restart requested`)).catch(e => toast.error(`Restart failed: ${e.message}`)); }}
-              className="c-btn c-btn-ghost text-label"
-            >
-              <RotateCw size={15} strokeWidth={1.75} /> Restart
-            </button>
+            <Button variant="ghost" size="sm" icon={<RotateCw size={15} strokeWidth={1.75} />} onClick={() => { toast.info(`Restarting ${line.name}...`); api.restart(line.name).then(() => toast.success(`${line.name} restart requested`)).catch(e => toast.error(`Restart failed: ${e.message}`)); }}>
+              Restart
+            </Button>
           )}
-          <button
-            type="button"
-            onClick={() => setShowDeleteConfirm(true)}
-            className="c-btn c-btn-ghost text-s-crit text-label"
-          >
-            <Trash2 size={15} strokeWidth={1.75} /> Delete
-          </button>
+          <Button variant="danger" size="sm" icon={<Trash2 size={15} strokeWidth={1.75} />} onClick={() => setShowDeleteConfirm(true)}>
+            Delete
+          </Button>
         </div>
       </div>
 

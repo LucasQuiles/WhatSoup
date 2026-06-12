@@ -232,3 +232,22 @@ describe('LineDetail tablist (Tabs primitive)', () => {
     expect(panel.getAttribute('aria-labelledby')).toBe('tab-summary');
   });
 });
+
+describe('LineDetail header — primitive buttons + overflow contract', () => {
+  it('back/re-link-or-restart/delete render as soup buttons with accessible names', async () => {
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', status: 'online' }) });
+    });
+    expect(screen.getByRole('button', { name: 'Back' }).className).toContain('soup-actbtn');
+    expect(screen.getByRole('button', { name: 'Restart' }).className).toContain('soup-btn--ghost');
+    expect(screen.getByRole('button', { name: 'Delete' }).className).toContain('soup-btn--danger');
+  });
+
+  it('the line name carries the truncation contract (class-only; box metrics are D7)', async () => {
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'a-very-long-line-name-that-should-not-blow-out-the-header-row' }) });
+    });
+    const h1 = screen.getByRole('heading', { level: 1 });
+    expect(h1.className).toContain('truncate');
+  });
+});
