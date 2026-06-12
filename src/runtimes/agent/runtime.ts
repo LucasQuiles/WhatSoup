@@ -1424,6 +1424,13 @@ export class AgentRuntime implements Runtime {
   // Epoch ms of the most recent recovery probe (either path); null until the
   // first probe. Process-local observability only — never persisted.
   private fallbackLastProbeAt: number | null = null;
+  // Lifetime-of-process transition totals (countable report fields for the
+  // expensive fallback paths — never just logs). Activations count first arms
+  // only (extensions excluded), reverts count deactivations of an active
+  // window, replays count successful continue-on-fallback replay dispatches.
+  private fallbackActivations = 0;
+  private fallbackReverts = 0;
+  private fallbackReplays = 0;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -5702,6 +5709,9 @@ export class AgentRuntime implements Runtime {
     lastFallbackTurnAt: number | null;
     probeAttempts: number;
     lastProbeAt: number | null;
+    fallbackActivations: number;
+    fallbackReverts: number;
+    fallbackReplays: number;
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   } {
@@ -5719,6 +5729,9 @@ export class AgentRuntime implements Runtime {
       lastFallbackTurnAt: this.lastFallbackTurnAt,
       probeAttempts: this.fallbackProbeAttempts,
       lastProbeAt: this.fallbackLastProbeAt,
+      fallbackActivations: this.fallbackActivations,
+      fallbackReverts: this.fallbackReverts,
+      fallbackReplays: this.fallbackReplays,
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
     };
@@ -5849,9 +5862,18 @@ export class AgentRuntime implements Runtime {
     this.fallbackActiveUntil = until;
     this.fallbackActivatedAt = activatedAt;
     // Preserve original cause: only set on first arm; extensions and restores
-    // must pass the original reason so it is not overwritten.
+    // must pass the original reason so it is not overwritten. The null-guard
+    // doubles as the first-arm discriminator: the activation alert + counter
+    // fire exactly once per window, never on extensions.
     if (this.fallbackArmReason === null) {
       this.fallbackArmReason = reason;
+      this.fallbackActivations += 1;
+      emitAlert(
+        this.instanceName,
+        'provider_fallback_activated',
+        'Provider fallback window activated',
+        `reason=${reason} provider=${fallbackEntry.provider} model=${fallbackEntry.model ?? 'default'} until=${new Date(until).toISOString()}`,
+      );
     }
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -6090,6 +6112,9 @@ export class AgentRuntime implements Runtime {
       this.fallbackPrimaryProbeTimer = null;
     }
     if (this.fallbackActiveUntil === null) return;
+    // Capture before clearing: the revert alert reports how long the window
+    // ran. The idempotency guard above means this fires once per window.
+    const windowMs = this.fallbackActivatedAt !== null ? Date.now() - this.fallbackActivatedAt : null;
     this.fallbackActiveUntil = null;
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
@@ -6111,6 +6136,14 @@ export class AgentRuntime implements Runtime {
       primaryProvider: this.agentProvider,
       reason,
     }, 'reverting to primary provider');
+    this.fallbackReverts += 1;
+    emitAlert(
+      this.instanceName,
+      'provider_fallback_reverted',
+      'Provider fallback window ended — reverted to primary provider',
+      `reason=${reason} turnsServed=${this.fallbackTurnsServed} turnsEmpty=${this.fallbackTurnsEmpty}`
+        + ` windowMs=${windowMs ?? 'unknown'}`,
+    );
   }
 
   private handleFallbackRevertTimer(): void {
@@ -6343,6 +6376,15 @@ export class AgentRuntime implements Runtime {
       ? this.pendingTurnActorJid.get(args.mapKey)
       : this.currentTurnReplayActorJid;
 
+    // Past every gate: the replay dispatches. Once-per-activation by the
+    // extended-guard above (extensions never reach this point).
+    this.fallbackReplays += 1;
+    emitAlert(
+      this.instanceName,
+      'provider_fallback_replayed',
+      'Interrupted turn replayed on fallback provider',
+      `reason=${args.activation.reason} provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'}`,
+    );
     void this.replayTurnOnFallback({
       chatJid: args.chatJid,
       mapKey: args.mapKey,
