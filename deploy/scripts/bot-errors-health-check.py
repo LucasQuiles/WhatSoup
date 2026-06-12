@@ -2346,20 +2346,36 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         append_evidence_field(details, "expected_instance", expected_name)
     auth_bond = whatsapp.get("auth_bond") if isinstance(whatsapp.get("auth_bond"), dict) else {}
     auth_status = auth_bond.get("status")
+    issues = auth_bond.get("issues")
+    creds = auth_bond.get("creds") if isinstance(auth_bond.get("creds"), dict) else {}
+    fresh_credential_write_age: int | None = None
+    if (
+        auth_status == "invalid"
+        and isinstance(issues, list)
+        and any(str(issue) in {"creds_json_empty", "creds_json_invalid_json"} for issue in issues)
+        and creds.get("exists") is True
+    ):
+        creds_epoch = parse_iso_epoch(creds.get("mtime"))
+        if creds_epoch is not None:
+            age = current_epoch() - creds_epoch
+            grace = env_int("BOT_ERRORS_AUTH_BOND_WRITE_INFLIGHT_GRACE_SECONDS", 10)
+            if 0 <= age < grace:
+                fresh_credential_write_age = age
+                details.append("auth_bond_credential_write_inflight=true")
+                details.append(f"auth_bond_credential_write_inflight_age_seconds={age}")
     if isinstance(auth_status, str) and auth_status:
-        if auth_status != "present":
+        if auth_status != "present" and fresh_credential_write_age is None:
             add_marker("auth_bond_at_risk")
         append_evidence_field(details, "auth_bond_status", auth_status)
-    issues = auth_bond.get("issues")
     if isinstance(issues, list) and issues:
-        add_marker("auth_bond_at_risk")
+        if fresh_credential_write_age is None:
+            add_marker("auth_bond_at_risk")
         rendered = [redact_evidence_string(str(item), 80) for item in issues[:8]]
         details.append("auth_bond_issues=" + ",".join(item for item in rendered if item))
     auth_dir = auth_bond.get("auth_dir") if isinstance(auth_bond.get("auth_dir"), dict) else {}
     append_evidence_field(details, "auth_bond_auth_dir_exists", auth_dir.get("exists"))
     append_evidence_field(details, "auth_bond_auth_dir_mode", auth_dir.get("mode"))
     append_evidence_field(details, "auth_bond_auth_dir_mtime", auth_dir.get("mtime"))
-    creds = auth_bond.get("creds") if isinstance(auth_bond.get("creds"), dict) else {}
     append_evidence_field(details, "auth_bond_creds_exists", creds.get("exists"))
     append_evidence_field(details, "auth_bond_creds_mode", creds.get("mode"))
     append_evidence_field(details, "auth_bond_creds_size", creds.get("size"))
@@ -2416,6 +2432,9 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
         details.append(canary_detail)
         if canary_ok is False:
             add_marker("auth_bond_restore_canary_failed")
+    append_evidence_field(details, "auth_bond_backup_last_capture_deferred_at", backup.get("last_capture_deferred_at"))
+    append_evidence_field(details, "auth_bond_backup_last_capture_deferred_reason", backup.get("last_capture_deferred_reason"))
+    append_evidence_field(details, "auth_bond_backup_last_capture_deferred_age_ms", backup.get("last_capture_deferred_age_ms"))
     last_capture_error = backup.get("last_capture_error")
     if isinstance(last_capture_error, str) and last_capture_error:
         add_marker("auth_bond_at_risk")

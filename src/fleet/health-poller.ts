@@ -687,6 +687,9 @@ export class HealthPoller {
       this.pushEvidenceField(evidence, 'auth_bond_backup_last_capture_at', backup['last_capture_at'] ?? backup['lastCaptureAt']);
       this.pushEvidenceField(evidence, 'auth_bond_backup_last_capture_reason', backup['last_capture_reason'] ?? backup['lastCaptureReason']);
       this.pushEvidenceField(evidence, 'auth_bond_backup_last_capture_error', backup['last_capture_error'] ?? backup['lastCaptureError'], 180);
+      this.pushEvidenceField(evidence, 'auth_bond_backup_last_capture_deferred_at', backup['last_capture_deferred_at'] ?? backup['lastCaptureDeferredAt']);
+      this.pushEvidenceField(evidence, 'auth_bond_backup_last_capture_deferred_reason', backup['last_capture_deferred_reason'] ?? backup['lastCaptureDeferredReason']);
+      this.pushEvidenceField(evidence, 'auth_bond_backup_last_capture_deferred_age_ms', backup['last_capture_deferred_age_ms'] ?? backup['lastCaptureDeferredAgeMs']);
       this.pushEvidenceField(evidence, 'auth_bond_backup_last_restore_at', backup['last_restore_at'] ?? backup['lastRestoreAt']);
       const restoreSource = backup['last_restore_source'] ?? backup['lastRestoreSource'];
       evidence.push(`auth_bond_backup_last_restore_source_present=${String(typeof restoreSource === 'string' && restoreSource.length > 0)}`);

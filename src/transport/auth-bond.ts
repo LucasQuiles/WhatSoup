@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
 
 export type AuthBondStatus = 'present' | 'missing' | 'invalid';
 
@@ -38,6 +39,9 @@ export interface AuthBondBackupSnapshot {
   lastCaptureAt: string | null;
   lastCaptureReason: string | null;
   lastCaptureError: string | null;
+  lastCaptureDeferredAt: string | null;
+  lastCaptureDeferredReason: string | null;
+  lastCaptureDeferredAgeMs: number | null;
   lastRestoreAt: string | null;
   lastRestoreSource: string | null;
   lastRestoreError: string | null;
@@ -57,6 +61,7 @@ export interface AuthBondCaptureResult {
   ok: boolean;
   snapshot: AuthBondSnapshot;
   captured: boolean;
+  deferred: boolean;
   path: string | null;
   error: string | null;
 }
@@ -96,6 +101,7 @@ interface AuthBondGuardOptions {
   captureAttempts?: number;
   captureRetryDelayMs?: number;
   captureBlockReason?: () => string | null;
+  freshInvalidGraceMs?: number;
 }
 
 const DEFAULT_KEEP_BACKUPS = 96;
@@ -424,12 +430,16 @@ export class AuthBondGuard {
   private readonly captureAttempts: number;
   private readonly captureRetryDelayMs: number;
   private readonly captureBlockReason: () => string | null;
+  private readonly freshInvalidGraceMs: number;
   private readonly root: string;
   private readonly historyRoot: string;
   private readonly latestManifestPath: string;
   private lastCaptureAt: string | null = null;
   private lastCaptureReason: string | null = null;
   private lastCaptureError: string | null = null;
+  private lastCaptureDeferredAt: string | null = null;
+  private lastCaptureDeferredReason: string | null = null;
+  private lastCaptureDeferredAgeMs: number | null = null;
   private lastRestoreAt: string | null = null;
   private lastRestoreSource: string | null = null;
   private lastRestoreError: string | null = null;
@@ -443,6 +453,7 @@ export class AuthBondGuard {
     this.captureAttempts = Math.max(1, options.captureAttempts ?? DEFAULT_CAPTURE_ATTEMPTS);
     this.captureRetryDelayMs = Math.max(0, options.captureRetryDelayMs ?? DEFAULT_CAPTURE_RETRY_DELAY_MS);
     this.captureBlockReason = options.captureBlockReason ?? (() => null);
+    this.freshInvalidGraceMs = Math.max(0, options.freshInvalidGraceMs ?? DEFAULT_FRESH_INVALID_GRACE_MS);
     const stateRoot = options.stateRoot && options.stateRoot.trim() !== ''
       ? options.stateRoot
       : join(dirname(options.authDir), '..', 'state');
@@ -511,7 +522,7 @@ export class AuthBondGuard {
     let lastResult: AuthBondCaptureResult | null = null;
     for (let attempt = 1; attempt <= this.captureAttempts; attempt += 1) {
       lastResult = this.captureOnce(reason);
-      if (lastResult.ok || attempt === this.captureAttempts) return lastResult;
+      if (lastResult.ok || !lastResult.deferred || attempt === this.captureAttempts) return lastResult;
       sleepSync(this.captureRetryDelayMs);
     }
     return lastResult!;
@@ -524,13 +535,17 @@ export class AuthBondGuard {
       this.lastCaptureAt = this.now().toISOString();
       this.lastCaptureReason = reason;
       this.lastCaptureError = `auth bond capture blocked: ${blockedReason}`;
-      return { ok: false, snapshot: this.inspect(), captured: false, path: null, error: this.lastCaptureError };
+      return { ok: false, snapshot: this.inspect(), captured: false, deferred: false, path: null, error: this.lastCaptureError };
     }
     if (snapshot.status !== 'present' || !snapshot.treeHash) {
+      const freshAgeMs = this.freshInvalidCredentialAgeMs(snapshot);
+      if (freshAgeMs !== null && freshAgeMs < this.freshInvalidGraceMs) {
+        return this.deferFreshInvalidCapture(reason, freshAgeMs, 'auth bond credential write still in flight');
+      }
       this.lastCaptureAt = this.now().toISOString();
       this.lastCaptureReason = reason;
       this.lastCaptureError = `auth bond is ${snapshot.status}: ${snapshot.issues.join(',')}`;
-      return { ok: false, snapshot: this.inspect(), captured: false, path: null, error: this.lastCaptureError };
+      return { ok: false, snapshot: this.inspect(), captured: false, deferred: false, path: null, error: this.lastCaptureError };
     }
 
     let tmp: string | null = null;
@@ -548,7 +563,7 @@ export class AuthBondGuard {
         this.lastCaptureAt = this.now().toISOString();
         this.lastCaptureReason = reason;
         this.lastCaptureError = null;
-        return { ok: true, snapshot: this.inspect(), captured: false, path: latest.backupPath, error: null };
+        return { ok: true, snapshot: this.inspect(), captured: false, deferred: false, path: latest.backupPath, error: null };
       }
 
       const createdAt = this.now();
@@ -587,15 +602,49 @@ export class AuthBondGuard {
       this.lastCaptureReason = reason;
       this.lastCaptureError = null;
       this.pruneHistory();
-      return { ok: true, snapshot: this.inspect(), captured: true, path: target, error: null };
+      return { ok: true, snapshot: this.inspect(), captured: true, deferred: false, path: target, error: null };
     } catch (err) {
       if (tmp) rmSync(tmp, { recursive: true, force: true });
       if (publishedTarget) rmSync(publishedTarget, { recursive: true, force: true });
+      const freshSnapshot = this.inspect();
+      const freshAgeMs = this.freshInvalidCredentialAgeMs(freshSnapshot);
+      if (freshAgeMs !== null && freshAgeMs < this.freshInvalidGraceMs) {
+        return this.deferFreshInvalidCapture(reason, freshAgeMs, 'auth bond changed during capture');
+      }
       this.lastCaptureAt = this.now().toISOString();
       this.lastCaptureReason = reason;
       this.lastCaptureError = err instanceof Error ? err.message : String(err);
-      return { ok: false, snapshot: this.inspect(), captured: false, path: null, error: this.lastCaptureError };
+      return { ok: false, snapshot: this.inspect(), captured: false, deferred: false, path: null, error: this.lastCaptureError };
     }
+  }
+
+  private freshInvalidCredentialAgeMs(snapshot: AuthBondSnapshot): number | null {
+    if (snapshot.status === 'present') return null;
+    if (!snapshot.creds.exists || !snapshot.creds.mtime) return null;
+    if (!snapshot.issues.some(issue => issue === 'creds_json_empty' || issue === 'creds_json_invalid_json')) {
+      return null;
+    }
+    const mtime = Date.parse(snapshot.creds.mtime);
+    if (!Number.isFinite(mtime)) return null;
+    return Math.max(0, this.now().getTime() - mtime);
+  }
+
+  private deferFreshInvalidCapture(
+    reason: string,
+    ageMs: number,
+    message: string,
+  ): AuthBondCaptureResult {
+    this.lastCaptureDeferredAt = this.now().toISOString();
+    this.lastCaptureDeferredReason = reason;
+    this.lastCaptureDeferredAgeMs = ageMs;
+    return {
+      ok: false,
+      snapshot: this.inspect(),
+      captured: false,
+      deferred: true,
+      path: null,
+      error: `${message}: age_ms=${ageMs}`,
+    };
   }
 
   restoreLatestIfNeeded(): AuthBondRestoreResult {
@@ -712,6 +761,9 @@ export class AuthBondGuard {
       lastCaptureAt: this.lastCaptureAt,
       lastCaptureReason: this.lastCaptureReason,
       lastCaptureError: this.lastCaptureError,
+      lastCaptureDeferredAt: this.lastCaptureDeferredAt,
+      lastCaptureDeferredReason: this.lastCaptureDeferredReason,
+      lastCaptureDeferredAgeMs: this.lastCaptureDeferredAgeMs,
       lastRestoreAt: this.lastRestoreAt,
       lastRestoreSource: this.lastRestoreSource,
       lastRestoreError: this.lastRestoreError,

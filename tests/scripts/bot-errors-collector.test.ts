@@ -6,11 +6,11 @@
  */
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 let tmpRoot = '';
+const tmpdir = () => '/tmp';
 
 function writeFakeSsh(root: string): string {
   const script = join(root, 'fake-ssh.sh');
