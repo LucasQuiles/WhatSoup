@@ -417,3 +417,26 @@ reduced-motion path, table/tablist keyboard). FilterPill suffix rule documented 
 origin/main merged (+6, console untouched). 1,753/1,753 tests.
 "Modal law live" scope clarified: migrated surfaces only; remaining 8 ad-hoc dialogs tracked by
 ratchet buckets and their migration slices (W8-4 acknowledged).
+
+---
+
+## C2.3 — Table / Toolbar / LogStream / Drawer + Fleet pilot — 2026-06-12
+
+**Verdict: Pass.** Eight code commits (`701a7ff7` Table+Toolbar, `1d27f116` LogStream+Drawer,
+`33a3788b` LogsTab/Ops adoption, `1f9bde39` Fleet pilot, `a24d09e5` enforcement, `682558f7`
+live-QA D2+D3, `d451262c`+`85707997` stacking/short-height, `0ff73055` assertion hardening) after
+investigation packet `bfe42920` (Ready with Constraints; the A0 gate introduced this slice).
+Adoption proof: Fleet renders via the four new primitives; LogsTab+Ops unified onto LogStream;
+raw table / th-onClick / sk-col / log-col all at ZERO with shadow tripwires (probe-proven) pinning
+them there. Drawer law live: container-query squeeze at 900px (spec amended from 1080px with
+rationale — full-width-container assumption), retarget swaps in place, Escape stack-aware,
+focus restores to the CURRENT row via new useDismissable restoreFocus override. Row activation
+now opens the drawer per spec; LineDetail navigation moved to the drawer's "Open line" action.
+Sort follows the spec asc/desc/none cycle (deliberate change from legacy default-desc).
+Three live browser QA rounds (both themes, 390/768/1024/1280/1440 + 1440×500): two squeeze/
+focus defects and two responsive defects found and fixed in-slice; one QA "crash" was a harness
+artifact (dev server piped through head — never pipe a dev server). 1,878/1,878 tests (+125);
+ratchet 614→602; verify:push:branch PASS (5 weak assertions strengthened). DD-18 Fleet legs +
+DD-21 table half CLOSED (register split into DD-18r/DD-21r); DD-22 opened (log virtualization
+deferred until a streaming source exists). origin/main merged ×3 mid-slice, zero conflicts.
+Packet: `06-implementation/c2-3-evidence.md`.
