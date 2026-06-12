@@ -150,7 +150,13 @@ function decodeXmlEntities(s: string): string {
 export function parsePlist(rawText: string): PlistShape | null {
   // Strip XML comments — their contents (including example $HOME / ${VAR}
   // documentation) are not part of the loaded plist and must not be scanned.
-  const text = rawText.replace(/<!--[\s\S]*?-->/g, '');
+  // Loop to a fixpoint: one pass over overlapping sequences can leave a
+  // reassembled `<!--` behind (js/incomplete-multi-character-sanitization).
+  let text = rawText;
+  for (let prev = ''; prev !== text; ) {
+    prev = text;
+    text = text.replace(/<!--[\s\S]*?-->/g, '');
+  }
   if (!/<plist[\s>]/.test(text) || !/<\/plist>/.test(text)) return null;
   if (!/<dict>/.test(text) || !/<\/dict>/.test(text)) return null;
 
