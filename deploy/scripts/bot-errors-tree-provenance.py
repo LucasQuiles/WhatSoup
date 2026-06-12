@@ -428,11 +428,12 @@ def tree_provenance_inventory(profile: dict[str, Any] | None = None, *, do_fetch
     the existing failure/warning classifier -- no health-check change needed
     beyond splicing this call into ``lines``.
 
-    Gated by the ``expectTreeProvenance`` profile flag (default True); a host
-    that opts out emits a single skipped line.
+    Gated by the ``expectTreeProvenance`` profile flag (default False, matching
+    the health profile schema's opt-in convention); a host enables it in its
+    local health profile. When disabled it emits a single skipped line.
     """
     profile = profile or {}
-    expect = profile.get("expectTreeProvenance", True)
+    expect = profile.get("expectTreeProvenance", False)
     if isinstance(expect, str):
         expect = expect.lower() in {"1", "true", "yes", "on"}
     if not expect:

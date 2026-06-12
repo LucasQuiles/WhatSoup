@@ -240,7 +240,7 @@ def test_inventory_lines_use_fail_warn_prefixes(tmp_path: Path, monkeypatch):
     _, work = _make_origin_and_clone(tmp_path, branch="main")
     _commit(work, "direct.txt", "unpushed\n")
     monkeypatch.setattr(_mod, "REPO_ROOT", work.resolve())
-    lines = _mod.tree_provenance_inventory({}, do_fetch=False)
+    lines = _mod.tree_provenance_inventory({"expectTreeProvenance": True}, do_fetch=False)
     # Critical -> FAIL prefix so the health-check classifier counts it.
     assert any(line.startswith("FAIL tree_provenance ") for line in lines), lines
     # Instance token is the branch (second token after the prefix), never a path.
@@ -256,7 +256,7 @@ def test_inventory_lines_use_fail_warn_prefixes(tmp_path: Path, monkeypatch):
 def test_inventory_clean_line_no_fail(tmp_path: Path, monkeypatch):
     _, work = _make_origin_and_clone(tmp_path, branch="develop")
     monkeypatch.setattr(_mod, "REPO_ROOT", work.resolve())
-    lines = _mod.tree_provenance_inventory({}, do_fetch=False)
+    lines = _mod.tree_provenance_inventory({"expectTreeProvenance": True}, do_fetch=False)
     assert len(lines) == 1
     assert lines[0].startswith("tree_provenance ")
     assert "clean" in lines[0]
@@ -265,6 +265,13 @@ def test_inventory_clean_line_no_fail(tmp_path: Path, monkeypatch):
 
 def test_inventory_profile_opt_out(tmp_path: Path):
     lines = _mod.tree_provenance_inventory({"expectTreeProvenance": False}, do_fetch=False)
+    assert lines == ["tree_provenance: skipped by health profile"]
+
+
+def test_inventory_default_is_opt_in(tmp_path: Path):
+    # Matching the health-profile schema convention, the check is opt-in:
+    # an empty profile must not inspect the tree (or warn) at all.
+    lines = _mod.tree_provenance_inventory({}, do_fetch=False)
     assert lines == ["tree_provenance: skipped by health profile"]
 
 
