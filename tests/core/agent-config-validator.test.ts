@@ -462,11 +462,27 @@ describe('agent type rules', () => {
     expect(result?.message).toContain('single, shared, or per_chat');
   });
 
-  it('requires sessionScope on load', () => {
+  it('accepts missing sessionScope on load/discovery (runtime parity: AgentRuntime defaults to "single")', () => {
+    // Inverted from the original required-on-load rule: the agent runtime
+    // constructor defaults a missing sessionScope to 'single'
+    // (src/runtimes/agent/runtime.ts — `options?.sessionScope ?? (options?.shared
+    // ? 'shared' : 'single')`), so a config the runtime boots happily must not
+    // surface config_error at load or discovery time.
     const raw = baseAgent({ agentOptions: {} });
-    const result = validateInstanceConfig(raw, ctx('load'));
-    expect(result?.field).toBe('agentOptions.sessionScope');
-    expect(result?.message).toContain('required and must be one of');
+    expect(validateInstanceConfig(raw, ctx('load'))).toBeNull();
+    expect(validateInstanceConfig(raw, ctx('discovery'))).toBeNull();
+    // Control: an invalid VALUE is still rejected on load — only absence is allowed.
+    const bad = baseAgent({ agentOptions: { sessionScope: 'bogus' } });
+    expect(validateInstanceConfig(bad, ctx('load'))?.field).toBe('agentOptions.sessionScope');
+  });
+
+  it('rejects invalid sessionScope value on load/discovery', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'global' } });
+    for (const mode of ['load', 'discovery'] as const) {
+      const result = validateInstanceConfig(raw, ctx(mode));
+      expect(result?.field).toBe('agentOptions.sessionScope');
+      expect(result?.message).toContain('single, shared, or per_chat');
+    }
   });
 
   it('rejects sandboxPerChat without per_chat sessionScope', () => {

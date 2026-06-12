@@ -29,10 +29,22 @@ function agentRawFallback(
 describe('validateInstanceConfig — agentOptions.fallbackProvider / fallbackModel', () => {
   it('accepts every canonical provider ID as a fallbackProvider', () => {
     for (const id of PROVIDER_IDS) {
-      const err = validateInstanceConfig(agentRawFallback({ fallbackProvider: id }), {
-        name: 'test-line',
-        mode: 'create',
-      });
+      // API-type fallback providers (openai-api / anthropic-api) additionally
+      // require an explicit fallbackModel (cross-field rule — see
+      // agent-config-validator-crossfield coverage); pair one so this test
+      // isolates the provider-ID enum rule.
+      const isApiProvider = id === 'openai-api' || id === 'anthropic-api';
+      const err = validateInstanceConfig(
+        agentRawFallback(
+          isApiProvider
+            ? { fallbackProvider: id, fallbackModel: 'some-model-id' }
+            : { fallbackProvider: id },
+        ),
+        {
+          name: 'test-line',
+          mode: 'create',
+        },
+      );
       expect(err, `expected fallbackProvider ${id} to be accepted`).toBeNull();
     }
   });

@@ -444,16 +444,17 @@ The operation tracker detects and recovers from stuck operations regardless of t
 ### `agentOptions`
 
 Optional when `type` is `agent`. Fleet create/update APIs fill a default
-`sessionScope` and `cwd` when they are omitted; hand-written configs that
-include `agentOptions` should keep these fields explicit.
+`sessionScope` and `cwd` when they are omitted; hand-written configs may omit
+`sessionScope` (the runtime defaults it to `single`) but should keep it
+explicit for readability.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `sessionScope` | string | no | `per_chat` via fleet API | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). |
+| `sessionScope` | string | no | `single` at runtime (`per_chat` via fleet API) | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). Omitted = the runtime defaults to `single`; the fleet create/update APIs fill `per_chat` when the whole `agentOptions` block is omitted. Invalid values are rejected on every path (create, update, load, discovery). |
 | `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. |
-| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. |
+| `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. `providerConfig.baseUrl` selects a custom endpoint — see [Custom endpoint](#custom-endpoint-providerconfigbaseurl) for semantics, validation rules, and the current routing limitation. |
 | `fallbackProvider` | string | no | — | Provider to route **new** sessions to when the primary `provider` hits a usage limit. Must be one of the same IDs as `provider` (`claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`); unknown IDs are rejected before startup. When the primary returns a usage-limit `result`, the in-flight session is torn down, the user is notified in-chat, and the auto-respawned next session uses this provider until the limit resets, then automatically reverts to the primary. Omitted = fallback disabled (the primary session is killed and the user is told to retry after the limit resets). See [Provider fallback behavior](#provider-fallback-behavior) for the full lifecycle: user notice, window persistence across restarts, turn telemetry, credential pre-flight, and admin override commands. |
-| `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2.7`). The id must match the provider's model catalog **exactly, including case** — `opencode` treats `minimax/minimax-m2` and `minimax/MiniMax-M2` as different ids, and a wrong-case id fails every session with an opaque provider error. Copy the id verbatim from `opencode models` — the runtime warns at arm time (`fallback_model_unknown`) when the configured model is not found in the provider catalog. Non-empty string when present. When omitted, the fallback provider runs with no `--model`/`-m` override (its own default). |
+| `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2.7`). The id must match the provider's model catalog **exactly, including case** — `opencode` treats `minimax/minimax-m2` and `minimax/MiniMax-M2` as different ids, and a wrong-case id fails every session with an opaque provider error. Copy the id verbatim from `opencode models` — the runtime warns at arm time (`fallback_model_unknown`) when the configured model is not found in the provider catalog. Non-empty string when present. When omitted, a CLI fallback provider runs with no `--model`/`-m` override (its own default); **required when `fallbackProvider` is `openai-api` or `anthropic-api`** (see [Cross-field validation rules](#cross-field-validation-rules)). |
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
@@ -463,6 +464,46 @@ include `agentOptions` should keep these fields explicit.
 | `enabledPlugins` | Record<string, boolean> | no | — | Per-instance plugin overrides. Keys are `plugin@marketplace` identifiers. `true` = enabled, `false` = disabled. Omitted keys inherit from global `~/.claude/settings.json`. Written to `<cwd>/.claude/settings.json` at startup. |
 | `autoCompactInputTokens` | number | no | `150000` | For Claude CLI agent sessions, automatically send a silent `/compact` after this many input tokens since the last successful compact. Default: 150,000 tokens (prevents prompt-too-long errors while leaving headroom for tool results). Valid range: 50,000-100,000,000. **Bootstrap behavior:** the first time eligibility is checked on any session whose `last_compact_input_tokens=0` (a fresh enable, or a brand-new session whose first turn crosses the threshold), the baseline is initialised silently without firing `/compact`. This prevents a compact storm on rollout but means the first real compact is deferred by one full threshold's worth of tokens. **Cooldown behavior:** successful auto-compacts wait 5 minutes before re-arming; scopes that become eligible again inside the rapid re-arm window escalate to 15, 30, then 60 minute cooldowns. Health counters are exposed at `GET /health` under `runtime.agent.autoCompactIneffective`, `runtime.agent.autoCompactConsecutiveRapidRearmsMax`, and `runtime.agent.autoCompactNextTurnOverThreshold`. |
 | `allowM365Mutations` | boolean | no | `false` | Per-instance opt-in for propagating `ALLOW_M365_MUTATIONS` to the agent subprocess. Only consulted when `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set on the parent process (off by default). See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
+
+#### Cross-field validation rules
+
+Beyond the per-field shapes above, the shared validator
+(`src/core/agent-config-validator.ts`) rejects these combinations at
+create/update time and at load/discovery (where the fleet surfaces them as a
+config error):
+
+- **API-type `fallbackProvider` without `fallbackModel`.** `openai-api` and
+  `anthropic-api` take their fallback-window model from `fallbackModel`;
+  without it the window would silently run on a provider-internal default the
+  operator never chose. CLI fallback providers (`claude-cli`, `codex-cli`,
+  `gemini-cli`, `opencode-cli`) may omit it and use their own default.
+- **`providerConfig.baseUrl` with a non-`http(s)` scheme.** The value must be
+  an absolute `http://` or `https://` URL.
+- **`provider: opencode-cli` with `providerConfig.baseUrl` but no resolvable
+  model.** The custom endpoint block written into `opencode.json` is only
+  exercised when the instance's resolved model (top-level `model`, else
+  `models.conversation`) routes to it; without one the endpoint would never be
+  used. API providers consume `baseUrl` directly as an endpoint override and
+  are exempt from this rule.
+
+A missing `sessionScope` is **not** an error: the runtime defaults it to
+`single`, so load and discovery accept the omission rather than flagging a
+config that would boot fine.
+
+#### Custom endpoint (`providerConfig.baseUrl`)
+
+For `provider: opencode-cli`, `providerConfig.baseUrl` merges a custom
+OpenAI-compatible provider block into the `opencode.json` written at startup;
+for the API providers (`openai-api`, `anthropic-api`) it overrides the HTTP
+endpoint the managed loop calls directly.
+
+**Limitation (opencode-cli):** sessions are currently routed by model prefix —
+the resolved model is passed to the provider CLI as a `-m`/`--model` argument,
+and the custom provider block applies only when `opencode` itself resolves
+that model id to the block. End-to-end routing of sessions through a custom
+endpoint (session argument strategy plus credential wiring for custom provider
+ids) is future work; until then, treat `baseUrl` as effective only for models
+that `opencode` maps to the generated provider block.
 
 #### Provider fallback behavior
 
@@ -676,8 +717,9 @@ The loader enforces these constraints before the process starts:
 - `chat` instances must have a non-empty `systemPrompt`.
 - `passive` instances must not have a `systemPrompt` and must use `accessMode: self_only`.
 - Fleet create/update APIs default omitted `agentOptions` to `sessionScope: per_chat` with a per-instance workspace under the user's home directory.
-- `agent` instances with hand-written `agentOptions` must have a valid `sessionScope`; an empty or missing `cwd` is normalized by the fleet API before persistence.
+- `agent` instances may omit `sessionScope` (the runtime defaults it to `single`); a present value must be `single`, `shared`, or `per_chat`. An empty or missing `cwd` is normalized by the fleet API before persistence.
 - `agentOptions.sandboxPerChat: true` requires `sessionScope: per_chat`.
+- The fallback/custom-endpoint combinations listed under [Cross-field validation rules](#cross-field-validation-rules) are rejected.
 - `agentOptions.allowM365Mutations`, when present, must be a boolean.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
 - `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.
