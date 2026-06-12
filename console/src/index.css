@@ -1,9 +1,7 @@
-/* Typography: Geist + Geist Mono self-hosting preferred (typography.md §1).
-   Font files not available in this environment; using Google Fonts CSS import
-   as a documented temporary fallback. Design debt: DD-4 (self-host Geist under
-   console/public/fonts/ at C2 or before next release freeze).
-   @font-face definitions will replace this import when files are available. */
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap');
+/* Typography: Geist + Geist Mono self-hosted (typography.md §1, DD-4 closed).
+   @font-face declarations in ./styles/fonts.css; woff2 files in console/public/fonts/.
+   Provenance: console/public/fonts/README.md (vercel/geist-font v1.7.2, SIL OFL 1.1). */
+@import "./styles/fonts.css";
 @import "tailwindcss";
 
 /* SOUP Design System v3 - C1 token value swap + dual themes (03-spec/tokens-v3.md §5).
