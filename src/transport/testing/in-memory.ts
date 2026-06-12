@@ -1,6 +1,6 @@
 // src/transport/testing/in-memory.ts
 import {
-  makeChannelId, type ChannelId, type ConversationRef, type MessageRef,
+  makeChannelId, type ChannelId, type ChannelKind, type ConversationRef, type MessageRef,
   type ParticipantRef,
 } from '../../core/transport-refs.ts';
 import type {
@@ -84,7 +84,7 @@ export class InMemoryAdapter implements
   constructor(channel: ChannelId = makeChannelId('whatsapp', 'in-memory')) {
     this.capabilities = {
       channel,
-      kind: channel.split(':', 1)[0] as 'whatsapp' | 'telegram',
+      kind: channel.split(':', 1)[0] as ChannelKind,
       extensions: new Set([
         'media', 'voice-notes', 'reactions', 'edit', 'delete',
         'typing', 'presence', 'groups', 'read-receipts',

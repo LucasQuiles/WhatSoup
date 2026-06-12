@@ -75,7 +75,7 @@ Current baseline measurements:
 
 | rule | path | lines |
 |------|------|-------|
-| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 6009 |
+| `arch.file-size` | `src/runtimes/agent/runtime.ts` | 6359 |
 | `arch.file-size` | `tests/runtimes/agent/runtime.test.ts` | 7043 |
 
 ## ESLint Ring (live)

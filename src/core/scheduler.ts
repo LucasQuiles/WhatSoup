@@ -3,7 +3,7 @@
 
 import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
-import type { ConnectionManager } from '../transport/connection.ts';
+import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { nextCronRun } from './cron.ts';
 import { nowUnixSec } from '../fleet/time-utils.ts';
 
@@ -23,12 +23,12 @@ interface ScheduledRow {
 export class MessageScheduler {
   private timer: NodeJS.Timeout | null = null;
   private db: Database;
-  private connection: ConnectionManager;
+  private connection: RuntimeConnection;
   private config: { intervalMs: number; maxRetries: number };
 
   constructor(
     db: Database,
-    connection: ConnectionManager,
+    connection: RuntimeConnection,
     config: { intervalMs: number; maxRetries: number },
   ) {
     this.db = db;
@@ -200,7 +200,7 @@ export class MessageScheduler {
         Object.assign(rest, legacyRest);
       }
 
-      await this.connection.sendMedia(row.chat_jid, { type, buffer: buf, ...rest } as Parameters<ConnectionManager['sendMedia']>[1]);
+      await this.connection.sendMedia(row.chat_jid, { type, buffer: buf, ...rest } as Parameters<RuntimeConnection["sendMedia"]>[1]);
     }
   }
 }

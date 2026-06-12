@@ -15,6 +15,7 @@ import {
   ReplyGuaranteeManager,
 } from '../../core/reply-guarantee.ts';
 import { emitAlert, clearAlertSource } from '../../lib/emit-alert.ts';
+import { lookupCredential } from '../../lib/keyring.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   ensureAgentSchema,
@@ -29,9 +30,15 @@ import {
   getSessionTokenSnapshot,
   markSessionCompacted,
 } from './session-db.ts';
+import {
+  ensureFallbackStateSchema,
+  saveFallbackState,
+  loadFallbackState,
+  clearFallbackState,
+} from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writePrivateFileSync, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
 import { classifyActiveSessions } from './session-classifier.ts';
-import { SessionManager, formatAge, type SessionCrashInfo } from './session.ts';
+import { SessionManager, formatAge, getProviderBinary, type SessionCrashInfo } from './session.ts';
 import {
   OutboundQueue,
   type IOutboundQueue,
@@ -63,6 +70,8 @@ import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
 import { createProviderMcpBridge, generateMcpConfigFile } from './providers/mcp-bridge.ts';
+import { verifyFallbackCredential } from './providers/credential-verify.ts';
+import { probeFallbackBinary } from './providers/binary-preflight.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -122,6 +131,14 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 const GLOBAL_TOOL_SCOPE_KEY = '__global__';
 const GLOBAL_CRASH_SCOPE_KEY = '__global__';
 const SILENT_COMPACT_TTL_MS = 5 * 60 * 1000;
+// Default provider-fallback window when the usage-limit message names no reset
+// time. Claude usage limits operate on 5-hour rolling windows, so 5h is a safe
+// upper-bound estimate for when the primary provider becomes available again.
+const DEFAULT_FALLBACK_WINDOW_MS = 5 * 60 * 60 * 1000; // 18_000_000 ms (5h)
+// Clamp the fallback window so a malformed/adversarial reset time can neither
+// revert almost immediately nor pin the fallback for an unreasonable span.
+const MIN_FALLBACK_WINDOW_MS = 60 * 1000; // 1 minute
+const MAX_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 // Time to wait for an auto-triggered /compact to complete before giving up.
 // A /compact must summarize the whole conversation, so on large contexts it can
 // legitimately take a few minutes; 2 min was too short and produced false
@@ -1047,6 +1064,80 @@ export function isUsageLimitMessage(text: string): boolean {
 }
 
 /**
+ * Extract the usage-limit reset time from a provider usage-limit message.
+ *
+ * Claude usage-limit notices often name when the cap resets — e.g.
+ *   "resets at 3pm", "resets at 15:00", "try again at 9:30am",
+ *   "will be available at 11pm", or a raw Unix-epoch seconds value.
+ * The fallback state machine uses this to schedule auto-revert to the primary
+ * provider. Parsing is conservative: anything it cannot confidently interpret
+ * yields `null`, and the caller then applies a default rolling-window estimate.
+ *
+ * Returned times are always in the future relative to `now` — a clock time like
+ * "3pm" that has already passed today is rolled forward to tomorrow.
+ *
+ * @param text the usage-limit message text
+ * @param now  injectable clock for deterministic tests (defaults to Date.now)
+ * @returns the reset Date, or null when unparseable
+ */
+export function extractUsageLimitResetTime(text: string, now: Date = new Date()): Date | null {
+  if (typeof text !== 'string' || text.length === 0) return null;
+  const lower = text.toLowerCase();
+
+  // 1) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
+  //    "come back at 9:30am", "try again at 11 pm".
+  //    Parsed FIRST so an explicit clock cue always wins over an incidental
+  //    long number elsewhere in the message (e.g. an order/quota figure).
+  //    The trailing (?!\d) prevents the clock hour from matching the leading
+  //    digits of a longer number (e.g. "5551234567").
+  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?(?!\d)\s*(am|pm)?/i;
+  const m = lower.match(cue);
+  if (m) {
+    let hour = Number.parseInt(m[1]!, 10);
+    const minute = m[2] ? Number.parseInt(m[2], 10) : 0;
+    const meridiem = m[3];
+    if (
+      Number.isFinite(hour) &&
+      Number.isFinite(minute) &&
+      hour >= 0 &&
+      minute >= 0 &&
+      minute < 60 &&
+      (meridiem ? hour >= 1 && hour <= 12 : hour <= 23)
+    ) {
+      if (meridiem === 'pm' && hour < 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+      const candidate = new Date(now);
+      candidate.setHours(hour, minute, 0, 0);
+      // A clock time already past today rolls forward to tomorrow.
+      if (candidate.getTime() <= now.getTime()) {
+        candidate.setDate(candidate.getDate() + 1);
+      }
+      return candidate;
+    }
+  }
+
+  // 2) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
+  //    Milliseconds (13 digits) are also accepted. Cue-anchored: the epoch must
+  //    directly follow a reset cue, so an incidental long number (order/quota
+  //    figure) is never mistaken for a reset time.
+  const epochMatch = lower.match(
+    /(?:reset[s]?|available|try\s+again|come\s+back|back)\D{0,12}(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/,
+  );
+  if (epochMatch) {
+    const seconds = epochMatch[1]!;
+    const millis = epochMatch[2];
+    const epochMs = millis
+      ? Number.parseInt(seconds + millis, 10)
+      : Number.parseInt(seconds, 10) * 1000;
+    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
+      return new Date(epochMs);
+    }
+  }
+
+  return null;
+}
+
+/**
  * Detect context-window overflow errors from the Claude provider.
  *
  * When the accumulated conversation exceeds the model's context window, Claude
@@ -1138,6 +1229,10 @@ export class AgentRuntime implements Runtime {
   private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
+  // Automatic provider fallback (claude-cli → opencode-cli etc.) on usage limit.
+  // Both undefined unless configured via agentOptions.fallback{Provider,Model}.
+  private readonly agentFallbackProvider: string | undefined;
+  private readonly agentFallbackModel: string | undefined;
   private readonly replyGuaranteeTimeoutMs: number;
   private readonly registry: ToolRegistry;
 
@@ -1179,6 +1274,23 @@ export class AgentRuntime implements Runtime {
   private workspaceSweepTimer: ReturnType<typeof setInterval> | null = null;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
+  // Provider-fallback window: epoch ms until which new sessions route to the
+  // fallback provider, or null when the primary provider is active.
+  private fallbackActiveUntil: number | null = null;
+  // Epoch ms when the current fallback window was first activated. Preserved
+  // across extensions so the original engagement time is never overwritten.
+  private fallbackActivatedAt: number | null = null;
+  // The ORIGINAL cause that first armed the current window. Set once on first
+  // activation and preserved across extensions and restores so the root cause
+  // is never overwritten by a later extension or restart. Cleared alongside
+  // fallbackActivatedAt on deactivation and shutdown.
+  private fallbackArmReason: string | null = null;
+  // Process-local fallback telemetry — deliberately NOT persisted (reset on
+  // restart); the durable artifact is the window itself (agent_fallback_state).
+  private fallbackTurnsServed = 0;
+  private fallbackTurnsEmpty = 0;
+  private lastFallbackTurnAt: number | null = null;
+  private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -1224,6 +1336,23 @@ export class AgentRuntime implements Runtime {
   /** Maps toolScopeKey → (toolId → toolName) so tool_result errors stay isolated per session scope. */
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
+
+  /**
+   * Tracks toolScopeKeys where at least one non-phantom tool_use event was
+   * processed for the current turn. Used to suppress the empty-turn fallback
+   * notice when the agent's entire reply was tool work (e.g. send_message,
+   * send_media MCP tools) — in that case the user already received a visible
+   * result via the outbound channel and the "no reply" notice would be wrong.
+   *
+   * Lifecycle: set on tool_use (after post-turn-gate check); cleared by
+   * clearToolNames at the start of each result event (same lifecycle as
+   * activeToolNames). Not persisted — process-local only.
+   */
+  private turnHadToolActivity = new Set<string>();
+
+  /** For the single/shared path (handleEvent): mirrors turnHadToolActivity
+   *  as a boolean since that path uses a single global scope key. */
+  private singleTurnHadToolActivity = false;
 
   /** Count of swallowed pending_polls persistence failures (persist/remove/rehydrate). Surfaced in health. */
   private pollPersistenceErrors = 0;
@@ -1281,6 +1410,8 @@ export class AgentRuntime implements Runtime {
 
   private clearToolNames(toolScopeKey: string): void {
     this.activeToolNames.delete(toolScopeKey);
+    // Note: turnHadToolActivity is NOT cleared here — the result handler captures
+    // it for the empty-turn check and clears it explicitly after the check.
   }
 
   private beginSilentCompact(scopeKey: string): void {
@@ -1922,6 +2053,8 @@ export class AgentRuntime implements Runtime {
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
+    this.agentFallbackProvider = config.agentFallbackProvider;
+    this.agentFallbackModel = config.agentFallbackModel;
 
     this.registry = new ToolRegistry();
     this.registerAllTools();
@@ -2153,6 +2286,7 @@ export class AgentRuntime implements Runtime {
 
   async start(): Promise<void> {
     ensureAgentSchema(this.db);
+    this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
 
     // Write sandbox policy and hook settings when sandbox config is present
@@ -4246,7 +4380,11 @@ export class AgentRuntime implements Runtime {
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event, mapKey);
           if (!normalizedText) break;
-          // Suppress usage-limit messages — don't flood WhatsApp with them
+          // Suppress usage-limit messages — don't flood WhatsApp with them.
+          // Fallback activation is intentionally NOT triggered here: it is
+          // deferred to the 'result' event. Activating on streaming text would
+          // race the usage-limit session kill/respawn (the result path also
+          // shuts the session down), so we only observe + suppress here.
           if (isUsageLimitMessage(normalizedText)) {
             log.warn({ chatJid: queue.targetChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
             break;
@@ -4283,6 +4421,7 @@ export class AgentRuntime implements Runtime {
         }
 
         this.getToolNames(toolScopeKey).set(event.toolId, event.toolName);
+        this.turnHadToolActivity.add(toolScopeKey);
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           queue.enqueueToolUpdate(toolUpdate);
@@ -4339,6 +4478,9 @@ export class AgentRuntime implements Runtime {
         const hadCompactBoundary = this.consumeCompactBoundary(compactScopeKey);
         session?.clearTurnWatchdog();
         tracker?.onTurnComplete();
+        // Capture before clearToolNames so the empty-turn check can read it.
+        const turnHadToolWork = this.turnHadToolActivity.has(toolScopeKey);
+        this.turnHadToolActivity.delete(toolScopeKey);
         this.clearToolNames(toolScopeKey);
         // Activate post-turn gate — suppress any SDK-injected events until next user turn
         const hasPendingPoll = mapKey !== undefined && this.pendingPollQuestions.has(mapKey);
@@ -4362,6 +4504,10 @@ export class AgentRuntime implements Runtime {
           // Suppress usage-limit messages — log and skip instead of forwarding
           if (isUsageLimitMessage(event.text)) {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
+            // Route the auto-respawned next session to the fallback provider
+            // (if configured) until the limit resets, before tearing down.
+            this.activateProviderFallback(extractUsageLimitResetTime(event.text));
+            queue.enqueueText(this.usageLimitNotice());
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
               conversationKey,
@@ -4476,6 +4622,22 @@ export class AgentRuntime implements Runtime {
           if (mapKey !== undefined) {
             this.perChatTurnContentType.delete(mapKey);
             this.perChatTurnText.delete(mapKey);
+          }
+          if (!isSystemResult && !hasPendingPoll && !wasSilentCompact) {
+            const hadVisible =
+              responseText.trim() !== '' ||
+              (typeof event.text === 'string' && event.text.trim() !== '');
+            // A fallback turn whose entire reply was MCP tool sends (e.g.
+            // send_message, send_media) is NOT silent — the user received the
+            // result through the outbound channel. Only fire the notice and
+            // increment the empty counter when neither text nor tool work occurred.
+            // turnHadToolWork was captured before clearToolNames above.
+            this.recordFallbackTurnOutcome(queue, hadVisible, turnHadToolWork);
+            if (!hadVisible && !turnHadToolWork && this.isFallbackWindowActive) {
+              // This path has no '_(no response)_' fallback and the reply guarantee
+              // was just disarmed — without this the user gets pure silence.
+              queue.enqueueText('_The backup model returned no reply — please resend or rephrase your message._');
+            }
           }
           queue.flush()
             .then(() => {
@@ -4871,6 +5033,13 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
     }
+    if (this.revertTimer) {
+      clearTimeout(this.revertTimer);
+      this.revertTimer = null;
+    }
+    this.fallbackActiveUntil = null;
+    this.fallbackActivatedAt = null;
+    this.fallbackArmReason = null;
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
     }
@@ -5007,6 +5176,7 @@ export class AgentRuntime implements Runtime {
     this.chatQueues.clear();
     this.perChatCrashCount.clear();
     this.activeToolNames.clear();
+    this.turnHadToolActivity.clear();
     this.perChatInboundSeqQueue.clear();
     this.perChatPendingSystemResults.clear();
     this.currentTurnInboundContentType = null;
@@ -5140,6 +5310,367 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Provider routing for the *next* session. While a fallback window is active
+   * (and a fallback provider is configured), new sessions use the fallback
+   * provider/model; otherwise the primary. Existing sessions are unaffected —
+   * `SessionManager.provider`/`model` are per-session and read-only, so fallback
+   * takes effect on the next auto-respawned or freshly created session.
+   */
+  private get effectiveProvider(): string {
+    return this.isFallbackWindowActive && this.agentFallbackProvider
+      ? this.agentFallbackProvider
+      : this.agentProvider;
+  }
+
+  /** True while a fallback window is armed and not yet expired. */
+  private get isFallbackWindowActive(): boolean {
+    return this.fallbackActiveUntil !== null && Date.now() < this.fallbackActiveUntil;
+  }
+
+  /**
+   * Public, read-only view of the provider-fallback state for observability
+   * (health snapshot / fleet provider-status). Returns the currently effective
+   * provider, the epoch-ms expiry of an active fallback window (`null` when
+   * the bot is on its primary provider), and process-local turn counters (reset
+   * on restart). Mirrors {@link effectiveProvider} but does not widen the
+   * underlying fields' visibility.
+   *
+   * Hand-constructed scalar fields only — health.ts spreads this object
+   * verbatim into /health; do not add non-scalar fields.
+   */
+  getFallbackState(): {
+    effectiveProvider: string;
+    fallbackActiveUntil: number | null;
+    fallbackTurnsServed: number;
+    fallbackTurnsEmpty: number;
+    lastFallbackTurnAt: number | null;
+  } {
+    const active = this.isFallbackWindowActive;
+    return {
+      effectiveProvider: this.effectiveProvider,
+      fallbackActiveUntil: active ? this.fallbackActiveUntil : null,
+      fallbackTurnsServed: this.fallbackTurnsServed,
+      fallbackTurnsEmpty: this.fallbackTurnsEmpty,
+      lastFallbackTurnAt: this.lastFallbackTurnAt,
+    };
+  }
+
+  /**
+   * Admin override (FALLBACK ON): force a fallback window. Unlike usage-limit
+   * activation, the window is set EXACTLY — it may shorten an active window;
+   * operator intent wins over extend-never-shorten. Arms via the shared
+   * hardened path (persistence + credential pre-flight).
+   *
+   * Reason provenance: an admin force is always treated as a NEW cause, even
+   * when a usage-limit window is already active. The stored reason is reset to
+   * 'admin-forced' so the persisted record accurately reflects the current
+   * operator action rather than the original automatic trigger.
+   */
+  forceFallback(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string } {
+    if (!this.agentFallbackProvider) {
+      return { ok: false, reason: 'no fallbackProvider configured for this instance' };
+    }
+    const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
+    const dur = Math.min(MAX_FALLBACK_WINDOW_MS, Math.max(MIN_FALLBACK_WINDOW_MS, requested));
+    const until = Date.now() + dur;
+    // Reset reason so armFallbackWindow stores 'admin-forced' as the new
+    // original cause, replacing any prior reason (e.g. 'usage-limit').
+    this.fallbackArmReason = null;
+    this.armFallbackWindow(until, 'admin-forced');
+    log.info({ activeUntil: new Date(until).toISOString() }, 'fallback window forced by admin');
+    return { ok: true, activeUntil: until, clamped: dur !== requested };
+  }
+
+  /** Admin override (FALLBACK OFF): end any active fallback window now. Idempotent. */
+  disableFallback(): { ok: true } {
+    this.deactivateProviderFallback('admin-disabled');
+    return { ok: true };
+  }
+
+  /** Model paired with {@link effectiveProvider}: fallbackModel while the window is active, else the primary model. */
+  private get effectiveModel(): string | undefined {
+    return this.isFallbackWindowActive && this.agentFallbackProvider
+      ? this.agentFallbackModel
+      : this.model;
+  }
+
+  /**
+   * Map a fallback provider/model to its keyring service (shared by the
+   * presence guard and the validity pre-flight).
+   *
+   * Returns null when the provider authenticates via subscription/login
+   * (claude-cli, codex-cli, gemini-cli, anthropic-api) — no keyring key applies.
+   */
+  private resolveFallbackService(provider: string | undefined, model: string | undefined): string | null {
+    if (provider === 'opencode-cli') {
+      const prefix = model?.split('/')[0]?.trim();
+      return prefix ? prefix.toLowerCase() : null;
+    }
+    if (provider === 'openai-api') {
+      return 'openai';
+    }
+    // CLI/native-auth providers (claude-cli/codex-cli/gemini-cli/anthropic-api)
+    // and an opencode model with no provider prefix → not applicable.
+    return null;
+  }
+
+  /**
+   * Whether the keyring holds an API key for the configured fallback target.
+   *
+   * Returns:
+   *  - `true`  — a key is present for the resolved service.
+   *  - `false` — a key is expected but absent (opencode sessions would fail auth).
+   *  - `null`  — not applicable: CLI/native-auth providers (claude-cli, codex-cli,
+   *              gemini-cli, anthropic-api) authenticate via subscription/login,
+   *              so no keyring key is checked.
+   *
+   * Service mapping: opencode-cli → the model's provider prefix
+   * (`minimax/...` → `minimax`); openai-api → `openai`. Never logs the value.
+   */
+  private fallbackKeyPresent(provider: string | undefined, model: string | undefined): boolean | null {
+    const service = this.resolveFallbackService(provider, model);
+    if (!service) return null;
+    return lookupCredential(service) !== null;
+  }
+
+  /** User-facing notice for a usage-limit teardown. Asks the user to resend
+   *  rather than auto-replaying the triggering message (double-execution risk). */
+  private usageLimitNotice(): string {
+    return this.agentFallbackProvider
+      ? '_Hit my usage limit — switching to a backup model. Please resend your last message._'
+      : '_Hit my usage limit — please try again after the limit resets._';
+  }
+
+  /**
+   * Count a completed turn during an active fallback window; alert and enqueue
+   * a user notice when the turn produced neither visible text nor tool activity.
+   *
+   * A turn whose entire reply was MCP tool sends (send_message, send_media, etc.)
+   * is NOT silent — the user already received the visible result through the
+   * outbound channel. hadToolWork suppresses both the counter and the notice for
+   * those turns, preserving the signal for genuinely empty ones.
+   */
+  private recordFallbackTurnOutcome(queue: IOutboundQueue, hadVisibleOutput: boolean, hadToolWork: boolean = false): void {
+    if (!this.isFallbackWindowActive) return;
+    this.fallbackTurnsServed += 1;
+    this.lastFallbackTurnAt = Date.now();
+    if (hadVisibleOutput || hadToolWork) return;
+    this.fallbackTurnsEmpty += 1;
+    log.warn({
+      chatJid: queue.targetChatJid,
+      fallbackProvider: this.agentFallbackProvider,
+      fallbackModel: this.agentFallbackModel,
+      served: this.fallbackTurnsServed,
+      empty: this.fallbackTurnsEmpty,
+    }, 'fallback turn completed with zero visible output');
+    emitAlert(
+      this.instanceName,
+      'fallback_empty_turn',
+      'Fallback turn produced no visible output',
+      `provider=${this.agentFallbackProvider} model=${this.agentFallbackModel} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
+    );
+  }
+
+  /** Arm (or move) the fallback window to `until`, schedule the revert timer,
+   *  and persist best-effort so a restart mid-window resumes on fallback.
+   *  Pass `activatedAt` explicitly when restoring to preserve the original time. */
+  private armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now()): void {
+    this.fallbackActiveUntil = until;
+    this.fallbackActivatedAt = activatedAt;
+    // Preserve original cause: only set on first arm; extensions and restores
+    // must pass the original reason so it is not overwritten.
+    if (this.fallbackArmReason === null) {
+      this.fallbackArmReason = reason;
+    }
+    if (this.revertTimer) {
+      clearTimeout(this.revertTimer);
+      this.revertTimer = null;
+    }
+    this.revertTimer = setTimeout(() => {
+      this.deactivateProviderFallback('window-elapsed');
+    }, Math.max(0, until - Date.now()));
+    // Do not let the revert timer keep the process alive at shutdown.
+    this.revertTimer.unref?.();
+    // Belt-and-suspenders: persist the memory-authoritative reason (fallbackArmReason
+    // after the set-when-null guard above) so the DB can never diverge from the
+    // in-memory value even if a caller passes an incorrect reason directly.
+    const persistReason = this.fallbackArmReason ?? reason;
+    try {
+      saveFallbackState(this.db, { activeUntil: until, activatedAt, reason: persistReason });
+    } catch (err) {
+      log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
+      emitAlert(
+        this.instanceName,
+        'fallback_persist_failed',
+        'Failed to persist fallback window — will not survive restart',
+        `until=${new Date(until).toISOString()} reason=${persistReason}`,
+      );
+    }
+    // Pre-flight: check key presence and probe validity; never blocks or reverts
+    // the window — fail-open on anything except a definitive 401/403.
+    const service = this.resolveFallbackService(this.agentFallbackProvider, this.agentFallbackModel);
+    if (service) {
+      const key = lookupCredential(service);
+      if (!key) {
+        log.warn({
+          instanceName: this.instanceName,
+          fallbackProvider: this.agentFallbackProvider,
+          fallbackModel: this.agentFallbackModel,
+        }, 'fallback provider key not found in keyring — opencode sessions will fail auth');
+        emitAlert(
+          this.instanceName,
+          'fallback_credential_missing',
+          'Fallback provider key not found in keyring',
+          `service=${service} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+        );
+      } else {
+        void verifyFallbackCredential(service, key).then((result) => {
+          if (result !== 'invalid') return;
+          log.error({ service, fallbackProvider: this.agentFallbackProvider }, 'fallback credential rejected by provider (401/403)');
+          emitAlert(
+            this.instanceName,
+            'fallback_credential_invalid',
+            'Fallback API key rejected by provider',
+            `service=${service} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+          );
+        });
+      }
+    }
+    // Pre-flight: check binary presence for CLI-backed fallback providers.
+    // Managed-loop providers (openai-api, anthropic-api) have no binary to probe.
+    // Never blocks or reverts the window — fail-open on anything except ENOENT.
+    const fallbackBinary = this.agentFallbackProvider
+      ? getProviderBinary(this.agentFallbackProvider)
+      : null;
+    if (fallbackBinary) {
+      void probeFallbackBinary(fallbackBinary).then((r) => {
+        if (r.status === 'missing') {
+          log.error(
+            { fallbackProvider: this.agentFallbackProvider, binary: fallbackBinary },
+            'fallback provider binary not found on this host',
+          );
+          emitAlert(
+            this.instanceName,
+            'fallback_binary_missing',
+            'Fallback provider binary not found on this host',
+            `binary=${fallbackBinary} provider=${this.agentFallbackProvider} model=${this.agentFallbackModel}`,
+          );
+        } else if (r.status === 'present' && r.version) {
+          log.info(
+            { fallbackProvider: this.agentFallbackProvider, binary: fallbackBinary, version: r.version },
+            'fallback provider binary present',
+          );
+        }
+      });
+    }
+  }
+
+  /**
+   * Re-arm a persisted fallback window after a process restart. Never throws —
+   * a corrupt, missing, or stale row is cleared and startup proceeds on the primary.
+   * loadFallbackState returns null for both "no row" and "bad-typed row" (SQLite
+   * affinity can store TEXT in INTEGER columns); clearing on null ensures corrupt
+   * rows do not linger across restarts.
+   */
+  private restorePersistedFallbackWindow(): void {
+    try {
+      ensureFallbackStateSchema(this.db);
+      const persisted = loadFallbackState(this.db);
+      if (!persisted) {
+        clearFallbackState(this.db);
+        return;
+      }
+      if (!this.agentFallbackProvider || persisted.activeUntil <= Date.now()) {
+        clearFallbackState(this.db);
+        return;
+      }
+      // Clamp the restored window so a clock-skew or tampered row cannot pin
+      // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
+      const clampedUntil = Math.min(persisted.activeUntil, Date.now() + MAX_FALLBACK_WINDOW_MS);
+      // Pass persisted.reason so the original cause survives the restart.
+      // 'restored' is already captured in the log line below.
+      this.armFallbackWindow(clampedUntil, persisted.reason, persisted.activatedAt);
+      const wasClamped = clampedUntil < persisted.activeUntil;
+      log.info({
+        activeUntil: new Date(clampedUntil).toISOString(),
+        ...(wasClamped ? { persistedUntil: new Date(persisted.activeUntil).toISOString() } : {}),
+        originalReason: persisted.reason,
+      }, 'restored provider-fallback window from persisted state');
+    } catch (err) {
+      log.warn({ err }, 'failed to restore persisted fallback window');
+    }
+  }
+
+  /**
+   * Activate provider fallback after the primary provider hit a usage limit.
+   *
+   * No-op unless a fallback provider is configured. The window ends at the
+   * parsed `resetAt` when available, else `DEFAULT_FALLBACK_WINDOW_MS` from now,
+   * clamped to [MIN_FALLBACK_WINDOW_MS, MAX_FALLBACK_WINDOW_MS]. Idempotent: a
+   * second activation while already active extends the window to the later of
+   * the two. Schedules an auto-revert timer (unref'd so it never keeps the
+   * process alive).
+   */
+  private activateProviderFallback(resetAt: Date | null): void {
+    if (!this.agentFallbackProvider) return;
+
+    const now = Date.now();
+    const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
+    const clampedUntil = Math.min(
+      now + MAX_FALLBACK_WINDOW_MS,
+      Math.max(now + MIN_FALLBACK_WINDOW_MS, rawUntil),
+    );
+    // Extend rather than shorten an already-active window.
+    const until = this.fallbackActiveUntil
+      ? Math.max(this.fallbackActiveUntil, clampedUntil)
+      : clampedUntil;
+
+    const wasActive = this.fallbackActiveUntil !== null;
+    // Preserve the original first-engagement time across extensions so the
+    // persisted record always reflects when the fallback was first triggered,
+    // not when it was last extended.
+    const activatedAt = wasActive && this.fallbackActivatedAt !== null
+      ? this.fallbackActivatedAt
+      : now;
+    // Pass the original cause on extension so the root cause is preserved;
+    // on first activation fallbackArmReason is null so armFallbackWindow
+    // stores 'usage-limit' as the original cause.
+    const reason = wasActive && this.fallbackArmReason !== null ? this.fallbackArmReason : 'usage-limit';
+    this.armFallbackWindow(until, reason, activatedAt);
+
+    log.info({
+      instanceName: this.instanceName,
+      fallbackProvider: this.agentFallbackProvider,
+      fallbackModel: this.agentFallbackModel,
+      resetAt: resetAt ? resetAt.toISOString() : null,
+      activeUntil: new Date(until).toISOString(),
+      extended: wasActive,
+    }, 'activating provider fallback after usage limit');
+  }
+
+  /** Clear the fallback window + timer, reverting new sessions to the primary provider. */
+  private deactivateProviderFallback(reason: string): void {
+    if (this.revertTimer) {
+      clearTimeout(this.revertTimer);
+      this.revertTimer = null;
+    }
+    if (this.fallbackActiveUntil === null) return;
+    this.fallbackActiveUntil = null;
+    this.fallbackActivatedAt = null;
+    this.fallbackArmReason = null;
+    try {
+      clearFallbackState(this.db);
+    } catch (err) {
+      log.warn({ err }, 'failed to clear persisted fallback state');
+    }
+    log.info({
+      instanceName: this.instanceName,
+      primaryProvider: this.agentProvider,
+      reason,
+    }, 'reverting to primary provider');
+  }
+
+  /**
    * Construct a SessionManager with all instance-level fields pre-filled.
    * Callers supply only the variable parts: chatJid, cwd, and the three callbacks.
    */
@@ -5181,10 +5712,10 @@ export class AgentRuntime implements Runtime {
       cwd: opts.cwd,
       configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
-      model: this.model,
+      model: this.effectiveModel,
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
-      provider: this.agentProvider,
+      provider: this.effectiveProvider,
       providerConfig: this.agentProviderConfig,
       mcpBridge: createProviderMcpBridge(this.registry, providerToolSession),
       mcpSessionContext: providerToolSession,
@@ -5578,6 +6109,8 @@ export class AgentRuntime implements Runtime {
 
   private cleanupSharedCrashTurnState(): void {
     this.activeToolNames.clear();
+    this.turnHadToolActivity.clear();
+    this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
     this.currentTurnInboundContentType = null;
@@ -5598,6 +6131,8 @@ export class AgentRuntime implements Runtime {
 
   private cleanupPerChatCrashTurnState(mapKey: string): void {
     this.activeToolNames.clear();
+    this.turnHadToolActivity.clear();
+    this.singleTurnHadToolActivity = false;
     this.turnHadVisibleOutput = false;
     this.currentTurnChatJid = null;
     this.perChatTurnContentType.delete(mapKey);
@@ -5855,7 +6390,11 @@ export class AgentRuntime implements Runtime {
         {
           const normalizedText = this.normalizeAssistantTextForDelivery(event);
           if (!normalizedText) break;
-          // Suppress usage-limit messages — don't flood WhatsApp with them
+          // Suppress usage-limit messages — don't flood WhatsApp with them.
+          // Fallback activation is intentionally NOT triggered here: it is
+          // deferred to the 'result' event. Activating on streaming text would
+          // race the usage-limit session kill/respawn (the result path also
+          // shuts the session down), so we only observe + suppress here.
           if (isUsageLimitMessage(normalizedText)) {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
             break;
@@ -5889,6 +6428,7 @@ export class AgentRuntime implements Runtime {
         }
 
         this.getToolNames(GLOBAL_TOOL_SCOPE_KEY).set(event.toolId, event.toolName);
+        this.singleTurnHadToolActivity = true;
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           queue.enqueueToolUpdate(toolUpdate);
@@ -5977,6 +6517,10 @@ export class AgentRuntime implements Runtime {
           // Suppress usage-limit messages — log and kill session instead of forwarding
           if (isUsageLimitMessage(event.text)) {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
+            // Route the auto-respawned next session to the fallback provider
+            // (if configured) until the limit resets, before tearing down.
+            this.activateProviderFallback(extractUsageLimitResetTime(event.text));
+            queue.enqueueText(this.usageLimitNotice());
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
               conversationKey: toConversationKey(queue.targetChatJid),
@@ -6007,6 +6551,10 @@ export class AgentRuntime implements Runtime {
         this.currentTurnAssistantItemText.clear();
         const rowId = this.session?.getDbRowId() ?? null;
         const lastOpId = queue.getLastOpId();
+        if (!wasSilentCompact && !isSystemResult) {
+          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, this.singleTurnHadToolActivity);
+        }
+        this.singleTurnHadToolActivity = false;
         // If nothing visible was emitted this turn, send an explicit fallback
         if (!this.turnHadVisibleOutput && !wasSilentCompact) {
           queue.enqueueText('_(no response)_');
@@ -6145,6 +6693,8 @@ export class AgentRuntime implements Runtime {
     const { inboundSeq, conversationKey, mapKey, clearCurrentInboundSeq = false } = opts
 
     this.activeToolNames.clear()
+    this.turnHadToolActivity.clear()
+    this.singleTurnHadToolActivity = false
     this.currentTurnChatJid = null
     this.turnHadVisibleOutput = false
 

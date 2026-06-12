@@ -530,6 +530,26 @@ describe('fleet server -- API route dispatch (real factory)', () => {
     expect(res.status).not.toBe(401);
   });
 
+  it('GET /api/providers dispatches to the catalog handler and includes claude-cli', async () => {
+    const res = await fetch(`${baseUrl}/api/providers`, { headers: auth });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body)).toBe(true);
+    const claude = (body as Array<{ id: string; displayName: string }>).find((p) => p.id === 'claude-cli');
+    expect(claude?.displayName).toBe('Claude CLI');
+  });
+
+  it('GET /api/lines/:name/provider-status dispatches with the extracted param', async () => {
+    const res = await fetch(`${baseUrl}/api/lines/${INST_A}/provider-status`, { headers: auth });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // INST_A is a chat instance with no agentOptions → primary provider is null
+    // and the fallback window is inactive. Asserts both shape and the
+    // not-on-fallback default.
+    expect(body.primary).toEqual({ provider: null, model: null, keyPresent: null });
+    expect(body.fallback.active).toBe(false);
+  });
+
   it('GET /api/directories/check dispatches (real-table-only route)', async () => {
     // Missing `path` query param returns 400 from the handler — that's a successful dispatch.
     const res = await fetch(`${baseUrl}/api/directories/check`, { headers: auth });

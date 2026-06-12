@@ -28,12 +28,35 @@ before the process starts. They are never written to disk.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `CONVERSATION_MODEL` | string | `claude-opus-4-6` | Primary model for response generation. |
+| `CONVERSATION_MODEL` | string | `claude-opus-4-8` | Primary model for response generation. |
 | `EXTRACTION_MODEL` | string | `claude-sonnet-4-6` | Model for memory extraction and enrichment. |
 | `VALIDATION_MODEL` | string | `claude-haiku-4-5` | Model for validation and lightweight classification. |
 | `FALLBACK_MODEL` | string | `gpt-5.4` | OpenAI fallback when the primary model is unavailable. |
 
 All four can be overridden per-instance via `config.json` `models` object.
+
+#### Model currency advisories
+
+Model IDs are passed through to providers opaquely — any string is accepted, so
+new vendor releases work without a WhatSoup change. On startup (and daily
+thereafter) the bot checks every configured model against the catalog in
+`src/lib/model-catalog.ts`, plus the live Anthropic/OpenAI Models APIs when the
+matching API key is present, and notifies operators through the BOT_ERRORS alert
+pipeline (source `model-currency`) when a configured model:
+
+- has a newer sibling in the same family (`info` severity, e.g. `claude-opus-4-6` → `claude-opus-4-8`), or
+- is deprecated or retired upstream (`warning` severity, with the retirement date and replacement).
+
+The check is advisory and fail-open: unknown providers/IDs, missing API keys,
+and network failures all degrade to silence. Note the dependency this implies:
+detecting a brand-new release the static catalog has never heard of requires
+the live Models API (matching API key present); without keys, advisories come
+from the static catalog alone, so an upstream retirement that postdates the
+catalog produces no warning. The latest result is exposed on
+the `/health` endpoint under `model_advisories`. Future model IDs that follow
+vendor naming conventions (`claude-<family>-<major>-<minor>`,
+`gpt-<major>.<minor>`) are recognized and ordered automatically; only
+lifecycle metadata (deprecations/retirements) needs occasional catalog updates.
 
 ### Conversation
 
@@ -172,6 +195,8 @@ into place during deployment.
 | `echoGuard` | object | no | `{ enabled: true, groupCooldownMs: 1000 }` | Suppresses outbound echo loops in group chats. When enabled, group messages sent within `groupCooldownMs` of a prior send are suppressed. DMs are never affected. In-memory state, resets on restart. |
 | `operationTracker` | object | no | see defaults | Per-tool progress reporting and stall detection. All sub-fields optional; unset fields use platform defaults. See [operationTracker](#operationtracker). |
 | `agentOptions` | object | agent only | — | Agent-specific settings. Required fields vary by `sessionScope`. See [agentOptions](#agentoptions). |
+| `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default) or `twilio` (SMS). See [`twilioConfig`](#twilioconfig). |
+| `twilioConfig` | object | iff `transport: "twilio"` | — | Twilio SMS transport settings. **Required** when `transport` is `twilio`; **rejected** when present with any other transport. See [`twilioConfig`](#twilioconfig). |
 
 [^enabled]: Enforcement sites: [`src/fleet/discovery.ts:94`](../src/fleet/discovery.ts) (fleet scan skip), [`src/fleet/routes/ops.ts:767`](../src/fleet/routes/ops.ts) (port-in-use scan), [`src/fleet/routes/ops.ts:788`](../src/fleet/routes/ops.ts) (existing-port map for PATCH conflict checks).
 
@@ -427,15 +452,97 @@ include `agentOptions` should keep these fields explicit.
 | `sessionScope` | string | no | `per_chat` via fleet API | `single`, `shared`, or `per_chat`. See [Session Scopes](#session-scopes). |
 | `provider` | string | no | `claude-cli` | Agent provider ID. Must be one of `claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, or `anthropic-api`. |
 | `providerConfig` | object | no | — | Provider-specific overrides. The selected provider owns the accepted keys; unknown provider IDs are rejected before runtime startup. |
+| `fallbackProvider` | string | no | — | Provider to route **new** sessions to when the primary `provider` hits a usage limit. Must be one of the same IDs as `provider` (`claude-cli`, `codex-cli`, `gemini-cli`, `opencode-cli`, `openai-api`, `anthropic-api`); unknown IDs are rejected before startup. When the primary returns a usage-limit `result`, the in-flight session is torn down, the user is notified in-chat, and the auto-respawned next session uses this provider until the limit resets, then automatically reverts to the primary. Omitted = fallback disabled (the primary session is killed and the user is told to retry after the limit resets). See [Provider fallback behavior](#provider-fallback-behavior) for the full lifecycle: user notice, window persistence across restarts, turn telemetry, credential pre-flight, and admin override commands. |
+| `fallbackModel` | string | no | — | Model string passed to `fallbackProvider` while fallback is active (e.g. `minimax/MiniMax-M2.7`). Non-empty string when present. When omitted, the fallback provider runs with no `--model`/`-m` override (its own default). |
 | `cwd` | string | no | `~/.local/share/whatsoup/instances/<name>/workspace` | Working directory for the agent subprocess. Tilde is expanded (`~` → `$HOME`). Empty values are replaced with the default. |
 | `instructionsPath` | string | no | — | Path to a CLAUDE.md-style instructions file, relative to `cwd`. |
 | `sandboxPerChat` | boolean | no | `false` | Provision a separate workspace per chat. Requires `sessionScope: per_chat`. |
 | `sandbox` | object | no | — | Sandbox constraints applied via agent enforcement hooks. See [sandbox](#agentoptionssandbox). |
 | `mcp` | object | no | — | MCP feature flags for the agent subprocess (e.g., `{ "send_media": true }`). |
-| `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the Claude Code subprocess. |
+| `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the `claude-cli` agent subprocess. Tilde is expanded (`~` → `$HOME`). **Version resilience:** when an entry pins a version directory (e.g. `~/.claude/plugins/superpowers/5.0.7`) that no longer exists — for example after `claude plugin update` bumps it to `5.1.0` — the highest existing semver sibling under the same parent is substituted automatically at startup. Non-version paths and still-present directories are passed through unchanged. |
 | `enabledPlugins` | Record<string, boolean> | no | — | Per-instance plugin overrides. Keys are `plugin@marketplace` identifiers. `true` = enabled, `false` = disabled. Omitted keys inherit from global `~/.claude/settings.json`. Written to `<cwd>/.claude/settings.json` at startup. |
 | `autoCompactInputTokens` | number | no | `150000` | For Claude CLI agent sessions, automatically send a silent `/compact` after this many input tokens since the last successful compact. Default: 150,000 tokens (prevents prompt-too-long errors while leaving headroom for tool results). Valid range: 50,000-100,000,000. **Bootstrap behavior:** the first time eligibility is checked on any session whose `last_compact_input_tokens=0` (a fresh enable, or a brand-new session whose first turn crosses the threshold), the baseline is initialised silently without firing `/compact`. This prevents a compact storm on rollout but means the first real compact is deferred by one full threshold's worth of tokens. **Cooldown behavior:** successful auto-compacts wait 5 minutes before re-arming; scopes that become eligible again inside the rapid re-arm window escalate to 15, 30, then 60 minute cooldowns. Health counters are exposed at `GET /health` under `runtime.agent.autoCompactIneffective`, `runtime.agent.autoCompactConsecutiveRapidRearmsMax`, and `runtime.agent.autoCompactNextTurnOverThreshold`. |
 | `allowM365Mutations` | boolean | no | `false` | Per-instance opt-in for propagating `ALLOW_M365_MUTATIONS` to the agent subprocess. Only consulted when `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set on the parent process (off by default). See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
+
+#### Provider fallback behavior
+
+When the primary provider returns a usage-limit `result` (`src/runtimes/agent/runtime.ts`), the runtime:
+
+1. **Tears down and notifies.** The in-flight session is killed and the user receives a notice in the chat — with a fallback configured: "_Hit my usage limit — switching to a backup model. Please resend your last message._"; without one: "_Hit my usage limit — please try again after the limit resets._". The triggering message is deliberately **not** auto-replayed (double-execution risk); the user must resend it.
+2. **Arms a fallback window** (only when `fallbackProvider` is set). New sessions route to the fallback provider until the window expires, then revert to the primary automatically. The window ends at the reset time parsed from the usage-limit message when available, else 5 hours from now, clamped to [1 minute, 24 hours]. A second usage-limit hit while a window is active extends it — never shortens.
+3. **Persists the window across restarts.** The window is written to the singleton `agent_fallback_state` SQLite table (`src/runtimes/agent/fallback-state-db.ts`) and re-armed on startup, so a restart mid-window resumes on the fallback provider. Restored windows are clamped to at most 24 hours from startup; expired, corrupt, or no-longer-applicable rows are cleared and startup proceeds on the primary. The original activation time is preserved across extensions and restores.
+4. **Pre-flights credentials and binary on every window arm — without ever blocking.** When the fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2.7` → `minimax`; `openai-api` → `openai`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`). The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The key value is never logged. In addition, CLI-backed providers (`opencode-cli`, `claude-cli`, `codex-cli`, `gemini-cli`) have their binary probed via `binary --version` (`src/runtimes/agent/providers/binary-preflight.ts`): a definitive ENOENT raises `fallback_binary_missing`; anything else is fail-open. Managed-loop providers (`openai-api`, `anthropic-api`) have no binary to probe. The window arms in all cases — no pre-flight blocks or reverts activation.
+5. **Counts fallback turns.** Every completed user turn during an active window (compact and system turns excluded) increments process-local counters — `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt` — surfaced in the `GET /health` `instance` block and reset on restart. A turn that completes with zero visible output raises the `fallback_empty_turn` operator alert (the silent-dead-bot signal). On `per_chat` sessions the user additionally gets "_The backup model returned no reply — please resend or rephrase your message._"; `single`/`shared` sessions surface their existing generic `_(no response)_` fallback instead.
+
+Admins can force, end, or inspect the window from WhatsApp with `FALLBACK ON [<n>m|<n>h]` / `FALLBACK OFF` / `FALLBACK STATUS` — see [docs/runbook.md §7.2](runbook.md#72-force-or-inspect-provider-fallback).
+
+#### Enabling provider fallback on a new host
+
+When deploying an instance config that uses `fallbackProvider` to a machine where the stack has not run before, complete these steps before starting the service. The runtime will alert on any gap at activation time (`fallback_binary_missing`, `fallback_credential_missing`, `fallback_credential_invalid`), but early provisioning avoids the first-activation surprise.
+
+1. **Install the fallback provider CLI and confirm it is on the service user's PATH.**
+
+   For `opencode-cli`:
+   ```sh
+   # Install opencode per the upstream instructions, then confirm:
+   opencode --version
+   ```
+   The runtime spawns `opencode --version` at window-arm time (`src/runtimes/agent/providers/binary-preflight.ts`) and raises `fallback_binary_missing` if the binary is absent. The check runs on the service user's PATH, so install under that user or ensure the binary is in a PATH entry that the service environment inherits.
+
+2. **Provision the provider API key** via one of three portable routes. The lookup order is: environment variable first (when no per-user scoping is requested), then platform keyring (`src/lib/keyring.ts:82`).
+
+   **Route A — environment variable (universal).**
+   Set the variable named in `SERVICE_ENV_MAP` (`src/lib/keyring.ts:16–25`):
+
+   | Provider service | Environment variable |
+   |-----------------|---------------------|
+   | `minimax`       | `MINIMAX_API_KEY`   |
+   | `deepseek`      | `DEEPSEEK_API_KEY`  |
+   | `openai`        | `OPENAI_API_KEY`    |
+
+   For **systemd** managed instances, add a drop-in or `EnvironmentFile`:
+   ```ini
+   # ~/.config/systemd/user/whatsoup@<name>.service.d/fallback-key.conf
+   [Service]
+   Environment="MINIMAX_API_KEY=sk-…"
+   # or: EnvironmentFile=%h/.config/whatsoup/<name>.env
+   ```
+   For **launchd** managed instances, add an `EnvironmentVariables` key to the plist (or regenerate via `npm run deploy:launchd.generated`):
+   ```xml
+   <key>EnvironmentVariables</key>
+   <dict>
+     <key>MINIMAX_API_KEY</key>
+     <string>sk-…</string>
+   </dict>
+   ```
+
+   **Route B — macOS Keychain.**
+   The keyring reads via `security find-generic-password -s <service> -a <username> -w` (`src/lib/keyring.ts:128–134`), where `<service>` is the service name (e.g. `minimax`) and `<username>` is the OS username (`os.userInfo().username`). Store with the matching attributes:
+   ```sh
+   security add-generic-password -s minimax -a "$USER" -w "sk-…"
+   ```
+
+   **Route C — Linux GNOME Keyring (`secret-tool`).**
+   The keyring reads via `secret-tool lookup service <service>` (`src/lib/keyring.ts:99–103, 109`), where `service` is the attribute name and the service name (e.g. `minimax`) is its value. Store with the matching attribute:
+   ```sh
+   secret-tool store --label="WhatSoup minimax key" service minimax
+   # enter the key at the password prompt
+   ```
+
+3. **Set `agentOptions.fallbackProvider` and `fallbackModel`** in the instance `config.json`:
+   ```json
+   "agentOptions": {
+     "fallbackProvider": "opencode-cli",
+     "fallbackModel": "minimax/MiniMax-M2.7"
+   }
+   ```
+
+4. **Restart the instance** so the runtime loads the new config and arms any previously-persisted fallback window with the new pre-flight checks active.
+
+5. **Verify.** From an admin WhatsApp DM:
+   - `FALLBACK STATUS` — confirms the current window state and configured provider/model.
+   - `FALLBACK ON 5m` — forces a 5-minute canary window; expect a reply served by the fallback provider. Check the `/health` endpoint `instance` block for `effectiveProvider` (flips to the fallback while the window is active), `fallbackTurnsServed`, and related fields.
+   - Watch for the three arm-time alert sources: `fallback_binary_missing` (binary absent), `fallback_credential_missing` (key absent from keyring/env), `fallback_credential_invalid` (key rejected by provider API). Any of these surfaces via the BOT_ERRORS alert pipeline within seconds of window activation.
 
 #### Session Scopes
 
@@ -520,6 +627,44 @@ export WHATSOUP_CONNECTOR_FAILCLOSED=1
 }
 ```
 
+### `twilioConfig`
+
+Selects the optional Twilio SMS transport for this instance. Stage 2 supports
+outbound text, poll-mode inbound text, webhook-mode inbound with signature
+validation, and recorded voicemail with transcription. Operational guidance,
+identity model, limitations, and keyring provisioning live in the runbook:
+[`docs/runbooks/twilio-transport.md`](runbooks/twilio-transport.md).
+
+```json
+"transport": "twilio",
+"twilioConfig": {
+  "account": "sms-agent",
+  "accountSid": "AC00000000000000000000000000000000",
+  "authTokenService": "twilio-sms-agent",
+  "phoneNumber": "+15550001111",
+  "inboundMode": "poll",
+  "pollIntervalMs": 15000,
+  "rateLimit": { "smsPerMinute": 30 }
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `account` | string | yes | — | Channel account segment for the `sms:<account>` channel ID. Must match `^[a-z][a-z0-9-]{0,63}$`. Changing it changes the channel identity. |
+| `accountSid` | string | yes | — | Twilio Account SID. Must match `^AC[0-9a-f]{32}$` (hex must be lowercase). |
+| `authTokenService` | string | yes | — | OS keyring **service name** for the auth token — never the token itself. Non-empty, no whitespace, max 128 chars. Resolved via `src/lib/keyring.ts` `lookupCredential` at first use; no environment-variable fallback exists for Twilio. |
+| `phoneNumber` | string | XOR | — | E.164 sender number (`^\+[1-9]\d{6,14}$`). Exactly one of `phoneNumber` or `messagingServiceSid` must be set. |
+| `messagingServiceSid` | string | XOR | — | Messaging Service SID sender. Must match `^MG[0-9a-f]{32}$` (lowercase hex). Without `phoneNumber`, inbound polling uses a single unfiltered call listing all messages on the account in both directions (no targeted per-number filtering). |
+| `inboundMode` | string | no | `poll` | `poll` (REST polling) or `webhook` (signature-validated HTTP listener). |
+| `webhook.publicBaseUrl` | string | webhook-mode | — | Public HTTPS base URL for Twilio to call. Trailing slash is stripped by the loader. Signature validation depends on this matching exactly. |
+| `webhook.listenPort` | integer | webhook-mode | — | Local listener port (`[1, 65535]`; must not equal `healthPort`). Bind address defaults to `127.0.0.1`; use an HTTPS proxy/tunnel. |
+| `webhook.listenAddress` | string | no | `127.0.0.1` | Override local bind address. |
+| `voice.enabled` | boolean | no | `false` | Enable voicemail + `placeCall`. Requires `inboundMode:'webhook'` and `phoneNumber`. |
+| `voice.voicemailMaxLengthSec` | integer | no | `120` | Max recording length (`[5, 600]`). |
+| `voice.voicemailGreeting` | string | no | built-in | Custom `<Say>` greeting text (≤ 500 chars). |
+| `pollIntervalMs` | integer | no | `15000` | Inbound poll interval; also the lookback window at connect. Range `[5000, 86400000]`. |
+| `rateLimit.smsPerMinute` | integer | no | `30` | Range `[1, 600]`. Validated config only — **no rate limiter enforces it yet**. |
+
 ### Validation Rules Summary
 
 The loader enforces these constraints before the process starts:
@@ -536,6 +681,8 @@ The loader enforces these constraints before the process starts:
 - `agentOptions.allowM365Mutations`, when present, must be a boolean.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
 - `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.
+- `transport`, when present, must be `baileys` or `twilio`.
+- `twilioConfig` is required when `transport` is `twilio` and rejected otherwise; its field rules (SID shapes, sender XOR, inbound mode, webhook block, voice coherence, numeric ranges) are listed under [`twilioConfig`](#twilioconfig).
 
 ---
 

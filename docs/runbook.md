@@ -249,10 +249,22 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
     "last_run": "2026-03-30T14:22:00.000Z"
   },
   "models": {
-    "conversation": "claude-opus-4-6",
+    "conversation": "claude-opus-4-8",
     "extraction": "claude-sonnet-4-6",
     "validation": "claude-haiku-4-5",
     "fallback": "gpt-5.4"
+  },
+  "model_advisories": {
+    "checkedAt": "2026-03-30T14:22:00.000Z",
+    "advisories": [
+      {
+        "model": "claude-opus-4-6",
+        "role": "conversation",
+        "level": "upgrade-available",
+        "recommended": "claude-opus-4-8",
+        "message": "model \"claude-opus-4-6\" has a newer sibling — \"claude-opus-4-8\" is available"
+      }
+    ]
   },
   "durability": {
     "pendingOutbound": 0,
@@ -261,6 +273,8 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
   }
 }
 ```
+
+`model_advisories` carries the latest model-currency check (`checkedAt` is `null` until the first check completes; `advisories` is empty when every configured model is current). Levels: `upgrade-available`, `deprecated` (with `retiresAt`), `retired`. See `docs/configuration.md` → "Model currency advisories" for the full behavior.
 
 ### Status Meanings
 
@@ -702,7 +716,28 @@ After `ALLOW`, any messages the user sent while pending are replayed automatical
 
 **Groups:** If an admin adds the bot to a WhatsApp group, the group is auto-allowed without requiring an explicit `ALLOW` command.
 
-### 7.2 Manage the Access List Directly
+### 7.2 Force or Inspect Provider Fallback
+
+Agent instances with `agentOptions.fallbackProvider` configured (see [docs/configuration.md §Provider fallback behavior](configuration.md#provider-fallback-behavior)) accept three more admin commands. Like `ALLOW`/`BLOCK`, they are matched case-insensitively and only from an admin phone in a direct chat — never in groups:
+
+```
+FALLBACK ON          # force a fallback window for the default 5 hours
+FALLBACK ON 30m      # force a 30-minute window (<n>m or <n>h, positive integer)
+FALLBACK ON 2h       # force a 2-hour window
+FALLBACK OFF         # end the window now — new sessions use the primary provider
+FALLBACK STATUS      # report effective provider, window expiry, turn counters
+```
+
+- `FALLBACK ON` sets the window **exactly** to the requested duration — unlike usage-limit activation it may *shorten* an already-active window (operator intent wins). Durations are clamped to the allowed bounds (1 minute–24 hours) and the reply notes when clamping occurred. With no duration, the window is 5 hours. Forced windows go through the same hardened path as usage-limit windows: persisted across restarts, with credential pre-flight alerts.
+- `FALLBACK OFF` reverts new sessions to the primary provider immediately and is idempotent — safe to send when no window is active.
+- `FALLBACK STATUS` replies with the effective provider, the window expiry as an ISO timestamp (`none` when on the primary), and the process-local fallback turn counters (`served` / `empty`, reset on restart).
+- `FALLBACK` or `FALLBACK HELP` replies with a one-line usage summary of these commands (support varies by instance type).
+
+**Canary test:** `FALLBACK ON 5m` is the operator's way to live-test the fallback provider end-to-end — force a short window, send the bot a message, confirm a real reply arrives and `FALLBACK STATUS` shows `served` incrementing while `empty` stays at 0, then let the window lapse or send `FALLBACK OFF`.
+
+Notes: on instances whose runtime has no fallback support (e.g. chat-mode), the bot replies "Fallback control not supported on this instance." A malformed duration (`FALLBACK ON 0m`, `FALLBACK ON tomorrow`) is not recognized as an admin command at all — the text falls through to normal message handling.
+
+### 7.3 Manage the Access List Directly
 
 ```bash
 INSTANCE=sandbox-agent
@@ -734,7 +769,7 @@ sqlite3 $DB \
    VALUES ('phone', '15551234567', 'allowed', 'Alice', datetime('now'));"
 ```
 
-### 7.3 Check Inbound/Outbound Durability State
+### 7.4 Check Inbound/Outbound Durability State
 
 ```bash
 DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db
@@ -765,7 +800,7 @@ sqlite3 $DB \
    FROM session_checkpoints ORDER BY updated_at DESC LIMIT 10;"
 ```
 
-### 7.4 Useful SQL Queries
+### 7.5 Useful SQL Queries
 
 ```bash
 DB=~/.local/share/whatsoup/instances/sandbox-agent/bot.db

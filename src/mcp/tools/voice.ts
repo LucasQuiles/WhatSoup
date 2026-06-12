@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { ToolRegistry } from '../registry.ts';
 import { toolError, type SessionContext } from '../types.ts';
 import type { Database } from '../../core/database.ts';
-import type { ConnectionManager } from '../../transport/connection.ts';
+import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { synthesizeSpeech } from '../../runtimes/chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -21,7 +21,7 @@ function errorResult(error: string, message: string) {
 // ---------------------------------------------------------------------------
 
 export interface VoiceDeps {
-  connection: ConnectionManager;
+  connection: RuntimeConnection;
   db: Database;
 }
 

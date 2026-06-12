@@ -37,7 +37,7 @@ import { isAdminMessage, parseAdminCommand } from '../../src/core/command-router
 import type { IncomingMessage } from '../../src/core/types.ts';
 import type { Database } from '../../src/core/database.ts';
 
-// Minimal mock DB for resolvePhoneFromJid — lid_mappings table queries
+// Minimal mock DB for resolvePhoneFromJid -- lid_mappings table queries
 function makeMockDb(lidMap: Record<string, string> = {}): Database {
   return {
     raw: {
@@ -84,7 +84,7 @@ function makeIncomingMsg(overrides: Partial<IncomingMessage> = {}): IncomingMess
 // isAdminMessage
 // ---------------------------------------------------------------------------
 
-describe('isAdminMessage — positive', () => {
+describe('isAdminMessage -- positive', () => {
   it('returns true when senderJid matches adminPhones and message is a DM', () => {
     const msg = makeIncomingMsg({ senderJid: '15550100001@s.whatsapp.net', isGroup: false });
     expect(isAdminMessage(msg, mockDb)).toBe(true);
@@ -101,7 +101,7 @@ describe('isAdminMessage — positive', () => {
   });
 });
 
-describe('isAdminMessage — negative', () => {
+describe('isAdminMessage -- negative', () => {
   it('returns false for non-admin phone DM', () => {
     const msg = makeIncomingMsg({ senderJid: '15559998888@s.whatsapp.net', isGroup: false });
     expect(isAdminMessage(msg, mockDb)).toBe(false);
@@ -119,10 +119,10 @@ describe('isAdminMessage — negative', () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseAdminCommand — phone subjects
+// parseAdminCommand -- phone subjects
 // ---------------------------------------------------------------------------
 
-describe('parseAdminCommand — phone positive', () => {
+describe('parseAdminCommand -- phone positive', () => {
   it('parses ALLOW command', () => {
     expect(parseAdminCommand('ALLOW 15184194479')).toEqual({ action: 'allow', subjectType: 'phone', subjectId: '15184194479' });
   });
@@ -142,56 +142,129 @@ describe('parseAdminCommand — phone positive', () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseAdminCommand — group subjects
+// parseAdminCommand -- group subjects
 // ---------------------------------------------------------------------------
 
 // @check CHK-078
 // @traces REQ-013.AC-05
-describe('parseAdminCommand — group positive', () => {
+describe('parseAdminCommand -- group positive', () => {
+  // Use test-safe group JIDs that do not match real-shaped WhatsApp group JID patterns.
+  const GROUP_A = '111111123456789@g.us';
+  const GROUP_B = '111111987654321@g.us';
+  const GROUP_C = '111111100000000@g.us';
+
   it('parses ALLOW GROUP command', () => {
-    expect(parseAdminCommand('ALLOW GROUP 120363123456789@g.us')).toEqual({
+    expect(parseAdminCommand(`ALLOW GROUP ${GROUP_A}`)).toEqual({
       action: 'allow',
       subjectType: 'group',
-      subjectId: '120363123456789@g.us',
+      subjectId: GROUP_A,
     });
   });
 
   it('parses BLOCK GROUP command', () => {
-    expect(parseAdminCommand('BLOCK GROUP 120363987654321@g.us')).toEqual({
+    expect(parseAdminCommand(`BLOCK GROUP ${GROUP_B}`)).toEqual({
       action: 'block',
       subjectType: 'group',
-      subjectId: '120363987654321@g.us',
+      subjectId: GROUP_B,
     });
   });
 
   it('is case insensitive for GROUP keyword', () => {
-    expect(parseAdminCommand('allow group 120363111111@g.us')).toEqual({
+    expect(parseAdminCommand(`allow group ${GROUP_C}`)).toEqual({
       action: 'allow',
       subjectType: 'group',
-      subjectId: '120363111111@g.us',
+      subjectId: GROUP_C,
     });
   });
 
   it('handles trailing whitespace for GROUP command', () => {
-    expect(parseAdminCommand('ALLOW GROUP 120363111111@g.us   ')).toEqual({
+    expect(parseAdminCommand(`ALLOW GROUP ${GROUP_C}   `)).toEqual({
       action: 'allow',
       subjectType: 'group',
-      subjectId: '120363111111@g.us',
+      subjectId: GROUP_C,
     });
   });
 });
 
 // ---------------------------------------------------------------------------
-// parseAdminCommand — negative
+// parseAdminCommand -- negative
 // ---------------------------------------------------------------------------
 
-describe('parseAdminCommand — negative', () => {
+describe('parseAdminCommand -- negative', () => {
   it('returns null for no phone', () => { expect(parseAdminCommand('ALLOW')).toBeNull(); });
   it('returns null for empty string', () => { expect(parseAdminCommand('')).toBeNull(); });
   it('returns null for unknown command', () => { expect(parseAdminCommand('GRANT 123')).toBeNull(); });
   it('returns null for non-digits in phone', () => { expect(parseAdminCommand('ALLOW +1-518')).toBeNull(); });
   it('returns null for random text', () => { expect(parseAdminCommand('hello world')).toBeNull(); });
   it('returns null for GROUP with no jid', () => { expect(parseAdminCommand('ALLOW GROUP')).toBeNull(); });
+});
+
+// ---------------------------------------------------------------------------
+// parseAdminCommand -- fallback positive
+// ---------------------------------------------------------------------------
+
+describe('parseAdminCommand -- fallback positive', () => {
+  it('parses FALLBACK ON (default, no duration)', () => {
+    expect(parseAdminCommand('FALLBACK ON')).toEqual({ action: 'fallback', sub: 'on' });
+  });
+
+  it('parses fallback on 90m (minutes)', () => {
+    expect(parseAdminCommand('fallback on 90m')).toEqual({ action: 'fallback', sub: 'on', durationMs: 90 * 60_000 });
+  });
+
+  it('parses Fallback On 2h (hours)', () => {
+    expect(parseAdminCommand('Fallback On 2h')).toEqual({ action: 'fallback', sub: 'on', durationMs: 2 * 3_600_000 });
+  });
+
+  it('parses FALLBACK OFF', () => {
+    expect(parseAdminCommand('FALLBACK OFF')).toEqual({ action: 'fallback', sub: 'off' });
+  });
+
+  it('parses fallback status (lowercase)', () => {
+    expect(parseAdminCommand('fallback status')).toEqual({ action: 'fallback', sub: 'status' });
+  });
+
+  it('parses FALLBACK HELP', () => {
+    expect(parseAdminCommand('FALLBACK HELP')).toEqual({ action: 'fallback', sub: 'help' });
+  });
+
+  it('parses fallback help (lowercase)', () => {
+    expect(parseAdminCommand('fallback help')).toEqual({ action: 'fallback', sub: 'help' });
+  });
+
+  it('parses bare FALLBACK as help', () => {
+    expect(parseAdminCommand('FALLBACK')).toEqual({ action: 'fallback', sub: 'help' });
+  });
+
+  it('parses bare fallback with trailing spaces as help', () => {
+    expect(parseAdminCommand('fallback  ')).toEqual({ action: 'fallback', sub: 'help' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseAdminCommand -- fallback negative
+// ---------------------------------------------------------------------------
+
+describe('parseAdminCommand -- fallback negative', () => {
+  it('returns null for FALLBACK ON 0m (zero is not a positive integer)', () => {
+    expect(parseAdminCommand('FALLBACK ON 0m')).toBeNull();
+  });
+
+  it('returns null for FALLBACK ON 0h', () => {
+    expect(parseAdminCommand('FALLBACK ON 0h')).toBeNull();
+  });
+
+  it('returns null for FALLBACK ON tomorrow (non-numeric)', () => {
+    expect(parseAdminCommand('FALLBACK ON tomorrow')).toBeNull();
+  });
+
+  it('returns null for FALLBACK ON 5d (unsupported unit)', () => {
+    expect(parseAdminCommand('FALLBACK ON 5d')).toBeNull();
+  });
+
+  it('returns null for FALLBACK MAYBE (unrecognised sub-command)', () => {
+    expect(parseAdminCommand('FALLBACK MAYBE')).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

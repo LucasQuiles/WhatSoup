@@ -1,6 +1,6 @@
 import type { Database } from './database.ts';
 import { createChildLogger } from '../logger.ts';
-import type { ConnectionManager } from '../transport/connection.ts';
+import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 
 const log = createChildLogger('mark-read');
 
@@ -12,7 +12,7 @@ export interface MarkConversationReadResult {
 
 export async function markConversationRead(
   db: Database,
-  connectionManager: Pick<ConnectionManager, 'getSocket' | 'botJid'>,
+  connectionManager: Pick<RuntimeConnection, 'getSocket' | 'botJid'>,
   conversationKey: string,
 ): Promise<MarkConversationReadResult | { ok: false; error: 'chat_not_found'; conversation_key: string }> {
   const chatRow = db.raw

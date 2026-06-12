@@ -8,9 +8,11 @@ import { cleanupOldRateLimits } from './runtimes/chat/rate-limits-db.ts';
 import { deleteOldMessages, getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { execFileSync } from 'node:child_process';
-import { ConnectionManager } from './transport/connection.ts';
+import { createConnection } from './transport/factory.ts';
+import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
+import { resolveLatestPluginDir } from './runtimes/agent/plugin-dir-resolver.ts';
 import { resolveAgentModel } from './instance-loader.ts';
 import { PassiveRuntime } from './runtimes/passive/runtime.ts';
 import { PineconeMemory, getPineconeReadiness } from './runtimes/chat/providers/pinecone.ts';
@@ -22,6 +24,7 @@ import { checkDegradationSignals } from './core/heal.ts';
 import { createIngestHandler } from './core/ingest.ts';
 import { toConversationKey } from './core/conversation-key.ts';
 import { toPersonalJid, toLidJid } from './core/jid-constants.ts';
+import { selectReplayableDms, rememberReplayedId } from './core/admin.ts';
 import { DurabilityEngine, sendTracked } from './core/durability.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
@@ -49,6 +52,7 @@ import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
 import { TriggerPoller } from './core/substrate/poller.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
+import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
 
 function resolveTilde(p: string): string {
@@ -184,6 +188,17 @@ durability.preConnectRecovery();
 // Parse INSTANCE_CONFIG once — used for warm-start import and instance type selection.
 const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INSTANCE_CONFIG) as Record<string, unknown> : null;
 
+// Model currency advisories — startup + daily check that configured models are
+// still current, with operator notification via BOT_ERRORS when they are not.
+// Advisory-only and fail-open; never blocks startup. See docs/configuration.md.
+startModelCurrencyMonitor(config.botName, {
+  conversation: config.models.conversation,
+  extraction: config.models.extraction,
+  validation: config.models.validation,
+  fallback: config.models.fallback,
+  agent: resolveAgentModel(instanceConfig),
+});
+
 // 2a. Warm-start import: if DB is empty, import from legacy instance DB
 {
   const instanceName = instanceConfig?.name as string | undefined;
@@ -224,7 +239,7 @@ const instanceConfig = process.env.INSTANCE_CONFIG ? JSON.parse(process.env.INST
 const instanceType = (instanceConfig?.type as string | undefined) ?? 'chat';
 
 // 4. Connection
-const connectionManager = new ConnectionManager();
+const connectionManager: RuntimeConnection = createConnection(config);
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
@@ -256,7 +271,16 @@ if (instanceType === 'agent') {
     sandbox: agentOpts?.sandbox,
     model: agentModel,
     sandboxPerChat: agentOpts?.sandboxPerChat as boolean | undefined,
-    pluginDirs: agentOpts?.pluginDirs?.map(d => resolveTilde(d)),
+    pluginDirs: agentOpts?.pluginDirs?.map(d => {
+      const resolved = resolveTilde(d);
+      // A pinned plugin version dir (e.g. .../superpowers/5.0.7) disappears
+      // after `claude plugin update`; substitute the latest existing sibling.
+      const latest = resolveLatestPluginDir(resolved);
+      if (latest !== resolved) {
+        log.debug({ configured: resolved, resolved: latest }, 'substituted missing plugin dir with latest version sibling');
+      }
+      return latest;
+    }),
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
@@ -573,12 +597,18 @@ const healthServer = startHealthServer({
   accessMode: config.accessMode,
   handleAccessDecision: async (subjectType, subjectId, action) => {
     if (action === 'allow' && subjectType === 'phone') {
-      // Replay queued messages — mirrors admin.ts allow path
+      // Replay queued DM messages — uses shared selectReplayableDms helper from admin.ts
+      // so group exclusion, dedup (replayedIds), and adminReplayMax cap are all applied consistently.
       log.info({ subjectType, subjectId }, 'access: allowed via POST /access — replaying queued messages');
       const jidFormats = [toPersonalJid(subjectId), toLidJid(subjectId)];
       for (const senderJid of jidFormats) {
         const stored = getMessagesBySender(db, senderJid);
-        for (const msg of stored) {
+        const { toReplay, groupSkipped } = selectReplayableDms(stored, config.adminReplayMax);
+        if (groupSkipped > 0) {
+          log.info({ subjectId, senderJid, groupSkipped }, 'access replay: skipped group messages');
+        }
+        for (const msg of toReplay) {
+          rememberReplayedId(msg.messageId);
           await runtime.handleMessage({
             messageId: msg.messageId,
             chatJid: msg.chatJid,
@@ -588,6 +618,7 @@ const healthServer = startHealthServer({
             contentText: msg.contentText ?? null,
             contentType: msg.contentType,
             isFromMe: false,
+            // group messages never replay: mentioned ones dispatched at ingest; unmentioned ones must not re-enter as pseudo-DMs
             isGroup: false,
             mentionedJids: [],
             timestamp: msg.timestamp,

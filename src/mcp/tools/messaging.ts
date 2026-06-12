@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ToolRegistry } from '../registry.ts';
 import { toolError, type SessionContext } from '../types.ts';
-import type { ConnectionManager } from '../../transport/connection.ts';
+import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import {
   AliasNotFoundError,
@@ -72,7 +72,7 @@ export interface PollRegistrar {
 }
 
 export interface MessagingDeps {
-  connection: ConnectionManager;
+  connection: RuntimeConnection;
   db: DatabaseSync;
   profiles?: ProfileRegistry;
   auditWriter?: OutboundSendsWriter;

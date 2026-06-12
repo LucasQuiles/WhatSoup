@@ -14,7 +14,7 @@ import { config } from '../../config.ts';
 import type { Database } from '../../core/database.ts';
 import type { ToolRegistry } from '../registry.ts';
 import { assertConversationAccess, isPathWithinAllowedRoot, toolError, type SessionContext } from '../types.ts';
-import type { ConnectionManager } from '../../transport/connection.ts';
+import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { isBaileysEncryptedTmpEnoent, createMediaReadStream } from '../../transport/baileys-media-errors.ts';
 import type { OutboundMedia } from '../../core/types.ts';
 
@@ -29,7 +29,7 @@ function errorResult<T extends Record<string, unknown>>(payload: T) {
 // ---------------------------------------------------------------------------
 
 export interface MediaDeps {
-  connection: ConnectionManager;
+  connection: RuntimeConnection;
   db: Database;
 }
 

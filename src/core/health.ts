@@ -6,10 +6,11 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
-import type { ConnectionManager } from '../transport/connection.ts';
+import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import type { DurabilityEngine } from './durability.ts';
 import { sendTracked } from './durability.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { getModelAdvisories } from '../lib/model-advisor.ts';
 import {
   AliasNotFoundError,
   MissingTargetError,
@@ -46,7 +47,7 @@ function verifyBearer(header: string | undefined, expectedToken: string | undefi
 
 export interface HealthDeps {
   db: Database;
-  connectionManager: ConnectionManager;
+  connectionManager: RuntimeConnection;
   startedAt: number;
   getEnrichmentStats: () => { lastRun: string | null; unprocessed: number; runtimeDegraded?: boolean };
   durability?: DurabilityEngine;
@@ -580,6 +581,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         'failed to count pending polls',
       );
 
+      // Provider-fallback observability (agent runtimes only). Surfaced in the
+      // instance block so operators can see when a bot is running on its
+      // fallback provider and when that window expires.
+      const fallbackState = deps.runtime?.getFallbackState?.() ?? null;
+
       // Mode-specific runtime block for control-plane
       let runtimeBlock: Record<string, unknown> = {};
       if (deps.runtime) {
@@ -609,6 +615,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           accessMode: deps.accessMode,
           socketPath: deps.socketPath ?? null,
           provider: config.agentProvider,
+          ...(fallbackState ? { ...fallbackState } : {}),
         },
         whatsapp: {
           connected: isConnected,
@@ -643,6 +650,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           validation: config.models.validation,
           fallback: config.models.fallback,
         },
+        model_advisories: getModelAdvisories(),
         durability: deps.durability?.getHealthStats() ?? null,
         runtime: runtimeBlock,
       });

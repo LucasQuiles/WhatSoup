@@ -24,6 +24,12 @@ import {
   isGroupJid,
   bareNumber,
   normalizeLid,
+  DOMAIN_SMS,
+  JID_SMS,
+  toSmsJid,
+  fromSmsJid,
+  smsJidToPhone,
+  isSmsJid,
 } from '../../src/core/jid-constants.ts';
 
 describe('domain constants', () => {
@@ -145,5 +151,40 @@ describe('normalizeLid', () => {
 
   it('preserves multiple-colon inputs by stripping at the first colon', () => {
     expect(normalizeLid('12345:67:extra')).toBe('12345');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SMS JID helpers (DOMAIN_SMS / JID_SMS / toSmsJid / fromSmsJid /
+// smsJidToPhone / isSmsJid)
+// ---------------------------------------------------------------------------
+
+describe('SMS JID helpers', () => {
+  it('toSmsJid appends the @sms suffix and is idempotent', () => {
+    expect(toSmsJid('+15551230000')).toBe('+15551230000@sms');
+    expect(toSmsJid('+15551230000@sms')).toBe('+15551230000@sms');
+  });
+
+  it('fromSmsJid strips the suffix and tolerates bare addresses', () => {
+    expect(fromSmsJid('+15551230000@sms')).toBe('+15551230000');
+    expect(fromSmsJid('+15551230000')).toBe('+15551230000');
+  });
+
+  it('smsJidToPhone yields digits without the leading plus (phone-subject convention)', () => {
+    expect(smsJidToPhone('+15551230000@sms')).toBe('15551230000');
+    expect(smsJidToPhone('+15551230000')).toBe('15551230000');
+    expect(smsJidToPhone('15551230000')).toBe('15551230000');
+  });
+
+  it('isSmsJid detects only @sms-suffixed ids', () => {
+    expect(isSmsJid('+15551230000@sms')).toBe(true);
+    expect(isSmsJid('+15551230000')).toBe(false);
+    expect(isSmsJid('15551230000@s.whatsapp.net')).toBe(false);
+  });
+
+  it('round-trip composes with the JID constants', () => {
+    expect(JID_SMS).toBe('@sms');
+    expect(DOMAIN_SMS).toBe('sms');
+    expect(fromSmsJid(toSmsJid('+15551230000'))).toBe('+15551230000');
   });
 });

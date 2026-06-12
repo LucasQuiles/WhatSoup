@@ -7,7 +7,7 @@ Consolidated WhatsApp platform — one process, one Baileys connection, one data
 - **Language:** TypeScript (Node `>=24.0.0 <26`, pinned at `24.15.0` via `.nvmrc` / `package.json#volta.node` / `package.json#packageManager`; native `--experimental-strip-types`, no build step)
 - **Test:** `npm test` (vitest, 10s timeout)
 - **Typecheck:** `npm run typecheck`
-- **Lint:** None configured yet (follow existing code style)
+- **Lint:** `npm run guard:lint:src` (ESLint architectural-fitness ring — warn-only on ring rules, fail-closed on errors/config faults; see `docs/architecture/fitness-taxonomy.md`)
 
 ## Architecture
 

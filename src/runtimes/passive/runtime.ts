@@ -5,7 +5,7 @@
 import type { Runtime } from '../types.ts';
 import type { IncomingMessage, RuntimeHealth } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
-import type { ConnectionManager } from '../../transport/connection.ts';
+import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import type { Database } from '../../core/database.ts';
 import { ToolRegistry } from '../../mcp/registry.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
@@ -18,7 +18,7 @@ const log = createChildLogger('passive-runtime');
 
 export class PassiveRuntime implements Runtime {
   private db: Database;
-  private connection: ConnectionManager;
+  private connection: RuntimeConnection;
   private config: { name: string; paths: { stateRoot: string }; socketPath?: string };
   private socketServer: WhatSoupSocketServer | null = null;
   private registry: ToolRegistry;
@@ -26,7 +26,7 @@ export class PassiveRuntime implements Runtime {
 
   constructor(
     db: Database,
-    connection: ConnectionManager,
+    connection: RuntimeConnection,
     config: { name: string; paths: { stateRoot: string }; socketPath?: string },
   ) {
     this.db = db;
