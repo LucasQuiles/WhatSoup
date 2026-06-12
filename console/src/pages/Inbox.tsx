@@ -16,6 +16,7 @@ import ChatList from '../components/ChatList'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
 import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X, CheckCheck } from 'lucide-react'
+import { SearchInput } from '../components/shared/SearchInput.js'
 import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
@@ -262,38 +263,32 @@ export default function Inbox() {
             <div
               className="flex items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-b bg-d2"
             >
-              <div className="relative flex-1">
-                <Search
-                  size={13}
-                  strokeWidth={1.75}
-                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-t5 pointer-events-none"
-                />
-                <input
-                  type="text"
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
-                  placeholder="Search this conversation..."
-                  aria-label="Search messages in this conversation"
-                  className="c-input c-input-search"
-                />
-                {isSearchBusy ? (
-                  <Loader2
-                    size={14}
-                    strokeWidth={1.75}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 animate-spin text-t4"
-                  />
-                ) : isSearchMode ? (
-                  <button
-                    type="button"
-                    onClick={() => setSearchInput('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 c-hover cursor-pointer text-t5 hover:text-t2 p-[var(--sp-1)]"
-                    title="Clear search"
-                    aria-label="Clear search"
-                  >
-                    <X size={14} strokeWidth={1.75} />
-                  </button>
-                ) : null}
-              </div>
+              <SearchInput
+                containerClassName="flex-1"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder="Search this conversation..."
+                aria-label="Search messages in this conversation"
+                endAdornment={
+                  isSearchBusy ? (
+                    <Loader2
+                      size={14}
+                      strokeWidth={1.75}
+                      className="animate-spin text-t4"
+                    />
+                  ) : isSearchMode ? (
+                    <button
+                      type="button"
+                      onClick={() => setSearchInput('')}
+                      className="c-hover cursor-pointer text-t5 hover:text-t2 p-[var(--sp-1)]"
+                      title="Clear search"
+                      aria-label="Clear search"
+                    >
+                      <X size={14} strokeWidth={1.75} />
+                    </button>
+                  ) : null
+                }
+              />
               {isSearchMode && (
                 <span className="c-label whitespace-nowrap">
                   {isSearchBusy ? 'Searching…' : `${searchTotal} result${searchTotal === 1 ? '' : 's'}`}
@@ -415,7 +410,7 @@ export default function Inbox() {
             >
               <textarea
                 ref={textareaRef}
-                className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-body"
+                className="flex-1 text-t2 font-sans placeholder-t5 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-body"
                 rows={1}
                 style={{
                   maxHeight: 'var(--feed-preview-max)',

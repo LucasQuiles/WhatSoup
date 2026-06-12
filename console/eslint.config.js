@@ -709,14 +709,13 @@ export default defineConfig([
 
   // ─────────────────────────────────────────────────────────────────────────
   // Block 2 — Composer carve-out for Group F (focus suppression).
-  // Inbox.tsx and HistoryTab.tsx are the two chat composers that carry the
-  // two known outline-none violations; they are carved out of the focus rule
-  // until their migration wave lands. They still get the full base wall and
+  // HistoryTab.tsx carries the one remaining outline-none violation (the
+  // HistoryTab composer); it is carved out of the focus rule until its
+  // migration wave lands (C-B4-6). It still gets the full base wall and
   // Group S structural selectors.
   // ─────────────────────────────────────────────────────────────────────────
   {
     files: [
-      'src/pages/Inbox.tsx',
       'src/components/line-detail/HistoryTab.tsx',
     ],
     rules: {

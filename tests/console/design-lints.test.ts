@@ -513,7 +513,7 @@ describe('soup/no-brand-regression', () => {
 //   FIXTURE_PATH (pages/__fixture__.tsx)      — base scope, gets S + F + (not M, not P)
 //   LINEDETAIL_PATH (pages/LineDetail.tsx)    — M list: gets S + F + M
 //   PRIMITIVES_FIXTURE_PATH (primitives/__fixture__.tsx) — P scope: gets F + P, NOT S/M
-//   INBOX_PATH (pages/Inbox.tsx)              — carve-out: gets S, NOT F
+//   INBOX_PATH (pages/Inbox.tsx)              — B4 retired carve-out: now gets S + F (full enforcement)
 //   LINEPICKER_PATH (components/LinePicker.tsx) — NOT in M list: no M rules at error
 //
 // All assertions filter severity === 2 (error) to isolate promoted rules.
@@ -606,10 +606,22 @@ describe('promoted-path probes (D6 flip groups)', () => {
       expect(hasError(messages, 'no-focus-suppression')).toBe(true)
     })
 
-    it('no-focus-suppression is silent at Inbox.tsx (composer carve-out)', async () => {
+    it('no-focus-suppression fires at Inbox.tsx (B4 retired the carve-out)', async () => {
+      // B4 removed Inbox.tsx from the Block 2 carve-out list — the composer outline-none
+      // was eliminated, so Inbox now joins the fully-enforced set. Verify the rule is live.
       const messages = await lintErrors(
         'const x = <button className="outline-none px-4 py-2">Click</button>',
         INBOX_PATH
+      )
+      expect(hasError(messages, 'no-focus-suppression')).toBe(true)
+    })
+
+    it('no-focus-suppression is still silent at HistoryTab.tsx (carve-out retained, C-B4-6)', async () => {
+      // HistoryTab.tsx remains in Block 2 — its composer outline-none is the
+      // remaining hit, owned by the form-kit composer-flavor slice (C-B4-6).
+      const messages = await lintErrors(
+        'const x = <button className="outline-none px-4 py-2">Click</button>',
+        resolve(REPO_ROOT, 'console/src/components/line-detail/HistoryTab.tsx')
       )
       expect(hasError(messages, 'no-focus-suppression')).toBe(false)
     })

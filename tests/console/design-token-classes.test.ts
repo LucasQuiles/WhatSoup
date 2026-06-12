@@ -34,7 +34,10 @@ describe('design token component classes', () => {
 
     // C2.3: SoupKitchen migrated to ToolbarSearch primitive; no longer uses c-input c-input-search.
     expect(soupKitchen).toContain('ToolbarSearch')
-    expect(inbox).toContain('c-input c-input-search')
+    // B4: Inbox migrated to shared SearchInput component — the last raw c-input-search
+    // re-roll is gone; Inbox now imports and uses the shared SearchInput producer.
+    expect(inbox).toContain('SearchInput')
+    expect(inbox).not.toContain('c-input c-input-search')
   })
 
   it('uses detail card classes for message bubble hover metadata', () => {
