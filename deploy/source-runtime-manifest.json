@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "scope": "whatsoup-source-runtime",
+  "description": "Critical source entrypoints whose import graphs must be tracked, committed, and clean before deploy/restart. Hashes are from the blessed committed source, never from a dirty working tree.",
+  "entrypoints": [
+    {
+      "path": "src/main.ts",
+      "sha256": "b507b54b2b17e109be1645b148fa28c567d339fa08df4aec80979b75fb8cc1b5",
+      "mustContain": ["startHealthServer", "ConnectionManager"],
+      "importGraph": true
+    },
+    {
+      "path": "src/bootstrap.ts",
+      "sha256": "75fae25e395cf2ecbb73cdb1b17f2473543b3adcfe6d87e39cc92c9405068278",
+      "mustContain": ["bootstrapCommon"],
+      "importGraph": true
+    },
+    {
+      "path": "src/transport/connection.ts",
+      "sha256": "19db1fb76affa0e31c66f78f8749d3221ed27b59f6000d37a53c6199c8d03242",
+      "mustContain": ["decideDisconnectAction", "whatsapp_device_bond_lost"],
+      "importGraph": true
+    },
+    {
+      "path": "src/transport/auth.ts",
+      "sha256": "87ba65f9c4a7888360b6d917d63ac10204291f60dac13f22d5dcf64c9e56ca70",
+      "mustContain": ["useMultiFileAuthState"],
+      "importGraph": true
+    },
+    {
+      "path": "src/transport/auth-bond.ts",
+      "mustContain": ["AuthBondGuard", "restoreLatestIfNeeded"],
+      "importGraph": true
+    },
+    {
+      "path": "src/transport/auth-disconnect-policy.ts",
+      "sha256": "fd94295cd05d2ee5e2c120d88c18457cea9efa579b72e2f015586f73859c52a4",
+      "mustContain": ["decideDisconnectAction"],
+      "importGraph": true
+    },
+    {
+      "path": "src/runtimes/agent/session.ts",
+      "sha256": "9f9ee64ee9923f0431fadab48630f0426de30b05f7d2cfbcd30df50154e0a5c3",
+      "mustContain": ["composeWithExactLineDedup"],
+      "importGraph": true
+    },
+    {
+      "path": "src/runtimes/agent/session-db.ts",
+      "sha256": "aa3936fb7a50b996180bad55f93cdacebbbdc851102b6ecf8f677aa9947861d0",
+      "mustContain": ["getSessionTokenSnapshot"],
+      "importGraph": true
+    },
+    {
+      "path": "src/runtimes/agent/prompt-compose.ts",
+      "sha256": "8edabbbc670aa79a9ae91a806db296f9ea6d32d3d7aaffa07da70f20c0b20f43",
+      "mustContain": ["composeWithExactLineDedup"],
+      "importGraph": true
+    }
+  ]
+}
