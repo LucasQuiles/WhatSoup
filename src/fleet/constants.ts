@@ -10,3 +10,4 @@
  * all of them together.
  */
 export const DEFAULT_FLEET_PORT = 9099;
+export const DEFAULT_INSTANCE_HEALTH_PORT = 9090;

@@ -6,7 +6,7 @@ import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
 import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
 import { DEFAULT_TRANSPORT_ID, isTransportId, type TransportId } from './transport/registry.ts';
-import { DEFAULT_FLEET_PORT } from './fleet/constants.ts';
+import { DEFAULT_FLEET_PORT, DEFAULT_INSTANCE_HEALTH_PORT } from './fleet/constants.ts';
 import { DEFAULT_TWILIO_SMS, DEFAULT_TWILIO_VOICE, type TwilioSmsConfig, type TwilioInboundMode, type TwilioWebhookConfig, type TwilioVoiceConfig } from './transport/twilio/types.ts';
 import { normalizeFallbackEntriesFromAgentOptions } from './core/fallback-chain.ts';
 
@@ -890,7 +890,7 @@ export const config = {
   },
 
   // Health
-  healthPort: (instance?.healthPort as number | undefined) ?? intEnv('HEALTH_PORT', 9090),
+  healthPort: (instance?.healthPort as number | undefined) ?? intEnv('HEALTH_PORT', DEFAULT_INSTANCE_HEALTH_PORT),
 
   // GUI
   gui: (instance?.gui as boolean | undefined) ?? false,
