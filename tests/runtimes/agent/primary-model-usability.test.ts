@@ -111,6 +111,18 @@ describe('probePrimaryModelUsability', () => {
     ).resolves.toMatchObject({ status: 'unknown', reason: 'probe-threw' });
   });
 
+  it('returns unknown when an adapter throws synchronously before returning a promise', async () => {
+    const adapters: PrimaryModelProbeAdapters = {
+      probeApiModelAccess: vi.fn(() => {
+        throw new Error('synchronous adapter failure');
+      }),
+    };
+
+    await expect(
+      probePrimaryModelUsability({ provider: 'openai-api', model: 'primary-model-a' }, adapters),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'probe-threw' });
+  });
+
   it('returns unknown without calling adapters when provider or model is not probeable', async () => {
     const adapters: PrimaryModelProbeAdapters = {
       probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' })),

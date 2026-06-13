@@ -72,7 +72,7 @@ export async function probePrimaryModelUsability(
     if (!adapters.probeBinaryModel) {
       return result(target, model, 'unknown', 'binary-model-probe-unavailable');
     }
-    const probe = await withTimeout(adapters.probeBinaryModel({ provider, model }), timeoutMs);
+    const probe = await withTimeout(() => adapters.probeBinaryModel!({ provider, model }), timeoutMs);
     if (probe === TIMEOUT) return result(target, model, 'timeout');
     if (probe === PROBE_THROW) return result(target, model, 'unknown', 'probe-threw');
     return mapBinaryModelProbe(target, model, probe);
@@ -81,7 +81,7 @@ export async function probePrimaryModelUsability(
   if (provider === 'opencode-cli') {
     const probeModelCatalog = adapters.probeModelCatalog ?? defaultProbeModelCatalog;
     const binary = normalizedModel(target.binary) ?? OPENCODE_BINARY;
-    const probe = await withTimeout(probeModelCatalog(binary, model), timeoutMs);
+    const probe = await withTimeout(() => probeModelCatalog(binary, model), timeoutMs);
     if (probe === TIMEOUT) return result(target, model, 'timeout');
     if (probe === PROBE_THROW) return result(target, model, 'unknown', 'probe-threw');
     return mapCatalogProbe(target, model, probe);
@@ -91,7 +91,7 @@ export async function probePrimaryModelUsability(
     if (!adapters.probeApiModelAccess) {
       return result(target, model, 'unknown', 'api-model-probe-unavailable');
     }
-    const probe = await withTimeout(adapters.probeApiModelAccess({ provider, model }), timeoutMs);
+    const probe = await withTimeout(() => adapters.probeApiModelAccess!({ provider, model }), timeoutMs);
     if (probe === TIMEOUT) return result(target, model, 'timeout');
     if (probe === PROBE_THROW) return result(target, model, 'unknown', 'probe-threw');
     return mapApiModelProbe(target, model, probe);
@@ -181,7 +181,7 @@ function normalizedModel(value: string | null | undefined): string | null {
 }
 
 async function withTimeout<T>(
-  promise: Promise<T>,
+  run: () => Promise<T>,
   timeoutMs: number,
 ): Promise<T | typeof TIMEOUT | typeof PROBE_THROW> {
   if (timeoutMs <= 0) return TIMEOUT;
@@ -193,6 +193,16 @@ async function withTimeout<T>(
       resolve(TIMEOUT);
     }, timeoutMs);
     timer.unref?.();
+
+    let promise: Promise<T>;
+    try {
+      promise = run();
+    } catch {
+      settled = true;
+      clearTimeout(timer);
+      resolve(PROBE_THROW);
+      return;
+    }
 
     promise.then(
       (value) => {
