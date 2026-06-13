@@ -213,6 +213,33 @@ describe('provisionWorkspace', () => {
     expect(opencode).not.toHaveProperty('mcpServers');
   });
 
+  it('writes custom endpoint provider config for opencode-cli sandbox workspaces', () => {
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+    provisionWorkspace({
+      ...makeOpts(workspacePath, instanceCwd),
+      provider: 'opencode-cli',
+      providerConfig: {
+        baseUrl: 'https://api.example.invalid/v1',
+        model: 'model-a',
+        apiKeyService: 'openai',
+      },
+      sendMediaServerPath: '/abs/path/to/send-media-server.ts',
+    });
+
+    const opencode = JSON.parse(readFileSync(join(workspacePath, 'opencode.json'), 'utf8'));
+    expect(opencode.model).toBe('whatsoup-cloud/model-a');
+    expect(opencode.provider['whatsoup-cloud']).toEqual({
+      options: {
+        baseURL: 'https://api.example.invalid/v1',
+        apiKey: '{env:OPENAI_API_KEY}',
+      },
+      models: { 'model-a': {} },
+    });
+    expect(opencode).toHaveProperty('mcp.whatsoup');
+    expect(opencode).toHaveProperty('mcp.send-media');
+  });
+
   it('merges opencode sandbox MCP entries without clobbering existing opencode.json', () => {
     const workspacePath = makeTmp();
     const instanceCwd = makeTmp();

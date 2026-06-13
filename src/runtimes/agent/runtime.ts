@@ -78,7 +78,12 @@ import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
-import { createProviderMcpBridge, writeProviderMcpConfig, writeProviderMcpConfigTarget } from './providers/mcp-bridge.ts';
+import {
+  createProviderMcpBridge,
+  writeProviderMcpConfig,
+  writeProviderMcpConfigTarget,
+  type OpencodeProviderConfig,
+} from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus } from './providers/binary-preflight.ts';
 import {
@@ -2626,18 +2631,7 @@ export class AgentRuntime implements Runtime {
           }
         };
 
-        const primaryOpencodeProviderConfig =
-          this.agentProvider === 'opencode-cli' && this.agentProviderConfig
-            ? {
-                baseUrl: typeof this.agentProviderConfig['baseUrl'] === 'string'
-                  ? (this.agentProviderConfig['baseUrl'] as string)
-                  : undefined,
-                model: this.model,
-                apiKeyService: typeof this.agentProviderConfig['apiKeyService'] === 'string'
-                  ? (this.agentProviderConfig['apiKeyService'] as string)
-                  : undefined,
-              }
-            : undefined;
+        const primaryOpencodeProviderConfig = this.primaryOpencodeProviderConfig();
         writeFor(this.agentProvider, primaryOpencodeProviderConfig);
         for (const entry of this.agentFallbacks) {
           if (entry.provider === this.agentProvider) continue;
@@ -6047,6 +6041,24 @@ export class AgentRuntime implements Runtime {
     return this.fallbackProviderConfigFor(fallbackEntry.provider) ?? this.agentProviderConfig;
   }
 
+  private primaryOpencodeProviderConfig(): OpencodeProviderConfig | undefined {
+    if (this.agentProvider !== 'opencode-cli' || !this.agentProviderConfig) return undefined;
+
+    const providerConfig: OpencodeProviderConfig = {};
+    const baseUrl = this.agentProviderConfig['baseUrl'];
+    if (typeof baseUrl === 'string') {
+      providerConfig.baseUrl = baseUrl;
+    }
+    if (this.model) {
+      providerConfig.model = this.model;
+    }
+    const apiKeyService = this.agentProviderConfig['apiKeyService'];
+    if (typeof apiKeyService === 'string') {
+      providerConfig.apiKeyService = apiKeyService;
+    }
+    return providerConfig;
+  }
+
   /**
    * Whether the keyring holds an API key for the configured fallback target.
    *
@@ -7040,10 +7052,15 @@ export class AgentRuntime implements Runtime {
         const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
         const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
         const chatScopedToolNames = this.registry.getChatScopedToolNames();
+        const providerConfig =
+          this.effectiveProvider === 'opencode-cli' && this.effectiveFallbackEntry === null
+            ? this.primaryOpencodeProviderConfig()
+            : undefined;
         const socketPath = provisionWorkspace({
           workspacePath,
           instanceCwd: this.cwd ?? homedir(),
           provider: this.effectiveProvider,
+          providerConfig,
           sandbox: this.sandbox!,
           hookPath,
           pollLintHookPath,
