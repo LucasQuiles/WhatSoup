@@ -93,6 +93,16 @@ The deploy contract is:
 7. Verify every active runtime path against the manifest, then check outbox/writefail
    queues and service restart counters.
 
+Current stability evidence, refreshed read-only on 2026-06-13 14:03 ET:
+
+- All probed active runtime paths matched `8/8` host-local runtime manifest hashes.
+- `outbox` and `writefail` were empty on every probed host.
+- The hub collector, dispatcher, q-loop, and health timer were active; `processing`,
+  `dead-letter`, and `quarantine` were empty.
+- Dev and relay hosts had the expected health or dispatcher launchd jobs loaded.
+- Non-Git runtime trees still report `git_head_sha: not_a_git_repository`; that is
+  expected for stream-synced non-Git trees with a source SHA in the host-local manifest.
+
 ## Manual daily-health validation
 
 Do not wait for the randomized systemd timer when validating a deploy or close-out fix.
