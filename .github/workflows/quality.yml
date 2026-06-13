@@ -110,6 +110,12 @@ jobs:
       - name: Node pin consistency guard
         run: npm run guard:node-pin-consistency
 
+      - name: Source runtime drift guard
+        run: npm run guard:source-runtime-drift
+
+      - name: Simulation matrix guard
+        run: npm run guard:bot-errors-simulation-matrix
+
       - name: Fail-closed gate guard
         run: npm run guard:fail-closed-gate
 
