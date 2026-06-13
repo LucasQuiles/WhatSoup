@@ -72,7 +72,7 @@ export function parseGeminiEvent(line: string): AgentEvent | null {
 
   if (eventType === 'result') {
     const status = String(parsed['status'] ?? '').trim().toLowerCase();
-    const { inputTokens, outputTokens } = extractTokenCounts(parsed['stats']);
+    const tokens = extractTokenCounts(parsed['stats']);
     const text =
       status === '' || status === 'success' || status === 'ok'
         ? null
@@ -80,7 +80,12 @@ export function parseGeminiEvent(line: string): AgentEvent | null {
           extractMessage(parsed['message']) ??
           (status ? `Gemini CLI result status: ${status}` : null);
 
-    return { type: 'result', text, inputTokens, outputTokens };
+    return {
+      type: 'result',
+      text,
+      ...(text !== null ? { isError: true } : {}),
+      ...tokens,
+    };
   }
 
   if (eventType === 'error') {
@@ -91,6 +96,7 @@ export function parseGeminiEvent(line: string): AgentEvent | null {
         extractMessage(parsed['message']) ??
         stringifyValue(parsed) ??
         'Gemini CLI error',
+      isError: true,
     };
   }
 

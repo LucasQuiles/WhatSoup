@@ -170,7 +170,7 @@ function handleNotification(method: string, params: JsonObject): AgentEvent {
         const error = isRecord(turn) && isRecord(turn['error'])
           ? String((turn['error'] as JsonObject)['message'] ?? 'Codex turn failed')
           : 'Codex turn failed';
-        return { type: 'result', text: error };
+        return { type: 'result', text: error, isError: true };
       }
 
       return { type: 'result', text: null };
@@ -276,7 +276,7 @@ export function parseCodexEvent(line: string): AgentEvent | null {
   if (id !== undefined && parsed['error'] !== undefined) {
     const error = parsed['error'];
     const errorMsg = isRecord(error) ? String(error['message'] ?? 'Unknown error') : String(error);
-    return { type: 'result', text: `Codex error: ${errorMsg}` };
+    return { type: 'result', text: `Codex error: ${errorMsg}`, isError: true };
   }
 
   return { type: 'unknown', raw: parsed };
@@ -393,6 +393,7 @@ function parseLegacyExecEvent(parsed: JsonObject): AgentEvent {
         extractMessage(parsed['details']) ??
         extractMessage(parsed['reason']) ??
         'Codex CLI turn failed',
+      isError: true,
       inputTokens,
       outputTokens,
     };

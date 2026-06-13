@@ -7,7 +7,7 @@ export type AgentEvent =
   | { type: 'assistant_text'; text: string; itemId?: string; complete?: boolean }
   | { type: 'tool_use'; toolName: string; toolId: string; toolInput: Record<string, unknown> }
   | { type: 'tool_result'; isError: boolean; toolId: string; content: string }
-  | { type: 'result'; text: string | null; inputTokens?: number; outputTokens?: number; costUsd?: number }
+  | { type: 'result'; text: string | null; isError?: boolean; inputTokens?: number; outputTokens?: number; costUsd?: number }
   | { type: 'token_usage'; inputTokens?: number; outputTokens?: number }
   | { type: 'ignored' }
   | { type: 'unknown'; raw: unknown }
@@ -101,7 +101,7 @@ export function parseEvent(line: string): AgentEvent | null {
       // before any assistant/result event. Surface them as a terminal result so
       // the WhatsApp runtime does not silently drop the turn.
       if (/^Unknown skill:\s+/i.test(trimmed)) {
-        return { type: 'result', text: trimmed };
+        return { type: 'result', text: trimmed, isError: true };
       }
     }
     const contentArr = messageObj['content'];
@@ -154,20 +154,20 @@ export function parseEvent(line: string): AgentEvent | null {
     // Error result: extract the error message text.
     const content = event['content'];
     if (typeof content === 'string') {
-      return { type: 'result', text: content || null, inputTokens, outputTokens };
+      return { type: 'result', text: content || null, isError: true, inputTokens, outputTokens };
     }
     if (Array.isArray(content)) {
       for (const block of content) {
         if (typeof block !== 'object' || block === null) continue;
         const b = block as Record<string, unknown>;
         if (b['type'] === 'text') {
-          return { type: 'result', text: String(b['text'] ?? '') || null, inputTokens, outputTokens };
+          return { type: 'result', text: String(b['text'] ?? '') || null, isError: true, inputTokens, outputTokens };
         }
       }
     }
     const resultField = event['result'];
     if (typeof resultField === 'string') {
-      return { type: 'result', text: resultField || null, inputTokens, outputTokens };
+      return { type: 'result', text: resultField || null, isError: true, inputTokens, outputTokens };
     }
     return { type: 'result', text: null, inputTokens, outputTokens };
   }

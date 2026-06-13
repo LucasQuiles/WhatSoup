@@ -158,6 +158,7 @@ describe('Gemini ACP parser', () => {
       ).toEqual({
         type: 'result',
         text: 'Gemini ACP error (code -32602): invalid params',
+        isError: true,
       });
     });
 

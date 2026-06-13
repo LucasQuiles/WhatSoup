@@ -68,6 +68,7 @@ describe('Codex turn lifecycle — parser level', () => {
     expect(event).toEqual({
       type: 'result',
       text: 'out of context',
+      isError: true,
     });
   });
 
