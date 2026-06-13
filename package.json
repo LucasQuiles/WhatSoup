@@ -49,6 +49,7 @@
     "guard:boundaries": "bash scripts/run-with-pinned-node.sh scripts/import-boundary-check.ts",
     "guard:ring-boundaries": "npm run guard:boundaries",
     "guard:lint:src": "bash scripts/run-with-pinned-node.sh scripts/eslint-fitness-check.ts",
+    "guard:coverage-headroom": "bash scripts/run-with-pinned-node.sh scripts/check-coverage-headroom.ts",
     "guard:restart-preflight": "bash deploy/preflight-check.sh .",
     "migrate-memory-config": "bash scripts/run-with-pinned-node.sh scripts/migrate-memory-config.ts",
     "fleet:rotate-token": "bash scripts/run-with-pinned-node.sh scripts/fleet-rotate-token.ts",
