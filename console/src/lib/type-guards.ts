@@ -17,3 +17,13 @@
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+/**
+ * Coerce `unknown` to a plain object record, returning `{}` for any
+ * non-record value (null, primitive, array). Used for safely extracting
+ * fields from untrusted JSON payloads without an explicit null check at
+ * every call site.
+ */
+export function asRecordOrEmpty(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
