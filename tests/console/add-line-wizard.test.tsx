@@ -82,6 +82,17 @@ beforeEach(() => {
   mockUpdateConfig.mockResolvedValue({})
   mockDeleteLine.mockResolvedValue({ deleted: 'test-line' })
   mockCheckExists.mockResolvedValue({ exists: false })
+  // jsdom has no EventSource; LinkStep (mounted when tests advance past
+  // Identity) opens one in an effect, which otherwise raises unhandled
+  // rejections. Inert stub — LinkStep's SSE behavior is pinned by its own
+  // suite (wizard-link-step.test.tsx) with a controllable FakeEventSource.
+  vi.stubGlobal('EventSource', class {
+    onmessage: ((e: MessageEvent) => void) | null = null
+    onerror: ((e: Event) => void) | null = null
+    addEventListener(): void {}
+    removeEventListener(): void {}
+    close(): void {}
+  })
 })
 
 /** Wrapper that manages the open prop for the latched-mount contract (C-B3W4-3). */

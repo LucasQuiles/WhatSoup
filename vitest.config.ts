@@ -30,9 +30,10 @@ export default defineConfig({
   },
   test: {
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
-    // Exclude the browser-mode subtree so jsdom/node runs do not pick it up.
-    // tests/browser/** runs only via vitest.browser.config.ts (npm run test:browser).
-    exclude: ['tests/browser/**'],
+    // Exclude the browser-mode subtrees so jsdom/node runs do not pick them up.
+    // tests/browser/** runs only via vitest.browser.config.ts (npm run test:browser);
+    // tests/browser-motion/** runs only via vitest.browser.motion.config.ts (F-B5-1).
+    exclude: ['tests/browser/**', 'tests/browser-motion/**'],
     testTimeout: 10_000,
     setupFiles: ['./tests/setup/bot-errors-vitest-isolation.ts'],
     coverage: {
