@@ -64,7 +64,7 @@
     "test:tokenomics": "bash scripts/run-tokenomics-pytests.sh",
     "test:drills": "bash tests/drills/bot-errors-failure-drills.sh",
     "coverage": "vitest run --coverage",
-    "coverage:check": "vitest run --coverage",
+    "coverage:check": "npm run strip-types-compat && vitest run --coverage",
     "test:watch": "vitest",
     "guard:bot-errors-simulation-matrix": "bash scripts/run-with-pinned-node.sh scripts/bot-errors-simulation-matrix.ts"
   },

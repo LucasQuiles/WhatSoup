@@ -27,5 +27,7 @@ describe('arch.file-size warning budget', () => {
       (issue) => issue.code === 'max-lines',
     );
     expect(fileSizeWarnings.length).toBeLessThanOrEqual(BUDGET_MAX);
-  });
+    // Full-repo ESLint run regularly exceeds the default 10s under coverage
+    // instrumentation or CI load.
+  }, 120_000);
 });
