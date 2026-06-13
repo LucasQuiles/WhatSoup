@@ -3,7 +3,7 @@
  *
  * Verifies that the per_chat branch details object contains
  * activeSessions (number), lastSessionStatus (string | null),
- * and lastSessionStartedAt (string | null).
+ * lastSessionStartedAt (string | null), and fallback-state fields.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -235,6 +235,7 @@ function expectedFallbackDetails(): Record<string, unknown> {
     fallbackReverts: 0,
     fallbackReplays: 0,
     fallbackWindowCostUsd: 0,
+    primaryModelUsability: null,
     activeFallbackEntry: null,
     fallbackChain: [],
   };
