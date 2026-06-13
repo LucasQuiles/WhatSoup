@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -14,6 +14,26 @@ const repos: string[] = [];
 
 function git(repo: string, args: string[]): void {
   execFileSync('git', args, { cwd: repo, stdio: 'ignore', env: cleanGitEnv() });
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function installGitShowFailureShim(repo: string): void {
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8', env: cleanGitEnv() }).trim();
+  const binDir = join(repo, 'fake-bin');
+  mkdirSync(binDir);
+  const fakeGit = join(binDir, 'git');
+  writeFileSync(fakeGit, `#!/usr/bin/env bash
+if [[ "$1" == "show" && "$2" == ":0:docs/publication-audit.md" ]]; then
+  echo "fatal: simulated object database read failure" >&2
+  exit 128
+fi
+exec ${shellQuote(realGit)} "$@"
+`);
+  chmodSync(fakeGit, 0o755);
+  vi.stubEnv('PATH', `${binDir}:${process.env.PATH ?? ''}`);
 }
 
 afterEach(() => {
@@ -109,6 +129,15 @@ describe('publication guard staged mode', () => {
 
     expect(runPublicationGuard(['--staged'], repo)).toBe(1);
     expect(error.mock.calls.join('\n')).toContain('github-token');
+  });
+
+  it('reports staged audit read errors separately from missing audit rows', () => {
+    const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
+    installGitShowFailureShim(repo);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--staged'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('audit-read-failed');
   });
 
   it('allows shape-preserving synthetic LID fixtures in staged public text', () => {

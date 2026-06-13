@@ -5,7 +5,7 @@
  * test-integrity: source-string-ok
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -124,6 +124,20 @@ function writePrivateJson(path: string, value: unknown) {
   chmodSync(path, 0o600);
 }
 
+function runAtomicWrite(targetPath: string) {
+  return spawnSync('python3', ['-c', `
+import importlib.util
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("bot_errors_collector", "deploy/scripts/bot-errors-collector.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.atomic_write_json(Path(${JSON.stringify(targetPath)}), {"ok": True})
+`], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+  });
+}
+
 function runCollector(fakeSsh: string, mode: 'fail' | 'success') {
   return spawnSync(
     'python3',
@@ -236,6 +250,30 @@ afterEach(() => {
 });
 
 describe('bot-errors-collector', () => {
+  it('asserts the atomic-write parent is private before creating a temp file', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const realParent = join(tmpRoot, 'real-outbox');
+    const linkedParent = join(tmpRoot, 'linked-outbox');
+    mkdirSync(realParent, { recursive: true, mode: 0o700 });
+    symlinkSync(realParent, linkedParent, 'dir');
+
+    const result = runAtomicWrite(join(linkedParent, 'event.json'));
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('refusing to use private directory through symlink');
+    expect(readdirSync(realParent)).toEqual([]);
+  });
+
+  it('creates a missing atomic-write parent with private permissions', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const parent = join(tmpRoot, 'new-outbox');
+    const result = runAtomicWrite(join(parent, 'event.json'));
+
+    expect(result.status).toBe(0);
+    expect(statSync(parent).mode & 0o777).toBe(0o700);
+    expect(JSON.parse(readFileSync(join(parent, 'event.json'), 'utf8'))).toEqual({ ok: true });
+  });
+
   it('isolates an unreachable remote while still relaying a reachable host', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
     const failedRemote = join(tmpRoot, 'remote-failed');

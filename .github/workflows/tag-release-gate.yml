@@ -48,6 +48,10 @@ jobs:
       - name: Repo hygiene release
         run: npm run guard:repo:release-hygiene
 
+      # Tag pushes commonly point at commits already reachable from origin/main,
+      # so this keeps guard:repo:commit-authors wired on tag pushes but cannot
+      # prove a PR-range author scan by itself.
+      # PR and local push gates remain the authoritative non-vacuous author scans.
       - name: Repo commit-authors
         run: npm run guard:repo:commit-authors
 

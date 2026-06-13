@@ -15,8 +15,10 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const packageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { scripts: Record<string, string> };
+const vitestConfig = readFileSync(resolve(repoRoot, 'vitest.config.ts'), 'utf8');
 const qualityWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/quality.yml'), 'utf8');
 const whatsoupGuardWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/whatsoup-guard.yml'), 'utf8');
+const tagReleaseWorkflow = readFileSync(resolve(repoRoot, '.github/workflows/tag-release-gate.yml'), 'utf8');
 const guardPackageJson = JSON.parse(
   readFileSync(resolve(repoRoot, 'tools/whatsoup_guard/package.json'), 'utf8'),
 ) as { scripts: Record<string, string>; devDependencies?: Record<string, string> };
@@ -196,6 +198,10 @@ describe('verify chain composition (package.json)', () => {
     expect(chain, 'verify:release script must exist').toBeDefined();
     expect(chain).toMatch(/\bnpm --prefix console run lint\b/);
   });
+
+  it('coverage thresholds are scoped to production source files', () => {
+    expect(vitestConfig).toContain("include: ['src/**/*.ts', 'src/**/*.tsx']");
+  });
 });
 
 describe('quality workflow composition', () => {
@@ -217,5 +223,15 @@ describe('quality workflow composition', () => {
   it('runs the standalone guard package test workflow', () => {
     expect(whatsoupGuardWorkflow).toContain('run: npm test');
     expect(whatsoupGuardWorkflow).not.toContain('npm run coverage:proof');
+  });
+
+  it('documents tag commit-author gate range semantics without changing enforcement', () => {
+    const commentIndex = tagReleaseWorkflow.indexOf('keeps guard:repo:commit-authors wired on tag pushes');
+    const stepIndex = tagReleaseWorkflow.indexOf('name: Repo commit-authors');
+
+    expect(commentIndex).toBeGreaterThanOrEqual(0);
+    expect(stepIndex).toBeGreaterThan(commentIndex);
+    expect(tagReleaseWorkflow).toContain('PR and local push gates remain the authoritative non-vacuous author scans.');
+    expect(tagReleaseWorkflow).toContain('run: npm run guard:repo:commit-authors');
   });
 });
