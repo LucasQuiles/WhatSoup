@@ -60,6 +60,36 @@ export function readStagedAddedLines(cwd: string, filePath: string): string {
   }
 }
 
+/**
+ * Read the content of a file from the staged index (`:0:<path>`), falling back
+ * to the HEAD blob if the file has not been staged, and returning undefined if
+ * neither exists.  Never reads from the working tree.
+ */
+export function readStagedFileContent(cwd: string, filePath: string): string | undefined {
+  // Try staging area first (:0:<path>)
+  try {
+    return execFileSync('git', ['show', `:0:${filePath}`], {
+      cwd,
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+      maxBuffer: 20 * 1024 * 1024,
+    });
+  } catch {
+    // fall through
+  }
+  // Fall back to HEAD blob
+  try {
+    return execFileSync('git', ['show', `HEAD:${filePath}`], {
+      cwd,
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+      maxBuffer: 20 * 1024 * 1024,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 export function isTextCandidate(filePath: string): boolean {
   const normalized = normalizeRepoPath(filePath);
   const baseName = path.basename(normalized);

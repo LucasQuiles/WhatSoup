@@ -11,7 +11,7 @@ evidence visible without turning chat history into the source of truth.
 | GitHub pull requests and issues | Live queue truth | `gh pr list --state open`, `gh issue list --state open` |
 | Work index | Generated index of scoped planning, SDLC, and superpowers artifacts | `npm run guard:work-index` |
 | Current program narrative | Human synthesis over the generated index | `docs/current-program.md` |
-| Artifact sweep dry run | Report-only scan for scattered plans, specs, tasks, beads, and sessions | Operators with the artifact-sweep plugin can invoke its `run-sweep.sh` script; otherwise enumerate the plans directory manually. |
+| Artifact sweep dry run | Report-only scan for scattered plans, specs, tasks, beads, and sessions | Operators with the artifact-sweep plugin can invoke its `run-sweep.sh` script; otherwise run `npm run guard:work-index` and read `docs/work-index.md` — the work index is the planning truth. |
 | Verification gates | Evidence that a change is ready to publish | `npm run verify:push:branch` for branch work; `npm run verify:release` for release work |
 
 Static docs must not be treated as live queue truth. Re-query GitHub for open
