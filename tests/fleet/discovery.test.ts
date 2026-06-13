@@ -509,6 +509,25 @@ describe('FleetDiscovery — auto-refresh lifecycle', () => {
     discovery.stop();
   });
 
+  it('startAutoRefresh is idempotent — a second call is a no-op', () => {
+    vi.useFakeTimers();
+    try {
+      const discovery = new FleetDiscovery(configRoot);
+      const scanSpy = vi.spyOn(discovery, 'scan');
+
+      discovery.startAutoRefresh();
+      discovery.startAutoRefresh();
+      expect(scanSpy).toHaveBeenCalledTimes(1); // one immediate scan, not two
+
+      vi.advanceTimersByTime(60_000);
+      expect(scanSpy).toHaveBeenCalledTimes(2); // one interval tick, not two
+
+      discovery.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stop is safe to call multiple times', () => {
     const discovery = new FleetDiscovery(configRoot);
     expect(() => {
