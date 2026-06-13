@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PassThrough } from 'node:stream';
-import { vi } from 'vitest';
+import { vi, type Mock } from 'vitest';
 
 export interface MockReqOptions {
   body?: string;
@@ -21,11 +21,11 @@ type DeepPartial<T> = {
 
 export interface CommonRouteDeps {
   discovery: {
-    getInstance: ReturnType<typeof vi.fn>;
-    getInstances: ReturnType<typeof vi.fn>;
+    getInstance: Mock<(name: string) => unknown | undefined>;
+    getInstances: Mock<() => Map<string, unknown>>;
   };
   realtime: {
-    publish: ReturnType<typeof vi.fn>;
+    publish: Mock<(...args: unknown[]) => unknown>;
   };
   serviceManager: ReturnType<typeof mockServiceManager>;
 }
@@ -86,10 +86,10 @@ export function makeDeps<T extends object>(overrides: DeepPartial<T>): CommonRou
 export function makeDeps<T extends object>(overrides: DeepPartial<T> = {}): CommonRouteDeps & T {
   const base: CommonRouteDeps = {
     discovery: {
-      getInstance: vi.fn(() => undefined),
-      getInstances: vi.fn(() => new Map()),
+      getInstance: vi.fn<(name: string) => unknown | undefined>(() => undefined),
+      getInstances: vi.fn<() => Map<string, unknown>>(() => new Map()),
     },
-    realtime: { publish: vi.fn() },
+    realtime: { publish: vi.fn<(...args: unknown[]) => unknown>() },
     serviceManager: mockServiceManager(),
   };
   const typedOverrides = overrides as DeepPartial<CommonRouteDeps>;

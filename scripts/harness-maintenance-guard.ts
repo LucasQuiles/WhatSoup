@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { isRecord } from '../src/lib/type-guards.ts';
 
 export const DEFAULT_COOLDOWN_MINUTES = 7 * 24 * 60;
 export const DEFAULT_NPMRC_MIN_RELEASE_AGE_DAYS = 7;
@@ -41,14 +42,12 @@ export interface ManifestValidation {
   tier1Harnesses: string[];
   probes: string[];
   floatingReferences: FloatingReference[];
+  allowedFloatingReferences: FloatingReference[];
+  unexpectedFloatingReferences: FloatingReference[];
   warnings: string[];
 }
 
 type JsonRecord = Record<string, unknown>;
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function asRecord(value: unknown, label: string): JsonRecord {
   if (!isRecord(value)) throw new Error(`${label} must be an object`);
@@ -175,10 +174,19 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
   const floatingReferences: FloatingReference[] = [];
   walkForFloatingReferences(payload, '', floatingReferences);
 
+  // Paths matching ^tier1\[\d+\]\.(update|rollback) are intentional update/rollback
+  // channels (e.g. "claude install latest") and are expected to contain floating refs.
+  const allowedFloatingPattern = /^tier1\[\d+\]\.(update|rollback)(?:[.\[]|$)/;
+  const allowedFloatingReferences: typeof floatingReferences = [];
+  const unexpectedFloatingReferences: typeof floatingReferences = [];
+  for (const ref of floatingReferences) {
+    (allowedFloatingPattern.test(ref.path) ? allowedFloatingReferences : unexpectedFloatingReferences).push(ref);
+  }
+
   const warnings: string[] = [];
-  if (floatingReferences.length > 0) {
+  if (allowedFloatingReferences.length > 0) {
     warnings.push(
-      `${floatingReferences.length} floating latest reference(s) will be reported by maintenance checks`,
+      `${allowedFloatingReferences.length} allowed floating latest reference(s) in tier1 update/rollback channels`,
     );
   }
 
@@ -190,6 +198,8 @@ export function validateManifestPayload(payload: unknown): ManifestValidation {
     tier1Harnesses,
     probes,
     floatingReferences,
+    allowedFloatingReferences,
+    unexpectedFloatingReferences,
     warnings,
   };
 }
@@ -369,7 +379,11 @@ export function run(argv: string[] = process.argv.slice(2)): unknown {
       `harness-maintenance manifest ok: tier1=${result.tier1Harnesses.join(',')} probes=${result.probes.join(',')}`,
     );
     for (const warning of result.warnings) console.warn(warning);
+    for (const ref of result.unexpectedFloatingReferences) {
+      console.error(`unexpected floating latest reference at ${ref.path}: ${ref.value}`);
+    }
   }
+  if (result.unexpectedFloatingReferences.length > 0) process.exitCode = 2;
   return result;
 }
 

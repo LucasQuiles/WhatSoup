@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
+import type { SessionContext } from '../../../../src/mcp/types.ts';
 import { ToolRegistry } from '../../../../src/mcp/registry.ts';
 import { OpenAIApiProvider } from '../../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
@@ -195,7 +196,7 @@ describe('HTTP provider MCP bridge', () => {
 
   it('openai-api blocks malformed MCP tool arguments without executing the tool', async () => {
     const registry = new ToolRegistry();
-    const handler = vi.fn(async () => ({ echoed: 'must not execute' }));
+    const handler = vi.fn<(params: Record<string, unknown>, session: SessionContext) => Promise<unknown>>(async () => ({ echoed: 'must not execute' }));
 
     registry.register({
       name: 'echo_tool',
@@ -287,7 +288,7 @@ describe('HTTP provider MCP bridge', () => {
 
   it('openai-api blocks non-object MCP tool arguments without executing the tool', async () => {
     const registry = new ToolRegistry();
-    const handler = vi.fn(async () => ({ echoed: 'must not execute' }));
+    const handler = vi.fn<(params: Record<string, unknown>, session: SessionContext) => Promise<unknown>>(async () => ({ echoed: 'must not execute' }));
 
     registry.register({
       name: 'echo_tool',
@@ -905,7 +906,7 @@ describe('anthropic malformed tool input blocking', () => {
 
   async function runTurnWithInputJson(
     provider: AnthropicApiProvider,
-    handler: ReturnType<typeof vi.fn>,
+    handler: (params: Record<string, unknown>, session: SessionContext) => Promise<unknown>,
     inputJson: string,
   ): Promise<void> {
     const registry = new ToolRegistry();
@@ -977,7 +978,7 @@ describe('anthropic malformed tool input blocking', () => {
   }
 
   it('blocks malformed tool input JSON without executing the tool (openai parity)', async () => {
-    const handler = vi.fn(async () => ({ echoed: 'must not execute' }));
+    const handler = vi.fn<(params: Record<string, unknown>, session: SessionContext) => Promise<unknown>>(async () => ({ echoed: 'must not execute' }));
     const provider = new AnthropicApiProvider();
 
     await runTurnWithInputJson(provider, handler, '{"value":');
@@ -1004,7 +1005,7 @@ describe('anthropic malformed tool input blocking', () => {
   });
 
   it('blocks non-object tool input JSON without executing the tool', async () => {
-    const handler = vi.fn(async () => ({ echoed: 'must not execute' }));
+    const handler = vi.fn<(params: Record<string, unknown>, session: SessionContext) => Promise<unknown>>(async () => ({ echoed: 'must not execute' }));
     const provider = new AnthropicApiProvider();
 
     await runTurnWithInputJson(provider, handler, '[1,2]');

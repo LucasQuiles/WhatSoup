@@ -116,6 +116,9 @@ jobs:
       - name: Simulation matrix guard
         run: npm run guard:bot-errors-simulation-matrix
 
+      - name: Harness maintenance manifest guard
+        run: npm run guard:harness-maintenance
+
       - name: Fail-closed gate guard
         run: npm run guard:fail-closed-gate
 

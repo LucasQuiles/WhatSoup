@@ -1,24 +1,28 @@
 import { EventEmitter } from 'node:events';
-import { vi } from 'vitest';
+import { vi, type Mock } from 'vitest';
 
 type ExecFileCallback = (error: Error | null, stdout: string, stderr: string) => void;
+type MockChild = Omit<EventEmitter, 'on'> & {
+  on: Mock<(event: string, listener: (...args: unknown[]) => void) => MockChild>;
+  unref: Mock<() => MockChild>;
+  stdout: EventEmitter;
+  stderr: EventEmitter;
+  pid: number;
+  kill: Mock<(signal?: string) => boolean>;
+};
 
-export function mockChildProcess() {
-  const child = new EventEmitter() as EventEmitter & {
-    on: ReturnType<typeof vi.fn>;
-    unref: ReturnType<typeof vi.fn>;
-    stdout: EventEmitter;
-    stderr: EventEmitter;
-    pid: number;
-    kill: ReturnType<typeof vi.fn>;
-  };
-  const on = child.on.bind(child);
-  child.on = vi.fn((event: string, listener: (...args: unknown[]) => void) => on(event, listener));
-  child.unref = vi.fn(() => child);
+export function mockChildProcess(): MockChild {
+  const child = new EventEmitter() as unknown as MockChild;
+  const on = EventEmitter.prototype.on.bind(child as unknown as EventEmitter);
+  child.on = vi.fn<(event: string, listener: (...args: unknown[]) => void) => MockChild>((event, listener) => {
+    on(event, listener);
+    return child;
+  });
+  child.unref = vi.fn<() => MockChild>(() => child);
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.pid = 12345;
-  child.kill = vi.fn(() => true);
+  child.kill = vi.fn<(signal?: string) => boolean>(() => true);
   return child;
 }
 
