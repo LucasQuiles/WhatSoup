@@ -67,7 +67,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-channel-specific-copy | proposed | global-error | P4/G7 | flags generic visible "WhatsApp" copy after the multi-channel positioning lock; protocol/runtime prompts stay allowlisted |
 | soup/protected-identifiers | scoped-error | global-error | P1 | cheap, zero current violations — start strict |
 | soup/no-raw-button | scoped-error (M list) | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
-| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate: 31 total = 31 consumer-migration + 0 primitive self-hits; element split 22 inputs / 2 selects / 7 textareas |
+| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate compares live shadow ESLint output to generated `console/design-raw-form-control-inventory.json`; current generated manifest is 31 total = 31 consumer-migration + 0 primitive self-hits |
 | soup/no-adhoc-modal | scoped-error (M list) | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
 | soup/no-legacy-tokens | scoped-error (primitives tier) | global-error | P2+ complete | enabled only after alias layer + primitives land |
 | soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap |
@@ -219,16 +219,19 @@ cannot express the check).
   scope like soup/no-raw-button. The census is mechanical through
   `npm --prefix console run design:raw-form-control-inventory`, which derives findings from
   `console/eslint.config.shadow.mjs` JSON output and classifies each hit as either
-  consumer-migration or exemption-movement.
+  consumer-migration or exemption-movement. The package script compares the live scan to
+  `console/design-raw-form-control-inventory.json`; packets update that generated inventory with
+  `npm --prefix console run design:raw-form-control-inventory -- --update`, never with copied
+  package-script counts.
 - **Scope/exemptions:** `components/primitives/**` and the form-kit module exempt; `type="file"`
   sites (`console/src/components/wizard/ConfigStep.tsx:437,753`) get a named waiver until
   a FileInput primitive is specced (none planned for v3.0).
 - **Violation / valid:** bare `<select className="c-input …">`
   (`console/src/components/line-detail/ConfigEditDialog.tsx:199-205`) → `<SelectInput …>`.
-- **FP strategy:** directory scoping plus the deterministic inventory gate. Current baseline is
-  exactly 31 consumer hits. D4.2 intentionally cleared the former 5 form-kit self-hits by moving the
-  canonical primitive under `components/primitives/**`; remaining count movement must be classified
-  as exemption-movement vs consumer-migration before any baseline ratchet.
+- **FP strategy:** directory scoping plus the deterministic inventory gate. Current generated
+  manifest is exactly 31 consumer hits. D4.2 intentionally cleared the former 5 form-kit self-hits
+  by moving the canonical primitive under `components/primitives/**`; remaining count movement must
+  be classified as exemption-movement vs consumer-migration before any inventory or baseline ratchet.
 - **Autofix:** no (prop surfaces differ). **Phase:** P2. **Entry:** shadow.
 
 ### soup/no-adhoc-modal

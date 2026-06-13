@@ -1,0 +1,545 @@
+{
+  "schema_version": 2,
+  "source_of_truth": {
+    "eslint_config": "console/eslint.config.shadow.mjs",
+    "eslint_command": [
+      "eslint",
+      ".",
+      "-c",
+      "eslint.config.shadow.mjs",
+      "--format",
+      "json"
+    ],
+    "primitive_exemption_glob": "**/components/primitives/**",
+    "primitive_self_module": "console/src/components/primitives/FormControl.tsx",
+    "rule_tag": "soup/no-raw-form-control",
+    "shadow_baseline": "console/lint-shadow-baseline.json"
+  },
+  "classification_model": {
+    "consumer_migration": "Raw form-control finding outside the transitional form-kit self module.",
+    "exemption_movement": "Raw form-control finding in the transitional form-kit self module; only clears by moving the canonical primitive under components/primitives/**."
+  },
+  "totals": {
+    "by_classification": {
+      "consumer_migration": 31
+    },
+    "by_consumer_group": {
+      "line_detail_and_modals": 17,
+      "pages": 1,
+      "shared_components": 1,
+      "standalone_components": 4,
+      "wizard_consumers": 8
+    },
+    "by_element": {
+      "input": 22,
+      "select": 2,
+      "textarea": 7
+    },
+    "files": 14,
+    "total": 31
+  },
+  "by_file": [
+    {
+      "by_element": {
+        "input": 4,
+        "select": 1,
+        "textarea": 2
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "line_detail_and_modals",
+      "file": "console/src/components/line-detail/ConfigEditDialog.tsx",
+      "lines": [
+        161,
+        177,
+        205,
+        232,
+        254,
+        269,
+        280
+      ],
+      "total": 7
+    },
+    {
+      "by_element": {
+        "input": 1
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "line_detail_and_modals",
+      "file": "console/src/components/line-detail/CreateGroupModal.tsx",
+      "lines": [
+        89
+      ],
+      "total": 1
+    },
+    {
+      "by_element": {
+        "input": 1,
+        "select": 1,
+        "textarea": 1
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "line_detail_and_modals",
+      "file": "console/src/components/line-detail/GroupDetailModal.tsx",
+      "lines": [
+        165,
+        183,
+        700
+      ],
+      "total": 3
+    },
+    {
+      "by_element": {
+        "textarea": 1
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "line_detail_and_modals",
+      "file": "console/src/components/line-detail/HistoryTab.tsx",
+      "lines": [
+        207
+      ],
+      "total": 1
+    },
+    {
+      "by_element": {
+        "input": 3,
+        "textarea": 2
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "line_detail_and_modals",
+      "file": "console/src/components/line-detail/ScheduleComposerModal.tsx",
+      "lines": [
+        248,
+        266,
+        282,
+        302,
+        339
+      ],
+      "total": 5
+    },
+    {
+      "by_element": {
+        "input": 1
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "standalone_components",
+      "file": "console/src/components/SaveContactDialog.tsx",
+      "lines": [
+        69
+      ],
+      "total": 1
+    },
+    {
+      "by_element": {
+        "input": 1
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "shared_components",
+      "file": "console/src/components/shared/SearchInput.tsx",
+      "lines": [
+        17
+      ],
+      "total": 1
+    },
+    {
+      "by_element": {
+        "input": 1
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "standalone_components",
+      "file": "console/src/components/TagInput.tsx",
+      "lines": [
+        89
+      ],
+      "total": 1
+    },
+    {
+      "by_element": {
+        "input": 1
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "standalone_components",
+      "file": "console/src/components/UnlockScreen.tsx",
+      "lines": [
+        39
+      ],
+      "total": 1
+    },
+    {
+      "by_element": {
+        "input": 1
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "standalone_components",
+      "file": "console/src/components/UpdateModal.tsx",
+      "lines": [
+        421
+      ],
+      "total": 1
+    },
+    {
+      "by_element": {
+        "input": 3
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "wizard_consumers",
+      "file": "console/src/components/wizard/ConfigStep.tsx",
+      "lines": [
+        436,
+        692,
+        752
+      ],
+      "total": 3
+    },
+    {
+      "by_element": {
+        "input": 2
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "wizard_consumers",
+      "file": "console/src/components/wizard/IdentityStep.tsx",
+      "lines": [
+        116,
+        154
+      ],
+      "total": 2
+    },
+    {
+      "by_element": {
+        "input": 3
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "wizard_consumers",
+      "file": "console/src/components/wizard/ModelAuthStep.tsx",
+      "lines": [
+        162,
+        263,
+        273
+      ],
+      "total": 3
+    },
+    {
+      "by_element": {
+        "textarea": 1
+      },
+      "classification": "consumer_migration",
+      "consumer_group": "pages",
+      "file": "console/src/pages/Inbox.tsx",
+      "lines": [
+        415
+      ],
+      "total": 1
+    }
+  ],
+  "hits": [
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "line_detail_and_modals",
+      "element": "input",
+      "file": "console/src/components/line-detail/ConfigEditDialog.tsx",
+      "line": 161,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 9,
+      "consumer_group": "line_detail_and_modals",
+      "element": "input",
+      "file": "console/src/components/line-detail/ConfigEditDialog.tsx",
+      "line": 177,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 9,
+      "consumer_group": "line_detail_and_modals",
+      "element": "textarea",
+      "file": "console/src/components/line-detail/ConfigEditDialog.tsx",
+      "line": 205,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<textarea"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "line_detail_and_modals",
+      "element": "select",
+      "file": "console/src/components/line-detail/ConfigEditDialog.tsx",
+      "line": 232,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<select"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 13,
+      "consumer_group": "line_detail_and_modals",
+      "element": "input",
+      "file": "console/src/components/line-detail/ConfigEditDialog.tsx",
+      "line": 254,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 9,
+      "consumer_group": "line_detail_and_modals",
+      "element": "textarea",
+      "file": "console/src/components/line-detail/ConfigEditDialog.tsx",
+      "line": 269,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<textarea"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 7,
+      "consumer_group": "line_detail_and_modals",
+      "element": "input",
+      "file": "console/src/components/line-detail/ConfigEditDialog.tsx",
+      "line": 280,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "line_detail_and_modals",
+      "element": "input",
+      "file": "console/src/components/line-detail/CreateGroupModal.tsx",
+      "line": 89,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "line_detail_and_modals",
+      "element": "input",
+      "file": "console/src/components/line-detail/GroupDetailModal.tsx",
+      "line": 165,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "line_detail_and_modals",
+      "element": "textarea",
+      "file": "console/src/components/line-detail/GroupDetailModal.tsx",
+      "line": 183,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<textarea"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "line_detail_and_modals",
+      "element": "select",
+      "file": "console/src/components/line-detail/GroupDetailModal.tsx",
+      "line": 700,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<select"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 9,
+      "consumer_group": "line_detail_and_modals",
+      "element": "textarea",
+      "file": "console/src/components/line-detail/HistoryTab.tsx",
+      "line": 207,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<textarea"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 13,
+      "consumer_group": "line_detail_and_modals",
+      "element": "textarea",
+      "file": "console/src/components/line-detail/ScheduleComposerModal.tsx",
+      "line": 248,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<textarea"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 15,
+      "consumer_group": "line_detail_and_modals",
+      "element": "input",
+      "file": "console/src/components/line-detail/ScheduleComposerModal.tsx",
+      "line": 266,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 15,
+      "consumer_group": "line_detail_and_modals",
+      "element": "textarea",
+      "file": "console/src/components/line-detail/ScheduleComposerModal.tsx",
+      "line": 282,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<textarea"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "line_detail_and_modals",
+      "element": "input",
+      "file": "console/src/components/line-detail/ScheduleComposerModal.tsx",
+      "line": 302,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 15,
+      "consumer_group": "line_detail_and_modals",
+      "element": "input",
+      "file": "console/src/components/line-detail/ScheduleComposerModal.tsx",
+      "line": 339,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "standalone_components",
+      "element": "input",
+      "file": "console/src/components/SaveContactDialog.tsx",
+      "line": 69,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 7,
+      "consumer_group": "shared_components",
+      "element": "input",
+      "file": "console/src/components/shared/SearchInput.tsx",
+      "line": 17,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 7,
+      "consumer_group": "standalone_components",
+      "element": "input",
+      "file": "console/src/components/TagInput.tsx",
+      "line": 89,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 9,
+      "consumer_group": "standalone_components",
+      "element": "input",
+      "file": "console/src/components/UnlockScreen.tsx",
+      "line": 39,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 21,
+      "consumer_group": "standalone_components",
+      "element": "input",
+      "file": "console/src/components/UpdateModal.tsx",
+      "line": 421,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 15,
+      "consumer_group": "wizard_consumers",
+      "element": "input",
+      "file": "console/src/components/wizard/ConfigStep.tsx",
+      "line": 436,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 25,
+      "consumer_group": "wizard_consumers",
+      "element": "input",
+      "file": "console/src/components/wizard/ConfigStep.tsx",
+      "line": 692,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 19,
+      "consumer_group": "wizard_consumers",
+      "element": "input",
+      "file": "console/src/components/wizard/ConfigStep.tsx",
+      "line": 752,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "wizard_consumers",
+      "element": "input",
+      "file": "console/src/components/wizard/IdentityStep.tsx",
+      "line": 116,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 9,
+      "consumer_group": "wizard_consumers",
+      "element": "input",
+      "file": "console/src/components/wizard/IdentityStep.tsx",
+      "line": 154,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 11,
+      "consumer_group": "wizard_consumers",
+      "element": "input",
+      "file": "console/src/components/wizard/ModelAuthStep.tsx",
+      "line": 162,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 15,
+      "consumer_group": "wizard_consumers",
+      "element": "input",
+      "file": "console/src/components/wizard/ModelAuthStep.tsx",
+      "line": 263,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 15,
+      "consumer_group": "wizard_consumers",
+      "element": "input",
+      "file": "console/src/components/wizard/ModelAuthStep.tsx",
+      "line": 273,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<input"
+    },
+    {
+      "classification": "consumer_migration",
+      "column": 15,
+      "consumer_group": "pages",
+      "element": "textarea",
+      "file": "console/src/pages/Inbox.tsx",
+      "line": 415,
+      "rule": "soup/no-raw-form-control",
+      "snippet": "<textarea"
+    }
+  ]
+}

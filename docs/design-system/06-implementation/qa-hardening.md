@@ -694,8 +694,20 @@ counts. It emits deterministic JSON with no timestamps and records:
 The current enforced inventory is 31 total findings: 31 consumer migrations and 0 primitive
 self-hits, with an element split of 22 inputs, 2 selects, and 7 textareas. The former 5
 transitional form-kit self-hits cleared only through the D4.2 primitive promotion to
-`console/src/components/primitives/FormControl.tsx`. The package script runs with explicit expected
-counts and `--fail-on-mismatch`, and `verify:console-design` includes it after
+`console/src/components/primitives/FormControl.tsx`.
+
+The current inventory baseline is the generated file
+`console/design-raw-form-control-inventory.json`. The package script does not carry manual expected
+counts; it compares the live mechanical scan to that generated manifest. When a packet legitimately
+changes the inventory, the update command is:
+
+```bash
+npm --prefix console run design:raw-form-control-inventory -- --update
+```
+
+The generated inventory update belongs in the same packet as the source/rule change that caused the
+movement, with the same exemption-vs-migration classification used for the shadow and burndown
+ratchets. `verify:console-design` includes the compare-mode inventory gate after
 `lint:shadow:baseline`.
 
 This gate prevents biased or stale raw-form counts. It does not prove a migration is correct, does

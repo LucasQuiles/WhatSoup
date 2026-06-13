@@ -58,7 +58,7 @@ function makeFixture(files: Record<string, string>, hits: EslintHit[]) {
 function runInventory(root: string, eslintJson: string, extraArgs: string[] = []) {
   return spawnSync(
     'node',
-    [SCRIPT, '--root', root, '--eslint-json', eslintJson, ...extraArgs],
+    [SCRIPT, '--root', root, '--eslint-json', eslintJson, '--no-baseline', ...extraArgs],
     {
       encoding: 'utf8',
       maxBuffer: 4 * 1024 * 1024,
@@ -82,6 +82,12 @@ function parsedOutput(result: ReturnType<typeof runInventory>) {
       line: number;
     }>;
     mismatches: Array<{ expected: number; observed: number; path: string }>;
+    baseline?: {
+      errors: Array<{ code: string; file: string }>;
+      mismatches: Array<{ path: string; message: string }>;
+      path: string;
+      update: boolean;
+    };
     totals: {
       by_classification: Record<string, number>;
       by_consumer_group: Record<string, number>;
@@ -226,6 +232,78 @@ export function TextArea() {
         code: 'source-missing',
         file: 'console/src/components/Missing.tsx',
       },
+    ]);
+  });
+
+  it('writes and compares a generated baseline instead of hand-entered package counts', () => {
+    const { eslintJson, root } = makeFixture(
+      {
+        'console/src/components/SaveContactDialog.tsx': 'export function SaveContactDialog() { return <input aria-label="Name" />; }\n',
+      },
+      [{ file: 'console/src/components/SaveContactDialog.tsx', line: 1 }],
+    );
+    const baseline = join(root, 'console', 'design-raw-form-control-inventory.json');
+
+    const update = spawnSync(
+      'node',
+      [SCRIPT, '--root', root, '--eslint-json', eslintJson, '--baseline', baseline, '--update'],
+      { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
+    );
+    const updateOutput = parsedOutput(update as ReturnType<typeof runInventory>);
+
+    expect(update.status).toBe(0);
+    expect(updateOutput.verdict).toBe('PASS');
+
+    const compare = spawnSync(
+      'node',
+      [SCRIPT, '--root', root, '--eslint-json', eslintJson, '--baseline', baseline],
+      { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
+    );
+    const compareOutput = parsedOutput(compare as ReturnType<typeof runInventory>);
+
+    expect(compare.status).toBe(0);
+    expect(compareOutput.verdict).toBe('PASS');
+    expect(compareOutput.baseline?.mismatches).toEqual([]);
+  });
+
+  it('fails when the live mechanical inventory drifts from the generated baseline', () => {
+    const { eslintJson, root } = makeFixture(
+      {
+        'console/src/components/SaveContactDialog.tsx': 'export function SaveContactDialog() { return <input aria-label="Name" />; }\n',
+      },
+      [{ file: 'console/src/components/SaveContactDialog.tsx', line: 1 }],
+    );
+    const baseline = join(root, 'console', 'design-raw-form-control-inventory.json');
+
+    const update = spawnSync(
+      'node',
+      [SCRIPT, '--root', root, '--eslint-json', eslintJson, '--baseline', baseline, '--update'],
+      { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
+    );
+    expect(update.status).toBe(0);
+
+    const drifted = makeFixture(
+      {
+        'console/src/components/SaveContactDialog.tsx': 'export function SaveContactDialog() { return <input aria-label="Name" />; }\n',
+        'console/src/pages/Inbox.tsx': 'export function Inbox() { return <textarea aria-label="Message" />; }\n',
+      },
+      [
+        { file: 'console/src/components/SaveContactDialog.tsx', line: 1 },
+        { file: 'console/src/pages/Inbox.tsx', line: 1 },
+      ],
+    );
+
+    const compare = spawnSync(
+      'node',
+      [SCRIPT, '--root', drifted.root, '--eslint-json', drifted.eslintJson, '--baseline', baseline],
+      { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
+    );
+    const output = parsedOutput(compare as ReturnType<typeof runInventory>);
+
+    expect(compare.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.baseline?.mismatches).toEqual([
+      expect.objectContaining({ path: 'generated_inventory' }),
     ]);
   });
 });

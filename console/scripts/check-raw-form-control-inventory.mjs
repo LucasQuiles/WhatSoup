@@ -2,7 +2,7 @@
 // Deterministic inventory for soup/no-raw-form-control shadow findings.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,6 +12,7 @@ const repoRoot = resolve(consoleRoot, '..');
 
 const RULE_TAG = 'soup/no-raw-form-control';
 const PRIMITIVE_SELF_MODULE = 'console/src/components/primitives/FormControl.tsx';
+const DEFAULT_BASELINE_PATH = resolve(consoleRoot, 'design-raw-form-control-inventory.json');
 const DEFAULT_ESLINT_ARGS = ['eslint', '.', '-c', 'eslint.config.shadow.mjs', '--format', 'json'];
 const ELEMENTS = ['input', 'select', 'textarea'];
 
@@ -21,6 +22,10 @@ function usage() {
 Options:
   --root <path>                  Repository root. Default: current repository root.
   --eslint-json <path>           Read existing ESLint JSON instead of invoking shadow ESLint.
+  --baseline <path>              Inventory baseline to compare/update.
+                                  Default: console/design-raw-form-control-inventory.json.
+  --no-baseline                  Do not compare a generated baseline. Intended for unit fixtures.
+  --update                       Regenerate the inventory baseline from the mechanical scan.
   --expected-total <n>           Expected total raw form-control findings.
   --expected-consumer <n>        Expected consumer-migration findings.
   --expected-exemption <n>       Expected primitive self-hit findings.
@@ -46,6 +51,8 @@ function parseNonNegativeInteger(raw, flag) {
 
 function parseArgs(argv) {
   const opts = {
+    baselineEnabled: true,
+    baselinePath: DEFAULT_BASELINE_PATH,
     eslintJson: null,
     expected: {
       by_classification: {},
@@ -55,6 +62,7 @@ function parseArgs(argv) {
     failOnMismatch: false,
     help: false,
     root: repoRoot,
+    update: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -62,6 +70,9 @@ function parseArgs(argv) {
     if (arg === '--help' || arg === '-h') opts.help = true;
     else if (arg === '--root') opts.root = resolve(requireValue(argv, ++i, arg));
     else if (arg === '--eslint-json') opts.eslintJson = resolve(requireValue(argv, ++i, arg));
+    else if (arg === '--baseline') opts.baselinePath = resolve(requireValue(argv, ++i, arg));
+    else if (arg === '--no-baseline') opts.baselineEnabled = false;
+    else if (arg === '--update') opts.update = true;
     else if (arg === '--expected-total') opts.expected.total = parseNonNegativeInteger(requireValue(argv, ++i, arg), arg);
     else if (arg === '--expected-consumer') opts.expected.by_classification.consumer_migration = parseNonNegativeInteger(requireValue(argv, ++i, arg), arg);
     else if (arg === '--expected-exemption') opts.expected.by_classification.exemption_movement = parseNonNegativeInteger(requireValue(argv, ++i, arg), arg);
@@ -256,7 +267,7 @@ function buildInventory(results, opts) {
   const verdict = errors.length || mismatches.length ? 'FAIL' : 'PASS';
 
   return {
-    schema_version: 1,
+    schema_version: 2,
     source_of_truth: {
       eslint_config: 'console/eslint.config.shadow.mjs',
       eslint_command: DEFAULT_ESLINT_ARGS,
@@ -298,6 +309,62 @@ function expectedMismatches(totals, expected) {
   return mismatches;
 }
 
+function baselineSnapshot(inventory) {
+  return {
+    schema_version: 2,
+    source_of_truth: inventory.source_of_truth,
+    classification_model: inventory.classification_model,
+    totals: inventory.totals,
+    by_file: inventory.by_file,
+    hits: inventory.hits,
+  };
+}
+
+function stableJson(value) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function readBaseline(path) {
+  if (!existsSync(path)) {
+    return {
+      errors: [{
+        code: 'baseline-missing',
+        file: path,
+        message: `No generated inventory baseline exists at ${path}. Run with --update to create it.`,
+      }],
+      snapshot: null,
+    };
+  }
+  try {
+    return {
+      errors: [],
+      snapshot: JSON.parse(readFileSync(path, 'utf8')),
+    };
+  } catch (error) {
+    return {
+      errors: [{
+        code: 'baseline-invalid-json',
+        file: path,
+        message: error instanceof Error ? error.message : String(error),
+      }],
+      snapshot: null,
+    };
+  }
+}
+
+function baselineMismatches(observedSnapshot, expectedSnapshot) {
+  if (!expectedSnapshot) return [];
+  const observed = stableJson(observedSnapshot);
+  const expected = stableJson(expectedSnapshot);
+  if (observed === expected) return [];
+  return [{
+    path: 'generated_inventory',
+    message:
+      'Live raw form-control inventory differs from console/design-raw-form-control-inventory.json. ' +
+      'Classify the movement, then regenerate with --update in the same packet as the source/rule change.',
+  }];
+}
+
 function main() {
   try {
     const opts = parseArgs(process.argv.slice(2));
@@ -309,9 +376,61 @@ function main() {
     const raw = readEslintJson(opts);
     const results = JSON.parse(raw);
     const inventory = buildInventory(results, opts);
+    const snapshot = baselineSnapshot(inventory);
+
+    const baseline = {
+      enabled: opts.baselineEnabled,
+      path: opts.baselinePath,
+      update: opts.update,
+    };
+
+    if (opts.update) {
+      if (inventory.errors.length || inventory.mismatches.length) {
+        inventory.baseline = {
+          ...baseline,
+          errors: [],
+          mismatches: [],
+        };
+        inventory.verdict = 'FAIL';
+        console.log(JSON.stringify(inventory, null, 2));
+        process.exit(1);
+      }
+      writeFileSync(opts.baselinePath, stableJson(snapshot));
+      inventory.baseline = {
+        ...baseline,
+        errors: [],
+        mismatches: [],
+      };
+      inventory.verdict = 'PASS';
+      console.log(JSON.stringify(inventory, null, 2));
+      return;
+    }
+
+    if (opts.baselineEnabled) {
+      const expectedBaseline = readBaseline(opts.baselinePath);
+      const mismatches = baselineMismatches(snapshot, expectedBaseline.snapshot);
+      inventory.baseline = {
+        ...baseline,
+        errors: expectedBaseline.errors,
+        mismatches,
+      };
+      if (expectedBaseline.errors.length || mismatches.length) inventory.verdict = 'FAIL';
+    } else {
+      inventory.baseline = {
+        ...baseline,
+        errors: [],
+        mismatches: [],
+      };
+    }
+
     console.log(JSON.stringify(inventory, null, 2));
 
-    if (inventory.errors.length || (opts.failOnMismatch && inventory.mismatches.length)) {
+    if (
+      inventory.errors.length
+      || (opts.failOnMismatch && inventory.mismatches.length)
+      || inventory.baseline.errors.length
+      || inventory.baseline.mismatches.length
+    ) {
       process.exit(1);
     }
   } catch (error) {
