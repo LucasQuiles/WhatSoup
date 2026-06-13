@@ -19,8 +19,8 @@ Last updated: 2026-06-13.
 | RR-011 | TRIAGED | Artifact sweep consolidation and objective hygiene | 40% | `.sweep/20260613T051113Z/manifest.md`; instruction audit output | Current dry-run found 1817 matched artifacts; apply or explicitly defer artifact/memory cleanup with user approval, and keep tracked docs independent of ignored local artifacts. |
 | RR-012 | TRIAGED | Historical pending-bead reconciliation | 90% | `docs/reliability-runner/pending-bead-dispositions.md`; `docs/current-program.md`; `docs/work-index.json` | Decide whether to rewrite historical bead markers or leave the tracked disposition ledger as the active source. |
 | RR-013 | TRIAGED | Coverage ratchet to requested target | 0% | `vitest.config.ts`; latest `verify:release` coverage summary | Coverage is at least 98% for statements, branches, functions, and lines, and thresholds enforce it. |
-| RR-014 | TRIAGED | Open PR/source landing | 70% | GitHub PR queue; local release gate | #804 and #813 are merged, `fix/mini1-health-profile-personal` is PR'd or retired, and no tracked work remains only local. |
+| RR-014 | TRIAGED | Open PR/source landing | 80% | GitHub PR queue; local release gate | #804, #813, and #816 are merged; `fix/mini1-health-profile-personal` and this docs branch are PR'd, merged, or retired, and no tracked work remains only local. |
 
 ## Current Gate Snapshot
 
-The integrated release gate passed for the locally merged #804/#813/#815 heads on 2026-06-13, but repository coverage was below the requested target: statements 81.91%, branches 75.93%, functions 79.71%, lines 83.56%. The current enforced thresholds are lower, so the coverage objective remains open.
+The integrated release gate passed for the locally merged #804/#813/#816 heads on 2026-06-13, but repository coverage was below the requested target: statements 81.90%, branches 75.92%, functions 79.73%, lines 83.53%. The current enforced thresholds are lower, so the coverage objective remains open.
