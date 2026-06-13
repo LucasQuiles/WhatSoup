@@ -154,6 +154,18 @@ Peer-review agents can fabricate claims — this happened in production work (PR
 
 Main thread should `grep` to spot-check whenever a reviewer claims a previously-filed F-task is invalid.
 
+## Release Runbook
+
+To cut a release:
+
+1. **Verify locally** — run `npm run verify:release` on the commit you intend to tag. All steps must pass.
+2. **Tag** — `git tag v<version>` on the verified commit.
+3. **Push tag** — `git push origin v<version>`. The `tag-release-gate` CI workflow (`.github/workflows/tag-release-gate.yml`) will run the guard subset automatically.
+4. **Wait for CI** — confirm `tag-release-gate` passes in the GitHub Actions tab before publishing any release artifacts.
+5. **Publish** — run `npm run verify:publish` as a final local gate, then proceed with any deployment.
+
+Note: the `tag-release-gate` workflow does NOT run the full test suite (those run on every PR via `quality.yml`). It runs the guard-only subset: typechecks, boundary/hygiene/drift/publication guards, ESLint fitness ring, and console lint + build.
+
 ## Maintenance
 
 When adding a new rule to this checklist:

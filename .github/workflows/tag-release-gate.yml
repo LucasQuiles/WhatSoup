@@ -1,0 +1,88 @@
+# Tag release gate
+#
+# Triggered on any v* tag push. Runs the guard-only subset of verify:release
+# that is meaningful at release time and does not require deploy-key secrets
+# (test-integrity is gated separately in quality.yml on PRs).
+#
+# This complements the pre-push hook (scripts/pre-push-guard.ts) which runs
+# verify:release locally — but cannot be relied upon for pushes from the
+# GitHub UI, gh CLI, or machines without the hook installed.
+
+name: tag-release-gate
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Python test dependencies
+        run: python3 -m pip install --user pytest
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Typecheck (all)
+        run: npm run typecheck:all
+
+      - name: Import boundary guard
+        run: npm run guard:boundaries
+
+      - name: Repo hygiene release
+        run: npm run guard:repo:release-hygiene
+
+      - name: Repo commit-authors
+        run: npm run guard:repo:commit-authors
+
+      - name: Publication guard (all)
+        run: npm run guard:publication:all
+
+      - name: Documentation drift guard
+        run: npm run guard:doc-drift
+
+      - name: Public surface drift guard
+        run: npm run guard:public-surface-drift
+
+      - name: Work index guard
+        run: npm run guard:work-index
+
+      - name: Node pin consistency guard
+        run: npm run guard:node-pin-consistency
+
+      - name: Claude settings guard
+        run: npm run guard:claude-settings
+
+      - name: Fail-closed gate guard
+        run: npm run guard:fail-closed-gate
+
+      - name: Service unit validity guard
+        run: npm run guard:service-units
+
+      - name: ESLint fitness ring
+        run: npm run guard:lint:src
+
+      - name: Install console dependencies
+        run: npm --prefix console ci
+
+      - name: Console lint
+        run: npm --prefix console run lint
+
+      - name: Console build
+        run: npm --prefix console run build
