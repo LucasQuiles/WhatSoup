@@ -217,7 +217,7 @@ describe('D1.3 trusted focus-visible and clipping contract', () => {
     );
 
     await userEvent.tab();
-    const button = getByRole('button', { name: 'Keyboard action' }).element();
+    const button = getByRole('button', { name: 'Keyboard action' }).element() as HTMLElement;
     expect(document.activeElement).toBe(button);
     assertVisibleFocusBox(button);
   });
