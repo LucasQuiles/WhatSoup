@@ -79,6 +79,7 @@ describe('classifyProviderFailure — negative cases (no false positives)', () =
     ).toBeNull();
     expect(classifyProviderFailure('Your account balance is too low to complete this transfer.')).toBeNull();
     expect(classifyProviderFailure('The student has insufficient credits to graduate this semester.')).toBeNull();
+    expect(classifyProviderFailure("Error: the student's transcript shows insufficient credits to graduate.")).toBeNull();
   });
 
   it('empty text is not a failure', () => {

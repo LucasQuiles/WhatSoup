@@ -109,8 +109,7 @@ function isProviderCreditBalanceLimitMessage(lower: string): boolean {
     lower.includes('provider') ||
     lower.includes('api') ||
     lower.includes('billing') ||
-    lower.includes('quota') ||
-    lower.includes('error')
+    lower.includes('quota')
   );
   return (
     lower.includes('insufficient_quota') ||
