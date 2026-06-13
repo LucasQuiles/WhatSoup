@@ -1,6 +1,6 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 401,
+  "total": 397,
   "rules": {
     "no-restricted-syntax :: src/components/line-detail/HistoryTab.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/ModeTab.tsx": 1,
@@ -15,7 +15,7 @@
     "soup/no-brand-regression :: src/components/UpdateModal.tsx": 1,
     "soup/no-focus-suppression :: src/components/line-detail/HistoryTab.tsx": 1,
     "soup/no-legacy-tokens :: src/App.tsx": 2,
-    "soup/no-legacy-tokens :: src/components/ActiveHoursHeatmap.tsx": 19,
+    "soup/no-legacy-tokens :: src/components/ActiveHoursHeatmap.tsx": 15,
     "soup/no-legacy-tokens :: src/components/ActivityFeed.tsx": 2,
     "soup/no-legacy-tokens :: src/components/AlertBanner.tsx": 2,
     "soup/no-legacy-tokens :: src/components/CardSelector.tsx": 4,

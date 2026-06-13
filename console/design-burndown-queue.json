@@ -2,15 +2,15 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 687,
-    "blocking": 621,
+    "total": 683,
+    "blocking": 617,
     "byCategory": {
       "accent-law": 0,
       "base-wall": 22,
       "brand-regression": 2,
       "focus-suppression": 1,
       "half-step": 64,
-      "legacy-token-tsx": 347,
+      "legacy-token-tsx": 343,
       "legacy-var-css": 221,
       "raw-color-css": 1,
       "raw-form-control": 28,
@@ -121,7 +121,7 @@
       "id": "burndown:legacy-token-tsx",
       "category": "legacy-token-tsx",
       "severity": "blocking",
-      "count": 347,
+      "count": 343,
       "files": [
         {
           "path": "src/App.tsx",
@@ -130,7 +130,7 @@
         },
         {
           "path": "src/components/ActiveHoursHeatmap.tsx",
-          "count": 19,
+          "count": 15,
           "lines": null
         },
         {

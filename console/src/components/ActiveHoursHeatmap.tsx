@@ -5,13 +5,12 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 
 function intensityColor(value: number, max: number): string {
-  if (max === 0 || value === 0) return 'var(--color-d2)';
+  if (max === 0 || value === 0) return 'var(--surface-raised)';
   const ratio = value / max;
-  // 4-stop opacity ramp against the accent color
-  if (ratio < 0.25) return 'color-mix(in srgb, var(--color-m-cht) 15%, var(--color-d2))';
-  if (ratio < 0.5) return 'color-mix(in srgb, var(--color-m-cht) 35%, var(--color-d2))';
-  if (ratio < 0.75) return 'color-mix(in srgb, var(--color-m-cht) 60%, var(--color-d2))';
-  return 'var(--color-m-cht)';
+  if (ratio < 0.25) return 'color-mix(in srgb, var(--data-activity-solid) 15%, var(--surface-raised))';
+  if (ratio < 0.5) return 'color-mix(in srgb, var(--data-activity-solid) 35%, var(--surface-raised))';
+  if (ratio < 0.75) return 'color-mix(in srgb, var(--data-activity-solid) 60%, var(--surface-raised))';
+  return 'var(--data-activity-solid)';
 }
 
 function formatHour(h: number): string {

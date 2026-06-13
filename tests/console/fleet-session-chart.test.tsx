@@ -19,11 +19,11 @@ vi.mock('recharts', async () => {
     return typeof value === 'number' ? value : 0;
   }
 
-  function renderSeries(name: string, dataKey: string, kind: string) {
+  function renderSeries(name: string, dataKey: string, kind: string, tokens: { fill?: string; stroke?: string }) {
     const rows = React.useContext(ChartDataContext);
 
     return (
-      <section role="group" aria-label={name} data-chart-kind={kind}>
+      <section role="group" aria-label={name} data-chart-kind={kind} data-fill={tokens.fill} data-stroke={tokens.stroke}>
         <h2>{name}</h2>
         {rows.length === 0 ? (
           <p>No values</p>
@@ -113,11 +113,29 @@ vi.mock('recharts', async () => {
     Legend() {
       return <div aria-label="Chart legend">Chart legend</div>;
     },
-    Area({ dataKey, name }: { dataKey: string; name: string }) {
-      return renderSeries(name, dataKey, 'area');
+    Area({
+      dataKey,
+      name,
+      stroke,
+      fill,
+    }: {
+      dataKey: string;
+      name: string;
+      stroke?: string;
+      fill?: string;
+    }) {
+      return renderSeries(name, dataKey, 'area', { fill, stroke });
     },
-    Bar({ dataKey, name }: { dataKey: string; name: string }) {
-      return renderSeries(name, dataKey, 'bar');
+    Bar({
+      dataKey,
+      name,
+      fill,
+    }: {
+      dataKey: string;
+      name: string;
+      fill?: string;
+    }) {
+      return renderSeries(name, dataKey, 'bar', { fill });
     },
   };
 });
@@ -152,10 +170,13 @@ describe('FleetSessionChart single-provider rendering', () => {
     const active = series('Active Sessions');
     expect(within(active).getByText('2026-04-05T18:00:00.000Z: 3')).toBeDefined();
     expect(within(active).getByText('2026-04-05T19:00:00.000Z: 5')).toBeDefined();
+    expect(active.dataset.stroke).toBe('var(--data-session-active-solid)');
+    expect(active.dataset.fill).toBe('var(--data-session-active-solid)');
 
     const started = series('Sessions Started');
     expect(within(started).getByText('2026-04-05T18:00:00.000Z: 2')).toBeDefined();
     expect(within(started).getByText('2026-04-05T19:00:00.000Z: 1')).toBeDefined();
+    expect(started.dataset.fill).toBe('var(--data-session-started-solid)');
   });
 
   it('keeps the single-provider view when one provider is supplied or provider data is missing', () => {

@@ -140,14 +140,14 @@ export function MetricsTab({
               <div className="c-section-label mb-[var(--sp-3)]">Token Usage</div>
               <div className="flex items-center gap-[var(--sp-5)]">
                 <div className="flex items-center gap-[var(--sp-2)]">
-                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-agt)] opacity-50" />
+                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--data-token-input-solid)] opacity-50" />
                   <span className="text-data text-t3">Input</span>
                   <span className="font-medium text-t1 text-data">
                     {line.tokenUsage.input.toLocaleString()}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
-                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-agt)]" />
+                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--data-token-output-solid)]" />
                   <span className="text-data text-t3">Output</span>
                   <span className="font-medium text-t1 text-data">
                     {line.tokenUsage.output.toLocaleString()}
@@ -167,9 +167,9 @@ export function MetricsTab({
                     width: `${(line.tokenUsage.input / (line.tokenUsage.input + line.tokenUsage.output)) * 100}%`,
                     height: '100%',
                   }}
-                  className="bg-[var(--color-m-agt)] opacity-50"
+                  className="bg-[var(--data-token-input-solid)] opacity-50"
                 />
-                <div className="flex-1 bg-[var(--color-m-agt)]" style={{ height: '100%' }} />
+                <div className="flex-1 bg-[var(--data-token-output-solid)]" style={{ height: '100%' }} />
               </div>
             </section>
           )}

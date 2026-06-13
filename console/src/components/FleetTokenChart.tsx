@@ -131,8 +131,8 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           dataKey="output"
           name="Output Tokens"
           stackId="tokens"
-          stroke="var(--color-m-agt)"
-          fill="var(--color-m-agt)"
+          stroke="var(--data-token-output-solid)"
+          fill="var(--data-token-output-solid)"
           fillOpacity={0.3}
         />
         <Area
@@ -140,9 +140,9 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           dataKey="input"
           name="Input Tokens"
           stackId="tokens"
-          stroke="var(--color-m-agt)"
+          stroke="var(--data-token-input-solid)"
           strokeDasharray="4 2"
-          fill="var(--color-m-agt)"
+          fill="var(--data-token-input-solid)"
           fillOpacity={0.15}
         />
       </AreaChart>

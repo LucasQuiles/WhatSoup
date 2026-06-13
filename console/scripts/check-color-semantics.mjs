@@ -18,8 +18,8 @@ const BORROWED_CHROMA_RE = new RegExp(`${BORROWED_TOKEN_OR_CLASS_RE.source}|#[0-
 const PROVIDER_IDENTITY_RE = /\b(?:PROVIDER_COLORS|getProviderColor|providerDisplay|displayName\(slot\.provider|slot\.provider)\b|label:\s*['"]PROVIDER['"]/i;
 const PROVIDER_TOKEN_RE = /var\(--provider-[^)]+\)/;
 const DATA_TOKEN_RE = /var\(--data-[^)]+\)/;
-const CHART_FILE_RE = /(?:Chart|Heatmap)\.tsx$/;
-const CHART_COLOR_RE = /\b(?:stroke|fill|stopColor|activeColor|background|color)\s*[=:]|color-mix\(|return\s+['"`]var\(--|return\s+['"`]color-mix/;
+const DATA_SERIES_FILE_RE = /(?:Chart|Heatmap|MetricsTab)\.tsx$/;
+const CHART_COLOR_RE = /\b(?:stroke|fill|stopColor|activeColor|background|color)\s*[=:]|\b(?:bg|text|border)-\[var\(--|color-mix\(|return\s+['"`]var\(--|return\s+['"`]color-mix/;
 const LOCAL_PALETTE_RE = /\b(?:export\s+)?(?:const|let)\s+\w*(?:color|Color|palette|Palette)\w*\s*(?::\s*Record<[^>]+>\s*=|=\s*\{)|Record<string,\s*string>\s*=\s*\{/;
 const NEUTRAL_TRAFFIC_LABELS = new Set([
   'Messages Sent',
@@ -194,7 +194,7 @@ function scanLine(findings, file, lines, index) {
 
   if (borrowed
     && !DATA_TOKEN_RE.test(line)
-    && CHART_FILE_RE.test(file)
+    && DATA_SERIES_FILE_RE.test(file)
     && CHART_COLOR_RE.test(line)) {
     addFinding(
       findings,

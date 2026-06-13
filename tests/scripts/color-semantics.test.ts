@@ -178,6 +178,37 @@ export function FleetTokenChart() {
     expect(output.by_rule).toEqual({ 'soup/data-series-token-only': 1 });
   });
 
+  it('reports chart-adjacent MetricsTab arbitrary classes that borrow mode colors for data series', () => {
+    const root = makeFixture({
+      'console/src/components/line-detail/MetricsTab.tsx': `
+export function MetricsTab() {
+  return <div className="flex-1 bg-[var(--color-m-agt)]" />;
+}
+`,
+    });
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(0);
+    expect(output.by_rule).toEqual({ 'soup/data-series-token-only': 1 });
+    expect(output.findings[0]?.file).toBe('console/src/components/line-detail/MetricsTab.tsx');
+  });
+
+  it('stays silent for MetricsTab arbitrary classes that consume data-series tokens', () => {
+    const root = makeFixture({
+      'console/src/components/line-detail/MetricsTab.tsx': `
+export function MetricsTab() {
+  return <div className="flex-1 bg-[var(--data-token-output-solid)]" />;
+}
+`,
+    });
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(0);
+    expect(output.finding_count).toBe(0);
+  });
+
   it('fails when the promoted local-palette rule regresses', () => {
     const root = makeFixture({
       'console/src/components/KpiCard.tsx': `
