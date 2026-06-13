@@ -10,8 +10,9 @@ no build, no test run, no install (package.json was mid-merge and ignored per br
 
 Post-audit current-state note: this file is a dated snapshot. Current raw form-control counts are
 mechanically generated in `console/design-raw-form-control-inventory.json` and checked by
-`npm --prefix console run design:raw-form-control-inventory`. As of D4.3a, `SearchInput` renders
-through `TextInput`; do not use the 2026-06-12 raw-form counts below as the live source of truth.
+`npm --prefix console run design:raw-form-control-inventory`. As of D4.3a/D4.3b, `SearchInput`
+and `UnlockScreen` render through `TextInput`; do not use the 2026-06-12 raw-form counts below as
+the live source of truth.
 
 ## 1. Methodology
 

@@ -1,5 +1,6 @@
 import { useState, useCallback, type FormEvent } from 'react'
 import { unlockConsole } from '../lib/api'
+import { TextInput } from './primitives'
 import { Button } from './primitives/Button'
 
 /**
@@ -36,7 +37,7 @@ export default function UnlockScreen({ onUnlocked }: { onUnlocked: () => void })
           Enter the fleet token to start a console session. The token is sent
           once to this server and is not stored in the browser.
         </p>
-        <input
+        <TextInput
           type="password"
           autoFocus
           value={token}

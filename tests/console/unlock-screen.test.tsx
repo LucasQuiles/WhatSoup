@@ -53,6 +53,7 @@ describe('UnlockScreen — render', () => {
     const input = document.querySelector('input[type="password"]') as HTMLInputElement
     expect(input).not.toBeNull()
     expect(input.getAttribute('aria-label')).toBe('fleet token')
+    expect(input.classList.contains('c-input')).toBe(true)
   })
 
   it('renders an Unlock submit button that is initially disabled when the token field is empty', () => {
