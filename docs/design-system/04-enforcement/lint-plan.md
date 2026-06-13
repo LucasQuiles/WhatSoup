@@ -67,7 +67,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-channel-specific-copy | proposed | global-error | P4/G7 | flags generic visible "WhatsApp" copy after the multi-channel positioning lock; protocol/runtime prompts stay allowlisted |
 | soup/protected-identifiers | scoped-error | global-error | P1 | cheap, zero current violations — start strict |
 | soup/no-raw-button | scoped-error (M list) | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
-| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | 27 raw inputs, 3 selects, 5+ textareas (control-catalogue §2-3) |
+| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate: 36 total = 31 consumer-migration + 5 form-kit self-hits; element split 25 inputs / 3 selects / 8 textareas |
 | soup/no-adhoc-modal | scoped-error (M list) | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
 | soup/no-legacy-tokens | scoped-error (primitives tier) | global-error | P2+ complete | enabled only after alias layer + primitives land |
 | soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap |
@@ -212,17 +212,24 @@ cannot express the check).
 
 - **Purpose:** `input`, `select`, `textarea` render through the promoted form kit
   (`console/src/components/wizard/form-primitives.tsx:20-119` moves to shared per DUP-12) and the
-  P2 `Select` policy (`.c-select` has exactly 1 consumer today, control-catalogue §3a; one select
-  is styled as a ghost button, `console/src/components/line-detail/GroupDetailModal.tsx:676-685`).
+  P2 `Select` policy. The current `c-select` consumers are the transitional form kit and
+  `console/src/components/line-detail/GroupDetailModal.tsx:704`; the GroupDetailModal control is
+  now a form-styled select, not a button-class residue.
 - **Mechanism:** selector `JSXOpeningElement[name.name=/^(input|select|textarea)$/]`, per-directory
-  scope like soup/no-raw-button.
+  scope like soup/no-raw-button. The census is mechanical through
+  `npm --prefix console run design:raw-form-control-inventory`, which derives findings from
+  `console/eslint.config.shadow.mjs` JSON output and classifies each hit as either
+  consumer-migration or exemption-movement.
 - **Scope/exemptions:** `components/primitives/**` and the form-kit module exempt; `type="file"`
-  sites (`console/src/components/wizard/ConfigStep.tsx:392-397,664-667`) get a named waiver until
+  sites (`console/src/components/wizard/ConfigStep.tsx:437,753`) get a named waiver until
   a FileInput primitive is specced (none planned for v3.0).
 - **Violation / valid:** bare `<select className="c-input …">`
   (`console/src/components/line-detail/ConfigEditDialog.tsx:199-205`) → `<SelectInput …>`.
-- **FP strategy:** directory scoping; baseline census already exists (control-catalogue §2c: 27
-  raw inputs classified).
+- **FP strategy:** directory scoping plus the deterministic inventory gate. Current baseline is
+  exactly 36 findings: 5 in `console/src/components/wizard/form-primitives.tsx` that may clear only
+  by moving the canonical primitive under `components/primitives/**`, and 31 consumer hits that must
+  clear by replacing native controls with primitives. Count movement must be classified as
+  exemption-movement vs consumer-migration before any baseline ratchet.
 - **Autofix:** no (prop surfaces differ). **Phase:** P2. **Entry:** shadow.
 
 ### soup/no-adhoc-modal
