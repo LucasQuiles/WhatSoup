@@ -5156,14 +5156,44 @@ def queue_inventory() -> list[str]:
     return lines
 
 
+def _event_file_age_seconds(path: Path, now: float) -> float:
+    """Return the age in seconds for a JSON event file.
+
+    For *.json event files, reads the event's createdAt ISO8601 field as the
+    true creation time (age = now - createdAt).  Falls back to st_mtime on
+    any error (missing field, unparseable timestamp, unreadable file).
+    Non-JSON callers already pass non-matching patterns; this path is only
+    reached for *.json glob results.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            created_at = data.get("createdAt")
+            if isinstance(created_at, str) and created_at.strip():
+                parsed = datetime.fromisoformat(created_at.strip().replace("Z", "+00:00"))
+                return max(0.0, now - parsed.timestamp())
+    except Exception:  # noqa: BLE001 - health path must never crash on malformed files
+        pass
+    try:
+        return max(0.0, now - path.stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
     if not path.exists():
         return 0, 0
     files = [item for item in path.glob(pattern) if item.is_file()]
     if not files:
         return 0, 0
-    oldest = int(time.time() - min(item.stat().st_mtime for item in files))
-    return len(files), max(0, oldest)
+    now = time.time()
+    is_json_pattern = pattern.endswith(".json") or pattern == "*.json"
+    if is_json_pattern:
+        oldest = max(_event_file_age_seconds(item, now) for item in files)
+    else:
+        oldest = now - min(item.stat().st_mtime for item in files)
+    return len(files), max(0, int(oldest))
 
 
 def queue_prefix(

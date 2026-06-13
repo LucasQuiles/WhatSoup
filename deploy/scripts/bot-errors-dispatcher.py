@@ -79,6 +79,9 @@ def positive_env_int(name: str, default: int) -> int:
 
 
 INCIDENT_COOLDOWN_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_COOLDOWN_SECONDS", 3600)
+BOT_ERRORS_DELIVERY_MAX_ATTEMPTS = positive_env_int("BOT_ERRORS_DELIVERY_MAX_ATTEMPTS", 10)
+DEAD_LETTER_META_ALERT_THROTTLE_SECONDS = 3600  # at most one meta-alert per hour
+CLOCK_SKEW_TOLERANCE_SECONDS = 60  # tolerate up to 60s clock skew on clear events
 INCIDENT_RENOTIFY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_RENOTIFY_SECONDS", 6 * 60 * 60)
 INCIDENT_ESCALATE_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_ESCALATE_SECONDS", 24 * 60 * 60)
 INCIDENT_ESCALATE_SUPPRESSED = positive_env_int("BOT_ERRORS_INCIDENT_ESCALATE_SUPPRESSED", 72)
@@ -283,6 +286,7 @@ def state_paths() -> dict[str, Path]:
         "writefail_quarantine": root / "writefail-quarantine",
         "locks": root / "locks",
         "logs": root / "logs",
+        "dead_letter": root / "dead-letter",
         "state": root / "dispatcher-state.json",
         "incident_state": root / "incident-state.json",
         "meta_state": root / "dispatcher-meta-state.json",
@@ -332,6 +336,7 @@ def setup_dirs() -> dict[str, Path]:
         "writefail_quarantine",
         "locks",
         "logs",
+        "dead_letter",
     ):
         ensure_private_dir(paths[key])
     return paths
@@ -616,7 +621,7 @@ def daily_health_recovered_incident_keys(
                 if status in {"closed", "resolved"}:
                     continue
                 opened = int_field(record, "eventCreatedAtEpoch")
-                if opened > 0 and created is not None and created < opened:
+                if opened > 0 and created is not None and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS:
                     continue
                 require_outbound_proof = source in DAILY_HEALTH_REQUIRES_OUTBOUND_PROOF_SOURCES
                 if not is_verified_whatsapp_health_recovery(probe, require_outbound_proof=require_outbound_proof):
@@ -1141,7 +1146,9 @@ def format_event(event: dict[str, Any]) -> str:
     return truncate(text, MAX_MESSAGE_CHARS)
 
 
-def next_backoff(attempts: int) -> int:
+def next_backoff(attempts: int) -> int | None:
+    if attempts >= BOT_ERRORS_DELIVERY_MAX_ATTEMPTS:
+        return None
     if attempts <= 1:
         return 60
     if attempts == 2:
@@ -1157,7 +1164,8 @@ def mark_failure(event: dict[str, Any], error: str) -> dict[str, Any]:
     attempts = max(int(delivery.get("attempts") or 0), 1)
     delivery["status"] = "queued"
     delivery["lastError"] = truncate(redact(error), 500)
-    delivery["nextAttemptAtEpoch"] = int(time.time()) + next_backoff(attempts)
+    backoff = next_backoff(attempts)
+    delivery["nextAttemptAtEpoch"] = int(time.time()) + backoff if backoff is not None else 0
     return event
 
 
@@ -1194,6 +1202,102 @@ def mark_suppressed(event: dict[str, Any], reason: str) -> dict[str, Any]:
 
 def reset_delivery(event: dict[str, Any]) -> None:
     event["delivery"] = {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None}
+
+
+def move_to_dead_letter(
+    claimed: Path,
+    paths: dict[str, Path],
+    event: dict[str, Any],
+    original_name: str,
+) -> Path:
+    """Move an event that exhausted all delivery attempts into dead-letter/."""
+    delivery = event.setdefault("delivery", {})
+    if isinstance(delivery, dict):
+        delivery["status"] = "dead_letter"
+        delivery["terminatedAt"] = now_iso()
+    terminated_at = now_iso()
+    record = {
+        "event": event,
+        "delivery": delivery if isinstance(delivery, dict) else {"status": "dead_letter"},
+        "terminated_at": terminated_at,
+    }
+    dest = safe_child_path(
+        paths["dead_letter"],
+        f"{original_name}.{int(time.time())}.dead_letter.json",
+    )
+    atomic_write_json(dest, record)
+    try:
+        claimed.unlink()
+    except FileNotFoundError:
+        pass
+    fsync_parent(dest)
+    return dest
+
+
+def dead_letter_meta_event(paths: dict[str, Path], count: int, oldest_summary: str) -> dict[str, Any]:
+    now = int(time.time())
+    return {
+        "schemaVersion": 1,
+        "eventType": "alert",
+        "severity": "critical",
+        "id": f"dispatcher-dead-letter-meta-{now}",
+        "createdAt": now_iso(),
+        "machine": socket.gethostname(),
+        "platform": sys.platform,
+        "instance": "bot-errors-dispatcher",
+        "source": "meta_alert_dead_letter",
+        "summary": f"BOT ERRORS dead-letter: {count} event(s) exhausted all delivery attempts",
+        "evidence": "\n".join([
+            f"dead_letter_count={count}",
+            f"dead_letter_dir={paths['dead_letter']}",
+            f"oldest_summary={redacted_state_text(oldest_summary, 200)}",
+        ]),
+        "process": {"pid": os.getpid()},
+        "diagnostics": {"omitDispatchLogInMessage": True},
+        "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
+def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
+    """Emit at most one meta-alert per hour when dead-letter dir is non-empty."""
+    dl_dir = paths["dead_letter"]
+    if not dl_dir.exists():
+        return 0
+    dl_files = [f for f in dl_dir.glob("*.json") if f.is_file()]
+    if not dl_files:
+        return 0
+
+    state = read_meta_state(paths)
+    last = int(state.get("deadLetterMetaAlertAtEpoch") or 0)
+    if last and now - last < DEAD_LETTER_META_ALERT_THROTTLE_SECONDS:
+        append_dispatch_log(paths, {
+            "type": "dead_letter_meta_debounced",
+            "count": len(dl_files),
+            "throttleSeconds": DEAD_LETTER_META_ALERT_THROTTLE_SECONDS,
+        })
+        return 0
+
+    oldest_summary = ""
+    try:
+        oldest_file = min(dl_files, key=lambda f: f.stat().st_mtime)
+        crumb = json.loads(oldest_file.read_text(encoding="utf-8"))
+        oldest_summary = str(crumb.get("event", {}).get("summary") or "")
+    except Exception:  # noqa: BLE001
+        oldest_summary = ""
+
+    event = dead_letter_meta_event(paths, len(dl_files), oldest_summary)
+    path = outbox_path_for_event(event, paths)
+    atomic_write_json(path, event)
+    state["deadLetterMetaAlertAtEpoch"] = now
+    state["deadLetterMetaAlertEventId"] = event["id"]
+    write_meta_state(paths, state)
+    append_dispatch_log(paths, {
+        "type": "dead_letter_meta_queued",
+        "eventId": event["id"],
+        "count": len(dl_files),
+    })
+    return 1
+
 
 
 def archive_path(directory: Path, original_name: str, status: str, event: dict[str, Any]) -> Path:
@@ -1288,7 +1392,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             return f"clear has no open incident for {key}; stale recovery suppressed"
         opened = int_field(open_record, "eventCreatedAtEpoch")
         created = event_created_epoch(event)
-        if opened > 0 and created is not None and created < opened:
+        if opened > 0 and created is not None and created < opened - CLOCK_SKEW_TOLERANCE_SECONDS:
             return f"clear predates open incident for {key}; stale recovery suppressed"
     return None
 
@@ -1302,6 +1406,20 @@ def is_test_provenance_event(event: dict[str, Any]) -> bool:
 def omit_dispatch_log_in_message(event: dict[str, Any]) -> bool:
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
     return diagnostics.get("omitDispatchLogInMessage") is True
+
+
+def _clear_satisfies_requirement(event: dict[str, Any], requirement: str) -> bool:
+    """Advisory check: does the clear event's source satisfy the stored clearRequirement?
+
+    Uses simple substring/containment matching: if the requirement string appears
+    in the clear source (or vice versa), the requirement is considered satisfied.
+    This is intentionally permissive — the advisory note is informational only.
+    """
+    if not requirement:
+        return True
+    source = incident_source(event).lower()
+    req = requirement.lower()
+    return req in source or source in req
 
 
 def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
@@ -1320,6 +1438,15 @@ def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) 
             f"suppressed_duplicates={suppressed}",
             f"last_seen={open_record.get('lastSeenIso') or open_record.get('lastSeenAt')}",
         ])
+        # F8: clearRequirement advisory — informational only; any clear still closes the incident.
+        stored_requirement = str(open_record.get("clearRequirement") or "").strip()
+        if stored_requirement and not _clear_satisfies_requirement(event, stored_requirement):
+            additions.append(
+                f"clearRequirement_mismatch=true"
+                f" clearRequirement={redacted_state_text(stored_requirement, 200)}"
+                f" clear_source={safe_segment(incident_source(event))}"
+                f" note=advisory_only_incident_still_closed"
+            )
     if recovered_keys:
         additions.append("recovered_incidents=" + ",".join(recovered_keys))
     evidence = str(event.get("evidence") or "").strip()
@@ -2677,14 +2804,40 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     except Exception as exc:
         event = mark_failure(event, str(exc))
         attempts = int(event.get("delivery", {}).get("attempts") or 0)
+        delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+
+        # --- F5: email fallback (attempts >= 3) with unavailability tracking ---
         email_status = "not_attempted"
         if attempts >= 3:
-            email_status = "accepted_unconfirmed" if email_fallback(f"BOT ERRORS delivery failing: {event.get('summary', 'unknown')}", text) else "failed"
-        delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+            fallback_path = Path(EMAIL_FALLBACK)
+            if not fallback_path.exists() or not os.access(fallback_path, os.X_OK):
+                # Fallback script is missing or non-executable — record unavailability
+                email_status = "failed"
+                if isinstance(delivery, dict):
+                    delivery["email_fallback_unavailable"] = True
+            else:
+                email_status = (
+                    "accepted_unconfirmed"
+                    if email_fallback(f"BOT ERRORS delivery failing: {event.get('summary', 'unknown')}", text)
+                    else "failed"
+                )
         if isinstance(delivery, dict):
             delivery["emailFallback"] = email_status
             if email_status != "not_attempted":
                 delivery["emailFallbackAt"] = now_iso()
+
+        # --- F5: dead-letter if attempt cap exhausted ---
+        if next_backoff(attempts) is None:
+            dead_path = move_to_dead_letter(claimed, paths, event, original_name_from_processing(claimed))
+            append_dispatch_log(paths, {
+                "type": "dead_lettered",
+                "eventId": event.get("id"),
+                "path": str(dead_path),
+                "attempts": attempts,
+                "error": str(exc),
+            })
+            return False, f"dead_letter; attempts={attempts}; {exc}"
+
         atomic_write_json(claimed, event)
         retry_path = safe_child_path(paths["outbox"], path.name)
         os.replace(claimed, retry_path)
@@ -2759,6 +2912,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             failed += stale_failed
             last_error = stale_error
 
+        # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
+        dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
+
         # Daily test-leak summary marker (at most once per UTC date per day).
         if test_leak_dropped > 0:
             incident_state = load_incident_state(paths)
@@ -2793,6 +2949,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             recoveryDeduped=recovery_deduped,
             stormCollapsed=storm_collapsed,
             suppressedPruned=suppressed_pruned,
+            deadLetterMetaAlerted=dead_letter_meta_alerted,
             lastError=last_error,
         )
         return {
@@ -2810,6 +2967,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             "recoveryDeduped": recovery_deduped,
             "stormCollapsed": storm_collapsed,
             "suppressedPruned": suppressed_pruned,
+            "deadLetterMetaAlerted": dead_letter_meta_alerted,
             "lastError": last_error,
         }
 
