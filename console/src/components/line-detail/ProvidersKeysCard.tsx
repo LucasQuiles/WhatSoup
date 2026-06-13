@@ -132,6 +132,7 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
     ? [
         typeof status.fallback.turnsServed === 'number' ? `${status.fallback.turnsServed} served` : null,
         typeof status.fallback.turnsEmpty === 'number' ? `${status.fallback.turnsEmpty} empty` : null,
+        typeof status.fallback.probeAttempts === 'number' ? `${status.fallback.probeAttempts} probes` : null,
         formatLastFallbackTurnAt(status.fallback.lastFallbackTurnAt),
       ].filter((value): value is string => value !== null)
     : []

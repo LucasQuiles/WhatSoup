@@ -21,6 +21,52 @@ let driftedTargetWarned = false;
 
 const GROUP_JID_RE = /^\d+@g\.us$/;
 
+// ---------------------------------------------------------------------------
+// In-process alert throttle
+// ---------------------------------------------------------------------------
+
+/**
+ * Window (ms) within which duplicate (instance, source, summary) triples are
+ * suppressed at the legacy-spawn layer.  Only the legacy path is throttled;
+ * the durable outbox path is unthrottled (the dispatcher handles dedup).
+ *
+ * Set EMIT_ALERT_THROTTLE_MS=0 to disable.  Values < 0 are treated as 0.
+ * Default: 300_000 ms (5 min).
+ */
+const EMIT_ALERT_THROTTLE_MS = (() => {
+  const raw = Number(process.env['EMIT_ALERT_THROTTLE_MS']);
+  if (Number.isFinite(raw)) return Math.max(0, raw);
+  return 300_000;
+})();
+
+/** Maps `${instance}|${source}|${summary}` → epoch ms of first legacy spawn. */
+const alertThrottleMap = new Map<string, number>();
+
+/** Reset the in-process throttle map (for tests). */
+export function resetEmitAlertThrottle(): void {
+  alertThrottleMap.clear();
+}
+
+/** Returns true when the legacy spawn should be suppressed. */
+function isThrottled(instance: string, source: string, summary: string): boolean {
+  const throttleMs = Number(process.env['EMIT_ALERT_THROTTLE_MS'] ?? EMIT_ALERT_THROTTLE_MS);
+  const effectiveWindow = Number.isFinite(throttleMs) ? Math.max(0, throttleMs) : EMIT_ALERT_THROTTLE_MS;
+  if (effectiveWindow === 0) return false;
+
+  const now = Date.now();
+  // Prune expired entries on insert.
+  for (const [key, recordedAt] of alertThrottleMap) {
+    if (now - recordedAt > effectiveWindow) alertThrottleMap.delete(key);
+  }
+
+  const key = `${instance}|${source}|${summary}`;
+  if (alertThrottleMap.has(key)) return true;
+  alertThrottleMap.set(key, now);
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+
 interface LegacyAlertResult {
   attempted: boolean;
   accepted: boolean;
@@ -109,7 +155,7 @@ function spawnLegacyAlert(args: string[], logContext: Record<string, unknown>, m
     const child = spawn(
       ALERT_SCRIPT,
       ['--alert-target', target, ...args],
-      { stdio: 'ignore', timeout: 5_000, detached: false },
+      { stdio: 'ignore', timeout: 5_000, detached: false, killSignal: 'SIGKILL' },
     );
     child.unref();
     child.on('error', (err) => {
@@ -146,6 +192,9 @@ export function emitAlert(
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     log.warn({ instance, source, err: reason }, 'bot-errors outbox write failed');
+    if (isThrottled(instance, source, summary)) {
+      return { ok: true, channel: 'legacy', status: 'legacy_accepted_unconfirmed', outboxError: reason };
+    }
     const legacy = spawnLegacyAlert(
       ['--instance', instance, '--source', source, '--summary', summary, '--evidence', evidence],
       { instance, source },

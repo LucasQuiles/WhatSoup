@@ -26,7 +26,7 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-import { emitAlert, clearAlertSource } from '../../src/lib/emit-alert.ts';
+import { emitAlert, clearAlertSource, resetEmitAlertThrottle } from '../../src/lib/emit-alert.ts';
 
 function spawnedChild() {
   return vi.mocked(spawn).mock.results.at(-1)?.value;
@@ -40,6 +40,7 @@ describe('emitAlert exit handler', () => {
     process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
     process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
     delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
+    resetEmitAlertThrottle();
   });
 
   afterEach(() => {
@@ -110,6 +111,7 @@ describe('clearAlertSource exit handler', () => {
     process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
     process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
     delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
+    resetEmitAlertThrottle();
   });
 
   afterEach(() => {

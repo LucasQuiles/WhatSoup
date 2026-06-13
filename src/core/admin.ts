@@ -311,7 +311,14 @@ export async function handleFallbackCommand(
           return `${target} (${readiness})`;
         }).join(' -> ')}`
       : '';
-    await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty${chain}`);
+    const probes = (state.probeAttempts ?? 0) > 0 ? `; probes: ${state.probeAttempts}` : '';
+    const acts = typeof state.fallbackActivations === 'number'
+      ? `; activations: ${state.fallbackActivations}; reverts: ${state.fallbackReverts ?? 'n/a'}`
+      : '';
+    const costUsd = typeof state.fallbackWindowCostUsd === 'number' && state.fallbackWindowCostUsd > 0
+      ? `; window cost: $${state.fallbackWindowCostUsd.toFixed(2)}`
+      : '';
+    await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty${probes}${acts}${costUsd}${chain}`);
     return;
   }
 

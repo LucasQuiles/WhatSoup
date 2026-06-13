@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { shortHash as shortHashImpl } from '../../../lib/short-hash.ts';
 import { z } from 'zod';
 import { createChildLogger } from '../../../logger.ts';
 import { config } from '../../../config.ts';
@@ -42,7 +42,7 @@ export interface ExportableFact {
  * loses idempotency. Keep this the single source of truth.
  */
 export function shortHash(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 12);
+  return shortHashImpl(text, 12);
 }
 
 /**

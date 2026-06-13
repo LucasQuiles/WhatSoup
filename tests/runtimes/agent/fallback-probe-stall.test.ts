@@ -5,7 +5,8 @@
  * the primary recovery probe keeps failing. These tests pin the hardening:
  *   - fallbackProbeAttempts increments per failed probe in the revert-timer path
  *   - one fallback_recovery_stalled alert at the threshold (default 12), never
- *     before, never again within the same stall episode
+ *     before
+ *   - re-alert fires again at 2T, 3T, ... (multiples of the threshold)
  *   - a successful probe / deactivation resets the counter
  *   - the window STILL extends past the threshold (the cap surfaces, it does
  *     not strand the instance on a dead primary)
@@ -199,7 +200,7 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(v.fallbackProbeAttempts).toBe(3);
   });
 
-  it('(b) emits fallback_recovery_stalled exactly once at the threshold — not before, not at threshold+1', async () => {
+  it('(b) emits fallback_recovery_stalled at threshold, not before, and includes attempts=N in evidence', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => false);
@@ -226,10 +227,43 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(evidence).toContain('primaryProvider=claude-cli');
     expect(evidence).not.toContain('present-key');
 
-    // Attempt = threshold+1: no re-alert within the same stall episode.
+    // Attempt = threshold+1: no re-alert (not a multiple of T yet).
     await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(v.fallbackProbeAttempts).toBe(STALL_THRESHOLD + 1);
     expect(stallAlerts()).toHaveLength(1);
+  });
+
+  it('(b2) re-alerts at 2T, 3T, ... — cadenced re-surfacing within the same stall episode', async () => {
+    const runtime = makeRuntime();
+    const v = view(runtime);
+    const probe = vi.fn(() => false);
+    await enterExtensionPhase(v, probe); // attempt 1
+
+    // Advance to threshold.
+    for (let attempt = 2; attempt <= STALL_THRESHOLD; attempt++) {
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    }
+    expect(stallAlerts()).toHaveLength(1);
+
+    // Advance from T+1 to 2T-1: no second alert yet.
+    for (let attempt = STALL_THRESHOLD + 1; attempt < 2 * STALL_THRESHOLD; attempt++) {
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    }
+    expect(stallAlerts()).toHaveLength(1);
+
+    // At exactly 2T: second alert fires, evidence includes attempts=2T.
+    await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    expect(v.fallbackProbeAttempts).toBe(2 * STALL_THRESHOLD);
+    const alerts = stallAlerts();
+    expect(alerts).toHaveLength(2);
+    const [, , , evidence2] = alerts[1] as [string, string, string, string];
+    expect(evidence2).toContain(`attempts=${2 * STALL_THRESHOLD}`);
+
+    // Advance to 3T: third alert fires.
+    for (let attempt = 2 * STALL_THRESHOLD + 1; attempt <= 3 * STALL_THRESHOLD; attempt++) {
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
+    }
+    expect(stallAlerts()).toHaveLength(3);
   });
 
   it('(c) a successful probe reverts to primary, resets attempts, and emits no stall alert', async () => {
@@ -320,7 +354,7 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(probe).toHaveBeenCalledTimes(3);
   });
 
-  it('(g2) preserves early recovery during a long initial window (the duplicate probe’s unique value)', async () => {
+  it("(g2) preserves early recovery during a long initial window (the duplicate probe's unique value)", async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     const probe = vi.fn(() => true);

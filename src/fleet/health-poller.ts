@@ -275,6 +275,7 @@ export class HealthPoller {
    * instead of sleeping. Subsequent polls are fire-and-forget on the interval.
    */
   start(): Promise<void> {
+    if (this.pollInterval) return Promise.resolve();
     const initial = this.poll(); // initial poll
     this.pollInterval = setInterval(() => this.poll(), this.intervalMs);
     this.pollInterval.unref();

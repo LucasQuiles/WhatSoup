@@ -1263,9 +1263,14 @@ def dead_letter_meta_event(paths: dict[str, Path], count: int, oldest_summary: s
         "instance": "bot-errors-dispatcher",
         "source": "meta_alert_dead_letter",
         "summary": f"BOT ERRORS dead-letter: {count} event(s) exhausted all delivery attempts",
+        # NOTE: the absolute dead-letter dir path is deliberately NOT in evidence.
+        # matched_test_leak_pattern() walks every string field, and a state root
+        # under a test sandbox (/var/folders/.../T/, /tmp/whatsoup-vitest-bot-errors/)
+        # would make this meta-alert self-match the test-leak filter and be silently
+        # dropped in integration tests. The path is a fixed, known location; it is
+        # recorded in the dispatch log instead (queue_dead_letter_meta_alert).
         "evidence": "\n".join([
             f"dead_letter_count={count}",
-            f"dead_letter_dir={paths['dead_letter']}",
             f"oldest_summary={redacted_state_text(oldest_summary, 200)}",
         ]),
         "process": {"pid": os.getpid()},
@@ -1311,6 +1316,7 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
         "type": "dead_letter_meta_queued",
         "eventId": event["id"],
         "count": len(dl_files),
+        "deadLetterDir": str(paths["dead_letter"]),
     })
     return 1
 
@@ -1603,6 +1609,13 @@ def incident_event_fields_from_key(key: str) -> dict[str, str]:
     fields = {"machine": machine, "instance": instance, "source": source}
     if source.startswith("heartbeat-watchdog:"):
         fields["source"] = "heartbeat-watchdog"
+        fields["alertSource"] = source.split(":", 1)[1]
+    elif source.startswith("daily-health-fail:"):
+        # Per-instance daily-health-fail incidents key as daily-health-fail:<instance>.
+        # Must be checked before daily-health: — "daily-health-fail:x" does NOT
+        # startswith "daily-health:" (char 13 is '-' not ':'), but keeping the more
+        # specific prefix first guards against future loosening.
+        fields["source"] = "daily-health-fail"
         fields["alertSource"] = source.split(":", 1)[1]
     elif source.startswith("daily-health:"):
         fields["source"] = "daily-health"

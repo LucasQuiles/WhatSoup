@@ -36,6 +36,22 @@ describe('UpdateChecker — start() / stop() lifecycle', () => {
     checker.stop();
   });
 
+  it('start() is idempotent — a second call is a no-op', async () => {
+    const checker = new UpdateChecker('/tmp/fake');
+    const checkNowSpy = vi.spyOn(checker, 'checkNow').mockResolvedValue({} as any);
+
+    checker.start();
+    await Promise.resolve();
+    checker.start();
+    await Promise.resolve();
+    expect(checkNowSpy).toHaveBeenCalledTimes(1); // one immediate check, not two
+
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(checkNowSpy).toHaveBeenCalledTimes(2); // one interval tick, not two
+
+    checker.stop();
+  });
+
   it('start() triggers periodic checks at the 60-minute interval', async () => {
     const checker = new UpdateChecker('/tmp/fake');
     const checkNowSpy = vi.spyOn(checker, 'checkNow').mockResolvedValue({} as any);

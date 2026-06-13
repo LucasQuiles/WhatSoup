@@ -63,9 +63,6 @@ class TestFailureIsInfraOnly:
     def test_disk_fail_is_infra(self):
         assert _failure_is_infra_only("FAIL disk: low") is True
 
-    def test_queue_fail_is_infra(self):
-        assert _failure_is_infra_only("FAIL queue oldest: 9000s") is True
-
     def test_dns_fail_is_infra(self):
         assert _failure_is_infra_only("FAIL dns: unresolved") is True
 
@@ -92,6 +89,16 @@ class TestFailureIsInfraOnly:
 
     def test_instance_fail_is_not_infra(self):
         assert _failure_is_infra_only("FAIL instance line-b: down") is False
+
+    def test_queue_class_fails_stay_critical(self):
+        # queue_inventory emits these real labels (NOT "queue"); on the alert
+        # SPOF host a backed-up outbox / writefail means alerts are not
+        # draining/writing, so they must stay CRITICAL (not de-conflated).
+        assert _failure_is_infra_only("FAIL outbox: count=100 oldest_seconds=9000") is False
+        assert _failure_is_infra_only("FAIL processing: count=5 oldest_seconds=600") is False
+        assert _failure_is_infra_only("FAIL quarantine: count=3") is False
+        assert _failure_is_infra_only("FAIL writefail: count=2 oldest_seconds=120") is False
+        assert _failure_is_infra_only("FAIL dispatcher_state: invalid_json") is False
 
     def test_empty_string_is_not_infra(self):
         assert _failure_is_infra_only("") is False

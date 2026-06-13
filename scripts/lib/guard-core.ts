@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
 
@@ -117,6 +118,17 @@ export function readStagedFileContentResult(cwd: string, filePath: string): GitB
 export function readStagedFileContent(cwd: string, filePath: string): string | undefined {
   const result = readStagedFileContentResult(cwd, filePath);
   return result.ok ? result.content : undefined;
+}
+
+/**
+ * Read a file relative to `cwd`. Returns the UTF-8 content, or null if the
+ * file does not exist. Byte-identical to the private `readText` helpers
+ * previously duplicated in agent-decision-polls-guard and safeguard-diagnostics.
+ */
+export function readText(cwd: string, file: string): string | null {
+  const absolute = path.join(cwd, file);
+  if (!existsSync(absolute)) return null;
+  return readFileSync(absolute, 'utf8');
 }
 
 export function isTextCandidate(filePath: string): boolean {

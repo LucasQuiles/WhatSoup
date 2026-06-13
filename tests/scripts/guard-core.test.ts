@@ -11,6 +11,7 @@ import {
   normalizeRepoPath,
   readStagedFileContent,
   readStagedFileContentResult,
+  readText,
 } from '../../scripts/lib/guard-core.ts';
 
 const repos: string[] = [];
@@ -63,5 +64,26 @@ describe('guard-core helpers', () => {
       content: undefined,
     });
     expect(readStagedFileContent(repo, 'docs/publication-audit.md')).toBeUndefined();
+  });
+
+  describe('readText', () => {
+    it('returns file content when the file exists', () => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'guard-core-readtext-'));
+      try {
+        writeFileSync(path.join(dir, 'sample.txt'), 'hello\n');
+        expect(readText(dir, 'sample.txt')).toBe('hello\n');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('returns null when the file is absent', () => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'guard-core-readtext-'));
+      try {
+        expect(readText(dir, 'nonexistent.txt')).toBeNull();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 });
