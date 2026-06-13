@@ -1,6 +1,34 @@
 # Outstanding Burndown Implementation Plan
 
-**Status:** active — implementation branch `chore/outstanding-specs-and-burndown`.
+**Status:** completed/superseded — original implementation branch landed through #810, with follow-on closures in #814, #808, #813, #804, #816, #817, #818, #820, and #821. Do not restart `chore/outstanding-specs-and-burndown`.
+
+> **CURRENT STATE REFOCUS (2026-06-13):** `origin/main` is `0c17e3c1dac3826db5cb006c740062873e360cb7`. The original hardening branch is closed:
+> - #810 closed R1-R5, H1 collector/runner, P1, and the safeguard-diagnostics fail-closed fix.
+> - #814 closed the remaining no-decision residuals and several decisions after approval: `bot-errors-emit.py` parent preflight, `bot-errors-q-loop.py` exception alignment for private-dir setup, `checkBearerAuth` deletion, `guard-core.readText`, `asRecordOrEmpty`, and import-boundary fail-closed coverage.
+> - #808 superseded the duplicate-helper lanes with `src/lib/private-fs.ts`, `src/core/provider-mcp-config.ts`, `src/runtimes/chat/enrichment/raw-output.ts`, and `src/lib/short-hash.ts`.
+> - #815 closed the alert-pipeline review follow-ups and is now part of current `origin/main`; post-merge main CI on `13068ac9` finished 5/5 green.
+> - #804, #813, #816, #817, #818, #820, and #821 have since landed on main. #816 post-merge main CI on `218dfacd` finished 5/5 green; #817 post-merge main CI on `558730b0` finished 5/5 green; #818 post-merge main CI on `e1f07ffe` finished 5/5 green; #820 post-merge main CI on `99c7a0f2` finished 5/5 green; #821 PR CI was 6/6 green before merge and post-merge main CI on `0c17e3c1` finished 5/5 green.
+>
+> **Do next:** finish the approval-gated #819 handoff update and #822 primary-model probe fix-up, then continue the provider-outage hardening follow-up PRs for health turn capability, outbound dedupe, and release drift detection. Preserve/triage dirty parallel worktrees before cleanup. **Do not** treat the historical task checklist below as active work without first rechecking current main.
+
+## Refocused Remaining Queue
+
+| Area | Current status | Next action |
+|---|---|---|
+| PR #804: libsignal key-log suppression | Landed in current main as `2c7867d3` | Closed; direct console-redaction coverage landed with the branch. |
+| PR #813: failure taxonomy + bounded retry | Landed in current main as `94862746` | Closed; provider retry/taxonomy adoption is now baseline context for later provider-failure work. |
+| PR #816: provider-failure classification + terminal-error leak | Landed in current main as `218dfacd`; post-merge main CI 5/5 green | Closed for source durability; binding local evidence is Test Integrity, targeted parser/runtime tests, typecheck, source-runtime drift, and `verify:push:branch`. A parallel release log reached the full-suite summary and console build (`9497 passed / 1 skipped`), but no explicit exit marker was found in the retained log, so do not cite it as the binding merge gate. Live release re-cut and WhatsApp turn proof remain separate deployment work, not implied by code merge. |
+| PR #817: reliability-runner tracking docs | Landed in current main as `558730b0`; post-merge main CI 5/5 green | Closed; tracked reliability-runner docs are now the current handoff source. |
+| PR #818: mini1 health profile personal runtime | Landed in current main as `e1f07ffe`; post-merge main CI 5/5 green | Closed; local isolated validation passed Test Integrity, `tests/scripts/bot-errors-health-check.test.ts` (110 tests), `guard:doc-drift`, and `verify:push:branch`. |
+| PR #820: Claude provider lifecycle coverage | Landed in current main as `99c7a0f2`; post-merge main CI 5/5 green | Closed; local review covered Test Integrity, targeted lifecycle tests, corrected adjacent provider tests, and `verify:push:branch`. |
+| PR #821: config/model consistency | Landed in current main as `0c17e3c1`; PR CI 6/6 green before merge; post-merge main CI 5/5 green | Closed; local review covered Test Integrity, 194 focused validator tests, typecheck, lint fitness, `verify:push:branch`, and `verify:release` on rerun with Python 3.12 after host Python 3.14 caused an inconclusive node-gyp/pyexpat failure. |
+| PR #822: primary-model usability probe contract | Open remote head `909e868a`; PR CI 6/6 green, but local review found a real sync-throw gap | Local fix `fc1669c9` adds red/green sync-adapter-throw coverage and passed Test Integrity, targeted tests, typecheck, and `verify:push:branch`; push that fix and rerun CI before any merge. The slice is still a contract module with no production caller. |
+| PR #815: alert-pipeline review follow-ups | Landed in current main as `13068ac9`; post-merge main CI 5/5 green | Closed; keep only as baseline context for #804/#813 validation. |
+| D5/R8 Python secret-redaction SSOT | Still open as architecture/security work; current main has cross-consumer redaction tests but no canonical pattern source | Use `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` as the execution package after approval. |
+| Python standalone deploy architecture | Still open | Recommended direction is a manifest-tracked `deploy/scripts/lib/` module; fallback is an explicit N-copy equivalence guard if host deployment proves standalone imports cannot ship safely. |
+| Collector cooldown flake | Still needs current CI-history verification | Confirm whether the flake remains merge-blocking; if yes, fix with deterministic fake timers, not retry/skip. |
+| Older runtime decisions | Need current-main revalidation | Recheck heal restart suppression, lock TOCTOU, detailed APIs wire-or-excise, HTTP-error degraded-forever, keychain unlock behavior, and errPreview sanitization against landed #807/#813/#815/#816/#818/#820. |
+| Parallel worktrees/branches | Active preservation concern | Classify by owner/status; use `git cherry -v` or `git range-diff` before deleting anything claimed superseded. |
 
 > **SPLIT RECONCILIATION (2026-06-13):** During pre-push review the consolidation lane was found to collide with the concurrent, more comprehensive PR #808 (`refactor/private-fs-and-mcp-writer-consolidation`), which independently lands `src/lib/private-fs.ts` (superset of F2's `privateWriteError`), `src/runtimes/chat/enrichment/raw-output.ts` (identical to F1's `truncateRaw`/fence-strip), and `src/lib/short-hash.ts`. To avoid duplicate modules and conflicting edits, this PR was split: **F1 and F2 are dropped and ceded to PR #808**; the **cosmetic F3 folds** (anonymize-private-literals.ts, work-index.ts onto guard-core git/text helpers) are also dropped (collision-free with #808 but pure DRY — re-landable later). **Kept:** R1–R5, H1, P1, the R3 staged-blob-distinct-error machinery in guard-core, and the safeguard-diagnostics fail-open→fail-closed reliability fix (a reliability fix, not consolidation; collision-free). Net shipped scope = hardening + correctness only.
 
@@ -14,10 +42,10 @@
 
 ---
 
-## Current Base And Constraints
+## Historical Base And Constraints
 
-- Base: `origin/main` at `9c729acc45d6d9fa34b88c7e44a26f71baf1a57d`.
-- Work surface: isolated worktree on branch `chore/outstanding-specs-and-burndown`.
+- Historical base: `origin/main` at `9c729acc45d6d9fa34b88c7e44a26f71baf1a57d`.
+- Historical work surface: isolated worktree on branch `chore/outstanding-specs-and-burndown`.
 - Do not use the shared checkout; it is on another branch and ahead of `origin/main`.
 - Do not touch other active worktrees or branches unless their owners explicitly hand them over.
 - Do not file GitHub issues or post externally without explicit operator approval.
