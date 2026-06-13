@@ -104,3 +104,39 @@ describe('generateMcpConfigFile – opencode-cli schema', () => {
     expect(json).toContain(socketPath);
   });
 });
+
+// ---------------------------------------------------------------------------
+// executeBridgeTool — shared tool execution helper (Step 5)
+// ---------------------------------------------------------------------------
+
+describe('executeBridgeTool', () => {
+  it('returns isError result containing "MCP bridge not configured" when bridge is undefined', async () => {
+    const { executeBridgeTool } = await import('../../../../src/runtimes/agent/providers/mcp-bridge.ts');
+    const result = await executeBridgeTool(undefined, 'my_tool', {});
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('MCP bridge not configured');
+  });
+
+  it('returns isError result containing "failed" and the error message when bridge throws', async () => {
+    const { executeBridgeTool } = await import('../../../../src/runtimes/agent/providers/mcp-bridge.ts');
+    const bridge = {
+      listTools: () => [],
+      executeTool: async () => { throw new Error('boom'); },
+    };
+    const result = await executeBridgeTool(bridge, 'my_tool', {});
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('failed');
+    expect(result.content).toContain('boom');
+  });
+
+  it('passes through the result from a resolving bridge', async () => {
+    const { executeBridgeTool } = await import('../../../../src/runtimes/agent/providers/mcp-bridge.ts');
+    const expected = { content: 'tool result', isError: false };
+    const bridge = {
+      listTools: () => [],
+      executeTool: async () => expected,
+    };
+    const result = await executeBridgeTool(bridge, 'my_tool', {});
+    expect(result).toEqual(expected);
+  });
+});

@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ToolRegistry } from '../registry.ts';
-import { toolError, type SessionContext } from '../types.ts';
+import { errorResult, toolError, type SessionContext } from '../types.ts';
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import {
@@ -50,10 +50,6 @@ function sanitizeError(err: unknown): string {
   }
   // Generic fallback — don't expose raw error details
   return 'Operation failed. Try again.';
-}
-
-function errorResult(error: string) {
-  return toolError({ error });
 }
 
 // ---------------------------------------------------------------------------
