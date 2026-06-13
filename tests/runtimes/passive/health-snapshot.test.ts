@@ -8,13 +8,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Module mocks ────────────────────────────────────────────────────────────
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
+
 vi.mock('../../../src/logger.ts', () => ({
-  createChildLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createChildLogger: () => mockLogger,
 }));
 
 vi.mock('../../../src/mcp/socket-server.ts', () => ({
@@ -66,6 +68,10 @@ function makeConfig() {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe('PassiveRuntime.getHealthSnapshot — shape', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('details contains unreadCount as a number', () => {
     const runtime = new PassiveRuntime(makeDb(), makeConnection(), makeConfig());
     const snapshot = runtime.getHealthSnapshot();
@@ -103,20 +109,29 @@ describe('PassiveRuntime.getHealthSnapshot — shape', () => {
     expect(snapshot.details).toEqual({ unreadCount: 0, lastActivityAt: null });
   });
 
-  it('gracefully returns defaults when DB query throws', () => {
+  it('returns degraded details when DB query throws', () => {
+    const err = new Error('DB locked');
     const db = {
       raw: {
         exec: vi.fn(),
         prepare: vi.fn().mockReturnValue({
           run: vi.fn(),
-          get: vi.fn().mockImplementation(() => { throw new Error('DB locked'); }),
+          get: vi.fn().mockImplementation(() => { throw err; }),
           all: vi.fn(),
         }),
       },
     } as unknown as Database;
     const runtime = new PassiveRuntime(db, makeConnection(), makeConfig());
     const snapshot = runtime.getHealthSnapshot();
-    expect(snapshot.details).toEqual({ unreadCount: 0, lastActivityAt: null });
+    expect(snapshot).toEqual({
+      status: 'degraded',
+      details: {
+        unreadCount: 0,
+        lastActivityAt: null,
+        healthSnapshotError: 'db_query_failed',
+      },
+    });
+    expect(mockLogger.warn).toHaveBeenCalledWith({ err }, 'passive health snapshot db query failed');
   });
 
   it('snapshot has a valid status string', () => {

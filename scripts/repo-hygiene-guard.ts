@@ -84,6 +84,17 @@ const operationalProtocolIdentifiers = new Set([
   'instances/personal/whatsoup.sock',
 ]);
 
+const privateHostLabels = [
+  ['mw', 'lab'],
+  ['nuc', 'les'],
+  ['ana', 'bot'],
+  ['mac', 'lab'],
+].map((parts) => parts.join(''));
+const privateTailnetIps = [
+  ['100', '91', '13', '7'],
+  ['100', '84', '79', '77'],
+].map((parts) => parts.join('.'));
+
 const trackedSensitiveAllowlist = new Set(['.env.example', '.claude/settings.json']);
 
 // Reserved/fictional phone ranges that are safe as test fixtures and documentation:
@@ -193,6 +204,16 @@ const addedLinePatterns: GuardPattern[] = [
     code: 'private-instance-label',
     message: 'Public repo text must not include private instance labels.',
     regex: /\b(?:BES Bot|Loops-managed|mw-bot|whatsapp:mw-bot|whatsapp-bot@(?:personal|loops|besbot)|whatsoup@(?:q|loops|besbot|personal)|whatsoup-personal|Q's (?:number|WhatsApp number))\b|instances\/personal\/whatsoup\.sock|\/home\/q\//,
+  },
+  {
+    code: 'private-host-label',
+    message: 'Public repo text must not include private host labels.',
+    regex: new RegExp(`\\b(?:${privateHostLabels.join('|')})\\b`, 'i'),
+  },
+  {
+    code: 'private-tailnet-ip',
+    message: 'Public repo text must not include private tailnet IPs.',
+    regex: new RegExp(`\\b(?:${privateTailnetIps.map((ip) => ip.replaceAll('.', '\\.')).join('|')})\\b`),
   },
   {
     code: 'whatsapp-group-jid',

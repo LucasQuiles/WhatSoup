@@ -612,6 +612,22 @@ def daily_health_recovered_incident_keys(
         instance = safe_segment(match.group(1))
         probe = match.group(2).strip()
         scope = f"{machine}|{instance}"
+        if is_verified_whatsapp_health_recovery(probe):
+            daily_health_fail_prefix = f"{scope}|daily-health-fail:"
+            for key, record in open_incidents.items():
+                if not str(key).startswith(daily_health_fail_prefix):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                status = str(record.get("status") or "open")
+                if status in {"closed", "resolved"}:
+                    continue
+                opened = int_field(record, "eventCreatedAtEpoch", int_field(record, "openedAt"))
+                if created is None or opened <= 0 or created <= opened:
+                    continue
+                if key not in seen:
+                    seen.add(key)
+                    recovered.append(key)
         for source in DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES:
             for key in [f"{scope}|{source}", f"{scope}|daily-health:{source}"]:
                 record = open_incidents.get(key)
@@ -2773,7 +2789,7 @@ def process_one(path: Path, paths: dict[str, Path]) -> tuple[bool, str]:
     atomic_write_json(claimed, event)
     incident_state = load_incident_state(paths)
 
-    if is_incident_alert(event) and str(event.get("source") or "") == "daily-health":
+    if str(event.get("source") or "") == "daily-health" and not is_incident_clear(event):
         recovered = close_recovered_daily_health_incidents(event, incident_state)
         if recovered:
             diagnostics = event.setdefault("diagnostics", {})

@@ -201,13 +201,13 @@ def test_summary_and_fail_events_do_not_fold(dirs):
     state_dir, outbox_dir = dirs
     dispatcher = _load_dispatcher(state_dir, outbox_dir)
     summary = {
-        "machine": "nucles",
+        "machine": "test-machine",
         "instance": "bot-errors-health",
         "source": "daily-health",
         "severity": "info",
     }
     fail = {
-        "machine": "nucles",
+        "machine": "test-machine",
         "instance": "bot-errors-health",
         "source": "daily-health-fail",
         "alertSource": "line-a",
@@ -228,7 +228,7 @@ def test_distinct_instances_distinct_keys(dirs):
     state_dir, outbox_dir = dirs
     dispatcher = _load_dispatcher(state_dir, outbox_dir)
     a = {
-        "machine": "nucles",
+        "machine": "test-machine",
         "instance": "bot-errors-health",
         "source": "daily-health-fail",
         "alertSource": "line-a",
@@ -270,7 +270,7 @@ def test_daily_health_fail_not_swallowed_by_info_retention(dirs):
     state_dir, outbox_dir = dirs
     dispatcher = _load_dispatcher(state_dir, outbox_dir)
     event = {
-        "machine": "nucles",
+        "machine": "test-machine",
         "instance": "bot-errors-health",
         "source": "daily-health-fail",
         "alertSource": "line-a",

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -24,7 +24,45 @@ function events(): Array<Record<string, any>> {
     .map((name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')) as Record<string, any>);
 }
 
+function runAtomicWrite(targetPath: string) {
+  return spawnSync('python3', ['-c', `
+import importlib.util
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("bot_errors_runner", "deploy/scripts/bot-errors-runner.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.atomic_write_json(Path(${JSON.stringify(targetPath)}), {"ok": True})
+`], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+  });
+}
+
 describe('bot-errors-runner', () => {
+  it('asserts the atomic-write parent is private before creating a temp file', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
+    const realParent = join(tmpRoot, 'real-outbox');
+    const linkedParent = join(tmpRoot, 'linked-outbox');
+    mkdirSync(realParent, { recursive: true, mode: 0o700 });
+    symlinkSync(realParent, linkedParent, 'dir');
+
+    const result = runAtomicWrite(join(linkedParent, 'event.json'));
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('refusing to use private directory through symlink');
+    expect(readdirSync(realParent)).toEqual([]);
+  });
+
+  it('creates a missing atomic-write parent with private permissions', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
+    const parent = join(tmpRoot, 'new-outbox');
+    const result = runAtomicWrite(join(parent, 'event.json'));
+
+    expect(result.status).toBe(0);
+    expect(statSync(parent).mode & 0o777).toBe(0o700);
+    expect(JSON.parse(readFileSync(join(parent, 'event.json'), 'utf8'))).toEqual({ ok: true });
+  });
+
   it('emits a durable alert with command context when a process exits nonzero', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-runner-'));
     mkdirSync(join(tmpRoot, 'outbox'), { recursive: true });

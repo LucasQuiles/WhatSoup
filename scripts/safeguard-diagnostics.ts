@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { cleanGitEnv } from './lib/guard-core.ts';
+import { git as runGit, gitList as runGitList } from './lib/guard-core.ts';
 
 export type DiagnosticStatus = 'pass' | 'warn' | 'fail';
 export type DiagnosticCategory =
@@ -252,10 +251,6 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
   },
 ];
 
-function normalizeRepoPath(filePath: string): string {
-  return filePath.split(path.sep).join('/');
-}
-
 function readText(cwd: string, filePath: string): string | null {
   const absolute = path.join(cwd, filePath);
   if (!existsSync(absolute)) return null;
@@ -275,23 +270,14 @@ function loadPackageScripts(cwd: string): Record<string, string> {
 
 function git(cwd: string, args: string[]): string | null {
   try {
-    return execFileSync('git', args, {
-      cwd,
-      encoding: 'utf8',
-      env: cleanGitEnv(),
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    return runGit(args, cwd).trim();
   } catch {
     return null;
   }
 }
 
 function gitList(cwd: string, args: string[]): string[] {
-  return (git(cwd, args) ?? '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map(normalizeRepoPath);
+  return runGitList(args, cwd);
 }
 
 function unsafeTrackedInstanceProfiles(cwd: string, tracked: string[]): string[] {
