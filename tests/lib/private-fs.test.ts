@@ -84,11 +84,24 @@ describe('two-algorithm split: assert-first vs mkdir-then-force-chmod', () => {
     expect(statSync(dir).mode & 0o777).toBe(0o755);
   });
 
-  it('ensurePrivateDirectorySync creates directory at mode 0700 but leaves existing untouched', () => {
+  it('ensurePrivateDirectorySync creates directory at mode 0700', () => {
     const root = makeTmp();
     const newDir = join(root, 'newdir');
 
     ensurePrivateDirectorySync(newDir);
     expect(statSync(newDir).mode & 0o777).toBe(0o700);
+  });
+
+  it('ensurePrivateDirectorySync chmods a pre-existing 0755 dir to 0700', () => {
+    const root = makeTmp();
+    const dir = join(root, 'ensuredir');
+    mkdirSync(dir, { recursive: true, mode: 0o755 });
+    chmodSync(dir, 0o755);
+
+    expect(statSync(dir).mode & 0o777).toBe(0o755);
+
+    ensurePrivateDirectorySync(dir);
+
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
   });
 });
