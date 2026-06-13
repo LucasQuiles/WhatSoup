@@ -9,6 +9,8 @@ import { useStickyScroll } from '../../hooks/use-sticky-scroll'
 import EmptyState from '../EmptyState'
 import ChatListItem from '../ChatListItem'
 import MessageBubble from '../MessageBubble'
+import { Button } from '../primitives/Button'
+import { ActionButton } from '../primitives/ActionButton'
 import type { Mode, ChatItem, Message } from './types'
 
 /* HistoryMessages — scroll-to-bottom + load older + send input */
@@ -181,19 +183,20 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
       {/* Jump to newest */}
       {showJumpToBottom && (
-        <button
-          type="button"
-          className="c-btn c-btn-sm absolute flex items-center justify-center hover:text-t2 c-hover text-t5 left-1/2 -translate-x-1/2 bottom-[var(--sp-4)] py-[var(--sp-2)] px-[var(--sp-5)] gap-[var(--sp-2)] rounded-md z-[var(--z-float)]"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="absolute flex items-center justify-center hover:text-t2 c-hover text-t5 left-1/2 -translate-x-1/2 bottom-[var(--sp-4)] py-[var(--sp-2)] px-[var(--sp-5)] gap-[var(--sp-2)] rounded-md z-[var(--z-float)]"
           style={{
             background: 'color-mix(in srgb, var(--color-d4) 80%, transparent)',
             backdropFilter: 'blur(4px)',
           }}
           onClick={jumpToBottom}
           aria-label="Jump to newest"
+          icon={<ChevronsUp size={14} strokeWidth={1.75} className="rotate-180" />}
         >
-          <ChevronsUp size={14} strokeWidth={1.75} className="rotate-180" />
           <span className="text-sm">Jump to newest</span>
-        </button>
+        </Button>
       )}
       </div>
 
@@ -222,15 +225,13 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           }}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
         />
-        <button
-          type="button"
-          className="c-btn c-btn-primary c-btn-send flex-shrink-0"
+        <ActionButton
+          label="Send"
+          icon={<Send size={16} strokeWidth={1.75} />}
+          className="flex-shrink-0"
           onClick={handleSend}
           disabled={isSending || !msgText.trim()}
-        >
-          <Send size={16} strokeWidth={1.75} />
-          <span className="c-btn-send-label">Send</span>
-        </button>
+        />
       </div>
     </>
   )

@@ -49,7 +49,9 @@ describe('design system compliance — Shannon slice', () => {
   it('uses accessible button and textarea semantics in HistoryTab', () => {
     const source = read('console/src/components/line-detail/HistoryTab.tsx')
 
-    expect(source).toContain('c-btn c-btn-sm')
+    // Buttons are on the Button/ActionButton primitives (raw <button>/c-btn retired).
+    expect(source).toContain('<Button')
+    expect(source).toContain('<ActionButton')
     expect(source).toContain("z-[var(--z-float)]")
     expect(source).toContain('aria-label="Type a reply"')
   })
@@ -83,9 +85,10 @@ describe('design system compliance — Shannon slice', () => {
     expect(heartbeat).toContain('role="img"')
     expect(heartbeat).toContain('aria-label={`Health: ${beats.filter(b => b === \'up\').length} of ${beats.length} heartbeats healthy`}')
 
-    expect(pipeline).toContain('<button')
-    expect(pipeline).toContain('type="button"')
-    expect(pipeline).toMatch(/className="[^"]*c-btn c-btn-sm font-mono inline-flex items-center gap-1\.5[^"]*"/)
+    // PipelineNode is a real, accessible button — now the Button primitive, not a
+    // clickable <span>. Preserved layout utilities ride on the primitive's className.
+    expect(pipeline).toContain('<Button')
+    expect(pipeline).toMatch(/className="font-mono inline-flex items-center gap-1\.5[^"]*"/)
     expect(pipeline).not.toContain('<span\n      className="inline-flex items-center gap-1.5"\n      onClick={onClick}')
   })
 
@@ -93,8 +96,9 @@ describe('design system compliance — Shannon slice', () => {
     const inbox = read('console/src/pages/Inbox.tsx')
 
     expect((inbox.match(/c-card/g) ?? []).length).toBeGreaterThanOrEqual(3)
-    expect(inbox).toMatch(/className="[^"]*c-btn c-btn-ghost[^"]*"/)
-    expect(inbox).toMatch(/className="[^"]*c-btn c-btn-sm[^"]*"/)
+    // Interaction affordances are on the Button/ActionButton primitives.
+    expect(inbox).toContain('<Button')
+    expect(inbox).toContain('<ActionButton')
     expect(inbox).toContain('z-[var(--z-float)]')
     expect(inbox).toContain('aria-label="Type a message"')
     expect(inbox).toContain('aria-label="Clear search"')

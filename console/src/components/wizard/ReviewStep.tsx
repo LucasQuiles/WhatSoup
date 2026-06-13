@@ -1,9 +1,10 @@
 import { type FC } from 'react'
-import { Pencil, Loader2, AlertCircle } from 'lucide-react'
+import { Pencil, AlertCircle } from 'lucide-react'
 import ModeBadge from '../ModeBadge'
 import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_LABELS } from '../../lib/access-modes'
+import { Button } from '../primitives/Button'
 
 interface ReviewStepProps {
   data: Record<string, unknown>
@@ -52,14 +53,14 @@ const kvValueStyle: React.CSSProperties = {
 /* ── Edit button ── */
 
 const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
-  <button
-    type="button"
-    className="c-btn c-btn-ghost flex items-center gap-[var(--sp-1)] py-[var(--sp-1)] px-[var(--sp-2)]"
+  <Button
+    variant="ghost"
+    className="flex items-center gap-[var(--sp-1)] py-[var(--sp-1)] px-[var(--sp-2)]"
+    icon={<Pencil size={12} strokeWidth={1.75} />}
     onClick={onClick}
   >
-    <Pencil size={12} strokeWidth={1.75} />
     <span className="text-xs">Edit</span>
-  </button>
+  </Button>
 )
 
 /* ── Key-value row ── */
@@ -208,15 +209,14 @@ const ReviewStep: FC<ReviewStepProps> = ({
       )}
 
       {/* Create button */}
-      <button
-        type="button"
-        className="c-btn c-btn-primary flex items-center justify-center self-stretch gap-[var(--sp-2)] p-[var(--sp-3)]"
+      <Button
+        variant="primary"
+        className="flex items-center justify-center self-stretch gap-[var(--sp-2)] p-[var(--sp-3)]"
         onClick={onCreateLine}
-        disabled={creating}
+        loading={creating}
       >
-        {creating && <Loader2 size={16} className="animate-spin" />}
         {creating ? 'Creating...' : 'Create Line'}
-      </button>
+      </Button>
     </div>
   )
 }

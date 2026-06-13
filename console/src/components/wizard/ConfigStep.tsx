@@ -9,6 +9,7 @@ import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../l
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_DETAILS, ACCESS_MODE_VALUES, type AccessModeValue } from '../../lib/access-modes'
 import { Tabs, Tab } from '../primitives/Tabs'
+import { Button } from '../primitives/Button'
 
 interface ConfigStepProps {
   data: Record<string, unknown>
@@ -641,17 +642,17 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             </div>
             <div className="flex items-center gap-[var(--sp-2)] mt-[var(--sp-2)] mb-[var(--sp-1)]">
               {agentOptions.enabledPlugins && Object.keys(agentOptions.enabledPlugins).length > 0 && (
-                <button
-                  type="button"
-                  className="c-btn c-btn-ghost c-btn-xs"
+                <Button
+                  variant="ghost"
+                  size="xs"
                   onClick={() => handleAgentOption('enabledPlugins', {})}
                 >
                   Reset to global defaults
-                </button>
+                </Button>
               )}
-              <button
-                type="button"
-                className="c-btn c-btn-ghost c-btn-xs"
+              <Button
+                variant="ghost"
+                size="xs"
                 onClick={() => {
                   const all: Record<string, boolean> = {}
                   ALL_PLUGINS.forEach(p => { all[p.key] = true })
@@ -659,10 +660,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 }}
               >
                 Enable all
-              </button>
-              <button
-                type="button"
-                className="c-btn c-btn-ghost c-btn-xs"
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
                 onClick={() => {
                   const core: Record<string, boolean> = {}
                   ALL_PLUGINS.forEach(p => { core[p.key] = p.category === 'core' })
@@ -670,7 +671,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 }}
               >
                 Core only
-              </button>
+              </Button>
             </div>
             {(Object.entries(CATEGORY_LABELS) as [string, string][]).map(([cat, catLabel]) => {
               const plugins = ALL_PLUGINS.filter(p => p.category === cat)
@@ -881,10 +882,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             </label>
             <div className="flex">
               {SEARCH_MODES.map((mode) => (
-                <button
+                <Button
                   key={mode}
-                  type="button"
-                  className="c-btn cursor-pointer py-[var(--sp-2)] px-[var(--sp-4)] text-data"
+                  variant="neutral"
+                  className="cursor-pointer py-[var(--sp-2)] px-[var(--sp-4)] text-data"
                   onClick={() => onChange({ pineconeSearchMode: mode })}
                   style={{
                     background:
@@ -899,7 +900,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                   }}
                 >
                   {mode}
-                </button>
+                </Button>
               ))}
             </div>
           </div>
@@ -934,13 +935,13 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       {/* Skip — sticky at bottom, right-aligned */}
       {onSkip && (
         <div className="flex justify-end mt-[var(--sp-4)] pt-[var(--sp-3)] c-border-t">
-          <button
-            type="button"
-            className="c-btn c-btn-ghost c-btn-sm"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={onSkip}
           >
             Skip — Use Defaults
-          </button>
+          </Button>
         </div>
       )}
     </div>

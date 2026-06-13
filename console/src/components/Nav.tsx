@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 import { useRealtime } from "../hooks/use-websocket";
 import { useTheme } from "../hooks/use-theme";
+import { Button } from "./primitives/Button";
+import { ActionButton } from "./primitives/ActionButton";
 
 interface NavProps {
   alertCount?: number;
@@ -136,14 +138,12 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
 
       {/* Right cluster: theme toggle + system status */}
       <div className="text-xs flex items-center gap-2 font-mono flex-shrink-0">
-        <button
-          type="button"
+        <ActionButton
           onClick={toggleTheme}
-          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-          className="c-btn-ghost flex items-center justify-center w-[var(--sp-6)] h-[var(--sp-6)] rounded-sm c-hover text-t4 hover:text-t2"
-        >
-          {theme === 'dark' ? <Sun size={14} strokeWidth={1.75} /> : <Moon size={14} strokeWidth={1.75} />}
-        </button>
+          label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          icon={theme === 'dark' ? <Sun size={14} strokeWidth={1.75} /> : <Moon size={14} strokeWidth={1.75} />}
+          className="flex items-center justify-center w-[var(--sp-6)] h-[var(--sp-6)] rounded-sm c-hover text-t4 hover:text-t2"
+        />
         {connected ? (
           <span className="flex items-center gap-1 text-s-ok" title="Realtime connected">
             <Wifi size={12} strokeWidth={1.75} />
@@ -171,16 +171,16 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         )}
         {version && version !== 'unknown' && (
           updateAvailable && remoteSha ? (
-            <button
-              type="button"
+            <Button
+              variant="ghost"
               onClick={onUpdateClick}
               className="flex items-center gap-1 c-hover cursor-pointer text-m-cht rounded-sm py-[var(--sp-0h)] px-[var(--sp-1h)] bg-[var(--m-cht-soft)]"
               title={`Update available: ${version} → ${remoteSha}`}
               aria-label={`Update available: ${version} to ${remoteSha}`}
+              icon={<Download size={15} strokeWidth={1.75} />}
             >
-              <Download size={15} strokeWidth={1.75} />
               <span>{version} → {remoteSha}</span>
-            </button>
+            </Button>
           ) : (
             <span className="text-t5 hidden md:inline" title={`Version ${version}`}>
               v{version}
@@ -190,16 +190,16 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
         {onLogout && (
           <>
             <span className="text-t5">|</span>
-            <button
-              type="button"
+            <Button
+              variant="ghost"
               onClick={onLogout}
               className="flex items-center gap-1 c-hover cursor-pointer text-t4 hover:text-t2 rounded-sm py-[var(--sp-0h)] px-[var(--sp-1h)]"
               title="Lock console (revoke session)"
               aria-label="Lock console"
+              icon={<LogOut size={14} strokeWidth={1.75} />}
             >
-              <LogOut size={14} strokeWidth={1.75} />
               <span>Lock</span>
-            </button>
+            </Button>
           </>
         )}
       </div>

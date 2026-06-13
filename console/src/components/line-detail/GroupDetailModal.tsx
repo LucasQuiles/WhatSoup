@@ -48,6 +48,7 @@ import {
 import { getInitials, capitalize } from '../../lib/text-utils.js'
 import type { GroupInfo, GroupDetail, GroupParticipant } from '../../types.js'
 import { Modal, ModalBody } from '../primitives'
+import { Button } from '../primitives/Button'
 import { ActionButton } from '../primitives/ActionButton'
 import { Tabs, Tab } from '../primitives/Tabs'
 import { ToolbarTimeRange } from '../primitives/Toolbar'
@@ -227,33 +228,39 @@ function InfoTab({
               {inviteLink}
             </div>
             <div className="flex gap-2">
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={handleCopyLink}
-                className="c-btn c-btn-sm c-btn-ghost font-mono"
+                className="font-mono"
+                icon={<Copy size={15} strokeWidth={1.75} />}
               >
-                <Copy size={15} strokeWidth={1.75} /> Copy
-              </button>
+                Copy
+              </Button>
               {isAdmin && (
-                <button
-                  type="button"
+                <Button
+                  variant="danger"
+                  size="sm"
                   onClick={() => setConfirmRevoke(true)}
-                  className="c-btn c-btn-sm c-btn-danger font-mono"
+                  className="font-mono"
+                  icon={<X size={15} strokeWidth={1.75} />}
                 >
-                  <X size={15} strokeWidth={1.75} /> Revoke
-                </button>
+                  Revoke
+                </Button>
               )}
             </div>
           </div>
         ) : (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={handleFetchInviteLink}
             disabled={loadingLink}
-            className="c-btn c-btn-sm c-btn-ghost font-mono"
+            className="font-mono"
+            icon={<Link size={15} strokeWidth={1.75} />}
           >
-            <Link size={15} strokeWidth={1.75} /> {loadingLink ? 'Fetching...' : 'Fetch invite link'}
-          </button>
+            {loadingLink ? 'Fetching...' : 'Fetch invite link'}
+          </Button>
         )}
       </div>
 
@@ -364,14 +371,16 @@ function ParticipantsTab({
             placeholder="Search contacts to add..."
           />
           {addContacts.length > 0 && (
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="sm"
               onClick={handleAdd}
               disabled={adding}
-              className="c-btn c-btn-sm c-btn-primary font-mono mt-[var(--sp-2)]"
+              className="font-mono mt-[var(--sp-2)]"
+              icon={<UserPlus size={15} strokeWidth={1.75} />}
             >
-              <UserPlus size={15} strokeWidth={1.75} /> {adding ? 'Adding...' : `Add ${addContacts.length}`}
-            </button>
+              {adding ? 'Adding...' : `Add ${addContacts.length}`}
+            </Button>
           )}
         </div>
       )}
@@ -386,20 +395,22 @@ function ParticipantsTab({
             {pendingRequests.map(req => (
               <div key={req.jid} className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] bg-[var(--s-warn-wash)] rounded-md">
                 <span className="c-data flex-1 truncate">{req.jid}</span>
-                <button
-                  type="button"
+                <Button
+                  variant="primary"
+                  size="sm"
                   onClick={() => handleRequestAction(req.jid, 'add')}
-                  className="c-btn c-btn-sm c-btn-primary font-mono"
+                  className="font-mono"
                 >
                   Approve
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
                   onClick={() => handleRequestAction(req.jid, 'remove')}
-                  className="c-btn c-btn-sm c-btn-danger font-mono"
+                  className="font-mono"
                 >
                   Reject
-                </button>
+                </Button>
               </div>
             ))}
           </div>
@@ -442,22 +453,24 @@ function ParticipantsTab({
               )}
               {isAdmin && !isMe && (
                 <div className="flex gap-1 flex-shrink-0">
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     onClick={() => handleToggleAdmin(p)}
-                    className="c-btn c-btn-sm c-btn-ghost font-mono"
+                    className="font-mono"
                     title={p.admin ? 'Demote' : 'Promote to admin'}
-                  >
-                    {p.admin ? <ShieldOff size={15} strokeWidth={1.75} /> : <ShieldCheck size={15} strokeWidth={1.75} />}
-                  </button>
-                  <button
-                    type="button"
+                    aria-label={p.admin ? 'Demote' : 'Promote to admin'}
+                    icon={p.admin ? <ShieldOff size={15} strokeWidth={1.75} /> : <ShieldCheck size={15} strokeWidth={1.75} />}
+                  />
+                  <Button
+                    variant="danger"
+                    size="sm"
                     onClick={() => setConfirmRemove(p)}
-                    className="c-btn c-btn-sm c-btn-danger font-mono"
+                    className="font-mono"
                     title="Remove participant"
-                  >
-                    <UserMinus size={15} strokeWidth={1.75} />
-                  </button>
+                    aria-label="Remove participant"
+                    icon={<UserMinus size={15} strokeWidth={1.75} />}
+                  />
                 </div>
               )}
             </div>
@@ -699,13 +712,14 @@ function SettingsTab({
 
       {/* Leave group */}
       <div className="mt-[var(--sp-4)]">
-        <button
-          type="button"
+        <Button
+          variant="danger"
           onClick={() => setConfirmLeave(true)}
-          className="c-btn c-btn-danger font-mono"
+          className="font-mono"
+          icon={<LogOut size={14} />}
         >
-          <LogOut size={14} /> Leave group
-        </button>
+          Leave group
+        </Button>
       </div>
 
       <ConfirmDialog

@@ -7,6 +7,7 @@ import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
 import { ToolbarTimeRange } from '../primitives'
+import { Button } from '../primitives/Button'
 import type { MetricsRange, LineMetrics, LineInstance } from './types'
 
 type DetailTab = 'tokens' | 'sessions';
@@ -49,18 +50,17 @@ export function MetricsTab({
           onChange={(v) => setMetricsRange(v as MetricsRange)}
         />
         {metrics?.messageVolume && metrics.messageVolume.length > 0 && (
-          <button
-            type="button"
-            className="c-btn c-btn-sm c-btn-ghost"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => {
               const csv = metricsToCSV(metrics.messageVolume);
               downloadCSV(csv, `${lineName ?? 'metrics'}-${metricsRange}.csv`);
             }}
             title="Export metrics as CSV"
             aria-label="Export metrics as CSV"
-          >
-            <Download size={14} />
-          </button>
+            icon={<Download size={14} />}
+          />
         )}
       </div>
 
@@ -95,22 +95,22 @@ export function MetricsTab({
             <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
               <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-3)]">
                 {metrics?.hasTokenData && (
-                  <button
-                    type="button"
-                    className={`c-btn c-btn-sm ${detailTab === 'tokens' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+                  <Button
+                    size="sm"
+                    variant={detailTab === 'tokens' ? 'primary' : 'ghost'}
                     onClick={() => setDetailTab('tokens')}
                   >
                     Tokens
-                  </button>
+                  </Button>
                 )}
                 {metrics?.hasSessionData && (
-                  <button
-                    type="button"
-                    className={`c-btn c-btn-sm ${detailTab === 'sessions' ? 'c-btn-primary' : 'c-btn-ghost'}`}
+                  <Button
+                    size="sm"
+                    variant={detailTab === 'sessions' ? 'primary' : 'ghost'}
                     onClick={() => setDetailTab('sessions')}
                   >
                     Sessions
-                  </button>
+                  </Button>
                 )}
               </div>
               <div className="h-[var(--chart-min-h)]">

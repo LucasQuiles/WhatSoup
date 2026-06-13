@@ -3,6 +3,7 @@ import { UserPlus, Check, X, RotateCw } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 import { formatFullTime, formatTime } from '../lib/format-time'
 import MessageContent from './MessageContent'
+import { Button } from './primitives/Button'
 import type { Message } from '../types'
 
 interface MessageBubbleProps {
@@ -78,15 +79,15 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
       <span className="flex items-center gap-[var(--bw-accent)]">
         <X size={12} strokeWidth={2.5} className="text-s-crit" />
         {onRetry && (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => onRetry(msg)}
-            className="c-btn c-btn-ghost c-btn-sm"
             aria-label="Retry send"
             title="Retry send"
           >
             <RotateCw size={10} strokeWidth={2.5} className="text-t1" />
-          </button>
+          </Button>
         )}
       </span>
     )
@@ -183,15 +184,15 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
         <div className="flex items-center mb-[var(--bw-accent)] pl-[var(--sp-1)] gap-[var(--sp-2)] max-w-full">
           <span className="c-label truncate">{resolveDisplayName(msg.senderName)}</span>
           {onCreateContact && isRawJid(msg.senderName ?? '') && (
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => onCreateContact(resolveDisplayName(msg.senderName))}
-              className="c-btn c-btn-ghost c-btn-sm"
               aria-label="Save as contact"
               title="Save as contact"
             >
               <UserPlus size={10} strokeWidth={1.75} />
-            </button>
+            </Button>
           )}
         </div>
       )}

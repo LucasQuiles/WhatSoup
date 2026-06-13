@@ -30,6 +30,7 @@ import { useState, useMemo, useRef, useId } from 'react';
 import { MessageSquare, Users, X } from 'lucide-react';
 import type { ChatItem } from '../../types.js';
 import { SearchInput } from './SearchInput.js';
+import { Button } from '../primitives/Button.js';
 import { Popover, popoverOptionId, usePopoverKeyboard } from '../primitives/Popover.js';
 import type { PopoverOption } from '../primitives/Popover.js';
 
@@ -124,14 +125,14 @@ export function ChatPicker({
           <MessageSquare size={14} className="text-t4" />
         )}
         <span className="c-data flex-1 truncate">{chatLabel(selected)}</span>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={onClear}
-          className="c-btn c-btn-ghost c-btn-sm"
           aria-label="Clear selection"
         >
           <X size={14} />
-        </button>
+        </Button>
       </div>
     );
   }

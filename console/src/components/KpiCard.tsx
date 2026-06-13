@@ -1,4 +1,5 @@
 import { type FC, useId } from "react";
+import { Button } from "./primitives/Button";
 
 interface KpiCardProps {
   value: string | number;
@@ -26,8 +27,8 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
   const gradientId = useId();
 
   return (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
       aria-pressed={active}
       onClick={onClick}
       className="cursor-pointer select-none relative overflow-hidden c-kpi-pad c-kpi-hover rounded-md"
@@ -75,7 +76,7 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
           />
         </svg>
       )}
-    </button>
+    </Button>
   );
 };
 

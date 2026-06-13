@@ -4,6 +4,7 @@ import { useToast } from '../../hooks/toast-context'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import ConfirmDialog from '../ConfirmDialog'
+import { Button } from '../primitives/Button'
 import type { AccessEntry } from './types'
 
 interface PendingAction { subjectType: string; subjectId: string; subjectName: string; action: 'allow' | 'block' }
@@ -87,41 +88,45 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       {/* Actions */}
       {showActions === 'pending' && (
         <div className="flex gap-1.5">
-          <button
-            type="button"
+          <Button
+            variant="success"
+            size="sm"
             onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
-            className="c-btn c-btn-sm c-btn-success font-mono"
+            className="font-mono"
+            icon={<UserCheck size={15} strokeWidth={1.75} />}
           >
-            <UserCheck size={15} strokeWidth={1.75} /> Allow
-          </button>
-          <button
-            type="button"
+            Allow
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
             onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
-            className="c-btn c-btn-sm c-btn-danger font-mono"
+            className="font-mono"
+            icon={<Ban size={15} strokeWidth={1.75} />}
           >
-            <Ban size={15} strokeWidth={1.75} /> Block
-          </button>
+            Block
+          </Button>
         </div>
       )}
       {showActions === 'allowed' && (
-        <button
-          type="button"
+        <Button
+          variant="danger"
+          size="sm"
           onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'block')}
-          className="c-btn c-btn-sm c-btn-danger font-mono"
+          className="font-mono"
           aria-label="Block contact"
-        >
-          <Ban size={15} strokeWidth={1.75} />
-        </button>
+          icon={<Ban size={15} strokeWidth={1.75} />}
+        />
       )}
       {showActions === 'blocked' && (
-        <button
-          type="button"
+        <Button
+          variant="success"
+          size="sm"
           onClick={() => confirmAccess(entry.subjectType, entry.subjectId, entry.subjectName, 'allow')}
-          className="c-btn c-btn-sm c-btn-success font-mono"
+          className="font-mono"
           aria-label="Allow contact"
-        >
-          <UserCheck size={15} strokeWidth={1.75} />
-        </button>
+          icon={<UserCheck size={15} strokeWidth={1.75} />}
+        />
       )}
     </div>
   )

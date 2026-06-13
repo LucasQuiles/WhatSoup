@@ -5,6 +5,7 @@ import FeedIcon from "./FeedIcon";
 import { formatWhatsAppText } from "../lib/format-wa-text";
 import { getProvider } from "../lib/providers";
 import { statusAlertMessage, statusSeverity } from "../lib/status-severity";
+import { Button } from "./primitives/Button";
 
 // ---------------------------------------------------------------------------
 //  Constants
@@ -341,11 +342,12 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
 
   // Copy — always available
   actions.push(
-    <button
+    <Button
       key="copy"
-      type="button"
+      variant="ghost"
       className="fc-action"
       aria-label="Copy to clipboard"
+      icon={<Copy size={12} strokeWidth={1.75} />}
       onClick={(e) => {
         e.stopPropagation();
         const text = copyContent(event);
@@ -354,28 +356,27 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
           .catch(() => onCopyResult?.(false));
       }}
     >
-      <Copy size={12} strokeWidth={1.75} />
       <span className="fc-action__label">copy</span>
-    </button>
+    </Button>
   );
 
   // Jump to conversation — message events with conversationKey
   if (d?.type === "message" && (d as { conversationKey?: string }).conversationKey && inst && onNavigate) {
     const ck = (d as { conversationKey?: string }).conversationKey!;
     actions.push(
-      <button
+      <Button
         key="jump"
-        type="button"
+        variant="ghost"
         className="fc-action"
         aria-label="Open conversation"
+        icon={<ExternalLink size={12} strokeWidth={1.75} />}
         onClick={(e) => {
           e.stopPropagation();
           onNavigate(`/inbox?line=${encodeURIComponent(inst)}&chat=${encodeURIComponent(ck)}`);
         }}
       >
-        <ExternalLink size={12} strokeWidth={1.75} />
         <span className="fc-action__label">open</span>
-      </button>
+      </Button>
     );
   }
 
@@ -385,16 +386,16 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
       || (d?.type === "health" && statusSeverity(d.status) === "crit");
     if (show) {
       actions.push(
-        <button
+        <Button
           key="restart"
-          type="button"
+          variant="ghost"
           className="fc-action"
           aria-label={`Restart ${inst}`}
+          icon={<RotateCw size={12} strokeWidth={1.75} />}
           onClick={(e) => { e.stopPropagation(); onRestart(inst); }}
         >
-          <RotateCw size={12} strokeWidth={1.75} />
           <span className="fc-action__label">restart</span>
-        </button>
+        </Button>
       );
     }
   }
@@ -405,16 +406,16 @@ function QuickActions({ event, onRestart, onStop, onNavigate, onCopyResult }: {
       || (d?.type === "health" && statusSeverity(d.status) === "crit");
     if (show) {
       actions.push(
-        <button
+        <Button
           key="stop"
-          type="button"
+          variant="danger"
           className="fc-action fc-action--danger"
           aria-label={`Stop ${inst} instance`}
+          icon={<Square size={12} strokeWidth={1.75} />}
           onClick={(e) => { e.stopPropagation(); onStop(inst); }}
         >
-          <Square size={12} strokeWidth={1.75} />
           <span className="fc-action__label">stop</span>
-        </button>
+        </Button>
       );
     }
   }

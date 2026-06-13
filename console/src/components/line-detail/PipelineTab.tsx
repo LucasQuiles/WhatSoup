@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { Button } from '../primitives/Button'
 import type { Mode, LineInstance } from './types'
 
 /* Pipeline Node — compact inline pill */
@@ -32,10 +33,11 @@ function PipelineNode({
 
   if (onClick) {
     return (
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={onClick}
-        className="c-btn c-btn-sm font-mono inline-flex items-center gap-1.5 text-data"
+        className="font-mono inline-flex items-center gap-1.5 text-data"
         style={pillStyle}
       >
         <span>{label}</span>
@@ -44,7 +46,7 @@ function PipelineNode({
             {value}
           </span>
         )}
-      </button>
+      </Button>
     )
   }
 

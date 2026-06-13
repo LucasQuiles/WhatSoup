@@ -1,5 +1,6 @@
 import { type FC } from "react";
 import { AlertTriangle } from "lucide-react";
+import { Button } from "./primitives/Button";
 
 interface Alert {
   line: string;
@@ -34,9 +35,9 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
       {/* Alert chips */}
       <div className="flex items-center gap-2 overflow-x-auto">
         {alerts.map((alert) => (
-          <button
+          <Button
             key={alert.line}
-            type="button"
+            variant="ghost"
             onClick={() => onAlertClick?.(alert)}
             className="inline-flex items-center gap-1 text-s-crit font-mono c-hover rounded cursor-pointer whitespace-nowrap hover:bg-[var(--s-crit-soft)] py-[var(--sp-1)] px-[var(--sp-3)] text-sm"
             style={{ backgroundColor: "var(--s-crit-wash)" }}
@@ -44,7 +45,7 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
             <span className="text-t4">{alert.line}</span>
             <span className="mx-1 text-t5">—</span>
             <span>{alert.message}</span>
-          </button>
+          </Button>
         ))}
       </div>
     </div>

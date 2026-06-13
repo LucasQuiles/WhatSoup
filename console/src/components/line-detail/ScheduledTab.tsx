@@ -6,6 +6,7 @@ import { useToast } from '../../hooks/toast-context.js'
 import EmptyState from '../EmptyState.js'
 import { ScheduledMessageRow } from './ScheduledMessageRow.js'
 import { ScheduleComposerModal } from './ScheduleComposerModal.js'
+import { Button } from '../primitives/Button'
 import type { ScheduledMessage, ChatItem } from '../../types.js'
 
 export function ScheduledTab({ lineName }: { lineName: string }) {
@@ -105,14 +106,15 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
           <span className="c-col-header text-t4 font-mono">
             {messages.length} scheduled message{messages.length !== 1 ? 's' : ''}
           </span>
-          <button
-            type="button"
+          <Button
+            variant="primary"
+            size="sm"
             onClick={handleNew}
-            className="c-btn c-btn-sm c-btn-primary font-mono"
+            className="font-mono"
+            icon={<Plus size={12} strokeWidth={1.75} />}
           >
-            <Plus size={12} strokeWidth={1.75} />
             New Scheduled Message
-          </button>
+          </Button>
         </div>
 
         {sorted.length === 0 ? (

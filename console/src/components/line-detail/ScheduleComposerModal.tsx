@@ -324,14 +324,15 @@ export function ScheduleComposerModal({
               {/* Preset buttons */}
               <div className="flex gap-2 flex-wrap">
                 {RECURRENCE_PRESETS.map(preset => (
-                  <button
+                  <Button
                     key={preset.label}
-                    type="button"
+                    size="xs"
+                    variant={cronExpr === preset.cron ? 'primary' : 'ghost'}
                     onClick={() => setCronExpr(preset.cron)}
-                    className={`c-btn c-btn-xs font-mono ${cronExpr === preset.cron ? 'c-btn-primary' : 'c-btn-ghost'}`}
+                    className="font-mono"
                   >
                     {preset.label}
-                  </button>
+                  </Button>
                 ))}
               </div>
               {/* Custom cron input */}

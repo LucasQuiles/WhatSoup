@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 import FilterPill from "./FilterPill";
 import FeedCard from "./FeedCard";
 import ConfirmDialog from "./ConfirmDialog";
+import { Button } from "./primitives/Button";
 import type { FeedEvent } from "../types";
 import { statusNeedsAttention, statusSeverity } from "../lib/status-severity";
 
@@ -152,18 +153,18 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
           />
         </div>
 
-        <button
-          type="button"
+        <Button
+          variant="ghost"
           aria-pressed={paused}
           onClick={() => {
             if (paused) { setSnapshot(null); setPaused(false); }
             else { setSnapshot(events); setPaused(true); }
           }}
           className="feed-toolbar__pause"
+          icon={paused ? <Play size={10} strokeWidth={1.75} /> : <Pause size={10} strokeWidth={1.75} />}
         >
-          {paused ? <Play size={10} strokeWidth={1.75} /> : <Pause size={10} strokeWidth={1.75} />}
           {paused ? "resume" : "pause"}
-        </button>
+        </Button>
       </div>
 
       {/* ── Filter bar — single compact row ── */}

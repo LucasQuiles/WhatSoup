@@ -1,5 +1,6 @@
 import { type FC, useEffect } from 'react'
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react'
+import { Button } from './primitives/Button'
 
 type ToastVariant = 'success' | 'error' | 'info'
 
@@ -47,14 +48,13 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
     >
       <Icon size={18} strokeWidth={1.75} className={`flex-shrink-0 ${iconColor[variant]}`} />
       <span className="flex-1 text-t2">{message}</span>
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={onClose}
-        className="c-btn c-btn-ghost c-btn-sm"
         aria-label="Dismiss notification"
-      >
-        <X size={14} strokeWidth={1.75} />
-      </button>
+        icon={<X size={14} strokeWidth={1.75} />}
+      />
     </div>
   )
 }

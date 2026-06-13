@@ -17,6 +17,8 @@ import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
 import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X, CheckCheck } from 'lucide-react'
 import { SearchInput } from '../components/shared/SearchInput.js'
+import { Button } from '../components/primitives/Button'
+import { ActionButton } from '../components/primitives/ActionButton'
 import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
@@ -277,15 +279,16 @@ export default function Inbox() {
                       className="animate-spin text-t4"
                     />
                   ) : isSearchMode ? (
-                    <button
-                      type="button"
+                    <Button
+                      variant="ghost"
+                      size="xs"
                       onClick={() => setSearchInput('')}
                       className="c-hover cursor-pointer text-t5 hover:text-t2 p-[var(--sp-1)]"
                       title="Clear search"
                       aria-label="Clear search"
                     >
                       <X size={14} strokeWidth={1.75} />
-                    </button>
+                    </Button>
                   ) : null
                 }
               />
@@ -347,20 +350,20 @@ export default function Inbox() {
                 className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative py-[var(--sp-4)] px-[var(--sp-5)]"
               >
                 {messages && messages.length > 0 && hasMore && (
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
                     onClick={handleLoadOlder}
                     disabled={loadingOlder}
-                    className="c-btn c-btn-ghost pt-[var(--sp-2)] pb-[var(--sp-4)] gap-[var(--sp-2)] w-full justify-center text-t5"
-                  >
-                    {loadingOlder
+                    className="pt-[var(--sp-2)] pb-[var(--sp-4)] gap-[var(--sp-2)] w-full justify-center text-t5"
+                    icon={loadingOlder
                       ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
                       : <ChevronsUp size={14} strokeWidth={1.75} />
                     }
+                  >
                     <span className="text-sm">
                       {loadingOlder ? 'Loading…' : 'Load older messages'}
                     </span>
-                  </button>
+                  </Button>
                 )}
                 {renderedMessages.length > 0 ? (
                   <div
@@ -392,13 +395,14 @@ export default function Inbox() {
                   </div>
                 )}
                 {showJump && (
-                  <button
-                    type="button"
+                  <Button
+                    size="sm"
                     onClick={jumpToBottom}
-                    className="c-btn c-btn-sm absolute left-1/2 bottom-16 -translate-x-1/2 shadow-[var(--card-shadow)] z-[var(--z-float)] text-sm"
+                    className="absolute left-1/2 bottom-16 -translate-x-1/2 shadow-[var(--card-shadow)] z-[var(--z-float)] text-sm"
+                    icon={<ChevronDown size={14} />}
                   >
-                    <ChevronDown size={14} /> New messages
-                  </button>
+                    New messages
+                  </Button>
                 )}
               </div>
             )}
@@ -429,17 +433,15 @@ export default function Inbox() {
                 }}
                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
               />
-              <button
-                type="button"
-                className="c-btn c-btn-primary c-btn-send flex-shrink-0"
-                onClick={handleSend}
-                disabled={isSending || !msgText.trim()}
-              >
-                {isSending
+              <ActionButton
+                className="flex-shrink-0"
+                label={isSending ? 'Sending' : 'Send'}
+                icon={isSending
                   ? <Loader2 size={16} strokeWidth={1.75} className="animate-spin" />
                   : <Send size={16} strokeWidth={1.75} />}
-                <span className="c-btn-send-label">{isSending ? 'Sending' : 'Send'}</span>
-              </button>
+                onClick={handleSend}
+                disabled={isSending || !msgText.trim()}
+              />
             </div>
           </>
         ) : (
@@ -507,10 +509,11 @@ export default function Inbox() {
                 <div className="c-col-header mb-[var(--sp-2)]">Actions</div>
                 <div className="flex flex-col gap-[var(--sp-2)]">
                   {currentChat.unreadCount > 0 && (
-                    <button
-                      type="button"
-                      className="c-btn c-btn-sm w-full justify-center border-[var(--b2)] text-t2"
+                    <Button
+                      size="sm"
+                      className="w-full justify-center border-[var(--b2)] text-t2"
                       disabled={actionBusy}
+                      icon={<CheckCheck size={14} strokeWidth={1.75} />}
                       onClick={async () => {
                         setActionBusy(true)
                         queryClient.setQueryData<ChatItem[]>(['chats', activeLine], old =>
@@ -528,13 +531,14 @@ export default function Inbox() {
                         }
                       }}
                     >
-                      <CheckCheck size={14} strokeWidth={1.75} /> Mark Read
-                    </button>
+                      Mark Read
+                    </Button>
                   )}
-                  <button
-                    type="button"
-                    className="c-btn c-btn-success w-full justify-center"
+                  <Button
+                    variant="success"
+                    className="w-full justify-center"
                     disabled={actionBusy}
+                    icon={<UserCheck size={14} strokeWidth={1.75} />}
                     onClick={async () => {
                       setActionBusy(true)
                       try {
@@ -548,12 +552,13 @@ export default function Inbox() {
                       }
                     }}
                   >
-                    <UserCheck size={14} strokeWidth={1.75} /> Allow Contact
-                  </button>
-                  <button
-                    type="button"
-                    className="c-btn c-btn-danger w-full justify-center"
+                    Allow Contact
+                  </Button>
+                  <Button
+                    variant="danger"
+                    className="w-full justify-center"
                     disabled={actionBusy}
+                    icon={<Ban size={14} strokeWidth={1.75} />}
                     onClick={async () => {
                       setActionBusy(true)
                       try {
@@ -567,19 +572,20 @@ export default function Inbox() {
                       }
                     }}
                   >
-                    <Ban size={14} strokeWidth={1.75} /> Block Contact
-                  </button>
+                    Block Contact
+                  </Button>
                   {!currentChat.isGroup && (
-                    <button
-                      type="button"
-                      className="c-btn w-full justify-center border-[var(--b2)] text-t2"
+                    <Button
+                      variant="neutral"
+                      className="w-full justify-center border-[var(--b2)] text-t2"
                       disabled={actionBusy}
+                      icon={<UserPlus size={14} strokeWidth={1.75} />}
                       onClick={() => {
                         setSaveContactChat(currentChat.conversationKey)
                       }}
                     >
-                      <UserPlus size={14} strokeWidth={1.75} /> Save Contact
-                    </button>
+                      Save Contact
+                    </Button>
                   )}
                 </div>
               </div>

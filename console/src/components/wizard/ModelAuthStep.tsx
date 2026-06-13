@@ -1,5 +1,6 @@
 import { type FC, useState } from 'react'
 import { Tabs, Tab } from '../primitives/Tabs'
+import { Button } from '../primitives/Button'
 import { Check, Eye, EyeOff } from 'lucide-react'
 import { SelectInput } from './form-primitives'
 import WizardStep from './WizardStep'
@@ -168,9 +169,12 @@ const ApiKeyInput: FC<{
               borderColor: error ? 'var(--color-s-crit)' : filled ? 'var(--wizard-accent)' : 'var(--b2)',
             }}
           />
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="xs"
+            aria-label={visible ? 'Hide API key' : 'Show API key'}
             onClick={() => setVisible((v) => !v)}
+            icon={visible ? <EyeOff size={16} /> : <Eye size={16} />}
             className="absolute cursor-pointer text-t3"
             style={{
               right: 'var(--sp-2)',
@@ -180,9 +184,7 @@ const ApiKeyInput: FC<{
               border: 'none',
               padding: 0,
             }}
-          >
-            {visible ? <EyeOff size={16} /> : <Eye size={16} />}
-          </button>
+          />
         </div>
         {!error && filled && (
           <Check size={16} className="wizard-check" />

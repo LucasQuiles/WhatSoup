@@ -6,6 +6,7 @@ import EmptyState from '../EmptyState.js'
 import { GroupCard } from './GroupCard.js'
 import { GroupDetailModal } from './GroupDetailModal.js'
 import { CreateGroupModal } from './CreateGroupModal.js'
+import { Button } from '../primitives/Button'
 import type { GroupInfo } from '../../types.js'
 
 export function GroupsTab({ lineName, myJid }: { lineName: string; myJid?: string }) {
@@ -44,14 +45,15 @@ export function GroupsTab({ lineName, myJid }: { lineName: string; myJid?: strin
           <span className="c-col-header text-t4 font-mono">
             {groups.length} group{groups.length !== 1 ? 's' : ''}
           </span>
-          <button
-            type="button"
+          <Button
+            variant="primary"
+            size="sm"
             onClick={() => setShowCreate(true)}
-            className="c-btn c-btn-sm c-btn-primary font-mono"
+            className="font-mono"
+            icon={<Plus size={12} strokeWidth={1.75} />}
           >
-            <Plus size={12} strokeWidth={1.75} />
             Create Group
-          </button>
+          </Button>
         </div>
 
         {groups.length === 0 ? (

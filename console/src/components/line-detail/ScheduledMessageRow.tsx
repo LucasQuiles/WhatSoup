@@ -18,6 +18,7 @@ import {
   ChevronUp,
 } from 'lucide-react'
 import type { ScheduledMessage } from '../../types.js'
+import { Button } from '../primitives/Button'
 import { statusColor, statusLabel, contentTypeLabel, cronToHuman } from './scheduled-utils.js'
 
 interface ScheduledMessageRowProps {
@@ -140,48 +141,47 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
         <div className="flex items-center gap-1 flex-shrink-0">
           {isPending && (
             <>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => onEdit(message)}
                 aria-label="Edit scheduled message"
-                className="c-btn c-btn-sm c-btn-ghost font-mono"
-              >
-                <Pencil size={15} strokeWidth={1.75} />
-              </button>
-              <button
-                type="button"
+                className="font-mono"
+                icon={<Pencil size={15} strokeWidth={1.75} />}
+              />
+              <Button
+                variant="danger"
+                size="sm"
                 onClick={() => onCancel(message.id)}
                 disabled={cancelling === message.id}
                 aria-label={`Cancel scheduled message to ${message.chatName ?? message.chatJid}`}
-                className="c-btn c-btn-sm c-btn-danger font-mono"
-              >
-                {cancelling === message.id
+                className="font-mono"
+                icon={cancelling === message.id
                   ? <Loader2 size={15} className="animate-spin" />
                   : <Trash2 size={15} strokeWidth={1.75} />}
-              </button>
+              />
             </>
           )}
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => onDuplicate(message)}
             aria-label="Duplicate as new scheduled message"
-            className="c-btn c-btn-sm c-btn-ghost font-mono"
+            className="font-mono"
             title="Duplicate"
-          >
-            <Copy size={15} strokeWidth={1.75} />
-          </button>
+            icon={<Copy size={15} strokeWidth={1.75} />}
+          />
           {/* Expand/collapse for next run + extra details */}
           {(isRecurring || message.retryCount > 0) && (
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setExpanded(!expanded)}
-              className="c-btn c-btn-sm c-btn-ghost"
               aria-label={expanded ? 'Collapse details' : 'Expand details'}
-            >
-              {expanded
+              icon={expanded
                 ? <ChevronUp size={15} strokeWidth={1.75} />
                 : <ChevronDown size={15} strokeWidth={1.75} />}
-            </button>
+            />
           )}
         </div>
       </div>

@@ -1,5 +1,6 @@
 import { type FC, type ReactNode } from 'react';
 import { BarChart3 } from 'lucide-react';
+import { Button } from './primitives/Button';
 
 export type ChartKey = 'messages' | 'tokens' | 'sessions';
 
@@ -64,13 +65,14 @@ export const ChartPanel: FC<ChartPanelProps> = ({
             Failed to load
           </span>
           {onRetry && (
-            <button
-              type="button"
-              className="c-btn c-btn-sm c-btn-ghost mt-[var(--sp-2)]"
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-[var(--sp-2)]"
               onClick={onRetry}
             >
               Retry
-            </button>
+            </Button>
           )}
         </div>
       ) : !hasData ? (

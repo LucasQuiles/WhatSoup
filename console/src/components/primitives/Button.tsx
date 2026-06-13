@@ -8,7 +8,7 @@
  * Loading state: spinner replaces start icon, aria-busy set, button inert.
  * Disabled state: opacity token, cursor not-allowed, variant colours kept.
  */
-import { type FC, type ReactNode, type ButtonHTMLAttributes } from 'react';
+import { type FC, type ReactNode, type RefObject, type ButtonHTMLAttributes } from 'react';
 import { Loader2 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -27,6 +27,12 @@ interface ButtonBaseProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   iconEnd?: ReactNode;
   /** When true: spinner replaces start icon, button is inert (aria-busy). */
   loading?: boolean;
+  /**
+   * Object ref forwarded to the underlying <button> — needed by anchored consumers
+   * (e.g. Popover triggers that pass the trigger to anchorRef). Matches the RefObject
+   * pattern used by the other primitives; React 19 ref-as-prop, no forwardRef needed.
+   */
+  ref?: RefObject<HTMLButtonElement | null>;
 }
 
 /**
@@ -52,6 +58,7 @@ export const Button: FC<ButtonProps> = ({
   children,
   className,
   type = 'button',
+  ref,
   ...rest
 }) => {
   const isInert = disabled || loading;
@@ -64,6 +71,7 @@ export const Button: FC<ButtonProps> = ({
 
   return (
     <button
+      ref={ref}
       type={type}
       className={composedClass}
       disabled={isInert}

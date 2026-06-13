@@ -7,7 +7,7 @@ import ModeBadge from '../components/ModeBadge'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import LinePicker from '../components/LinePicker'
-import { LogStream, Toolbar, ToolbarFilters, Pill } from '../components/primitives'
+import { LogStream, Toolbar, ToolbarFilters, Pill, Button } from '../components/primitives'
 import type { LogEntry } from '../types'
 import {
   Terminal, Power,
@@ -192,17 +192,19 @@ export default function Ops() {
                 {line.status !== 'online' && (
                   <div className="flex gap-[var(--sp-2)] mt-[var(--sp-3)] pt-[var(--sp-3)] c-border-t">
                     {line.linkedStatus === 'unlinked' ? (
-                      <button
-                        type="button"
-                        className="c-btn py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                      <Button
+                        variant="neutral"
+                        className="py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                        icon={<Link2 size={15} strokeWidth={1.75} />}
                         onClick={e => { e.stopPropagation(); setRelinkTarget(line.name) }}
                       >
-                        <Link2 size={15} strokeWidth={1.75} /> Re-link
-                      </button>
+                        Re-link
+                      </Button>
                     ) : (
-                      <button
-                        type="button"
-                        className="c-btn py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                      <Button
+                        variant="neutral"
+                        className="py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                        icon={<Power size={15} strokeWidth={1.75} />}
                         onClick={e => {
                           e.stopPropagation()
                           toast.info(`Restarting ${line.name}...`)
@@ -211,16 +213,17 @@ export default function Ops() {
                             .catch(err => toast.error(`Failed: ${err.message}`))
                         }}
                       >
-                        <Power size={15} strokeWidth={1.75} /> Restart
-                      </button>
+                        Restart
+                      </Button>
                     )}
-                    <button
-                      type="button"
-                      className="c-btn text-s-crit py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                    <Button
+                      variant="danger"
+                      className="py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                      icon={<Trash2 size={15} strokeWidth={1.75} />}
                       onClick={e => { e.stopPropagation(); setDeleteTarget(line.name) }}
                     >
-                      <Trash2 size={15} strokeWidth={1.75} /> Delete
-                    </button>
+                      Delete
+                    </Button>
                   </div>
                 )}
               </div>

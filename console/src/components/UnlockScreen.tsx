@@ -1,5 +1,6 @@
 import { useState, useCallback, type FormEvent } from 'react'
 import { unlockConsole } from '../lib/api'
+import { Button } from './primitives/Button'
 
 /**
  * B1 closure: the console starts locked in production. The operator enters
@@ -45,13 +46,14 @@ export default function UnlockScreen({ onUnlocked }: { onUnlocked: () => void })
           className="font-mono text-sm p-2 rounded border border-b3 bg-b1 text-t1"
         />
         {error && <div role="alert" className="text-err text-sm">{error}</div>}
-        <button
+        <Button
           type="submit"
+          variant="ghost"
           disabled={busy || !token.trim()}
           className="p-2 rounded bg-accent text-b1 font-semibold disabled:opacity-50"
         >
           {busy ? 'Unlocking…' : 'Unlock'}
-        </button>
+        </Button>
       </form>
     </div>
   )

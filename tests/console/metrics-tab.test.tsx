@@ -313,8 +313,8 @@ describe('MetricsTab — detail tab', () => {
 
     const tokensBtn = screen.getByRole('button', { name: 'Tokens' });
     const sessionsBtn = screen.getByRole('button', { name: 'Sessions' });
-    expect(tokensBtn.className).toContain('c-btn-primary');
-    expect(sessionsBtn.className).toContain('c-btn-ghost');
+    expect(tokensBtn.className).toContain('soup-btn--primary');
+    expect(sessionsBtn.className).toContain('soup-btn--ghost');
   });
 
   it('switches to the Sessions chart when the Sessions tab is clicked', () => {

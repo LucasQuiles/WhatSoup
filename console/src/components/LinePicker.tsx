@@ -22,6 +22,7 @@
 import { useId, useRef, useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { StatusCell, ModeBadge } from './primitives/Badge';
+import { Button } from './primitives/Button';
 import { Popover, popoverOptionId, usePopoverKeyboard } from './primitives/Popover';
 import type { PopoverOption } from './primitives/Popover';
 import type { LineInstance } from '../types';
@@ -133,9 +134,9 @@ export default function LinePicker({
   if (variant === 'toolbar') {
     return (
       <>
-        <button
+        <Button
           ref={triggerRef}
-          type="button"
+          variant="ghost"
           role="combobox"
           aria-expanded={open}
           aria-controls={open ? listboxId : undefined}
@@ -155,7 +156,7 @@ export default function LinePicker({
             size={14}
             className={`text-t4 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
           />
-        </button>
+        </Button>
 
         <Popover
           open={open}
@@ -178,9 +179,9 @@ export default function LinePicker({
 
   return (
     <>
-      <button
+      <Button
         ref={triggerRef}
-        type="button"
+        variant="ghost"
         role="combobox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
@@ -200,7 +201,7 @@ export default function LinePicker({
           strokeWidth={1.75}
           className={`text-t4 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
         />
-      </button>
+      </Button>
 
       <Popover
         open={open}
