@@ -41,7 +41,7 @@
 **Files:**
 - Modify: `deploy/scripts/tests/test_bot_errors_collector_backoff.py`
 
-- [ ] **Step 1: Add a deterministic fake clock helper**
+- [x] **Step 1: Add a deterministic fake clock helper**
 
 Insert this helper below `_load_mod_with_dirs`:
 
@@ -69,7 +69,7 @@ def _patched_collector_clock(mod, clock: FakeCollectorClock):
         yield
 ```
 
-- [ ] **Step 2: Convert cooldown tests away from list-backed clocks**
+- [x] **Step 2: Convert cooldown tests away from list-backed clocks**
 
 Replace local patterns like:
 
@@ -97,7 +97,7 @@ Apply this conversion to these tests first:
 - `test_no_per_attempt_meta_alerts_while_down`
 - `test_live_host_unaffected_by_dead_host`
 
-- [ ] **Step 3: Add a boundary test for the exact cooldown edge**
+- [x] **Step 3: Add a boundary test for the exact cooldown edge**
 
 Append this test after `test_backoff_schedule_nextAttemptAt`:
 
@@ -135,7 +135,7 @@ def test_backoff_window_boundary_is_deterministic(tmp_state):
         assert len(ssh_calls) > calls_before_window_checks
 ```
 
-- [ ] **Step 4: Verify the new test fails before any production-code change**
+- [x] **Step 4: Verify the new test fails before any production-code change**
 
 Run:
 
@@ -143,9 +143,9 @@ Run:
 python3 -m pytest deploy/scripts/tests/test_bot_errors_collector_backoff.py::test_backoff_window_boundary_is_deterministic -q
 ```
 
-Expected red condition if the existing test clock setup is insufficient: either the helper is not wired yet or the equality boundary behavior is wrong. If it passes immediately, keep the test because it pins the exact boundary that was previously only implicit.
+Observed: the boundary test passed immediately after the fake-clock helper was wired, so the production boundary was correct; the new test still pins the previously implicit exact edge.
 
-- [ ] **Step 5: Run the collector backoff suite repeatedly**
+- [x] **Step 5: Run the collector backoff suite repeatedly**
 
 Run:
 
@@ -157,7 +157,9 @@ done
 
 Expected: all 20 runs pass. Any failure is a real flake signal; do not replace this with retries in CI.
 
-- [ ] **Step 6: Commit the collector-clock slice**
+Observed proof: `python3.12 -m pytest deploy/scripts/tests/test_bot_errors_collector_backoff.py -q` passed once with 13 tests, then the same suite passed in a 20-run loop; host `python3`/`python3.14` lacks pytest, so proofs intentionally use `python3.12`.
+
+- [x] **Step 6: Commit the collector-clock slice**
 
 Run:
 

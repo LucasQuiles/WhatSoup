@@ -101,6 +101,29 @@ def _load_mod_with_dirs(state_dir: Path, outbox_dir: Path):
     })
 
 
+class FakeCollectorClock:
+    def __init__(self, start: int):
+        self.now = start
+
+    def time(self) -> float:
+        return float(self.now)
+
+    def advance(self, seconds: int) -> None:
+        self.now += seconds
+
+    def set(self, value: int) -> None:
+        self.now = value
+
+
+@contextlib.contextmanager
+def _patched_collector_clock(mod, clock: FakeCollectorClock):
+    with patch.object(mod, "time") as mock_time:
+        mock_time.time.side_effect = clock.time
+        mock_time.strftime = time.strftime
+        mock_time.gmtime = time.gmtime
+        yield
+
+
 def _run_once_defaults(mod, remotes: list[str], **kwargs):
     defaults = dict(
         best_effort_remotes=set(),
@@ -208,20 +231,17 @@ def test_relay_host_down_emitted_exactly_once(tmp_state):
             raise RuntimeError("ssh: connect to host deadhost port 22: Connection timed out")
         return []
 
-    clock = [1_000_000]
+    clock = FakeCollectorClock(1_000_000)
 
     with _env(state_dir, outbox_dir), \
          patch.object(mod, "ssh_json_lines", side_effect=fake_ssh_json_lines), \
-         patch.object(mod, "time") as mock_time, \
-         patch.object(mod, "remote_failure_context", return_value=([], {})):
-        mock_time.time.side_effect = lambda: float(clock[0])
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
 
         # Cycles 1-2: below threshold
         for i in range(2):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
 
         # No relay_host_down yet
         events_before = _outbox_by_source(outbox_dir)
@@ -229,7 +249,7 @@ def test_relay_host_down_emitted_exactly_once(tmp_state):
 
         # Cycle 3: threshold crossed → emit relay_host_down
         _run_once_defaults(mod, [remote])
-        clock[0] += 30
+        clock.advance(30)
 
         events_after = _outbox_by_source(outbox_dir)
         assert "relay_host_down" in events_after
@@ -246,7 +266,7 @@ def test_relay_host_down_emitted_exactly_once(tmp_state):
         # Stay well inside first 5-minute window (300s); only advance by 30s each
         for i in range(5):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
 
         # ssh_json_lines should NOT have been called while window is active
         assert ssh_call_count[0] == ssh_before, (
@@ -267,18 +287,15 @@ def test_backoff_schedule_nextAttemptAt(tmp_state):
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
 
     remote = "deadhost:/srv/whatsoup/bot-errors"
-    clock = [2_000_000]
+    clock = FakeCollectorClock(2_000_000)
 
     def fake_ssh_fail(h, script, args, timeout):
         raise RuntimeError("timeout")
 
     with _env(state_dir, outbox_dir), \
          patch.object(mod, "ssh_json_lines", side_effect=fake_ssh_fail), \
-         patch.object(mod, "time") as mock_time, \
-         patch.object(mod, "remote_failure_context", return_value=([], {})):
-        mock_time.time.side_effect = lambda: float(clock[0])
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
 
         schedule = mod.RELAY_BACKOFF_SCHEDULE_S  # [300, 900, 3600]
 
@@ -286,16 +303,16 @@ def test_backoff_schedule_nextAttemptAt(tmp_state):
         _run_once_defaults(mod, [remote])
         state = mod.load_state()
         assert state["remotes"][remote].get("consecutiveFailures", 0) == 1
-        clock[0] += 30
+        clock.advance(30)
 
         # Cycle 2: 2 failures
         _run_once_defaults(mod, [remote])
         state = mod.load_state()
         assert state["remotes"][remote].get("consecutiveFailures", 0) == 2
-        clock[0] += 30
+        clock.advance(30)
 
         # Cycle 3: 3rd failure — enters backoff, scheduleIndex=0 → 300s delay
-        attempt_time = clock[0]
+        attempt_time = clock.now
         _run_once_defaults(mod, [remote])
         state = mod.load_state()
         rr = state["remotes"][remote]
@@ -303,7 +320,7 @@ def test_backoff_schedule_nextAttemptAt(tmp_state):
         assert rr.get("downEventEmitted") is True
         # nextAttemptAt should be ~attempt_time + 300
         assert rr.get("nextAttemptAt") == pytest.approx(attempt_time + schedule[0], abs=2)
-        clock[0] += 30
+        clock.advance(30)
 
         # Cycles inside 300s window: skipped
         inside_window_calls = []
@@ -316,11 +333,11 @@ def test_backoff_schedule_nextAttemptAt(tmp_state):
             # Stay well within 300s window
             for _ in range(5):
                 _run_once_defaults(mod, [remote])
-                clock[0] += 30
+                clock.advance(30)
         assert inside_window_calls == [], f"ssh called inside window: {inside_window_calls}"
 
         # Advance past first window (300s), trigger 4th attempt → scheduleIndex=1 → 900s
-        clock[0] = attempt_time + schedule[0] + 1
+        clock.set(attempt_time + schedule[0] + 1)
 
         fail_calls_2 = [0]
 
@@ -335,11 +352,44 @@ def test_backoff_schedule_nextAttemptAt(tmp_state):
         state = mod.load_state()
         rr = state["remotes"][remote]
         # After a retry-fail, scheduleIndex moves to 1 → nextAttemptAt += 900
-        assert rr.get("nextAttemptAt") == pytest.approx(clock[0] + schedule[1], abs=2)
+        assert rr.get("nextAttemptAt") == pytest.approx(clock.now + schedule[1], abs=2)
 
         # No additional relay_host_down events (still exactly 1)
         evs = _outbox_by_source(outbox_dir)
         assert len(evs.get("relay_host_down", [])) == 1
+
+
+def test_backoff_window_boundary_is_deterministic(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    remote = "deadhost:/srv/whatsoup/bot-errors"
+    clock = FakeCollectorClock(8_000_000)
+    ssh_calls: list[int] = []
+
+    def fake_fail(h, script, args, timeout):
+        ssh_calls.append(clock.now)
+        raise RuntimeError("timeout")
+
+    with _env(state_dir, outbox_dir), \
+         patch.object(mod, "ssh_json_lines", side_effect=fake_fail), \
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
+        for _ in range(3):
+            _run_once_defaults(mod, [remote])
+            clock.advance(30)
+
+        state = mod.load_state()
+        next_attempt_at = int(state["remotes"][remote]["nextAttemptAt"])
+        calls_before_window_checks = len(ssh_calls)
+
+        clock.set(next_attempt_at - 1)
+        _run_once_defaults(mod, [remote])
+        assert len(ssh_calls) == calls_before_window_checks
+
+        clock.set(next_attempt_at)
+        _run_once_defaults(mod, [remote])
+        assert len(ssh_calls) > calls_before_window_checks
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +402,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
 
     remote = "deadhost:/srv/whatsoup/bot-errors"
     host = "deadhost"
-    clock = [3_000_000]
+    clock = FakeCollectorClock(3_000_000)
     failing = [True]
 
     def fake_ssh(h, script, args, timeout):
@@ -362,16 +412,13 @@ def test_relay_host_recovered_and_reset(tmp_state):
 
     with _env(state_dir, outbox_dir), \
          patch.object(mod, "ssh_json_lines", side_effect=fake_ssh), \
-         patch.object(mod, "time") as mock_time, \
-         patch.object(mod, "remote_failure_context", return_value=([], {})):
-        mock_time.time.side_effect = lambda: float(clock[0])
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
 
         # Drive to down state (3 failures)
         for _ in range(3):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
 
         evs = _outbox_by_source(outbox_dir)
         assert len(evs.get("relay_host_down", [])) == 1
@@ -381,7 +428,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
         next_attempt = rr.get("nextAttemptAt", 0)
 
         # Advance past backoff window and switch to success
-        clock[0] = next_attempt + 1
+        clock.set(next_attempt + 1)
         failing[0] = False
 
         _run_once_defaults(mod, [remote])
@@ -393,7 +440,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
         assert rr.get("downEventEmitted") is True
         assert rr.get("outboxRecoveryConsecutiveSuccesses") == 1
 
-        clock[0] += 30
+        clock.advance(30)
         _run_once_defaults(mod, [remote])
         # relay_host_recovered should be emitted after the configured threshold.
         evs = _outbox_by_source(outbox_dir)
@@ -412,7 +459,7 @@ def test_relay_host_recovered_and_reset(tmp_state):
         # Running more successful cycles should NOT emit more relay_host_recovered
         for _ in range(3):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
         evs = _outbox_by_source(outbox_dir)
         assert len(evs.get("relay_host_recovered", [])) == 1
 
@@ -426,23 +473,20 @@ def test_restart_does_not_reemit_host_down(tmp_state):
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
 
     remote = "deadhost:/srv/whatsoup/bot-errors"
-    clock = [4_000_000]
+    clock = FakeCollectorClock(4_000_000)
 
     def fake_fail(h, script, args, timeout):
         raise RuntimeError("timeout")
 
     with _env(state_dir, outbox_dir), \
          patch.object(mod, "ssh_json_lines", side_effect=fake_fail), \
-         patch.object(mod, "time") as mock_time, \
-         patch.object(mod, "remote_failure_context", return_value=([], {})):
-        mock_time.time.side_effect = lambda: float(clock[0])
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
 
         # Bring host to down state
         for _ in range(3):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
 
     evs_before = _outbox_by_source(outbox_dir)
     assert len(evs_before.get("relay_host_down", [])) == 1
@@ -451,7 +495,7 @@ def test_restart_does_not_reemit_host_down(tmp_state):
     mod2 = _load_mod_with_dirs(state_dir, outbox_dir)
 
     # After restart, still in backoff — should skip without re-emitting relay_host_down
-    clock2 = [clock[0]]
+    clock2 = FakeCollectorClock(clock.now)
     ssh_calls_after = [0]
 
     def fake_fail2(h, s, a, t):
@@ -466,16 +510,13 @@ def test_restart_does_not_reemit_host_down(tmp_state):
         assert rr.get("downEventEmitted") is True
 
         with patch.object(mod2, "ssh_json_lines", side_effect=fake_fail2), \
-             patch.object(mod2, "time") as mock_time2, \
-             patch.object(mod2, "remote_failure_context", return_value=([], {})):
-            mock_time2.time.side_effect = lambda: float(clock2[0])
-            mock_time2.strftime = time.strftime
-            mock_time2.gmtime = time.gmtime
+             patch.object(mod2, "remote_failure_context", return_value=([], {})), \
+             _patched_collector_clock(mod2, clock2):
 
             # Stay within backoff window
             for _ in range(5):
                 _run_once_defaults(mod2, [remote])
-                clock2[0] += 30
+                clock2.advance(30)
 
     evs_after = _outbox_by_source(outbox_dir)
     assert len(evs_after.get("relay_host_down", [])) == 1, (
@@ -493,7 +534,7 @@ def test_no_per_attempt_meta_alerts_while_down(tmp_state):
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
 
     remote = "deadhost:/srv/whatsoup/bot-errors"
-    clock = [5_000_000]
+    clock = FakeCollectorClock(5_000_000)
 
     def fake_fail(h, script, args, timeout):
         raise RuntimeError("timeout")
@@ -506,23 +547,20 @@ def test_no_per_attempt_meta_alerts_while_down(tmp_state):
     with _env(state_dir, outbox_dir), \
          patch.object(mod, "ssh_json_lines", side_effect=fake_fail), \
          patch.object(mod, "enqueue_meta_alert", side_effect=patched_enqueue), \
-         patch.object(mod, "time") as mock_time, \
-         patch.object(mod, "remote_failure_context", return_value=([], {})):
-        mock_time.time.side_effect = lambda: float(clock[0])
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
 
         # Cycles 1-3: drive to down state (alert calls allowed pre-threshold)
         for _ in range(3):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
 
         meta_alert_calls.clear()  # reset after threshold crossed
 
         # Cycles 4-12: all inside first backoff window, should be skipped
         for _ in range(9):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
 
         # No meta-alerts should have been enqueued while host is down and inside window
         assert meta_alert_calls == [], (
@@ -540,7 +578,7 @@ def test_live_host_unaffected_by_dead_host(tmp_state):
 
     dead_remote = "deadhost:/srv/whatsoup/bot-errors"
     live_remote = "livehost:/srv/whatsoup/bot-errors"
-    clock = [6_000_000]
+    clock = FakeCollectorClock(6_000_000)
 
     live_call_count = [0]
 
@@ -553,15 +591,12 @@ def test_live_host_unaffected_by_dead_host(tmp_state):
     N = 10
     with _env(state_dir, outbox_dir), \
          patch.object(mod, "ssh_json_lines", side_effect=fake_ssh), \
-         patch.object(mod, "time") as mock_time, \
-         patch.object(mod, "remote_failure_context", return_value=([], {})):
-        mock_time.time.side_effect = lambda: float(clock[0])
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
 
         for i in range(N):
             _run_once_defaults(mod, [dead_remote, live_remote])
-            clock[0] += 30
+            clock.advance(30)
 
     # livehost should have been called in every cycle
     # Each cycle = 2 calls for livehost (outbox claim + writefail claim)
@@ -579,23 +614,20 @@ def test_skipped_backoff_not_counted_as_failure(tmp_state):
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
 
     remote = "deadhost:/srv/whatsoup/bot-errors"
-    clock = [7_000_000]
+    clock = FakeCollectorClock(7_000_000)
 
     def fake_fail(h, s, a, t):
         raise RuntimeError("timeout")
 
     with _env(state_dir, outbox_dir), \
          patch.object(mod, "ssh_json_lines", side_effect=fake_fail), \
-         patch.object(mod, "time") as mock_time, \
-         patch.object(mod, "remote_failure_context", return_value=([], {})):
-        mock_time.time.side_effect = lambda: float(clock[0])
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
 
         # Drive to backoff (3 failures)
         for _ in range(3):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
 
         # Now in backoff window — next cycle should be skipped with NO SSH attempt.
         ssh_calls_on_skip = [0]
@@ -606,7 +638,7 @@ def test_skipped_backoff_not_counted_as_failure(tmp_state):
 
         with patch.object(mod, "ssh_json_lines", side_effect=fake_fail_counted):
             result = _run_once_defaults(mod, [remote])
-        clock[0] += 30
+        clock.advance(30)
 
     # Skipped cycle: no SSH, failed=0, isolatedFailures=0, remotesSkippedBackoff>=1.
     assert ssh_calls_on_skip[0] == 0, (
@@ -626,7 +658,7 @@ def test_event_severities(tmp_state):
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
 
     remote = "deadhost:/srv/whatsoup/bot-errors"
-    clock = [8_000_000]
+    clock = FakeCollectorClock(8_000_000)
     failing = [True]
 
     def fake_ssh(h, script, args, timeout):
@@ -636,15 +668,12 @@ def test_event_severities(tmp_state):
 
     with _env(state_dir, outbox_dir), \
          patch.object(mod, "ssh_json_lines", side_effect=fake_ssh), \
-         patch.object(mod, "time") as mock_time, \
-         patch.object(mod, "remote_failure_context", return_value=([], {})):
-        mock_time.time.side_effect = lambda: float(clock[0])
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
 
         for _ in range(3):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
 
         down_evs = _outbox_by_source(outbox_dir).get("relay_host_down", [])
         assert len(down_evs) == 1
@@ -653,14 +682,14 @@ def test_event_severities(tmp_state):
         # Advance past window; first success is evidence, second clears recovery.
         state = mod.load_state()
         next_attempt = state["remotes"][remote].get("nextAttemptAt", 0)
-        clock[0] = next_attempt + 1
+        clock.set(next_attempt + 1)
         failing[0] = False
         _run_once_defaults(mod, [remote])
 
         rec_evs = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
         assert len(rec_evs) == 0
 
-        clock[0] += 30
+        clock.advance(30)
         _run_once_defaults(mod, [remote])
 
         rec_evs = _outbox_by_source(outbox_dir).get("relay_host_recovered", [])
@@ -681,7 +710,7 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
 
     remote = "deadhost:/srv/whatsoup/bot-errors"
     host = "deadhost"
-    clock = [9_000_000]
+    clock = FakeCollectorClock(9_000_000)
     # Phase control: "down" = both calls fail; "split" = outbox ok, writefail fails.
     phase = ["down"]
 
@@ -698,22 +727,19 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
 
     with _env(state_dir, outbox_dir), \
          patch.object(mod, "ssh_json_lines", side_effect=fake_ssh), \
-         patch.object(mod, "time") as mock_time, \
-         patch.object(mod, "remote_failure_context", return_value=([], {})):
-        mock_time.time.side_effect = lambda: float(clock[0])
-        mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
 
         # Drive to down state (both calls failing).
         for _ in range(3):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
         assert len(_outbox_by_source(outbox_dir).get("relay_host_down", [])) == 1
         rr = mod.load_state()["remotes"][remote]
         assert rr.get("downEventEmitted") is True
 
         # Advance past backoff window; switch to split-success (outbox OK, writefail FAIL).
-        clock[0] = int(rr.get("nextAttemptAt") or 0) + 1
+        clock.set(int(rr.get("nextAttemptAt") or 0) + 1)
         phase[0] = "split"
         _run_once_defaults(mod, [remote])
 
@@ -724,7 +750,7 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
         assert rr_pending.get("downEventEmitted") is True
         assert rr_pending.get("outboxRecoveryConsecutiveSuccesses") == 1
 
-        clock[0] += 30
+        clock.advance(30)
         _run_once_defaults(mod, [remote])
 
         # Recovery MUST fire after the threshold even though the writefail harvest failed.
@@ -744,6 +770,6 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
         # and relay_host_down is not re-emitted.
         for _ in range(3):
             _run_once_defaults(mod, [remote])
-            clock[0] += 30
+            clock.advance(30)
         assert len(_outbox_by_source(outbox_dir).get("relay_host_down", [])) == 1
         assert mod.load_state()["remotes"][remote].get("consecutiveFailures", 0) == 0
