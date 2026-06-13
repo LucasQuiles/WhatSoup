@@ -38,7 +38,9 @@ hardening arc landed through PRs #781, #787, #788, #797, #802, #805, #809, #811,
 original implementation scope:
 
 - fleet parity and host currency for the already-shipped scripts;
-- activation of shipped-but-inert `expected_head_sha` runtime-skew checks and the drift hook;
+- C4 activation follow-through: `expected_head_sha` runtime-skew is now host-manifest
+  wired and manually simulated; the remaining activation residual is the owner-gated
+  Git-backed relay hook surface;
 - corpus validation after fleet propagation;
 - estate, rollback-anchor, and human-gated close-out.
 
@@ -93,7 +95,7 @@ Expected workspace symlink-refusal logs appear during `tests/core/workspace.test
 This packet has no open implementation gates. Residuals are intentionally carried
 outside this historical packet:
 
-1. C2/C3/C4: fleet script parity, deployed-vs-intended host currency, and `expected_head_sha` / drift-hook activation.
+1. C2/C3/C4: fleet script parity, deployed-vs-intended host currency, and the remaining Git-backed relay drift-hook activation or documented exception.
 2. C7: real alert corpus validation after parity propagation.
 3. C8/C10: estate pruning, rollback-anchor retirement, and human-gated ceremonies.
 4. Wave-owned runtime/provider residuals remain with their current PR lanes, not this SDLC packet.
