@@ -199,6 +199,12 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).toMatch(/\bnpm --prefix console run lint\b/);
   });
 
+  it('exposes coverage headroom as an explicit guard script', () => {
+    expect(packageJson.scripts['guard:coverage-headroom']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/check-coverage-headroom.ts',
+    );
+  });
+
   it('coverage thresholds are scoped to production source files', () => {
     expect(vitestConfig).toContain("include: ['src/**/*.ts', 'src/**/*.tsx']");
   });

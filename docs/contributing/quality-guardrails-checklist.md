@@ -41,7 +41,12 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 | Push target | Composite script | Required checks |
 |---|---|---|
 | Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, `npm run typecheck`, and the targeted guard test list below |
-| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, `tools/whatsoup_guard` install/typecheck/test, console dependency install, `npm run typecheck:all`, full Vitest suite with `--pool=forks`, and console production build |
+| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, `tools/whatsoup_guard` install/typecheck/test, console dependency install, `npm run typecheck:all`, full Vitest suite with `--pool=forks`, coverage generation, and console production build |
+
+Coverage-threshold headroom is available as an explicit diagnostic: run `npm run
+coverage:check && npm run guard:coverage-headroom`. It is not part of
+`verify:release` until the current tree has at least two percentage points of
+headroom above every enforced V8 threshold.
 
 `verify:push:branch` runs this targeted `tests/scripts/` list:
 - `repo-hygiene-guard.test.ts`
