@@ -113,6 +113,9 @@ jobs:
       - name: Source runtime drift guard
         run: npm run guard:source-runtime-drift
 
+      - name: BOT ERRORS runtime manifest guard
+        run: npm run guard:bot-errors-runtime-manifest
+
       - name: Simulation matrix guard
         run: npm run guard:bot-errors-simulation-matrix
 

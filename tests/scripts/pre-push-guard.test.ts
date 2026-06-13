@@ -144,12 +144,19 @@ describe('verify chain composition (package.json)', () => {
     }
   });
 
-  it('verify chains invoke BOT ERRORS runtime-source and simulation-matrix guards', () => {
+  it('verify chains invoke BOT ERRORS runtime-source, runtime-manifest, and simulation-matrix guards', () => {
     for (const scriptName of ['verify:push:branch', 'verify:release']) {
       const chain = packageJson.scripts[scriptName];
       expect(chain, `${scriptName} script must exist`).toBeDefined();
       expect(chain).toMatch(/\bnpm run guard:source-runtime-drift\b/);
+      expect(chain).toMatch(/\bnpm run guard:bot-errors-runtime-manifest\b/);
       expect(chain).toMatch(/\bnpm run guard:bot-errors-simulation-matrix\b/);
+      expect(chain.indexOf('npm run guard:source-runtime-drift')).toBeLessThan(
+        chain.indexOf('npm run guard:bot-errors-runtime-manifest'),
+      );
+      expect(chain.indexOf('npm run guard:bot-errors-runtime-manifest')).toBeLessThan(
+        chain.indexOf('npm run guard:bot-errors-simulation-matrix'),
+      );
       expect(chain).not.toMatch(/\bnpm run guard:bot-errors-critical-surfaces\b/);
     }
   });
@@ -218,6 +225,14 @@ describe('quality workflow composition', () => {
 
   it('runs the commit-author guard in CI quality workflow', () => {
     expect(qualityWorkflow).toContain('npm run guard:repo:commit-authors');
+  });
+
+  it('runs BOT ERRORS runtime manifest verification before the simulation matrix in CI', () => {
+    const runtimeManifestIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-runtime-manifest');
+    const simulationIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-simulation-matrix');
+
+    expect(runtimeManifestIndex).toBeGreaterThanOrEqual(0);
+    expect(simulationIndex).toBeGreaterThan(runtimeManifestIndex);
   });
 
   it('runs the standalone guard package test workflow', () => {

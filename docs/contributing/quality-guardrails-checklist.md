@@ -40,10 +40,10 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 
 | Push target | Composite script | Required checks |
 |---|---|---|
-| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, `npm run typecheck`, and the targeted guard test list below |
-| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, `tools/whatsoup_guard` install/typecheck/test, console dependency install, `npm run typecheck:all`, full Vitest suite with `--pool=forks`, and console production build |
+| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, and the targeted guard test list below |
+| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks --fileParallelism=false`, and coverage thresholds |
 
-`verify:push:branch` runs this targeted `tests/scripts/` list:
+`verify:push:branch` runs this targeted guard-test list:
 - `repo-hygiene-guard.test.ts`
 - `pre-push-guard.test.ts`
 - `doc-drift-check.test.ts`
@@ -52,6 +52,16 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 - `work-index.test.ts`
 - `node-pin-consistency.test.ts`
 - `safeguard-diagnostics.test.ts`
+- `bot-errors-simulation-matrix.test.ts`
+- `check-bot-errors-runtime-manifest.test.ts`
+- `claude-settings-guard.test.ts`
+- `agent-decision-polls-guard.test.ts`
+- `fail-closed-gate-guard.test.ts`
+- `check-service-units.test.ts`
+- `check-instance-config.test.ts`
+- `import-boundary-check.test.ts`
+- `fitness-registry.test.ts`
+- `tests/deploy/preflight-check.test.ts`
 
 ## Layer 3 — Discovered hygiene rules (hygiene-guard internals)
 
