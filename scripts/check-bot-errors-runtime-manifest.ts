@@ -47,6 +47,8 @@ export const REQUIRED_RUNTIME_MANIFEST_PATHS = [
   'deploy/scripts/bot-errors-collector.py',
   'deploy/scripts/bot-errors-emit.py',
   'deploy/scripts/bot-errors-runner.py',
+  'deploy/scripts/lib/__init__.py',
+  'deploy/scripts/lib/bot_errors_redaction.py',
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
