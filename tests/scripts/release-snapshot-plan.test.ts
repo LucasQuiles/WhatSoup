@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -25,6 +26,28 @@ function makeFixtureSource(): string {
   mkdirSync(path.join(sourceRoot, 'src'), { recursive: true });
   writeFileSync(path.join(sourceRoot, 'package.json'), '{"name":"whatsoup-fixture"}\n', 'utf8');
   writeFileSync(path.join(sourceRoot, 'src/main.ts'), 'export const main = true;\n', 'utf8');
+  return sourceRoot;
+}
+
+function execGit(cwd: string, args: string[]): void {
+  const proc = spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_EMAIL: 'whatsoup-test',
+      GIT_AUTHOR_NAME: 'WhatSoup Test',
+      GIT_COMMITTER_EMAIL: 'whatsoup-test',
+      GIT_COMMITTER_NAME: 'WhatSoup Test',
+    },
+  });
+  expect(proc.status, proc.stderr || proc.stdout).toBe(0);
+}
+
+function makeGitFixtureSource(): string {
+  const sourceRoot = makeFixtureSource();
+  execGit(sourceRoot, ['init']);
+  execGit(sourceRoot, ['add', 'package.json', 'src/main.ts']);
+  execGit(sourceRoot, ['commit', '-m', 'fixture']);
   return sourceRoot;
 }
 
@@ -211,6 +234,42 @@ describe('release snapshot planning', () => {
       issues: [expect.objectContaining({ kind: 'file-sha256-drift', path: 'src/main.ts' })],
     });
     expect(error.mock.calls.flat().join('\n')).toContain('file-sha256-drift: src/main.ts');
+  });
+
+  it('CLI planning mode emits JSON when invoked through an absolute script path', () => {
+    const sourceRoot = makeGitFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const scriptPath = path.join(process.cwd(), 'scripts/release-snapshot-plan.ts');
+
+    const proc = spawnSync(process.execPath, [
+      '--disable-warning=ExperimentalWarning',
+      '--experimental-strip-types',
+      scriptPath,
+      '--release-root',
+      releaseRoot,
+      '--source-ref',
+      'HEAD',
+      '--build-time',
+      '2026-06-13T06:00:00.000Z',
+      '--json',
+    ], {
+      cwd: sourceRoot,
+      encoding: 'utf8',
+    });
+
+    expect(proc.status, proc.stderr || proc.stdout).toBe(0);
+    expect(proc.stderr).toBe('');
+    const plan = JSON.parse(proc.stdout) as ReturnType<typeof createReleaseSnapshotPlan>;
+    expect(plan.dryRun).toBe(true);
+    expect(plan.manifest.release.path).toBe(path.join(
+      releaseRoot,
+      `WhatSoup-release-${plan.manifest.source.commit.slice(0, 12)}`,
+    ));
+    expect(plan.manifest.files.map((file) => file.path)).toEqual(['package.json', 'src/main.ts']);
+    expect(plan.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'write-manifest' }),
+      expect.objectContaining({ kind: 'approval-required', operation: 'repoint-launchd-and-restart' }),
+    ]));
   });
 
   it('rejects check-release mixed with planning-only flags', () => {
