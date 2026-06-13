@@ -1,9 +1,33 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { relative, resolve } from 'node:path'
 
 const repoRoot = resolve(import.meta.dirname, '../..')
 const read = (path: string) => readFileSync(resolve(repoRoot, path), 'utf8')
+const sourceRoots = ['console/src/components', 'console/src/pages']
+
+function tsxFiles(dir: string): string[] {
+  return readdirSync(resolve(repoRoot, dir)).flatMap(entry => {
+    const fullPath = resolve(repoRoot, dir, entry)
+    const stat = statSync(fullPath)
+    const relativePath = `${dir}/${entry}`
+    if (stat.isDirectory()) return tsxFiles(relativePath)
+    return /\.(?:ts|tsx)$/.test(entry) ? [relativePath] : []
+  })
+}
+
+function cBtnClassNameOffenders(): string[] {
+  return sourceRoots
+    .flatMap(tsxFiles)
+    .flatMap(path => read(path)
+      .split('\n')
+      .flatMap((line, index) => (
+        line.includes('className=')
+          && /\bc-btn(?:\b|-)/.test(line)
+          ? [`${relative(repoRoot, resolve(repoRoot, path))}:${index + 1}: ${line.trim()}`]
+          : []
+      )))
+}
 // C0 token split: index.css is now a slim importer; design-token assertions read the full tier set.
 const readTokenCss = () => [
   'console/src/index.css',
@@ -14,6 +38,10 @@ const readTokenCss = () => [
 ].map(read).join('\n')
 
 describe('design system compliance — Shannon slice', () => {
+  it('keeps legacy c-btn classes out of source consumers', () => {
+    expect(cBtnClassNameOffenders()).toEqual([])
+  })
+
   it('uses design tokens for Nav hardcoded pixel values', () => {
     const source = read('console/src/components/Nav.tsx')
 

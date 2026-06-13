@@ -1,6 +1,7 @@
 import { type FC, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import { AlertTriangle } from 'lucide-react'
+import { Button } from './primitives/Button'
 
 interface EmptyStateProps {
   icon?: ReactNode
@@ -62,15 +63,16 @@ const EmptyState: FC<EmptyStateProps> = ({
         </motion.div>
       )}
       {onRetry && (
-        <motion.button
-          className="c-btn c-btn-primary mt-[var(--sp-4)] text-sm"
-          onClick={onRetry}
+        <motion.div
+          className="mt-[var(--sp-4)]"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.3, ease, delay: 0.25 }}
         >
-          {retryLabel}
-        </motion.button>
+          <Button variant="primary" size="sm" onClick={onRetry}>
+            {retryLabel}
+          </Button>
+        </motion.div>
       )}
     </div>
   )

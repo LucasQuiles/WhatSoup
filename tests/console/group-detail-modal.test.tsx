@@ -427,6 +427,21 @@ describe('GroupDetailModal — settings seg pairs', () => {
       expect(freshBtns.every(b => b.disabled)).toBe(true)
     })
   })
+
+  it('disappearing messages select uses form-control classes and preserves change behavior', async () => {
+    await openSettingsAsAdmin()
+
+    const select = screen.getByRole('combobox') as HTMLSelectElement
+    expect(select.className).toContain('c-input')
+    expect(select.className).toContain('c-select')
+    expect(select.className).not.toContain('c-btn')
+
+    fireEvent.change(select, { target: { value: '86400' } })
+
+    await waitFor(() => {
+      expect(mockUpdateGroupEphemeral).toHaveBeenCalledWith(LINE, GROUP_ID, 86400)
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

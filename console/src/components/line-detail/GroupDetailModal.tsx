@@ -701,7 +701,7 @@ function SettingsTab({
             value={detail.ephemeralDuration ?? 0}
             disabled={saving === 'ephemeral'}
             onChange={e => handleEphemeral(Number(e.target.value))}
-            className="font-mono text-t2 c-btn c-btn-xs c-btn-ghost bg-d1"
+            className="c-input c-select font-mono text-t2 bg-d1 max-w-[var(--input-number-w)] shrink-0"
           >
             {EPHEMERAL_OPTIONS.map(opt => (
               <option key={opt.seconds} value={opt.seconds}>{opt.label}</option>
