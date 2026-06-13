@@ -677,6 +677,12 @@ function commitAuthorBaseRef(cwd: string): string | null {
     return `origin/${githubBaseRef}`;
   }
 
+  // The public boundary is the default branch, not the branch's own upstream:
+  // preferring the upstream made a sync-merge pull already-published main
+  // commits into the scan range, so violations that landed upstream blocked
+  // unrelated branches from pushing.
+  if (gitRefExists(cwd, 'origin/main')) return 'origin/main';
+
   try {
     const branch = git(['branch', '--show-current'], cwd).trim();
     const upstream = branch
@@ -684,10 +690,10 @@ function commitAuthorBaseRef(cwd: string): string | null {
       : '';
     if (upstream && gitRefExists(cwd, upstream)) return upstream;
   } catch {
-    // Fall through to origin/main for detached or not-yet-published branches.
+    // Detached or not-yet-published branch with no origin/main mirror.
   }
 
-  return gitRefExists(cwd, 'origin/main') ? 'origin/main' : null;
+  return null;
 }
 
 function readCommitAuthors(cwd: string): CommitAuthor[] {
