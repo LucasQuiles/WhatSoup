@@ -1,22 +1,5 @@
 import { createHash } from 'node:crypto';
 import { WhatSoupError } from '../../errors.ts';
-import {
-  isPromptTooLongMessage,
-  isProviderAuthRequiredMessage,
-  isProviderModelUnavailableMessage,
-  isProviderPolicyBlockMessage,
-  isRateLimitResultMessage,
-  isUsageLimitMessage,
-} from './provider-failure.ts';
-
-export {
-  isPromptTooLongMessage,
-  isProviderAuthRequiredMessage,
-  isProviderModelUnavailableMessage,
-  isProviderPolicyBlockMessage,
-  isRateLimitResultMessage,
-  isUsageLimitMessage,
-} from './provider-failure.ts';
 
 export type AgentFailureClass =
   | 'provider_usage_limit'
@@ -81,6 +64,128 @@ export interface AgentFailureClassification {
   fallbackEligible: boolean;
   qAlertRequired: boolean;
   severity: 'critical' | 'warning';
+}
+
+export type ProviderFailureKind =
+  | 'usage-limit'
+  | 'rate-limit'
+  | 'auth-required'
+  | 'model-unavailable'
+  | 'policy-block'
+  | 'context-overflow';
+
+/**
+ * Detect provider usage-limit / quota-exceeded messages that should not be
+ * forwarded as normal user-visible agent output.
+ */
+export function isUsageLimitMessage(text: string): boolean {
+  if (isPromptTooLongMessage(text)) return false;
+
+  const lower = text.toLowerCase();
+  if (
+    lower.includes('out of extra usage') ||
+    lower.includes('usage limit reached') ||
+    lower.includes('usage cap reached') ||
+    lower.includes("you've reached your usage limit") ||
+    lower.includes('you have reached your usage limit') ||
+    lower.includes('you have hit your usage limit') ||
+    lower.includes('claude usage limit')
+  ) {
+    return true;
+  }
+
+  const resetPattern = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
+  return resetPattern.test(text) && (
+    lower.includes('usage limit') ||
+    lower.includes('usage cap') ||
+    lower.includes('plan limit') ||
+    lower.includes('quota exceeded')
+  );
+}
+
+/** Detect context-window overflow errors from agent providers. */
+export function isPromptTooLongMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('prompt is too long') ||
+    lower.includes('prompt too long') ||
+    lower.includes('maximum context length') ||
+    lower.includes('context_length_exceeded') ||
+    lower.includes('max_tokens_exceeded') ||
+    (lower.includes('token') && lower.includes('limit') && lower.includes('exceed'))
+  );
+}
+
+/** Detect terminal provider rate-limit result text. */
+export function isRateLimitResultMessage(text: string): boolean {
+  const normalized = normalizeWhitespace(text).toLowerCase();
+  return (
+    normalized === '_rate limited - please wait a moment and try again._' ||
+    normalized === 'rate limited - please wait a moment and try again.' ||
+    normalized.includes('provider rate limited') ||
+    normalized.includes('api rate limited') ||
+    /\b429\b/.test(normalized)
+  ) && !isUsageLimitMessage(text);
+}
+
+export function isProviderAuthRequiredMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('not logged in') ||
+    lower.includes('please run /login') ||
+    lower.includes('please login') ||
+    lower.includes('authentication required') ||
+    lower.includes('auth required') ||
+    lower.includes('invalid api key') ||
+    lower.includes('missing api key') ||
+    lower.includes('no api key') ||
+    (lower.includes('oauth') && lower.includes('expired'))
+  );
+}
+
+export function isProviderPolicyBlockMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('usage policy') ||
+    lower.includes('policy violation') ||
+    lower.includes('violates our policy') ||
+    lower.includes('violative') ||
+    lower.includes('blocked by policy')
+  );
+}
+
+export function isProviderModelUnavailableMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    (lower.includes('issue with the selected model') &&
+      lower.includes('may not exist') &&
+      lower.includes('may not have access')) ||
+    lower.includes('does not exist or you do not have access') ||
+    lower.includes('model not found in provider catalog') ||
+    (lower.includes('unknown model') && lower.includes('provider'))
+  );
+}
+
+export function classifyProviderFailure(text: string): ProviderFailureKind | null {
+  if (!text) return null;
+  if (isPromptTooLongMessage(text)) return 'context-overflow';
+  if (isUsageLimitMessage(text)) return 'usage-limit';
+  if (isProviderAuthRequiredMessage(text)) return 'auth-required';
+  if (isRateLimitResultMessage(text)) return 'rate-limit';
+  if (isProviderPolicyBlockMessage(text)) return 'policy-block';
+  if (isProviderModelUnavailableMessage(text)) return 'model-unavailable';
+  return null;
+}
+
+const FALLBACK_PROVIDER_FAILURE_KINDS: ReadonlySet<ProviderFailureKind> = new Set<ProviderFailureKind>([
+  'usage-limit',
+  'rate-limit',
+  'auth-required',
+  'model-unavailable',
+]);
+
+export function providerFailureArmsFallback(kind: ProviderFailureKind): boolean {
+  return FALLBACK_PROVIDER_FAILURE_KINDS.has(kind);
 }
 
 export function isExpectedProviderShutdown(input: {

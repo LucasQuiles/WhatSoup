@@ -9,7 +9,7 @@ import type { AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
   isProviderAuthRequiredMessage,
-} from './provider-failure.ts';
+} from './failure-taxonomy.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
@@ -1076,7 +1076,7 @@ function humanizeError(_toolName: string, text: string): string | null {
 }
 
 // Provider-failure string matchers are the single source of truth in
-// `./provider-failure.ts`. They are imported above for internal use and re-exported
+// `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
 // here so existing importers (e.g. tests) keep `runtime.ts` as their entry point.
 export {
   isUsageLimitMessage,
@@ -1085,7 +1085,7 @@ export {
   isProviderPolicyBlockMessage,
   isPromptTooLongMessage,
   isProviderModelUnavailableMessage,
-} from './provider-failure.ts';
+} from './failure-taxonomy.ts';
 
 function providerDisplayName(provider: string): string {
   switch (provider) {
@@ -1218,7 +1218,7 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
   return null;
 }
 
-// `isPromptTooLongMessage` lives in `./provider-failure.ts` (imported + re-exported above).
+// `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
 /**
  * Classify a tool_result error as either a blocked tool (permission/hook denial),

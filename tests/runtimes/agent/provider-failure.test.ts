@@ -4,7 +4,7 @@ import {
   classifyProviderFailure,
   providerFailureArmsFallback,
   type ProviderFailureKind,
-} from '../../../src/runtimes/agent/provider-failure.ts';
+} from '../../../src/runtimes/agent/failure-taxonomy.ts';
 
 // PR-A-P1: the central provider-failure classifier is the single source of truth
 // for recognising terminal provider/CLI failure strings. It is pure text matching;
@@ -17,7 +17,7 @@ describe('classifyProviderFailure — known failure patterns', () => {
     { name: 'out of extra usage', text: 'You are out of extra usage for now.', kind: 'usage-limit' },
     { name: 'auth: not logged in', text: 'Not logged in · Please run /login', kind: 'auth-required' },
     { name: 'auth: invalid api key', text: 'Error: invalid API key provided', kind: 'auth-required' },
-    { name: 'rate limit', text: 'Rate limit exceeded, please slow down', kind: 'rate-limit' },
+    { name: 'rate limit', text: 'Provider rate limited, please slow down', kind: 'rate-limit' },
     { name: 'rate limit 429', text: 'HTTP 429 too many requests', kind: 'rate-limit' },
     { name: 'policy block', text: 'This request violates our policy.', kind: 'policy-block' },
     { name: 'context overflow', text: 'Error: prompt is too long for the context window', kind: 'context-overflow' },
