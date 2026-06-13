@@ -14,7 +14,7 @@
     },
     {
       "path": "src/bootstrap.ts",
-      "sha256": "4ef77b8c431d77efca5242ca649e10bded75b329c8eedb56b3c9357cc5fa5d79",
+      "sha256": "75aeb7eae92af8ad84305a026baca390353571139bfeaaad0b04abd1dad7a44d",
       "mustContain": [
         "bootstrapCommon"
       ],
