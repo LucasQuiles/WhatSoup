@@ -612,7 +612,7 @@ export class PineconeMemory {
         'Pinecone entity search complete',
       );
       trackSuccess('searchEntities');
-      return { results: capped, status: 'ok', durationMs };
+      return { results: capped, status: 'ok', durationMs, ...(retried ? { retried } : {}) };
     } catch (err) {
       const durationMs = Date.now() - startMs;
       const message = errorMessage(err);
