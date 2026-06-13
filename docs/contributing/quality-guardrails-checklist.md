@@ -154,6 +154,17 @@ Peer-review agents can fabricate claims — this happened in production work (PR
 
 Main thread should `grep` to spot-check whenever a reviewer claims a previously-filed F-task is invalid.
 
+## Branch Protection
+
+The default branch is protected by the active GitHub Ruleset "Lock" (id `16319133`), scoped to `~DEFAULT_BRANCH`, with four rules:
+- `deletion` — branch deletion blocked
+- `non_fast_forward` — force-pushes blocked
+- `required_status_checks` — both `quality` matrix legs must pass before merge: `quality (24.x)` and `quality (25.x)`
+- `pull_request` — a pull request is required before merge
+
+To inspect: `gh api repos/LucasQuiles/WhatSoup/rulesets/16319133 | jq '.rules[].type'`
+To modify: `gh api --method PUT repos/LucasQuiles/WhatSoup/rulesets/16319133 --input <json>` (PUT replaces the whole ruleset — include all existing rules or they are dropped)
+
 ## Release Runbook
 
 To cut a release:
