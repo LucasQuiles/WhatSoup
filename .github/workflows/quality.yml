@@ -144,11 +144,17 @@ jobs:
       - name: Test suite
         run: npm test -- --pool=forks
 
+      - name: Coverage thresholds
+        run: npm run coverage:check -- --pool=forks
+
       - name: Failure-scenario drills
         run: npm run test:drills
 
       - name: Install console dependencies
         run: npm --prefix console ci
+
+      - name: Console lint
+        run: npm --prefix console run lint
 
       - name: Console build
         run: npm --prefix console run build

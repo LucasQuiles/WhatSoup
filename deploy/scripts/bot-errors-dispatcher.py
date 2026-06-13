@@ -91,7 +91,7 @@ AWAITING_PHYSICAL_RENOTIFY_SECONDS = positive_env_int(
     "BOT_ERRORS_AWAITING_PHYSICAL_RENOTIFY_SECONDS",
     24 * 60 * 60,
 )
-INTERNAL_FORCE_NOTIFY_SOURCES = {"heartbeat-watchdog", "storm-collapse"}
+INTERNAL_FORCE_NOTIFY_SOURCES = {"heartbeat-watchdog", "storm-collapse", "daily-health-fail"}
 DAILY_HEALTH_WHATSAPP_RECOVERY_SOURCES = {
     "whatsapp_device_bond_lost",
     "whatsapp_auth_bond_local_failure",
@@ -450,7 +450,7 @@ def save_incident_state(paths: dict[str, Path], state: dict[str, Any]) -> None:
 def incident_source(event: dict[str, Any]) -> str:
     source = str(event.get("source") or "unknown")
     alert_source = str(event.get("alertSource") or "").strip()
-    if source in {"heartbeat-watchdog", "daily-health"} and alert_source:
+    if source in {"heartbeat-watchdog", "daily-health", "daily-health-fail"} and alert_source:
         return f"{source}:{alert_source}"
     diagnostics = event.get("diagnostics")
     remote = diagnostics.get("remote") if isinstance(diagnostics, dict) else None

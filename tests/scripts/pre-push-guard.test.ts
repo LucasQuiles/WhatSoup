@@ -190,6 +190,12 @@ describe('verify chain composition (package.json)', () => {
       chain.indexOf('npm run verify:release'),
     );
   });
+
+  it('verify:release invokes console lint', () => {
+    const chain = packageJson.scripts['verify:release'];
+    expect(chain, 'verify:release script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm --prefix console run lint\b/);
+  });
 });
 
 describe('quality workflow composition', () => {

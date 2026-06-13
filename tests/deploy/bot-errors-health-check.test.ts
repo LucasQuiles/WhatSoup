@@ -29,11 +29,19 @@ function writeInstance(name: string, healthPort: number): void {
   chmodSync(join(authDir, 'creds.json'), 0o600);
 }
 
-function readSingleOutboxEvent(): Record<string, unknown> {
+function readOutboxBySource(): {
+  summary: Record<string, unknown>;
+  fails: Array<Record<string, unknown>>;
+} {
   const outbox = join(tmpRoot, 'outbox');
-  const files = readdirSync(outbox);
-  expect(files).toHaveLength(1);
-  return JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as Record<string, unknown>;
+  const events = readdirSync(outbox).map(
+    (name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')) as Record<string, unknown>,
+  );
+  const summaries = events.filter((event) => event.source === 'daily-health');
+  const fails = events.filter((event) => event.source === 'daily-health-fail');
+  expect(summaries).toHaveLength(1);
+  expect(fails.length + summaries.length).toBe(events.length);
+  return { summary: summaries[0]!, fails };
 }
 
 describe('bot-errors-health-check daily event classification', () => {
@@ -79,7 +87,13 @@ describe('bot-errors-health-check daily event classification', () => {
       },
     });
 
-    const event = readSingleOutboxEvent();
+    const { summary: event, fails } = readOutboxBySource();
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect(fail.alertSource).toBe('line-alpha');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.eventType).toBe('alert');
     expect(event.instance).toBe('line-alpha');
@@ -140,7 +154,13 @@ describe('bot-errors-health-check daily event classification', () => {
       },
     });
 
-    const event = readSingleOutboxEvent();
+    const { summary: event, fails } = readOutboxBySource();
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect(fail.alertSource).toBe('line-beta');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.instance).toBe('line-beta');
     expect(event.alertSource).toBe('whatsapp_device_bond_lost');
     expect(event.evidence).toContain('auth_failure_class=pairing_required');

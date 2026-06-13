@@ -1551,6 +1551,8 @@ def outbox_event(
     severity: str = "critical",
     source: str = "daily-health",
     event_type: str = "alert",
+    alert_source: str | None = None,
+    force_notify: bool = False,
 ) -> Path:
     root = state_root()
     outbox, provenance = resolve_outbox_dir()
@@ -1586,11 +1588,17 @@ def outbox_event(
         instance = critical_asset_instance(critical_asset)
         if source == "daily-health" and instance:
             event["instance"] = instance
-    alert_source = alert_source_from_health_evidence(str(event["evidence"]))
-    if not alert_source:
-        alert_source = alert_source_from_critical_asset(critical_asset)
-    if alert_source:
+    if alert_source is not None:
         event["alertSource"] = alert_source
+    else:
+        derived_alert_source = alert_source_from_health_evidence(str(event["evidence"]))
+        if not derived_alert_source:
+            derived_alert_source = alert_source_from_critical_asset(critical_asset)
+        if derived_alert_source:
+            event["alertSource"] = derived_alert_source
+    if force_notify:
+        event["diagnostics"]["forceNotify"] = True
+        event["diagnostics"]["forceNotifyLevel"] = "critical"
     path = outbox / f"{event['createdAt'].replace(':', '').replace('-', '')}.{event_id}.json"
     try:
         atomic_write_json(path, event)
@@ -1598,6 +1606,83 @@ def outbox_event(
         record_writefail(event, exc, outbox)
         raise
     return path
+
+
+_INSTANCE_FAIL_PREFIXES = {
+    "config",
+    "health",
+    "socket",
+    "service",
+    "service_enabled",
+    "auth_bond",
+    "provider_probe",
+    "primary_phone_state",
+    "profile_coverage",
+    "profile_coverage_service",
+    "tree_provenance",
+}
+
+
+def _instance_from_fail_line(line: str) -> str | None:
+    """Extract the per-instance identifier from a daily-health FAIL line.
+
+    Strips a leading "FAIL " token if present, then inspects the first
+    whitespace-delimited token: when it names a known per-instance condition
+    prefix, the second token (with any trailing ":" stripped) is the instance.
+    Returns None for empty/short lines or non-per-instance conditions.
+
+    A token that contains a path separator is NOT an instance name — some
+    inventories emit `config <full/path/config.json>: invalid JSON` where the
+    second token is a filesystem path, not an instance id. Reject those so a
+    salient event is never keyed on (or titled with) a leaked path.
+    """
+    if not line:
+        return None
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("FAIL "):
+        stripped = stripped[len("FAIL "):].strip()
+    tokens = stripped.split()
+    if len(tokens) < 2:
+        return None
+    if tokens[0] in _INSTANCE_FAIL_PREFIXES:
+        candidate = tokens[1].rstrip(":")
+        if not candidate or "/" in candidate or os.sep in candidate:
+            return None
+        return candidate
+    return None
+
+
+def emit_per_instance_health_failures(failures: list[str]) -> list[Path]:
+    """Emit one salient critical outbox event per failing instance.
+
+    Groups failing daily-health lines by their per-instance identifier and
+    emits a distinct critical, force-notify event for each instance so a real
+    per-instance FAIL is not buried inside the generic daily-health summary.
+    """
+    grouped: dict[str, list[str]] = {}
+    for line in failures:
+        instance = _instance_from_fail_line(line)
+        if instance is None:
+            continue
+        grouped.setdefault(instance, []).append(line)
+    paths: list[Path] = []
+    for instance in sorted(grouped):
+        lines_for_instance = grouped[instance]
+        evidence = "\n".join([f"instance: {instance}", *lines_for_instance])
+        path = outbox_event(
+            summary=f"BOT ERRORS daily-health FAIL: instance {instance}",
+            evidence=evidence,
+            severity="critical",
+            source="daily-health-fail",
+            event_type="alert",
+            alert_source=instance,
+            force_notify=True,
+        )
+        print(path)
+        paths.append(path)
+    return paths
 
 
 def health_log_hint() -> str:
@@ -5283,6 +5368,7 @@ def daily() -> int:
         event_type = "observation"
     path = outbox_event(summary, evidence, severity=severity, source="daily-health", event_type=event_type)
     print(path)
+    emit_per_instance_health_failures(failures)
     source_update_signal = enforced_source_update_signal(lines)
     if source_update_signal is not None and alert_source_from_health_evidence(evidence) != "source_update":
         source_event_type, source_severity, source_summary, source_evidence = source_update_signal

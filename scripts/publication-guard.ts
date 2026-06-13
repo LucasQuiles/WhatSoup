@@ -8,6 +8,7 @@ import {
   listStagedFiles,
   normalizeRepoPath,
   readStagedAddedLines,
+  readStagedFileContent,
 } from './lib/guard-core.ts';
 
 export { isTextCandidate, normalizeRepoPath } from './lib/guard-core.ts';
@@ -50,7 +51,7 @@ interface PrivatePattern {
 
 const publicationClasses = new Set<PublicationClass>(['PUBLIC', 'PRIVATE-ARCHIVE', 'SANITIZE', 'DELETE']);
 
-const internalPublicationRoots = [
+export const internalPublicationRoots = [
   /^docs\/runbooks\//,
   /^docs\/sdlc\//,
   /^docs\/superpowers\//,
@@ -358,6 +359,16 @@ function loadAudit(cwd: string): ParsedAudit | undefined {
   return parsePublicationAudit(readFileSync(auditPath, 'utf8'));
 }
 
+/**
+ * Load the audit from the staged index (or HEAD), never from the working tree.
+ * Used in staged mode to prevent bypass via unstaged audit additions.
+ */
+function loadStagedAudit(cwd: string): ParsedAudit | undefined {
+  const content = readStagedFileContent(cwd, 'docs/publication-audit.md');
+  if (content === undefined) return undefined;
+  return parsePublicationAudit(content);
+}
+
 function readWorkingFile(cwd: string, filePath: string): string | undefined {
   const fullPath = path.join(cwd, filePath);
   return existsSync(fullPath) ? readFileSync(fullPath, 'utf8') : undefined;
@@ -367,7 +378,11 @@ function validateStaged(cwd: string): GuardIssue[] {
   const issues: GuardIssue[] = [];
   const staged = listStagedFiles(cwd, 'ACMR');
   const deleted = listStagedFiles(cwd, 'D');
-  const parsed = loadAudit(cwd);
+  // Use the staged (or HEAD) version of the audit — never the working tree.
+  // This closes the bypass where a new runbook is staged but its audit row is
+  // only added to the working tree (not staged), which previously made --staged
+  // return 0 (false negative).
+  const parsed = loadStagedAudit(cwd);
   const auditRows = new Set(parsed?.rows.map((row) => row.filePath) ?? []);
   const auditStaged = staged.includes('docs/publication-audit.md') || deleted.includes('docs/publication-audit.md');
 
