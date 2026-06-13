@@ -9,6 +9,14 @@ const METHODS: ConsoleMethodName[] = ['debug', 'error', 'info', 'log', 'warn'];
 const MAX_DEPTH = 5;
 const MAX_KEYS = 40;
 const MAX_ITEMS = 30;
+const LIBSIGNAL_SESSION_DUMP_PREFIXES = [
+  'Closing session:',
+  'Removing old closed session:',
+  'Opening session:',
+  'Migrating session to:',
+  'Session already closed',
+  'Session already open',
+] as const;
 
 const SENSITIVE_KEY_RE = /(?:token|secret|password|passphrase|pairing|customcode|authorization|bearer|cookie|apikey|api_key|privatekey|private_key|clientsecret|client_secret|accesstoken|access_token|refreshtoken|refresh_token|credential|creds|authstate|auth_state|keydata|advsecretkey|signedidentitykey|identitykey|noisekey|signalkeys|sessionrecord|senderkey|senderkeymemory|appstatesynckey|ratchet|rootkey|basekey|chainkey|messagekeys|ephemeralkey|remoteidentitykey|lastremoteephemeralkey|pubkey|privkey)/i;
 
@@ -90,12 +98,23 @@ export function redactThirdPartyConsoleArgs(args: readonly unknown[]): unknown[]
   return args.map(arg => redactThirdPartyConsoleValue(arg));
 }
 
+function shouldDropThirdPartyConsoleArgs(args: readonly unknown[]): boolean {
+  const first = args[0];
+  return (
+    typeof first === 'string' &&
+    LIBSIGNAL_SESSION_DUMP_PREFIXES.some(prefix => first.startsWith(prefix))
+  );
+}
+
 export function installThirdPartyConsoleRedaction(target: ConsolePatchTarget = console as unknown as ConsolePatchTarget): void {
   if (target[PATCHED]) return;
 
   for (const method of METHODS) {
     const original = target[method].bind(target);
-    target[method] = (...args: unknown[]) => original(...redactThirdPartyConsoleArgs(args));
+    target[method] = (...args: unknown[]) => {
+      if (shouldDropThirdPartyConsoleArgs(args)) return;
+      original(...redactThirdPartyConsoleArgs(args));
+    };
   }
 
   Object.defineProperty(target, PATCHED, {

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { shortHash } from '../lib/short-hash.ts';
 import { createChildLogger } from '../logger.ts';
 import type { PineconeMemory } from '../runtimes/chat/providers/pinecone.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
@@ -16,10 +16,6 @@ interface ConsolidationReport {
   discarded: number;
   clustersProcessed: number;
   errors: number;
-}
-
-function shortHash(text: string, length: number): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, length);
 }
 
 function scopeKey(chatJid: string, senderJid: string): string {

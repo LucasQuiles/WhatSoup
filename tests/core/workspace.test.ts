@@ -340,4 +340,51 @@ describe('provisionWorkspace', () => {
     expect(readFileSync(victim, 'utf8')).toBe('{"untouched":true}');
     expect(lstatSync(join(workspacePath, 'opencode.json')).isSymbolicLink()).toBe(true);
   });
+
+  it('overwrites corrupt pre-existing opencode.json and the result contains mcp.whatsoup', () => {
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+    writeFileSync(join(workspacePath, 'opencode.json'), 'not json{');
+
+    expect(() =>
+      provisionWorkspace({
+        ...makeOpts(workspacePath, instanceCwd),
+        provider: 'opencode-cli',
+        sendMediaServerPath: '/abs/path/to/send-media-server.ts',
+      }),
+    ).not.toThrow();
+
+    const opencode = JSON.parse(readFileSync(join(workspacePath, 'opencode.json'), 'utf8'));
+    expect(opencode).toHaveProperty('mcp.whatsoup');
+  });
+
+  it('prunes stale whatsoup-cloud provider/model but preserves sibling mcp entries and unrelated top-level keys', () => {
+    const workspacePath = makeTmp();
+    const instanceCwd = makeTmp();
+    writeFileSync(
+      join(workspacePath, 'opencode.json'),
+      JSON.stringify({
+        unrelated: 'preserved',
+        provider: { 'whatsoup-cloud': { options: { baseURL: 'https://old.example/v1' } } },
+        model: 'whatsoup-cloud/old-model',
+        mcp: { other: { type: 'local', command: ['other'], enabled: true } },
+      }),
+    );
+
+    provisionWorkspace({
+      ...makeOpts(workspacePath, instanceCwd),
+      provider: 'opencode-cli',
+      sendMediaServerPath: '/abs/path/to/send-media-server.ts',
+    });
+
+    const opencode = JSON.parse(readFileSync(join(workspacePath, 'opencode.json'), 'utf8'));
+    // Sibling MCP and unrelated key survive
+    expect(opencode.mcp.other).toEqual({ type: 'local', command: ['other'], enabled: true });
+    expect(opencode.unrelated).toBe('preserved');
+    // Stale provider and model pruned
+    expect(opencode).not.toHaveProperty('provider.whatsoup-cloud');
+    expect(opencode).not.toHaveProperty('model');
+    // Managed MCP entries are present
+    expect(opencode).toHaveProperty('mcp.whatsoup');
+  });
 });

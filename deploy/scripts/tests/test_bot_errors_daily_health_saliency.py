@@ -201,13 +201,13 @@ def test_summary_and_fail_events_do_not_fold(dirs):
     state_dir, outbox_dir = dirs
     dispatcher = _load_dispatcher(state_dir, outbox_dir)
     summary = {
-        "machine": "nucles",
+        "machine": "test-machine",
         "instance": "bot-errors-health",
         "source": "daily-health",
         "severity": "info",
     }
     fail = {
-        "machine": "nucles",
+        "machine": "test-machine",
         "instance": "bot-errors-health",
         "source": "daily-health-fail",
         "alertSource": "line-a",
@@ -228,7 +228,7 @@ def test_distinct_instances_distinct_keys(dirs):
     state_dir, outbox_dir = dirs
     dispatcher = _load_dispatcher(state_dir, outbox_dir)
     a = {
-        "machine": "nucles",
+        "machine": "test-machine",
         "instance": "bot-errors-health",
         "source": "daily-health-fail",
         "alertSource": "line-a",
@@ -270,7 +270,7 @@ def test_daily_health_fail_not_swallowed_by_info_retention(dirs):
     state_dir, outbox_dir = dirs
     dispatcher = _load_dispatcher(state_dir, outbox_dir)
     event = {
-        "machine": "nucles",
+        "machine": "test-machine",
         "instance": "bot-errors-health",
         "source": "daily-health-fail",
         "alertSource": "line-a",
@@ -286,6 +286,28 @@ def test_daily_health_fail_not_swallowed_by_info_retention(dirs):
         "but not posted to BOT ERRORS"
     )
     assert reason != info_retention
+
+
+# ---------------------------------------------------------------------------
+# T9: a stale daily-health-fail incident key reconstructs to the correct
+# (source, alertSource) split — NOT a malformed compound source token.
+# (incident_event_fields_from_key must handle daily-health-fail: like it
+# handles daily-health: and heartbeat-watchdog:.)
+# ---------------------------------------------------------------------------
+
+def test_stale_daily_health_fail_key_reconstructs_source_and_alert(dirs):
+    state_dir, outbox_dir = dirs
+    dispatcher = _load_dispatcher(state_dir, outbox_dir)
+    key = "test-machine|bot-errors-health|daily-health-fail:line-a"
+    fields = dispatcher.incident_event_fields_from_key(key)
+    assert fields["machine"] == "test-machine"
+    assert fields["instance"] == "bot-errors-health"
+    assert fields["source"] == "daily-health-fail"
+    assert fields["alertSource"] == "line-a"
+    # And the more-specific prefix must not be swallowed by daily-health:
+    plain = dispatcher.incident_event_fields_from_key("test-machine|bot-errors-health|daily-health:line-b")
+    assert plain["source"] == "daily-health"
+    assert plain["alertSource"] == "line-b"
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ export default defineConfig({
     setupFiles: ['./tests/setup/bot-errors-vitest-isolation.ts'],
     coverage: {
       provider: 'v8',
+      include: ['src/**/*.ts', 'src/**/*.tsx'],
       reporter: ['text', 'html', 'json', 'json-summary'],
       reportsDirectory: 'coverage',
       thresholds: {

@@ -510,6 +510,7 @@ def remote_python_command(host: str, args: list[str]) -> list[str]:
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    ensure_private_dir(path.parent)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)

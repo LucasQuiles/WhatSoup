@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
 
@@ -7,6 +8,8 @@ export { cleanGitEnv } from '../../src/lib/git-env.ts';
 const textExtensions = new Set([
   '.cjs',
   '.css',
+  '.env',
+  '.example',
   '.html',
   '.js',
   '.json',
@@ -20,6 +23,8 @@ const textExtensions = new Set([
   '.yaml',
   '.yml',
 ]);
+
+export type GitBlobReadResult = { ok: true; content?: string } | { ok: false; error: string };
 
 export function normalizeRepoPath(filePath: string): string {
   return filePath.split(path.sep).join('/').replace(/^\.\//, '');
@@ -60,34 +65,70 @@ export function readStagedAddedLines(cwd: string, filePath: string): string {
   }
 }
 
+function errorText(error: unknown): string {
+  const candidate = error as { stderr?: unknown; message?: unknown };
+  if (typeof candidate.stderr === 'string') return candidate.stderr;
+  if (Buffer.isBuffer(candidate.stderr)) return candidate.stderr.toString('utf8');
+  if (typeof candidate.message === 'string') return candidate.message;
+  return String(error);
+}
+
+function isMissingGitBlobError(error: unknown): boolean {
+  const text = errorText(error);
+  return /does not exist \(neither on disk nor in the index\)/i.test(text)
+    || /exists on disk, but not in the index/i.test(text)
+    || /does not exist in 'HEAD'/i.test(text)
+    || /invalid object name 'HEAD'/i.test(text);
+}
+
+function readGitBlob(cwd: string, blob: string): GitBlobReadResult {
+  try {
+    return {
+      ok: true,
+      content: execFileSync('git', ['show', blob], {
+        cwd,
+        encoding: 'utf8',
+        env: cleanGitEnv(),
+        maxBuffer: 20 * 1024 * 1024,
+      }),
+    };
+  } catch (error) {
+    if (isMissingGitBlobError(error)) return { ok: true, content: undefined };
+    return { ok: false, error: errorText(error).trim() || `git show ${blob} failed` };
+  }
+}
+
 /**
  * Read the content of a file from the staged index (`:0:<path>`), falling back
- * to the HEAD blob if the file has not been staged, and returning undefined if
- * neither exists.  Never reads from the working tree.
+ * to the HEAD blob if the file has not been staged. Expected missing staged and
+ * HEAD blobs return `{ ok: true, content: undefined }`; unexpected Git/blob
+ * failures return `{ ok: false, error }`. Never reads from the working tree.
+ */
+export function readStagedFileContentResult(cwd: string, filePath: string): GitBlobReadResult {
+  const normalized = normalizeRepoPath(filePath);
+  const staged = readGitBlob(cwd, `:0:${normalized}`);
+  if (!staged.ok || staged.content !== undefined) return staged;
+  return readGitBlob(cwd, `HEAD:${normalized}`);
+}
+
+/**
+ * Compatibility wrapper for callers that intentionally treat read failures as
+ * absent content. New guard code should prefer readStagedFileContentResult.
  */
 export function readStagedFileContent(cwd: string, filePath: string): string | undefined {
-  // Try staging area first (:0:<path>)
-  try {
-    return execFileSync('git', ['show', `:0:${filePath}`], {
-      cwd,
-      encoding: 'utf8',
-      env: cleanGitEnv(),
-      maxBuffer: 20 * 1024 * 1024,
-    });
-  } catch {
-    // fall through
-  }
-  // Fall back to HEAD blob
-  try {
-    return execFileSync('git', ['show', `HEAD:${filePath}`], {
-      cwd,
-      encoding: 'utf8',
-      env: cleanGitEnv(),
-      maxBuffer: 20 * 1024 * 1024,
-    });
-  } catch {
-    return undefined;
-  }
+  const result = readStagedFileContentResult(cwd, filePath);
+  return result.ok ? result.content : undefined;
+}
+
+/**
+ * Read a file relative to `cwd`. Returns the UTF-8 content, or null if the
+ * file does not exist. Byte-identical to the private `readText` helpers
+ * previously duplicated in agent-decision-polls-guard and safeguard-diagnostics.
+ */
+export function readText(cwd: string, file: string): string | null {
+  const absolute = path.join(cwd, file);
+  if (!existsSync(absolute)) return null;
+  return readFileSync(absolute, 'utf8');
 }
 
 export function isTextCandidate(filePath: string): boolean {

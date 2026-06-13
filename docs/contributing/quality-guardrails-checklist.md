@@ -23,6 +23,17 @@ The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on ev
 | Full test suite | `npm test -- --pool=forks` | vitest with --pool=forks for stability |
 | Console build | `npm --prefix console run build` | Vite production build smoke |
 
+## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
+
+The `.husky/pre-commit` hook hard-runs `npm run guard:repo:staged` (and console
+`lint-staged` for `console/src` changes). It additionally emits a **warn-only**
+architectural-drift signal when a commit stages `*.ts`, `package.json`, `.nvmrc`,
+or `deploy/` files: it runs `guard:node-pin-consistency`, `guard:boundaries`, and
+`guard:lint:src` and prints a warning for any that fail, **without aborting the
+commit**. These same guards are hard-enforced at push by `verify:push:branch`
+(Layer 2); the pre-commit signal only surfaces drift earlier. Skip with
+`WHATSOUP_SKIP_DRIFT_WARN=1`.
+
 ## Layer 2 — Local pre-push guards
 
 Pre-push hook routes through `scripts/pre-push-guard.ts`:

@@ -580,6 +580,7 @@ describe('Gemini stream parser', () => {
       expect(event).toEqual({
         type: 'result',
         text: 'Gemini CLI result status: cancelled',
+        isError: true,
         inputTokens: 7,
         outputTokens: 2,
       });
@@ -626,6 +627,7 @@ describe('Gemini stream parser', () => {
       expect(event).toEqual({
         type: 'result',
         text: '{"type":"error","code":"E_NO_MESSAGE"}',
+        isError: true,
       });
     });
 

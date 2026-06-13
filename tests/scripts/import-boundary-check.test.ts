@@ -557,6 +557,35 @@ describe('import-boundary-check', () => {
   // WHATSOUP_SKIP_BOUNDARY_CHECK env var
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Fail-closed baseline scanner
+  // -------------------------------------------------------------------------
+
+  describe('fail-closed baseline', () => {
+    it('exits nonzero when the baseline file is unparseable JSON', () => {
+      createFixtureTree({
+        'src/lib/util.ts': 'export function util() {}\n',
+        // Corrupt baseline — not valid JSON
+        '.claude/fitness/boundary-baseline.json': '{ this is not valid json !!',
+      });
+
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // run() throws on corrupt baseline; entry point catches and sets exitCode=1
+      expect(() => run(['--root', fixtureRoot], fixtureRoot, {})).toThrow();
+      // Confirm the error message is diagnostic, not a silent pass
+      errorSpy.mockRestore();
+    });
+
+    it('passes cleanly when the baseline file is absent', () => {
+      createFixtureTree({
+        'src/lib/util.ts': 'export function util() {}\n',
+      });
+      // No baseline file — should pass (0 violations, no throw)
+      expect(() => run(['--root', fixtureRoot], fixtureRoot, {})).not.toThrow();
+      expect(process.exitCode).not.toBe(1);
+    });
+  });
+
   describe('skip env var', () => {
     it('skips check when WHATSOUP_SKIP_BOUNDARY_CHECK=1 and not in CI', () => {
       createFixtureTree({

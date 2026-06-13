@@ -18,6 +18,8 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
+import { forceEnsurePrivateDirectorySync, privateWriteError } from '../lib/private-fs.ts';
+import { shortHash } from '../lib/short-hash.ts';
 
 export type AuthBondStatus = 'present' | 'missing' | 'invalid';
 
@@ -114,10 +116,6 @@ function safeName(value: string): string {
   return cleaned === '' ? 'unknown' : cleaned;
 }
 
-function shortHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 20);
-}
-
 function hashBuffer(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
 }
@@ -130,12 +128,6 @@ function modeString(mode: number): string {
   return (mode & 0o777).toString(8);
 }
 
-function authBondWriteError(message: string, code: string): NodeJS.ErrnoException {
-  const err = new Error(message) as NodeJS.ErrnoException;
-  err.code = code;
-  return err;
-}
-
 function fsyncDirectory(path: string): void {
   let fd: number | null = null;
   try {
@@ -146,18 +138,6 @@ function fsyncDirectory(path: string): void {
   } finally {
     if (fd !== null) closeSync(fd);
   }
-}
-
-function ensurePrivateDirectory(path: string, label: string): void {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  const st = lstatSync(path);
-  if (st.isSymbolicLink()) {
-    throw authBondWriteError(`refusing to use ${label} through symlink: ${path}`, 'ELOOP');
-  }
-  if (!st.isDirectory()) {
-    throw authBondWriteError(`refusing to use ${label} over non-directory path: ${path}`, 'EINVAL');
-  }
-  chmodSync(path, 0o700);
 }
 
 function fileSnapshot(path: string, includeHash = false): AuthBondFileSnapshot {
@@ -203,7 +183,7 @@ function extractMeHash(parsed: unknown): string | null {
     : typeof record['lid'] === 'string'
       ? record['lid']
       : null;
-  return id ? shortHash(id) : null;
+  return id ? shortHash(id, 20) : null;
 }
 
 function walkAuthFiles(root: string): string[] {
@@ -222,7 +202,7 @@ function walkAuthFiles(root: string): string[] {
       continue;
     }
     if (st.isSymbolicLink()) {
-      throw authBondWriteError(`refusing to walk auth tree containing symlink: ${relative(root, current) || '.'}`, 'ELOOP');
+      throw privateWriteError(`refusing to walk auth tree containing symlink: ${relative(root, current) || '.'}`, 'ELOOP');
     }
     if (st.isFile()) {
       out.push(current);
@@ -261,7 +241,7 @@ function copyPrivateTree(src: string, dst: string): void {
     return;
   }
   if (st.isSymbolicLink()) {
-    throw authBondWriteError(`refusing to copy auth tree containing symlink: ${src}`, 'ELOOP');
+    throw privateWriteError(`refusing to copy auth tree containing symlink: ${src}`, 'ELOOP');
   }
   copyFileSync(src, dst);
   chmodSync(dst, 0o600);
@@ -319,17 +299,17 @@ function assertPrivateJsonTarget(path: string): void {
   if (!existsSync(path)) return;
   const lst = lstatSync(path);
   if (lst.isSymbolicLink()) {
-    throw authBondWriteError('refusing to write auth-bond json through symlink', 'ELOOP');
+    throw privateWriteError('refusing to write auth-bond json through symlink', 'ELOOP');
   }
   const st = statSync(path);
   if (!st.isFile()) {
-    throw authBondWriteError('refusing to write auth-bond json over non-regular path', 'EINVAL');
+    throw privateWriteError('refusing to write auth-bond json over non-regular path', 'EINVAL');
   }
 }
 
 function writePrivateJson(path: string, value: unknown): void {
   const dir = dirname(path);
-  ensurePrivateDirectory(dir, 'auth-bond json directory');
+  forceEnsurePrivateDirectorySync(dir, 'auth-bond json directory');
   assertPrivateJsonTarget(path);
 
   const tmpPath = join(dir, `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
@@ -551,8 +531,8 @@ export class AuthBondGuard {
     let tmp: string | null = null;
     let publishedTarget: string | null = null;
     try {
-      ensurePrivateDirectory(this.root, 'auth-bond backup root directory');
-      ensurePrivateDirectory(this.historyRoot, 'auth-bond backup history directory');
+      forceEnsurePrivateDirectorySync(this.root, 'auth-bond backup root directory');
+      forceEnsurePrivateDirectorySync(this.historyRoot, 'auth-bond backup history directory');
 
       const latest = readLatestManifest(this.latestManifestPath);
       if (
@@ -695,10 +675,10 @@ export class AuthBondGuard {
       };
     }
 
-    ensurePrivateDirectory(this.root, 'auth-bond backup root directory');
+    forceEnsurePrivateDirectorySync(this.root, 'auth-bond backup root directory');
     const restoredAt = this.now();
     const quarantineRoot = join(this.root, 'quarantine');
-    ensurePrivateDirectory(quarantineRoot, 'auth-bond quarantine directory');
+    forceEnsurePrivateDirectorySync(quarantineRoot, 'auth-bond quarantine directory');
     const quarantine = join(
       quarantineRoot,
       `${isoForFileName(restoredAt)}.${safeName(basename(this.authDir))}.broken`,
@@ -712,7 +692,7 @@ export class AuthBondGuard {
         renameSync(this.authDir, quarantine);
         movedOriginal = true;
       } else {
-        ensurePrivateDirectory(dirname(this.authDir), 'auth parent directory');
+        forceEnsurePrivateDirectorySync(dirname(this.authDir), 'auth parent directory');
       }
       copyPrivateTree(source, tmp);
       renameSync(tmp, this.authDir);
