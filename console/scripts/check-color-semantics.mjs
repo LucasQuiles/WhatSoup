@@ -38,6 +38,7 @@ Options:
   --root <path>          Repository root. Default: current repository root.
   --scan-dir <path>      Directory to scan, relative to root. Repeatable. Default: console/src.
   --max-findings <n>     Maximum sample findings to print. Default: 200.
+  --fail-on-rule <rule>  Exit 1 when findings for this rule are present. Repeatable.
   --fail-on-findings     Exit 1 when findings are present. Default is report-only exit 0.
   --help                 Print this message.
 `;
@@ -58,6 +59,7 @@ function parsePositiveInteger(raw, flag) {
 function parseArgs(argv) {
   const opts = {
     failOnFindings: false,
+    failOnRules: new Set(),
     help: false,
     maxFindings: DEFAULT_MAX_FINDINGS,
     root: repoRoot,
@@ -69,6 +71,7 @@ function parseArgs(argv) {
     else if (arg === '--root') opts.root = resolve(requireValue(argv, ++i, arg));
     else if (arg === '--scan-dir') opts.scanDirs.push(requireValue(argv, ++i, arg));
     else if (arg === '--max-findings') opts.maxFindings = parsePositiveInteger(requireValue(argv, ++i, arg), arg);
+    else if (arg === '--fail-on-rule') opts.failOnRules.add(requireValue(argv, ++i, arg));
     else if (arg === '--fail-on-findings') opts.failOnFindings = true;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -257,14 +260,21 @@ function buildReport(opts) {
   const files = scanDirs.flatMap((dir) => walk(resolve(root, dir)));
   const findings = sortFindings(uniqueFindings(files.flatMap((file) => scanFile(root, file))));
   const shownFindings = findings.slice(0, opts.maxFindings);
-  const reportOnly = !opts.failOnFindings;
+  const failedRules = [...new Set(findings
+    .filter((finding) => opts.failOnFindings || opts.failOnRules.has(finding.rule))
+    .map((finding) => finding.rule))]
+    .sort();
+  const enforcedRules = [...opts.failOnRules].sort();
+  const reportOnly = !opts.failOnFindings && enforcedRules.length === 0;
 
   return {
     by_rule: summarize(findings),
+    enforced_rules: opts.failOnFindings ? ['*'] : enforcedRules,
+    failed_rules: failedRules,
     finding_count: findings.length,
     findings: shownFindings,
     generated_at_utc: new Date().toISOString(),
-    mode: reportOnly ? 'report-only' : 'fail-on-findings',
+    mode: reportOnly ? 'report-only' : opts.failOnFindings ? 'fail-on-findings' : 'fail-on-rule',
     paths: {
       root,
       scan_dirs: scanDirs,
@@ -273,7 +283,7 @@ function buildReport(opts) {
     scanned_file_count: files.filter((file) => statSync(file).isFile()).length,
     schema_version: 1,
     truncated: shownFindings.length < findings.length,
-    verdict: opts.failOnFindings && findings.length > 0 ? 'FAIL' : 'PASS',
+    verdict: failedRules.length > 0 ? 'FAIL' : 'PASS',
   };
 }
 

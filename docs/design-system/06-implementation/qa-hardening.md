@@ -647,7 +647,10 @@ inventoried by `console/scripts/check-color-semantics.mjs` and exposed as:
 npm --prefix console run design:color-semantics
 ```
 
-The audit scans `console/src` for report-only findings:
+The audit scans `console/src` for color-system findings. `soup/no-component-local-palette` is
+blocking because the repository has a canonical transitional helper at
+`console/src/lib/color-semantics.ts`; the remaining provider/data/traffic lanes stay report-only
+until their named prerequisites are complete.
 
 - `soup/provider-palette-only` candidates: provider identity colour maps or provider display
   contexts borrowing status/mode tokens or literal colours instead of `--provider-*`;
@@ -661,16 +664,13 @@ The audit scans `console/src` for report-only findings:
 - `soup/no-component-local-palette` candidates: component-local colour maps that duplicate design
   truth outside documented provider/data/status token maps.
 
-Default mode is deliberately report-only: findings are emitted as structured JSON with `verdict:
-PASS`, `mode: report-only`, per-rule counts, and sample file/line evidence. `--fail-on-findings`
-exists only for later promotion packets after provider tokens, data-series tokens, traffic-neutral
-classification, contrast proof, and both-theme screenshots exist.
-
-A report-only PASS means the audit ran and produced an inventory. It does not prove the provider
-palette is implemented, does not prove message-volume charts use lawful data colours, does not
-prove traffic quantities are neutral, does not replace contrast checks or screenshots, and must
-never be cited as colour-system compliance unless `finding_count` is actually `0` under the
-appropriate promotion mode.
+The default CLI mode is deliberately report-only, but `npm --prefix console run
+design:color-semantics` runs with `--fail-on-rule soup/no-component-local-palette`. A `PASS` from
+that package script proves only that no component/page-local colour map re-entered and that the
+remaining color-system inventory was emitted. It does not prove the provider palette is
+implemented, does not prove all charts use lawful data colours, does not replace contrast checks or
+screenshots, and must never be cited as full colour-system compliance unless `finding_count` is
+actually `0` under the appropriate promotion mode.
 
 ## 18. Done Means Durable
 

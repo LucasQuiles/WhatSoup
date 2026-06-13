@@ -82,7 +82,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/provider-palette-only | report-only script | scoped-error / blocking script | P4/G5 | provider identity must consume `--provider-*`; no status/mode/data/literal colours |
 | soup/data-series-token-only | report-only script | scoped-error / blocking script | P4/G5 | non-provider chart dimensions must consume `--data-*`; FleetMetricsChart is message-volume data, not provider identity |
 | soup/traffic-neutrality | report-only script | scoped-error / blocking script | P4/G5 | sent/received/sessions/media quantities stay neutral ink unless reclassified as status |
-| soup/no-component-local-palette | report-only script | warn-on-changed-files | P4/G5 | component-local colour maps collapse into documented provider/data/status token maps or explicit exceptions |
+| soup/no-component-local-palette | blocking script | keep blocking script / later scoped-error | P4/G5 | component-local colour maps collapse into documented provider/data/status token maps or explicit exceptions |
 | soup/tabular-nums-required | proposed | scoped-error (Table/metric) | P4 | zero current usage — needs spec landing first |
 | soup/no-unsafe-truncation | report-only script | warn-on-changed-files | P4/G7 | truncation needs full-value access or documented exception |
 | soup/scroll-owner-required | report-only script | scoped-error / blocking script | P4/G7 | scrollable regions need axis min-size proof and one declared owner |
@@ -497,8 +497,9 @@ cannot express the check).
 
 - **Purpose:** prevent duplicated colour truth in components after provider/data/status helpers
   exist.
-- **Mechanism:** report-only source audit for component-local colour maps; later warn-on-changed-files
-  after sanctioned token maps are in place.
+- **Mechanism:** blocking slice of `console/scripts/check-color-semantics.mjs` via
+  `--fail-on-rule soup/no-component-local-palette`. The same script still reports provider/data/
+  traffic findings; only this zeroed rule is fail-closed until those other prerequisites are true.
 - **Scope:** `console/src/components/**` and `console/src/pages/**`. Exempt canonical token/helper
   modules and documented one-off visual test fixtures.
 - **Violation / valid:** component `const colorMap = { 'text-s-ok': 'var(--color-s-ok)' }` →
@@ -507,7 +508,7 @@ cannot express the check).
   colour maps while legacy token replacement is still in flight.
 - **FP strategy:** `data-local-palette-exception` is temporary evidence only; durable exceptions
   require a lint-plan row and QA-hardening debt entry before promotion.
-- **Autofix:** no. **Phase:** P4/G5. **Entry:** report-only script.
+- **Autofix:** no. **Phase:** P4/G5. **Entry:** blocking script.
 
 ### soup/tabular-nums-required
 

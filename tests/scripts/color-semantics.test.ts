@@ -40,9 +40,11 @@ function runScript(root: string, extraArgs: string[] = []) {
 function parsedOutput(result: ReturnType<typeof runScript>) {
   return JSON.parse(result.stdout) as {
     by_rule: Record<string, number>;
+    enforced_rules: string[];
+    failed_rules: string[];
     finding_count: number;
     findings: Array<{ rule: string; file: string; line: number }>;
-    mode: 'report-only' | 'fail-on-findings';
+    mode: 'report-only' | 'fail-on-findings' | 'fail-on-rule';
     scanned_file_count: number;
     verdict: 'PASS' | 'FAIL';
   };
@@ -153,6 +155,54 @@ export function MetricsChart() {
     expect(output.verdict).toBe('FAIL');
     expect(output.mode).toBe('fail-on-findings');
     expect(output.by_rule).toEqual({ 'soup/data-series-token-only': 1 });
+    expect(output.enforced_rules).toEqual(['*']);
+    expect(output.failed_rules).toEqual(['soup/data-series-token-only']);
+  });
+
+  it('can promote a single zeroed rule while unrelated findings remain report-only', () => {
+    const root = makeFixture({
+      'console/src/components/FleetTokenChart.tsx': `
+export function FleetTokenChart() {
+  return <Area dataKey="tokens" stroke="var(--color-m-agt)" />;
+}
+`,
+    });
+    const result = runScript(root, ['--fail-on-rule', 'soup/no-component-local-palette']);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(0);
+    expect(output.verdict).toBe('PASS');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.enforced_rules).toEqual(['soup/no-component-local-palette']);
+    expect(output.failed_rules).toEqual([]);
+    expect(output.by_rule).toEqual({ 'soup/data-series-token-only': 1 });
+  });
+
+  it('fails when the promoted local-palette rule regresses', () => {
+    const root = makeFixture({
+      'console/src/components/KpiCard.tsx': `
+const colorMap: Record<string, string> = {
+  ok: 'var(--status-ok-solid)',
+};
+`,
+      'console/src/components/FleetTokenChart.tsx': `
+export function FleetTokenChart() {
+  return <Area dataKey="tokens" stroke="var(--color-m-agt)" />;
+}
+`,
+    });
+    const result = runScript(root, ['--fail-on-rule', 'soup/no-component-local-palette']);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.enforced_rules).toEqual(['soup/no-component-local-palette']);
+    expect(output.failed_rules).toEqual(['soup/no-component-local-palette']);
+    expect(output.by_rule).toMatchObject({
+      'soup/data-series-token-only': 1,
+      'soup/no-component-local-palette': 1,
+    });
   });
 
   it('supports repeated scan directories for focused inventories', () => {
