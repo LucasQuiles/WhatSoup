@@ -21,22 +21,21 @@
   },
   "totals": {
     "by_classification": {
-      "consumer_migration": 31
+      "consumer_migration": 30
     },
     "by_consumer_group": {
       "line_detail_and_modals": 17,
       "pages": 1,
-      "shared_components": 1,
       "standalone_components": 4,
       "wizard_consumers": 8
     },
     "by_element": {
-      "input": 22,
+      "input": 21,
       "select": 2,
       "textarea": 7
     },
-    "files": 14,
-    "total": 31
+    "files": 13,
+    "total": 30
   },
   "by_file": [
     {
@@ -125,18 +124,6 @@
       "file": "console/src/components/SaveContactDialog.tsx",
       "lines": [
         69
-      ],
-      "total": 1
-    },
-    {
-      "by_element": {
-        "input": 1
-      },
-      "classification": "consumer_migration",
-      "consumer_group": "shared_components",
-      "file": "console/src/components/shared/SearchInput.tsx",
-      "lines": [
-        17
       ],
       "total": 1
     },
@@ -408,16 +395,6 @@
       "element": "input",
       "file": "console/src/components/SaveContactDialog.tsx",
       "line": 69,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<input"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 7,
-      "consumer_group": "shared_components",
-      "element": "input",
-      "file": "console/src/components/shared/SearchInput.tsx",
-      "line": 17,
       "rule": "soup/no-raw-form-control",
       "snippet": "<input"
     },

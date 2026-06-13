@@ -161,9 +161,9 @@ App shell context: `console/src/App.tsx` mounts `Nav`, routes the 4 pages (lazy,
 
 ### SearchInput
 - Path: `console/src/components/shared/SearchInput.tsx`
-- Role: Text input with leading search icon and optional `endAdornment`; passes through native input props.
-- Props: `SearchInputProps` at `console/src/components/shared/SearchInput.tsx:4` (extends `InputHTMLAttributes` minus `type`).
-- Consumers: `console/src/components/shared/ChatPicker.tsx:4`, `console/src/components/shared/ContactSearchPicker.tsx:5`, `console/src/components/line-detail/GroupDetailModal.tsx:9`.
+- Role: Text input with leading search icon and optional `endAdornment`; renders through the `TextInput` form primitive.
+- Props: `SearchInputProps` at `console/src/components/shared/SearchInput.tsx` (extends `TextInputProps` minus `type`).
+- Consumers: `console/src/components/shared/ChatPicker.tsx`, `console/src/components/shared/ContactSearchPicker.tsx`, `console/src/components/line-detail/GroupDetailModal.tsx`, `console/src/pages/Inbox.tsx`.
 - State: stateless/controlled.
 
 ### ChatPicker

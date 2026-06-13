@@ -8,6 +8,11 @@ Audited tree: `<soup-impl worktree>` (implementation branch `feat/soup-v3-founda
 console app at `console/`. Design authority: `03-spec/` in this repo. Static analysis only —
 no build, no test run, no install (package.json was mid-merge and ignored per brief).
 
+Post-audit current-state note: this file is a dated snapshot. Current raw form-control counts are
+mechanically generated in `console/design-raw-form-control-inventory.json` and checked by
+`npm --prefix console run design:raw-form-control-inventory`. As of D4.3a, `SearchInput` renders
+through `TextInput`; do not use the 2026-06-12 raw-form counts below as the live source of truth.
+
 ## 1. Methodology
 
 1. **File census.** Every `.tsx/.ts/.css` under `console/src` enumerated (4 pages, 63 leaf

@@ -1,7 +1,8 @@
-import type { InputHTMLAttributes, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { Search } from 'lucide-react'
+import { TextInput, type TextInputProps } from '../primitives'
 
-interface SearchInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> {
+interface SearchInputProps extends Omit<TextInputProps, 'type'> {
   containerClassName?: string
   endAdornment?: ReactNode
 }
@@ -14,7 +15,7 @@ export function SearchInput({ containerClassName, className, endAdornment, ...pr
         strokeWidth={1.75}
         className="absolute top-1/2 -translate-y-1/2 pointer-events-none text-t5 left-[var(--sp-2h)]"
       />
-      <input
+      <TextInput
         type="text"
         {...props}
         className={['c-input c-input-search', className].filter(Boolean).join(' ')}
