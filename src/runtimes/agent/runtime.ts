@@ -6,6 +6,16 @@ import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types
 import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
+import {
+  classifyProviderFailure,
+  providerFailureArmsFallback,
+  isUsageLimitMessage,
+  isProviderAuthRequiredMessage,
+  isRateLimitResultMessage,
+  isProviderPolicyBlockMessage,
+  isPromptTooLongMessage,
+  isProviderModelUnavailableMessage,
+} from './provider-failure.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
@@ -168,7 +178,7 @@ const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
   return Math.min(Math.max(Math.trunc(raw), 3), 100);
 })();
 
-type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required';
+type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
 
 interface ProviderFallbackActivation {
   primaryProvider: string;
@@ -1080,66 +1090,17 @@ function humanizeError(_toolName: string, text: string): string | null {
  *
  * Returns `true` when the text looks like a provider usage-limit notice.
  */
-export function isUsageLimitMessage(text: string): boolean {
-  if (isPromptTooLongMessage(text)) return false; // distinct error path
-
-  const lower = text.toLowerCase();
-  if (
-    lower.includes('out of extra usage') ||
-    lower.includes('usage limit reached') ||
-    lower.includes('usage cap reached') ||
-    lower.includes("you've reached your usage limit") ||
-    lower.includes('you have reached your usage limit') ||
-    lower.includes('you have hit your usage limit') ||
-    lower.includes('claude usage limit')
-  ) {
-    return true;
-  }
-
-  const resetPattern = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
-  return resetPattern.test(text) && (
-    lower.includes('usage limit') ||
-    lower.includes('usage cap') ||
-    lower.includes('plan limit') ||
-    lower.includes('quota exceeded')
-  );
-}
-
-export function isProviderAuthRequiredMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('not logged in') ||
-    lower.includes('please run /login') ||
-    lower.includes('please login') ||
-    lower.includes('authentication required') ||
-    lower.includes('auth required') ||
-    lower.includes('invalid api key') ||
-    lower.includes('missing api key') ||
-    lower.includes('no api key') ||
-    (lower.includes('oauth') && lower.includes('expired'))
-  );
-}
-
-export function isRateLimitResultMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('rate limited') ||
-    lower.includes('rate limit exceeded') ||
-    lower.includes('too many requests') ||
-    lower.includes('429')
-  ) && !isUsageLimitMessage(text);
-}
-
-export function isProviderPolicyBlockMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('usage policy') ||
-    lower.includes('policy violation') ||
-    lower.includes('violates our policy') ||
-    lower.includes('violative') ||
-    lower.includes('blocked by policy')
-  );
-}
+// Provider-failure string matchers are the single source of truth in
+// `./provider-failure.ts`. They are imported above for internal use and re-exported
+// here so existing importers (e.g. tests) keep `runtime.ts` as their entry point.
+export {
+  isUsageLimitMessage,
+  isProviderAuthRequiredMessage,
+  isRateLimitResultMessage,
+  isProviderPolicyBlockMessage,
+  isPromptTooLongMessage,
+  isProviderModelUnavailableMessage,
+};
 
 function providerDisplayName(provider: string): string {
   switch (provider) {
@@ -1172,6 +1133,9 @@ function fallbackReasonForUser(reason: ProviderFallbackReason, activeUntil: numb
   if (reason === 'rate-limit') {
     return 'is rate limited; switching temporarily';
   }
+  if (reason === 'model-unavailable') {
+    return 'is unavailable on this host; switching temporarily';
+  }
   return 'needs re-auth; switching while the primary connection is repaired';
 }
 
@@ -1180,9 +1144,18 @@ function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
 }
 
 function fallbackReasonForResultText(text: string): ProviderFallbackReason | null {
-  if (isUsageLimitMessage(text)) return 'usage-limit';
-  if (isProviderAuthRequiredMessage(text)) return 'auth-required';
-  if (isRateLimitResultMessage(text)) return 'rate-limit';
+  // Routed through the central classifier (SSOT). Only fallback-arming kinds map to
+  // a ProviderFallbackReason; policy-block / context-overflow classify but do not
+  // arm fallback (they are suppressed and the session is killed by the handlers).
+  const kind = classifyProviderFailure(text);
+  if (
+    kind === 'usage-limit' ||
+    kind === 'rate-limit' ||
+    kind === 'auth-required' ||
+    kind === 'model-unavailable'
+  ) {
+    return kind;
+  }
   return null;
 }
 
@@ -1269,17 +1242,7 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
  * The correct recovery is to kill the session so the next user message spawns
  * a fresh one with recent chat context injected.
  */
-export function isPromptTooLongMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('prompt is too long') ||
-    lower.includes('prompt too long') ||
-    lower.includes('maximum context length') ||
-    lower.includes('context_length_exceeded') ||
-    lower.includes('max_tokens_exceeded') ||
-    (lower.includes('token') && lower.includes('limit') && lower.includes('exceed'))
-  );
-}
+// `isPromptTooLongMessage` lives in `./provider-failure.ts` (imported + re-exported above).
 
 /**
  * Classify a tool_result error as either a blocked tool (permission/hook denial),
@@ -4715,8 +4678,12 @@ export class AgentRuntime implements Runtime {
           // deferred to the 'result' event. Activating on streaming text would
           // race the usage-limit session kill/respawn (the result path also
           // shuts the session down), so we only observe + suppress here.
-          if (isUsageLimitMessage(normalizedText)) {
-            log.warn({ chatJid: queue.targetChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
+          // Suppress any KNOWN provider-failure string that streamed as assistant text.
+          // Fallback is armed on the terminal 'result' event, not here. Text that does
+          // NOT match a known failure pattern is genuine assistant output — pass it through
+          // (never default-deny streaming, or real replies would be dropped).
+          if (classifyProviderFailure(normalizedText) !== null) {
+            log.warn({ chatJid: queue.targetChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed provider-failure message from assistant_text');
             break;
           }
           queue.enqueueStreamingText(normalizedText);
@@ -4938,6 +4905,32 @@ export class AgentRuntime implements Runtime {
             if (!replayScheduled) session?.shutdown();
             break;
           }
+          if (isProviderModelUnavailableMessage(event.text)) {
+            log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
+            const activation = this.activateProviderFallback(null, 'model-unavailable');
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  mapKey,
+                  oldSession: session,
+                  hadToolActivity: turnHadToolWork,
+                })
+              : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq,
+              conversationKey,
+              mapKey,
+            });
+            if (!replayScheduled) session?.shutdown();
+            break;
+          }
           // Context overflow — session is unsalvageable, kill and let next message respawn
           if (isPromptTooLongMessage(event.text)) {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
@@ -4951,10 +4944,24 @@ export class AgentRuntime implements Runtime {
             break;
           }
           if (!wasSilentCompact) {
-            queue.enqueueResultText(event.text);
-            // Accumulate result text for voice reply (SP4)
-            if (mapKey !== undefined) {
-              this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
+            if (event.isError) {
+              // Default-deny: an is_error result with no recognised failure class is an
+              // UNKNOWN terminal provider error. Never forward raw provider/CLI text to the
+              // user — emit one generic notice and alert ops with the raw text.
+              log.error({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed unclassified terminal provider error from result — not forwarded to user');
+              emitAlertChecked(
+                this.instanceName,
+                'provider_unknown_terminal',
+                'Unclassified terminal provider error suppressed from user',
+                event.text.slice(0, 400),
+              );
+              queue.enqueueText(this.providerUnknownTerminalNotice());
+            } else {
+              queue.enqueueResultText(event.text);
+              // Accumulate result text for voice reply (SP4)
+              if (mapKey !== undefined) {
+                this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
+              }
             }
           }
         }
@@ -5989,6 +5996,16 @@ export class AgentRuntime implements Runtime {
     return this.agentFallbacks.length > 0
       ? '_Primary model hit a token/quota limit, but the backup could not continue this turn. An operator has been notified._'
       : '_Primary model hit a token/quota limit. Please try again after the limit resets._';
+  }
+
+  /**
+   * User-facing notice for an unclassified terminal provider error. The raw
+   * provider/CLI text is never shown to the user (it can contain internal detail and
+   * is captured in a `provider_unknown_terminal` ops alert instead); this generic copy
+   * is the single source of user-facing wording for that path.
+   */
+  private providerUnknownTerminalNotice(): string {
+    return '_I hit a problem completing that — an operator has been notified. Please try again, or send /new to start fresh._';
   }
 
   /**
@@ -7473,8 +7490,10 @@ export class AgentRuntime implements Runtime {
           // deferred to the 'result' event. Activating on streaming text would
           // race the usage-limit session kill/respawn (the result path also
           // shuts the session down), so we only observe + suppress here.
-          if (isUsageLimitMessage(normalizedText)) {
-            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
+          // Suppress any KNOWN provider-failure string streamed as assistant text; fallback
+          // is armed on the terminal 'result' event. Non-matching text is genuine output.
+          if (classifyProviderFailure(normalizedText) !== null) {
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed provider-failure message from assistant_text');
             break;
           }
           queue.enqueueStreamingText(normalizedText);
@@ -7699,6 +7718,32 @@ export class AgentRuntime implements Runtime {
             this.singleTurnHadToolActivity = false;
             break;
           }
+          if (isProviderModelUnavailableMessage(event.text)) {
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
+            const activation = this.activateProviderFallback(null, 'model-unavailable');
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  oldSession: this.session,
+                  hadToolActivity: turnHadToolWork,
+                })
+              : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq: this.currentInboundSeq,
+              conversationKey: toConversationKey(queue.targetChatJid),
+              clearCurrentInboundSeq: true,
+            });
+            if (!replayScheduled) this.session?.shutdown();
+            this.singleTurnHadToolActivity = false;
+            break;
+          }
           // Context overflow — session is unsalvageable, kill and let next message respawn
           if (isPromptTooLongMessage(event.text)) {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
@@ -7712,10 +7757,23 @@ export class AgentRuntime implements Runtime {
             break;
           }
           if (!wasSilentCompact) {
-            queue.enqueueResultText(event.text);
-            this.turnHadVisibleOutput = true;
-            // Accumulate result text for voice reply (SP4)
-            this.currentTurnAssistantText += event.text;
+            if (event.isError) {
+              // Default-deny: is_error result with no recognised class = unknown terminal
+              // provider error. Suppress the raw text; emit a generic notice + ops alert.
+              log.error({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed unclassified terminal provider error from result — not forwarded to user');
+              emitAlertChecked(
+                this.instanceName,
+                'provider_unknown_terminal',
+                'Unclassified terminal provider error suppressed from user',
+                event.text.slice(0, 400),
+              );
+              queue.enqueueText(this.providerUnknownTerminalNotice());
+            } else {
+              queue.enqueueResultText(event.text);
+              this.turnHadVisibleOutput = true;
+              // Accumulate result text for voice reply (SP4)
+              this.currentTurnAssistantText += event.text;
+            }
           }
         }
         this.currentTurnAssistantItemText.clear();
