@@ -16,6 +16,12 @@ import sys
 import time
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+
 
 TAILSCALE_STATUS_CACHE: dict[str, Any] | None = None
 TAILSCALE_STATUS_ERROR: str | None = None
@@ -580,51 +586,16 @@ def append_private_jsonl(path: Path, record: dict[str, Any]) -> None:
             os.close(dir_fd)
 
 
-REDACTED = "[REDACTED]"
-REDACTED_CREDENTIAL_PATH = "[REDACTED_CREDENTIAL_PATH]"
-AUTHORIZATION_BEARER_RE = re.compile(r"\b(authorization\s*[:=]\s*bearer\s+)[^\s\"',;}]+", re.I)
-BEARER_VALUE_RE = re.compile(r"\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.I)
-KEYED_SECRET_RE = re.compile(
-    r"\b((?:(?:[A-Za-z0-9_.-]*(?:api[_-]?key|cookie|password|passphrase|secret|session|token)"
-    r"[A-Za-z0-9_.-]*)|pat)\s*[:=]\s*)([\"']?)([^\"'\s,;}]+)([\"']?)",
-    re.I,
-)
-CREDENTIAL_PATH_RE = re.compile(
-    r"(?:~/|/(?:[^/\s\"',;}]+/)*)?(?:"
-    r"\.config/secrets/[^\s\"',;}]+|"
-    r"\.config/whatsoup/[^\s\"',;}]+|"
-    r"\.local/share/whatsoup/instances/[^\s\"',;}]*/auth(?:/[^\s\"',;}]+)?|"
-    r"auth-bond-backups/[^\s\"',;}]+|"
-    r"/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env|\.env(?:\.[^\s\"',;}]+)?)"
-    r")",
-    re.I,
-)
-GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
-URL_USERINFO_RE = re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@", re.I)
-
-
 def redact_collector_text(value: Any) -> str:
-    text = str(value)
-    text = CREDENTIAL_PATH_RE.sub(REDACTED_CREDENTIAL_PATH, text)
-    text = GITHUB_TOKEN_RE.sub("[REDACTED_GITHUB_TOKEN]", text)
-    text = URL_USERINFO_RE.sub(r"\1[REDACTED]@", text)
-    text = AUTHORIZATION_BEARER_RE.sub(r"\1" + REDACTED, text)
-    text = BEARER_VALUE_RE.sub(r"\1" + REDACTED, text)
-
-    def redact_keyed(match: re.Match[str]) -> str:
-        return f"{match.group(1)}{match.group(2)}{REDACTED}{match.group(4)}"
-
-    return KEYED_SECRET_RE.sub(redact_keyed, text)
+    return redact_bot_errors_text(
+        value,
+        credential_path_marker="[REDACTED_CREDENTIAL_PATH]",
+        github_marker="[REDACTED_GITHUB_TOKEN]",
+    )
 
 
 def redacted_collector_payload(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_collector_text(value)
-    if isinstance(value, list):
-        return [redacted_collector_payload(item) for item in value]
-    if isinstance(value, dict):
-        return {key: redacted_collector_payload(item) for key, item in value.items()}
-    return value
+    return redact_shared_json_value(value, redact_collector_text)
 
 
 def append_log(payload: dict[str, Any]) -> None:

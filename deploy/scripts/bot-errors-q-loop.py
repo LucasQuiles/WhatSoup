@@ -23,6 +23,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
 BOT_ERRORS_EXPECTED_JID = os.environ.get("BOT_ERRORS_EXPECTED_JID", "").strip()
@@ -65,31 +71,7 @@ NUDGE_AFTER_SECONDS = 20 * 60
 NUDGE_COOLDOWN_SECONDS = 45 * 60
 CHECKPOINT_AFTER_SECONDS = 60 * 60
 
-SECRETISH_ASSIGNMENT = re.compile(
-    r"\b(api[_-]?key|token|secret|password|cookie|credential)\b(\s*[:=]\s*)([\"']?)(?:Bearer\s+)?[^\s\"',}]+",
-    re.I,
-)
-AUTHORIZATION_BEARER = re.compile(r"\bAuthorization:\s*Bearer\s+[^\s\"',}]+", re.I)
-BEARER_VALUE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+")
-WHATSAPP_JID = re.compile(r"\b\d{5,}(?:-\d+)?@(s\.whatsapp\.net|g\.us|lid)\b", re.I)
-AWS_ACCESS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
-GITHUB_TOKEN = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
-JWT_VALUE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
-PEM_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S)
-URL_USERINFO = re.compile(r"\b(https?://)[^\s/@:]+:[^\s/@]+@", re.I)
 GROUP_JID_RE = re.compile(r"^\d+@g\.us$")
-CREDENTIAL_PATH = re.compile(
-    r"(?:~/|/(?:[^/\s\"',}]+/)*)?(?:"
-    r"\.config/whatsoup/[^\s\"',}]+|"
-    r"\.local/share/whatsoup/instances/[^\s\"',}]*/auth(?:/[^\s\"',}]*)?|"
-    r"auth-bond-backups/[^\s\"',}]+|"
-    r"/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env)"
-    r")\b",
-    re.I,
-)
-KEYED_PHONE_LIKE = re.compile(r"\b(phone|phone[_-]?number|msisdn|line)(\s*[:=]\s*|\s+)(\+?\d{10,16})\b", re.I)
-CONTEXT_PHONE_LIKE = re.compile(r"\b(for)(\s+)(\+?\d{10,16})\b", re.I)
-PHONE_LIKE = re.compile(r"(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])")
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -191,39 +173,12 @@ def append_activity(record: dict[str, Any]) -> None:
     append_private_jsonl(ACTIVITY_LOG, {"ts": now(), "time": iso(), **redact_json_value(record)})
 
 
-def redact_phone_like_match(match: re.Match[str]) -> str:
-    candidate = match.group(2)
-    digits = re.sub(r"\D", "", candidate)
-    has_phone_syntax = candidate.strip().startswith("+") or bool(re.search(r"[\s().-]", candidate))
-    if has_phone_syntax and 10 <= len(digits) <= 15:
-        return f"{match.group(1)}[REDACTED PHONE]"
-    return match.group(0)
-
-
 def redact_text(value: str) -> str:
-    text = PEM_PRIVATE_KEY.sub("[REDACTED PEM PRIVATE KEY]", value)
-    text = CREDENTIAL_PATH.sub("[REDACTED CREDENTIAL PATH]", text)
-    text = WHATSAPP_JID.sub("[REDACTED WHATSAPP JID]", text)
-    text = URL_USERINFO.sub(r"\1[REDACTED]@", text)
-    text = AWS_ACCESS_KEY_ID.sub("[REDACTED AWS ACCESS KEY]", text)
-    text = GITHUB_TOKEN.sub("[REDACTED GITHUB TOKEN]", text)
-    text = JWT_VALUE.sub("[REDACTED JWT]", text)
-    text = AUTHORIZATION_BEARER.sub("Authorization: Bearer [REDACTED]", text)
-    text = SECRETISH_ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}[REDACTED]", text)
-    text = BEARER_VALUE.sub("Bearer [REDACTED]", text)
-    text = KEYED_PHONE_LIKE.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED PHONE]", text)
-    text = CONTEXT_PHONE_LIKE.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED PHONE]", text)
-    return PHONE_LIKE.sub(redact_phone_like_match, text)
+    return redact_bot_errors_text(value, credential_path_marker="[REDACTED CREDENTIAL PATH]")
 
 
 def redact_json_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_text(value)
-    if isinstance(value, list):
-        return [redact_json_value(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): redact_json_value(item) for key, item in value.items()}
-    return value
+    return redact_shared_json_value(value, redact_text)
 
 
 def ensure_private_dir(path: Path) -> None:
