@@ -1,4 +1,5 @@
 import { type FC, useId } from "react";
+import { KPI_COLOR_TOKENS, isNeutralKpiColor, kpiStrokeColor } from "../lib/color-semantics";
 import { Button } from "./primitives/Button";
 
 interface KpiCardProps {
@@ -11,23 +12,12 @@ interface KpiCardProps {
   suffix?: string;
 }
 
-const colorMap: Record<string, string> = {
-  "neutral": "var(--text-2)",
-  "text-s-ok": "var(--color-s-ok)",
-  "text-s-crit": "var(--color-s-crit)",
-  "text-s-warn": "var(--color-s-warn)",
-  "text-m-agt": "var(--color-m-agt)",
-  "text-m-cht": "var(--color-m-cht)",
-  "text-m-pas": "var(--color-m-pas)",
-  "text-t2": "var(--color-t2)",
-};
-
 const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = false, sparkData, suffix }) => {
-  const strokeColor = colorMap[color] || "currentColor";
+  const strokeColor = kpiStrokeColor(color);
   const hasSparkline = sparkData && sparkData.length > 1;
   const gradientId = useId();
-  const valueClassName = color === "neutral" ? "c-kpi-value" : `c-kpi-value ${color}`;
-  const valueStyle = color === "neutral" ? { color: "var(--text-2)" } : undefined;
+  const valueClassName = isNeutralKpiColor(color) ? "c-kpi-value" : `c-kpi-value ${color}`;
+  const valueStyle = isNeutralKpiColor(color) ? { color: KPI_COLOR_TOKENS.neutral } : undefined;
 
   return (
     <Button

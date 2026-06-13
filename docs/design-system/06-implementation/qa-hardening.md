@@ -565,6 +565,21 @@ The audit scans `console/src` for report-only findings:
 - `soup/no-vw-font-size` candidates: viewport-width typography;
 - `soup/layer-owner-required` candidates: raw z-index utilities that do not consume `--z-*` tokens.
 
+Reviewers apply these rule-of-thumb checks before accepting any migrated surface:
+
+| Area | Required principle | Blocking evidence gap |
+|---|---|---|
+| Text wrapping | User data must either wrap within its column or expose a full-value path through `title`, `aria-label`, `aria-describedby`, `data-full-value`, or an approved disclosure primitive. | Long names, IDs, timestamps, model names, or log lines are clipped with no full-value path. |
+| Numeric sizing | Metric values use stable tabular sizing and reserve room for the longest realistic value plus suffix. | KPI/card/table cells resize the layout when values change or suffixes appear. |
+| Control sizing | Buttons, tabs, chips, and icon controls have stable min/max dimensions across default, hover, focus, active, selected, disabled, loading, and error states. | Interaction states change padding, gap, width, height, border width, or grid tracks. |
+| Scroll ownership | Every scrollable region declares one content owner and has axis min-size proof (`min-h-0` for vertical, `min-w-0` for horizontal). | Nested scroll areas compete, the owner is ambiguous, or a reduced-height viewport traps content. |
+| Sticky/fixed layers | Sticky bars, popovers, modals, drawers, and toasts consume `--z-*` tokens through primitives or named owner annotations. | Raw z-index literals or utility layers appear without ownership proof. |
+| Hover/focus parity | Anything revealed on hover is also available through focus, focus-within, touch, or a persistent control. | Row/card actions are hover-only or keyboard users cannot discover them. |
+| Reduced-height behavior | Critical routes are checked at reduced vertical height, not only desktop height. | Toolbars, modal footers, composer bars, or primary actions fall below inaccessible scroll boundaries. |
+| Small viewport behavior | Fixed-format UI uses responsive constraints (`minmax`, aspect ratio, stable tracks), not viewport-scaled type. | Text or controls overlap, shrink below legibility, or depend on `vw` font sizing. |
+| Empty/loading/error states | Empty, loading, error, and degraded states preserve the same space ownership and focus model as loaded states. | State changes remove landmarks, focus targets, or scroll owners. |
+| Motion and reveal | Motion clarifies state changes but does not carry required information; reduced motion has an equivalent static state. | Information appears only during animation or reveal timing. |
+
 Default mode is deliberately report-only: findings are emitted as structured JSON with `verdict:
 PASS`, `mode: report-only`, per-rule counts, and sample file/line evidence. `--fail-on-findings`
 exists only for future promotion packets after the current inventory is burned down or documented

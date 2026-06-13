@@ -155,10 +155,7 @@ export function buildConfigEntries(rawConfig: Record<string, unknown>): { key: s
   return entries
 }
 
-export const TYPE_COLOR: Record<string, string> = {
-  string: 'var(--color-m-pas)', number: 'var(--color-s-warn)',
-  boolean: 'var(--color-m-agt)', path: 'var(--color-m-cht)',
-}
+export { CONFIG_VALUE_TYPE_COLOR as TYPE_COLOR } from '../../lib/color-semantics'
 
 export const ENUM_OPTIONS: Record<string, string[]> = {
   accessMode: [...ACCESS_MODE_VALUES],

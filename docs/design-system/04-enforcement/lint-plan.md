@@ -84,6 +84,12 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/traffic-neutrality | report-only script | scoped-error / blocking script | P4/G5 | sent/received/sessions/media quantities stay neutral ink unless reclassified as status |
 | soup/no-component-local-palette | report-only script | warn-on-changed-files | P4/G5 | component-local colour maps collapse into documented provider/data/status token maps or explicit exceptions |
 | soup/tabular-nums-required | proposed | scoped-error (Table/metric) | P4 | zero current usage — needs spec landing first |
+| soup/no-unsafe-truncation | report-only script | warn-on-changed-files | P4/G7 | truncation needs full-value access or documented exception |
+| soup/scroll-owner-required | report-only script | scoped-error / blocking script | P4/G7 | scrollable regions need axis min-size proof and one declared owner |
+| soup/no-layout-shift-interaction | report-only script | scoped-error / blocking script | P4/G7 | hover/focus/active states must not change layout dimensions |
+| soup/no-hover-only-content | report-only script | scoped-error / blocking script | P4/G7 | hover-revealed content needs keyboard/focus parity |
+| soup/no-vw-font-size | report-only script | global-error | P4/G7 | typography must use tokenized type scale, not viewport width |
+| soup/layer-owner-required | report-only script | scoped-error / blocking script | P4/G7 | z-index uses `--z-*` layer tokens or a documented owner |
 | soup/no-duplicate-shell | shadow (advisory) | warn-on-changed-files | P2 | heuristic; routes to duplication-register, never error |
 | soup/theme-parity (script) | CI-blocking script | CI-blocking script | P1 | not an ESLint rule; section 5 |
 | soup/icon-family | scoped-error | global-error | P1 | zero current violations (lucide-react only) |
@@ -496,7 +502,9 @@ cannot express the check).
 - **Scope:** `console/src/components/**` and `console/src/pages/**`. Exempt canonical token/helper
   modules and documented one-off visual test fixtures.
 - **Violation / valid:** component `const colorMap = { 'text-s-ok': 'var(--color-s-ok)' }` →
-  import the documented status/provider/data token helper.
+  import the documented status/provider/data token helper. The transitional component-to-token
+  SSOT is `console/src/lib/color-semantics.ts`; component and page files must not carry local
+  colour maps while legacy token replacement is still in flight.
 - **FP strategy:** `data-local-palette-exception` is temporary evidence only; durable exceptions
   require a lint-plan row and QA-hardening debt entry before promotion.
 - **Autofix:** no. **Phase:** P4/G5. **Entry:** report-only script.
@@ -515,6 +523,94 @@ cannot express the check).
   composites. **Violation / valid:** numeric cell without tabular-nums → add to primitive style.
 - **FP strategy:** presence-check design. **Autofix:** yes (add class). **Phase:** P4 (screens) /
   spec at T6. **Entry:** proposed.
+
+### soup/no-unsafe-truncation
+
+- **Purpose:** truncated text must still expose the full value. Long IDs, names, timestamps, and
+  provider/model labels are operational data, not decorative copy.
+- **Mechanism:** report-only resilience script first. Flag `truncate`, `whitespace-nowrap`, and
+  ellipsis patterns unless the same element or adjacent wrapper provides `title`, `aria-label`,
+  `aria-describedby`, `data-full-value`, or a documented `data-truncation-exception`.
+- **Scope:** `console/src/**` TSX/CSS. Exempt purely decorative brand marks and intentionally clipped
+  generated visual assets when the exception names the visual proof artifact.
+- **Violation / valid:** `className="truncate"` on a line name → add a full-value path, wrapping
+  strategy, or primitive that owns the disclosure.
+- **FP strategy:** fixtures must include a valid `title`/`aria-describedby` case, an invalid bare
+  truncation case, and an allowed visual-brand exception.
+- **Autofix:** no. **Phase:** P4/G7. **Entry:** report-only script.
+
+### soup/scroll-owner-required
+
+- **Purpose:** every scrollable space must have exactly one visible owner and axis min-size proof so
+  panels do not create hidden nested scroll traps.
+- **Mechanism:** report-only resilience script. Flag `overflow-auto`, `overflow-scroll`,
+  `overflow-x-*`, and `overflow-y-*` without `min-h-0` / `min-w-0` proof or a
+  `data-scroll-owner` / `soup-scroll-owner-ok` exception.
+- **Scope:** scroll containers in route shells, modals, drawers, lists, tables, logs, and wizard
+  panes. Tiny icon scrollers are not exempt unless documented as non-content controls.
+- **Violation / valid:** `<div className="overflow-y-auto">` → `<div data-scroll-owner="inbox-list"
+  className="min-h-0 overflow-y-auto">`.
+- **FP strategy:** fixtures must distinguish axis-specific x/y scroll, nested scroll with one named
+  owner, and invalid unnamed nested scroll.
+- **Autofix:** partial (`min-h-0`/`min-w-0` suggestions only). **Phase:** P4/G7. **Entry:**
+  report-only script.
+
+### soup/no-layout-shift-interaction
+
+- **Purpose:** hover, focus, active, selected, and pressed states must not change component geometry.
+  Stable controls are required for dense operational scanning and keyboard use.
+- **Mechanism:** report-only resilience script. Flag hover/focus/active classes or CSS selectors that
+  change width, height, min/max dimensions, padding, gap, basis, grid tracks, or border width.
+- **Scope:** buttons, cards, rows, tabs, chips, toolbar controls, table rows, and list items. Motion
+  transforms are evaluated separately by reduced-motion rules.
+- **Violation / valid:** `hover:px-[var(--sp-4)]` → reserve the expanded width up front or reveal
+  affordances with opacity/transform inside stable bounds.
+- **FP strategy:** fixtures must include stable opacity/transform reveal, invalid padding growth, and
+  a tokenized exception for deliberate drag/resize handles.
+- **Autofix:** no. **Phase:** P4/G7. **Entry:** report-only script.
+
+### soup/no-hover-only-content
+
+- **Purpose:** content revealed on hover must also be reachable by keyboard, touch, and assistive
+  technology. Hover-only commands are hidden commands.
+- **Mechanism:** report-only resilience script. Flag `hover:` / `group-hover:` reveal patterns
+  without `focus:`, `focus-visible:`, `group-focus-within:`, always-visible small-screen handling,
+  or `data-hover-only-exception`.
+- **Scope:** row actions, card actions, toolbars, copy buttons, menus, popovers, and inline metadata.
+- **Violation / valid:** `group-hover:opacity-100 opacity-0` → pair with
+  `group-focus-within:opacity-100` and a real focusable trigger.
+- **FP strategy:** fixtures must include hover+focus parity, hover-only invalid reveal, and a
+  documented decorative-only exception.
+- **Autofix:** partial suggestion only. **Phase:** P4/G7. **Entry:** report-only script.
+
+### soup/no-vw-font-size
+
+- **Purpose:** type follows the tokenized type scale. Viewport-width font sizing breaks dense panels,
+  long labels, reduced-height views, and user zoom.
+- **Mechanism:** report-only resilience script now; later hard rule. Flag `text-[...vw]`,
+  `font-size: ...vw`, `clamp(...vw...)`, and equivalent viewport-relative type declarations.
+- **Scope:** `console/src/**` and checked-in brand assets. Exempt generated bitmap proofs; SVG/HTML
+  identity assets still need tokenized min/max sizing if they are product UI.
+- **Violation / valid:** `font-size: 8vw` → tokenized display/body scale with container max width and
+  line-height tokens.
+- **FP strategy:** fixtures must include invalid viewport type, valid tokenized clamp without vw, and
+  a non-UI generated artifact exception.
+- **Autofix:** no. **Phase:** P4/G7. **Entry:** report-only script.
+
+### soup/layer-owner-required
+
+- **Purpose:** layering must use the `--z-*` contract so modals, popovers, toasts, drawers, and
+  sticky bars do not fight through raw z-index literals.
+- **Mechanism:** report-only resilience script. Flag `z-[...]`, `z-50`-style utilities, and raw
+  `z-index` declarations unless they use a `--z-*` token or carry `data-layer-owner` /
+  `soup-layer-ok` evidence.
+- **Scope:** overlay, sticky, floating, and portal surfaces in `console/src/**`.
+- **Violation / valid:** `className="z-[999]"` → `className="z-[var(--z-modal)]"` or a primitive
+  prop that owns the layer.
+- **FP strategy:** fixtures must include valid tokenized layer, invalid literal layer, and a portal
+  fixture that proves the owner annotation is not a bypass for arbitrary literals.
+- **Autofix:** partial literal-to-token suggestions only when mapping is exact. **Phase:** P4/G7.
+  **Entry:** report-only script.
 
 ### soup/no-duplicate-shell
 

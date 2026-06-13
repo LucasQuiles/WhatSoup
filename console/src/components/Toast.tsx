@@ -1,8 +1,8 @@
 import { type FC, useEffect } from 'react'
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react'
+import type { ToastVariant } from '../hooks/toast-context'
+import { TOAST_BORDER_COLOR, TOAST_ICON_CLASS } from '../lib/color-semantics'
 import { Button } from './primitives/Button'
-
-type ToastVariant = 'success' | 'error' | 'info'
 
 interface ToastProps {
   variant: ToastVariant
@@ -15,18 +15,6 @@ const icons: Record<ToastVariant, typeof CheckCircle2> = {
   success: CheckCircle2,
   error: AlertCircle,
   info: Info,
-}
-
-const borderColor: Record<ToastVariant, string> = {
-  success: 'var(--s-ok-soft)',
-  error: 'var(--s-crit-soft)',
-  info: 'var(--m-cht-soft)',
-}
-
-const iconColor: Record<ToastVariant, string> = {
-  success: 'text-s-ok',
-  error: 'text-s-crit',
-  info: 'text-m-cht',
 }
 
 const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) => {
@@ -43,10 +31,10 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
       aria-live="polite"
       className="flex items-center gap-2.5 font-medium rounded-md bg-d3 shadow-[var(--shadow-md)] max-w-[var(--toast-max-w)] py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
       style={{
-        borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: borderColor[variant],
+        borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: TOAST_BORDER_COLOR[variant],
       }}
     >
-      <Icon size={18} strokeWidth={1.75} className={`flex-shrink-0 ${iconColor[variant]}`} />
+      <Icon size={18} strokeWidth={1.75} className={`flex-shrink-0 ${TOAST_ICON_CLASS[variant]}`} />
       <span className="flex-1 text-t2">{message}</span>
       <Button
         variant="ghost"

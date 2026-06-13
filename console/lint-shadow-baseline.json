@@ -1,6 +1,6 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 413,
+  "total": 411,
   "rules": {
     "no-restricted-syntax :: src/components/line-detail/HistoryTab.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/ModeTab.tsx": 1,
@@ -29,7 +29,7 @@
     "soup/no-legacy-tokens :: src/components/FleetSessionChart.tsx": 4,
     "soup/no-legacy-tokens :: src/components/FleetTokenChart.tsx": 4,
     "soup/no-legacy-tokens :: src/components/KeyboardShortcutsHelp.tsx": 4,
-    "soup/no-legacy-tokens :: src/components/KpiCard.tsx": 5,
+    "soup/no-legacy-tokens :: src/components/KpiCard.tsx": 3,
     "soup/no-legacy-tokens :: src/components/line-detail/AccessTab.tsx": 9,
     "soup/no-legacy-tokens :: src/components/line-detail/ConfigEditDialog.tsx": 1,
     "soup/no-legacy-tokens :: src/components/line-detail/CreateGroupModal.tsx": 2,

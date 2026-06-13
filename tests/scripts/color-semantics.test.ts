@@ -123,6 +123,11 @@ export function SoupKitchen() {
   );
 }
 `,
+      'console/src/lib/color-semantics.ts': `
+export const KPI_COLOR_TOKENS = {
+  'text-m-cht': 'var(--mode-chat-solid)',
+};
+`,
     });
     const result = runScript(root);
     const output = parsedOutput(result);
@@ -130,7 +135,7 @@ export function SoupKitchen() {
     expect(result.status).toBe(0);
     expect(output.verdict).toBe('PASS');
     expect(output.finding_count).toBe(0);
-    expect(output.scanned_file_count).toBe(3);
+    expect(output.scanned_file_count).toBe(4);
   });
 
   it('can fail when findings are promoted from report-only to blocking mode', () => {
