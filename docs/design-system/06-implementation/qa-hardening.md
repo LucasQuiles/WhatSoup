@@ -378,6 +378,42 @@ Score 1-5:
 | absence of design debt | TBD before final sign-off | TBD before final sign-off |
 | future contributor clarity | TBD before final sign-off | TBD before final sign-off |
 
+## 17. Visual Proof Automation Harness
+
+The deterministic capture harness lives at `console/scripts/capture-visual-matrix.mjs` and is exposed
+as:
+
+```bash
+npm --prefix console run design:capture
+```
+
+Default scope:
+
+- routes: Fleet (`/`), Inbox (`/inbox`), Ops (`/ops`), Line detail (`/lines/support`);
+- themes: dark and light;
+- viewports: 390x844, 768x1024, 1440x900, 1440x500;
+- browser context: Chromium, `prefers-reduced-motion: reduce`;
+- app state: Vite dev server with mock fallback enabled;
+- determinism: fixed clock, seeded `Math.random`, `document.fonts.ready`, forced theme storage, and
+  animation/transition freeze before screenshots.
+
+Artifacts are written under `artifacts/soup-v3-follow-up/visual-matrix/<run-id>/`:
+
+- one PNG per route x theme x viewport;
+- `manifest.json` with route, theme, viewport, screenshot path, byte size, DOM text length,
+  overflow flags, console warnings/errors, page errors, request failures, HTTP errors, and PASS/FAIL
+  verdict.
+
+An artifact is `PASS` when its screenshot is non-empty, the route rendered non-empty body text, and no
+browser `pageerror` fired. Console warnings/errors and HTTP/request failures remain in the manifest
+as review evidence; they do not by themselves replace visual, contrast, or behavior review.
+
+The harness is a proof collector, not a design reviewer. A PASS manifest proves only that screenshots
+were captured from populated DOM states under the declared matrix; it does not prove contrast,
+semantic color correctness, keyboard parity, or taste. Missing screenshots, launch failures, masked
+browser failures, or absent manifest rows are **INCONCLUSIVE** and block token/CSS/visual commits
+that require screenshot proof.
+
 Any score below 4 requires a remediation note. Any score below 3 blocks final acceptance unless the user
 explicitly waives it.
 

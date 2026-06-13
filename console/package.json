@@ -17,6 +17,7 @@
     "preview": "vite preview",
     "prepare": "husky",
     "design:theme-parity": "node scripts/check-theme-parity.mjs",
+    "design:capture": "node scripts/capture-visual-matrix.mjs",
     "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs",
     "design:metrics": "node scripts/design-metrics.mjs",
     "design:burndown": "node scripts/check-design-burndown.mjs",
