@@ -90,7 +90,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "e5bc63fe390c279877528d0f9738b3b1185fa6acfd1f0bca29dae918d20a0de3",
+      "sha256": "67c7875e3672585e93a2c5221a816199fe08572efd582fff20c3aa787ee26b83",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "Authorization: Bearer [REDACTED]",
