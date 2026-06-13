@@ -39,7 +39,7 @@ and the release manifest itself.
 Generate a deterministic plan before a re-cut:
 
 ```bash
-npm run release:snapshot -- \
+npm --silent run release:snapshot -- \
   --release-root "$HOME/LAB" \
   --source-ref HEAD \
   --json
@@ -66,7 +66,7 @@ the manifest's exclusion list is not code drift.
 Run the check in read-only mode:
 
 ```bash
-npm run release:snapshot -- \
+npm --silent run release:snapshot -- \
   --check-release "$HOME/LAB/WhatSoup-release-<commit>" \
   --json
 ```

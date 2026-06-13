@@ -272,6 +272,34 @@ describe('release snapshot planning', () => {
     ]));
   });
 
+  it('documented npm JSON planning command emits parseable JSON when run silent', () => {
+    tmpRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup-release-npm-smoke-'));
+    const releaseRoot = path.join(tmpRoot, 'releases');
+
+    const proc = spawnSync('npm', [
+      '--silent',
+      'run',
+      'release:snapshot',
+      '--',
+      '--release-root',
+      releaseRoot,
+      '--source-ref',
+      'HEAD',
+      '--build-time',
+      '2026-06-13T06:00:00.000Z',
+      '--json',
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    });
+
+    expect(proc.status, proc.stderr || proc.stdout).toBe(0);
+    const plan = JSON.parse(proc.stdout) as ReturnType<typeof createReleaseSnapshotPlan>;
+    expect(plan.dryRun).toBe(true);
+    expect(plan.manifest.source.ref).toBe('HEAD');
+    expect(plan.manifest.files.length).toBeGreaterThan(0);
+  });
+
   it('rejects check-release mixed with planning-only flags', () => {
     expect(() => run([
       '--check-release',
