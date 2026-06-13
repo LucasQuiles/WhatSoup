@@ -25,7 +25,7 @@ import type { Database } from './database.ts';
 import { parseIncomingMessage } from './message-parser.ts';
 import { withTransaction } from './db-tx.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { nowUnixSec } from '../fleet/time-utils.ts';
+import { normalizeUnixTimestampSeconds } from '../fleet/time-utils.ts';
 
 /** Raw Baileys WAMessage shape we rely on. Cast through unknown at the boundary. */
 export interface HistoryInput {
@@ -216,7 +216,7 @@ function processHistoryMessage(
   const existing = stmts.check.get(msgId);
   if (existing) return 'noop';
 
-  const timestamp = Number(waMsg.messageTimestamp ?? nowUnixSec());
+  const timestamp = normalizeUnixTimestampSeconds(waMsg.messageTimestamp);
   const senderJid = waMsg.key?.participant ?? chatJid;
   stmts.insertPlaceholder.run(
     chatJid,
