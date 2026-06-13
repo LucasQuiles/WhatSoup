@@ -4990,7 +4990,10 @@ export class AgentRuntime implements Runtime {
           });
           if (!isSystemResult) this.replyGuarantee?.disarm(inboundSeq);
           if (lastOpId !== undefined) {
-            queue.clearLastOpId();
+            queue.markLastTerminal({
+              dedupeText: event.isError === true && !wasSilentCompact,
+              skipDurabilityMark: true,
+            });
           }
         } else {
           if ((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
@@ -4998,7 +5001,7 @@ export class AgentRuntime implements Runtime {
           }
           // Defense-in-depth: mark last op terminal so echo auto-complete fires if
           // the process crashes after send but before completeInbound runs.
-          queue.markLastTerminal();
+          queue.markLastTerminal({ dedupeText: event.isError === true && !wasSilentCompact });
         }
         // Only advance the compact baseline when the SDK actually emitted a
         // compact_boundary on this turn. wasSilentCompact alone means "we
@@ -7824,7 +7827,10 @@ export class AgentRuntime implements Runtime {
             this.currentInboundSeq = undefined;
           }
           if (lastOpId !== undefined) {
-            queue.clearLastOpId();
+            queue.markLastTerminal({
+              dedupeText: event.isError === true && !wasSilentCompact,
+              skipDurabilityMark: true,
+            });
           }
         } else {
           if ((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
@@ -7832,7 +7838,7 @@ export class AgentRuntime implements Runtime {
           }
           // Defense-in-depth: mark last op terminal so echo auto-complete fires if
           // the process crashes after send but before completeInbound runs.
-          queue.markLastTerminal();
+          queue.markLastTerminal({ dedupeText: event.isError === true && !wasSilentCompact });
         }
         // Only advance the compact baseline when the SDK actually emitted a
         // compact_boundary. wasSilentCompact alone means "we suppressed

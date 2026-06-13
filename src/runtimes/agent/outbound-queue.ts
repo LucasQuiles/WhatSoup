@@ -161,7 +161,7 @@ export interface IOutboundQueue {
   /** Clear the tracked last outbound op id without touching durability. */
   clearLastOpId(): void;
   /** Mark the last outbound op created by this queue as terminal. */
-  markLastTerminal(): void;
+  markLastTerminal(options?: { dedupeText?: boolean; skipDurabilityMark?: boolean }): void;
   /** Propagate durability engine after late initialization. */
   setDurability(engine: DurabilityEngine): void;
   /** Whether the queue still has buffered, in-flight, or typing work that should block eviction. */
@@ -311,19 +311,19 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /** Mark the last outbound op created by this queue as terminal (defense-in-depth echo fallback). */
-  markLastTerminal(): void {
-    if (this.lastOpId !== undefined && this.durability) {
+  markLastTerminal(options: { dedupeText?: boolean; skipDurabilityMark?: boolean } = {}): void {
+    if (this.lastOpId !== undefined && this.durability && options.skipDurabilityMark !== true) {
       this.durability.markTerminal(this.lastOpId);
     }
-    if (this.lastSubmittedTextDedupeKey !== undefined) {
+    if (options.dedupeText === true && this.lastSubmittedTextDedupeKey !== undefined) {
       const now = Date.now();
       this.pruneTerminalTextDedupe(now);
       this.recentTerminalTextKeys.set(this.lastSubmittedTextDedupeKey, {
         lastSeenAt: now,
         suppressedCount: 0,
       });
-      this.lastSubmittedTextDedupeKey = undefined;
     }
+    this.lastSubmittedTextDedupeKey = undefined;
     this.clearLastOpId();
   }
 

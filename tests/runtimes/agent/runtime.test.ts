@@ -5456,8 +5456,64 @@ describe('AgentRuntime', () => {
       inbound: { seq: 17, terminalReason: 'response_sent' },
       lastOpId: 77,
     });
-    expect(queue.markLastTerminal).not.toHaveBeenCalled();
-    expect(queue.clearLastOpId).toHaveBeenCalledOnce();
+    expect(queue.markLastTerminal).toHaveBeenCalledWith({
+      dedupeText: false,
+      skipDurabilityMark: true,
+    });
+    expect(queue.clearLastOpId).not.toHaveBeenCalled();
+  });
+
+  it('per_chat error result terminalizes with text dedupe after durability completion', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const completeTurn = vi.fn();
+    const session = {
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => 41),
+      getStatus: vi.fn(() => ({ active: true })),
+    };
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+    (runtime as unknown as { durability: { completeTurn: typeof completeTurn } }).durability = {
+      completeTurn,
+    };
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: {
+            clearTurnWatchdog: ReturnType<typeof vi.fn>;
+            shutdown: ReturnType<typeof vi.fn>;
+            getDbRowId: ReturnType<typeof vi.fn>;
+          } | null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    handleEventWithContext(
+      { type: 'result', text: 'raw terminal provider failure', isError: true },
+      queue,
+      session,
+      'conv-111',
+      17,
+      '111',
+      '111#session',
+    );
+
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+    expect(completeTurn).toHaveBeenCalledWith(expect.objectContaining({ lastOpId: 77 }));
+    expect(queue.markLastTerminal).toHaveBeenCalledWith({
+      dedupeText: true,
+      skipDurabilityMark: true,
+    });
+    expect(queue.clearLastOpId).not.toHaveBeenCalled();
   });
 
   it('per_chat system-turn result does not terminate the user inbound seq or disarm its reply guarantee', () => {
@@ -5593,8 +5649,11 @@ describe('AgentRuntime', () => {
       inbound: { seq: 23, terminalReason: 'response_sent' },
       lastOpId: 88,
     });
-    expect(queue.markLastTerminal).not.toHaveBeenCalled();
-    expect(queue.clearLastOpId).toHaveBeenCalledOnce();
+    expect(queue.markLastTerminal).toHaveBeenCalledWith({
+      dedupeText: false,
+      skipDurabilityMark: true,
+    });
+    expect(queue.clearLastOpId).not.toHaveBeenCalled();
     expect(queue.enqueueResultText).toHaveBeenCalledWith('done');
     expect(queue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
     expect(queue.flush).toHaveBeenCalledOnce();
@@ -5607,6 +5666,46 @@ describe('AgentRuntime', () => {
       pendingInboundSeq: undefined,
       visibleOutputForNextTurn: false,
     });
+  });
+
+  it('shared error result terminalizes with text dedupe after durability completion', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const completeTurn = vi.fn();
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(88);
+
+    const state = runtime as unknown as {
+      durability: { completeTurn: typeof completeTurn };
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      currentInboundSeq: number | undefined;
+      turnHadVisibleOutput: boolean;
+      outboundQueues: Map<string, IOutboundQueue>;
+      handleEvent: (event: AgentEvent) => void;
+    };
+    state.durability = { completeTurn };
+    state.session = Object.assign({}, mockSession, {
+      getDbRowId: vi.fn(() => 52),
+      clearTurnWatchdog: vi.fn(),
+    });
+    state.activeChatJid = '111@s.whatsapp.net';
+    state.currentTurnChatJid = '111@s.whatsapp.net';
+    state.currentInboundSeq = 23;
+    state.turnHadVisibleOutput = true;
+    state.outboundQueues.set('111@s.whatsapp.net', queue);
+
+    state.handleEvent({ type: 'result', text: 'raw terminal provider failure', isError: true });
+
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+    expect(completeTurn).toHaveBeenCalledWith(expect.objectContaining({ lastOpId: 88 }));
+    expect(queue.markLastTerminal).toHaveBeenCalledWith({
+      dedupeText: true,
+      skipDurabilityMark: true,
+    });
+    expect(queue.clearLastOpId).not.toHaveBeenCalled();
   });
 
   // ─── Voice reply integration tests (SP4) ─────────────────────────────────────

@@ -772,7 +772,7 @@ describe('OutboundQueue', () => {
 
     queue.enqueueText('There was an issue with my conversation data. An operator has been notified.');
     await vi.runAllTimersAsync();
-    queue.markLastTerminal();
+    queue.markLastTerminal({ dedupeText: true });
 
     queue.enqueueText('There was an issue with my conversation data. An operator has been notified.');
     await vi.runAllTimersAsync();
@@ -810,6 +810,23 @@ describe('OutboundQueue', () => {
     expect(durability.createOutboundOp).toHaveBeenCalledTimes(2);
   });
 
+  it('does not suppress ordinary terminal bookkeeping unless text dedupe is requested', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('Repeatable normal answer');
+    await vi.runAllTimersAsync();
+    queue.markLastTerminal();
+
+    queue.enqueueText('Repeatable normal answer');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Repeatable normal answer', 'Repeatable normal answer']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(2);
+  });
+
   it('does not suppress a distinct terminal follow-up text', async () => {
     const { messenger, calls } = makeMessenger();
     const durability = makeDurabilityStub();
@@ -818,7 +835,7 @@ describe('OutboundQueue', () => {
 
     queue.enqueueText('Terminal notice A');
     await vi.runAllTimersAsync();
-    queue.markLastTerminal();
+    queue.markLastTerminal({ dedupeText: true });
 
     queue.enqueueText('Terminal notice B');
     await vi.runAllTimersAsync();
@@ -837,7 +854,7 @@ describe('OutboundQueue', () => {
 
     queueA.enqueueText('Shared terminal notice');
     await vi.runAllTimersAsync();
-    queueA.markLastTerminal();
+    queueA.markLastTerminal({ dedupeText: true });
 
     queueB.enqueueText('Shared terminal notice');
     await vi.runAllTimersAsync();
@@ -855,7 +872,7 @@ describe('OutboundQueue', () => {
     vi.setSystemTime(new Date('2026-06-13T07:00:00Z'));
     queue.enqueueText('Windowed terminal notice');
     await vi.runAllTimersAsync();
-    queue.markLastTerminal();
+    queue.markLastTerminal({ dedupeText: true });
 
     vi.setSystemTime(Date.now() + TERMINAL_TEXT_DEDUPE_WINDOW_MS + 1);
     queue.enqueueText('Windowed terminal notice');
