@@ -881,3 +881,98 @@ min-height meeting the 24px floor and flip the target-size suite's numeric FINDI
 the floor assertion as the fix proof (the remediation direction the suite itself records).
 No commit yet; the DD-10 register row carries the remaining scope (sort-button fix +
 bottom hit-extension proof or accepted ruling).
+
+---
+
+## B3 wave 2 — ACCEPTANCE — 2026-06-12
+
+**Verdict: Pass with deferred debt** (supersedes the "Inconclusive — committed; acceptance
+evidence packet outstanding" wave-2 entry).
+
+`b3-wave2-evidence.md`: all seven C-B3W2-* constraints verified at tip with file:line evidence;
+fresh 201/201 across the seven wave suites (config-edit-dialog 57, schedule-composer 65, pins,
+scheduled-tab, chat-picker, primitives-popover); ratchet 563→533 at exactly the packet-§11
+bucket values, only-fall held through current 486 with zero ad-hoc-modal buckets repo-wide;
+all five orphaned sizing tokens confirmed deleted. Live QA via the visual-qa matrix: composer
+segs PASS (row 3); ConfigEditDialog environment-INCONCLUSIVE (row 4 — no mock line carries
+`config`; compensated by the shared Modal shell confirmed on sibling dialogs + the 57-test
+suite; fixture fix rides C3). Deviations recorded, not hidden: one combined commit instead of
+the planned two; per-dialog focus-restore pins never written (DD-33); the C-B3W2-4 seg ruling
+never registered (DD-32). Deferred debt: DD-32, DD-33, ConfigEditDialog live confirmation.
+
+---
+
+## B3 wave 3 — ACCEPTANCE — 2026-06-12
+
+**Verdict: Pass with deferred debt** (supersedes the wave-3 "Inconclusive" entry).
+
+`b3-wave3-evidence.md`: C-B3W3-1/2/4/5/6/8 verified with file:line evidence (inverted backdrop
+pin, abort-path signal.aborted pin, ToolbarTimeRange disabled contract, baseline diff matching
+every §11 bucket); fresh 94/94 (group-detail-modal 21, update-modal 39, a11y 3, sse-error 2,
+primitives-toolbar 29). **C-B3W3-7 recorded as FAILED-then-rescoped to DD-27** — the
+transient-self-healing disposition falsified in real Chromium (d7-evidence); the browser suite
+pins actual escape behavior as characterization. C-B3W3-3 partially discharged: GroupDetailModal
+live-confirmed (matrix rows 5/6, corroborated by 13); UpdateModal has no live row — honest
+residue filed as DD-34. New integrity findings routed: two test name/claim mismatches in the
+update-modal/new suites (primitive-level pins compensate), program-directives execution-log
+path corrected same evening. Deferred debt: DD-27, DD-34, DD-18r modal-sizing strike pending
+the wave-4 packet.
+
+---
+
+## B4 Inbox — ACCEPTANCE — 2026-06-12
+
+**Verdict: Pass with deferred debt** (supersedes the "Inconclusive — lane in flight" B4 entry).
+
+`b4-evidence.md`: all seven impl commits verified with file:line evidence; sequencing
+constraints proven by commit order; fresh runs 125/125 across the five B4 suites + 73/73
+enforcement suites, eslint exit 0, ratchet 486≤486, parity 100, typecheck 0. The 10
+pre-existing hover-card tests byte-unchanged through the positioning commit. **DD-17
+narrowed, not closed:** traversal half done (listbox + roving + arrow contract); the
+focus-visible ring never reaches the ChatListItem divs (designed ring block covers only
+form elements/anchors) — ring leg stays P2/blocking, C3-owned. DD-18r re-narrowed: Inbox
+viewport rows + drawer-flip delivered at `4fbad4ef`; MessageBubble positioning closed at
+`d5627923` with a geometry-glance residue for the C3 visual round. Two integrity findings
+recorded (weak inbox-page additions with the real proof living in the inverted fixture +
+live lint; an unattributed SummaryTab +1 inherited from a main-side merge). Visual rows 1–2
+re-verified from surviving frames; no frame shows a selected conversation — those glances
+routed to C3, not claimed.
+
+---
+
+## B5 motion polish — ACCEPTANCE — 2026-06-12
+
+**Verdict: Pass with deferred debt** (supersedes the B5 slice's interim standing; the earlier
+"B5 hook unit suites — Pass" entry covered only the coverage-floor closure).
+
+`b5-evidence.md`: all nine C-B5-* constraints verified with file:line evidence (instant path,
+toast portal, inert-release-before-focus-restore, guarded animationend, duration-stub seam);
+fresh hook suites 42/42 + adjacent 87/87; browser proofs cited as records and subsequently
+re-validated under the vitest-4 stack (93/93 + motion 3/3 at `76012b68`). The packet's
+full-suite run FOUND F-B5-1 — the default vitest config collected the browser-motion lane,
+failing full-repo `npm test` — fixed same evening (`76012b68`, fresh 601 files/10,148 green,
+zero unhandled errors; the EventSource rejections it also surfaced fixed in the same commit).
+C-B5-7 met with recorded deviation (motion config delivered; npm script deliberately unwired
+pending the gate-placement decision). Deferred debt: DD-25 re-homed to C3, DD-30 escalated
+per c3-investigation (make-live), escape-while-closing pin + header corrections bundled to C3.
+
+---
+
+## B3 wave 4 — ACCEPTANCE — 2026-06-12
+
+**Verdict: Pass with deferred debt** (supersedes the wave-4 "Inconclusive — committed;
+acceptance evidence packet outstanding" entry; dialog burn-down acceptance now packet-backed).
+
+`b3-wave4-evidence.md`: all nine C-B3W4-* constraints verified fresh with file:line evidence —
+the option-α discard pin (handleConfirmDiscard contains no deleteLine; confirm branches with
+"Save and close" primary post-creation), latched lazy mount in SoupKitchen, static
+data-line-type accent block replacing the runtime injection (WVR-014 retirement reproduced
+post-commit: regression check 19 count=0), baseline diff removing exactly the five predicted
+wizard buckets (501→486), ad-hoc-modal shadow set empty console-wide. Fresh runs: wave suites
+179/179 (add-line-wizard exactly 23), consumed-contract primitives 61/61, eslint exit 0.
+Live QA via matrix rows 8/10/11/12 PASS; row 9 environment-INCONCLUSIVE (502 path) with the
+fail-visible banner + jsdom compensations. Honest gaps recorded: four §8 consumer-level pins
+absent (primitive-level compensations cited), one suite-header overclaim, one stale Modal.tsx
+comment, the `--panel-shortcuts` zero-consumer orphan — all routed to C3. Register delta
+executed by the integrator: DD-18r modal-sizing leg STRUCK (all four consumed panel tokens
+verified deleted).
