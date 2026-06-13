@@ -5,6 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { cleanGitEnv } from './lib/guard-core.ts';
+import { isRecord } from '../src/lib/type-guards.ts';
 
 export type SourceRuntimeIssueKind =
   | 'invalid-manifest'
@@ -63,10 +64,6 @@ const DEFAULT_MANIFEST = 'deploy/source-runtime-manifest.json';
 const EXTENSION_CANDIDATES = ['', '.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs', '.json'];
 const INDEX_CANDIDATES = ['index.ts', 'index.tsx', 'index.mts', 'index.cts', 'index.js', 'index.mjs', 'index.cjs', 'index.json'];
 const IMPORT_PATTERN = /(?:\bimport\b|\bexport\b)\s+(?:type\s+)?(?:[^'"()]*?\s+from\s*)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function normalizeMarkers(value: unknown): string[] {
   if (value === undefined) return [];
