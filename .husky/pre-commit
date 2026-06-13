@@ -17,7 +17,7 @@ fi
 # commit time so it is not discovered only at push. Never aborts the commit.
 # Skip with WHATSOUP_SKIP_DRIFT_WARN=1 for fast local iteration.
 if [ -z "$WHATSOUP_SKIP_DRIFT_WARN" ] && \
-   git diff --cached --name-only | grep -Eq '\.ts$|^package\.json$|^\.nvmrc$|^deploy/'; then
+   git diff --cached --name-only | grep -Eq '\.tsx?$|^package\.json$|^\.nvmrc$|^deploy/'; then
   drift_warn() {
     if ! _out=$(npm run "$1" 2>&1); then
       printf '  ⚠ %s drift (warn-only; pre-push enforces) — run: npm run %s\n' "$2" "$1" >&2
