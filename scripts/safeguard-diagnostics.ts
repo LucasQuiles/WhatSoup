@@ -77,12 +77,31 @@ const REQUIRED_SCRIPTS = [
   'guard:claude-settings',
   'guard:agent-decision-polls',
   'guard:safeguard-diagnostics',
+  'verify:console-design',
   'verify:push:branch',
   'verify:release',
   'verify:publish',
 ];
 
 const CHAIN_REQUIREMENTS: ChainRequirement[] = [
+  {
+    id: 'console-design-chain',
+    scriptName: 'verify:console-design',
+    orderedSteps: [
+      'npm --prefix console run design:theme-parity',
+      'npm --prefix console run design:token-drift',
+      'npm --prefix console run design:contrast',
+      'npm --prefix console run lint:shadow:baseline',
+      'npm --prefix console run design:regression',
+      'npm --prefix console run design:metrics',
+      'npm --prefix console run design:burndown',
+      'npm --prefix console run design:color-semantics',
+      'npm --prefix console run design:resilience',
+      'npm --prefix console run design:font-assets',
+      'npm --prefix console run design:brand-assets',
+      'npm --prefix console run design:lint-fixtures',
+    ],
+  },
   {
     id: 'branch-push-chain',
     scriptName: 'verify:push:branch',
@@ -101,6 +120,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:lint:src',
       'npm run typecheck:all',
       'npm test',
+      'npm run verify:console-design',
     ],
   },
   {
@@ -124,6 +144,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm test',
       'npm run coverage:check',
       'npm --prefix console run build',
+      'npm run verify:console-design',
     ],
   },
   {
@@ -250,6 +271,20 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'baseline --check --ci',
     ],
     remediation: 'Restore CI fail-closed behavior for missing test-integrity tooling.',
+  },
+  {
+    id: 'pre-commit-design-system-hygiene',
+    category: 'guard-chain',
+    file: '.husky/pre-commit',
+    anchors: [
+      'npm run guard:repo:staged',
+      'npm run guard:publication:staged',
+      'npm run guard:design-system-hygiene',
+      'npm run guard:node-pin-consistency',
+      'npm run guard:claude-settings',
+      'lint-staged',
+    ],
+    remediation: 'Restore the pre-commit hook so staged repo, publication, docs-hygiene, node-pin, settings, and console lint checks run before commit.',
   },
 ];
 

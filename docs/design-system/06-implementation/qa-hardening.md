@@ -506,7 +506,43 @@ range. A PASS means only that the staged packet included the required tracked do
 it does not prove the documentation is substantively correct. Reviewers still inspect the diff and
 the packet evidence.
 
-### 17.4 Design Resilience Audit
+The hook wiring itself is protected by `scripts/safeguard-diagnostics.ts`: the safeguard diagnostics
+must fail if `.husky/pre-commit` drops repo hygiene, publication, design-system documentation
+hygiene, node-pin, settings, or console lint coverage.
+
+### 17.4 Shared Console Design Verification Chain
+
+The root verification scripts call one shared design-system audit tail:
+
+```bash
+npm run verify:console-design
+```
+
+This chain is the DRY owner for non-browser console design checks in `verify:push:branch` and
+`verify:release`. It currently runs, in order:
+
+1. `npm --prefix console run design:theme-parity`
+2. `npm --prefix console run design:token-drift`
+3. `npm --prefix console run design:contrast`
+4. `npm --prefix console run lint:shadow:baseline`
+5. `npm --prefix console run design:regression`
+6. `npm --prefix console run design:metrics`
+7. `npm --prefix console run design:burndown`
+8. `npm --prefix console run design:color-semantics`
+9. `npm --prefix console run design:resilience`
+10. `npm --prefix console run design:font-assets`
+11. `npm --prefix console run design:brand-assets`
+12. `npm --prefix console run design:lint-fixtures`
+
+`scripts/safeguard-diagnostics.ts` enforces both the shared chain and the fact that push/release
+verification call it. Removing, reordering, or bypassing this chain is a guard-chain failure.
+
+Report-only audits inside this chain remain report-only. Their presence in `verify:*` proves that a
+structured inventory was generated during the verification run; it does not prove the inventory is
+empty. Any final acceptance claim must cite the finding counts and promotion mode, not merely the
+script exit code.
+
+### 17.5 Design Resilience Audit
 
 Layout, text, scroll, layer, and interaction resilience risks are inventoried by
 `console/scripts/check-design-resilience.mjs` and exposed as:
@@ -539,7 +575,7 @@ resilient, does not replace long-string screenshots, reduced-height screenshots,
 tests, focus-ring checks, or reviewer inspection, and must never be cited as "zero findings" unless
 `finding_count` is actually `0`.
 
-### 17.5 Font Asset Integrity Guard
+### 17.6 Font Asset Integrity Guard
 
 Font delivery integrity is checked by `console/scripts/check-font-assets.mjs` and exposed as:
 
@@ -563,7 +599,7 @@ and documented. It does not authorize a Bricolage/Hanken/Plex or other typeface 
 typography spec, token stacks, font files, provenance README, and visual proof all change in the same
 packet.
 
-### 17.6 Brand Asset Readiness Audit
+### 17.7 Brand Asset Readiness Audit
 
 SOUP identity asset readiness is inventoried by `console/scripts/check-brand-assets.mjs` and exposed
 as:
@@ -587,7 +623,7 @@ asset is known bad. `--fail-on-findings` exists for the later promotion packet a
 badge, PWA, and maskable assets are replaced and visually proven. A report-only PASS must never be
 cited as visual approval or 16px legibility proof.
 
-### 17.7 Color Semantics Audit
+### 17.8 Color Semantics Audit
 
 Provider identity, chart data palettes, traffic quantity ink, and component-local palettes are
 inventoried by `console/scripts/check-color-semantics.mjs` and exposed as:

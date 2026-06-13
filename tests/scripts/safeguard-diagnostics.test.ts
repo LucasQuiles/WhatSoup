@@ -30,6 +30,20 @@ const requiredPackageScripts = {
   'guard:claude-settings': 'node scripts/claude-settings-guard.ts --check',
   'guard:agent-decision-polls': 'node scripts/agent-decision-polls-guard.ts',
   'guard:safeguard-diagnostics': 'node scripts/safeguard-diagnostics.ts',
+  'verify:console-design': [
+    'npm --prefix console run design:theme-parity',
+    'npm --prefix console run design:token-drift',
+    'npm --prefix console run design:contrast',
+    'npm --prefix console run lint:shadow:baseline',
+    'npm --prefix console run design:regression',
+    'npm --prefix console run design:metrics',
+    'npm --prefix console run design:burndown',
+    'npm --prefix console run design:color-semantics',
+    'npm --prefix console run design:resilience',
+    'npm --prefix console run design:font-assets',
+    'npm --prefix console run design:brand-assets',
+    'npm --prefix console run design:lint-fixtures',
+  ].join(' && '),
   'verify:push:branch': [
     'npm run guard:repo:staged',
     'npm run guard:repo:commit-authors',
@@ -45,6 +59,7 @@ const requiredPackageScripts = {
     'npm run guard:lint:src',
     'npm run typecheck:all',
     'npm test',
+    'npm run verify:console-design',
   ].join(' && '),
   'verify:release': [
     'npm run guard:repo:release-hygiene',
@@ -64,6 +79,7 @@ const requiredPackageScripts = {
     'npm test',
     'npm run coverage:check',
     'npm --prefix console run build',
+    'npm run verify:console-design',
   ].join(' && '),
   'verify:publish': [
     'npm run guard:claude-settings',
@@ -137,6 +153,14 @@ const requiredFiles: Record<string, string> = {
     'CI=true',
     'GITHUB_ACTIONS=true',
     'baseline --check --ci',
+  ].join('\n'),
+  '.husky/pre-commit': [
+    'npm run guard:repo:staged',
+    'npm run guard:publication:staged',
+    'npm run guard:design-system-hygiene',
+    'npm run guard:node-pin-consistency',
+    'npm run guard:claude-settings',
+    'lint-staged',
   ].join('\n'),
 };
 
@@ -216,6 +240,34 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'branch-push-chain')?.evidence)
       .toContain('missing npm run guard:safeguard-diagnostics');
+  });
+
+  it('fails when the shared console design verification chain omits resilience coverage', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:console-design': requiredPackageScripts['verify:console-design']
+          .replace(' && npm --prefix console run design:resilience', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+      .toContain('missing npm --prefix console run design:resilience');
+  });
+
+  it('fails when the pre-commit hook omits design-system documentation hygiene', () => {
+    const fixture = makeRepo({
+      files: {
+        '.husky/pre-commit': requiredFiles['.husky/pre-commit']
+          .replace('npm run guard:design-system-hygiene\n', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'pre-commit-design-system-hygiene'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['npm run guard:design-system-hygiene']) });
   });
 
   it('fails when a sensitive-surface anchor is removed', () => {
