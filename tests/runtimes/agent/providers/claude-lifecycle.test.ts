@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { spawnMock } = vi.hoisted(() => ({
+const { spawnMock, warnMock } = vi.hoisted(() => ({
   spawnMock: vi.fn(),
+  warnMock: vi.fn(),
 }));
 
 vi.mock('node:child_process', () => ({
@@ -14,7 +15,7 @@ vi.mock('../../../../src/logger.ts', () => ({
     debug: vi.fn(),
     error: vi.fn(),
     info: vi.fn(),
-    warn: vi.fn(),
+    warn: warnMock,
   }),
 }));
 
@@ -63,6 +64,7 @@ describe('ClaudeProvider lifecycle', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   it('spawns Claude with model, plugin dirs, resume checkpoint, and stream-json flags', async () => {
@@ -126,7 +128,7 @@ describe('ClaudeProvider lifecycle', () => {
 
     await provider.initialize(makeOptions({ onEvent }));
 
-    child.stdout.emit('data', Buffer.from('{"type":"system","subtype":"init","session_id":"session-1"}\n{"type":"assistant","message":{"content":[{"type":"text","text":"hel'));
+    child.stdout.emit('data', Buffer.from('\n{"type":"system","subtype":"init","session_id":"session-1"}\n{"type":"assistant","message":{"content":[{"type":"text","text":"hel'));
     expect(onEvent).toHaveBeenCalledTimes(1);
     expect(onEvent).toHaveBeenCalledWith({ type: 'init', sessionId: 'session-1' });
 
@@ -143,6 +145,64 @@ describe('ClaudeProvider lifecycle', () => {
         path: expect.stringContaining('session-1.jsonl'),
       }),
       providerState: {},
+    }));
+  });
+
+  it('reports spawn errors through crash metadata and clears active state', async () => {
+    const provider = new ClaudeProvider();
+    const child = makeChild();
+    const onCrash = vi.fn();
+    spawnMock.mockReturnValueOnce(child);
+
+    await provider.initialize(makeOptions({ onCrash }));
+    child.emit('error', new Error('claude ENOENT'));
+
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: null,
+      signal: null,
+      provider: 'claude-cli',
+      crashClass: 'provider_binary_missing',
+      stderrPreview: 'claude ENOENT',
+    }));
+    expect(provider.isActive()).toBe(false);
+    expect(provider.getCheckpoint().runtimeHandle).toEqual({ kind: 'none' });
+  });
+
+  it('records stderr previews, redacts sensitive text, and ignores empty chunks', async () => {
+    const provider = new ClaudeProvider();
+    const child = makeChild();
+    const onCrash = vi.fn();
+    spawnMock.mockReturnValueOnce(child);
+
+    await provider.initialize(makeOptions({ onCrash }));
+    child.stderr.emit('data', Buffer.from('auth_token=super-secret-token auth required'));
+
+    expect(warnMock).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'claude-cli',
+      pid: 4242,
+      stderrPreview: expect.stringContaining('auth_token=[REDACTED]'),
+    }), 'claude stderr');
+    expect(String(warnMock.mock.calls.at(-1)?.[0]?.stderrPreview)).not.toContain('super-secret-token');
+
+    const warningCount = warnMock.mock.calls.length;
+    child.stderr.emit('data', Buffer.from('   \n'));
+    expect(warnMock).toHaveBeenCalledTimes(warningCount);
+
+    (child as unknown as { pid?: number }).pid = undefined;
+    child.stderr.emit('data', Buffer.from('second stderr line'));
+    expect(warnMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      provider: 'claude-cli',
+      pid: null,
+      stderrPreview: expect.stringContaining('second stderr line'),
+    }), 'claude stderr');
+
+    child.emit('exit', 1, null);
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: 1,
+      signal: null,
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+      stderrPreview: expect.stringContaining('auth required'),
     }));
   });
 
@@ -234,7 +294,8 @@ describe('ClaudeProvider lifecycle', () => {
     spawnMock.mockReturnValueOnce(child);
     await provider.initialize(makeOptions({ onEvent, onCrash }));
 
-    child.stdout.emit('data', Buffer.from('{"type":"assistant","message":{"content":[{"type":"text","text":"final"}]}}'));
+    (provider as unknown as { stdoutBuffer: string }).stdoutBuffer =
+      '   \n{"type":"assistant","message":{"content":[{"type":"text","text":"final"}]}}';
     child.emit('exit', 2, 'SIGTERM');
 
     expect(onEvent).toHaveBeenCalledWith({ type: 'assistant_text', text: 'final' });
@@ -245,6 +306,24 @@ describe('ClaudeProvider lifecycle', () => {
     }));
     expect(provider.isActive()).toBe(false);
     expect(provider.getCheckpoint().runtimeHandle).toEqual({ kind: 'none' });
+  });
+
+  it('ignores superseded and inactive child exits', async () => {
+    const provider = new ClaudeProvider();
+    const child = makeChild();
+    const onCrash = vi.fn();
+    spawnMock.mockReturnValueOnce(child);
+
+    await provider.initialize(makeOptions({ onCrash }));
+
+    (provider as unknown as { child: MockChild }).child = makeChild();
+    child.emit('exit', 1, null);
+    expect(onCrash).not.toHaveBeenCalled();
+
+    (provider as unknown as { child: MockChild; active: boolean }).child = child;
+    (provider as unknown as { active: boolean }).active = false;
+    child.emit('exit', 0, null);
+    expect(onCrash).not.toHaveBeenCalled();
   });
 
   it('suppresses crash callbacks for clean shutdown and kill paths', async () => {
@@ -273,6 +352,14 @@ describe('ClaudeProvider lifecycle', () => {
     expect(killChild.kill).toHaveBeenCalledWith('SIGKILL');
     expect(killCrash).not.toHaveBeenCalled();
     expect(killProvider.isActive()).toBe(false);
+
+    const idleProvider = new ClaudeProvider();
+    await idleProvider.shutdown('suspend');
+    idleProvider.kill();
+    expect(idleProvider.getCheckpoint()).toEqual(expect.objectContaining({
+      runtimeHandle: { kind: 'none' },
+      transcriptLocator: { kind: 'none' },
+    }));
   });
 
   it('generates MCP config for the WhatSoup proxy socket', () => {
@@ -285,5 +372,15 @@ describe('ClaudeProvider lifecycle', () => {
         }),
       },
     });
+  });
+
+  it('builds the Claude child environment without forwarding unrelated provider keys', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'openai-test-key');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-test-key');
+
+    const env = new ClaudeProvider().buildEnv();
+
+    expect(env.OPENAI_API_KEY).toBe('openai-test-key');
+    expect(Object.prototype.hasOwnProperty.call(env, 'ANTHROPIC_API_KEY')).toBe(false);
   });
 });
