@@ -815,7 +815,7 @@ function configuredDefaultPollTimeoutMs(): number {
 function normalizePendingPollTimeoutMs(timeoutMs: unknown): number {
   const raw = Number(timeoutMs);
   return Number.isFinite(raw) && raw > 0
-    ? raw
+    ? clampPollTimeoutMs(raw)
     : configuredDefaultPollTimeoutMs();
 }
 

@@ -8090,5 +8090,42 @@ describe('AgentRuntime', () => {
 
       db.close();
     });
+
+    it('clamps out-of-range legacy pending poll timeout before persistence', () => {
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const createdAt = 1_700_000_000_000;
+      const pending = {
+        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
+        toolId: 'tool-huge-timeout',
+        chatJid: 'chatHuge@g.us',
+        chatJidAliases: new Set(['chatHuge@g.us']),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([['POLL_HUGE', 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt,
+        resolution: 'first-vote-wins',
+        timeoutMs: Number.MAX_SAFE_INTEGER,
+        votesByQuestion: new Map(),
+        adminJids: null,
+        source: 'askuser',
+        sentPollMessageIds: ['POLL_HUGE'],
+      } as PendingPollQuestion;
+
+      (runtime as unknown as { persistPendingPoll(k: string, p: PendingPollQuestion): void })
+        .persistPendingPoll('huge-timeout', pending);
+
+      const row = db.raw
+        .prepare('SELECT payload, closes_at, hard_closes_at FROM pending_polls WHERE map_key = ?')
+        .get('huge-timeout') as { payload: string; closes_at: number; hard_closes_at: number };
+      const payload = JSON.parse(row.payload) as { timeoutMs?: number };
+      expect(payload.timeoutMs).toBe(86_400_000);
+      expect(row.closes_at).toBe(createdAt + 86_400_000);
+      expect(row.hard_closes_at).toBe(createdAt + 172_800_000);
+
+      db.close();
+    });
   });
 });
