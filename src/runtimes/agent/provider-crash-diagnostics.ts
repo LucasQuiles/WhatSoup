@@ -1,6 +1,7 @@
 // Shared, non-secret provider crash diagnostics for agent runtime alerts.
 
 import type { AgentFailureClass } from './failure-taxonomy.ts';
+import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 
 export const PROVIDER_CRASH_PREVIEW_MAX = 1_000;
 
@@ -11,14 +12,7 @@ export interface ProviderCrashMetadata {
 }
 
 export function sanitizeProviderCrashText(text: string): string {
-  return text
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(
-      /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|pat|password|secret)\s*[:=]\s*['"]?)[^'"\s]{8,}/gi,
-      '$1[REDACTED]',
-    )
-    .replace(/\b(?:sk|pk|rk|ghp|github_pat|xox[baprs]|ya29|AIza)[-_A-Za-z0-9]{12,}\b/g, '[REDACTED_TOKEN]')
-    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]');
+  return sanitizeProviderPreviewText(text);
 }
 
 export function appendProviderCrashPreview(
