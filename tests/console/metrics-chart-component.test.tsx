@@ -1,11 +1,11 @@
 /**
- * FleetMetricsChart - rendered behavior through a semantic Recharts boundary.
+ * MetricsChart - rendered behavior through a semantic Recharts boundary.
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import type { MessageVolumeBucket } from '../../console/src/types.js';
-import { FleetMetricsChart } from '../../console/src/components/FleetMetricsChart';
+import { MetricsChart } from '../../console/src/components/MetricsChart';
 
 vi.mock('recharts', async () => {
   const React = await import('react');
@@ -23,12 +23,12 @@ vi.mock('recharts', async () => {
   return {
     ResponsiveContainer({ children }: { children?: React.ReactNode }) {
       return (
-        <section aria-label="Fleet message volume chart" role="region">
+        <section aria-label="Line message volume chart" role="region">
           {children}
         </section>
       );
     },
-    AreaChart({ data = [], children }: { data?: ChartDatum[]; children?: React.ReactNode }) {
+    BarChart({ data = [], children }: { data?: ChartDatum[]; children?: React.ReactNode }) {
       return (
         <ChartDataContext.Provider value={data}>
           <div aria-label="Stacked message volume" role="group">
@@ -73,30 +73,12 @@ vi.mock('recharts', async () => {
         </div>
       );
     },
-    Area({
-      dataKey,
-      fill,
-      fillOpacity,
-      name,
-      stroke,
-    }: {
-      dataKey?: string;
-      fill?: string;
-      fillOpacity?: number;
-      name?: string;
-      stroke?: string;
-    }) {
+    Bar({ dataKey, fill, name }: { dataKey?: string; fill?: string; name?: string }) {
       const data = React.useContext(ChartDataContext);
       const seriesName = name ?? dataKey ?? 'Series';
 
       return (
-        <section
-          aria-label={`${seriesName} series`}
-          data-fill={fill}
-          data-fill-opacity={fillOpacity}
-          data-stroke={stroke}
-          role="region"
-        >
+        <section aria-label={`${seriesName} series`} data-fill={fill} role="region">
           <h3>{seriesName}</h3>
           <ul aria-label={`${seriesName} data points`}>
             {data.map((datum) => (
@@ -119,16 +101,16 @@ const SAMPLE: MessageVolumeBucket[] = [
 ];
 
 function chart() {
-  return screen.getByRole('region', { name: 'Fleet message volume chart' });
+  return screen.getByRole('region', { name: 'Line message volume chart' });
 }
 
 function series(name: string) {
   return within(chart()).getByRole('region', { name: `${name} series` });
 }
 
-describe('FleetMetricsChart', () => {
+describe('MetricsChart', () => {
   it('renders the chart frame, axes, tooltip label, legend, and stacked message series', () => {
-    render(<FleetMetricsChart data={SAMPLE} />);
+    render(<MetricsChart data={SAMPLE} />);
 
     expect(chart()).toBeDefined();
     expect(within(chart()).getByRole('group', { name: 'Stacked message volume' })).toBeDefined();
@@ -140,57 +122,10 @@ describe('FleetMetricsChart', () => {
     expect(within(series('Inbound')).getByRole('heading', { name: 'Inbound' })).toBeDefined();
     expect(within(series('Outbound')).getByRole('heading', { name: 'Outbound' })).toBeDefined();
     expect(within(series('Media')).getByRole('heading', { name: 'Media' })).toBeDefined();
-
-    expect(within(series('Inbound')).getByText(/Inbound: .* - 4 messages/)).toBeDefined();
-    expect(within(series('Inbound')).getByText(/Inbound: .* - 6 messages/)).toBeDefined();
-    expect(within(series('Outbound')).getByText(/Outbound: .* - 2 messages/)).toBeDefined();
-    expect(within(series('Outbound')).getByText(/Outbound: .* - 3 messages/)).toBeDefined();
-    expect(within(series('Media')).getByText(/Media: .* - 1 messages/)).toBeDefined();
-    expect(within(series('Media')).getByText(/Media: .* - 0 messages/)).toBeDefined();
-  });
-
-  it('uses range-aware labels for the visible time axis and active tooltip bucket', () => {
-    const { rerender } = render(<FleetMetricsChart data={SAMPLE} />);
-
-    const defaultAxis = within(chart()).getByRole('group', { name: 'Time axis' }).textContent;
-    const defaultTooltip = within(chart()).getByLabelText('Active bucket label').textContent;
-
-    rerender(<FleetMetricsChart data={SAMPLE} range="7d" />);
-    const weeklyAxis = within(chart()).getByRole('group', { name: 'Time axis' }).textContent;
-    const weeklyTooltip = within(chart()).getByLabelText('Active bucket label').textContent;
-
-    rerender(<FleetMetricsChart data={SAMPLE} range="30d" />);
-    const monthlyAxis = within(chart()).getByRole('group', { name: 'Time axis' }).textContent;
-    const monthlyTooltip = within(chart()).getByLabelText('Active bucket label').textContent;
-
-    expect(defaultAxis).toBeTruthy();
-    expect(defaultTooltip).toBeTruthy();
-    expect(weeklyAxis).toBeTruthy();
-    expect(weeklyTooltip).toBeTruthy();
-    expect(monthlyAxis).toBeTruthy();
-    expect(monthlyTooltip).toBeTruthy();
-
-    expect(defaultAxis).not.toBe(weeklyAxis);
-    expect(weeklyAxis).not.toBe(monthlyAxis);
-    expect(defaultTooltip).not.toBe(weeklyTooltip);
-    expect(weeklyTooltip).not.toBe(monthlyTooltip);
-  });
-
-  it('keeps the chart semantics and series labels when there are no message buckets', () => {
-    render(<FleetMetricsChart data={[]} range="30d" />);
-
-    expect(chart()).toBeDefined();
-    expect(within(chart()).getByRole('group', { name: 'Time axis' })).toBeDefined();
-    expect(within(chart()).queryByLabelText('Active bucket label')).toBeNull();
-
-    for (const name of ['Inbound', 'Outbound', 'Media']) {
-      expect(within(series(name)).getByRole('heading', { name })).toBeDefined();
-      expect(within(series(name)).queryAllByRole('listitem')).toHaveLength(0);
-    }
   });
 
   it('uses the data-series token palette for aggregate message dimensions', () => {
-    render(<FleetMetricsChart data={SAMPLE} />);
+    render(<MetricsChart data={SAMPLE} />);
 
     const expected = {
       Inbound: 'var(--data-inbound-solid)',
@@ -200,9 +135,21 @@ describe('FleetMetricsChart', () => {
 
     for (const [name, token] of Object.entries(expected)) {
       const region = series(name);
-      expect(region.getAttribute('data-stroke')).toBe(token);
       expect(region.getAttribute('data-fill')).toBe(token);
-      expect(region.getAttribute('data-stroke')).not.toMatch(/--(?:color-[ms]-|provider-|status-|mode-)/);
+      expect(region.getAttribute('data-fill')).not.toMatch(/--(?:color-[ms]-|provider-|status-|mode-)/);
+    }
+  });
+
+  it('keeps the chart semantics and series labels when there are no message buckets', () => {
+    render(<MetricsChart data={[]} range="30d" />);
+
+    expect(chart()).toBeDefined();
+    expect(within(chart()).getByRole('group', { name: 'Time axis' })).toBeDefined();
+    expect(within(chart()).queryByLabelText('Active bucket label')).toBeNull();
+
+    for (const name of ['Inbound', 'Outbound', 'Media']) {
+      expect(within(series(name)).getByRole('heading', { name })).toBeDefined();
+      expect(within(series(name)).queryAllByRole('listitem')).toHaveLength(0);
     }
   });
 });

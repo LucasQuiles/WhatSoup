@@ -9,7 +9,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { MessageVolumeBucket, MetricsRange } from '../types';
-import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
+import { AXIS_TICK, CHART_MARGIN, MESSAGE_VOLUME_SERIES_COLORS, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
 
 interface FleetMetricsChartProps {
   data: MessageVolumeBucket[];
@@ -47,8 +47,8 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
           dataKey="inbound"
           name="Inbound"
           stackId="msgs"
-          stroke="var(--color-m-pas)"
-          fill="var(--color-m-pas)"
+          stroke={MESSAGE_VOLUME_SERIES_COLORS.inbound}
+          fill={MESSAGE_VOLUME_SERIES_COLORS.inbound}
           fillOpacity={0.3}
         />
         <Area
@@ -56,8 +56,8 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
           dataKey="outbound"
           name="Outbound"
           stackId="msgs"
-          stroke="var(--color-m-cht)"
-          fill="var(--color-m-cht)"
+          stroke={MESSAGE_VOLUME_SERIES_COLORS.outbound}
+          fill={MESSAGE_VOLUME_SERIES_COLORS.outbound}
           fillOpacity={0.3}
         />
         <Area
@@ -65,8 +65,8 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
           dataKey="media"
           name="Media"
           stackId="msgs"
-          stroke="var(--color-s-warn)"
-          fill="var(--color-s-warn)"
+          stroke={MESSAGE_VOLUME_SERIES_COLORS.media}
+          fill={MESSAGE_VOLUME_SERIES_COLORS.media}
           fillOpacity={0.2}
         />
       </AreaChart>

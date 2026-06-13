@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AXIS_TICK,
   CHART_MARGIN,
+  MESSAGE_VOLUME_SERIES_COLORS,
   TOOLTIP_STYLE,
   formatBucketLabel,
   formatTooltipLabel,
@@ -44,6 +45,18 @@ describe('chart style constants', () => {
       fontFamily: 'var(--font-mono)',
       padding: 'var(--sp-2) var(--sp-3)',
     });
+  });
+
+  it('MESSAGE_VOLUME_SERIES_COLORS maps aggregate message dimensions to data tokens', () => {
+    expect(MESSAGE_VOLUME_SERIES_COLORS).toEqual({
+      inbound: 'var(--data-inbound-solid)',
+      outbound: 'var(--data-outbound-solid)',
+      media: 'var(--data-media-solid)',
+    });
+    for (const color of Object.values(MESSAGE_VOLUME_SERIES_COLORS)) {
+      expect(color).toMatch(/^var\(--data-/);
+      expect(color).not.toMatch(/--(?:color-[ms]-|provider-|status-|mode-)/);
+    }
   });
 });
 

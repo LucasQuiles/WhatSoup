@@ -7,6 +7,12 @@ export const AXIS_TICK = {
   fill: 'var(--color-t4)',
 };
 
+export const MESSAGE_VOLUME_SERIES_COLORS = {
+  inbound: 'var(--data-inbound-solid)',
+  outbound: 'var(--data-outbound-solid)',
+  media: 'var(--data-media-solid)',
+} as const;
+
 /* eslint-disable no-restricted-syntax -- waiver:WVR-001 recharts margin accepts raw pixel offsets for SVG layout, not CSS tokens; expires 2026-12-31 */
 export const CHART_MARGIN = { top: 4, right: 8, left: -12, bottom: 0 };
 /* eslint-enable no-restricted-syntax */
