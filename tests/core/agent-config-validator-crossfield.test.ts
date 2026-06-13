@@ -36,6 +36,81 @@ function agentRaw(
 
 const createCtx = { name: 'test-line', mode: 'create' } as const;
 
+describe('validateInstanceConfig — top-level model must match models.conversation', () => {
+  it('rejects an agent config when both model fields are set to different values', () => {
+    const err = validateInstanceConfig(
+      agentRaw(
+        { provider: 'claude-cli' },
+        { model: 'primary-model-a', models: { conversation: 'primary-model-b' } },
+      ),
+      createCtx,
+    );
+    expect(err).not.toBeNull();
+    expect(err?.field).toBe('model');
+    expect(err?.message).toContain('model');
+    expect(err?.message).toContain('models.conversation');
+  });
+
+  it('accepts an agent config when both model fields match', () => {
+    expect(
+      validateInstanceConfig(
+        agentRaw(
+          { provider: 'claude-cli' },
+          { model: 'primary-model-a', models: { conversation: 'primary-model-a' } },
+        ),
+        createCtx,
+      ),
+      'matching model fields must validate clean',
+    ).toBeNull();
+    // Control: changing only models.conversation makes the same config invalid.
+    const bad = validateInstanceConfig(
+      agentRaw(
+        { provider: 'claude-cli' },
+        { model: 'primary-model-a', models: { conversation: 'primary-model-b' } },
+      ),
+      createCtx,
+    );
+    expect(bad?.field).toBe('model');
+  });
+
+  it('accepts single-field legacy configs on either side', () => {
+    expect(
+      validateInstanceConfig(
+        agentRaw({ provider: 'claude-cli' }, { model: 'primary-model-a' }),
+        createCtx,
+      ),
+      'top-level model alone remains valid',
+    ).toBeNull();
+    expect(
+      validateInstanceConfig(
+        agentRaw({ provider: 'claude-cli' }, { models: { conversation: 'primary-model-a' } }),
+        createCtx,
+      ),
+      'models.conversation alone remains valid',
+    ).toBeNull();
+    // Control: adding a disagreeing sibling is rejected.
+    const bad = validateInstanceConfig(
+      agentRaw(
+        { provider: 'claude-cli' },
+        { model: 'primary-model-a', models: { conversation: 'primary-model-b' } },
+      ),
+      createCtx,
+    );
+    expect(bad?.field).toBe('model');
+  });
+
+  it('fires on the load path too so persisted split-brain configs do not boot silently', () => {
+    const err = validateInstanceConfig(
+      agentRaw(
+        { provider: 'claude-cli' },
+        { model: 'primary-model-a', models: { conversation: 'primary-model-b' } },
+      ),
+      { name: 'test-line', mode: 'load' },
+    );
+    expect(err?.field).toBe('model');
+  });
+});
+
 describe('validateInstanceConfig — API fallbackProvider requires fallbackModel', () => {
   for (const apiProvider of ['openai-api', 'anthropic-api'] as const) {
     it(`rejects fallbackProvider ${apiProvider} without fallbackModel, naming both fields`, () => {
