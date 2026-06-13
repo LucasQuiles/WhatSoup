@@ -477,6 +477,33 @@ the report-only design-regression lanes until those token families are migrated 
 Masked output, unavailable files, or fixture-only proof without the live repository run is
 **INCONCLUSIVE** for token/CSS packets.
 
+### 17.3 Design-System Hygiene Guard
+
+Design-system documentation maintenance is checked by `scripts/design-system-hygiene-guard.ts` and
+is exposed as:
+
+```bash
+npm run guard:design-system-hygiene
+```
+
+The guard reads staged file paths and fails when implementation or gate changes omit their tracked
+SSOT maintenance:
+
+- token implementation files (`console/src/styles/tokens.*.css`) require
+  `docs/design-system/03-spec/tokens-v3.md`;
+- soup/design lint wiring, selectors, and fixtures require
+  `docs/design-system/04-enforcement/lint-plan.md`;
+- visual capture, manifest validation, contrast, browser-a11y, and token-drift harness changes
+  require this QA hardening document;
+- new root or console `design:*` / `guard:design-system-hygiene` package scripts require this QA
+  hardening document.
+
+This guard is intentionally local/report-only in its first slice. It is not wired into `verify:*`
+until it has burned in across real design-system packets and any false-positive cases have been
+classified. A PASS means only that the staged packet included the required tracked documentation
+owner; it does not prove the documentation is substantively correct. Reviewers still inspect the
+diff and the packet evidence.
+
 ## 18. Done Means Durable
 
 A slice is not done when it only:

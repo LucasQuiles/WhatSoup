@@ -25,6 +25,7 @@
     "guard:publication:staged": "npm run guard:publication -- --staged",
     "guard:pre-push": "bash scripts/run-with-pinned-node.sh scripts/pre-push-guard.ts",
     "guard:doc-drift": "bash scripts/run-with-pinned-node.sh scripts/doc-drift-check.ts",
+    "guard:design-system-hygiene": "bash scripts/run-with-pinned-node.sh scripts/design-system-hygiene-guard.ts",
     "guard:public-surface-drift": "bash scripts/run-with-pinned-node.sh scripts/public-surface-drift-check.ts",
     "guard:work-index": "bash scripts/run-with-pinned-node.sh scripts/work-index.ts --check",
     "guard:repo": "bash scripts/run-with-pinned-node.sh scripts/repo-hygiene-guard.ts",
