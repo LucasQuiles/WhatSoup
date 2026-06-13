@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isRecord } from '../../src/lib/type-guards.js';
+import { asRecord, isRecord } from '../../src/lib/type-guards.js';
 
 /**
  * Contract-lock tests for isRecord.
@@ -68,5 +68,56 @@ describe('isRecord', () => {
     ])('%s', (_label, value) => {
       expect(isRecord(value)).toBe(false);
     });
+  });
+});
+
+/**
+ * Contract-lock tests for asRecord — the coercer companion to isRecord.
+ *
+ * Contract: returns the value itself (same reference, narrowed to
+ * Record<string, unknown>) when isRecord holds, otherwise `undefined`
+ * (never `null` — `undefined` composes with optional parameters and `??`).
+ */
+describe('asRecord', () => {
+  describe('returns the same reference for record values', () => {
+    it.each([
+      ['empty object literal', {}],
+      ['object with primitive value', { a: 1 }],
+      ['nested object', { a: { b: 2 } }],
+      ['Object.create(null) — no prototype', Object.create(null) as Record<string, unknown>],
+      ['Date instance (pinned: isRecord accepts object instances)', new Date()],
+      ['Map instance (pinned: isRecord accepts object instances)', new Map()],
+    ])('%s', (_label, value) => {
+      expect(asRecord(value)).toBe(value);
+    });
+  });
+
+  describe('returns undefined (never null) for non-records', () => {
+    it.each([
+      ['null', null],
+      ['undefined', undefined],
+      ['empty string', ''],
+      ['non-empty string', 'string'],
+      ['zero', 0],
+      ['positive integer', 42],
+      ['true', true],
+      ['false', false],
+      ['arrow function', () => {}],
+      ['NaN', NaN],
+      ['empty array', []],
+      ['populated array', [1, 2, 3]],
+    ])('%s', (_label, value) => {
+      expect(asRecord(value)).toBeUndefined();
+      expect(asRecord(value)).not.toBeNull();
+    });
+  });
+
+  it('agrees with isRecord on every probe (delegation contract)', () => {
+    const probes: unknown[] = [
+      {}, { a: 1 }, [], [1], null, undefined, '', 'x', 0, 1, true, false, new Date(), () => {},
+    ];
+    for (const probe of probes) {
+      expect(asRecord(probe) !== undefined).toBe(isRecord(probe));
+    }
   });
 });

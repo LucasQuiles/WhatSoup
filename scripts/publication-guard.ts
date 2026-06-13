@@ -51,6 +51,7 @@ interface PrivatePattern {
 const publicationClasses = new Set<PublicationClass>(['PUBLIC', 'PRIVATE-ARCHIVE', 'SANITIZE', 'DELETE']);
 
 const internalPublicationRoots = [
+  /^docs\/runbooks\//,
   /^docs\/sdlc\//,
   /^docs\/superpowers\//,
   /^docs\/plans\//,

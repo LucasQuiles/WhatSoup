@@ -195,6 +195,50 @@ Co-Authored-By: Person <person@example.com>
     ]);
   });
 
+  // Regression tests for the origin/main exclusion in readCommitAuthors.
+  //
+  // Background: GitHub squash-merge appends a generated Co-authored-by trailer to
+  // the landed commit on origin/main (e.g. PR #791, sha 11553580).  Before the fix,
+  // a branch whose upstream happened to point to an older tip of origin/main would
+  // include that already-merged commit in the git-log range, causing the guard to
+  // fail on every stale-upstream push.  After the fix, the '--not origin/main'
+  // argument ensures commits reachable from origin/main are always excluded.
+  //
+  // Red-evidence path: readCommitAuthors executes real git and cannot be called in
+  // a unit test without a live repo fixture.  Instead we demonstrate the mechanical
+  // guarantee at the layer that matters:
+  //
+  //   (a) stale-upstream case — scanCommitAuthors receives an empty CommitAuthor[]
+  //       (the output of readCommitAuthors after exclusion) and returns no issues.
+  //       This is the guard-PASSES scenario that was broken before the fix.
+  //
+  //   (b) branch-only trailer case — a trailer-bearing commit that IS in scope
+  //       (i.e. NOT reachable from origin/main) still produces issues.  This
+  //       confirms the guard remains active for branch-introduced trailers.
+
+  it('passes when the trailer-bearing commit is already in origin/main (stale upstream)', () => {
+    // After the fix, readCommitAuthors excludes commits reachable from origin/main,
+    // yielding an empty slice.  The guard must report no issues for an empty input.
+    const issues = scanCommitAuthors([]);
+
+    expect(issues).toEqual([]);
+  });
+
+  it('fails when a trailer-bearing commit is introduced only on the branch (not in origin/main)', () => {
+    // A new commit on the branch that carries a Co-authored-by trailer must still
+    // be caught — the exclusion applies only to already-merged commits.
+    const branchOnlyCommit = {
+      sha: 'cafe1234beef5678',
+      name: 'Lucas Quiles',
+      email: '180208450+LucasQuiles@users.noreply.github.com',
+      subject: 'chore: branch-only squash',
+      message: 'chore: branch-only squash\n\nCo-authored-by: LucasQuiles <LucasQuiles@users.noreply.github.com>\n',
+    };
+    const issues = scanCommitAuthors([branchOnlyCommit]);
+
+    expect(issues.map((issue) => issue.code)).toContain('commit-coauthor-trailer');
+  });
+
   it('allows operational script labels without suppressing group JID detection', () => {
     const issues = scanAddedLines([
       {

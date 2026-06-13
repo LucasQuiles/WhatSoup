@@ -37,7 +37,9 @@ const { mockSocketServerInstance, MockWhatSoupSocketServer } = vi.hoisted(() => 
     updateDeliveryJid: vi.fn(),
     updateActorJid: vi.fn(),
   };
-  const MockWhatSoupSocketServer = vi.fn().mockImplementation(() => mockSocketServerInstance);
+  function MockWhatSoupSocketServer() {
+    return mockSocketServerInstance;
+  }
   return { mockSocketServerInstance, MockWhatSoupSocketServer };
 });
 
@@ -154,12 +156,12 @@ vi.mock('../../../src/runtimes/agent/control-queue.ts', () => ({
   })),
 }));
 vi.mock('../../../src/runtimes/agent/turn-queue.ts', () => ({
-  TurnQueue: vi.fn().mockImplementation(() => ({
-    setProcessor: vi.fn(),
-    enqueue: vi.fn(),
-    shutdown: vi.fn(async () => {}),
-    getStatus: vi.fn(() => ({ depth: 0, maxDepth: 100 })),
-  })),
+  TurnQueue: class {
+    setProcessor = vi.fn();
+    enqueue = vi.fn();
+    shutdown = vi.fn(async () => {});
+    getStatus = vi.fn(() => ({ depth: 0, maxDepth: 100 }));
+  },
 }));
 vi.mock('../../../src/mcp/registry.ts', () => ({
   ToolRegistry: class {
