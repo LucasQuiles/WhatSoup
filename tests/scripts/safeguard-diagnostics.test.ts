@@ -21,6 +21,7 @@ const requiredPackageScripts = {
   'guard:publication:all': 'npm run guard:publication -- --all',
   'guard:publication:release': 'npm run guard:publication -- --release',
   'guard:publication:staged': 'npm run guard:publication -- --staged',
+  'guard:design-system-hygiene': 'node scripts/design-system-hygiene-guard.ts',
   'guard:repo:staged': 'npm run guard:repo -- --staged',
   'guard:repo:commit-authors': 'npm run guard:repo -- --commit-authors',
   'guard:repo:release-hygiene': 'npm run guard:repo -- --release-hygiene',

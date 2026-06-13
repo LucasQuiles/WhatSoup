@@ -5,6 +5,7 @@ npm run guard:repo:staged
 
 # Sub-second deterministic guards — no console deps required, always run.
 npm run guard:publication:staged
+npm run guard:design-system-hygiene
 npm run guard:node-pin-consistency
 npm run guard:claude-settings
 

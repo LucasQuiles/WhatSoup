@@ -68,6 +68,7 @@ const REQUIRED_SCRIPTS = [
   'guard:publication:all',
   'guard:publication:release',
   'guard:publication:staged',
+  'guard:design-system-hygiene',
   'guard:repo:staged',
   'guard:repo:commit-authors',
   'guard:repo:release-hygiene',

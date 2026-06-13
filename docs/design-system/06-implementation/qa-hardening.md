@@ -493,16 +493,18 @@ SSOT maintenance:
   `docs/design-system/03-spec/tokens-v3.md`;
 - soup/design lint wiring, selectors, and fixtures require
   `docs/design-system/04-enforcement/lint-plan.md`;
-- visual capture, manifest validation, contrast, browser-a11y, and token-drift harness changes
-  require this QA hardening document;
+- visual capture, manifest validation, contrast, browser-a11y, color-semantics, font, resilience,
+  brand-asset, and token-drift harness changes require this QA hardening document;
+- font implementation/asset changes require both the typography spec and font provenance README;
+- brand asset changes require both the brand spec and iconography spec;
 - new root or console `design:*` / `guard:design-system-hygiene` package scripts require this QA
   hardening document.
 
-This guard is intentionally local/report-only in its first slice. It is not wired into `verify:*`
-until it has burned in across real design-system packets and any false-positive cases have been
-classified. A PASS means only that the staged packet included the required tracked documentation
-owner; it does not prove the documentation is substantively correct. Reviewers still inspect the
-diff and the packet evidence.
+This guard is wired into the root pre-commit hook because it depends on staged paths. It is not
+useful as a post-commit `verify:*` step unless a future mode compares changed files against a commit
+range. A PASS means only that the staged packet included the required tracked documentation owner;
+it does not prove the documentation is substantively correct. Reviewers still inspect the diff and
+the packet evidence.
 
 ### 17.4 Design Resilience Audit
 
