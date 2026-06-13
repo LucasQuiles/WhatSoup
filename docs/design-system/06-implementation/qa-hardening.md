@@ -385,6 +385,7 @@ as:
 
 ```bash
 npm --prefix console run design:capture
+npm --prefix console run design:capture:validate -- artifacts/soup-v3-follow-up/visual-matrix/<run-id>/manifest.json
 ```
 
 Default scope:
@@ -413,6 +414,14 @@ were captured from populated DOM states under the declared matrix; it does not p
 semantic color correctness, keyboard parity, or taste. Missing screenshots, launch failures, masked
 browser failures, or absent manifest rows are **INCONCLUSIVE** and block token/CSS/visual commits
 that require screenshot proof.
+
+The manifest validator lives at `console/scripts/validate-visual-manifest.mjs`. It fails when the
+manifest is missing, the declared route x theme x viewport matrix has missing or duplicate rows,
+screenshot files are missing or empty, manifest byte counts do not match screenshot files, rendered
+DOM text is empty, browser `pageerror` entries exist, artifact verdicts are not `PASS`, or the
+top-level manifest verdict is not `PASS`. Console warnings/errors, HTTP errors, and request failures
+are summarized as non-blocking review signals because the mock dev-server path can emit expected
+backend-proxy noise; reviewers must still inspect them when accepting visual evidence.
 
 Any score below 4 requires a remediation note. Any score below 3 blocks final acceptance unless the user
 explicitly waives it.
