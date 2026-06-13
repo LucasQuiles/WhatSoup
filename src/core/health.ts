@@ -84,6 +84,34 @@ interface LatestSuccessfulOutboundSend {
   latest_successful_transport_id: string | null;
 }
 
+interface HealthTurnCapability {
+  model_usable: boolean | null;
+  model_usability_status: string | null;
+  last_successful_turn_at: number | null;
+  last_turn_error_class: string | null;
+  last_turn_error_at: number | null;
+}
+
+const HEALTH_MODEL_USABILITY_STATUSES = new Set([
+  'usable',
+  'model-unavailable',
+  'credential-unavailable',
+  'provider-unavailable',
+  'timeout',
+  'unknown',
+]);
+
+const HEALTH_TURN_ERROR_CLASSES = new Set([
+  'usage-limit',
+  'rate-limit',
+  'auth-required',
+  'model-unavailable',
+  'policy-block',
+  'context-overflow',
+  'unknown-terminal',
+  'empty-output',
+]);
+
 function latestSuccessfulOutboundSend(deps: HealthDeps): LatestSuccessfulOutboundSend {
   return safeDbQuery(
     () => {
@@ -105,6 +133,50 @@ function latestSuccessfulOutboundSend(deps: HealthDeps): LatestSuccessfulOutboun
     { latest_successful_send_at: null, latest_successful_transport_id: null },
     'failed to read latest successful outbound send',
   );
+}
+
+function normalizeBooleanOrNull(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function normalizeNumberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function normalizeEnumStringOrNull(value: unknown, allowed: ReadonlySet<string>): string | null {
+  return typeof value === 'string' && allowed.has(value) ? value : null;
+}
+
+function normalizeAgentTurnCapability(details: Record<string, unknown> | null): HealthTurnCapability | null {
+  if (!details) return null;
+  const raw = details.turnCapability;
+  if (!isRecord(raw)) return null;
+  return {
+    model_usable: normalizeBooleanOrNull(raw.modelUsable),
+    model_usability_status: normalizeEnumStringOrNull(raw.modelUsabilityStatus, HEALTH_MODEL_USABILITY_STATUSES),
+    last_successful_turn_at: normalizeNumberOrNull(raw.lastSuccessfulTurnAt),
+    last_turn_error_class: normalizeEnumStringOrNull(raw.lastTurnErrorClass, HEALTH_TURN_ERROR_CLASSES),
+    last_turn_error_at: normalizeNumberOrNull(raw.lastTurnErrorAt),
+  };
+}
+
+function agentRuntimeDetailsForHealth(
+  details: Record<string, unknown>,
+  turnCapability: HealthTurnCapability | null,
+): Record<string, unknown> {
+  if (!('turnCapability' in details)) return details;
+  return {
+    ...details,
+    turnCapability: turnCapability
+      ? {
+          modelUsable: turnCapability.model_usable,
+          modelUsabilityStatus: turnCapability.model_usability_status,
+          lastSuccessfulTurnAt: turnCapability.last_successful_turn_at,
+          lastTurnErrorClass: turnCapability.last_turn_error_class,
+          lastTurnErrorAt: turnCapability.last_turn_error_at,
+        }
+      : null,
+  };
 }
 
 export const ENRICHMENT_STALE_MS = 10 * 60 * 1000; // 10 minutes
@@ -832,6 +904,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const enrichmentStaleness = enrichmentStats.lastRun
         ? Date.now() - new Date(enrichmentStats.lastRun).getTime()
         : null;
+      const runtimeSnapshot = deps.runtime ? deps.runtime.getHealthSnapshot() : null;
+      const agentRuntimeStatus = deps.instanceType === 'agent' ? runtimeSnapshot?.status ?? null : null;
+      const turnCapability = deps.instanceType === 'agent'
+        ? normalizeAgentTurnCapability(runtimeSnapshot?.details ?? null)
+        : null;
+      const turnCapabilityIsDegraded =
+        turnCapability !== null &&
+        (turnCapability.model_usable === false || turnCapability.last_turn_error_class !== null);
 
       // Determine health status.
       // Enrichment staleness only matters if enrichment has actually run before
@@ -847,9 +927,17 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         status = 'unhealthy';
       } else if (!isConnected) {
         status = isRecoveringConnection ? 'degraded' : 'unhealthy';
+      } else if (agentRuntimeStatus === 'unhealthy') {
+        status = 'unhealthy';
       } else if (authFailureIsDegraded) {
         status = 'degraded';
-      } else if (enrichmentIsStale || enrichmentStats.runtimeDegraded || connectionChurnIsDegraded) {
+      } else if (
+        enrichmentIsStale ||
+        enrichmentStats.runtimeDegraded ||
+        connectionChurnIsDegraded ||
+        agentRuntimeStatus === 'degraded' ||
+        turnCapabilityIsDegraded
+      ) {
         status = 'degraded';
       } else {
         status = 'healthy';
@@ -911,8 +999,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
 
       // Mode-specific runtime block for control-plane
       let runtimeBlock: Record<string, unknown> = {};
-      if (deps.runtime) {
-        const snap = deps.runtime.getHealthSnapshot();
+      if (runtimeSnapshot) {
+        const snap = runtimeSnapshot;
         if (deps.instanceType === 'passive') {
           runtimeBlock = { passive: snap.details };
         } else if (deps.instanceType === 'chat') {
@@ -925,7 +1013,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             },
           };
         } else if (deps.instanceType === 'agent') {
-          runtimeBlock = { agent: snap.details };
+          runtimeBlock = { agent: agentRuntimeDetailsForHealth(snap.details, turnCapability) };
         }
       }
 
@@ -1004,6 +1092,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         },
         model_advisories: getModelAdvisories(),
         durability: deps.durability?.getHealthStats() ?? null,
+        turn_capability: turnCapability,
         runtime: runtimeBlock,
       });
 
