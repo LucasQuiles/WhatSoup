@@ -36,6 +36,11 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html', 'json', 'json-summary'],
       reportsDirectory: 'coverage',
+      thresholds: {
+        lines: 82,
+        branches: 73,
+        functions: 79,
+      },
     },
     env: {
       INSTANCE_CONFIG: '',

@@ -626,3 +626,10 @@ The migrated group was 1203631234567890@g.us.
     });
   });
 });
+
+describe('tag-release-gate workflow', () => {
+  it('tag-release-gate.yml exists', async () => {
+    const { existsSync } = await import('node:fs');
+    expect(existsSync('.github/workflows/tag-release-gate.yml')).toBe(true);
+  });
+});

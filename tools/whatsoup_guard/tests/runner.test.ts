@@ -1240,7 +1240,6 @@ describe('runCycle', () => {
     expect(body).toMatch(/action:\s+propose_fix/u);
     expect(body).not.toMatch(/^propose_fix:/m);
     const hintLine = body.split('\n').find((line: string) => line.startsWith('remediation_hint:'));
-    expect(hintLine).toBeDefined();
     expect(hintLine!).toMatch(/docs\/specs\/2026-05-08-whatsoup-protection-layer-design\.md/u);
   });
 
