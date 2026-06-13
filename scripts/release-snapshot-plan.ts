@@ -6,6 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { cleanGitEnv } from './lib/guard-core.ts';
+import { isRecord } from '../src/lib/type-guards.ts';
 
 export const RELEASE_MANIFEST_FILE = '.whatsoup-release-manifest.json';
 
@@ -90,10 +91,6 @@ interface ParsedArgs {
   sourceRef: string;
   buildTime: string;
   json: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function normalizeRepoPath(filePath: string): string {
