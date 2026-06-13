@@ -434,6 +434,28 @@ palette lands; below-threshold designated pairs fail the gate.
 Any score below 4 requires a remediation note. Any score below 3 blocks final acceptance unless the user
 explicitly waives it.
 
+### 17.1 Browser A11y Contract Lane
+
+The browser a11y contract lane lives in `tests/browser/a11y-contracts.test.tsx` and runs through:
+
+```bash
+npm run test:browser -- tests/browser/a11y-contracts.test.tsx
+npm run test:browser
+```
+
+It proves browser-only behavior that jsdom cannot establish:
+
+- one app-owned `main` landmark per route shell and one labeled primary navigation region, using
+  mocked route sentinels to prove shell ownership without asserting real-page heading copy;
+- trusted keyboard `:focus-visible` activation through Chromium-driven Tab events;
+- focused controls and their outline boxes remain inside reduced-height viewports;
+- Escape closes only the topmost overlay layer when a Popover is open inside a Modal.
+
+This is not an axe gate. Do not claim axe coverage unless a separate dependency packet adds
+`axe-core`, updates the lockfile, documents the new command, and records focused proof. Missing
+browser a11y rows, unavailable Chromium, or masked browser output are **INCONCLUSIVE** and block
+interaction/accessibility packets.
+
 ## 17. Done Means Durable
 
 A slice is not done when it only:
