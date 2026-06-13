@@ -42,6 +42,7 @@ import {
   INSTANCE_HEALTH_PORT_MIN,
   INSTANCE_HEALTH_PORT_MAX,
 } from '../src/fleet/constants.ts';
+import { isRecord } from '../src/lib/type-guards.ts';
 
 // ---------------------------------------------------------------------------
 // SSOT for the host-suffix shape and projectId-UUID shape.
@@ -85,10 +86,6 @@ export interface CheckOptions {
    * are flagged rather than silently passing.
    */
   defaultPort?: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function nonBlankString(value: unknown): value is string {
