@@ -2,21 +2,13 @@
 // Pure functions for mapping chat JIDs to workspace paths.
 
 import {
-  closeSync,
-  constants,
   existsSync,
-  fchmodSync,
-  fstatSync,
-  ftruncateSync,
   lstatSync,
-  mkdirSync,
-  openSync,
   readFileSync,
   symlinkSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import {
   applyRequiredDeny,
   defaultSettingsJson,
@@ -31,68 +23,15 @@ import {
   type AdditionalMcpServerConfig,
 } from './provider-mcp-config.ts';
 import { createChildLogger } from '../logger.ts';
+import {
+  assertPrivateDirectorySync,
+  ensurePrivateDirectorySync,
+  writePrivateFileSync,
+} from '../lib/private-fs.ts';
+
+export { writePrivateFileSync } from '../lib/private-fs.ts';
 
 const log = createChildLogger('workspace');
-
-function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
-  const err = new Error(message) as NodeJS.ErrnoException;
-  err.code = code;
-  return err;
-}
-
-function assertPrivateDirectorySync(dirPath: string): void {
-  const stat = lstatSync(dirPath);
-  if (stat.isSymbolicLink()) {
-    throw privateWriteError('refusing to use private directory through symlink', 'ELOOP');
-  }
-  if (!stat.isDirectory()) {
-    throw privateWriteError('refusing to use private directory over non-directory path', 'EINVAL');
-  }
-}
-
-function ensurePrivateDirectorySync(dirPath: string): void {
-  try {
-    assertPrivateDirectorySync(dirPath);
-    return;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
-
-  mkdirSync(dirPath, { recursive: true, mode: 0o700 });
-  assertPrivateDirectorySync(dirPath);
-}
-
-export function writePrivateFileSync(filePath: string, data: string): void {
-  assertPrivateDirectorySync(dirname(filePath));
-
-  try {
-    const stat = lstatSync(filePath);
-    if (stat.isSymbolicLink()) {
-      throw privateWriteError('refusing to write private file through symlink', 'ELOOP');
-    }
-    if (!stat.isFile()) {
-      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
-
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK;
-  let fd: number | undefined;
-  try {
-    fd = openSync(filePath, flags, 0o600);
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) {
-      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
-    }
-    fchmodSync(fd, 0o600);
-    ftruncateSync(fd, 0);
-    writeFileSync(fd, data, { encoding: 'utf-8' });
-    fchmodSync(fd, 0o600);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
 
 export interface WorkspaceInfo {
   kind: 'dm' | 'group';
