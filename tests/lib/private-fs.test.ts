@@ -40,9 +40,10 @@ describe('writePrivateFileSync', () => {
     const decoy = join(root, 'decoy.json');
     symlinkSync(decoy, target);
 
-    expect(() => writePrivateFileSync(target, '{"x":1}')).toThrow();
-    const err = (() => { try { writePrivateFileSync(target, '{"x":1}'); } catch (e) { return e as NodeJS.ErrnoException; } })();
-    expect(err.code).toBe('ELOOP');
+    let caughtErr: NodeJS.ErrnoException | undefined;
+    try { writePrivateFileSync(target, '{"x":1}'); } catch (e) { caughtErr = e as NodeJS.ErrnoException; }
+    expect(caughtErr).toBeDefined();
+    expect(caughtErr?.code).toBe('ELOOP');
 
     // Write to a real file — confirm mode 0600
     const real = join(dir, 'real.json');
