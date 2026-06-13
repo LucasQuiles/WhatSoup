@@ -760,6 +760,27 @@ print(json.dumps(samples, sort_keys=True))
     expect(event.evidence).toContain('forbidden_present=35.155.7.183');
   });
 
+  it('tracks mini1 personal runtime instead of stale secondary-bot profile entries', () => {
+    const profile = JSON.parse(readFileSync(join(process.cwd(), 'deploy', 'health-profiles', 'mini1.json'), 'utf8')) as {
+      requiredCredentialFiles?: string[];
+      instances?: Array<Record<string, unknown>>;
+    };
+    const names = (profile.instances ?? []).map((instance) => instance.name);
+    expect(names).toContain('ana-bot');
+    expect(names).toContain('personal');
+    expect(names).not.toContain('secondary-bot');
+    expect(profile.requiredCredentialFiles).toContain('instances/personal/tokens.env');
+    expect(profile.requiredCredentialFiles).not.toContain('instances/secondary-bot/tokens.env');
+
+    const personal = (profile.instances ?? []).find((instance) => instance.name === 'personal');
+    expect(personal).toMatchObject({
+      expected: 'always_on',
+      service: 'com.whatsoup.personal',
+      healthPort: 9095,
+      primaryPhoneOwner: 'instance:personal',
+    });
+  });
+
   it('keeps the expected fleet manifest aligned with health profiles and collector remotes', () => {
     const manifest = JSON.parse(readFileSync(join(process.cwd(), 'deploy', 'bot-errors-expected-fleet.json'), 'utf8')) as {
       schemaVersion?: unknown;

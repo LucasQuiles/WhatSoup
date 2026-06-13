@@ -13,7 +13,7 @@
     "fleet-token",
     "fleet-tokens.json",
     "instances/ana-bot/tokens.env",
-    "instances/secondary-bot/tokens.env"
+    "instances/personal/tokens.env"
   ],
   "instances": [
     {
@@ -24,11 +24,11 @@
       "primaryPhoneOwner": "instance:ana-bot"
     },
     {
-      "name": "secondary-bot",
+      "name": "personal",
       "expected": "always_on",
-      "service": "com.whatsoup.secondary-bot",
+      "service": "com.whatsoup.personal",
       "healthPort": 9095,
-      "primaryPhoneOwner": "instance:secondary-bot"
+      "primaryPhoneOwner": "instance:personal"
     }
   ]
 }
