@@ -4784,6 +4784,49 @@ describe('AgentRuntime', () => {
     });
   });
 
+  it('sandboxPerChat passes custom endpoint config for primary opencode workspaces', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentProviderConfig?: Record<string, unknown>;
+    };
+    agentConfig.agentProvider = 'opencode-cli';
+    agentConfig.agentProviderConfig = {
+      baseUrl: 'https://api.example.invalid/v1',
+      apiKeyService: 'openai',
+    };
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+      model: 'model-a',
+    });
+    await runtime.start();
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello primary' }));
+
+    expect(mockProvisionWorkspace).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'opencode-cli',
+      providerConfig: {
+        baseUrl: 'https://api.example.invalid/v1',
+        model: 'model-a',
+        apiKeyService: 'openai',
+      },
+    }));
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      provider: 'opencode-cli',
+      model: 'model-a',
+      providerConfig: {
+        baseUrl: 'https://api.example.invalid/v1',
+        apiKeyService: 'openai',
+      },
+    });
+  });
+
   it('sandboxPerChat: two DMs from different JIDs produce different sessions', async () => {
     const { SessionManager: MockSessionManagerCtor } = await import('../../../src/runtimes/agent/session.ts');
     const db = makeDb();
