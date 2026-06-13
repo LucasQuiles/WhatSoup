@@ -25,21 +25,14 @@ scoped markdown files currently on disk.
 | Dimension | Breakdown |
 |---|---|
 | Kind | bead=113, doc=15, handoff=4, plan=21, review=2, spec=13, state=20 |
-| Status | active=2, closed=9, completed=118, deferred=8, pending=38, unknown=13 |
-| Status source | bead-manifest=3, body-marker=109, directory=7, fallback=4, phase-log=7, state-md-status=58 |
+| Status | closed=11, completed=118, deferred=8, pending=38, unknown=13 |
+| Status source | bead-manifest=3, body-marker=110, directory=7, fallback=4, phase-log=7, state-md-status=57 |
 
 ## Inconsistencies
 
 0 detected.
 
 ## Synthesis
-
-### Active (2)
-
-| Path | Kind | Topic | Status source |
-|------|------|-------|---------------|
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md` | doc | bot-errors-reliability | state-md-status |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md` | state | bot-errors-reliability | state-md-status |
 
 ### Unknown-status — triage needed (13)
 
@@ -78,6 +71,13 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 |------|------|--------|--------|-------|----------|------------|
 | `docs/sdlc/closed/add-line-wizard-20260401/implementation-plan.md` | doc | closed | directory | add-line-wizard | 2026-04-05 |  |
 | `docs/sdlc/closed/add-line-wizard-20260401/state.md` | state | closed | directory | add-line-wizard | 2026-04-23 |  |
+
+### docs/sdlc/closed/bot-errors-reliability-20260531  _(2 entries)_
+
+| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
+|------|------|--------|--------|-------|----------|------------|
+| `docs/sdlc/closed/bot-errors-reliability-20260531/implementation-plan.md` | doc | closed | body-marker | bot-errors-reliability | 2026-06-14 |  |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/state.md` | state | closed | state-md-status | bot-errors-reliability | 2026-06-14 |  |
 
 ### docs/sdlc/closed/control-plane-20260401  _(1 entries)_
 
@@ -313,13 +313,6 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B07-docs-durability.md` | bead | pending | body-marker | whatsoup-full-hardening | 2026-04-04 |  |
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/state.md` | state | completed | state-md-status | whatsoup-full-hardening | 2026-04-04 |  |
 
-### docs/sdlc/in-progress/bot-errors-reliability-20260531  _(2 entries)_
-
-| Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
-|------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md` | doc | active | state-md-status | bot-errors-reliability | 2026-06-12 |  |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md` | state | active | state-md-status | bot-errors-reliability | 2026-06-12 |  |
-
 ### docs/superpowers/handoffs  _(4 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
@@ -383,4 +376,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-14T02:39:06Z from commit `97e60757fc462b715eb30b887d390460a4d419c6`
+- Generated at 2026-06-14T02:51:07Z from commit `8a60f2ad21953c54217f3b83c9346fa7eb2ac017`

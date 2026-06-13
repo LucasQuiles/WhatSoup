@@ -2,25 +2,25 @@
 
 **ID:** bot-errors-reliability-20260531
 **Created:** 2026-05-31
-**Status:** in-progress
+**Status:** closed — superseded by the 2026-06-13 bot-errors consolidation close-out
 **Profile:** REPAIR + HARDEN
 **Scope owner:** Lucas, with Q review gate in BOT ERRORS
 
 ## Objective
 
-Ensure no WhatSoup agent, bot, fleet monitor, or maintenance command fails silently across:
+Ensure no WhatSoup agent, bot, fleet monitor, or maintenance command fails silently across the managed fleet:
 
-- MACLAB
-- MWLAB
-- mini1 through mini11
-- nucles relay and personal line
+- development hosts
+- lab relay hosts
+- managed mini hosts
+- the relay and personal-line alert path
 
-Brick is explicitly out of scope because it is not running WhatSoup and is not part of the Mac fleet for this protocol.
+Non-WhatSoup infrastructure is explicitly out of scope for this protocol.
 
 ## Success Criteria
 
 1. Critical BOT ERRORS events are written to a durable local outbox before any network send attempt.
-2. nucles dispatcher drains local and remote outboxes to the BOT ERRORS group through Lucas's personal line.
+2. Relay dispatcher drains local and remote outboxes to the BOT ERRORS group through the operator alert line.
 3. Dispatcher, collector, q-loop, deadman, and daily health checks are supervised and independently watched.
 4. Daily health checks verify required WhatSoup tools, configs, credentials, plugin/skill coverage, disk, clock, boot, and service state.
 5. Agent runtime tool failures emit provider-wide BOT ERRORS alerts without duplicating normal Claude PostToolUse hook logs.
@@ -30,20 +30,37 @@ Brick is explicitly out of scope because it is not running WhatSoup and is not p
 9. Operator/coordination commands have a failure-reporting wrapper or an accepted residual-risk note.
 10. Every deploy step is verified one machine at a time before the protocol is considered ready for Lucas's absence.
 
+## Closure Note
+
+This packet is no longer the active implementation tracker. The repo-side bot-errors
+hardening arc landed through PRs #781, #787, #788, #797, #802, #805, #809, #811,
+#812, and #815. The remaining work is consolidation rather than this packet's
+original implementation scope:
+
+- fleet parity and host currency for the already-shipped scripts;
+- activation of shipped-but-inert `expected_head_sha` runtime-skew checks and the drift hook;
+- corpus validation after fleet propagation;
+- estate, rollback-anchor, and human-gated close-out.
+
+The operator-local close-out SSOT lives under
+`~/.claude/plans/whatsoup-stabilization/` (`RESUME-NOTE.md`,
+`CURRENT-SNAPSHOT.md`, `NEXT-PHASE-GOALS.md`, and `STATUS-LEDGER.md`). Keep this
+repo packet as historical evidence; do not use it as the active queue.
+
 ## Phase Log
 
 | Phase | Status | Evidence |
 |---|---|---|
 | Normalize | complete | Existing emitAlert, outbox, health, dispatcher, collector, q-loop, and runner surfaces mapped. |
-| Frame | complete | Fleet scope set to MACLAB, MWLAB, mini1-11, and nucles; brick excluded. |
+| Frame | complete | Fleet scope set to managed development, relay, and mini hosts; non-WhatSoup infrastructure excluded. |
 | Scout | complete | Tool-result, PostToolUse, dispatcher rendering, stale numeric identity, and operator-command gaps identified. |
-| Architect | in-progress | Q accepted runtime tool_result as canonical provider-wide path with PostToolUseFailure as fallback. |
-| Execute | in-progress | Tool-failure and mention-safe rendering slices implemented locally and synced to nucles for review. |
-| Synthesize | pending | Requires Q review, commit, deploy, and per-machine validation. |
+| Architect | closed | Superseded by the landed PR train and consolidation notes above. |
+| Execute | closed | Bot-errors alert-pipeline hardening landed; residual fleet propagation is tracked as C2/C3/C4 close-out. |
+| Synthesize | closed | Runtime evidence and closure certificates moved to the operator-local close-out SSOT. |
 
 ## Current Verification Evidence
 
-Local MACLAB:
+Local development host:
 
 ```text
 npx vitest run --pool=forks tests/runtimes/agent/runtime.test.ts tests/hooks/rgp-hooks.test.ts tests/core/workspace.test.ts tests/hooks/poll-interaction-lint.test.ts tests/lib/emit-alert.test.ts
@@ -55,7 +72,7 @@ npx vitest run --pool=forks tests/scripts/bot-errors-dispatcher.test.ts
 1 file passed, 4 tests passed
 ```
 
-nucles:
+Relay host:
 
 ```text
 npx vitest run --pool=forks tests/runtimes/agent/runtime.test.ts tests/hooks/rgp-hooks.test.ts tests/core/workspace.test.ts tests/hooks/poll-interaction-lint.test.ts tests/lib/emit-alert.test.ts tests/scripts/bot-errors-dispatcher.test.ts
@@ -71,10 +88,12 @@ npx vitest run --pool=forks tests/runtimes/agent/runtime.test.ts tests/hooks/rgp
 
 Expected workspace symlink-refusal logs appear during `tests/core/workspace.test.ts`; these are assertion-path logs, not failures.
 
-## Open Gates
+## Residual Ownership
 
-1. Q review of runtime tool-failure slice, mention-safe renderer slice, and B5 redaction hardening.
-2. Commit only the intended files on nucles, preserving unrelated dirty work.
-3. Deploy without restarting MACLAB personal agent unless Lucas approves.
-4. Validate controlled failure drills per machine, one machine at a time.
-5. Close or explicitly document residuals for hung tools, stale numeric instance identity, and operator command wrapping.
+This packet has no open implementation gates. Residuals are intentionally carried
+outside this historical packet:
+
+1. C2/C3/C4: fleet script parity, deployed-vs-intended host currency, and `expected_head_sha` / drift-hook activation.
+2. C7: real alert corpus validation after parity propagation.
+3. C8/C10: estate pruning, rollback-anchor retirement, and human-gated ceremonies.
+4. Wave-owned runtime/provider residuals remain with their current PR lanes, not this SDLC packet.
