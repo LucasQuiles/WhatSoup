@@ -21,6 +21,18 @@ TAILSCALE_STATUS_CACHE: dict[str, Any] | None = None
 TAILSCALE_STATUS_ERROR: str | None = None
 REMOTE_HOST_TARGETS_CACHE: dict[str, list[str]] = {}
 
+
+def reset_tailscale_cache() -> None:
+    """Clear the module-level Tailscale status memo.
+
+    Called at the start of each collection cycle so that load_tailscale_status()
+    re-fetches a fresh snapshot.  Within a single cycle the memo still avoids
+    redundant subprocess calls (N hosts → 1 call per cycle).
+    """
+    global TAILSCALE_STATUS_CACHE, TAILSCALE_STATUS_ERROR
+    TAILSCALE_STATUS_CACHE = None
+    TAILSCALE_STATUS_ERROR = None
+
 RELAY_BACKOFF_FAILURE_THRESHOLD: int = 3
 RELAY_BACKOFF_SCHEDULE_S: list[int] = [300, 900, 3600]
 
@@ -843,7 +855,55 @@ def tailscale_evidence_lines(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _is_ssh_transport_failure(normalized_error: str) -> bool:
+    """Return True when the error string indicates a transport-level SSH failure.
+
+    Transport failures mean the TCP/TLS handshake never completed or SSH's own
+    authentication (key / host-key) was rejected — the remote host is unreachable
+    or the SSH layer itself cannot establish a session.  These are distinct from
+    remote-command failures (nonzero exit, missing script, file permission errors)
+    where the SSH tunnel was established successfully.
+
+    Transport patterns (any of):
+    - connection refused / reset
+    - no route to host / network is unreachable
+    - ssh: connect to host …  (generic SSH connect error prefix)
+    - permission denied (publickey) / (password) / (gssapi…)  — SSH auth failure
+    - host key verification failed / known_hosts mismatch
+    - timed out / operation timed out / connection timed out (handled separately
+      as tailscale_online_ssh_timeout; listed here so the caller need not repeat
+      the check, but this helper is not called for timeouts — see ssh_failure_diagnosis)
+    """
+    return (
+        "connection refused" in normalized_error
+        or "connection reset by peer" in normalized_error
+        or "no route to host" in normalized_error
+        or "network is unreachable" in normalized_error
+        or normalized_error.startswith("ssh: connect to host")
+        or "permission denied (publickey" in normalized_error
+        or "permission denied (password" in normalized_error
+        or "permission denied (gssapi" in normalized_error
+        or "host key verification failed" in normalized_error
+        or "known_hosts" in normalized_error
+    )
+
+
 def ssh_failure_diagnosis(error: str, tailscale: dict[str, Any]) -> str | None:
+    """Classify an SSH failure into one of three reachability diagnoses.
+
+    Classification table:
+    | Condition                               | Diagnosis                          |
+    |-----------------------------------------|------------------------------------|
+    | peer online + timeout variant           | tailscale_online_ssh_timeout       |
+    | peer online + transport-level failure   | tailscale_online_ssh_failed        |
+    | peer online + remote-command failure    | tailscale_online_ssh_remote_error  |
+    | peer offline                            | tailscale_offline                  |
+    | peer status unknown / not found         | None                               |
+
+    Only tailscale_offline, tailscale_online_ssh_timeout, and
+    tailscale_online_ssh_failed are genuine unreachability signals — callers must
+    NOT skip secondary probes for tailscale_online_ssh_remote_error.
+    """
     if not tailscale or tailscale.get("status") != "found":
         return None
     normalized_error = error.lower()
@@ -854,7 +914,9 @@ def ssh_failure_diagnosis(error: str, tailscale: dict[str, Any]) -> str | None:
     ):
         return "tailscale_online_ssh_timeout"
     if tailscale.get("online") is True:
-        return "tailscale_online_ssh_failed"
+        if _is_ssh_transport_failure(normalized_error):
+            return "tailscale_online_ssh_failed"
+        return "tailscale_online_ssh_remote_error"
     if tailscale.get("online") is False:
         return "tailscale_offline"
     return None
@@ -1691,6 +1753,7 @@ def run_once(
     alert_cooldown: int,
     recovery_successes: int,
 ) -> dict[str, Any]:
+    reset_tailscale_cache()
     state = load_state()
     state["configuredRemotes"] = list(remotes)
     state["configuredRemoteHosts"] = configured_remote_hosts(remotes)

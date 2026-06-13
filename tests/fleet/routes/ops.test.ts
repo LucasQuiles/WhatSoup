@@ -1157,7 +1157,7 @@ describe('handleCreateLine', () => {
         type: 'chat',
         // Real-shaped phone — the shared validator (added for #244/#249)
         // now rejects unparseable strings that normalize to empty.
-        adminPhones: ['18459780919'],
+        adminPhones: ['15551230006'],
         healthPort: 3201,
       })),
       res,
@@ -1188,7 +1188,7 @@ describe('handleCreateLine', () => {
       mockReq(JSON.stringify({
         name,
         type: 'chat',
-        adminPhones: ['18459780919'],
+        adminPhones: ['15551230006'],
         healthPort: 3202,
       })),
       res,
@@ -1224,7 +1224,7 @@ describe('handleCreateLine', () => {
       mockReq(JSON.stringify({
         name,
         type: 'chat',
-        adminPhones: ['18459780919'],
+        adminPhones: ['15551230006'],
         healthPort: 3203,
       })),
       res,
@@ -1249,7 +1249,7 @@ describe('handleCreateLine', () => {
     fs.writeFileSync(path.join(siblingDir, 'config.json'), JSON.stringify({
       name: 'legacy-line',
       type: 'chat',
-      adminPhones: ['18459780919'],
+      adminPhones: ['15551230006'],
       accessMode: 'self_only',
     }));
 
@@ -1266,7 +1266,7 @@ describe('handleCreateLine', () => {
       mockReq(JSON.stringify({
         name: 'new-line',
         type: 'chat',
-        adminPhones: ['18459780919'],
+        adminPhones: ['15551230006'],
         healthPort: 9090,
       })),
       res,
@@ -1296,7 +1296,7 @@ describe('handleCreateLine', () => {
       mockReq(JSON.stringify({
         name: 'new-line',
         type: 'chat',
-        adminPhones: ['18459780919'],
+        adminPhones: ['15551230006'],
         healthPort: 9200,
       })),
       res,

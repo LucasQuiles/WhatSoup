@@ -14,7 +14,7 @@ When WhatSoup agent instances restart, multiple agents produce unsolicited messa
 
 This is not a cascade where agents respond to each other. Each agent independently fires its own resume, producing parallel unsolicited messages. The sibling filter in `src/core/access-policy.ts` works correctly for normal message flow — verified by logs showing dozens of successful `sibling_bot` blocks. The problem is that proactive resume is a separate code path with no group awareness.
 
-A secondary issue compounds it: the WHATSOUP orchestration group (`120363406689931730@g.us`) has `status='allowed'` in agent instances' access lists, meaning every non-sibling message (including Lucas's) triggers `group_auto_respond` — all agents respond independently instead of only when @mentioned.
+A secondary issue compounds it: the WHATSOUP orchestration group (`120363555555555001@g.us`) has `status='allowed'` in agent instances' access lists, meaning every non-sibling message (including Lucas's) triggers `group_auto_respond` — all agents respond independently instead of only when @mentioned.
 
 ### 1.1 The Two Code Paths
 
@@ -47,7 +47,7 @@ runtime.start() → L1131: sessionScope === 'per_chat' && !sandboxPerChat
 |---|-----------|---------------|----------|
 | RC-1 | Proactive resume bypasses ingest pipeline for groups | `runtime.ts:1198-1207` — fire-and-forget `.then()` injects turn via `session.sendTurn()` | Agents post "Using superpowers to recover state..." unprompted |
 | RC-2 | Shared/single mode resume has no staleness check | `runtime.ts:1218` — `getActiveSession(this.db)` returns any `active`/`suspended` session, no age filter | Per-chat has 60-min check at L1139; shared/single has none |
-| RC-3 | Group `allowed` status causes `group_auto_respond` for non-siblings | `access-policy.ts:128-131` — `lookupAccess(db, 'group', msg.chatJid)` returns `allowed` | Verified: `sqlite3 besbot/bot.db "SELECT * FROM access_list WHERE subject_type='group'"` → `120363406689931730@g.us|allowed` |
+| RC-3 | Group `allowed` status causes `group_auto_respond` for non-siblings | `access-policy.ts:128-131` — `lookupAccess(db, 'group', msg.chatJid)` returns `allowed` | Verified: `sqlite3 besbot/bot.db "SELECT * FROM access_list WHERE subject_type='group'"` → `120363555555555001@g.us|allowed` |
 | RC-4 | No outbound rate limiting or cooldown on group messages | `outbound-queue.ts:571-586` — `drainQueue()` sends immediately, only inter-message pacing via `MIN_SEND_GAP_MS` | No throttle, no group awareness in send path |
 | RC-5 | No admin commands for session visibility or manual kill | `commands.ts:11` — `LOCAL_COMMANDS = new Set(['new', 'status', 'help'])` | No `/sessions` or `/kill-session` |
 
@@ -56,7 +56,7 @@ runtime.start() → L1131: sessionScope === 'per_chat' && !sandboxPerChat
 | Assertion | Verdict | Evidence |
 |-----------|---------|----------|
 | Sibling filter fails due to LID resolution | **FALSE** | Instance logs show dozens of `reason: "sibling_bot"` entries for Q's messages in the WHATSOUP group. All 3 instances (Q, besbot, shandroid) have identical 41-row `lid_mappings` tables — `diff` exit code 0. |
-| L1 hydration only knows own mappings | **FALSE** | Q's auth dir (`~/.config/whatsoup/instances/q/auth/`) has 7 `lid-mapping-*_reverse.json` files including BES Bot (`4600648175816` → `19297905323`), Shannon (`74823329915101` → `18454179470`), and L (`203552140054731` → `18454433572`). Baileys writes these from WhatsApp protocol events. |
+| L1 hydration only knows own mappings | **FALSE** | Q's auth dir (`~/.config/whatsoup/instances/q/auth/`) has 7 `lid-mapping-*_reverse.json` files including Agent C (`1111111000004` → `15551230005`), Shannon (`11111110000005` → `15551230003`), and L (`111111100000006` → `15551230002`). Baileys writes these from WhatsApp protocol events. |
 | Resume fires before LID data available | **FALSE** | `main.ts:138` calls `hydrateLidMappings(db, config.authDir)` synchronously. `runtime.start()` is called later at `main.ts:676` (`await runtime.start()`). LID mappings are fully populated before resume runs. |
 | Agents respond to each other's messages (cascade) | **FALSE** | The sibling filter at `access-policy.ts:121-124` correctly blocks cross-agent messages. The unsolicited output comes from proactive resume injecting turns, not from agents responding to each other. |
 
@@ -66,11 +66,11 @@ Groups use LID-only addressing. Verified across all instances:
 
 | Instance | Sender JID format in WHATSOUP group | Example |
 |----------|--------------------------------------|---------|
-| Q | Others appear as `@lid` | BES Bot: `4600648175816@lid`, Lucas: `16566225768547@lid` |
-| BES Bot | Others appear as `@lid` | Q: `49079279169655@lid`, Shannon: `74823329915101@lid` |
-| Shandroid | Others appear as `@lid` | Q: `49079279169655@lid`, BES Bot: `4600648175816@lid` |
+| Q | Others appear as `@lid` | Agent C: `1111111000004@lid`, Lucas: `11111110000007@lid` |
+| Agent C | Others appear as `@lid` | Q: `11111110000008@lid`, Shannon: `11111110000005@lid` |
+| Shandroid | Others appear as `@lid` | Q: `11111110000008@lid`, Agent C: `1111111000004@lid` |
 
-Self-messages use the group JID as sender: `120363406689931730@g.us`. Zero `@s.whatsapp.net` JIDs appear as `sender_jid` in group messages.
+Self-messages use the group JID as sender: `120363555555555001@g.us`. Zero `@s.whatsapp.net` JIDs appear as `sender_jid` in group messages.
 
 The `resolvePhoneFromJid()` call at `access-policy.ts:52` resolves these LIDs correctly via `lid_mappings` DB table → sibling filter works. The problem is that proactive resume never reaches this code path.
 
@@ -115,7 +115,7 @@ if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability)
     // L1149-1152: derive chatJid from conversation_key
     const chatJid = cp.conversation_key.includes('_at_')
       ? cp.conversation_key.replace('_at_', '@')  // groups: '120363..._at_g.us' → '120363...@g.us'
-      : `${cp.conversation_key}@lid`;              // DMs: '18459780919' → '18459780919@lid'
+      : `${cp.conversation_key}@lid`;              // DMs: '15551230006' → '15551230006@lid'
 
     // L1163-1194: create SessionManager + outbound queue (no group filter)
     // L1198-1210: fire-and-forget resume + synthetic turn injection
@@ -130,7 +130,7 @@ if (this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability)
 }
 ```
 
-The loop iterates ALL resumable checkpoints including group conversations. The `conversation_key` format for groups ends with `_at_g.us` (e.g., `120363406689931730_at_g.us`). No check exists to skip groups.
+The loop iterates ALL resumable checkpoints including group conversations. The `conversation_key` format for groups ends with `_at_g.us` (e.g., `120363555555555001_at_g.us`). No check exists to skip groups.
 
 ### 3.2 Design
 
@@ -152,7 +152,7 @@ if (cp.conversation_key.endsWith('_at_g.us')) {
 
 ### 3.3 Edge Cases
 
-- **DM resume unaffected.** Only `_at_g.us` conversation keys are skipped. DM keys are bare phone numbers (e.g., `18459780919`) or LID numbers (e.g., `49079279169655`). Resume continues with the existing 60-minute staleness check at L1137-1147.
+- **DM resume unaffected.** Only `_at_g.us` conversation keys are skipped. DM keys are bare phone numbers (e.g., `15551230006`) or LID numbers (e.g., `11111110000008`). Resume continues with the existing 60-minute staleness check at L1137-1147.
 - **Agent loses in-progress group work.** If an agent was mid-task in a group when the restart happened, that session context is lost. Acceptable because: (a) the orchestrator can re-assign via @mention, (b) the conversation window (`window.ts:23-68`, default 50-100 messages) provides recent context, and (c) the alternative (unsolicited group messages) is worse.
 - **Sandboxed per_chat already excluded.** The guard at L1131 (`!this.sandboxPerChat`) skips sandbox mode. Sandbox resume happens lazily via workspace provisioning. This fix applies only to the non-sandboxed per_chat path.
 - **Checkpoint marked `ended`.** `upsertSessionCheckpoint()` (`durability.ts:514-516`) updates `session_status` and `updated_at`. The `ended` status prevents the checkpoint from appearing in future `getResumableCheckpoints()` calls (query filters for `IN ('active', 'suspended')`).
@@ -281,16 +281,16 @@ if (resumeChatJid.endsWith('@g.us')) {
 
 ### 5.1 Problem
 
-The WHATSOUP group (`120363406689931730@g.us`) has `status='allowed'` in the `access_list` table of agent instances. This was verified directly:
+The WHATSOUP group (`120363555555555001@g.us`) has `status='allowed'` in the `access_list` table of agent instances. This was verified directly:
 
 ```
 sqlite3 ~/.local/share/whatsoup/instances/besbot/bot.db \
   "SELECT * FROM access_list WHERE subject_type='group';"
-→ group|120363406689931730@g.us|allowed|WHATSOUP|2026-04-06 04:19:58|
+→ group|120363555555555001@g.us|allowed|WHATSOUP|2026-04-06 04:19:58|
 
 sqlite3 ~/.local/share/whatsoup/instances/shandroid/bot.db \
   "SELECT * FROM access_list WHERE subject_type='group';"
-→ group|120363406689931730@g.us|allowed|WHATSOUP|2026-04-06 04:19:58|
+→ group|120363555555555001@g.us|allowed|WHATSOUP|2026-04-06 04:19:58|
 ```
 
 This triggers `group_auto_respond` at `access-policy.ts:127-131`:
@@ -306,13 +306,13 @@ if (groupEntry?.status === 'allowed') {
 }
 ```
 
-The sibling filter at L121-124 runs first and correctly blocks agent-to-agent messages. But Lucas (`18459780919`) is NOT in any agent's `siblingPhones` (verified across all configs):
+The sibling filter at L121-124 runs first and correctly blocks agent-to-agent messages. But Lucas (`15551230006`) is NOT in any agent's `siblingPhones` (verified across all configs):
 
 | Instance | `siblingPhones` in config | Lucas present? |
 |----------|--------------------------|----------------|
-| besbot | Q (`18454174651`), L (`18454433572`), Shannon (`18454179470`), Loops (`18455943112`) | **No** |
-| shandroid | Q (`18454174651`), L (`18454433572`), BES Bot (`19297905323`), Loops (`18455943112`) | **No** |
-| loops | Q (`18454174651`), L (`18454433572`), Shannon (`18454179470`), BES Bot (`19297905323`) | **No** |
+| besbot | Q (`15551230001`), L (`15551230002`), Shannon (`15551230003`), Loops (`15551230004`) | **No** |
+| shandroid | Q (`15551230001`), L (`15551230002`), Agent C (`15551230005`), Loops (`15551230004`) | **No** |
+| loops | Q (`15551230001`), L (`15551230002`), Shannon (`15551230003`), Agent C (`15551230005`) | **No** |
 
 So every Lucas message to the WHATSOUP group bypasses the sibling filter (not a sibling) → hits `group_auto_respond` (group is `allowed`) → ALL agents respond independently.
 
@@ -325,7 +325,7 @@ So every Lucas message to the WHATSOUP group bypasses the sibling filter (not a 
 -- besbot: ~/.local/share/whatsoup/instances/besbot/bot.db
 -- shandroid: ~/.local/share/whatsoup/instances/shandroid/bot.db
 DELETE FROM access_list
-WHERE subject_type = 'group' AND subject_id = '120363406689931730@g.us';
+WHERE subject_type = 'group' AND subject_id = '120363555555555001@g.us';
 ```
 
 **Behavioral result:** With the entry removed, `lookupAccess()` returns null → `groupEntry?.status === 'allowed'` is false → falls through to the mention check at L142-143:
@@ -688,7 +688,7 @@ const classified = classifyActiveSessions(this.db, this.durability);
 
 | Sub-Project | Test File | Test Cases |
 |-------------|-----------|------------|
-| AE1 | `tests/runtimes/agent/runtime.test.ts` | (1) Resume loop encounters `conversation_key: '120363406689931730_at_g.us'` → skipped, checkpoint marked `ended` via `upsertSessionCheckpoint`. (2) DM checkpoint `'18459780919'` → resumed normally. (3) Multiple group checkpoints all skipped in same loop iteration. |
+| AE1 | `tests/runtimes/agent/runtime.test.ts` | (1) Resume loop encounters `conversation_key: '120363555555555001_at_g.us'` → skipped, checkpoint marked `ended` via `upsertSessionCheckpoint`. (2) DM checkpoint `'15551230006'` → resumed normally. (3) Multiple group checkpoints all skipped in same loop iteration. |
 | AE2 | `tests/runtimes/agent/runtime.test.ts` | (1) Shared mode: `updated_at` 2h ago → `prior` set to null, session not created. (2) Shared mode: `chat_jid` ends with `@g.us` → session resumes but `pendingStartupMessage` not set. (3) Single mode: group `chat_jid` → `prior` nullified, `shutdown(false)` called. (4) No checkpoint found → resume skipped (safety default). |
 | AE4 | `tests/core/echo-guard.test.ts` | (1) First send to group → allowed, recorded. (2) Second send within 60s → blocked. (3) Send after 60s → allowed. (4) DM send → always allowed regardless of cooldown. (5) `enabled: false` → always allowed. (6) `__resetForTests()` clears state. |
 | AE5 | `tests/runtimes/agent/commands.test.ts` | (1) `/sessions` → `{ type: 'local', command: 'sessions' }`. (2) `/kill-session 3` → `{ type: 'local', command: 'kill-session', args: '3' }`. (3) `/kill-session` (no arg) → `{ type: 'local', command: 'kill-session', args: undefined }`. |
@@ -697,7 +697,7 @@ const classified = classifyActiveSessions(this.db, this.durability);
 
 ### 9.2 Integration Tests
 
-- **Restart simulation:** Seed `session_checkpoints` with 3 rows: one group (`120363406689931730_at_g.us`, status `active`), one fresh DM (`18459780919`, status `active`, `updated_at` 5 min ago), one stale DM (`18454433572`, status `active`, `updated_at` 3 hours ago). Start runtime. Verify: group checkpoint → `ended`; fresh DM → session created + system turn sent; stale DM → `ended`.
+- **Restart simulation:** Seed `session_checkpoints` with 3 rows: one group (`120363555555555001_at_g.us`, status `active`), one fresh DM (`15551230006`, status `active`, `updated_at` 5 min ago), one stale DM (`15551230002`, status `active`, `updated_at` 3 hours ago). Start runtime. Verify: group checkpoint → `ended`; fresh DM → session created + system turn sent; stale DM → `ended`.
 - **Echo guard integration:** Wire a mock `messenger.sendMessage` that counts calls per JID. Enqueue 3 messages to a group queue within 60s. Verify: first message sent (count=1), second and third dropped (count stays 1). Wait 60s, enqueue fourth → sent (count=2).
 - **Session kill flow:** Create a session via `ensureSessionAndQueueSync()` (L1442). Verify it appears in `chatSessions`. Send `/kill-session 1`. Verify: `chatSessions.has(mapKey)` → false, `chatQueues.has(mapKey)` → false, `session.getStatus().active` → false, `agent_sessions.status` → `'ended'`.
 

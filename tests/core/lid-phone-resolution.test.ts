@@ -25,7 +25,7 @@ import fs from 'node:fs';
 
 const { testConfig } = vi.hoisted(() => {
   const testConfig = {
-    adminPhones: new Set(['18455880337']),
+    adminPhones: new Set(['15551230007']),
     accessMode: 'allowlist' as string,
     dbPath: ':memory:',
     authDir: '/tmp/wa-test-auth',
@@ -84,13 +84,13 @@ import type { IncomingMessage } from '../../src/core/types.ts';
 // Shared test constants
 // ---------------------------------------------------------------------------
 
-const ADMIN_PHONE = '18455880337';
+const ADMIN_PHONE = '15551230007';
 const ADMIN_LID = '31478083756155';
 const ADMIN_JID = `${ADMIN_PHONE}@s.whatsapp.net`;
 const ADMIN_LID_JID = `${ADMIN_LID}@lid`;
 
-const USER_PHONE = '15184194479';
-const USER_LID = '74823329915101';
+const USER_PHONE = '15551230008';
+const USER_LID = '11111110000005';
 const USER_JID = `${USER_PHONE}@s.whatsapp.net`;
 const USER_LID_JID = `${USER_LID}@lid`;
 
@@ -99,8 +99,8 @@ const UNKNOWN_LID = '88888888888888';
 const UNKNOWN_JID = `${UNKNOWN_PHONE}@s.whatsapp.net`;
 const UNKNOWN_LID_JID = `${UNKNOWN_LID}@lid`;
 
-const BOT_JID = '18454179470@s.whatsapp.net';
-const BOT_LID = '74823329915101@lid';
+const BOT_JID = '15551230003@s.whatsapp.net';
+const BOT_LID = '11111110000005@lid';
 
 const GROUP_JID = '120363123456789@g.us';
 
@@ -150,7 +150,7 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
 
 describe('extractLocal', () => {
   it('extracts phone from personal JID', () => {
-    expect(extractLocal('15184194479@s.whatsapp.net')).toBe('15184194479');
+    expect(extractLocal('15551230008@s.whatsapp.net')).toBe('15551230008');
   });
 
   it('extracts opaque LID from LID JID (does NOT resolve)', () => {
@@ -166,7 +166,7 @@ describe('extractLocal', () => {
   });
 
   it('returns bare string unchanged when no @', () => {
-    expect(extractLocal('15184194479')).toBe('15184194479');
+    expect(extractLocal('15551230008')).toBe('15551230008');
   });
 
   it('returns empty string for bare @domain', () => {
@@ -285,8 +285,8 @@ describe('resolveLid — L1.5 disk fallback', () => {
 
   it('resolves a LID whose reverse file exists on disk but is not in the DB', () => {
     const db = createTestDb();
-    const lid = '16566225768547';
-    const phone = '18459780919';
+    const lid = '11111110000007';
+    const phone = '15551230006';
     fs.writeFileSync(
       path.join(tmpDir, `lid-mapping-${lid}_reverse.json`),
       JSON.stringify(phone),
@@ -444,7 +444,7 @@ describe('resolvePhoneFromJid', () => {
 
   describe('bare strings (no @)', () => {
     it('returns string unchanged', () => {
-      expect(resolvePhoneFromJid('15184194479', db)).toBe('15184194479');
+      expect(resolvePhoneFromJid('15551230008', db)).toBe('15551230008');
       expect(resolvePhoneFromJid('', db)).toBe('');
     });
   });
@@ -744,11 +744,11 @@ describe('isAdminMessage with LID senders', () => {
     expect(isAdminMessage(msg, db)).toBe(false);
   });
 
-  it('admin phone without country code matches via suffix (8455880337)', () => {
-    testConfig.adminPhones.add('8455880337'); // no country code
+  it('admin phone without country code matches via suffix (5551230007)', () => {
+    testConfig.adminPhones.add('5551230007'); // no country code
     const msg = makeMsg({ senderJid: ADMIN_LID_JID, isGroup: false });
     expect(isAdminMessage(msg, db)).toBe(true);
-    testConfig.adminPhones.delete('8455880337');
+    testConfig.adminPhones.delete('5551230007');
   });
 });
 
@@ -882,14 +882,14 @@ describe('rate limiter key normalization', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('isAdminPhone with various phone formats', () => {
-  const adminSet = new Set(['18455880337']);
+  const adminSet = new Set(['15551230007']);
 
   it('exact match', () => {
-    expect(isAdminPhone('18455880337', adminSet)).toBe(true);
+    expect(isAdminPhone('15551230007', adminSet)).toBe(true);
   });
 
   it('without country code (suffix match)', () => {
-    expect(isAdminPhone('8455880337', adminSet)).toBe(true);
+    expect(isAdminPhone('5551230007', adminSet)).toBe(true);
   });
 
   it('with different country code format (no match if too different)', () => {
@@ -978,11 +978,11 @@ describe('parseAdminCommand and LID interactions', () => {
   type AllowBlock = { action: 'allow' | 'block'; subjectType: string; subjectId: string };
 
   it('ALLOW command with phone number', () => {
-    const cmd = parseAdminCommand('allow 18455880337') as AllowBlock | null;
+    const cmd = parseAdminCommand('allow 15551230007') as AllowBlock | null;
     expect(cmd).not.toBeNull();
     expect(cmd!.action).toBe('allow');
     expect(cmd!.subjectType).toBe('phone');
-    expect(cmd!.subjectId).toBe('18455880337');
+    expect(cmd!.subjectId).toBe('15551230007');
   });
 
   it('ALLOW command with LID number (treated as phone digits)', () => {
@@ -1010,7 +1010,7 @@ describe('parseAdminCommand and LID interactions', () => {
 
 describe('JID construction roundtrip', () => {
   it('toPersonalJid + extractLocal roundtrips', () => {
-    expect(extractLocal(toPersonalJid('18455880337'))).toBe('18455880337');
+    expect(extractLocal(toPersonalJid('15551230007'))).toBe('15551230007');
   });
 
   it('toLidJid + extractLocal roundtrips', () => {
@@ -1019,14 +1019,14 @@ describe('JID construction roundtrip', () => {
 
   it('toPersonalJid + resolvePhoneFromJid roundtrips', () => {
     const db = createTestDb();
-    expect(resolvePhoneFromJid(toPersonalJid('18455880337'), db)).toBe('18455880337');
+    expect(resolvePhoneFromJid(toPersonalJid('15551230007'), db)).toBe('15551230007');
     db.close();
   });
 
   it('toLidJid + resolvePhoneFromJid resolves when mapping exists', () => {
     const db = createTestDb();
-    upsertLidMapping(db, '31478083756155', '18455880337@s.whatsapp.net');
-    expect(resolvePhoneFromJid(toLidJid('31478083756155'), db)).toBe('18455880337');
+    upsertLidMapping(db, '31478083756155', '15551230007@s.whatsapp.net');
+    expect(resolvePhoneFromJid(toLidJid('31478083756155'), db)).toBe('15551230007');
     db.close();
   });
 });
@@ -1037,13 +1037,13 @@ describe('JID construction roundtrip', () => {
 
 describe('phone normalization with resolved LID phones', () => {
   it('normalizePhone strips non-digits from resolved phone', () => {
-    expect(normalizePhone('18455880337')).toBe('18455880337');
-    expect(normalizePhone('+1-845-588-0337')).toBe('18455880337');
+    expect(normalizePhone('15551230007')).toBe('15551230007');
+    expect(normalizePhone('+1-555-123-0007')).toBe('15551230007');
   });
 
   it('normalizePhoneE164 adds country code for 10-digit numbers', () => {
-    expect(normalizePhoneE164('8455880337')).toBe('18455880337');
-    expect(normalizePhoneE164('18455880337')).toBe('18455880337');
+    expect(normalizePhoneE164('5551230007')).toBe('15551230007');
+    expect(normalizePhoneE164('15551230007')).toBe('15551230007');
   });
 
   it('resolved LID phone is already E.164 (no normalization needed)', () => {
@@ -1258,7 +1258,7 @@ describe('ALLOW replay with LID-stored messages', () => {
     expect(validLidJid).toBe(`${ADMIN_LID}@lid`);
 
     // The old broken approach:
-    const invalidLidJid = toLidJid(ADMIN_PHONE); // '18455880337@lid' — WRONG
+    const invalidLidJid = toLidJid(ADMIN_PHONE); // '15551230007@lid' — WRONG
     expect(invalidLidJid).toBe(`${ADMIN_PHONE}@lid`);
     // This would never match any message in the DB
     expect(invalidLidJid).not.toBe(validLidJid);

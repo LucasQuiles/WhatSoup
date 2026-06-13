@@ -162,7 +162,12 @@ TEST_FIXTURE_AUTH_BOND = re.compile(r"(?:^|\s)(?:authDir|auth|creds):\s*/tmp/wa-
 # nil; the win is catching test siblings beyond the original auth-only literal.
 _TEST_LEAK_DEFAULT_PATTERNS: list[str] = [
     r"/tmp/wa-test-",                          # /tmp/wa-test-auth and siblings
-    r"/var/folders/[^/]+/[^/]+/T/",           # macOS user temp dirs (vitest/jest)
+    # macOS user temp dirs (vitest/jest mkdtemp roots). The negative lookahead
+    # exempts the dispatcher's OWN TMPDIR writefail fallback directory: real
+    # macOS daily-health events embed that path in their writefail inventory
+    # line, and matching it silently dropped legitimate host alerts as "test
+    # leaks" (the exact silent-loss class this defense exists to prevent).
+    r"/var/folders/[^/]+/[^/]+/T/(?!bot-errors-writefail(?:[/,\s]|$))",
     r"/tmp/whatsoup-vitest-bot-errors/",       # vitest redirect outbox root
 ]
 

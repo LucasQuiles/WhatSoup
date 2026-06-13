@@ -132,7 +132,7 @@ describe('access-list', () => {
 
 describe('extractLocal', () => {
   it('strips @s.whatsapp.net suffix', () => {
-    expect(extractLocal('15184194479@s.whatsapp.net')).toBe('15184194479');
+    expect(extractLocal('15551230008@s.whatsapp.net')).toBe('15551230008');
   });
 
   it('strips @lid suffix', () => {
@@ -140,6 +140,6 @@ describe('extractLocal', () => {
   });
 
   it('returns the string unchanged when there is no @ symbol', () => {
-    expect(extractLocal('15184194479')).toBe('15184194479');
+    expect(extractLocal('15551230008')).toBe('15551230008');
   });
 });

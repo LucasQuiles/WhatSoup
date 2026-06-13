@@ -110,6 +110,12 @@ jobs:
       - name: Node pin consistency guard
         run: npm run guard:node-pin-consistency
 
+      - name: Source runtime drift guard
+        run: npm run guard:source-runtime-drift
+
+      - name: Simulation matrix guard
+        run: npm run guard:bot-errors-simulation-matrix
+
       - name: Harness maintenance manifest guard
         run: npm run guard:harness-maintenance
 
@@ -137,6 +143,9 @@ jobs:
 
       - name: Test suite
         run: npm test -- --pool=forks
+
+      - name: Failure-scenario drills
+        run: npm run test:drills
 
       - name: Install console dependencies
         run: npm --prefix console ci

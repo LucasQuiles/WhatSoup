@@ -115,8 +115,8 @@ function makeRuntime(): Runtime {
 function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
     messageId: `msg-${randomBytes(3).toString('hex')}`,
-    chatJid: '15184194479@s.whatsapp.net',
-    senderJid: '15184194479@s.whatsapp.net',
+    chatJid: '15551230008@s.whatsapp.net',
+    senderJid: '15551230008@s.whatsapp.net',
     senderName: 'Alice',
     content: 'hello',
     contentType: 'text',
@@ -137,7 +137,7 @@ async function runIngest(handler: (msg: IncomingMessage) => void, msg: IncomingM
   await drainIngest();
 }
 
-const BOT_JID = '18455943112@s.whatsapp.net';
+const BOT_JID = '15551230004@s.whatsapp.net';
 
 function makeIngest(db: Database, messenger: Messenger, runtime: Runtime, durability?: DurabilityEngine) {
   return createIngestHandler(db, messenger, runtime, () => BOT_JID, () => null, durability);

@@ -497,7 +497,7 @@ describe('Sent message contract', () => {
     const userMessage = 'Hey can I join?';
     const approvalText = `New contact: ${name} (+${phone})\nMessage: ${userMessage}`;
 
-    await cm.sendMessage('15184194479@s.whatsapp.net', approvalText);
+    await cm.sendMessage('15551230008@s.whatsapp.net', approvalText);
     const { text: sent } = cm.sent[0]!;
 
     expect(sent).toMatch(/^New contact: .+ \(\+\d+\)\nMessage: .+$/);
