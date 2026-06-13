@@ -1,6 +1,7 @@
 // src/runtimes/agent/outbound-queue.ts
 // Serialized outbound queue for WhatsApp messages with batching and pacing.
 
+import { createHash } from 'node:crypto';
 import type { Messenger } from '../../core/types.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
@@ -62,6 +63,13 @@ export const TYPING_REFRESH_MS = 8_000;
 export const SEND_TIMEOUT_MS = 15_000;
 /** Delay before flushing aggregated text — batches streaming provider fragments. */
 export const TEXT_AGGREGATE_DELAY_MS = 2_000;
+/** Suppress repeated terminal/error text from respawn loops without affecting normal repeated assistant output. */
+export const TERMINAL_TEXT_DEDUPE_WINDOW_MS = 5 * 60_000;
+
+interface TerminalTextDedupeEntry {
+  lastSeenAt: number;
+  suppressedCount: number;
+}
 
 /**
  * Pre-process text for WhatsApp delivery:
@@ -173,6 +181,10 @@ export class OutboundQueue implements IOutboundQueue {
   private currentInboundSeq: number | undefined;
   /** The outbound_ops.id of the most recently created op (for markLastTerminal). */
   private lastOpId: number | undefined;
+  /** Dedupe key for the most recently submitted text op, promoted only if markLastTerminal follows. */
+  private lastSubmittedTextDedupeKey: string | undefined;
+  /** Recent terminal text sends. Only terminalized text can suppress a later duplicate. */
+  private readonly recentTerminalTextKeys = new Map<string, TerminalTextDedupeEntry>();
 
   /** Queue of text chunks ready to send. */
   private sendQueue: string[] = [];
@@ -302,6 +314,15 @@ export class OutboundQueue implements IOutboundQueue {
   markLastTerminal(): void {
     if (this.lastOpId !== undefined && this.durability) {
       this.durability.markTerminal(this.lastOpId);
+    }
+    if (this.lastSubmittedTextDedupeKey !== undefined) {
+      const now = Date.now();
+      this.pruneTerminalTextDedupe(now);
+      this.recentTerminalTextKeys.set(this.lastSubmittedTextDedupeKey, {
+        lastSeenAt: now,
+        suppressedCount: 0,
+      });
+      this.lastSubmittedTextDedupeKey = undefined;
     }
     this.clearLastOpId();
   }
@@ -657,6 +678,9 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private enqueue(chunk: string): void {
+    if (this.suppressDuplicateTerminalText(chunk)) {
+      return;
+    }
     this.lastActivity = Date.now();
     this.sendQueue.push(chunk);
     if (!this.sending) {
@@ -709,6 +733,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private async sendWithRetry(text: string): Promise<void> {
+    const textDedupeKey = this.terminalTextDedupeKey('text', this.chatJid, text);
     // Create an outbound op before first attempt (if durability is wired)
     let opId: number | undefined;
     if (this.durability) {
@@ -745,6 +770,7 @@ export class OutboundQueue implements IOutboundQueue {
         if (opId !== undefined && this.durability) {
           this.durability.markSubmitted(opId, receipt.waMessageId);
         }
+        this.lastSubmittedTextDedupeKey = textDedupeKey;
         return;
       } catch (err) {
         lastErr = err;
@@ -778,5 +804,41 @@ export class OutboundQueue implements IOutboundQueue {
     const retryAfterMs = (err as { payload?: { retryAfterMs?: unknown } })?.payload?.retryAfterMs;
     if (typeof retryAfterMs !== 'number' || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) return undefined;
     return Math.min(retryAfterMs, OutboundQueue.SEND_RETRY_MAX_MS);
+  }
+
+  private suppressDuplicateTerminalText(text: string): boolean {
+    const now = Date.now();
+    this.pruneTerminalTextDedupe(now);
+    const key = this.terminalTextDedupeKey('text', this.chatJid, text);
+    const entry = this.recentTerminalTextKeys.get(key);
+    if (!entry) return false;
+
+    entry.lastSeenAt = now;
+    entry.suppressedCount += 1;
+    log.info({
+      chatJid: this.chatJid,
+      opType: 'text',
+      terminal: true,
+      payloadHash: this.terminalTextPayloadHash(text),
+      suppressedCount: entry.suppressedCount,
+      windowMs: TERMINAL_TEXT_DEDUPE_WINDOW_MS,
+    }, 'suppressed duplicate outbound terminal text');
+    return true;
+  }
+
+  private pruneTerminalTextDedupe(now: number): void {
+    for (const [key, entry] of this.recentTerminalTextKeys) {
+      if (now - entry.lastSeenAt > TERMINAL_TEXT_DEDUPE_WINDOW_MS) {
+        this.recentTerminalTextKeys.delete(key);
+      }
+    }
+  }
+
+  private terminalTextDedupeKey(opType: 'text', chatJid: string, text: string): string {
+    return `${opType}:${chatJid}:${this.terminalTextPayloadHash(text)}`;
+  }
+
+  private terminalTextPayloadHash(text: string): string {
+    return createHash('sha256').update(text).digest('hex');
   }
 }
