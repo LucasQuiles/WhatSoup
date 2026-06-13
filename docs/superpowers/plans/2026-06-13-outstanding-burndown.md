@@ -1,6 +1,27 @@
 # Outstanding Burndown Implementation Plan
 
-**Status:** active — implementation branch `chore/outstanding-specs-and-burndown`.
+**Status:** completed/superseded — original implementation branch landed through #810, with follow-on closures in #814 and #808. Do not restart `chore/outstanding-specs-and-burndown`.
+
+> **CURRENT STATE REFOCUS (2026-06-13):** `origin/main` is `13068ac98d27eb43f4d2001f54780badfb9955a0`. The original hardening branch is closed:
+> - #810 closed R1-R5, H1 collector/runner, P1, and the safeguard-diagnostics fail-closed fix.
+> - #814 closed the remaining no-decision residuals and several decisions after approval: `bot-errors-emit.py` parent preflight, `bot-errors-q-loop.py` exception alignment for private-dir setup, `checkBearerAuth` deletion, `guard-core.readText`, `asRecordOrEmpty`, and import-boundary fail-closed coverage.
+> - #808 superseded the duplicate-helper lanes with `src/lib/private-fs.ts`, `src/core/provider-mcp-config.ts`, `src/runtimes/chat/enrichment/raw-output.ts`, and `src/lib/short-hash.ts`.
+> - #815 closed the alert-pipeline review follow-ups and is now part of current `origin/main`; post-merge main CI on `13068ac9` finished 5/5 green.
+>
+> **Do next:** validate the remaining open PRs #804 and #813; build a closure matrix for older high-risk runtime decisions against current main; and preserve/triage dirty parallel worktrees before cleanup. **Do not** treat the historical task checklist below as active work without first rechecking current main.
+
+## Refocused Remaining Queue
+
+| Area | Current status | Next action |
+|---|---|---|
+| Open PR #804: libsignal key-log suppression | Open, clean, GitHub checks green; review found missing direct coverage, fixed locally as `feff7dfe` (`test: cover libsignal console guard`) but not pushed | Needs approval to push the local test commit to the PR branch, then CI rerun before merge approval. |
+| Open PR #813: failure taxonomy + bounded retry | Open, clean, GitHub checks green; locally merged with #804 + local #804 test fix on top of current main and `verify:push:branch` passed on validation branch `4aa68577` | Requires human approval before merge; post-merge main CI still required. Review note: broad `classifyAgentFailure` API is mostly future-facing; production adoption is currently detector relocation, crash-class typing, and API Retry-After wiring. |
+| PR #815: alert-pipeline review follow-ups | Landed in current main as `13068ac9`; post-merge main CI 5/5 green | Closed; keep only as baseline context for #804/#813 validation. |
+| D5/R8 Python secret-redaction SSOT | Still open as architecture/security work; current main has cross-consumer redaction tests but no canonical pattern source | Create a decision package: canonical source, standalone deploy import/manifest strategy, and fixture coverage. |
+| Python standalone deploy architecture | Still open | Decide shared `deploy/scripts/lib/` module versus explicit N-copy-by-design guard. |
+| Collector cooldown flake | Still needs current CI-history verification | Confirm whether the flake remains merge-blocking; if yes, fix with deterministic fake timers, not retry/skip. |
+| Older runtime decisions | Need current-main revalidation | Recheck heal restart suppression, lock TOCTOU, detailed APIs wire-or-excise, HTTP-error degraded-forever, keychain unlock behavior, and errPreview sanitization against landed #807/#813/#815. |
+| Parallel worktrees/branches | Active preservation concern | Classify by owner/status; use `git cherry -v` or `git range-diff` before deleting anything claimed superseded. |
 
 > **SPLIT RECONCILIATION (2026-06-13):** During pre-push review the consolidation lane was found to collide with the concurrent, more comprehensive PR #808 (`refactor/private-fs-and-mcp-writer-consolidation`), which independently lands `src/lib/private-fs.ts` (superset of F2's `privateWriteError`), `src/runtimes/chat/enrichment/raw-output.ts` (identical to F1's `truncateRaw`/fence-strip), and `src/lib/short-hash.ts`. To avoid duplicate modules and conflicting edits, this PR was split: **F1 and F2 are dropped and ceded to PR #808**; the **cosmetic F3 folds** (anonymize-private-literals.ts, work-index.ts onto guard-core git/text helpers) are also dropped (collision-free with #808 but pure DRY — re-landable later). **Kept:** R1–R5, H1, P1, the R3 staged-blob-distinct-error machinery in guard-core, and the safeguard-diagnostics fail-open→fail-closed reliability fix (a reliability fix, not consolidation; collision-free). Net shipped scope = hardening + correctness only.
 
