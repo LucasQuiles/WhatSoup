@@ -284,6 +284,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when the plugin is absent only outside CI |
 | `cli:npm.guard-lint-src` | `npm run guard:lint:src` | `package.json` | stable | active | ESLint architectural-fitness ring over src/scripts/tests; warns (non-blocking), fails only on errors/config faults |
 | `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |
+| `cli:npm.verify-console-design` | `npm run verify:console-design` | `package.json` | stable | active | Shared console design-system verification chain used by push and release gates |
 | `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |
 | `cli:npm.verify-publish` | `npm run verify:publish` | `package.json` | beta | active | Strict public-publication prep gate; expected to fail until `PRIVATE-ARCHIVE` rows are removed, sanitized, or reclassified |
