@@ -58,6 +58,7 @@ const requiredPackageScripts = {
     'npm run guard:safeguard-diagnostics',
     'npm run guard:test-integrity',
     'npm run guard:lint:src',
+    'npm --prefix console run lint',
     'npm run typecheck:all',
     'npm test',
     'npm run coverage:check',
