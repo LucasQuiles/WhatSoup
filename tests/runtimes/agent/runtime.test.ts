@@ -4852,6 +4852,48 @@ describe('AgentRuntime', () => {
     });
   });
 
+  it('sandboxPerChat does not pass primary custom endpoint config to fallback opencode workspaces', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentProviderConfig?: Record<string, unknown>;
+      agentFallbackProvider?: string;
+      agentFallbackModel?: string;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    agentConfig.agentProviderConfig = {
+      baseUrl: 'https://primary.example.invalid/v1',
+      apiKeyService: 'openai',
+    };
+    agentConfig.agentFallbackProvider = 'opencode-cli';
+    agentConfig.agentFallbackModel = 'minimax/minimax-m2';
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    (runtime as unknown as { fallbackActiveUntil: number | null }).fallbackActiveUntil = Date.now() + 60_000;
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello fallback' }));
+
+    const provisionCalls = mockProvisionWorkspace.mock.calls as unknown as Array<[{
+      provider?: string;
+      providerConfig?: unknown;
+    }]>;
+    const fallbackProvision = provisionCalls.find(([opts]) => opts.provider === 'opencode-cli')?.[0];
+    expect(fallbackProvision?.providerConfig).toBeUndefined();
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      provider: 'opencode-cli',
+      model: 'minimax/minimax-m2',
+      providerConfig: {},
+    });
+  });
+
   it('sandboxPerChat passes custom endpoint config for primary opencode workspaces', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
