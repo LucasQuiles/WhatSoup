@@ -119,7 +119,7 @@ Canonical impl: [`src/core/health.ts`](../src/core/health.ts). Bound by `HEALTH_
 
 | Identifier | Method + Path | Source | Stability | Status | Notes |
 |---|---|---|---|---|---|
-| `http:health.status` | `GET /health` | `src/core/health.ts:810` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) |
+| `http:health.status` | `GET /health` | `src/core/health.ts:810` | stable | active | Liveness probe; on agent instances the `instance` block carries provider-fallback telemetry (`effectiveProvider`, `fallbackActiveUntil`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt`; counters are process-local, reset on restart) and `primaryModelUsability` (`status`, `provider`, `model`, `reason`, `suggestion`, `checkedAt`, `probeInFlight`) from the startup primary model usability probe. |
 | `http:health.send` | `POST /send` | `src/core/health.ts:405` | stable | active | Send a text message |
 | `http:health.access` | `POST /access` | `src/core/health.ts:633` | stable | active | Allow / block contact or group |
 | `http:health.mark-read` | `POST /mark-read` | `src/core/health.ts:725` | stable | active | Zero unread + chatModify |

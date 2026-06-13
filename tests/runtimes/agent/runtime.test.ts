@@ -91,6 +91,22 @@ const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
   mockClearAlertSource: vi.fn(),
 }));
 
+const { mockProbePrimaryModelUsability, mockCreatePrimaryModelProbeAdapters } = vi.hoisted(() => ({
+  mockProbePrimaryModelUsability: vi.fn(async (target: { provider: string; model?: string | null }): Promise<{
+    status: 'usable' | 'model-unavailable' | 'credential-unavailable' | 'provider-unavailable' | 'timeout' | 'unknown';
+    provider: string;
+    model: string | null;
+    reason?: string;
+    suggestion?: string | null;
+  }> => ({
+    status: target.model ? 'usable' : 'unknown',
+    provider: target.provider,
+    model: target.model ?? null,
+    ...(target.model ? {} : { reason: 'model-not-configured' }),
+  })),
+  mockCreatePrimaryModelProbeAdapters: vi.fn(() => ({})),
+}));
+
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -293,6 +309,18 @@ const { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat } = 
 vi.mock('../../../src/runtimes/agent/media-bridge.ts', () => ({
   startMediaBridge: mockStartMediaBridge,
   setMediaBridgeChat: mockSetMediaBridgeChat,
+}));
+
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability.ts')>();
+  return {
+    ...actual,
+    probePrimaryModelUsability: mockProbePrimaryModelUsability,
+  };
+});
+
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
+  createPrimaryModelProbeAdapters: mockCreatePrimaryModelProbeAdapters,
 }));
 
 vi.mock('../../../src/mcp/registry.ts', () => ({
@@ -618,6 +646,14 @@ describe('AgentRuntime', () => {
     mockRuntimeLogger.debug.mockClear();
     mockEmitAlert.mockClear();
     mockClearAlertSource.mockClear();
+    mockCreatePrimaryModelProbeAdapters.mockClear();
+    mockProbePrimaryModelUsability.mockReset();
+    mockProbePrimaryModelUsability.mockImplementation(async (target: { provider: string; model?: string | null }) => ({
+      status: target.model ? 'usable' : 'unknown',
+      provider: target.provider,
+      model: target.model ?? null,
+      ...(target.model ? {} : { reason: 'model-not-configured' }),
+    }));
     const agentConfig = mockConfig as typeof mockConfig & {
       agentProvider?: string;
       agentProviderConfig?: Record<string, unknown>;
@@ -644,6 +680,54 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     expect(ensureAgentSchema).toHaveBeenCalledWith(db);
+  });
+
+  it('start() records primary model usability and alerts on unusable primary model', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentProviderConfig?: Record<string, unknown>;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    agentConfig.agentProviderConfig = { apiKeyService: 'do-not-log-this' };
+    mockProbePrimaryModelUsability.mockResolvedValueOnce({
+      status: 'model-unavailable',
+      provider: 'claude-cli',
+      model: 'configured-primary',
+      reason: 'selected-model-rejected',
+    });
+
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      model: 'configured-primary',
+    });
+    await runtime.start();
+
+    await vi.waitFor(() => {
+      expect(mockProbePrimaryModelUsability).toHaveBeenCalledWith(
+        { provider: 'claude-cli', model: 'configured-primary' },
+        {},
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(runtime.getFallbackState().primaryModelUsability).toMatchObject({
+        status: 'model-unavailable',
+        provider: 'claude-cli',
+        model: 'configured-primary',
+        reason: 'selected-model-rejected',
+        probeInFlight: false,
+      });
+    });
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      'test',
+      'primary_model_unusable',
+      'Primary model usability probe failed',
+      expect.stringContaining('status=model-unavailable'),
+      'warning',
+    );
+    const evidence = mockEmitAlert.mock.calls.find((call) => call[1] === 'primary_model_unusable')?.[3] as string;
+    expect(evidence).toContain('provider=claude-cli');
+    expect(evidence).toContain('model=configured-primary');
+    expect(evidence).not.toContain('do-not-log-this');
   });
 
   it('applies outbound status routing config when creating queues', () => {

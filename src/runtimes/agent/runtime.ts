@@ -80,6 +80,11 @@ import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-
 import { createProviderMcpBridge, writeProviderMcpConfig, writeProviderMcpConfigTarget } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus } from './providers/binary-preflight.ts';
+import {
+  probePrimaryModelUsability,
+  type PrimaryModelUsabilityResult,
+} from './providers/primary-model-usability.ts';
+import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -402,6 +407,11 @@ export interface AgentRuntimeOptions {
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
   replyGuaranteeTimeoutMs?: number;
 }
+
+type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
+  checkedAt: number | null;
+  probeInFlight: boolean;
+};
 
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting
@@ -1403,6 +1413,8 @@ export class AgentRuntime implements Runtime {
   // path must be countable — a silent expensive fallback is a billing
   // surprise waiting to be found on the invoice instead of in /health.
   private fallbackWindowCostUsd = 0;
+  private primaryModelUsability: RuntimePrimaryModelUsability | null = null;
+  private primaryModelUsabilityAlertActive = false;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -2490,6 +2502,7 @@ export class AgentRuntime implements Runtime {
     ensureAgentSchema(this.db);
     this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
+    this.schedulePrimaryModelUsabilityProbe('startup');
 
     // Write sandbox policy and hook settings when sandbox config is present
     if (this.sandbox) {
@@ -5846,6 +5859,7 @@ export class AgentRuntime implements Runtime {
     fallbackReverts: number;
     fallbackReplays: number;
     fallbackWindowCostUsd: number;
+    primaryModelUsability: RuntimePrimaryModelUsability | null;
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   } {
@@ -5867,6 +5881,7 @@ export class AgentRuntime implements Runtime {
       fallbackReverts: this.fallbackReverts,
       fallbackReplays: this.fallbackReplays,
       fallbackWindowCostUsd: this.fallbackWindowCostUsd,
+      primaryModelUsability: this.primaryModelUsability ? { ...this.primaryModelUsability } : null,
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
     };
@@ -6506,6 +6521,92 @@ export class AgentRuntime implements Runtime {
         });
     }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
     this.fallbackPrimaryProbeTimer.unref?.();
+  }
+
+  private schedulePrimaryModelUsabilityProbe(trigger: 'startup' | 'manual'): void {
+    const target = {
+      provider: this.agentProvider,
+      model: this.model ?? null,
+    };
+    this.primaryModelUsability = {
+      status: 'unknown',
+      provider: target.provider,
+      model: target.model,
+      reason: 'probe-in-flight',
+      checkedAt: this.primaryModelUsability?.checkedAt ?? null,
+      probeInFlight: true,
+    };
+
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig);
+    void Promise.resolve()
+      .then(() => probePrimaryModelUsability(target, adapters))
+      .then((result) => this.recordPrimaryModelUsability(result, trigger))
+      .catch((err) => {
+        log.warn({ err, provider: target.provider, model: target.model }, 'primary model usability probe threw');
+        this.recordPrimaryModelUsability({
+          status: 'unknown',
+          provider: target.provider,
+          model: target.model,
+          reason: 'probe-threw',
+        }, trigger);
+      });
+  }
+
+  private recordPrimaryModelUsability(
+    result: PrimaryModelUsabilityResult,
+    trigger: 'startup' | 'manual',
+  ): void {
+    this.primaryModelUsability = {
+      ...result,
+      checkedAt: Date.now(),
+      probeInFlight: false,
+    };
+
+    if (result.status === 'usable') {
+      if (this.primaryModelUsabilityAlertActive) {
+        clearAlertSourceChecked(
+          this.instanceName,
+          'primary_model_unusable',
+          `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`,
+        );
+        this.primaryModelUsabilityAlertActive = false;
+      }
+      return;
+    }
+
+    if (!this.primaryModelUsabilityRequiresAlert(result)) return;
+
+    this.primaryModelUsabilityAlertActive = true;
+    emitAlertChecked(
+      this.instanceName,
+      'primary_model_unusable',
+      'Primary model usability probe failed',
+      this.primaryModelUsabilityEvidence(result, trigger),
+      'warning',
+    );
+  }
+
+  private primaryModelUsabilityRequiresAlert(result: PrimaryModelUsabilityResult): boolean {
+    if (result.model === null) return false;
+    if (result.status === 'unknown') {
+      return result.reason !== 'model-not-configured' && result.reason !== 'unsupported-provider';
+    }
+    return result.status !== 'usable';
+  }
+
+  private primaryModelUsabilityEvidence(
+    result: PrimaryModelUsabilityResult,
+    trigger: 'startup' | 'manual',
+  ): string {
+    const parts = [
+      `trigger=${trigger}`,
+      `status=${alertEvidenceValue(result.status)}`,
+      `provider=${alertEvidenceValue(result.provider)}`,
+      `model=${alertEvidenceValue(result.model)}`,
+    ];
+    if (result.reason) parts.push(`reason=${alertEvidenceValue(result.reason)}`);
+    if (result.suggestion) parts.push(`suggestion=${alertEvidenceValue(result.suggestion)}`);
+    return parts.join(' ');
   }
 
   /**
