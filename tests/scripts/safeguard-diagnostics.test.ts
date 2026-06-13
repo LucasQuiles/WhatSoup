@@ -83,6 +83,7 @@ const requiredFiles: Record<string, string> = {
     'private-key',
     'Co-Authored-By:',
     '--commit-authors',
+    'scanCommitMessage(commit.message',
   ].join('\n'),
   'scripts/publication-guard.ts': [
     'scanTextForPrivateLiterals',

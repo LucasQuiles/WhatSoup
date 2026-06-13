@@ -66,14 +66,32 @@ describe('check-unit-drift.sh', () => {
     expect(result.stderr).toContain('missing installed unit: example.service');
   });
 
-  it('skips cleanly when the systemd user directory is absent', () => {
+  it('exits 3 with SKIP: prefix when the systemd user directory is absent', () => {
     const { repo, systemd } = makeFixture();
     const missingSystemd = join(systemd, 'missing');
     writeFileSync(join(repo, 'deploy/example.service'), '[Unit]\nDescription=Repo\n');
 
     const result = run(['--repo-root', repo, '--systemd-dir', missingSystemd, '--unit', 'example.service']);
 
+    expect(result.status).toBe(3);
+    expect(result.stdout).toContain('SKIP:');
+    expect(result.stdout).toContain('systemd unit directory not found');
+  });
+
+  it('exits 0 with SKIP: prefix when the systemd directory is absent and --allow-missing-systemd-dir is passed', () => {
+    const { repo, systemd } = makeFixture();
+    const missingSystemd = join(systemd, 'missing');
+    writeFileSync(join(repo, 'deploy/example.service'), '[Unit]\nDescription=Repo\n');
+
+    const result = run([
+      '--repo-root', repo,
+      '--systemd-dir', missingSystemd,
+      '--allow-missing-systemd-dir',
+      '--unit', 'example.service',
+    ]);
+
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('systemd unit directory not found; skipping drift check');
+    expect(result.stdout).toContain('SKIP:');
+    expect(result.stdout).toContain('systemd unit directory not found');
   });
 });

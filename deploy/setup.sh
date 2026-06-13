@@ -16,7 +16,9 @@ LAUNCHD_TIMER_LABELS=(
 )
 
 if [ "${1:-}" = "--check" ]; then
-  exec "$REPO_ROOT/scripts/check-unit-drift.sh"
+  # macOS hosts have no systemd user dir — tolerate the documented skip
+  # (exit 3 without the flag) instead of failing every Darwin --check.
+  exec "$REPO_ROOT/scripts/check-unit-drift.sh" --allow-missing-systemd-dir
 fi
 if [ "${1:-}" = "--remove-timers" ]; then
   if [ "$PLATFORM" != "Darwin" ]; then

@@ -350,9 +350,10 @@ describe('GET /api/lid-mappings -- conflict surfacing (#251)', () => {
   it('does not emit lid_conflict events on GET because reads must not trigger refetch loops', async () => {
     broadcastSpy.mockClear();
     await fetch(`${baseUrl}/api/lid-mappings`, { headers: auth });
+    type LidConflictEvent = { type: string; instance?: string };
     const lidEvents = broadcastSpy.mock.calls
-      .map(call => call[0] as { type: string; instance?: string })
-      .filter(ev => ev.type === 'lid_conflict');
+      .map((call: unknown[]) => call[0] as LidConflictEvent)
+      .filter((ev: LidConflictEvent) => ev.type === 'lid_conflict');
     expect(lidEvents).toEqual([]);
   });
 });
@@ -373,16 +374,17 @@ describe('POST /api/lid-mappings/sync -- conflict event emission (#251)', () => 
       .filter(d => d.conflicts > 0);
     expect(conflictDetails.length).toBeGreaterThan(0);
 
+    type LidConflictEvent = { type: string; lid?: string; conversationKey?: string };
     const lidEvents = broadcastSpy.mock.calls
-      .map(call => call[0] as { type: string; lid?: string; conversationKey?: string })
-      .filter(ev => ev.type === 'lid_conflict');
+      .map((call: unknown[]) => call[0] as LidConflictEvent)
+      .filter((ev: LidConflictEvent) => ev.type === 'lid_conflict');
     expect(lidEvents.length).toBeGreaterThan(0);
     expect(lidEvents).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: 'lid_conflict', lid: expect.any(String) }),
       ]),
     );
-    expect(lidEvents.every(ev => ev.conversationKey === undefined)).toBe(true);
+    expect(lidEvents.every((ev: LidConflictEvent) => ev.conversationKey === undefined)).toBe(true);
 
     for (const inst of [INST_ALPHA, INST_BRAVO, INST_CHARLIE]) {
       const db = new DatabaseSync(path.join(dataRoot, inst, 'bot.db'));
