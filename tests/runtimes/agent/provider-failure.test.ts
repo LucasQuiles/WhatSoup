@@ -15,6 +15,9 @@ describe('classifyProviderFailure — known failure patterns', () => {
   const cases: Array<{ name: string; text: string; kind: ProviderFailureKind }> = [
     { name: 'usage limit reached', text: 'Claude usage limit reached. Resets at 3pm.', kind: 'usage-limit' },
     { name: 'out of extra usage', text: 'You are out of extra usage for now.', kind: 'usage-limit' },
+    { name: 'credit balance exhausted', text: 'Provider error: insufficient credits. Please add credits to continue.', kind: 'usage-limit' },
+    { name: 'account balance exhausted', text: 'Provider billing error: your account balance is too low to complete this request.', kind: 'usage-limit' },
+    { name: 'api insufficient quota code', text: 'Error code: insufficient_quota. You exceeded your current quota, please check your billing details.', kind: 'usage-limit' },
     { name: 'auth: not logged in', text: 'Not logged in · Please run /login', kind: 'auth-required' },
     { name: 'auth: invalid api key', text: 'Error: invalid API key provided', kind: 'auth-required' },
     { name: 'rate limit', text: 'Provider rate limited, please slow down', kind: 'rate-limit' },
@@ -68,6 +71,14 @@ describe('classifyProviderFailure — negative cases (no false positives)', () =
 
   it('ordinary reply text is not a failure', () => {
     expect(classifyProviderFailure('Sure — I sent the message and updated the sheet.')).toBeNull();
+  });
+
+  it('ordinary financial prose is not a provider credit failure', () => {
+    expect(
+      classifyProviderFailure('The customer has a low balance, but their credit account is still active.'),
+    ).toBeNull();
+    expect(classifyProviderFailure('Your account balance is too low to complete this transfer.')).toBeNull();
+    expect(classifyProviderFailure('The student has insufficient credits to graduate this semester.')).toBeNull();
   });
 
   it('empty text is not a failure', () => {
