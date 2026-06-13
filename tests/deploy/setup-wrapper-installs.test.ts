@@ -32,4 +32,8 @@ describe('deploy/setup.sh wrapper installs', () => {
   it('installs whatsoup-auth so credential pairing works on a fresh host', () => {
     expect(wrappers.get('whatsoup-auth')).toBe('deploy/whatsoup-auth');
   });
+
+  it('installs whatsoup-heal-notify so the systemd unit does not hardcode a host path', () => {
+    expect(wrappers.get('whatsoup-heal-notify')).toBe('deploy/scripts/heal-notify.sh');
+  });
 });

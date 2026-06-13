@@ -180,6 +180,9 @@ echo "  ✓ whatsoup-harness-maintenance → $REPO_ROOT/deploy/scripts/harness-m
 ln -sf "$REPO_ROOT/deploy/scripts/reply-guarantee-drain.sh" "$BIN_DIR/whatsoup-reply-guarantee-drain"
 chmod +x "$REPO_ROOT/deploy/scripts/reply-guarantee-drain.sh"
 echo "  ✓ whatsoup-reply-guarantee-drain → $REPO_ROOT/deploy/scripts/reply-guarantee-drain.sh"
+ln -sf "$REPO_ROOT/deploy/scripts/heal-notify.sh" "$BIN_DIR/whatsoup-heal-notify"
+chmod +x "$REPO_ROOT/deploy/scripts/heal-notify.sh"
+echo "  ✓ whatsoup-heal-notify → $REPO_ROOT/deploy/scripts/heal-notify.sh"
 
 # Ensure ~/.local/bin is on PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then

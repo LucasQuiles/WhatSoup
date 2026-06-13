@@ -1021,14 +1021,17 @@ def email_fallback(subject: str, body: str) -> bool:
     fallback = Path(EMAIL_FALLBACK)
     if not fallback.exists() or not os.access(fallback, os.X_OK):
         return False
-    proc = subprocess.run(
-        [str(fallback), "--subject", subject, "--body", body],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        timeout=20,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [str(fallback), "--subject", subject, "--body", body],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
     return proc.returncode == 0
 
 

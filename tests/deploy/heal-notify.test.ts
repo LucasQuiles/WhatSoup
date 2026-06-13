@@ -18,4 +18,28 @@ describe('deploy/scripts/heal-notify.sh', () => {
   it('extracts msg fields with BSD-compatible extended grep', () => {
     expect(scriptSrc).toMatch(/grep\s+-oE\s+'"msg":"\[\^"\]\*"'/);
   });
+
+  it('derives HEALTH_PORT from config.json rather than hardcoding 9092', () => {
+    expect(scriptSrc).not.toContain('127.0.0.1:9092');
+    expect(scriptSrc).toContain('HEALTH_PORT');
+    expect(scriptSrc).toContain('config.json');
+  });
+
+  it('reads health token from tokens.env before falling back to keyring', () => {
+    expect(scriptSrc).toContain('tokens.env');
+    expect(scriptSrc).toContain('WHATSOUP_HEALTH_TOKEN');
+  });
+
+  it('uses instance-scoped config root matching src/fleet/paths.ts XDG convention', () => {
+    expect(scriptSrc).toContain('XDG_CONFIG_HOME');
+    expect(scriptSrc).toContain('.config}/whatsoup/instances/${INSTANCE}');
+  });
+
+  it('guards the alert binary with an existence + executable check', () => {
+    expect(scriptSrc).toMatch(/if \[ ! -x "\$ALERT_BIN" \]/);
+  });
+
+  it('uses HEALTH_PORT variable in the HEAL_URL', () => {
+    expect(scriptSrc).toMatch(/127\.0\.0\.1:\$\{HEALTH_PORT\}/);
+  });
 });
