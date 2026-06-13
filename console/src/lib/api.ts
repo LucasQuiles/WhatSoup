@@ -45,6 +45,7 @@ import type {
   ProviderStatus,
   ScheduledMessage,
 } from '../types.js';
+import { asRecordOrEmpty } from './type-guards.js';
 
 const API_BASE = '';
 
@@ -243,10 +244,6 @@ async function withFallback<T>(apiFn: () => Promise<T>, mockFn: () => Promise<T>
 
 type ApiRecord = Record<string, unknown>;
 
-function asRecord(value: unknown): ApiRecord {
-  return value && typeof value === 'object' ? value as ApiRecord : {};
-}
-
 function stringField(source: ApiRecord, key: string, fallback = ''): string {
   const value = source[key];
   return typeof value === 'string' ? value : fallback;
@@ -273,7 +270,7 @@ function booleanField(source: ApiRecord, key: string, fallback = false): boolean
 }
 
 function normalizeChatItem(value: unknown): ChatItem {
-  const row = asRecord(value);
+  const row = asRecordOrEmpty(value);
   const conversationKey = requiredStringField(row, 'conversationKey');
   return {
     conversationKey,
@@ -286,7 +283,7 @@ function normalizeChatItem(value: unknown): ChatItem {
 }
 
 function normalizeMessage(value: unknown): Message {
-  const row = asRecord(value);
+  const row = asRecordOrEmpty(value);
   return {
     pk: numberField(row, 'pk'),
     conversationKey: requiredStringField(row, 'conversationKey'),
@@ -301,7 +298,7 @@ function normalizeMessage(value: unknown): Message {
 }
 
 function normalizeSearchResponse(value: unknown): { results: Message[]; total: number; query: string } {
-  const row = asRecord(value);
+  const row = asRecordOrEmpty(value);
   const resultsValue = row.results;
   const results = Array.isArray(resultsValue) ? resultsValue.map(normalizeMessage) : [];
   return {

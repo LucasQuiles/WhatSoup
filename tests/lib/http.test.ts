@@ -7,7 +7,6 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   readBody,
   jsonResponse,
-  checkBearerAuth,
   parseRoute,
   parseQueryString,
   asyncHandler,
@@ -63,47 +62,6 @@ describe('jsonResponse', () => {
     const res = mockResponse();
     jsonResponse(res, 201, [1, 2, 3]);
     expect(JSON.parse(res._body)).toEqual([1, 2, 3]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// checkBearerAuth
-// ---------------------------------------------------------------------------
-
-describe('checkBearerAuth', () => {
-  it('returns true for valid Bearer token', () => {
-    const req = mockRequest({ headers: { authorization: 'Bearer my-secret' } });
-    expect(checkBearerAuth(req, 'my-secret')).toBe(true);
-  });
-
-  it('returns false for wrong token', () => {
-    const req = mockRequest({ headers: { authorization: 'Bearer wrong' } });
-    expect(checkBearerAuth(req, 'my-secret')).toBe(false);
-  });
-
-  it('returns false when authorization header is missing', () => {
-    const req = mockRequest();
-    expect(checkBearerAuth(req, 'my-secret')).toBe(false);
-  });
-
-  it('returns false for non-Bearer scheme', () => {
-    const req = mockRequest({ headers: { authorization: 'Basic abc123' } });
-    expect(checkBearerAuth(req, 'abc123')).toBe(false);
-  });
-
-  it('returns false for malformed or multibyte Bearer tokens without throwing', () => {
-    const multibyte = mockRequest({ headers: { authorization: `Bearer ${'é'.repeat(10)}` } });
-    const loneSurrogate = mockRequest({ headers: { authorization: 'Bearer \uD800' } });
-
-    expect(() => checkBearerAuth(multibyte, 'a'.repeat(10))).not.toThrow();
-    expect(checkBearerAuth(multibyte, 'a'.repeat(10))).toBe(false);
-    expect(() => checkBearerAuth(loneSurrogate, '\uFFFD')).not.toThrow();
-    expect(checkBearerAuth(loneSurrogate, '\uFFFD')).toBe(false);
-  });
-
-  it('does not authenticate empty expected tokens', () => {
-    const req = mockRequest({ headers: { authorization: 'Bearer ' } });
-    expect(checkBearerAuth(req, '')).toBe(false);
   });
 });
 

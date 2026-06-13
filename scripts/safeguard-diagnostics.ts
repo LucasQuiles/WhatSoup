@@ -1,8 +1,7 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { git as runGit, gitList as runGitList } from './lib/guard-core.ts';
+import { git as runGit, gitList as runGitList, readText } from './lib/guard-core.ts';
 
 export type DiagnosticStatus = 'pass' | 'warn' | 'fail';
 export type DiagnosticCategory =
@@ -250,12 +249,6 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     remediation: 'Restore CI fail-closed behavior for missing test-integrity tooling.',
   },
 ];
-
-function readText(cwd: string, filePath: string): string | null {
-  const absolute = path.join(cwd, filePath);
-  if (!existsSync(absolute)) return null;
-  return readFileSync(absolute, 'utf8');
-}
 
 function loadPackageScripts(cwd: string): Record<string, string> {
   const text = readText(cwd, 'package.json');
