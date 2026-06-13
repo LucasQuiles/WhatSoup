@@ -87,6 +87,20 @@ function readJsonl(path: string): Array<Record<string, unknown>> {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+function readOutboxBySource(outbox: string): {
+  summary: Record<string, unknown>;
+  fails: Array<Record<string, unknown>>;
+} {
+  const events = readdirSync(outbox).map(
+    (name) => JSON.parse(readFileSync(join(outbox, name), 'utf8')) as Record<string, unknown>,
+  );
+  const summaries = events.filter((event) => event.source === 'daily-health');
+  const fails = events.filter((event) => event.source === 'daily-health-fail');
+  expect(summaries).toHaveLength(1);
+  expect(fails.length + summaries.length).toBe(events.length);
+  return { summary: summaries[0]!, fails };
+}
+
 function python(code: string): string {
   return execFileSync('python3', ['-c', code], { cwd: process.cwd(), encoding: 'utf8' }).trim();
 }
@@ -1524,12 +1538,16 @@ print(json.dumps(samples, sort_keys=True))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.evidence).toContain('service personal: active_process_fallback (com.whatsoup.personal-dry-fallback)');
     expect(event.evidence).not.toContain('FAIL service personal');
     expect(event.evidence).toContain('outbound_success_at=2026-06-11T10:00:00.000Z');
@@ -2131,12 +2149,16 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('FAIL plugin_coverage agent');
     expect(event.evidence).toContain('inherited_disabled=sdlc-os@sdlc-os-dev');
@@ -2412,12 +2434,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('FAIL profile_coverage personal: enabled config not declared in health profile');
     expect(event.evidence).toContain('type=passive healthPort=9100');
@@ -2458,12 +2484,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('FAIL profile_coverage_service personal: active service not declared in health profile');
     expect(event.evidence).toContain('service=com.whatsoup.personal config_exists=False');
@@ -2975,12 +3005,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('health primary-bot: FAIL 503 http://127.0.0.1:9090/health');
     expect(event.evidence).toContain('physical_intervention_required');
@@ -3345,9 +3379,8 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
       alertSource?: string;
@@ -3355,6 +3388,11 @@ print(m.probe_health(9092))
         failure?: { code?: string; confidence?: string };
       };
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.alertSource).toBe('primary_phone:primary-bot');
     expect(event.evidence).toContain('FAIL primary_phone_state primary-bot: refusing to trust symlinked critical file');
@@ -3573,12 +3611,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('health primary-bot: FAIL 200 http://127.0.0.1:9090/health auth_bond_at_risk');
     expect(event.evidence).toContain('auth_failure_class=local_corruption_restorable');
@@ -3744,9 +3786,13 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as { evidence: string };
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as { evidence: string };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.evidence).toContain('auth_bond_at_risk');
     expect(event.evidence).toContain('auth_bond_status=invalid');
     expect(event.evidence).toContain('auth_bond_issues=creds_json_empty');
@@ -3802,12 +3848,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('health primary-bot: FAIL 200 http://127.0.0.1:9090/health health_identity_mismatch');
     expect(event.evidence).toContain('instance_name=other-bot');
@@ -3856,12 +3906,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('health primary-bot: FAIL 401 http://127.0.0.1:9090/health health_probe_auth_failed');
   });
@@ -3905,12 +3959,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('FAIL auth_bond primary-bot: present');
     expect(event.evidence).toContain('mode_violation=auth_mode>700,creds_mode>600');
@@ -3956,12 +4014,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('FAIL auth_bond primary-bot: creds_symlink=true credential_paths_redacted=true');
     expect(event.evidence).not.toContain(outsideCreds);
@@ -4022,12 +4084,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('FAIL auth_bond eh-bot: physical_intervention_required recent_log_pattern=device_removed');
   });
@@ -4165,12 +4231,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('FAIL config ar-bot: expected=blocked exists=True service_status=inactive');
     expect(event.evidence).toContain('config_enabled=True');
@@ -4503,9 +4573,8 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
       alertSource?: string;
@@ -4514,6 +4583,11 @@ print(m.probe_health(9092))
         failure?: { code?: string; recoverability?: string };
       };
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.alertSource).toBe('provider_probe:q:provider_usage_limit');
     expect(event.criticalAsset?.asset?.kind).toBe('agent_provider');
@@ -4682,9 +4756,8 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
       alertSource?: string;
@@ -4693,6 +4766,11 @@ print(m.probe_health(9092))
         failure?: { code?: string; recoverability?: string };
       };
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.alertSource).toBe('provider_probe:agent-alpha:provider_compatibility_degraded');
     expect(event.criticalAsset?.asset?.kind).toBe('agent_provider');
@@ -4796,9 +4874,8 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
       alertSource?: string;
@@ -4807,6 +4884,11 @@ print(m.probe_health(9092))
         failure?: { code?: string; recoverability?: string };
       };
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.alertSource).toBe('provider_probe:agent-alpha:provider_compatibility_unsupported');
     expect(event.criticalAsset?.asset?.kind).toBe('agent_provider');
@@ -4989,14 +5071,18 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
       alertSource?: string;
       criticalAsset?: { failure?: { code?: string } };
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.alertSource).toBe('provider_probe:agent-alpha:provider_credential_missing');
     expect(event.criticalAsset?.failure?.code).toBe('AGENT_PROVIDER_CREDENTIAL_MISSING');
@@ -5209,13 +5295,17 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       evidence: string;
       alertSource?: string;
       criticalAsset?: { failure?: { code?: string } };
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.alertSource).toBe('provider_probe:agent-alpha:provider_auth_required');
     expect(event.criticalAsset?.failure?.code).toBe('AGENT_PROVIDER_AUTH_REQUIRED');
     expect(event.evidence).toContain('failure_class=provider_auth_required');
@@ -5828,12 +5918,16 @@ print(m.probe_health(9092))
     });
 
     const outbox = join(tmpRoot, 'outbox');
-    const files = readdirSync(outbox);
-    expect(files).toHaveLength(1);
-    const event = JSON.parse(readFileSync(join(outbox, files[0]!), 'utf8')) as {
+    const { summary, fails } = readOutboxBySource(outbox);
+    const event = summary as unknown as {
       severity: string;
       evidence: string;
     };
+    expect(fails.length).toBeGreaterThanOrEqual(1);
+    for (const fail of fails) {
+      expect(fail.severity).toBe('critical');
+      expect((fail.diagnostics as Record<string, unknown>).forceNotify).toBe(true);
+    }
     expect(event.severity).toBe('critical');
     expect(event.evidence).toContain('auth_bond_backup_tree_mismatch live=live-tree-hash latest=old-tree-hash');
     expect(event.evidence).toContain('auth_bond_backup_stale_for_live_creds');
