@@ -8,6 +8,7 @@ export { normalizeRepoPath } from './lib/guard-core.ts';
 
 export type GuardMode =
   | 'staged'
+  | 'branch-diff'
   | 'commit-msg'
   | 'release-hygiene'
   | 'commit-authors'
@@ -16,6 +17,7 @@ export type GuardMode =
 export interface ParsedArgs {
   mode: GuardMode;
   messageFile?: string;
+  baseRef?: string;
   historyDepth?: number;
   help: boolean;
 }
@@ -319,6 +321,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.help = true;
     } else if (arg === '--staged') {
       args.mode = 'staged';
+    } else if (arg === '--branch-diff') {
+      args.mode = 'branch-diff';
+    } else if (arg === '--base') {
+      const next = argv[i + 1];
+      if (!next || next.startsWith('--')) {
+        throw new Error('--base requires a git ref');
+      }
+      args.baseRef = next;
+      i += 1;
     } else if (arg === '--release-hygiene') {
       args.mode = 'release-hygiene';
     } else if (arg === '--commit-authors') {
@@ -346,6 +357,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
+  }
+
+  if (args.baseRef && args.mode !== 'branch-diff') {
+    throw new Error('--base is only valid with --branch-diff');
   }
 
   return args;
@@ -540,14 +555,26 @@ export function isTrackedSensitiveArtifact(filePath: string): boolean {
   return false;
 }
 
-function scanStagedSensitiveArtifacts(cwd: string): GuardIssue[] {
-  return stagedFilePaths(cwd)
+function sensitiveArtifactIssues(
+  filePaths: readonly string[],
+  code: string,
+  message: string,
+): GuardIssue[] {
+  return filePaths
     .filter(isTrackedSensitiveArtifact)
     .map((filePath) => ({
-      code: 'staged-sensitive-artifact',
+      code,
       filePath,
-      message: 'Runtime credential, database, key, workspace, or scratch artifact must not be committed.',
+      message,
     }));
+}
+
+function scanStagedSensitiveArtifacts(cwd: string): GuardIssue[] {
+  return sensitiveArtifactIssues(
+    stagedFilePaths(cwd),
+    'staged-sensitive-artifact',
+    'Runtime credential, database, key, workspace, or scratch artifact must not be committed.',
+  );
 }
 
 export function scanContentLines(lines: AddedLine[]): GuardIssue[] {
@@ -640,6 +667,58 @@ export function scanCommitHistory(cwd: string, depth: number): GuardIssue[] {
   return issues;
 }
 
+function branchCommitShas(cwd: string, mergeBase: string): string[] {
+  return git(['log', '--reverse', '--format=%H', `${mergeBase}..HEAD`], cwd)
+    .split(/\r?\n/)
+    .filter(Boolean);
+}
+
+function scanBranchCommitSecretLines(cwd: string, sha: string): GuardIssue[] {
+  const issues: GuardIssue[] = [];
+  const diff = git(['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha], cwd);
+
+  for (const line of parseUnifiedDiffAddedLines(diff)) {
+    const filePath = normalizeRepoPath(line.filePath);
+    if (fixtureFiles.has(filePath)) continue;
+    for (const pattern of secretPatterns) {
+      if (findDisallowedMatch(filePath, pattern, line.text)) {
+        issues.push({
+          code: pattern.code,
+          message: `[branch history ${sha.slice(0, 12)}] ${pattern.message}`,
+          filePath: line.filePath,
+          line: line.line,
+        });
+      }
+    }
+  }
+
+  return issues;
+}
+
+function scanBranchCommitSensitiveArtifacts(cwd: string, sha: string): GuardIssue[] {
+  const changedFiles = git(['diff-tree', '--no-commit-id', '--name-only', '--diff-filter=ACMR', '-r', sha], cwd)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(normalizeRepoPath);
+
+  return sensitiveArtifactIssues(
+    changedFiles,
+    'branch-history-sensitive-artifact',
+    `Runtime credential, database, key, workspace, or scratch artifact was committed in branch history ${sha.slice(0, 12)}.`,
+  );
+}
+
+export function scanBranchSecretHistory(cwd: string, mergeBase: string): GuardIssue[] {
+  const issues: GuardIssue[] = [];
+  for (const sha of branchCommitShas(cwd, mergeBase)) {
+    issues.push(
+      ...scanBranchCommitSensitiveArtifacts(cwd, sha),
+      ...scanBranchCommitSecretLines(cwd, sha),
+    );
+  }
+  return issues;
+}
+
 export function parseCommitAuthorLog(log: string): CommitAuthor[] {
   return log
     .split('\x1e')
@@ -693,6 +772,88 @@ function gitRefExists(cwd: string, ref: string): boolean {
   } catch {
     return false;
   }
+}
+
+function branchDiffBaseRef(cwd: string, requestedBaseRef?: string): string | null {
+  const explicitBaseRef = requestedBaseRef?.trim();
+  if (explicitBaseRef) {
+    if (!gitRefExists(cwd, explicitBaseRef)) {
+      throw new Error(`--base ref does not exist: ${explicitBaseRef}`);
+    }
+    return explicitBaseRef;
+  }
+
+  const githubBaseRef = process.env.GITHUB_BASE_REF?.trim();
+  if (githubBaseRef && gitRefExists(cwd, `origin/${githubBaseRef}`)) {
+    return `origin/${githubBaseRef}`;
+  }
+
+  if (gitRefExists(cwd, 'origin/main')) return 'origin/main';
+
+  try {
+    const branch = git(['branch', '--show-current'], cwd).trim();
+    const upstream = branch
+      ? git(['for-each-ref', '--format=%(upstream:short)', `refs/heads/${branch}`], cwd).trim()
+      : '';
+    if (upstream && gitRefExists(cwd, upstream)) return upstream;
+  } catch {
+    // Detached or not-yet-published branch with no origin/main mirror.
+  }
+
+  return null;
+}
+
+function branchMergeBase(cwd: string, baseRef: string): string {
+  const mergeBase = git(['merge-base', baseRef, 'HEAD'], cwd).trim();
+  if (!mergeBase) {
+    throw new Error(`No merge base found between ${baseRef} and HEAD`);
+  }
+  return mergeBase;
+}
+
+export function scanBranchDiff(cwd: string, requestedBaseRef?: string): GuardIssue[] {
+  const baseRef = branchDiffBaseRef(cwd, requestedBaseRef);
+  if (!baseRef) {
+    throw new Error('No branch-diff base ref found; pass --base <ref> or fetch origin/main');
+  }
+
+  const mergeBase = branchMergeBase(cwd, baseRef);
+  const changedFiles = git(['diff', '--name-only', '--diff-filter=ACMR', `${mergeBase}..HEAD`], cwd)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(normalizeRepoPath);
+  const diff = git(['diff', '--unified=0', '--no-ext-diff', `${mergeBase}..HEAD`], cwd);
+
+  const finalDiffIssues = [
+    ...sensitiveArtifactIssues(
+      changedFiles,
+      'branch-sensitive-artifact',
+      'Runtime credential, database, key, workspace, or scratch artifact must not be committed in the branch diff.',
+    ),
+    ...scanAddedLines(parseUnifiedDiffAddedLines(diff)),
+  ];
+  const finalSensitiveArtifactPaths = new Set(
+    finalDiffIssues
+      .filter((issue) => issue.code === 'branch-sensitive-artifact' && issue.filePath)
+      .map((issue) => issue.filePath),
+  );
+  const seen = new Set(finalDiffIssues.map((issue) => `${issue.code}:${issue.filePath ?? ''}:${issue.line ?? 0}`));
+  const historyIssues = scanBranchSecretHistory(cwd, mergeBase)
+    .filter((issue) => {
+      if (
+        issue.code === 'branch-history-sensitive-artifact'
+        && issue.filePath
+        && finalSensitiveArtifactPaths.has(issue.filePath)
+      ) {
+        return false;
+      }
+      const key = `${issue.code}:${issue.filePath ?? ''}:${issue.line ?? 0}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+  return [...finalDiffIssues, ...historyIssues];
 }
 
 function commitAuthorBaseRef(cwd: string): string | null {
@@ -757,12 +918,16 @@ function printIssues(issues: GuardIssue[]): void {
 
 function printHelp(): void {
   console.log(`Usage: npm run guard:repo -- [--staged]
+       npm run guard:repo -- --branch-diff [--base <ref>]
        npm run guard:repo -- --release-hygiene
        npm run guard:repo -- --commit-authors
        npm run guard:repo:commit-msg -- <message-file>
 
 Modes:
   --staged              Scan staged added lines. This is the default.
+  --branch-diff         Scan added lines from merge-base(base, HEAD)..HEAD.
+  --base <ref>          Base ref for --branch-diff (default: origin/<GITHUB_BASE_REF>,
+                        then origin/main, then branch upstream).
   --release-hygiene     Scan tracked release-hygiene files.
   --commit-authors      Scan commits in the branch/PR range for placeholder authors
                         and public commit-message hygiene violations.
@@ -811,10 +976,12 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
       ? scanTrackedFiles(cwd)
       : args.mode === 'commit-authors'
         ? scanCommitAuthors(readCommitAuthors(cwd))
-      : [
-          ...scanStagedSensitiveArtifacts(cwd),
-          ...scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd))),
-        ];
+        : args.mode === 'branch-diff'
+          ? scanBranchDiff(cwd, args.baseRef)
+          : [
+              ...scanStagedSensitiveArtifacts(cwd),
+              ...scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd))),
+            ];
 
   if (issues.length > 0) {
     printIssues(issues);
