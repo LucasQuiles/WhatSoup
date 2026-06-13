@@ -1,10 +1,15 @@
-# mwlab WhatSoup Deployment
+# Host-Specific WhatSoup Deployment
 
-Operator reference for the live WhatSoup install on `mwlab`
-(`michaels-mac-studio`, Tailscale `100.84.79.77`). Covers the repo layout,
-launchd services, log locations, canonical data paths, and restart
-mechanics. For the Phase 3 WhatsApp hybrid ingestion pipeline into
-`mw-mind`, see `mwlab-transcription-pinecone.md`.
+Operator reference for a host-specific WhatSoup install. Covers the repo layout,
+launchd services, log locations, canonical data paths, and restart mechanics.
+For the companion WhatsApp transcription bridge, see the matching
+host-specific transcription bridge runbook.
+
+> Supersession note, 2026-06-13: this runbook contains historical
+> live-from-checkout assumptions. When the service runs from a non-git release
+> snapshot, use `docs/runbooks/release-deployment.md` as the source-controlled
+> release/re-cut workflow and verify the active launchd `ProgramArguments`
+> before acting. A source PR merge does not update a running release snapshot.
 
 ## Repo and branch
 
