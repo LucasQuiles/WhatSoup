@@ -150,3 +150,9 @@ user-visible strings outside process-level copy, "Soup Kitchen", "WhatSoup" outs
 PROTECTED list), `no-channel-specific-copy` / channel vocabulary guard (generic visible "WhatsApp"
 outside the §4 protected channel contexts), forbidden-treatment review in the QA matrix (no
 gradient/illustration assets in the console bundle).
+
+`design:brand-assets` is the report-only identity asset audit. It inventories whether the favicon is
+still the legacy purple/blue bolt, whether gradients/glow/masks remain in production brand assets,
+whether the favicon canvas is square, and whether the HTML/PWA manifest path can carry the future
+maskable SOUP mark. Report-only PASS means the inventory ran; it does not approve the visual asset
+or replace 16px screenshot proof.

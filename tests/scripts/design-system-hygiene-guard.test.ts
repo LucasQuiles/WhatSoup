@@ -103,18 +103,18 @@ describe('design-system hygiene guard', () => {
     expect(findDesignSystemHygieneIssues(repo)).toEqual([]);
   });
 
-  it('fails visual, contrast, resilience, or font harness changes without QA hardening docs', () => {
+  it('fails visual, brand, contrast, resilience, or font harness changes without QA hardening docs', () => {
     const repo = makeRepo();
-    stageFile(repo, 'console/scripts/check-font-assets.mjs', 'console.log("fonts");\n');
+    stageFile(repo, 'console/scripts/check-brand-assets.mjs', 'console.log("brand");\n');
 
     expect(findDesignSystemHygieneIssues(repo).map((issue) => issue.code)).toEqual([
       'qa-harness-missing-docs',
     ]);
   });
 
-  it('passes visual, contrast, resilience, or font harness changes when qa-hardening.md is staged too', () => {
+  it('passes visual, brand, contrast, resilience, or font harness changes when qa-hardening.md is staged too', () => {
     const repo = makeRepo();
-    stageFile(repo, 'console/scripts/check-font-assets.mjs', 'console.log("fonts");\n');
+    stageFile(repo, 'console/scripts/check-brand-assets.mjs', 'console.log("brand");\n');
     stageFile(repo, 'docs/design-system/06-implementation/qa-hardening.md', '# QA hardening\n');
 
     expect(findDesignSystemHygieneIssues(repo)).toEqual([]);
@@ -147,6 +147,25 @@ describe('design-system hygiene guard', () => {
       'font-implementation-missing-typography-spec',
       'font-asset-missing-provenance',
     ]);
+  });
+
+  it('fails brand asset changes without brand and iconography specs', () => {
+    const repo = makeRepo();
+    stageFile(repo, 'console/public/favicon.svg', '<svg />\n');
+
+    expect(findDesignSystemHygieneIssues(repo).map((issue) => issue.code)).toEqual([
+      'brand-asset-missing-brand-spec',
+      'brand-asset-missing-iconography-spec',
+    ]);
+  });
+
+  it('passes brand asset changes when brand and iconography specs are staged too', () => {
+    const repo = makeRepo();
+    stageFile(repo, 'console/public/favicon.svg', '<svg />\n');
+    stageFile(repo, 'docs/design-system/03-spec/brand.md', '# Brand\n');
+    stageFile(repo, 'docs/design-system/03-spec/iconography.md', '# Iconography\n');
+
+    expect(findDesignSystemHygieneIssues(repo)).toEqual([]);
   });
 
   it('fails added design package scripts without QA hardening docs', () => {

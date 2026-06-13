@@ -561,6 +561,30 @@ and documented. It does not authorize a Bricolage/Hanken/Plex or other typeface 
 typography spec, token stacks, font files, provenance README, and visual proof all change in the same
 packet.
 
+### 17.6 Brand Asset Readiness Audit
+
+SOUP identity asset readiness is inventoried by `console/scripts/check-brand-assets.mjs` and exposed
+as:
+
+```bash
+npm --prefix console run design:brand-assets
+```
+
+The audit is report-only until the approved asset set lands. It checks:
+
+- favicon canvas/viewBox square-ness for small-size and maskable rendering;
+- legacy purple/blue bolt palette re-entry (`#863bff`, `#7e14ff`, `#47bfff`, `#aa3bff`, or
+  embedded display-p3 variants);
+- gradients, filter/glow/blur effects, and mask-heavy illustration structure forbidden by
+  `brand.md` §1.3;
+- canonical `/favicon.svg` link in `console/index.html`;
+- `/manifest.webmanifest` link plus checked-in manifest coverage for at least one maskable icon.
+
+Default mode emits `verdict: PASS`, `mode: report-only`, and finding counts even when the current
+asset is known bad. `--fail-on-findings` exists for the later promotion packet after favicon,
+badge, PWA, and maskable assets are replaced and visually proven. A report-only PASS must never be
+cited as visual approval or 16px legibility proof.
+
 ## 18. Done Means Durable
 
 A slice is not done when it only:

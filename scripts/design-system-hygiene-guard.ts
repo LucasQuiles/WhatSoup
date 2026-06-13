@@ -25,6 +25,8 @@ const lintPlan = 'docs/design-system/04-enforcement/lint-plan.md';
 const qaHardening = 'docs/design-system/06-implementation/qa-hardening.md';
 const typographySpec = 'docs/design-system/03-spec/typography.md';
 const fontProvenance = 'console/public/fonts/README.md';
+const brandSpec = 'docs/design-system/03-spec/brand.md';
+const iconographySpec = 'docs/design-system/03-spec/iconography.md';
 
 const tokenFiles = new Set([
   'console/src/styles/tokens.primitive.css',
@@ -43,6 +45,7 @@ const lintFiles = [
 const qaFiles = [
   /^console\/scripts\/capture-visual-matrix\.mjs$/,
   /^console\/scripts\/validate-visual-manifest\.mjs$/,
+  /^console\/scripts\/check-brand-assets\.mjs$/,
   /^console\/scripts\/check-contrast-matrix\.mjs$/,
   /^console\/scripts\/check-design-resilience\.mjs$/,
   /^console\/scripts\/check-font-assets\.mjs$/,
@@ -54,6 +57,13 @@ const qaFiles = [
 const fontFiles = [
   /^console\/src\/styles\/fonts\.css$/,
   /^console\/public\/fonts\/.+\.(?:woff2|ttf|otf)$/,
+];
+
+const brandAssetFiles = [
+  /^console\/public\/favicon\.svg$/,
+  /^console\/public\/manifest\.webmanifest$/,
+  /^console\/public\/icons\/.+$/,
+  /^console\/index\.html$/,
 ];
 
 function pathMatches(filePath: string, patterns: RegExp[]): boolean {
@@ -96,6 +106,18 @@ const rules: GuardRule[] = [
     description: 'staged font asset changes must update the font provenance README',
     required: [fontProvenance],
     matches: (filePath) => pathMatches(filePath, fontFiles),
+  },
+  {
+    code: 'brand-asset-missing-brand-spec',
+    description: 'staged brand asset changes must update the brand spec SSOT',
+    required: [brandSpec],
+    matches: (filePath) => pathMatches(filePath, brandAssetFiles),
+  },
+  {
+    code: 'brand-asset-missing-iconography-spec',
+    description: 'staged brand asset changes must update the iconography spec SSOT',
+    required: [iconographySpec],
+    matches: (filePath) => pathMatches(filePath, brandAssetFiles),
   },
   {
     code: 'design-script-missing-docs',
