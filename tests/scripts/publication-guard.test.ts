@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
-import { isInternalPublicationPath, runPublicationGuard } from '../../scripts/publication-guard.ts';
+import { internalPublicationRoots, isInternalPublicationPath, runPublicationGuard } from '../../scripts/publication-guard.ts';
 
 const internalDocPath = 'docs/sdlc/closed/example/state.md';
 
@@ -169,5 +169,77 @@ describe('publication guard root classification', () => {
 
     expect(runPublicationGuard(['--staged'], repo)).toBe(1);
     expect(error.mock.calls.join('\n')).toContain('staged-internal-doc-unclassified');
+  });
+
+  it('fails when a new runbook is staged but its audit row is only in the working tree', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'publication-guard-staged-audit-'));
+    repos.push(repo);
+
+    mkdirSync(join(repo, 'docs/runbooks'), { recursive: true });
+    const existingRunbook = 'docs/runbooks/existing.md';
+    const lines = ['# Publication Audit', '', '**Total classification rows:** 1', '', '| Classification | Count |', '|---|---:|', '| PUBLIC | 0 |', '| PRIVATE-ARCHIVE | 1 |', '| SANITIZE | 0 |', '| DELETE | 0 |', '| Total | 1 |', '', '| Path | Classification | Rationale |', '|---|---|---|', '| `' + existingRunbook + '` | PRIVATE-ARCHIVE | Existing runbook. |', ''];
+    const initialAudit = lines.join('\n');
+
+    writeFileSync(join(repo, existingRunbook), 'Existing runbook content.\n');
+    writeFileSync(join(repo, 'docs/publication-audit.md'), initialAudit);
+    git(repo, ['init']);
+    // CI runners have no global git identity; the temp repo must provide one
+    // for the baseline commit to succeed.
+    git(repo, ['config', 'user.email', 'guard-test@users.noreply.github.com']);
+    git(repo, ['config', 'user.name', 'Guard Test']);
+    git(repo, ['config', 'commit.gpgsign', 'false']);
+    git(repo, ['add', existingRunbook, 'docs/publication-audit.md']);
+    git(repo, ['commit', '-m', 'initial']);
+
+    const newRunbook = 'docs/runbooks/new-runbook.md';
+    writeFileSync(join(repo, newRunbook), 'New internal runbook.\n');
+    git(repo, ['add', newRunbook]);
+
+    const updatedLines = ['# Publication Audit', '', '**Total classification rows:** 2', '', '| Classification | Count |', '|---|---:|', '| PUBLIC | 0 |', '| PRIVATE-ARCHIVE | 2 |', '| SANITIZE | 0 |', '| DELETE | 0 |', '| Total | 2 |', '', '| Path | Classification | Rationale |', '|---|---|---|', '| `' + existingRunbook + '` | PRIVATE-ARCHIVE | Existing runbook. |', '| `' + newRunbook + '` | PRIVATE-ARCHIVE | New runbook. |', ''];
+    writeFileSync(join(repo, 'docs/publication-audit.md'), updatedLines.join('\n'));
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(runPublicationGuard(['--staged'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('staged-internal-doc-unclassified');
+  });
+});
+
+describe('publication audit root list drift pin', () => {
+  it('docs/publication-audit.md prose root list has an exemplar for every internalPublicationRoots pattern', () => {
+    const repoRoot = resolve(new URL('../..', import.meta.url).pathname);
+    const auditText = readFileSync(join(repoRoot, 'docs/publication-audit.md'), 'utf8');
+    const proseLine =
+      auditText.split('\n').find((line) => line.includes('Internal publication roots covered by the guard:')) ?? '';
+    // Extract backtick-quoted tokens from the prose line using index-based split.
+    // (Avoids backtick-inside-regex that confuses tree-sitter paren matching.)
+    const proseTokens: string[] = proseLine.split('`').filter((_, i) => i % 2 === 1);
+
+    // Build exemplar paths from each prose token.
+    // For directory roots (ends with /): append an example file path.
+    // For glob patterns (contains *): replace * with empty or a concrete value.
+    // For exact file refs: use as-is.
+    const exemplars: string[] = [];
+    for (const token of proseTokens) {
+      const baseExact = token.replace(/\*([^*]*)$/, '$1').replace(/\/$/, '');
+      const baseFilled = token.replace(/\*([^*]*)$/, 'example$1').replace(/\/$/, '');
+      exemplars.push(
+        baseExact, baseExact + '/example.md', baseExact + '/sub/file.md', baseExact + '.md', baseExact + '.json',
+        baseFilled, baseFilled + '/example.md', baseFilled + '/sub/file.md', baseFilled + '.md', baseFilled + '.json',
+      );
+    }
+
+    const missingPatterns: string[] = [];
+    for (const pattern of internalPublicationRoots) {
+      let covered = false;
+      for (const c of exemplars) {
+        if (pattern.test(c)) {
+          covered = true;
+          break;
+        }
+      }
+      if (!covered) missingPatterns.push(String(pattern));
+    }
+
+    expect(missingPatterns).toEqual([]);
   });
 });
