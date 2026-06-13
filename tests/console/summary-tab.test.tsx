@@ -201,7 +201,10 @@ describe('SummaryTab — agent-mode PROVIDER card', () => {
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
     const sessionsCard = screen.getByText('SESSIONS').closest('div.c-card') as HTMLElement
-    expect(within(sessionsCard).getByText('3')).toBeDefined()
+    const sessionsValue = within(sessionsCard).getByText('3')
+    expect(sessionsValue).toBeDefined()
+    expect(sessionsValue.className).not.toMatch(/text-(m-|s-)/)
+    expect(sessionsValue.getAttribute('style')).toContain('--text-2')
   })
 })
 

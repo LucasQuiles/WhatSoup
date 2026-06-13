@@ -2,15 +2,15 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 700,
-    "blocking": 634,
+    "total": 699,
+    "blocking": 633,
     "byCategory": {
       "accent-law": 0,
       "base-wall": 22,
       "brand-regression": 2,
       "focus-suppression": 1,
       "half-step": 64,
-      "legacy-token-tsx": 352,
+      "legacy-token-tsx": 351,
       "legacy-var-css": 221,
       "raw-color-css": 1,
       "raw-form-control": 36,
@@ -121,7 +121,7 @@
       "id": "burndown:legacy-token-tsx",
       "category": "legacy-token-tsx",
       "severity": "blocking",
-      "count": 352,
+      "count": 351,
       "files": [
         {
           "path": "src/App.tsx",
@@ -425,7 +425,7 @@
         },
         {
           "path": "src/pages/SoupKitchen.tsx",
-          "count": 8,
+          "count": 7,
           "lines": null
         }
       ],
@@ -739,7 +739,7 @@
           "path": "src/components/KpiCard.tsx",
           "count": 1,
           "lines": [
-            49
+            52
           ]
         },
         {
@@ -786,8 +786,8 @@
           "path": "src/components/line-detail/SummaryTab.tsx",
           "count": 2,
           "lines": [
-            186,
-            196
+            191,
+            201
           ]
         },
         {

@@ -640,6 +640,9 @@ The audit scans `console/src` for report-only findings:
   colours instead of `--data-*`, unless the series is explicitly provider identity;
 - `soup/traffic-neutrality` candidates: non-status traffic quantities such as sent, received,
   sessions, and media rendered with chromatic status/mode ink;
+- `soup/traffic-neutrality` neutral paths: `KpiCard color="neutral"` and direct semantic `--text-2`
+  styling for raw values. Status/severity KPIs such as connected, attention, unread, failed,
+  warning, and health remain outside this rule;
 - `soup/no-component-local-palette` candidates: component-local colour maps that duplicate design
   truth outside documented provider/data/status token maps.
 

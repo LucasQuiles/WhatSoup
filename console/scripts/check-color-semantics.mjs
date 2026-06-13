@@ -29,7 +29,7 @@ const NEUTRAL_TRAFFIC_LABELS = new Set([
 ]);
 const TRAFFIC_LABEL_LINE_RE = /label:\s*['"](?:Messages Sent|Messages Received|Agent Sessions|Media Processed|SESSIONS)['"]/i;
 const TRAFFIC_CONTEXT_RE = /\b(?:Messages Sent|Messages Received|Agent Sessions|Media Processed|sent|recv|received|inbound|outbound|media|activeSessions|totalSessions|sessions)\b/i;
-const NEUTRAL_CLASS_RE = /\btext-t[1-5]\b|var\(--(?:color-t[1-5]|text-[1-3])\)/;
+const NEUTRAL_CLASS_RE = /\b(?:neutral|text-t[1-5])\b|var\(--(?:color-t[1-5]|text-[1-3])\)/;
 
 function usage() {
   return `Usage: node console/scripts/check-color-semantics.mjs [options]

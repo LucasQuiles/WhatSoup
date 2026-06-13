@@ -108,11 +108,18 @@ export function FleetMetricsChart() {
       'console/src/pages/SoupKitchen.tsx': `
 export function SoupKitchen() {
   return (
-    <KpiCard
-      value="12"
-      label="Messages Sent"
-      color="text-t2"
-    />
+    <>
+      <KpiCard
+        value="12"
+        label="Messages Sent"
+        color="text-t2"
+      />
+      <KpiCard
+        value="12"
+        label="Messages Received"
+        color="neutral"
+      />
+    </>
   );
 }
 `,

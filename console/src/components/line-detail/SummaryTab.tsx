@@ -65,7 +65,12 @@ export function SummaryTab({
     ] : []),
     ...(line.mode === 'agent' ? [
       { label: 'PROVIDER', value: providerDisplay, color: '', style: { color: providerInk } },
-      { label: 'SESSIONS', value: String(line.activeSessions ?? 0), color: (line.activeSessions ?? 0) > 0 ? 'text-m-agt' : 'text-t3' },
+      {
+        label: 'SESSIONS',
+        value: String(line.activeSessions ?? 0),
+        color: (line.activeSessions ?? 0) > 0 ? '' : 'text-t3',
+        style: (line.activeSessions ?? 0) > 0 ? { color: 'var(--text-2)' } : undefined,
+      },
       ...(line.health?.runtime?.agent?.lastSessionStatus
         ? [{ label: 'LAST SESSION', value: line.health.runtime.agent.lastSessionStatus, color: line.health.runtime.agent.lastSessionStatus === 'success' ? 'text-s-ok' : 'text-s-warn' }]
         : []),

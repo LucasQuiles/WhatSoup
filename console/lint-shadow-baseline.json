@@ -1,6 +1,6 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 414,
+  "total": 413,
   "rules": {
     "no-restricted-syntax :: src/components/line-detail/HistoryTab.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/ModeTab.tsx": 1,
@@ -74,7 +74,7 @@
     "soup/no-legacy-tokens :: src/pages/Inbox.tsx": 25,
     "soup/no-legacy-tokens :: src/pages/LineDetail.tsx": 7,
     "soup/no-legacy-tokens :: src/pages/Ops.tsx": 8,
-    "soup/no-legacy-tokens :: src/pages/SoupKitchen.tsx": 8,
+    "soup/no-legacy-tokens :: src/pages/SoupKitchen.tsx": 7,
     "soup/no-raw-form-control :: src/components/line-detail/ConfigEditDialog.tsx": 7,
     "soup/no-raw-form-control :: src/components/line-detail/CreateGroupModal.tsx": 1,
     "soup/no-raw-form-control :: src/components/line-detail/GroupDetailModal.tsx": 3,

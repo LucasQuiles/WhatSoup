@@ -480,8 +480,9 @@ cannot express the check).
 - **Scope:** KPI strip, fleet table traffic columns, line summary traffic rows, and adjacent
   traffic counters. Lines connected, need attention, unread, failed, warning, and health metrics
   stay outside this rule because they carry status/severity.
-- **Violation / valid:** `Messages Sent` with `color="text-m-cht"` → `color="text-t2"` or the
-  approved neutral metric primitive.
+- **Violation / valid:** `Messages Sent` with `color="text-m-cht"` → `color="neutral"` on
+  `KpiCard`, direct semantic `--text-2` styling for raw values, or the approved neutral metric
+  primitive.
 - **FP strategy:** fixtures must prove status KPIs remain chromatic while non-status traffic KPIs
   fail when chromatic.
 - **Autofix:** no. **Phase:** P4/G5. **Entry:** report-only script.

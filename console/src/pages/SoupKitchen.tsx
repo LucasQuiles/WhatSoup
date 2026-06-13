@@ -581,7 +581,7 @@ const SoupKitchen: FC = () => {
         <KpiCard
           value={kpis.totalSent.toLocaleString()}
           label="Messages Sent"
-          color="text-m-cht"
+          color="neutral"
           onClick={() => toggleKpi("sent", "messages")}
           active={activeKpi === "sent"}
           sparkData={messageSparklines?.outbound}
@@ -589,7 +589,7 @@ const SoupKitchen: FC = () => {
         <KpiCard
           value={kpis.totalReceived.toLocaleString()}
           label="Messages Received"
-          color="text-t2"
+          color="neutral"
           onClick={() => toggleKpi("received", "messages")}
           active={activeKpi === "received"}
           sparkData={messageSparklines?.inbound}
@@ -597,7 +597,7 @@ const SoupKitchen: FC = () => {
         <KpiCard
           value={kpis.agentSessions}
           label="Agent Sessions"
-          color="text-m-agt"
+          color="neutral"
           onClick={() => toggleKpi("agent", "sessions")}
           active={activeKpi === "agent"}
           sparkData={sessionSparklines?.active}
@@ -612,7 +612,7 @@ const SoupKitchen: FC = () => {
         <KpiCard
           value={kpis.totalMedia.toLocaleString()}
           label="Media Processed"
-          color="text-s-ok"
+          color="neutral"
           onClick={() => toggleKpi("media", "messages")}
           active={activeKpi === "media"}
           sparkData={messageSparklines?.media}
@@ -943,13 +943,13 @@ const SoupKitchen: FC = () => {
                             )}
                           </TableCell>
                           <TableCell numeric>
-                            <span className="c-data text-s-ok">
+                            <span className="c-data" style={{ color: "var(--text-2)" }}>
                               {String.fromCharCode(0x2191)}
                               {sent}
                             </span>
                           </TableCell>
                           <TableCell numeric>
-                            <span className="c-data text-m-cht">
+                            <span className="c-data" style={{ color: "var(--text-2)" }}>
                               {String.fromCharCode(0x2193)}
                               {recv}
                             </span>
@@ -971,7 +971,7 @@ const SoupKitchen: FC = () => {
                           </TableCell>
                           <TableCell numeric>
                             {line.mode === "agent" ? (
-                              <span className="c-data text-m-agt font-medium">
+                              <span className="c-data font-medium" style={{ color: "var(--text-2)" }}>
                                 {line.totalSessions ?? 0}
                               </span>
                             ) : (

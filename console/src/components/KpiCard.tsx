@@ -12,6 +12,7 @@ interface KpiCardProps {
 }
 
 const colorMap: Record<string, string> = {
+  "neutral": "var(--text-2)",
   "text-s-ok": "var(--color-s-ok)",
   "text-s-crit": "var(--color-s-crit)",
   "text-s-warn": "var(--color-s-warn)",
@@ -25,6 +26,8 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
   const strokeColor = colorMap[color] || "currentColor";
   const hasSparkline = sparkData && sparkData.length > 1;
   const gradientId = useId();
+  const valueClassName = color === "neutral" ? "c-kpi-value" : `c-kpi-value ${color}`;
+  const valueStyle = color === "neutral" ? { color: "var(--text-2)" } : undefined;
 
   return (
     <Button
@@ -38,7 +41,7 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
         boxShadow: active ? "var(--shadow-inset)" : "none",
       }}
     >
-      <div className={`c-kpi-value ${color}`}>
+      <div className={valueClassName} style={valueStyle}>
         {value}
         {suffix && (
           <span className="text-data font-normal ml-[var(--bw-accent)]">

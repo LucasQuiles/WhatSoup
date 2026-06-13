@@ -289,6 +289,15 @@ describe('Ops page — log-level filter wiring', () => {
 // ---------------------------------------------------------------------------
 
 describe('Ops page — statusWashClass applied to instance cards', () => {
+  it('renders agent session counts as neutral traffic ink', () => {
+    const line = makeLine({ name: 'agent-line', mode: 'agent', activeSessions: 2 })
+    renderOps({ lines: [line] })
+
+    const sessionCount = screen.getByText('2 sessions')
+    expect(sessionCount.getAttribute('style')).toContain('--text-2')
+    expect(sessionCount.className).not.toContain('text-m-agt')
+  })
+
   it('online line card has no warn/crit wash class (clean background)', () => {
     const line = makeLine({ name: 'alpha', status: 'online' })
     const { container } = renderOps({ lines: [line] })

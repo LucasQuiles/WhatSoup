@@ -181,7 +181,7 @@ export default function Ops() {
                       </>
                     )}
                     {line.mode === 'agent' && (
-                      <span className="text-m-agt">
+                      <span style={{ color: "var(--text-2)" }}>
                         {line.activeSessions ?? 0} session{(line.activeSessions ?? 0) !== 1 ? 's' : ''}
                       </span>
                     )}

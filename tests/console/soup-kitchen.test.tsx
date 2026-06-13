@@ -356,10 +356,18 @@ describe('SoupKitchen KPI cards with data', () => {
     renderPage({ lines });
     expect(within(getKpiCard('Lines Connected')).getByText('2')).toBeDefined();
     expect(within(getKpiCard('Need Attention')).getByText('3')).toBeDefined();
-    expect(within(getKpiCard('Messages Sent')).getByText('170')).toBeDefined();
-    expect(within(getKpiCard('Messages Received')).getByText('310')).toBeDefined();
-    expect(within(getKpiCard('Agent Sessions')).getByText('2')).toBeDefined();
-    expect(within(getKpiCard('Media Processed')).getByText('21')).toBeDefined();
+    const sentValue = within(getKpiCard('Messages Sent')).getByText('170');
+    const receivedValue = within(getKpiCard('Messages Received')).getByText('310');
+    const sessionsValue = within(getKpiCard('Agent Sessions')).getByText('2');
+    const mediaValue = within(getKpiCard('Media Processed')).getByText('21');
+    expect(sentValue).toBeDefined();
+    expect(receivedValue).toBeDefined();
+    expect(sessionsValue).toBeDefined();
+    expect(mediaValue).toBeDefined();
+    for (const value of [sentValue, receivedValue, sessionsValue, mediaValue]) {
+      expect(value.className).not.toMatch(/text-(m-|s-)/);
+      expect(value.getAttribute('style')).toContain('--text-2');
+    }
   });
 });
 
@@ -434,6 +442,11 @@ describe('SoupKitchen instance table rendering', () => {
     // Unread=4, Sent=5, Recv=6, Tokens=7, Sessions=8).
     const agentRow = screen.getByText(displayInstanceName('operator-agent')).closest('tr') as HTMLElement;
     expect(tableCell(agentRow, 8).textContent).toBe('47');
+    for (const index of [5, 6, 8]) {
+      const value = tableCell(agentRow, index).querySelector('.c-data') as HTMLElement;
+      expect(value.className).not.toMatch(/text-(m-|s-)/);
+      expect(value.getAttribute('style')).toContain('--text-2');
+    }
 
     const passiveRow = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
     expect(tableCell(passiveRow, 8).textContent).toBe('—');
