@@ -1,4 +1,5 @@
-import { type FC, useState, useCallback, useRef, type KeyboardEvent } from 'react'
+import { type FC, useState, useCallback, type KeyboardEvent } from 'react'
+import { TextInput } from './primitives'
 import { Pill, type PillTone } from './primitives/Pill'
 
 // ---------------------------------------------------------------------------
@@ -56,7 +57,6 @@ interface TagInputProps {
 
 const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, normalizeValue, accentColor, displayLabels }) => {
   const [input, setInput] = useState('')
-  const inputRef = useRef<HTMLInputElement>(null)
 
   const tone = resolveTone(accentColor)
 
@@ -86,15 +86,14 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, 
 
   return (
     <div>
-      <input
-        ref={inputRef}
+      <TextInput
         type="text"
         value={input}
         onChange={e => setInput(e.target.value)}
         onKeyDown={handleKeyDown}
         onBlur={() => addTag(input)}
         placeholder={placeholder ? `${placeholder} (press Enter to add)` : 'Press Enter to add'}
-        className="c-input w-full font-mono"
+        className="w-full"
       />
       {values.length > 0 && (
         <div className="flex flex-wrap gap-[var(--sp-2)] mt-[var(--sp-2)]">

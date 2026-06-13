@@ -39,6 +39,12 @@ function setup(initial: string[] = [], extraProps: Partial<React.ComponentProps<
 }
 
 describe('TagInput', () => {
+  it('renders the text input through the form primitive class contract', () => {
+    const { input } = setup([])
+    expect(input().classList.contains('c-input')).toBe(true)
+    expect(input().classList.contains('font-mono')).toBe(true)
+  })
+
   it('adds a tag on Enter, clears the input, and emits the new values', () => {
     const { onChange, input } = setup([])
     fireEvent.change(input(), { target: { value: 'alpha' } })

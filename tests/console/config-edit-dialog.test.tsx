@@ -9,7 +9,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
 
-// SOURCE SURPRISE: TagInput is default-exported and uses useState + useRef internally.
+// SOURCE SURPRISE: TagInput is default-exported and owns local input state.
 // Stub it so all array-of-strings fields (adminPhones, etc.) are testable without
 // keyboard-simulation complexity; the TagInput unit is covered by its own tests.
 vi.mock('../../console/src/components/TagInput', () => ({
