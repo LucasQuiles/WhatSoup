@@ -2,21 +2,24 @@
 
 **Status:** completed/superseded — original implementation branch landed through #810, with follow-on closures in #814 and #808. Do not restart `chore/outstanding-specs-and-burndown`.
 
-> **CURRENT STATE REFOCUS (2026-06-13):** `origin/main` is `13068ac98d27eb43f4d2001f54780badfb9955a0`. The original hardening branch is closed:
+> **CURRENT STATE REFOCUS (2026-06-13):** `origin/main` is `558730b04ddbf84b22832c23f7ce5657dcb5f3c7`. The original hardening branch is closed:
 > - #810 closed R1-R5, H1 collector/runner, P1, and the safeguard-diagnostics fail-closed fix.
 > - #814 closed the remaining no-decision residuals and several decisions after approval: `bot-errors-emit.py` parent preflight, `bot-errors-q-loop.py` exception alignment for private-dir setup, `checkBearerAuth` deletion, `guard-core.readText`, `asRecordOrEmpty`, and import-boundary fail-closed coverage.
 > - #808 superseded the duplicate-helper lanes with `src/lib/private-fs.ts`, `src/core/provider-mcp-config.ts`, `src/runtimes/chat/enrichment/raw-output.ts`, and `src/lib/short-hash.ts`.
 > - #815 closed the alert-pipeline review follow-ups and is now part of current `origin/main`; post-merge main CI on `13068ac9` finished 5/5 green.
+> - #804, #813, #816, and #817 have since landed on main. #816 post-merge main CI on `218dfacd` finished 5/5 green; #817 post-merge CI was still running when this local plan refresh was written.
 >
-> **Do next:** validate the remaining open PRs #804 and #813; build a closure matrix for older high-risk runtime decisions against current main; and preserve/triage dirty parallel worktrees before cleanup. **Do not** treat the historical task checklist below as active work without first rechecking current main.
+> **Do next:** finish validating the remaining open PR #818 (`fix/mini1-health-profile-personal`), observe its CI before any merge decision, then build a closure matrix for older high-risk runtime decisions against current main. Preserve/triage dirty parallel worktrees before cleanup. **Do not** treat the historical task checklist below as active work without first rechecking current main.
 
 ## Refocused Remaining Queue
 
 | Area | Current status | Next action |
 |---|---|---|
-| Open PR #804: libsignal key-log suppression | Open, clean, GitHub checks green; review found missing direct coverage, fixed locally as `feff7dfe` (`test: cover libsignal console guard`) but not pushed | Needs approval to push the local test commit to the PR branch, then CI rerun before merge approval. |
-| Open PR #813: failure taxonomy + bounded retry | Open, mergeable, and GitHub checks green at remote head `ad994fdb`; prior local validation branch `4aa68577` covered an older head and is now stale | Re-review current head before approval. Review note still applies unless contradicted by the new diff: broad `classifyAgentFailure` API was mostly future-facing; production adoption was detector relocation, crash-class typing, and API Retry-After wiring. |
-| Open PR #816: provider-failure classification + terminal-error leak | Remote PR head `6b9df941` is open, mergeable, and GitHub checks are green; local branch head `8e5f4504` adds unpushed parser `isError` fixes after review caught raw-error paths in Codex/Gemini parsers | Needs approval to push the local #816 fix stack, then CI rerun before merge. Local current-main integration branch `ac07bb5d` (`validation/pr816-local-current-20260613T005207`) passed targeted tests, Test Integrity, typecheck, source-runtime drift, and `verify:push:branch`. |
+| PR #804: libsignal key-log suppression | Landed in current main as `2c7867d3` | Closed; direct console-redaction coverage landed with the branch. |
+| PR #813: failure taxonomy + bounded retry | Landed in current main as `94862746` | Closed; provider retry/taxonomy adoption is now baseline context for later provider-failure work. |
+| PR #816: provider-failure classification + terminal-error leak | Landed in current main as `218dfacd`; post-merge main CI 5/5 green | Closed; local validation covered Test Integrity, targeted parser/runtime tests, typecheck, source-runtime drift, and `verify:push:branch`. A local `verify:release` attempt became invalid after another process removed the worktree mid-run, so do not use that failed log as code evidence. |
+| PR #817: reliability-runner tracking docs | Landed in current main as `558730b0`; post-merge CI still running at this refresh | Treat the tracked reliability-runner docs as current handoff source once post-merge CI settles. |
+| Open PR #818: mini1 health profile personal runtime | Open at `9a198ec5`, mergeable, CI pending | Local isolated validation passed Test Integrity, `tests/scripts/bot-errors-health-check.test.ts` (110 tests), `guard:doc-drift`, and `verify:push:branch`; wait for GitHub quality before any merge decision. |
 | PR #815: alert-pipeline review follow-ups | Landed in current main as `13068ac9`; post-merge main CI 5/5 green | Closed; keep only as baseline context for #804/#813 validation. |
 | D5/R8 Python secret-redaction SSOT | Still open as architecture/security work; current main has cross-consumer redaction tests but no canonical pattern source | Use `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` as the execution package after approval. |
 | Python standalone deploy architecture | Still open | Recommended direction is a manifest-tracked `deploy/scripts/lib/` module; fallback is an explicit N-copy equivalence guard if host deployment proves standalone imports cannot ship safely. |

@@ -17,7 +17,7 @@
 - `deploy/scripts/bot-errors-health-check.py` has a `CREDENTIAL_PATH_RE` clone that omits the `.config/secrets/` branch covered by collector, heartbeat-watchdog, runner, emit, and q-loop variants.
 - `deploy/scripts/tests/test_bot_errors_redaction_regex.py` does not load `bot-errors-health-check.py`, so the health-check gap is not enforced by the current Python parity test.
 - The deploy scripts are manifest-managed by `deploy/bot-errors-runtime-manifest.json`; `tests/scripts/bot-errors-health-check.test.ts` validates the committed manifest hashes and `mustContain` markers.
-- There is no in-repo `deploy/secret-patterns.json` or shared Python redaction module on current `origin/main` `13068ac98d27eb43f4d2001f54780badfb9955a0`.
+- There is no in-repo `deploy/secret-patterns.json` or shared Python redaction module on current `origin/main` `558730b04ddbf84b22832c23f7ce5657dcb5f3c7`.
 - Recent hardening already closed the emit atomic-write parent preflight; this plan is only for D5/R8 redaction SSOT and the Python deploy import/manifest strategy.
 
 ## File Structure
