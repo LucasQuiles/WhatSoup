@@ -81,6 +81,12 @@ function nonBlankString(value: unknown): boolean {
   return typeof value === 'string' && value.trim() !== '';
 }
 
+function normalizedModelString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
 function hasAnyOwn(raw: Record<string, unknown>, fields: readonly string[]): boolean {
   return fields.some(field => Object.prototype.hasOwnProperty.call(raw, field));
 }
@@ -165,6 +171,27 @@ function validatePineconeProjectGuard(
     'memory.pinecone.projectId',
     'non-q instances with Pinecone config must set memory.pinecone.projectId or memory.pinecone.expectedHostSuffix',
   );
+}
+
+function validateAgentModelConsistency(raw: Record<string, unknown>): ValidationError | null {
+  const topLevelModel = normalizedModelString(raw['model']);
+  const models = raw['models'];
+  const conversationModel = isRecord(models)
+    ? normalizedModelString(models['conversation'])
+    : null;
+
+  if (
+    topLevelModel !== null &&
+    conversationModel !== null &&
+    topLevelModel !== conversationModel
+  ) {
+    return err(
+      'model',
+      'top-level model and models.conversation must match when both are set; keep one configured model source or remove one field',
+    );
+  }
+
+  return null;
 }
 
 /**
@@ -310,6 +337,11 @@ export function validateInstanceConfig(
 
   const transportErr = validateTransportConfig(raw);
   if (transportErr) return transportErr;
+
+  if (raw['type'] === 'agent') {
+    const modelConsistencyErr = validateAgentModelConsistency(raw);
+    if (modelConsistencyErr) return modelConsistencyErr;
+  }
 
   // Auth-only mode (loader bootstrap-auth path) stops here.
   if (ctx.authOnly) return null;
