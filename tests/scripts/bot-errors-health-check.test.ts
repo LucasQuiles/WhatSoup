@@ -662,7 +662,7 @@ print(json.dumps(samples, sort_keys=True))
       severity: string;
       evidence: string;
     };
-    expect(event.severity).toBe('critical');
+    expect(event.severity).toBe('warning'); // F7: rustdesk is infra-class, de-conflated from critical
     expect(event.evidence).toContain('FAIL rustdesk: id=999999999 expected_id=1076834574');
   });
 
@@ -753,7 +753,7 @@ print(json.dumps(samples, sort_keys=True))
       severity: string;
       evidence: string;
     };
-    expect(event.severity).toBe('critical');
+    expect(event.severity).toBe('warning'); // F7: dns is infra-class, de-conflated from critical
     expect(event.evidence).toContain('FAIL dns nucles-custom-domain: host=nucles.quiles.studio');
     expect(event.evidence).toContain('addresses=35.155.7.183');
     expect(event.evidence).toContain('missing_expected=100.91.13.7');
@@ -4323,7 +4323,7 @@ print(m.probe_health(9092))
       severity: string;
       evidence: string;
     };
-    expect(event.severity).toBe('critical');
+    expect(event.severity).toBe('warning'); // F7: disk is infra-class, de-conflated from critical
     expect(event.evidence).toContain('FAIL disk');
     expect(event.evidence).toContain('free_bytes=134217728');
   });
@@ -4360,7 +4360,7 @@ print(m.probe_health(9092))
       severity: string;
       evidence: string;
     };
-    expect(event.severity).toBe('critical');
+    expect(event.severity).toBe('warning'); // F7: clock is infra-class, de-conflated from critical
     expect(event.evidence).toContain('FAIL clock: status=synced offset_ms=600000.0');
   });
 
