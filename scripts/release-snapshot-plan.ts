@@ -2,6 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import type { Stats } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -62,7 +63,13 @@ export interface ReleaseSnapshotPlan {
   actions: ReleaseSnapshotAction[];
 }
 
-export type ReleaseSnapshotDriftKind = 'release-missing' | 'file-missing' | 'file-sha256-drift' | 'extra-file';
+export type ReleaseSnapshotDriftKind =
+  | 'release-missing'
+  | 'manifest-release-path-mismatch'
+  | 'file-missing'
+  | 'file-type-drift'
+  | 'file-sha256-drift'
+  | 'extra-file';
 
 export interface ReleaseSnapshotDriftIssue {
   kind: ReleaseSnapshotDriftKind;
@@ -280,13 +287,17 @@ function listFiles(root: string, mutablePathExcludes: readonly string[], current
     const absolute = path.join(current, entry.name);
     const rel = path.relative(root, absolute).split(path.sep).join('/');
     if (matchesExclude(rel, mutablePathExcludes)) continue;
-    if (entry.isDirectory()) {
-      files.push(...listFiles(root, mutablePathExcludes, absolute));
-    } else if (entry.isFile()) {
-      files.push(rel);
-    }
+    if (entry.isDirectory()) files.push(...listFiles(root, mutablePathExcludes, absolute));
+    else files.push(rel);
   }
   return files.sort();
+}
+
+function fileTypeName(stat: Stats): string {
+  if (stat.isSymbolicLink()) return 'symlink';
+  if (stat.isDirectory()) return 'directory';
+  if (stat.isFile()) return 'regular-file';
+  return 'non-file';
 }
 
 export function collectReleaseSnapshotDrift(
@@ -295,16 +306,41 @@ export function collectReleaseSnapshotDrift(
 ): ReleaseSnapshotDriftIssue[] {
   const manifest = parseReleaseSnapshotManifest(manifestPayload);
   const absoluteReleasePath = requireAbsolute('releasePath', releasePath);
+  const issues: ReleaseSnapshotDriftIssue[] = [];
+  if (path.resolve(manifest.release.path) !== absoluteReleasePath) {
+    issues.push({
+      kind: 'manifest-release-path-mismatch',
+      expected: path.resolve(manifest.release.path),
+      actual: absoluteReleasePath,
+      message: `release path does not match manifest release.path: ${absoluteReleasePath}`,
+    });
+  }
   if (!existsSync(absoluteReleasePath)) {
-    return [{ kind: 'release-missing', message: `release path does not exist: ${absoluteReleasePath}` }];
+    issues.push({ kind: 'release-missing', message: `release path does not exist: ${absoluteReleasePath}` });
+    return issues;
   }
 
-  const issues: ReleaseSnapshotDriftIssue[] = [];
   const expected = new Map(manifest.files.map((file) => [file.path, file]));
   for (const file of manifest.files) {
     const absolute = path.join(absoluteReleasePath, file.path);
     if (!existsSync(absolute)) {
-      issues.push({ kind: 'file-missing', path: file.path, expected: file.sha256, message: `release file missing: ${file.path}` });
+      issues.push({
+        kind: 'file-missing',
+        path: file.path,
+        expected: file.sha256,
+        message: `release file missing: ${file.path}`,
+      });
+      continue;
+    }
+    const stat = lstatSync(absolute);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      issues.push({
+        kind: 'file-type-drift',
+        path: file.path,
+        expected: 'regular-file',
+        actual: fileTypeName(stat),
+        message: `release file is not a regular file: ${file.path}`,
+      });
       continue;
     }
     const actual = sha256(readFileSync(absolute));
@@ -365,6 +401,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     buildTime: new Date().toISOString(),
     json: false,
   };
+  const planningOnlyFlags = new Set<string>();
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = (): string => {
@@ -373,21 +410,38 @@ function parseArgs(argv: string[]): ParsedArgs {
       index += 1;
       return value;
     };
-    if (arg === '--release-root') options.releaseRoot = next();
-    else if (arg === '--release-name') options.releaseName = next();
-    else if (arg === '--rollback-root') options.rollbackRoot = next();
-    else if (arg === '--check-release') options.checkRelease = next();
+    if (arg === '--release-root') {
+      planningOnlyFlags.add(arg);
+      options.releaseRoot = next();
+    } else if (arg === '--release-name') {
+      planningOnlyFlags.add(arg);
+      options.releaseName = next();
+    } else if (arg === '--rollback-root') {
+      planningOnlyFlags.add(arg);
+      options.rollbackRoot = next();
+    } else if (arg === '--check-release') options.checkRelease = next();
     else if (arg === '--manifest') options.manifestPath = next();
-    else if (arg === '--source-ref') options.sourceRef = next();
-    else if (arg === '--build-time') options.buildTime = next();
-    else if (arg === '--json') options.json = true;
+    else if (arg === '--source-ref') {
+      planningOnlyFlags.add(arg);
+      options.sourceRef = next();
+    } else if (arg === '--build-time') {
+      planningOnlyFlags.add(arg);
+      options.buildTime = next();
+    } else if (arg === '--json') options.json = true;
     else if (arg === '--help' || arg === '-h') {
       throw new Error('Usage: scripts/release-snapshot-plan.ts --release-root /absolute/path [--release-name name] [--rollback-root /absolute/path] [--source-ref HEAD] [--build-time iso] [--json]\n       scripts/release-snapshot-plan.ts --check-release /absolute/path [--manifest /absolute/path] [--json]');
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
   }
-  if (options.checkRelease) return options;
+  if (options.checkRelease) {
+    if (planningOnlyFlags.size > 0) {
+      throw new Error(
+        `--check-release cannot be combined with release planning flags: ${[...planningOnlyFlags].sort().join(', ')}`,
+      );
+    }
+    return options;
+  }
   if (options.manifestPath) throw new Error('--manifest requires --check-release');
   if (!options.releaseRoot) throw new Error('--release-root is required');
   return options;

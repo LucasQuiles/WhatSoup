@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -110,6 +110,36 @@ describe('release snapshot planning', () => {
     ]);
   });
 
+  it('flags manifest path mismatches and non-regular release files', () => {
+    const sourceRoot = makeFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot,
+      buildTime: '2026-06-13T06:00:00.000Z',
+      trackedFiles: ['package.json', 'src/main.ts'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    symlinkSync(path.join(sourceRoot, 'src/main.ts'), path.join(releasePath, 'src/main.ts'));
+    symlinkSync(path.join(sourceRoot, 'package.json'), path.join(releasePath, 'src/hotpatch-link.ts'));
+
+    expect(collectReleaseSnapshotDrift(releasePath, {
+      ...plan.manifest,
+      release: {
+        ...plan.manifest.release,
+        path: path.join(tmpRoot, 'other-release'),
+      },
+    })).toEqual([
+      expect.objectContaining({ kind: 'manifest-release-path-mismatch' }),
+      expect.objectContaining({ kind: 'file-type-drift', path: 'src/main.ts', actual: 'symlink' }),
+      expect.objectContaining({ kind: 'extra-file', path: 'src/hotpatch-link.ts' }),
+    ]);
+  });
+
   it('CLI check-release mode exits clean for a manifest-matching release', () => {
     const sourceRoot = makeFixtureSource();
     const releaseRoot = path.join(tmpRoot, 'releases');
@@ -181,5 +211,14 @@ describe('release snapshot planning', () => {
       issues: [expect.objectContaining({ kind: 'file-sha256-drift', path: 'src/main.ts' })],
     });
     expect(error.mock.calls.flat().join('\n')).toContain('file-sha256-drift: src/main.ts');
+  });
+
+  it('rejects check-release mixed with planning-only flags', () => {
+    expect(() => run([
+      '--check-release',
+      path.join(tmpdir(), 'release'),
+      '--release-root',
+      path.join(tmpdir(), 'releases'),
+    ])).toThrow(/cannot be combined with release planning flags: --release-root/);
   });
 });
