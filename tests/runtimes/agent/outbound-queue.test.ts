@@ -5,10 +5,12 @@ import {
   MIN_SEND_GAP_MS,
   TYPING_REFRESH_MS,
   TEXT_AGGREGATE_DELAY_MS,
+  TERMINAL_TEXT_DEDUPE_WINDOW_MS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import type { DurabilityEngine } from '../../../src/core/durability.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
 
@@ -40,6 +42,20 @@ function makeMessenger(): { messenger: Messenger; calls: string[]; typingCalls: 
     }),
   };
   return { messenger, calls, typingCalls };
+}
+
+function makeDurabilityStub(): DurabilityEngine {
+  let nextId = 0;
+  return {
+    createOutboundOp: vi.fn(() => {
+      nextId += 1;
+      return nextId;
+    }),
+    markSending: vi.fn(),
+    markSubmitted: vi.fn(),
+    markMaybeSent: vi.fn(),
+    markTerminal: vi.fn(),
+  } as unknown as DurabilityEngine;
 }
 
 function deferred<T>(): {
@@ -745,6 +761,125 @@ describe('OutboundQueue', () => {
     expect(mockLog.error).not.toHaveBeenCalled();
     // Warn logged once per failed attempt (2 failures before the successful 3rd)
     expect(mockLog.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('suppresses a duplicate terminal text enqueue within the dedupe window', async () => {
+    mockLog.info.mockClear();
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('There was an issue with my conversation data. An operator has been notified.');
+    await vi.runAllTimersAsync();
+    queue.markLastTerminal({ dedupeText: true });
+
+    queue.enqueueText('There was an issue with my conversation data. An operator has been notified.');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual([
+      'There was an issue with my conversation data. An operator has been notified.',
+    ]);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(1);
+    expect(mockLog.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatJid: CHAT_JID,
+        opType: 'text',
+        terminal: true,
+        suppressedCount: 1,
+      }),
+      'suppressed duplicate outbound terminal text',
+    );
+    expect(JSON.stringify(mockLog.info.mock.calls)).not.toContain('There was an issue with my conversation data');
+  });
+
+  it('does not suppress repeated nonterminal assistant text', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('Repeat this exact instruction.');
+    queue.enqueueText('Repeat this exact instruction.');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual([
+      'Repeat this exact instruction.',
+      'Repeat this exact instruction.',
+    ]);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not suppress ordinary terminal bookkeeping unless text dedupe is requested', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('Repeatable normal answer');
+    await vi.runAllTimersAsync();
+    queue.markLastTerminal();
+
+    queue.enqueueText('Repeatable normal answer');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Repeatable normal answer', 'Repeatable normal answer']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not suppress a distinct terminal follow-up text', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('Terminal notice A');
+    await vi.runAllTimersAsync();
+    queue.markLastTerminal({ dedupeText: true });
+
+    queue.enqueueText('Terminal notice B');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Terminal notice A', 'Terminal notice B']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not suppress matching terminal text across different chats', async () => {
+    const chatA = makeMessenger();
+    const chatB = makeMessenger();
+    const queueA = new OutboundQueue(chatA.messenger, CHAT_JID);
+    const queueB = new OutboundQueue(chatB.messenger, 'other@s.whatsapp.net');
+    queueA.setDurability(makeDurabilityStub());
+    queueB.setDurability(makeDurabilityStub());
+
+    queueA.enqueueText('Shared terminal notice');
+    await vi.runAllTimersAsync();
+    queueA.markLastTerminal({ dedupeText: true });
+
+    queueB.enqueueText('Shared terminal notice');
+    await vi.runAllTimersAsync();
+
+    expect(chatA.calls).toEqual(['Shared terminal notice']);
+    expect(chatB.calls).toEqual(['Shared terminal notice']);
+  });
+
+  it('allows matching terminal text after the dedupe window expires', async () => {
+    const { messenger, calls } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    vi.setSystemTime(new Date('2026-06-13T07:00:00Z'));
+    queue.enqueueText('Windowed terminal notice');
+    await vi.runAllTimersAsync();
+    queue.markLastTerminal({ dedupeText: true });
+
+    vi.setSystemTime(Date.now() + TERMINAL_TEXT_DEDUPE_WINDOW_MS + 1);
+    queue.enqueueText('Windowed terminal notice');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Windowed terminal notice', 'Windowed terminal notice']);
+    expect(durability.createOutboundOp).toHaveBeenCalledTimes(2);
   });
 
   it('logs error and keeps queue draining when all 3 attempts fail', async () => {
