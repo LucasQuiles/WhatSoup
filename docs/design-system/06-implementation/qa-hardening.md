@@ -386,6 +386,7 @@ as:
 ```bash
 npm --prefix console run design:capture
 npm --prefix console run design:capture:validate -- artifacts/soup-v3-follow-up/visual-matrix/<run-id>/manifest.json
+npm --prefix console run design:contrast
 ```
 
 Default scope:
@@ -422,6 +423,13 @@ DOM text is empty, browser `pageerror` entries exist, artifact verdicts are not 
 top-level manifest verdict is not `PASS`. Console warnings/errors, HTTP errors, and request failures
 are summarized as non-blocking review signals because the mock dev-server path can emit expected
 backend-proxy noise; reviewers must still inspect them when accepting visual evidence.
+
+The contrast collector lives at `console/scripts/check-contrast-matrix.mjs` and writes
+`artifacts/soup-v3-follow-up/contrast-matrix.json`. It recomputes the binding token-pair rows from
+`tokens.semantic.css`: ink on surfaces, accent foreground/background, focus ring, status/mode channel
+foregrounds on surfaces and own washes, plus any future `--provider-*-fg` and `--data-*-fg` /
+`--data-*-solid` tokens. Missing provider/data tokens are recorded as skipped discovery rows until the
+palette lands; below-threshold designated pairs fail the gate.
 
 Any score below 4 requires a remediation note. Any score below 3 blocks final acceptance unless the user
 explicitly waives it.
