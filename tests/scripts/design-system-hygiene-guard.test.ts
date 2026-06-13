@@ -103,21 +103,50 @@ describe('design-system hygiene guard', () => {
     expect(findDesignSystemHygieneIssues(repo)).toEqual([]);
   });
 
-  it('fails visual, contrast, or resilience harness changes without QA hardening docs', () => {
+  it('fails visual, contrast, resilience, or font harness changes without QA hardening docs', () => {
     const repo = makeRepo();
-    stageFile(repo, 'console/scripts/check-design-resilience.mjs', 'console.log("resilience");\n');
+    stageFile(repo, 'console/scripts/check-font-assets.mjs', 'console.log("fonts");\n');
 
     expect(findDesignSystemHygieneIssues(repo).map((issue) => issue.code)).toEqual([
       'qa-harness-missing-docs',
     ]);
   });
 
-  it('passes visual, contrast, or resilience harness changes when qa-hardening.md is staged too', () => {
+  it('passes visual, contrast, resilience, or font harness changes when qa-hardening.md is staged too', () => {
     const repo = makeRepo();
-    stageFile(repo, 'console/scripts/check-design-resilience.mjs', 'console.log("resilience");\n');
+    stageFile(repo, 'console/scripts/check-font-assets.mjs', 'console.log("fonts");\n');
     stageFile(repo, 'docs/design-system/06-implementation/qa-hardening.md', '# QA hardening\n');
 
     expect(findDesignSystemHygieneIssues(repo)).toEqual([]);
+  });
+
+  it('fails font implementation changes without typography and provenance docs', () => {
+    const repo = makeRepo();
+    stageFile(repo, 'console/src/styles/fonts.css', '@font-face { font-family: Fixture; }\n');
+
+    expect(findDesignSystemHygieneIssues(repo).map((issue) => issue.code)).toEqual([
+      'font-implementation-missing-typography-spec',
+      'font-asset-missing-provenance',
+    ]);
+  });
+
+  it('passes font implementation changes when typography and provenance docs are staged too', () => {
+    const repo = makeRepo();
+    stageFile(repo, 'console/src/styles/fonts.css', '@font-face { font-family: Fixture; }\n');
+    stageFile(repo, 'docs/design-system/03-spec/typography.md', '# Typography\n');
+    stageFile(repo, 'console/public/fonts/README.md', '# Font provenance\n');
+
+    expect(findDesignSystemHygieneIssues(repo)).toEqual([]);
+  });
+
+  it('fails font asset changes without typography and provenance docs', () => {
+    const repo = makeRepo();
+    stageFile(repo, 'console/public/fonts/Fixture.woff2', 'font-bytes');
+
+    expect(findDesignSystemHygieneIssues(repo).map((issue) => issue.code)).toEqual([
+      'font-implementation-missing-typography-spec',
+      'font-asset-missing-provenance',
+    ]);
   });
 
   it('fails added design package scripts without QA hardening docs', () => {

@@ -85,3 +85,10 @@ hierarchy is wrong; restructure instead of adding size.
 - `no-new-uppercase` — `text-transform: uppercase` outside overline/nameplate utilities.
 - `tabular-nums-in-data-lanes` — numeric table cells and KPI values must use a data-lane utility.
 - `nameplate-reserved` — `--type-nameplate`/`.t-nameplate` outside the Nameplate component.
+- `design:font-assets` — every active `@font-face` is self-hosted under `console/public/fonts`,
+  uses `font-display: swap`, resolves to a documented `.woff2`, and matches the provenance README
+  sha256 table. No external font CDN URLs may re-enter `console/index.html` or `console/src`.
+
+Font-family changes are design-law mutations. They must update this typography SSOT, the token font
+stacks, `fonts.css`, font provenance hashes, and visual proof in one packet; a showcase-only font
+choice is not enough to change the product font contract.

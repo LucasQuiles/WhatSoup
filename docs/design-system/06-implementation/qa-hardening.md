@@ -537,6 +537,30 @@ resilient, does not replace long-string screenshots, reduced-height screenshots,
 tests, focus-ring checks, or reviewer inspection, and must never be cited as "zero findings" unless
 `finding_count` is actually `0`.
 
+### 17.5 Font Asset Integrity Guard
+
+Font delivery integrity is checked by `console/scripts/check-font-assets.mjs` and exposed as:
+
+```bash
+npm --prefix console run design:font-assets
+```
+
+The guard verifies:
+
+- every `@font-face` in `console/src/styles/fonts.css` uses a local `/fonts/*.woff2` URL;
+- every face declares `font-display: swap` and `format("woff2")`;
+- every referenced font file exists in `console/public/fonts`;
+- every font file is listed in `console/public/fonts/README.md`;
+- the README sha256 values match the checked-in bytes;
+- no unused `.woff2` files are left in the font directory;
+- no external font URLs (`fonts.googleapis.com`, `fonts.gstatic.com`, Typekit, or remote font file
+  URLs) appear in `console/index.html` or `console/src`.
+
+This is a substrate gate, not a typeface decision. It proves the active font set is locally shipped
+and documented. It does not authorize a Bricolage/Hanken/Plex or other typeface switch unless the
+typography spec, token stacks, font files, provenance README, and visual proof all change in the same
+packet.
+
 ## 18. Done Means Durable
 
 A slice is not done when it only:

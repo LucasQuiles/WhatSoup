@@ -23,6 +23,8 @@ interface ParsedArgs {
 const tokensSpec = 'docs/design-system/03-spec/tokens-v3.md';
 const lintPlan = 'docs/design-system/04-enforcement/lint-plan.md';
 const qaHardening = 'docs/design-system/06-implementation/qa-hardening.md';
+const typographySpec = 'docs/design-system/03-spec/typography.md';
+const fontProvenance = 'console/public/fonts/README.md';
 
 const tokenFiles = new Set([
   'console/src/styles/tokens.primitive.css',
@@ -43,9 +45,15 @@ const qaFiles = [
   /^console\/scripts\/validate-visual-manifest\.mjs$/,
   /^console\/scripts\/check-contrast-matrix\.mjs$/,
   /^console\/scripts\/check-design-resilience\.mjs$/,
+  /^console\/scripts\/check-font-assets\.mjs$/,
   /^console\/scripts\/check-token-spec-drift\.mjs$/,
   /^tests\/browser\/.+$/,
   /^vitest\.browser(?:\.motion)?\.config\.ts$/,
+];
+
+const fontFiles = [
+  /^console\/src\/styles\/fonts\.css$/,
+  /^console\/public\/fonts\/.+\.(?:woff2|ttf|otf)$/,
 ];
 
 function pathMatches(filePath: string, patterns: RegExp[]): boolean {
@@ -73,9 +81,21 @@ const rules: GuardRule[] = [
   },
   {
     code: 'qa-harness-missing-docs',
-    description: 'staged visual, contrast, browser, or token-drift harness changes must update QA hardening docs',
+    description: 'staged visual, contrast, browser, font, resilience, or token-drift harness changes must update QA hardening docs',
     required: [qaHardening],
     matches: (filePath) => pathMatches(filePath, qaFiles),
+  },
+  {
+    code: 'font-implementation-missing-typography-spec',
+    description: 'staged font implementation changes must update the typography spec SSOT',
+    required: [typographySpec],
+    matches: (filePath) => pathMatches(filePath, fontFiles),
+  },
+  {
+    code: 'font-asset-missing-provenance',
+    description: 'staged font asset changes must update the font provenance README',
+    required: [fontProvenance],
+    matches: (filePath) => pathMatches(filePath, fontFiles),
   },
   {
     code: 'design-script-missing-docs',
