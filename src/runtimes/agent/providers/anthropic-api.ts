@@ -25,6 +25,7 @@ import { turnPartsToAnthropicContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
+import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -285,7 +286,7 @@ export class AnthropicApiProvider implements ProviderSession {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private async callApi(model: string, selfHealAttempt = false): Promise<CallApiResult> {
+  private async callApi(model: string, selfHealAttempt = false, rateLimitRetryAttempt = false): Promise<CallApiResult> {
     if (!this.opts) throw new Error('Provider not initialized.');
 
     this.abortController = new AbortController();
@@ -351,6 +352,12 @@ export class AnthropicApiProvider implements ProviderSession {
         friendlyMsg = '_There was an issue with my conversation data. Please try again or send /new to start fresh._';
         log.error({ status: 400, errPreview: errText.slice(0, 500), model, selfHealAttempt }, 'API 400 error (post self-heal)');
       } else if (response.status === 429) {
+        const retryAfterMs = boundedRetryAfterMs(response.headers);
+        if (!rateLimitRetryAttempt && retryAfterMs !== null) {
+          log.warn({ status: 429, model, retryAfterMs }, 'API rate limited — retrying after Retry-After');
+          await waitForRateLimitRetry(retryAfterMs, this.abortController.signal);
+          return this.callApi(model, selfHealAttempt, true);
+        }
         friendlyMsg = '_Rate limited - please wait a moment and try again._';
         log.warn({ status: 429, model }, 'API rate limited');
       } else if (response.status === 401) {

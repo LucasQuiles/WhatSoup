@@ -83,6 +83,8 @@ import { writeTempFile } from '../../core/media-download.ts';
 import { OperationTracker } from './operation-tracker.ts';
 import type { ProgressEvent } from './operation-tracker.ts';
 
+import { isUsageLimitMessage, isPromptTooLongMessage } from './failure-taxonomy.ts';
+export { isUsageLimitMessage, isPromptTooLongMessage } from './failure-taxonomy.ts';
 const log = createChildLogger('agent-runtime');
 
 /** Tracks workspace media directories already created — avoids redundant mkdirSync calls. */
@@ -1071,40 +1073,6 @@ function humanizeError(_toolName: string, text: string): string | null {
   return null;
 }
 
-/**
- * Detect provider usage-limit / quota-exceeded messages that should NOT be
- * forwarded to WhatsApp.  When a Claude Code session hits its usage cap it
- * emits a human-readable message like "You're out of extra usage · resets …".
- * Forwarding this to a group chat can trigger other agents to respond, which
- * spawns new sessions that also hit the cap → infinite flood.
- *
- * Returns `true` when the text looks like a provider usage-limit notice.
- */
-export function isUsageLimitMessage(text: string): boolean {
-  if (isPromptTooLongMessage(text)) return false; // distinct error path
-
-  const lower = text.toLowerCase();
-  if (
-    lower.includes('out of extra usage') ||
-    lower.includes('usage limit reached') ||
-    lower.includes('usage cap reached') ||
-    lower.includes("you've reached your usage limit") ||
-    lower.includes('you have reached your usage limit') ||
-    lower.includes('you have hit your usage limit') ||
-    lower.includes('claude usage limit')
-  ) {
-    return true;
-  }
-
-  const resetPattern = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
-  return resetPattern.test(text) && (
-    lower.includes('usage limit') ||
-    lower.includes('usage cap') ||
-    lower.includes('plan limit') ||
-    lower.includes('quota exceeded')
-  );
-}
-
 export function isProviderAuthRequiredMessage(text: string): boolean {
   const lower = text.toLowerCase();
   return (
@@ -1258,27 +1226,6 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
   }
 
   return null;
-}
-
-/**
- * Detect context-window overflow errors from the Claude provider.
- *
- * When the accumulated conversation exceeds the model's context window, Claude
- * returns an error like "Prompt is too long". The session is unsalvageable —
- * sending /compact will also fail because the prompt is already too large.
- * The correct recovery is to kill the session so the next user message spawns
- * a fresh one with recent chat context injected.
- */
-export function isPromptTooLongMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('prompt is too long') ||
-    lower.includes('prompt too long') ||
-    lower.includes('maximum context length') ||
-    lower.includes('context_length_exceeded') ||
-    lower.includes('max_tokens_exceeded') ||
-    (lower.includes('token') && lower.includes('limit') && lower.includes('exceed'))
-  );
 }
 
 /**
