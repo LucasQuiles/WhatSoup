@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { readText } from './lib/guard-core.ts';
 
 export interface AgentDecisionPollsGuardResult {
   ok: boolean;
@@ -69,12 +69,6 @@ const REQUIRED_ANCHORS: RequiredAnchor[] = [
     anchors: ['guard:agent-decision-polls', 'poll-interaction-lint.mjs'],
   },
 ];
-
-function readText(cwd: string, file: string): string | null {
-  const absolute = path.join(cwd, file);
-  if (!existsSync(absolute)) return null;
-  return readFileSync(absolute, 'utf8');
-}
 
 function checkAnchors(cwd: string, findings: string[]): void {
   for (const requirement of REQUIRED_ANCHORS) {

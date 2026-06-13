@@ -2,21 +2,12 @@
 // Pure functions for mapping chat JIDs to workspace paths.
 
 import {
-  closeSync,
-  constants,
   existsSync,
-  fchmodSync,
-  fstatSync,
-  ftruncateSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
   readFileSync,
   symlinkSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import {
   applyRequiredDeny,
   defaultSettingsJson,
@@ -25,74 +16,19 @@ import {
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
 import {
-  generateMcpConfigFile,
-  mergeOpencodeConfig,
-  writeProviderMcpConfigTarget,
+  writeProviderMcpConfig,
   type AdditionalMcpServerConfig,
 } from './provider-mcp-config.ts';
 import { createChildLogger } from '../logger.ts';
+import {
+  assertPrivateDirectorySync,
+  ensurePrivateDirectorySync,
+  writePrivateFileSync,
+} from '../lib/private-fs.ts';
+
+export { writePrivateFileSync } from '../lib/private-fs.ts';
 
 const log = createChildLogger('workspace');
-
-function privateWriteError(message: string, code: string): NodeJS.ErrnoException {
-  const err = new Error(message) as NodeJS.ErrnoException;
-  err.code = code;
-  return err;
-}
-
-function assertPrivateDirectorySync(dirPath: string): void {
-  const stat = lstatSync(dirPath);
-  if (stat.isSymbolicLink()) {
-    throw privateWriteError('refusing to use private directory through symlink', 'ELOOP');
-  }
-  if (!stat.isDirectory()) {
-    throw privateWriteError('refusing to use private directory over non-directory path', 'EINVAL');
-  }
-}
-
-function ensurePrivateDirectorySync(dirPath: string): void {
-  try {
-    assertPrivateDirectorySync(dirPath);
-    return;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
-
-  mkdirSync(dirPath, { recursive: true, mode: 0o700 });
-  assertPrivateDirectorySync(dirPath);
-}
-
-export function writePrivateFileSync(filePath: string, data: string): void {
-  assertPrivateDirectorySync(dirname(filePath));
-
-  try {
-    const stat = lstatSync(filePath);
-    if (stat.isSymbolicLink()) {
-      throw privateWriteError('refusing to write private file through symlink', 'ELOOP');
-    }
-    if (!stat.isFile()) {
-      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
-
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK;
-  let fd: number | undefined;
-  try {
-    fd = openSync(filePath, flags, 0o600);
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) {
-      throw privateWriteError('refusing to write private file over non-regular path', 'EINVAL');
-    }
-    fchmodSync(fd, 0o600);
-    ftruncateSync(fd, 0);
-    writeFileSync(fd, data, { encoding: 'utf-8' });
-    fchmodSync(fd, 0o600);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
 
 export interface WorkspaceInfo {
   kind: 'dm' | 'group';
@@ -178,56 +114,7 @@ function writeWorkspaceMcpConfig(
       env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
     });
   }
-  const generated = generateMcpConfigFile(provider, socketPath, mcpServerPath, additionalServers);
-  if (generated === null) return;
-
-  const target = writeProviderMcpConfigTarget(provider, workspacePath);
-  if (target === null) return;
-
-  if (provider === 'opencode-cli') {
-    // Symlink preflight BEFORE reading existing config — mirrors
-    // writeProviderMcpConfig in providers/mcp-bridge.ts. Without it the
-    // merge path reads through a symlinked opencode.json (and the later
-    // ELOOP from writePrivateFileSync would fail the whole provisioning).
-    try {
-      const stat = lstatSync(target);
-      if (stat.isSymbolicLink()) {
-        log.warn({ target }, 'skipping opencode MCP config write because opencode.json is a symlink');
-        return;
-      }
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ELOOP') {
-        log.warn({ err, target }, 'skipping opencode MCP config write after file stat failed');
-        return;
-      }
-      if (code !== 'ENOENT') throw err;
-    }
-
-    let existing: Record<string, unknown> | null = null;
-    if (existsSync(target)) {
-      try {
-        const parsed = JSON.parse(readFileSync(target, 'utf8'));
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          existing = parsed as Record<string, unknown>;
-        }
-      } catch (err) {
-        log.warn({ err, target }, 'failed to parse existing opencode.json during workspace provisioning; overwriting managed entries');
-      }
-    }
-    try {
-      writePrivateFileSync(target, JSON.stringify(mergeOpencodeConfig(existing, generated), null, 2));
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
-        log.warn({ err, target }, 'skipping opencode MCP config write because opencode.json is a symlink');
-        return;
-      }
-      throw err;
-    }
-    return;
-  }
-
-  writePrivateFileSync(target, JSON.stringify(generated, null, 2));
+  writeProviderMcpConfig(provider, workspacePath, socketPath, mcpServerPath, undefined, additionalServers);
 }
 
 /**

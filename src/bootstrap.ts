@@ -1,3 +1,4 @@
+import './transport/install-third-party-console-redaction.ts';
 import { bootstrapCommon } from './bootstrap-common.ts';
 
 export async function bootstrap(): Promise<void> {

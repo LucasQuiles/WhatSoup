@@ -72,6 +72,7 @@ export class PassiveRuntime implements Runtime {
   getHealthSnapshot(): RuntimeHealth {
     let unreadCount = 0;
     let lastActivityAt: string | null = null;
+    let healthSnapshotError: 'db_query_failed' | undefined;
     try {
       const row = this.db.raw
         .prepare('SELECT COALESCE(SUM(unread_count), 0) as total, MAX(updated_at) as last_at FROM chats')
@@ -80,10 +81,18 @@ export class PassiveRuntime implements Runtime {
         unreadCount = row.total;
         lastActivityAt = row.last_at;
       }
-    } catch {
-      // DB error — fall back to safe defaults
+    } catch (err) {
+      log.warn({ err }, 'passive health snapshot db query failed');
+      healthSnapshotError = 'db_query_failed';
     }
-    return { status: 'healthy', details: { unreadCount, lastActivityAt } };
+    return {
+      status: healthSnapshotError ? 'degraded' : 'healthy',
+      details: {
+        unreadCount,
+        lastActivityAt,
+        ...(healthSnapshotError ? { healthSnapshotError } : {}),
+      },
+    };
   }
 
   async shutdown(): Promise<void> {

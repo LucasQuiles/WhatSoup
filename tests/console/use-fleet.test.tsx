@@ -202,6 +202,7 @@ const PROVIDER_STATUS_1: ProviderStatus = {
     effectiveProvider: null,
     turnsServed: 0,
     turnsEmpty: 0,
+    probeAttempts: null,
     lastFallbackTurnAt: null,
     activeEntry: null,
     chain: [],

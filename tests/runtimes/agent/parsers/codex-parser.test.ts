@@ -2,6 +2,57 @@ import { describe, it, expect } from 'vitest';
 import { parseCodexEvent } from '../../../../src/runtimes/agent/providers/codex-parser.ts';
 
 describe('parseCodexEvent', () => {
+  describe('terminal error results', () => {
+    it('marks app-server failed turns as isError so runtime default-denies raw text', () => {
+      const line = JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          turn: {
+            status: 'failed',
+            error: { message: 'raw provider failure detail' },
+          },
+        },
+      });
+
+      expect(parseCodexEvent(line)).toEqual({
+        type: 'result',
+        text: 'raw provider failure detail',
+        isError: true,
+      });
+    });
+
+    it('marks JSON-RPC error responses as isError', () => {
+      const line = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 7,
+        error: { message: 'server rejected request' },
+      });
+
+      expect(parseCodexEvent(line)).toEqual({
+        type: 'result',
+        text: 'Codex error: server rejected request',
+        isError: true,
+      });
+    });
+
+    it('marks legacy turn.failed events as isError while preserving usage', () => {
+      const line = JSON.stringify({
+        type: 'turn.failed',
+        error: 'legacy failure',
+        usage: { input_tokens: 4, output_tokens: 2 },
+      });
+
+      expect(parseCodexEvent(line)).toEqual({
+        type: 'result',
+        text: 'legacy failure',
+        isError: true,
+        inputTokens: 4,
+        outputTokens: 2,
+      });
+    });
+  });
+
   describe('thread/tokenUsage/updated notification', () => {
     it('produces a token_usage event with token counts from nested tokenUsage', () => {
       const line = JSON.stringify({

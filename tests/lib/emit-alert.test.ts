@@ -27,11 +27,11 @@ vi.mock('../../src/logger.ts', () => ({
   }),
 }));
 
-import { clearAlertSource, emitAlert, observeAlertEmission } from '../../src/lib/emit-alert.ts';
+import { clearAlertSource, emitAlert, observeAlertEmission, resetEmitAlertThrottle } from '../../src/lib/emit-alert.ts';
 import { buildBotErrorsEvent } from '../../src/lib/bot-errors-outbox.ts';
 
 const ALERT_SCRIPT = join(homedir(), '.claude', 'scripts', 'whatsapp-alert.sh');
-const SPAWN_OPTIONS = { stdio: 'ignore', timeout: 5_000, detached: false };
+const SPAWN_OPTIONS = { stdio: 'ignore', timeout: 5_000, detached: false, killSignal: 'SIGKILL' as const };
 const BOT_ERRORS_JID = '120363555555555000@g.us';
 const AWS_KEY_SAMPLE = ['AKIA', 'IOSFODNN7EXAMPLE'].join('');
 const GITHUB_TOKEN_SAMPLE = ['ghp', 'abcdefghijklmnopqrstuvwxyz1234567890'].join('_');
@@ -79,6 +79,7 @@ afterEach(() => {
   delete process.env['BOT_ERRORS_OUTBOX_DIR'];
   delete process.env['BOT_ERRORS_WRITEFAIL_DIR'];
   delete process.env['BOT_ERRORS_STATE_DIR'];
+  delete process.env['EMIT_ALERT_THROTTLE_MS'];
 });
 
 describe('emitAlert', () => {
@@ -98,6 +99,7 @@ describe('emitAlert', () => {
     delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
     delete process.env['BOT_ERRORS_DRY_PLATFORM'];
     delete process.env['BOT_ERRORS_DRY_PLATFORM_RELEASE'];
+    resetEmitAlertThrottle();
   });
 
   it('writes a durable outbox event with instance, source, summary, and evidence', () => {
@@ -438,6 +440,58 @@ describe('emitAlert', () => {
   });
 });
 
+describe('emitAlert — in-process throttle (legacy fallback path)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    loggerWarn.mockClear();
+    existsSyncMock.mockReturnValue(true);
+    fsyncSyncMock.mockClear();
+    if (outboxDir) rmSync(outboxDir, { recursive: true, force: true });
+    if (writefailDir) rmSync(writefailDir, { recursive: true, force: true });
+    writefailDir = mkdtempSync(join(tmpdir(), 'bot-errors-writefail-'));
+    // Force outbox to fail so every call exercises the legacy spawn path.
+    process.env['BOT_ERRORS_OUTBOX_DIR'] = '/dev/null/outbox';
+    process.env['BOT_ERRORS_WRITEFAIL_DIR'] = writefailDir;
+    process.env['BOT_ERRORS_JID'] = BOT_ERRORS_JID;
+    process.env['BOT_ERRORS_EXPECTED_JID'] = BOT_ERRORS_JID;
+    delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
+    resetEmitAlertThrottle();
+  });
+
+  it('spawns only once when the same (instance, source, summary) triple is emitted twice within the throttle window', () => {
+    emitAlert('inst', 'src', 'summary', 'evidence 1');
+    emitAlert('inst', 'src', 'summary', 'evidence 2');
+
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+  });
+
+  it('spawns twice when source differs (different key -> not throttled)', () => {
+    emitAlert('inst', 'src-a', 'summary', 'evidence');
+    emitAlert('inst', 'src-b', 'summary', 'evidence');
+
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+  });
+
+  it('spawns twice when EMIT_ALERT_THROTTLE_MS=0 disables the throttle', () => {
+    process.env['EMIT_ALERT_THROTTLE_MS'] = '0';
+
+    emitAlert('inst', 'src', 'summary', 'evidence 1');
+    emitAlert('inst', 'src', 'summary', 'evidence 2');
+
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+  });
+
+  it('killSignal: SIGKILL is present in the spawn options', () => {
+    emitAlert('inst', 'src', 'summary', 'evidence');
+
+    expect(vi.mocked(spawn)).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Array),
+      expect.objectContaining({ killSignal: 'SIGKILL' }),
+    );
+  });
+});
+
 describe('BOT ERRORS alert emission governance', () => {
   it('requires production callers to use checked alert wrappers', () => {
     const offenders = listTsFiles(join(process.cwd(), 'src'))
@@ -473,6 +527,7 @@ describe('clearAlertSource', () => {
     delete process.env['BOT_ERRORS_REQUIRE_EXPECTED'];
     delete process.env['BOT_ERRORS_DRY_PLATFORM'];
     delete process.env['BOT_ERRORS_DRY_PLATFORM_RELEASE'];
+    resetEmitAlertThrottle();
   });
 
   it('writes a durable clear event', () => {

@@ -44,6 +44,25 @@ describe('repo hygiene guard', () => {
     ]);
   });
 
+  it('flags private host labels in deploy script Python tests', () => {
+    const issues = scanAddedLines([
+      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: 'HOST = "nucles"' },
+    ]);
+
+    expect(issues.map((issue) => issue.code)).toContain('private-host-label');
+  });
+
+  it('flags private host domains and tailnet IPs in deploy script Python tests', () => {
+    const issues = scanAddedLines([
+      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: 'HOST = "nucles.quiles.studio"' },
+      { filePath: 'deploy/scripts/tests/test_example.py', line: 5, text: 'EXPECTED = "100.91.13.7"' },
+    ]);
+
+    expect(issues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining(['private-host-label', 'private-tailnet-ip']),
+    );
+  });
+
   it('allows synthetic user and group fixtures', () => {
     const issues = scanAddedLines([
       { filePath: 'tests/example.test.ts', line: 12, text: 'const user = "15551234@s.whatsapp.net";' },

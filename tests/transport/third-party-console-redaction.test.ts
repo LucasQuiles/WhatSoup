@@ -58,7 +58,7 @@ describe('third-party console redaction', () => {
     expect(redacted).not.toContain('<Buffer 01 02 03>');
   });
 
-  it('installs once and wraps console methods with redaction', () => {
+  it('drops libsignal session dumps when installed', () => {
     const captured: unknown[][] = [];
     const target = {
       debug: vi.fn((...args: unknown[]) => captured.push(args)),
@@ -73,6 +73,26 @@ describe('third-party console redaction', () => {
     installThirdPartyConsoleRedaction(target);
     installThirdPartyConsoleRedaction(target);
     target.info('Closing session:', { privKey: Buffer.from('private-material') });
+
+    expect(originalInfo).not.toHaveBeenCalled();
+    expect(captured).toHaveLength(0);
+  });
+
+  it('installs once and wraps console methods with redaction', () => {
+    const captured: unknown[][] = [];
+    const target = {
+      debug: vi.fn((...args: unknown[]) => captured.push(args)),
+      error: vi.fn((...args: unknown[]) => captured.push(args)),
+      info: vi.fn((...args: unknown[]) => captured.push(args)),
+      log: vi.fn((...args: unknown[]) => captured.push(args)),
+      warn: vi.fn((...args: unknown[]) => captured.push(args)),
+    } as any;
+
+    const originalInfo = target.info;
+
+    installThirdPartyConsoleRedaction(target);
+    installThirdPartyConsoleRedaction(target);
+    target.info('Pre-key upload failed', { privKey: Buffer.from('private-material') });
 
     expect(originalInfo).toHaveBeenCalledTimes(1);
     expect(captured).toHaveLength(1);

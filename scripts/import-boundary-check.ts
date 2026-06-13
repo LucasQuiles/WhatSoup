@@ -285,11 +285,11 @@ function baselinePath(repoRoot: string): string {
 function loadBaseline(repoRoot: string): BoundaryViolation[] {
   const bp = baselinePath(repoRoot);
   if (!existsSync(bp)) return [];
-  try {
-    return JSON.parse(readFileSync(bp, 'utf8')) as BoundaryViolation[];
-  } catch {
-    return [];
-  }
+  const raw = readFileSync(bp, 'utf8');
+  // Fail-closed: a corrupt baseline must not silently pass the check.
+  // Any JSON parse error propagates up to the run() caller so it can
+  // set a nonzero exit code rather than treating all violations as new.
+  return JSON.parse(raw) as BoundaryViolation[];
 }
 
 /**

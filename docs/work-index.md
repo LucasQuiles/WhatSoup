@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 183
+**Total entries:** 185
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | bead=113, doc=15, handoff=4, plan=16, review=2, spec=13, state=20 |
-| Status | active=2, closed=9, completed=117, deferred=8, pending=38, unknown=9 |
-| Status source | bead-manifest=3, body-marker=104, directory=7, fallback=4, phase-log=7, state-md-status=58 |
+| Kind | bead=113, doc=15, handoff=4, plan=18, review=2, spec=13, state=20 |
+| Status | active=2, closed=9, completed=118, deferred=8, pending=39, unknown=9 |
+| Status source | bead-manifest=3, body-marker=106, directory=7, fallback=4, phase-log=7, state-md-status=58 |
 
 ## Inconsistencies
 
@@ -325,7 +325,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-project-statement.md` | handoff | deferred | body-marker | fleet-charts-project-statement | 2026-04-24 |  |
 | `docs/superpowers/handoffs/2026-04-07-fleet-charts-sop.md` | handoff | deferred | body-marker | fleet-charts-sop | 2026-05-12 |  |
 
-### docs/superpowers/plans  _(16 entries)_
+### docs/superpowers/plans  _(18 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -345,6 +345,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-05-29-harness-maintenance.md` | plan | completed | body-marker | harness-maintenance | 2026-05-29 |  |
 | `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | completed | body-marker | twilio-sms-transport | 2026-06-11 |  |
 | `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | completed | body-marker | twilio-voice-webhook | 2026-06-11 |  |
+| `docs/superpowers/plans/2026-06-13-outstanding-burndown.md` | plan | completed | body-marker | outstanding-burndown | 2026-06-13 |  |
+| `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | pending | body-marker | python-deploy-redaction-ssot | 2026-06-13 |  |
 
 ### docs/superpowers/reviews  _(2 entries)_
 
@@ -374,4 +376,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-12T23:31:52Z from commit `e47276a4bb7ba006f74bcb5702547a04728bef26`
+- Generated at 2026-06-13T06:21:26Z from commit `5b3fc8a67a5546cf78e541375a269002cd6e92c1`

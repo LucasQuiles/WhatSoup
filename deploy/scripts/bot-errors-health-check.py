@@ -786,6 +786,70 @@ def load_runtime_manifest() -> tuple[dict[str, Any] | None, str | None]:
     return loaded, None
 
 
+def _run_git_rev_parse(repo_root: Path) -> tuple[str, str, int]:
+    """Run ``git -C <repo_root> rev-parse HEAD`` and return (stdout, stderr, returncode).
+
+    Raises FileNotFoundError if git is not on PATH, subprocess.TimeoutExpired on timeout.
+    Callers are responsible for catching those exceptions.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return proc.stdout, proc.stderr, proc.returncode
+
+
+def git_head_sha_line(manifest: dict[str, Any]) -> str:
+    """Return a single observability/status line for the host git HEAD sha.
+
+    Prefixed with ``WARN `` on transient git problems, ``FAIL `` on a confirmed
+    expected/actual mismatch, and no prefix for normal observability output.
+    All lines begin with ``git_head_sha`` so they sit under the
+    runtime_manifest umbrella in health output.
+    """
+    raw_expected = manifest.get("expected_head_sha")
+
+    # Validate expected_head_sha shape when present.
+    expected_sha: str | None = None
+    if raw_expected is not None:
+        if not isinstance(raw_expected, str) or not re.fullmatch(r"[a-fA-F0-9]{7,64}", raw_expected):
+            return "WARN git_head_sha: invalid expected_head_sha=<redacted>"
+        expected_sha = raw_expected.lower()
+
+    # Resolve the host HEAD sha.
+    try:
+        stdout, stderr, rc = _run_git_rev_parse(REPO_ROOT)
+    except FileNotFoundError:
+        return "WARN git_head_sha: git_unavailable"
+    except subprocess.TimeoutExpired:
+        return "WARN git_head_sha: git_rev_parse_timeout"
+
+    if rc != 0:
+        reason = stderr.strip().replace("\n", " ")[:120] or f"rc={rc}"
+        if "not a git repository" in reason.lower():
+            return "WARN git_head_sha: not_a_git_repository"
+        return f"WARN git_head_sha: git_rev_parse_failed rc={rc}"
+
+    actual_sha = stdout.strip()
+    if not re.fullmatch(r"[a-fA-F0-9]{7,64}", actual_sha):
+        return f"WARN git_head_sha: unexpected_output={actual_sha[:40]!r}"
+
+    actual_sha = actual_sha.lower()
+
+    if expected_sha is None:
+        return f"git_head_sha: {actual_sha} expected=unset"
+
+    # Prefix match: allow expected to be a short sha (>= 7 hex chars) that is a
+    # prefix of the actual 40-char sha, as well as full equality.
+    if actual_sha.startswith(expected_sha) or expected_sha.startswith(actual_sha):
+        return f"git_head_sha: {actual_sha} expected={expected_sha} match"
+
+    return f"FAIL git_head_sha: {actual_sha} expected={expected_sha} git_head_sha_mismatch"
+
+
 def runtime_manifest_inventory(profile: dict[str, Any]) -> list[str]:
     if not profile_bool(profile, "expectRuntimeManifest", False):
         return ["runtime_manifest: skipped by health profile"]
@@ -862,6 +926,7 @@ def runtime_manifest_inventory(profile: dict[str, Any]) -> list[str]:
             lines.append(
                 f"FAIL runtime_manifest {raw_path}: missing_marker={redact_evidence_string(marker, 120)} path={path}"
             )
+    lines.append(git_head_sha_line(manifest))
     return lines
 
 
@@ -1621,6 +1686,60 @@ _INSTANCE_FAIL_PREFIXES = {
     "profile_coverage_service",
     "tree_provenance",
 }
+
+# Infrastructure-class daily-health FAIL categories: host-environment problems
+# that are NOT a bot/auth/credential outage. When EVERY failure is infra-class,
+# the daily summary de-conflates from critical to warning. Per-instance critical
+# salient events (emit_per_instance_health_failures) still fire regardless.
+# Fail-safe: any category NOT in this set keeps the summary CRITICAL.
+#
+# Intentionally NARROW: only true host-environment categories belong here.
+# queue_inventory() emits FAIL lines prefixed outbox/processing/quarantine/
+# dispatcher_state/writefail — these are NOT listed, and stay CRITICAL on
+# purpose: a backed-up outbox or a writefail on the alert host means alerts
+# are not draining/writing, i.e. the alert pipeline itself is failing. (There
+# is no "queue" prefix emitter — do not re-add one; it would match nothing.)
+_DAILY_INFRA_FAIL_PREFIXES = frozenset({
+    "disk", "dns", "rustdesk", "clock",
+})
+
+
+def _failure_is_infra_only(line: str) -> bool:
+    """True iff this failure line is an infrastructure-class category (downgradeable).
+    Parses the category token the same way _instance_from_fail_line does: strip a
+    leading "FAIL " if present, take the first whitespace token, strip trailing ':'.
+    A path-like token (contains '/') is NOT infra (fail-safe -> keep critical).
+    Unknown categories return False (fail-safe -> keep critical)."""
+    if not line:
+        return False
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("FAIL "):
+        stripped = stripped[len("FAIL "):].strip()
+    tokens = stripped.split()
+    if not tokens:
+        return False
+    category = tokens[0].rstrip(":")
+    if "/" in category or os.sep in category:
+        return False
+    return category in _DAILY_INFRA_FAIL_PREFIXES
+
+
+def daily_summary_severity(failures: list[str], warnings: list[str]) -> str:
+    """Pure severity decision for the daily-health summary event.
+
+    Returns "critical" when any failure is not infrastructure-class (fail-safe),
+    "warning" when there are only infra-class failures or only warnings, and
+    "info" when there are neither failures nor warnings.
+    """
+    if failures:
+        if all(_failure_is_infra_only(f) for f in failures):
+            return "warning"   # infra-only daily failure -- de-conflated, not a page
+        return "critical"
+    if warnings:
+        return "warning"
+    return "info"
 
 
 def _instance_from_fail_line(line: str) -> str | None:
@@ -5156,14 +5275,44 @@ def queue_inventory() -> list[str]:
     return lines
 
 
+def _event_file_age_seconds(path: Path, now: float) -> float:
+    """Return the age in seconds for a JSON event file.
+
+    For *.json event files, reads the event's createdAt ISO8601 field as the
+    true creation time (age = now - createdAt).  Falls back to st_mtime on
+    any error (missing field, unparseable timestamp, unreadable file).
+    Non-JSON callers already pass non-matching patterns; this path is only
+    reached for *.json glob results.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            created_at = data.get("createdAt")
+            if isinstance(created_at, str) and created_at.strip():
+                parsed = datetime.fromisoformat(created_at.strip().replace("Z", "+00:00"))
+                return max(0.0, now - parsed.timestamp())
+    except Exception:  # noqa: BLE001 - health path must never crash on malformed files
+        pass
+    try:
+        return max(0.0, now - path.stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
     if not path.exists():
         return 0, 0
     files = [item for item in path.glob(pattern) if item.is_file()]
     if not files:
         return 0, 0
-    oldest = int(time.time() - min(item.stat().st_mtime for item in files))
-    return len(files), max(0, oldest)
+    now = time.time()
+    is_json_pattern = pattern.endswith(".json") or pattern == "*.json"
+    if is_json_pattern:
+        oldest = max(_event_file_age_seconds(item, now) for item in files)
+    else:
+        oldest = now - min(item.stat().st_mtime for item in files)
+    return len(files), max(0, int(oldest))
 
 
 def queue_prefix(
@@ -5352,7 +5501,7 @@ def daily() -> int:
     if missing_required_tools:
         failures.append(f"required tools missing: {','.join(missing_required_tools)}")
     warnings = [line for line in lines if line.startswith("WARN ") or " WARN " in line]
-    severity = "critical" if failures else "warning" if warnings else "info"
+    severity = daily_summary_severity(failures, warnings)
     evidence = "\n".join(lines)
     critical_asset = critical_asset_from_health_evidence(evidence) if severity != "info" else None
     if missing_required_tools:

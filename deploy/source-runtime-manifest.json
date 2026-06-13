@@ -14,7 +14,7 @@
     },
     {
       "path": "src/bootstrap.ts",
-      "sha256": "75fae25e395cf2ecbb73cdb1b17f2473543b3adcfe6d87e39cc92c9405068278",
+      "sha256": "75aeb7eae92af8ad84305a026baca390353571139bfeaaad0b04abd1dad7a44d",
       "mustContain": [
         "bootstrapCommon"
       ],
@@ -32,7 +32,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "90364c937c5f0b6610ecaa85fd1ba8c18acf1ac9c8462cc4b619f841f00c7d44",
+      "sha256": "8bda247e92880806754179a5a8378421fee0dc57bbf0b6cfbe9b97447cddca74",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",

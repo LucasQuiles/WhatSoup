@@ -231,6 +231,7 @@ export function parseGeminiAcpEvent(line: string, currentSessionId = ''): AgentE
     return {
       type: 'result',
       text: `Gemini ACP error (code ${frame.code}): ${frame.message}`,
+      isError: true,
     };
   }
 

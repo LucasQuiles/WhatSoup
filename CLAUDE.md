@@ -1,6 +1,6 @@
 # WhatSoup
 
-Consolidated WhatsApp platform — one process, one Baileys connection, one database, 162 MCP tools (160 always-registered + 2 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, and `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer; see `docs/tools.md`).
+Consolidated WhatsApp platform — one process, one Baileys connection, one database, with the canonical MCP tool surface documented in `docs/tools.md`.
 
 ## Quick Reference
 
@@ -72,7 +72,7 @@ If anything turns up, read the matched line in context — if your PR closes the
 ## Documentation
 
 - `docs/configuration.md` — environment variables, instance.json schema, XDG paths, **per-instance plugin scoping**
-- `docs/tools.md` — complete MCP tool API reference (162 tools — 161 across 20 modules under `src/mcp/tools/*.ts` plus 1 inline registration in `src/runtimes/agent/runtime.ts`; 160 always-registered + 2 conditionally-registered)
+- `docs/tools.md` — complete MCP tool API reference, including conditional registration details and the inline runtime registration
 - `docs/runbook.md` — operational runbook (service management, troubleshooting, recovery)
 - `docs/runbooks/agent-decision-polls.md` — portable contract for `AskUserQuestion` poll bridging and MCP `send_poll` usage
 - `docs/durability.md` — durability engine design, state machines, recovery algorithms

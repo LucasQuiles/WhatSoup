@@ -1,11 +1,16 @@
 // src/runtimes/agent/runtime.ts
 // AgentRuntime implements the Runtime interface, tying all agent components together.
 
-import type { AgentCommandRequest, AgentCommandResult, Runtime } from '../types.ts';
+import type { AgentCommandRequest, AgentCommandResult, Runtime, RuntimeTurnCapabilityHealth } from '../types.ts';
 import type { IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
+import {
+  classifyProviderFailure,
+  isProviderAuthRequiredMessage,
+  type ProviderFailureKind,
+} from './failure-taxonomy.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
@@ -76,6 +81,11 @@ import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-
 import { createProviderMcpBridge, writeProviderMcpConfig, writeProviderMcpConfigTarget } from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus } from './providers/binary-preflight.ts';
+import {
+  probePrimaryModelUsability,
+  type PrimaryModelUsabilityResult,
+} from './providers/primary-model-usability.ts';
+import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
 import { extractRawMime } from '../../core/media-mime.ts';
 import { jitteredDelay } from '../../core/retry.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
@@ -168,7 +178,12 @@ const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
   return Math.min(Math.max(Math.trunc(raw), 3), 100);
 })();
 
-type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required';
+type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
+type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empty-output';
+type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
+  modelUsabilityStatus: PrimaryModelUsabilityResult['status'] | null;
+  lastTurnErrorClass: TurnCapabilityErrorClass | null;
+};
 
 interface ProviderFallbackActivation {
   primaryProvider: string;
@@ -398,6 +413,11 @@ export interface AgentRuntimeOptions {
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
   replyGuaranteeTimeoutMs?: number;
 }
+
+type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
+  checkedAt: number | null;
+  probeInFlight: boolean;
+};
 
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting
@@ -1071,75 +1091,17 @@ function humanizeError(_toolName: string, text: string): string | null {
   return null;
 }
 
-/**
- * Detect provider usage-limit / quota-exceeded messages that should NOT be
- * forwarded to WhatsApp.  When a Claude Code session hits its usage cap it
- * emits a human-readable message like "You're out of extra usage · resets …".
- * Forwarding this to a group chat can trigger other agents to respond, which
- * spawns new sessions that also hit the cap → infinite flood.
- *
- * Returns `true` when the text looks like a provider usage-limit notice.
- */
-export function isUsageLimitMessage(text: string): boolean {
-  if (isPromptTooLongMessage(text)) return false; // distinct error path
-
-  const lower = text.toLowerCase();
-  if (
-    lower.includes('out of extra usage') ||
-    lower.includes('usage limit reached') ||
-    lower.includes('usage cap reached') ||
-    lower.includes("you've reached your usage limit") ||
-    lower.includes('you have reached your usage limit') ||
-    lower.includes('you have hit your usage limit') ||
-    lower.includes('claude usage limit')
-  ) {
-    return true;
-  }
-
-  const resetPattern = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
-  return resetPattern.test(text) && (
-    lower.includes('usage limit') ||
-    lower.includes('usage cap') ||
-    lower.includes('plan limit') ||
-    lower.includes('quota exceeded')
-  );
-}
-
-export function isProviderAuthRequiredMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('not logged in') ||
-    lower.includes('please run /login') ||
-    lower.includes('please login') ||
-    lower.includes('authentication required') ||
-    lower.includes('auth required') ||
-    lower.includes('invalid api key') ||
-    lower.includes('missing api key') ||
-    lower.includes('no api key') ||
-    (lower.includes('oauth') && lower.includes('expired'))
-  );
-}
-
-export function isRateLimitResultMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('rate limited') ||
-    lower.includes('rate limit exceeded') ||
-    lower.includes('too many requests') ||
-    lower.includes('429')
-  ) && !isUsageLimitMessage(text);
-}
-
-export function isProviderPolicyBlockMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('usage policy') ||
-    lower.includes('policy violation') ||
-    lower.includes('violates our policy') ||
-    lower.includes('violative') ||
-    lower.includes('blocked by policy')
-  );
-}
+// Provider-failure string matchers are the single source of truth in
+// `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
+// here so existing importers (e.g. tests) keep `runtime.ts` as their entry point.
+export {
+  isUsageLimitMessage,
+  isProviderAuthRequiredMessage,
+  isRateLimitResultMessage,
+  isProviderPolicyBlockMessage,
+  isPromptTooLongMessage,
+  isProviderModelUnavailableMessage,
+} from './failure-taxonomy.ts';
 
 function providerDisplayName(provider: string): string {
   switch (provider) {
@@ -1172,6 +1134,9 @@ function fallbackReasonForUser(reason: ProviderFallbackReason, activeUntil: numb
   if (reason === 'rate-limit') {
     return 'is rate limited; switching temporarily';
   }
+  if (reason === 'model-unavailable') {
+    return 'is unavailable on this host; switching temporarily';
+  }
   return 'needs re-auth; switching while the primary connection is repaired';
 }
 
@@ -1180,9 +1145,18 @@ function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
 }
 
 function fallbackReasonForResultText(text: string): ProviderFallbackReason | null {
-  if (isUsageLimitMessage(text)) return 'usage-limit';
-  if (isProviderAuthRequiredMessage(text)) return 'auth-required';
-  if (isRateLimitResultMessage(text)) return 'rate-limit';
+  // Routed through the central classifier (SSOT). Only fallback-arming kinds map to
+  // a ProviderFallbackReason; policy-block / context-overflow classify but do not
+  // arm fallback (they are suppressed and the session is killed by the handlers).
+  const kind = classifyProviderFailure(text);
+  if (
+    kind === 'usage-limit' ||
+    kind === 'rate-limit' ||
+    kind === 'auth-required' ||
+    kind === 'model-unavailable'
+  ) {
+    return kind;
+  }
   return null;
 }
 
@@ -1260,26 +1234,7 @@ export function extractUsageLimitResetTime(text: string, now: Date = new Date())
   return null;
 }
 
-/**
- * Detect context-window overflow errors from the Claude provider.
- *
- * When the accumulated conversation exceeds the model's context window, Claude
- * returns an error like "Prompt is too long". The session is unsalvageable —
- * sending /compact will also fail because the prompt is already too large.
- * The correct recovery is to kill the session so the next user message spawns
- * a fresh one with recent chat context injected.
- */
-export function isPromptTooLongMessage(text: string): boolean {
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('prompt is too long') ||
-    lower.includes('prompt too long') ||
-    lower.includes('maximum context length') ||
-    lower.includes('context_length_exceeded') ||
-    lower.includes('max_tokens_exceeded') ||
-    (lower.includes('token') && lower.includes('limit') && lower.includes('exceed'))
-  );
-}
+// `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
 /**
  * Classify a tool_result error as either a blocked tool (permission/hook denial),
@@ -1464,6 +1419,11 @@ export class AgentRuntime implements Runtime {
   // path must be countable — a silent expensive fallback is a billing
   // surprise waiting to be found on the invoice instead of in /health.
   private fallbackWindowCostUsd = 0;
+  private primaryModelUsability: RuntimePrimaryModelUsability | null = null;
+  private primaryModelUsabilityAlertActive = false;
+  private lastSuccessfulTurnAt: number | null = null;
+  private lastTurnErrorClass: TurnCapabilityErrorClass | null = null;
+  private lastTurnErrorAt: number | null = null;
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -1510,6 +1470,7 @@ export class AgentRuntime implements Runtime {
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
   private recentProviderFallbackNotices = new Map<string, number>();
+  private recentFallbackEmptyTurnAlerts = new Map<string, number>();
   private recentToolFailureAlerts = new Map<string, number>();
 
   /**
@@ -2550,6 +2511,7 @@ export class AgentRuntime implements Runtime {
     ensureAgentSchema(this.db);
     this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
+    this.schedulePrimaryModelUsabilityProbe('startup');
 
     // Write sandbox policy and hook settings when sandbox config is present
     if (this.sandbox) {
@@ -4715,8 +4677,12 @@ export class AgentRuntime implements Runtime {
           // deferred to the 'result' event. Activating on streaming text would
           // race the usage-limit session kill/respawn (the result path also
           // shuts the session down), so we only observe + suppress here.
-          if (isUsageLimitMessage(normalizedText)) {
-            log.warn({ chatJid: queue.targetChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
+          // Suppress any KNOWN provider-failure string that streamed as assistant text.
+          // Fallback is armed on the terminal 'result' event, not here. Text that does
+          // NOT match a known failure pattern is genuine assistant output — pass it through
+          // (never default-deny streaming, or real replies would be dropped).
+          if (classifyProviderFailure(normalizedText) !== null) {
+            log.warn({ chatJid: queue.targetChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed provider-failure message from assistant_text');
             break;
           }
           queue.enqueueStreamingText(normalizedText);
@@ -4842,10 +4808,18 @@ export class AgentRuntime implements Runtime {
             this.postTurnGate.add(mapKey);
           }
         }
+        const isUserTurnResult = !isSystemResult && !hasPendingPoll && !wasSilentCompact;
+        let turnCapabilityFailureRecorded = false;
+        const recordTurnFailure = (errorClass: TurnCapabilityErrorClass): void => {
+          this.recordTurnCapabilityFailure(isUserTurnResult, errorClass);
+          turnCapabilityFailureRecorded = turnCapabilityFailureRecorded || isUserTurnResult;
+        };
 
         if (event.text && !hasPendingPoll) {
+          const providerFailureKind = classifyProviderFailure(event.text);
           // Suppress usage-limit messages — log and skip instead of forwarding
-          if (isUsageLimitMessage(event.text)) {
+          if (providerFailureKind === 'usage-limit') {
+            recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
@@ -4876,7 +4850,8 @@ export class AgentRuntime implements Runtime {
             }
             break;
           }
-          if (isProviderPolicyBlockMessage(event.text)) {
+          if (providerFailureKind === 'policy-block') {
+            recordTurnFailure(providerFailureKind);
             log.error({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
@@ -4886,7 +4861,8 @@ export class AgentRuntime implements Runtime {
             session?.shutdown();
             break;
           }
-          if (isProviderAuthRequiredMessage(event.text)) {
+          if (providerFailureKind === 'auth-required') {
+            recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
             const activation = this.activateProviderFallback(null, 'auth-required');
             const replayScheduled = activation
@@ -4912,7 +4888,8 @@ export class AgentRuntime implements Runtime {
             if (!replayScheduled) session?.shutdown();
             break;
           }
-          if (isRateLimitResultMessage(event.text)) {
+          if (providerFailureKind === 'rate-limit') {
+            recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
             const activation = this.activateProviderFallback(null, 'rate-limit');
             const replayScheduled = activation
@@ -4938,8 +4915,36 @@ export class AgentRuntime implements Runtime {
             if (!replayScheduled) session?.shutdown();
             break;
           }
+          if (providerFailureKind === 'model-unavailable') {
+            recordTurnFailure(providerFailureKind);
+            log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
+            const activation = this.activateProviderFallback(null, 'model-unavailable');
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  mapKey,
+                  oldSession: session,
+                  hadToolActivity: turnHadToolWork,
+                })
+              : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq,
+              conversationKey,
+              mapKey,
+            });
+            if (!replayScheduled) session?.shutdown();
+            break;
+          }
           // Context overflow — session is unsalvageable, kill and let next message respawn
-          if (isPromptTooLongMessage(event.text)) {
+          if (providerFailureKind === 'context-overflow') {
+            recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
             queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
             this.cleanupUsageLimitTurn(queue, {
@@ -4951,10 +4956,25 @@ export class AgentRuntime implements Runtime {
             break;
           }
           if (!wasSilentCompact) {
-            queue.enqueueResultText(event.text);
-            // Accumulate result text for voice reply (SP4)
-            if (mapKey !== undefined) {
-              this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
+            if (event.isError) {
+              recordTurnFailure('unknown-terminal');
+              // Default-deny: an is_error result with no recognised failure class is an
+              // UNKNOWN terminal provider error. Never forward raw provider/CLI text to the
+              // user — emit one generic notice and alert ops with the raw text.
+              log.error({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed unclassified terminal provider error from result — not forwarded to user');
+              emitAlertChecked(
+                this.instanceName,
+                'provider_unknown_terminal',
+                'Unclassified terminal provider error suppressed from user',
+                event.text.slice(0, 400),
+              );
+              queue.enqueueText(this.providerUnknownTerminalNotice());
+            } else {
+              queue.enqueueResultText(event.text);
+              // Accumulate result text for voice reply (SP4)
+              if (mapKey !== undefined) {
+                this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
+              }
             }
           }
         }
@@ -5005,7 +5025,10 @@ export class AgentRuntime implements Runtime {
           });
           if (!isSystemResult) this.replyGuarantee?.disarm(inboundSeq);
           if (lastOpId !== undefined) {
-            queue.clearLastOpId();
+            queue.markLastTerminal({
+              dedupeText: event.isError === true && !wasSilentCompact,
+              skipDurabilityMark: true,
+            });
           }
         } else {
           if ((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
@@ -5013,7 +5036,7 @@ export class AgentRuntime implements Runtime {
           }
           // Defense-in-depth: mark last op terminal so echo auto-complete fires if
           // the process crashes after send but before completeInbound runs.
-          queue.markLastTerminal();
+          queue.markLastTerminal({ dedupeText: event.isError === true && !wasSilentCompact });
         }
         // Only advance the compact baseline when the SDK actually emitted a
         // compact_boundary on this turn. wasSilentCompact alone means "we
@@ -5055,6 +5078,13 @@ export class AgentRuntime implements Runtime {
             // increment the empty counter when neither text nor tool work occurred.
             // turnHadToolWork was captured before clearToolNames above.
             this.recordFallbackTurnOutcome(queue, hadVisible, turnHadToolWork);
+            if (!turnCapabilityFailureRecorded) {
+              if (hadVisible || turnHadToolWork) {
+                this.recordTurnCapabilitySuccess(true);
+              } else {
+                this.recordTurnCapabilityFailure(true, 'empty-output');
+              }
+            }
             if (!hadVisible && !turnHadToolWork && this.isFallbackWindowActive) {
               // This path has no '_(no response)_' fallback and the reply guarantee
               // was just disarmed — without this the user gets pure silence.
@@ -5858,6 +5888,8 @@ export class AgentRuntime implements Runtime {
     fallbackReverts: number;
     fallbackReplays: number;
     fallbackWindowCostUsd: number;
+    primaryModelUsability: RuntimePrimaryModelUsability | null;
+    turnCapability: RuntimeTurnCapability;
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   } {
@@ -5879,9 +5911,46 @@ export class AgentRuntime implements Runtime {
       fallbackReverts: this.fallbackReverts,
       fallbackReplays: this.fallbackReplays,
       fallbackWindowCostUsd: this.fallbackWindowCostUsd,
+      primaryModelUsability: this.primaryModelUsability ? { ...this.primaryModelUsability } : null,
+      turnCapability: this.getTurnCapability(),
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
     };
+  }
+
+  private getTurnCapability(): RuntimeTurnCapability {
+    const usability = this.primaryModelUsability;
+    let modelUsable: boolean | null = null;
+    if (usability && !usability.probeInFlight) {
+      if (usability.status === 'usable') {
+        modelUsable = true;
+      } else if (this.primaryModelUsabilityRequiresAlert(usability)) {
+        modelUsable = false;
+      }
+    }
+    return {
+      modelUsable,
+      modelUsabilityStatus: usability?.status ?? null,
+      lastSuccessfulTurnAt: this.lastSuccessfulTurnAt,
+      lastTurnErrorClass: this.lastTurnErrorClass,
+      lastTurnErrorAt: this.lastTurnErrorAt,
+    };
+  }
+
+  private recordTurnCapabilitySuccess(isUserTurnResult: boolean): void {
+    if (!isUserTurnResult) return;
+    this.lastSuccessfulTurnAt = Date.now();
+    this.lastTurnErrorClass = null;
+    this.lastTurnErrorAt = null;
+  }
+
+  private recordTurnCapabilityFailure(
+    isUserTurnResult: boolean,
+    errorClass: TurnCapabilityErrorClass,
+  ): void {
+    if (!isUserTurnResult) return;
+    this.lastTurnErrorClass = errorClass;
+    this.lastTurnErrorAt = Date.now();
   }
 
   /**
@@ -5992,6 +6061,16 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * User-facing notice for an unclassified terminal provider error. The raw
+   * provider/CLI text is never shown to the user (it can contain internal detail and
+   * is captured in a `provider_unknown_terminal` ops alert instead); this generic copy
+   * is the single source of user-facing wording for that path.
+   */
+  private providerUnknownTerminalNotice(): string {
+    return '_I hit a problem completing that — an operator has been notified. Please try again, or send /new to start fresh._';
+  }
+
+  /**
    * Count a completed turn during an active fallback window; alert and enqueue
    * a user notice when the turn produced neither visible text nor tool activity.
    *
@@ -6014,12 +6093,21 @@ export class AgentRuntime implements Runtime {
       served: this.fallbackTurnsServed,
       empty: this.fallbackTurnsEmpty,
     }, 'fallback turn completed with zero visible output');
-    emitAlertChecked(
-      this.instanceName,
-      'fallback_empty_turn',
-      'Fallback turn produced no visible output',
-      `provider=${entry?.provider} model=${entry?.model} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
-    );
+    // Per-chat dedup: reuse PROVIDER_FALLBACK_NOTICE_DEDUP_MS window to avoid
+    // one alert per empty turn in a sustained silent-bot episode.
+    const emptyAlertNow = Date.now();
+    for (const [k, ts] of this.recentFallbackEmptyTurnAlerts) {
+      if (emptyAlertNow - ts > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) this.recentFallbackEmptyTurnAlerts.delete(k);
+    }
+    if (!this.recentFallbackEmptyTurnAlerts.has(queue.targetChatJid)) {
+      this.recentFallbackEmptyTurnAlerts.set(queue.targetChatJid, emptyAlertNow);
+      emitAlertChecked(
+        this.instanceName,
+        'fallback_empty_turn',
+        'Fallback turn produced no visible output',
+        `provider=${entry?.provider} model=${entry?.model} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
+      );
+    }
   }
 
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,
@@ -6429,16 +6517,19 @@ export class AgentRuntime implements Runtime {
         } catch (err) {
           log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
         }
-        // Exactly-once-at-threshold stall alert. The counter only resets on
-        // deactivation, so attempts > threshold never re-alerts within the same
-        // stall episode. Extension continues regardless — surfacing must never
+        // Stall alert at threshold and every subsequent multiple (T, 2T, 3T ...).
+        // Re-alerting on multiples surfaces a long-running stall without
+        // drowning operators with per-probe noise. The counter only resets on
+        // deactivation. Extension continues regardless — surfacing must never
         // strand the instance on a dead primary.
-        if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
+        const T = PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD;
+        const atts = this.fallbackProbeAttempts;
+        if (atts === T || (atts > T && (atts - T) % T === 0)) {
           emitAlertChecked(
             this.instanceName,
             'fallback_recovery_stalled',
             'Primary provider recovery probe is stalled — fallback window extending indefinitely',
-            `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${this.fallbackProbeAttempts} `
+            `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${atts} `
               + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
           );
         }
@@ -6496,6 +6587,92 @@ export class AgentRuntime implements Runtime {
         });
     }, PROVIDER_FALLBACK_PRIMARY_RECHECK_MS);
     this.fallbackPrimaryProbeTimer.unref?.();
+  }
+
+  private schedulePrimaryModelUsabilityProbe(trigger: 'startup' | 'manual'): void {
+    const target = {
+      provider: this.agentProvider,
+      model: this.model ?? null,
+    };
+    this.primaryModelUsability = {
+      status: 'unknown',
+      provider: target.provider,
+      model: target.model,
+      reason: 'probe-in-flight',
+      checkedAt: this.primaryModelUsability?.checkedAt ?? null,
+      probeInFlight: true,
+    };
+
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig);
+    void Promise.resolve()
+      .then(() => probePrimaryModelUsability(target, adapters))
+      .then((result) => this.recordPrimaryModelUsability(result, trigger))
+      .catch((err) => {
+        log.warn({ err, provider: target.provider, model: target.model }, 'primary model usability probe threw');
+        this.recordPrimaryModelUsability({
+          status: 'unknown',
+          provider: target.provider,
+          model: target.model,
+          reason: 'probe-threw',
+        }, trigger);
+      });
+  }
+
+  private recordPrimaryModelUsability(
+    result: PrimaryModelUsabilityResult,
+    trigger: 'startup' | 'manual',
+  ): void {
+    this.primaryModelUsability = {
+      ...result,
+      checkedAt: Date.now(),
+      probeInFlight: false,
+    };
+
+    if (result.status === 'usable') {
+      if (this.primaryModelUsabilityAlertActive) {
+        clearAlertSourceChecked(
+          this.instanceName,
+          'primary_model_unusable',
+          `provider=${alertEvidenceValue(result.provider)} model=${alertEvidenceValue(result.model)}`,
+        );
+        this.primaryModelUsabilityAlertActive = false;
+      }
+      return;
+    }
+
+    if (!this.primaryModelUsabilityRequiresAlert(result)) return;
+
+    this.primaryModelUsabilityAlertActive = true;
+    emitAlertChecked(
+      this.instanceName,
+      'primary_model_unusable',
+      'Primary model usability probe failed',
+      this.primaryModelUsabilityEvidence(result, trigger),
+      'warning',
+    );
+  }
+
+  private primaryModelUsabilityRequiresAlert(result: PrimaryModelUsabilityResult): boolean {
+    if (result.model === null) return false;
+    if (result.status === 'unknown') {
+      return result.reason !== 'model-not-configured' && result.reason !== 'unsupported-provider';
+    }
+    return result.status !== 'usable';
+  }
+
+  private primaryModelUsabilityEvidence(
+    result: PrimaryModelUsabilityResult,
+    trigger: 'startup' | 'manual',
+  ): string {
+    const parts = [
+      `trigger=${trigger}`,
+      `status=${alertEvidenceValue(result.status)}`,
+      `provider=${alertEvidenceValue(result.provider)}`,
+      `model=${alertEvidenceValue(result.model)}`,
+    ];
+    if (result.reason) parts.push(`reason=${alertEvidenceValue(result.reason)}`);
+    if (result.suggestion) parts.push(`suggestion=${alertEvidenceValue(result.suggestion)}`);
+    return parts.join(' ');
   }
 
   /**
@@ -7473,8 +7650,10 @@ export class AgentRuntime implements Runtime {
           // deferred to the 'result' event. Activating on streaming text would
           // race the usage-limit session kill/respawn (the result path also
           // shuts the session down), so we only observe + suppress here.
-          if (isUsageLimitMessage(normalizedText)) {
-            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed usage-limit message from assistant_text');
+          // Suppress any KNOWN provider-failure string streamed as assistant text; fallback
+          // is armed on the terminal 'result' event. Non-matching text is genuine output.
+          if (classifyProviderFailure(normalizedText) !== null) {
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: normalizedText.slice(0, 300) }, 'suppressed provider-failure message from assistant_text');
             break;
           }
           queue.enqueueStreamingText(normalizedText);
@@ -7602,11 +7781,19 @@ export class AgentRuntime implements Runtime {
         if (!isSystemResult) {
           this.postTurnGate.add(GLOBAL_TOOL_SCOPE_KEY);
         }
+        const isUserTurnResult = !isSystemResult && !wasSilentCompact;
+        let turnCapabilityFailureRecorded = false;
+        const recordTurnFailure = (errorClass: TurnCapabilityErrorClass): void => {
+          this.recordTurnCapabilityFailure(isUserTurnResult, errorClass);
+          turnCapabilityFailureRecorded = turnCapabilityFailureRecorded || isUserTurnResult;
+        };
 
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
+          const providerFailureKind = classifyProviderFailure(event.text);
           // Suppress usage-limit messages — log and kill session instead of forwarding
-          if (isUsageLimitMessage(event.text)) {
+          if (providerFailureKind === 'usage-limit') {
+            recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
@@ -7637,7 +7824,8 @@ export class AgentRuntime implements Runtime {
             this.singleTurnHadToolActivity = false;
             break;
           }
-          if (isProviderPolicyBlockMessage(event.text)) {
+          if (providerFailureKind === 'policy-block') {
+            recordTurnFailure(providerFailureKind);
             log.error({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
@@ -7647,7 +7835,8 @@ export class AgentRuntime implements Runtime {
             this.session?.shutdown();
             break;
           }
-          if (isProviderAuthRequiredMessage(event.text)) {
+          if (providerFailureKind === 'auth-required') {
+            recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
             const activation = this.activateProviderFallback(null, 'auth-required');
             const replayScheduled = activation
@@ -7673,7 +7862,8 @@ export class AgentRuntime implements Runtime {
             this.singleTurnHadToolActivity = false;
             break;
           }
-          if (isRateLimitResultMessage(event.text)) {
+          if (providerFailureKind === 'rate-limit') {
+            recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
             const activation = this.activateProviderFallback(null, 'rate-limit');
             const replayScheduled = activation
@@ -7699,8 +7889,36 @@ export class AgentRuntime implements Runtime {
             this.singleTurnHadToolActivity = false;
             break;
           }
+          if (providerFailureKind === 'model-unavailable') {
+            recordTurnFailure(providerFailureKind);
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
+            const activation = this.activateProviderFallback(null, 'model-unavailable');
+            const replayScheduled = activation
+              ? this.scheduleFallbackReplay({
+                  activation,
+                  chatJid: queue.targetChatJid,
+                  oldSession: this.session,
+                  hadToolActivity: turnHadToolWork,
+                })
+              : false;
+            if (activation) {
+              this.notifyProviderFallbackActivated(queue, activation, {
+                replayScheduled,
+                blockedByToolActivity: turnHadToolWork,
+              });
+            }
+            this.cleanupUsageLimitTurn(queue, {
+              inboundSeq: this.currentInboundSeq,
+              conversationKey: toConversationKey(queue.targetChatJid),
+              clearCurrentInboundSeq: true,
+            });
+            if (!replayScheduled) this.session?.shutdown();
+            this.singleTurnHadToolActivity = false;
+            break;
+          }
           // Context overflow — session is unsalvageable, kill and let next message respawn
-          if (isPromptTooLongMessage(event.text)) {
+          if (providerFailureKind === 'context-overflow') {
+            recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
             queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
             this.cleanupUsageLimitTurn(queue, {
@@ -7712,10 +7930,24 @@ export class AgentRuntime implements Runtime {
             break;
           }
           if (!wasSilentCompact) {
-            queue.enqueueResultText(event.text);
-            this.turnHadVisibleOutput = true;
-            // Accumulate result text for voice reply (SP4)
-            this.currentTurnAssistantText += event.text;
+            if (event.isError) {
+              recordTurnFailure('unknown-terminal');
+              // Default-deny: is_error result with no recognised class = unknown terminal
+              // provider error. Suppress the raw text; emit a generic notice + ops alert.
+              log.error({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed unclassified terminal provider error from result — not forwarded to user');
+              emitAlertChecked(
+                this.instanceName,
+                'provider_unknown_terminal',
+                'Unclassified terminal provider error suppressed from user',
+                event.text.slice(0, 400),
+              );
+              queue.enqueueText(this.providerUnknownTerminalNotice());
+            } else {
+              queue.enqueueResultText(event.text);
+              this.turnHadVisibleOutput = true;
+              // Accumulate result text for voice reply (SP4)
+              this.currentTurnAssistantText += event.text;
+            }
           }
         }
         this.currentTurnAssistantItemText.clear();
@@ -7723,6 +7955,13 @@ export class AgentRuntime implements Runtime {
         const lastOpId = queue.getLastOpId();
         if (!wasSilentCompact && !isSystemResult) {
           this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, turnHadToolWork);
+          if (!turnCapabilityFailureRecorded) {
+            if (this.turnHadVisibleOutput || turnHadToolWork) {
+              this.recordTurnCapabilitySuccess(true);
+            } else {
+              this.recordTurnCapabilityFailure(true, 'empty-output');
+            }
+          }
         }
         this.singleTurnHadToolActivity = false;
         // If nothing visible was emitted this turn, send an explicit fallback
@@ -7775,7 +8014,10 @@ export class AgentRuntime implements Runtime {
             this.currentInboundSeq = undefined;
           }
           if (lastOpId !== undefined) {
-            queue.clearLastOpId();
+            queue.markLastTerminal({
+              dedupeText: event.isError === true && !wasSilentCompact,
+              skipDurabilityMark: true,
+            });
           }
         } else {
           if ((event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
@@ -7783,7 +8025,7 @@ export class AgentRuntime implements Runtime {
           }
           // Defense-in-depth: mark last op terminal so echo auto-complete fires if
           // the process crashes after send but before completeInbound runs.
-          queue.markLastTerminal();
+          queue.markLastTerminal({ dedupeText: event.isError === true && !wasSilentCompact });
         }
         // Only advance the compact baseline when the SDK actually emitted a
         // compact_boundary. wasSilentCompact alone means "we suppressed

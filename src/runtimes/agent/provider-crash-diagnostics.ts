@@ -1,5 +1,7 @@
 // Shared, non-secret provider crash diagnostics for agent runtime alerts.
 
+import type { AgentFailureClass } from './failure-taxonomy.ts';
+
 export const PROVIDER_CRASH_PREVIEW_MAX = 1_000;
 
 export interface ProviderCrashMetadata {
@@ -30,7 +32,7 @@ export function appendProviderCrashPreview(
   return `${existing}\n${next}`.trim().slice(-maxLength);
 }
 
-export function classifyProviderCrash(text: string): string | undefined {
+export function classifyProviderCrash(text: string): AgentFailureClass | undefined {
   const lower = text.toLowerCase();
   if (!lower.trim()) return undefined;
   if (lower.includes('enoent') || lower.includes('command not found')) return 'provider_binary_missing';

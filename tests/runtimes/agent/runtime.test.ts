@@ -91,6 +91,22 @@ const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
   mockClearAlertSource: vi.fn(),
 }));
 
+const { mockProbePrimaryModelUsability, mockCreatePrimaryModelProbeAdapters } = vi.hoisted(() => ({
+  mockProbePrimaryModelUsability: vi.fn(async (target: { provider: string; model?: string | null }): Promise<{
+    status: 'usable' | 'model-unavailable' | 'credential-unavailable' | 'provider-unavailable' | 'timeout' | 'unknown';
+    provider: string;
+    model: string | null;
+    reason?: string;
+    suggestion?: string | null;
+  }> => ({
+    status: target.model ? 'usable' : 'unknown',
+    provider: target.provider,
+    model: target.model ?? null,
+    ...(target.model ? {} : { reason: 'model-not-configured' }),
+  })),
+  mockCreatePrimaryModelProbeAdapters: vi.fn(() => ({})),
+}));
+
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -293,6 +309,18 @@ const { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat } = 
 vi.mock('../../../src/runtimes/agent/media-bridge.ts', () => ({
   startMediaBridge: mockStartMediaBridge,
   setMediaBridgeChat: mockSetMediaBridgeChat,
+}));
+
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability.ts')>();
+  return {
+    ...actual,
+    probePrimaryModelUsability: mockProbePrimaryModelUsability,
+  };
+});
+
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
+  createPrimaryModelProbeAdapters: mockCreatePrimaryModelProbeAdapters,
 }));
 
 vi.mock('../../../src/mcp/registry.ts', () => ({
@@ -618,6 +646,14 @@ describe('AgentRuntime', () => {
     mockRuntimeLogger.debug.mockClear();
     mockEmitAlert.mockClear();
     mockClearAlertSource.mockClear();
+    mockCreatePrimaryModelProbeAdapters.mockClear();
+    mockProbePrimaryModelUsability.mockReset();
+    mockProbePrimaryModelUsability.mockImplementation(async (target: { provider: string; model?: string | null }) => ({
+      status: target.model ? 'usable' : 'unknown',
+      provider: target.provider,
+      model: target.model ?? null,
+      ...(target.model ? {} : { reason: 'model-not-configured' }),
+    }));
     const agentConfig = mockConfig as typeof mockConfig & {
       agentProvider?: string;
       agentProviderConfig?: Record<string, unknown>;
@@ -644,6 +680,54 @@ describe('AgentRuntime', () => {
     await runtime.start();
 
     expect(ensureAgentSchema).toHaveBeenCalledWith(db);
+  });
+
+  it('start() records primary model usability and alerts on unusable primary model', async () => {
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentProviderConfig?: Record<string, unknown>;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    agentConfig.agentProviderConfig = { apiKeyService: 'do-not-log-this' };
+    mockProbePrimaryModelUsability.mockResolvedValueOnce({
+      status: 'model-unavailable',
+      provider: 'claude-cli',
+      model: 'configured-primary',
+      reason: 'selected-model-rejected',
+    });
+
+    const runtime = new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', {
+      model: 'configured-primary',
+    });
+    await runtime.start();
+
+    await vi.waitFor(() => {
+      expect(mockProbePrimaryModelUsability).toHaveBeenCalledWith(
+        { provider: 'claude-cli', model: 'configured-primary' },
+        {},
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(runtime.getFallbackState().primaryModelUsability).toMatchObject({
+        status: 'model-unavailable',
+        provider: 'claude-cli',
+        model: 'configured-primary',
+        reason: 'selected-model-rejected',
+        probeInFlight: false,
+      });
+    });
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      'test',
+      'primary_model_unusable',
+      'Primary model usability probe failed',
+      expect.stringContaining('status=model-unavailable'),
+      'warning',
+    );
+    const evidence = mockEmitAlert.mock.calls.find((call) => call[1] === 'primary_model_unusable')?.[3] as string;
+    expect(evidence).toContain('provider=claude-cli');
+    expect(evidence).toContain('model=configured-primary');
+    expect(evidence).not.toContain('do-not-log-this');
   });
 
   it('applies outbound status routing config when creating queues', () => {
@@ -2766,7 +2850,7 @@ describe('AgentRuntime', () => {
         chatJid: 'test@s.whatsapp.net',
         textPreview: expect.stringContaining('out of extra usage'),
       }),
-      'suppressed usage-limit message from assistant_text',
+      'suppressed provider-failure message from assistant_text',
     );
   });
 
@@ -2920,6 +3004,96 @@ describe('AgentRuntime', () => {
     const calls = mockQueue.enqueueResultText.mock.calls.map((args) => args[0] as string);
     expect(calls).toContain('Context limit reached');
     expect(mockQueue.flush).toHaveBeenCalled();
+  });
+
+  it('model-unavailable result is not forwarded raw to the user (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = "There's an issue with the selected model (some-test-model). It may not exist or you may not have access to it. Run --model to pick a different model.";
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() =>
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ textPreview: expect.stringContaining('issue with the selected model') }),
+        'suppressed provider model-unavailable message from result — session will be shut down',
+      ),
+    );
+    const forwarded = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
+    expect(forwarded).not.toContain(raw);
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('model-unavailable');
+    expect(turnCapability.lastTurnErrorAt).toEqual(expect.any(Number));
+    expect(JSON.stringify(turnCapability)).not.toContain(raw);
+  });
+
+  it('unknown terminal (is_error) result is default-denied: generic notice, never raw', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = 'Unexpected provider explosion exposing internal-detail-xyz';
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() =>
+      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('an operator has been notified')),
+    );
+    const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
+    expect(forwardedRaw).not.toContain(raw);
+    const allText = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string).join('\n');
+    expect(allText).not.toContain('internal-detail-xyz');
+
+    let turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('unknown-terminal');
+    expect(turnCapability.lastTurnErrorAt).toEqual(expect.any(Number));
+    expect(JSON.stringify(turnCapability)).not.toContain('internal-detail-xyz');
+    const failedAt = turnCapability.lastTurnErrorAt as number;
+
+    mockQueue.enqueueResultText.mockClear();
+    await runtime.handleMessage(makeMsg({ content: 'follow up' }));
+    capturedOnEventRef.current!({ type: 'result', text: 'Recovered reply', isError: false });
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Recovered reply'));
+
+    turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastSuccessfulTurnAt).toEqual(expect.any(Number));
+    expect(turnCapability.lastSuccessfulTurnAt).toBeGreaterThanOrEqual(failedAt);
+    expect({
+      lastTurnErrorClass: turnCapability.lastTurnErrorClass,
+      lastTurnErrorAt: turnCapability.lastTurnErrorAt,
+    }).toEqual({
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: null,
+    });
+  });
+
+  it('non-error result with text is still forwarded (no over-suppression)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({ type: 'result', text: 'a genuine terminal reply', isError: false });
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('a genuine terminal reply'));
+  });
+
+  it('model-unavailable assistant_text is suppressed from streaming (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({
+      type: 'assistant_text',
+      text: "There's an issue with the selected model (m). It may not exist or you may not have access to it.",
+    });
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
   });
 
   it('assistant_text after result event is suppressed (post-turn gate)', async () => {
@@ -5392,8 +5566,64 @@ describe('AgentRuntime', () => {
       inbound: { seq: 17, terminalReason: 'response_sent' },
       lastOpId: 77,
     });
-    expect(queue.markLastTerminal).not.toHaveBeenCalled();
-    expect(queue.clearLastOpId).toHaveBeenCalledOnce();
+    expect(queue.markLastTerminal).toHaveBeenCalledWith({
+      dedupeText: false,
+      skipDurabilityMark: true,
+    });
+    expect(queue.clearLastOpId).not.toHaveBeenCalled();
+  });
+
+  it('per_chat error result terminalizes with text dedupe after durability completion', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const completeTurn = vi.fn();
+    const session = {
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => 41),
+      getStatus: vi.fn(() => ({ active: true })),
+    };
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+    (runtime as unknown as { durability: { completeTurn: typeof completeTurn } }).durability = {
+      completeTurn,
+    };
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: {
+            clearTurnWatchdog: ReturnType<typeof vi.fn>;
+            shutdown: ReturnType<typeof vi.fn>;
+            getDbRowId: ReturnType<typeof vi.fn>;
+          } | null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    handleEventWithContext(
+      { type: 'result', text: 'raw terminal provider failure', isError: true },
+      queue,
+      session,
+      'conv-111',
+      17,
+      '111',
+      '111#session',
+    );
+
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+    expect(completeTurn).toHaveBeenCalledWith(expect.objectContaining({ lastOpId: 77 }));
+    expect(queue.markLastTerminal).toHaveBeenCalledWith({
+      dedupeText: true,
+      skipDurabilityMark: true,
+    });
+    expect(queue.clearLastOpId).not.toHaveBeenCalled();
   });
 
   it('per_chat system-turn result does not terminate the user inbound seq or disarm its reply guarantee', () => {
@@ -5452,6 +5682,43 @@ describe('AgentRuntime', () => {
     expect(arg.sessionTokens).toEqual({ dbRowId: 41, inputTokens: 3, outputTokens: 5 });
   });
 
+  it('shared model-unavailable result is not forwarded raw to the user (shared path)', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+
+    const state = runtime as unknown as {
+      durability: {
+        completeTurn: ReturnType<typeof vi.fn>;
+        upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+        completeInbound: ReturnType<typeof vi.fn>;
+      };
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      currentInboundSeq: number | undefined;
+      outboundQueues: Map<string, IOutboundQueue>;
+      handleEvent: (event: AgentEvent) => void;
+    };
+    state.durability = { completeTurn: vi.fn(), upsertSessionCheckpoint: vi.fn(), completeInbound: vi.fn() };
+    state.session = Object.assign({}, mockSession, { shutdown: vi.fn(), clearTurnWatchdog: vi.fn() });
+    state.activeChatJid = '111@s.whatsapp.net';
+    state.currentTurnChatJid = '111@s.whatsapp.net';
+    state.currentInboundSeq = 1;
+    state.outboundQueues.set('111@s.whatsapp.net', queue);
+
+    const raw = "There's an issue with the selected model (x). It may not exist or you may not have access to it.";
+    state.handleEvent({ type: 'result', text: raw, isError: true });
+
+    const forwarded = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a) => a[0] as string);
+    expect(forwarded).not.toContain(raw);
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('model-unavailable');
+    expect(turnCapability.lastTurnErrorAt).toEqual(expect.any(Number));
+    expect(JSON.stringify(turnCapability)).not.toContain(raw);
+  });
+
   it('shared result batches turn completion writes through durability.completeTurn', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -5496,8 +5763,11 @@ describe('AgentRuntime', () => {
       inbound: { seq: 23, terminalReason: 'response_sent' },
       lastOpId: 88,
     });
-    expect(queue.markLastTerminal).not.toHaveBeenCalled();
-    expect(queue.clearLastOpId).toHaveBeenCalledOnce();
+    expect(queue.markLastTerminal).toHaveBeenCalledWith({
+      dedupeText: false,
+      skipDurabilityMark: true,
+    });
+    expect(queue.clearLastOpId).not.toHaveBeenCalled();
     expect(queue.enqueueResultText).toHaveBeenCalledWith('done');
     expect(queue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
     expect(queue.flush).toHaveBeenCalledOnce();
@@ -5510,6 +5780,46 @@ describe('AgentRuntime', () => {
       pendingInboundSeq: undefined,
       visibleOutputForNextTurn: false,
     });
+  });
+
+  it('shared error result terminalizes with text dedupe after durability completion', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const completeTurn = vi.fn();
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(88);
+
+    const state = runtime as unknown as {
+      durability: { completeTurn: typeof completeTurn };
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      currentInboundSeq: number | undefined;
+      turnHadVisibleOutput: boolean;
+      outboundQueues: Map<string, IOutboundQueue>;
+      handleEvent: (event: AgentEvent) => void;
+    };
+    state.durability = { completeTurn };
+    state.session = Object.assign({}, mockSession, {
+      getDbRowId: vi.fn(() => 52),
+      clearTurnWatchdog: vi.fn(),
+    });
+    state.activeChatJid = '111@s.whatsapp.net';
+    state.currentTurnChatJid = '111@s.whatsapp.net';
+    state.currentInboundSeq = 23;
+    state.turnHadVisibleOutput = true;
+    state.outboundQueues.set('111@s.whatsapp.net', queue);
+
+    state.handleEvent({ type: 'result', text: 'raw terminal provider failure', isError: true });
+
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
+    expect(completeTurn).toHaveBeenCalledWith(expect.objectContaining({ lastOpId: 88 }));
+    expect(queue.markLastTerminal).toHaveBeenCalledWith({
+      dedupeText: true,
+      skipDurabilityMark: true,
+    });
+    expect(queue.clearLastOpId).not.toHaveBeenCalled();
   });
 
   // ─── Voice reply integration tests (SP4) ─────────────────────────────────────

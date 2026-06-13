@@ -202,6 +202,16 @@ function makeRepo(options: {
   return repo;
 }
 
+function makeNonGitTree(): string {
+  const repo = mkdtempSync(path.join(tmpdir(), 'safeguard-diagnostics-nongit-'));
+  tempRepos.push(repo);
+  writeRepoFile(repo, 'package.json', JSON.stringify({ scripts: requiredPackageScripts }, null, 2));
+  for (const [filePath, text] of Object.entries(requiredFiles)) {
+    writeRepoFile(repo, filePath, `${text}\n`);
+  }
+  return repo;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   process.exitCode = undefined;
@@ -298,6 +308,12 @@ describe('safeguard diagnostics', () => {
       .toEqual(['deploy/health-profiles/mwlab.json:unsafe-credential-path']);
     expect(result.checks.find((check) => check.id === 'no-tracked-generated-artifacts')?.evidence)
       .toEqual(['coverage-target/index.html']);
+  });
+
+  it('fails closed when required git inventory is unavailable', () => {
+    const fixture = makeNonGitTree();
+
+    expect(() => checkSafeguards(fixture)).toThrow(/not a git repository/);
   });
 
   it('strict mode fails on repo-state warnings', () => {

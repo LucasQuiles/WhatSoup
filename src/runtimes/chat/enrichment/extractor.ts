@@ -2,14 +2,11 @@ import { config } from '../../../config.ts';
 import { createChildLogger } from '../../../logger.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
+import { RAW_OUTPUT_TRUNCATE, truncateRaw } from './raw-output.ts';
 
 const log = createChildLogger('enrichment');
 
-// P3.6-H1: maximum length of rawOutput preserved on ExtractionError details.
-// 500 chars is enough to diagnose schema drift without leaking conversation content.
-// Keep in sync with validator.ts RAW_OUTPUT_TRUNCATE. PII hygiene for
-// ExtractionError.details.rawOutput.
-const RAW_OUTPUT_TRUNCATE = 500;
+
 
 /**
  * P3.6-H1 strict-mode error.
@@ -64,10 +61,6 @@ export class ExtractionError extends Error {
     this.details = details;
     this.name = 'ExtractionError';
   }
-}
-
-function truncateRaw(raw: string): string {
-  return raw.length > RAW_OUTPUT_TRUNCATE ? raw.slice(0, RAW_OUTPUT_TRUNCATE) : raw;
 }
 
 export interface ExtractFactsOptions {

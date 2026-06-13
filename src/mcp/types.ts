@@ -80,6 +80,10 @@ export function toolError<T extends Record<string, unknown>>(payload: T): ToolEr
   return result as ToolErrorPayload<T>;
 }
 
+export function errorResult(error: string) {
+  return toolError({ error });
+}
+
 export function isToolErrorPayload(value: unknown): value is ToolErrorPayload {
   return typeof value === 'object' && value !== null && (value as { [TOOL_ERROR]?: unknown })[TOOL_ERROR] === true;
 }

@@ -1028,3 +1028,191 @@ describe('anthropic malformed tool input blocking', () => {
     ]);
   });
 });
+
+describe('rate-limit retry on 429 responses', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  function make429Response(retryAfterSeconds?: number): Response {
+    return new Response('', {
+      status: 429,
+      headers: retryAfterSeconds !== undefined
+        ? { 'retry-after': String(retryAfterSeconds) }
+        : {},
+    });
+  }
+
+  function makeTextResponse(text: string): Response {
+    return new Response(
+      `data: ${JSON.stringify({
+        choices: [{ delta: { content: text }, finish_reason: null }],
+      })}\n\ndata: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`,
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }
+
+  function makeAnthropicSseResponse(text: string): Response {
+    return new Response(
+      [
+        `data: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 1, output_tokens: 0 } } })}`,
+        `data: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}`,
+        `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } })}`,
+        `data: ${JSON.stringify({ type: 'message_delta', usage: { output_tokens: 1 } })}`,
+        `data: ${JSON.stringify({ type: 'message_stop' })}`,
+        '',
+      ].join('\n\n'),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }
+
+  async function initProvider(provider: OpenAIApiProvider | AnthropicApiProvider): Promise<AgentEvent[]> {
+    const events: AgentEvent[] = [];
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: 'System prompt',
+      instanceName: 'test-instance',
+      onEvent: (e) => events.push(e),
+      onCrash: vi.fn(),
+    });
+    return events;
+  }
+
+  it('openai-api retries once on 429 with Retry-After and then succeeds', async () => {
+    const provider = new OpenAIApiProvider();
+    const events = await initProvider(provider);
+
+    fetchMock
+      .mockResolvedValueOnce(make429Response(3))
+      .mockResolvedValueOnce(makeTextResponse('Hello after retry'));
+
+    const sendPromise = provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Hello' }],
+    });
+
+    // Advance past the 3s Retry-After window
+    await vi.advanceTimersByTimeAsync(3000);
+    await sendPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(events.some((e) => e.type === 'assistant_text' && e.text === 'Hello after retry')).toBe(true);
+  });
+
+  it('openai-api falls through to terminal message on 429 without Retry-After header', async () => {
+    const provider = new OpenAIApiProvider();
+    const events = await initProvider(provider);
+
+    fetchMock.mockResolvedValueOnce(make429Response());
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Hello' }],
+    });
+
+    // Only one fetch — no retry without Retry-After
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const terminal = events.find((e) => e.type === 'result');
+    expect(terminal).toBeDefined();
+    expect((terminal as { type: string; text: string | null }).text).toContain('Rate limited');
+  });
+
+  it('openai-api does not retry a second time after already retrying once', async () => {
+    const provider = new OpenAIApiProvider();
+    const events = await initProvider(provider);
+
+    // First call: 429 with Retry-After — triggers retry
+    // Second call: another 429 with Retry-After — must NOT retry again
+    fetchMock
+      .mockResolvedValueOnce(make429Response(1))
+      .mockResolvedValueOnce(make429Response(1));
+
+    const sendPromise = provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Hello' }],
+    });
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await sendPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const terminal = events.find((e) => e.type === 'result');
+    expect(terminal).toBeDefined();
+    expect((terminal as { type: string; text: string | null }).text).toContain('Rate limited');
+  });
+
+  it('anthropic-api retries once on 429 with Retry-After and then succeeds', async () => {
+    const provider = new AnthropicApiProvider();
+    const events = await initProvider(provider);
+
+    fetchMock
+      .mockResolvedValueOnce(make429Response(2))
+      .mockResolvedValueOnce(makeAnthropicSseResponse('Hello from Anthropic'));
+
+    const sendPromise = provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Hello' }],
+    });
+
+    await vi.advanceTimersByTimeAsync(2000);
+    await sendPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(events.some((e) => e.type === 'assistant_text' && e.text === 'Hello from Anthropic')).toBe(true);
+  });
+
+  it('anthropic-api falls through to terminal message on 429 without Retry-After header', async () => {
+    const provider = new AnthropicApiProvider();
+    const events = await initProvider(provider);
+
+    fetchMock.mockResolvedValueOnce(make429Response());
+
+    await provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Hello' }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const terminal = events.find((e) => e.type === 'result');
+    expect(terminal).toBeDefined();
+    expect((terminal as { type: string; text: string | null }).text).toContain('Rate limited');
+  });
+
+  it('anthropic-api does not retry a second time after already retrying once', async () => {
+    const provider = new AnthropicApiProvider();
+    const events = await initProvider(provider);
+
+    fetchMock
+      .mockResolvedValueOnce(make429Response(1))
+      .mockResolvedValueOnce(make429Response(1));
+
+    const sendPromise = provider.sendTurn({
+      role: 'user',
+      conversationKey: 'chat-key',
+      parts: [{ kind: 'text', text: 'Hello' }],
+    });
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await sendPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const terminal = events.find((e) => e.type === 'result');
+    expect(terminal).toBeDefined();
+    expect((terminal as { type: string; text: string | null }).text).toContain('Rate limited');
+  });
+});

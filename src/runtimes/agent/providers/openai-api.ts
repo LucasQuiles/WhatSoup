@@ -20,12 +20,13 @@ import type {
   ProviderSessionOptions,
   ProviderTurnRequest,
 } from './types.ts';
-import { convertMcpToolsToOpenAI } from './mcp-bridge.ts';
+import { convertMcpToolsToOpenAI, executeBridgeTool } from './mcp-bridge.ts';
 import { resolveApiKey } from './api-key-resolver.ts';
 import { turnPartsToOpenAIContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
+import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
 
 const log = createChildLogger('openai-api-provider');
 
@@ -192,7 +193,7 @@ export class OpenAIApiProvider implements ProviderSession {
         });
 
         const toolResult = parsedToolInput.ok
-          ? await this.executeTool(tc.function.name, toolInput)
+          ? await executeBridgeTool(this.opts?.mcpBridge, tc.function.name, toolInput)
           : { content: parsedToolInput.content, isError: true };
 
         this.messages.push({
@@ -276,7 +277,7 @@ export class OpenAIApiProvider implements ProviderSession {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  private async callApi(model: string, selfHealAttempt = false): Promise<CallApiResult> {
+  private async callApi(model: string, selfHealAttempt = false, rateLimitRetryAttempt = false): Promise<CallApiResult> {
     if (!this.opts) throw new Error('Provider not initialized.');
 
     this.abortController = new AbortController();
@@ -328,6 +329,12 @@ export class OpenAIApiProvider implements ProviderSession {
         friendlyMsg = '_There was an issue with my conversation data. Please try again or send /new to start fresh._';
         log.error({ status: 400, errPreview: errText.slice(0, 500), model, selfHealAttempt }, 'API 400 error');
       } else if (response.status === 429) {
+        const retryAfterMs = boundedRetryAfterMs(response.headers);
+        if (!rateLimitRetryAttempt && retryAfterMs !== null) {
+          log.warn({ status: 429, model, retryAfterMs }, 'API rate limited — retrying after Retry-After');
+          await waitForRateLimitRetry(retryAfterMs, this.abortController.signal);
+          return this.callApi(model, selfHealAttempt, true);
+        }
         friendlyMsg = '_Rate limited - please wait a moment and try again._';
       } else if (response.status >= 500) {
         friendlyMsg = '_Service temporarily unavailable - please try again in a moment._';
@@ -422,28 +429,6 @@ export class OpenAIApiProvider implements ProviderSession {
       inputTokens,
       outputTokens,
     };
-  }
-
-  private async executeTool(
-    name: string,
-    input: Record<string, unknown>,
-  ): Promise<ProviderMcpToolResult> {
-    if (!this.opts?.mcpBridge) {
-      return {
-        content: `Tool "${name}" failed: MCP bridge not configured`,
-        isError: true,
-      };
-    }
-
-    try {
-      return await this.opts.mcpBridge.executeTool(name, input);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        content: `Tool "${name}" failed: ${message}`,
-        isError: true,
-      };
-    }
   }
 
   private parseToolInput(toolCall: ToolCall, model: string): ParsedToolInput {

@@ -341,6 +341,67 @@ describe('bot-errors-dispatcher', () => {
     expect(event.delivery.suppressedReason).toContain('daily-health info events');
   });
 
+  it('closes daily-health-fail incidents from a later healthy daily-health summary', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const suppressed = join(tmpRoot, 'suppressed');
+    const incidentKey = 'test-machine|line-a|daily-health-fail:line-a';
+    writeFileSync(join(tmpRoot, 'incident-state.json'), `${JSON.stringify({
+      version: 1,
+      openIncidents: {
+        [incidentKey]: {
+          status: 'open',
+          eventId: 'daily-health-fail-line-a',
+          eventCreatedAt: '2026-05-31T00:00:00Z',
+          eventCreatedAtEpoch: 1780185600,
+          openedAt: 1780185600,
+          openedIso: '2026-05-31T00:00:00Z',
+          lastSummary: 'line-a daily health failed',
+          lastEvidence: 'health line-a: FAIL status=unhealthy',
+        },
+      },
+      lastSentAt: { [incidentKey]: 1780185600 },
+    }, null, 2)}\n`, { mode: 0o600 });
+    writeEvent(tmpRoot, 'info', {
+      id: 'daily-health-recovers-line-a',
+      source: 'daily-health',
+      instance: 'bot-errors-health',
+      createdAt: '2026-05-31T00:05:00Z',
+      summary: 'BOT ERRORS daily health passed',
+      evidence: [
+        'health line-a: 200 status=healthy wa_connected=true state=connected',
+        'auth_bond_status=present auth_bond_creds_exists=true auth_bond_creds_size=42',
+        'auth_failure_class=none',
+      ].join(' '),
+    });
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 0, suppressed: 1, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    const incidentState = JSON.parse(readFileSync(join(tmpRoot, 'incident-state.json'), 'utf8')) as {
+      openIncidents: Record<string, unknown>;
+      lastSentAt: Record<string, unknown>;
+    };
+    expect(incidentState.openIncidents).not.toHaveProperty(incidentKey);
+    expect(incidentState.lastSentAt).not.toHaveProperty(incidentKey);
+    const [suppressedFile] = readdirSync(suppressed);
+    const suppressedEvent = JSON.parse(readFileSync(join(suppressed, suppressedFile!), 'utf8')) as {
+      diagnostics?: { sourceSpecificRecoveredIncidents?: string[] };
+      delivery: { suppressedReason: string };
+    };
+    expect(suppressedEvent.delivery.suppressedReason).toContain('daily-health info events');
+    expect(suppressedEvent.diagnostics?.sourceSpecificRecoveredIncidents).toEqual([incidentKey]);
+  });
+
   it('still sends daily-health warnings', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');

@@ -1,0 +1,154 @@
+import { getProviderBinary } from '../session.ts';
+import { classifyProviderFailure } from '../failure-taxonomy.ts';
+import {
+  probeBinaryAuthStatus,
+  probeModelCatalog,
+  type BinaryAuthStatusResult,
+} from './binary-preflight.ts';
+import { resolveApiKey, type ResolveApiKeyOptions } from './api-key-resolver.ts';
+import type {
+  ApiModelAccessProbeResult,
+  BinaryModelProbeResult,
+  PrimaryModelProbeAdapters,
+} from './primary-model-usability.ts';
+
+export interface PrimaryModelProbeAdapterDeps {
+  getProviderBinary?: (provider: string) => string | null;
+  probeBinaryAuthStatus?: (
+    binary: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+  ) => Promise<BinaryAuthStatusResult>;
+  probeModelCatalog?: typeof probeModelCatalog;
+  resolveApiKey?: (opts: ResolveApiKeyOptions) => string;
+  fetch?: typeof fetch;
+}
+
+interface ModelsListResponse {
+  data?: Array<{ id?: unknown }>;
+}
+
+const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
+const API_PROBE_TIMEOUT_MS = 5_000;
+const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
+
+export function createPrimaryModelProbeAdapters(
+  providerConfig?: Record<string, unknown>,
+  deps: PrimaryModelProbeAdapterDeps = {},
+): PrimaryModelProbeAdapters {
+  return {
+    probeBinaryModel: (target) => probeCliModel(target.provider, target.model, deps),
+    probeModelCatalog: deps.probeModelCatalog ?? probeModelCatalog,
+    probeApiModelAccess: (target) => probeApiModelAccess(target.provider, target.model, providerConfig, deps),
+  };
+}
+
+async function probeCliModel(
+  provider: string,
+  model: string,
+  deps: PrimaryModelProbeAdapterDeps,
+): Promise<BinaryModelProbeResult> {
+  const resolveBinary = deps.getProviderBinary ?? getProviderBinary;
+  let binary: string | null;
+  try {
+    binary = resolveBinary(provider);
+  } catch {
+    return { status: 'provider_unavailable' };
+  }
+  if (!binary) return { status: 'provider_unavailable' };
+
+  const probe = deps.probeBinaryAuthStatus ?? probeBinaryAuthStatus;
+  const result = await probe(binary, ['-p', CLAUDE_MODEL_PROBE_PROMPT, '--model', model], {
+    HOME: process.env.HOME,
+    PATH: process.env.PATH,
+    USER: process.env.USER,
+    NO_COLOR: '1',
+  });
+  return mapCliProbeResult(result);
+}
+
+function mapCliProbeResult(result: BinaryAuthStatusResult): BinaryModelProbeResult {
+  if (result.status === 'ok') return { status: 'ok' };
+  const kind = classifyProviderFailure(result.output);
+  switch (kind) {
+    case 'model-unavailable':
+      return { status: 'model_unavailable' };
+    case 'auth-required':
+      return { status: 'credential_unavailable' };
+    case 'usage-limit':
+    case 'rate-limit':
+      return { status: 'provider_unavailable' };
+    case 'context-overflow':
+    case 'policy-block':
+      return { status: 'unknown', reason: kind };
+    case null:
+      return result.output.trim()
+        ? { status: 'unknown', reason: 'binary-model-probe-failed' }
+        : { status: 'provider_unavailable' };
+  }
+}
+
+async function probeApiModelAccess(
+  provider: 'openai-api' | 'anthropic-api',
+  model: string,
+  providerConfig: Record<string, unknown> | undefined,
+  deps: PrimaryModelProbeAdapterDeps,
+): Promise<ApiModelAccessProbeResult> {
+  const apiKey = resolveProviderApiKey(provider, providerConfig, deps.resolveApiKey ?? resolveApiKey);
+  if (!apiKey) return { status: 'credential_failed' };
+
+  const fetchImpl = deps.fetch ?? globalThis.fetch;
+  if (!fetchImpl) return { status: 'provider_unavailable' };
+
+  const url = `${baseUrlFor(provider, providerConfig)}/models${provider === 'anthropic-api' ? '?limit=100' : ''}`;
+  try {
+    const response = await fetchImpl(url, {
+      headers: apiHeaders(provider, apiKey),
+      signal: AbortSignal.timeout(API_PROBE_TIMEOUT_MS),
+    });
+    if (response.status === 401 || response.status === 403) return { status: 'credential_failed' };
+    if (response.status === 404) return { status: 'not_found' };
+    if (response.status === 408 || response.status === 504) return { status: 'timeout' };
+    if (!response.ok) return { status: 'provider_unavailable' };
+
+    const body = await response.json().catch(() => null) as ModelsListResponse | null;
+    const ids = (body?.data ?? [])
+      .map((entry) => entry.id)
+      .filter((id): id is string => typeof id === 'string');
+    return ids.includes(model) ? { status: 'found' } : { status: 'not_found' };
+  } catch (err) {
+    const name = err instanceof Error ? err.name : '';
+    return name === 'AbortError' || name === 'TimeoutError'
+      ? { status: 'timeout' }
+      : { status: 'provider_unavailable' };
+  }
+}
+
+function resolveProviderApiKey(
+  provider: 'openai-api' | 'anthropic-api',
+  providerConfig: Record<string, unknown> | undefined,
+  resolver: (opts: ResolveApiKeyOptions) => string,
+): string {
+  const service = typeof providerConfig?.apiKeyService === 'string'
+    ? providerConfig.apiKeyService
+    : undefined;
+  const envVar = provider === 'openai-api' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+  return resolver({ service, envVar });
+}
+
+function baseUrlFor(provider: 'openai-api' | 'anthropic-api', providerConfig: Record<string, unknown> | undefined): string {
+  const configured = typeof providerConfig?.baseUrl === 'string' ? providerConfig.baseUrl.trim() : '';
+  const baseUrl = configured || (provider === 'openai-api' ? DEFAULT_OPENAI_BASE_URL : DEFAULT_ANTHROPIC_BASE_URL);
+  return baseUrl.replace(/\/+$/, '');
+}
+
+function apiHeaders(provider: 'openai-api' | 'anthropic-api', apiKey: string): Record<string, string> {
+  if (provider === 'openai-api') {
+    return { Authorization: `Bearer ${apiKey}` };
+  }
+  return {
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+  };
+}

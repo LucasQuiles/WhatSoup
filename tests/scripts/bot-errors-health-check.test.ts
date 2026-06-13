@@ -662,7 +662,7 @@ print(json.dumps(samples, sort_keys=True))
       severity: string;
       evidence: string;
     };
-    expect(event.severity).toBe('critical');
+    expect(event.severity).toBe('warning'); // F7: rustdesk is infra-class, de-conflated from critical
     expect(event.evidence).toContain('FAIL rustdesk: id=999999999 expected_id=1076834574');
   });
 
@@ -753,11 +753,32 @@ print(json.dumps(samples, sort_keys=True))
       severity: string;
       evidence: string;
     };
-    expect(event.severity).toBe('critical');
+    expect(event.severity).toBe('warning'); // F7: dns is infra-class, de-conflated from critical
     expect(event.evidence).toContain('FAIL dns nucles-custom-domain: host=nucles.quiles.studio');
     expect(event.evidence).toContain('addresses=35.155.7.183');
     expect(event.evidence).toContain('missing_expected=100.91.13.7');
     expect(event.evidence).toContain('forbidden_present=35.155.7.183');
+  });
+
+  it('tracks mini1 personal runtime instead of stale secondary-bot profile entries', () => {
+    const profile = JSON.parse(readFileSync(join(process.cwd(), 'deploy', 'health-profiles', 'mini1.json'), 'utf8')) as {
+      requiredCredentialFiles?: string[];
+      instances?: Array<Record<string, unknown>>;
+    };
+    const names = (profile.instances ?? []).map((instance) => instance.name);
+    expect(names).toContain('ana-bot');
+    expect(names).toContain('personal');
+    expect(names).not.toContain('secondary-bot');
+    expect(profile.requiredCredentialFiles).toContain('instances/personal/tokens.env');
+    expect(profile.requiredCredentialFiles).not.toContain('instances/secondary-bot/tokens.env');
+
+    const personal = (profile.instances ?? []).find((instance) => instance.name === 'personal');
+    expect(personal).toMatchObject({
+      expected: 'always_on',
+      service: 'com.whatsoup.personal',
+      healthPort: 9095,
+      primaryPhoneOwner: 'instance:personal',
+    });
   });
 
   it('keeps the expected fleet manifest aligned with health profiles and collector remotes', () => {
@@ -2263,10 +2284,16 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     );
     chmodSync(join(binDir, 'sntp'), 0o755);
 
+    const env = { ...process.env };
+    delete env.BOT_ERRORS_DRY_CLOCK_STATUS;
+    delete env.BOT_ERRORS_DRY_CLOCK_OFFSET_MS;
+    delete env.BOT_ERRORS_CLOCK_WARNING_OFFSET_MS;
+    delete env.BOT_ERRORS_CLOCK_CRITICAL_OFFSET_MS;
+
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
       cwd: process.cwd(),
       env: {
-        ...process.env,
+        ...env,
         HOME: tmpRoot,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         BOT_ERRORS_STATE_DIR: tmpRoot,
@@ -4323,7 +4350,7 @@ print(m.probe_health(9092))
       severity: string;
       evidence: string;
     };
-    expect(event.severity).toBe('critical');
+    expect(event.severity).toBe('warning'); // F7: disk is infra-class, de-conflated from critical
     expect(event.evidence).toContain('FAIL disk');
     expect(event.evidence).toContain('free_bytes=134217728');
   });
@@ -4360,7 +4387,7 @@ print(m.probe_health(9092))
       severity: string;
       evidence: string;
     };
-    expect(event.severity).toBe('critical');
+    expect(event.severity).toBe('warning'); // F7: clock is infra-class, de-conflated from critical
     expect(event.evidence).toContain('FAIL clock: status=synced offset_ms=600000.0');
   });
 

@@ -3,14 +3,13 @@ import {
   closeSync,
   constants,
   fsyncSync,
-  lstatSync,
-  mkdirSync,
   openSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { forceEnsurePrivateDirectorySync } from './private-fs.ts';
 import { homedir, hostname, platform, release, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -169,18 +168,6 @@ function hostRelease(): string {
   return process.env['BOT_ERRORS_DRY_PLATFORM_RELEASE'] ?? release();
 }
 
-function ensurePrivateDir(path: string): void {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  const st = lstatSync(path);
-  if (st.isSymbolicLink()) {
-    throw new Error(`refusing to use bot-errors private directory through symlink: ${path}`);
-  }
-  if (!st.isDirectory()) {
-    throw new Error(`refusing to use bot-errors private directory over non-directory path: ${path}`);
-  }
-  chmodSync(path, 0o700);
-}
-
 function writeFileDurable(path: string, payload: string): void {
   const fd = openSync(
     path,
@@ -233,7 +220,7 @@ export function recordBotErrorsWritefail(
     const finalPath = join(base, fileName);
     const tmpPath = join(base, `.${fileName}.${process.pid}.tmp`);
     try {
-      ensurePrivateDir(base);
+      forceEnsurePrivateDirectorySync(base, 'bot-errors private directory');
       writeFileDurable(tmpPath, payload);
       renameSync(tmpPath, finalPath);
       chmodSync(finalPath, 0o600);
@@ -368,7 +355,7 @@ export function writeBotErrorsEvent(input: BotErrorsOutboxInput): BotErrorsOutbo
   const payload = `${JSON.stringify(event, null, 2)}\n`;
 
   try {
-    ensurePrivateDir(outbox);
+    forceEnsurePrivateDirectorySync(outbox, 'bot-errors private directory');
     writeFileDurable(tmpPath, payload);
     renameSync(tmpPath, finalPath);
     chmodSync(finalPath, 0o600);

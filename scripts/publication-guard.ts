@@ -8,7 +8,7 @@ import {
   listStagedFiles,
   normalizeRepoPath,
   readStagedAddedLines,
-  readStagedFileContent,
+  readStagedFileContentResult,
 } from './lib/guard-core.ts';
 
 export { isTextCandidate, normalizeRepoPath } from './lib/guard-core.ts';
@@ -48,6 +48,10 @@ interface PrivatePattern {
   description: string;
   regex: RegExp;
 }
+
+type StagedAuditRead =
+  | { ok: true; parsed: ParsedAudit | undefined }
+  | { ok: false; issue: GuardIssue };
 
 const publicationClasses = new Set<PublicationClass>(['PUBLIC', 'PRIVATE-ARCHIVE', 'SANITIZE', 'DELETE']);
 
@@ -363,10 +367,23 @@ function loadAudit(cwd: string): ParsedAudit | undefined {
  * Load the audit from the staged index (or HEAD), never from the working tree.
  * Used in staged mode to prevent bypass via unstaged audit additions.
  */
-function loadStagedAudit(cwd: string): ParsedAudit | undefined {
-  const content = readStagedFileContent(cwd, 'docs/publication-audit.md');
-  if (content === undefined) return undefined;
-  return parsePublicationAudit(content);
+function loadStagedAudit(cwd: string): StagedAuditRead {
+  const result = readStagedFileContentResult(cwd, 'docs/publication-audit.md');
+  if (!result.ok) {
+    return {
+      ok: false,
+      issue: {
+        severity: 'error',
+        code: 'audit-read-failed',
+        filePath: 'docs/publication-audit.md',
+        message: `Could not read docs/publication-audit.md from the staged index or HEAD: ${result.error}`,
+      },
+    };
+  }
+  return {
+    ok: true,
+    parsed: result.content === undefined ? undefined : parsePublicationAudit(result.content),
+  };
 }
 
 function readWorkingFile(cwd: string, filePath: string): string | undefined {
@@ -382,29 +399,33 @@ function validateStaged(cwd: string): GuardIssue[] {
   // This closes the bypass where a new runbook is staged but its audit row is
   // only added to the working tree (not staged), which previously made --staged
   // return 0 (false negative).
-  const parsed = loadStagedAudit(cwd);
+  const stagedAudit = loadStagedAudit(cwd);
+  if (!stagedAudit.ok) issues.push(stagedAudit.issue);
+  const parsed = stagedAudit.ok ? stagedAudit.parsed : undefined;
   const auditRows = new Set(parsed?.rows.map((row) => row.filePath) ?? []);
   const auditStaged = staged.includes('docs/publication-audit.md') || deleted.includes('docs/publication-audit.md');
 
-  for (const filePath of staged.filter(isInternalPublicationPath)) {
-    if (!auditRows.has(filePath)) {
-      issues.push({
-        severity: 'error',
-        code: 'staged-internal-doc-unclassified',
-        filePath,
-        message: 'Staged internal documentation must be classified in docs/publication-audit.md before commit.',
-      });
+  if (stagedAudit.ok) {
+    for (const filePath of staged.filter(isInternalPublicationPath)) {
+      if (!auditRows.has(filePath)) {
+        issues.push({
+          severity: 'error',
+          code: 'staged-internal-doc-unclassified',
+          filePath,
+          message: 'Staged internal documentation must be classified in docs/publication-audit.md before commit.',
+        });
+      }
     }
-  }
 
-  for (const filePath of deleted.filter(isInternalPublicationPath)) {
-    if (auditRows.has(filePath)) {
-      issues.push({
-        severity: 'error',
-        code: 'deleted-internal-doc-stale-audit',
-        filePath,
-        message: 'Deleted internal documentation still has a docs/publication-audit.md row. Update the audit in the same commit.',
-      });
+    for (const filePath of deleted.filter(isInternalPublicationPath)) {
+      if (auditRows.has(filePath)) {
+        issues.push({
+          severity: 'error',
+          code: 'deleted-internal-doc-stale-audit',
+          filePath,
+          message: 'Deleted internal documentation still has a docs/publication-audit.md row. Update the audit in the same commit.',
+        });
+      }
     }
   }
 
@@ -416,7 +437,7 @@ function validateStaged(cwd: string): GuardIssue[] {
     }
   }
 
-  if (auditStaged) {
+  if (auditStaged && stagedAudit.ok) {
     if (!parsed) {
       issues.push({
         severity: 'error',

@@ -3,6 +3,14 @@ import type { IncomingMessage, RuntimeHealth } from '../core/types.ts';
 import type { DurabilityEngine } from '../core/durability.ts';
 import type { AgentFallbackEntry } from '../core/fallback-chain.ts';
 
+export interface RuntimeTurnCapabilityHealth {
+  modelUsable: boolean | null;
+  modelUsabilityStatus: string | null;
+  lastSuccessfulTurnAt: number | null;
+  lastTurnErrorClass: string | null;
+  lastTurnErrorAt: number | null;
+}
+
 export interface AgentCommandRequest {
   command: 'compact';
   /** Required for per-chat agent runtimes so control-plane calls target one session. */
@@ -46,6 +54,13 @@ export interface Runtime {
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
+    probeAttempts?: number;
+    lastProbeAt?: number | null;
+    fallbackActivations?: number;
+    fallbackReverts?: number;
+    fallbackWindowCostUsd?: number;
+    primaryModelUsability?: unknown | null;
+    turnCapability?: RuntimeTurnCapabilityHealth;
     activeFallbackEntry?: AgentFallbackEntry | null;
     fallbackChain?: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   };

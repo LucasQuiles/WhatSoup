@@ -9,7 +9,7 @@ import { truncateForRerank } from '../../lib/text-utils.ts';
 import { routeQuery } from '../../runtimes/chat/memory/query-router.ts';
 import { config } from '../../config.ts';
 import type { KnowledgeProfileConfig } from '../../config.ts';
-import { toolError, type ToolDeclaration } from '../types.ts';
+import { errorResult, toolError, type ToolDeclaration } from '../types.ts';
 import { pineconeProjectGuardError, type PineconeProjectGuard } from '../../lib/pinecone-project-guard.ts';
 
 const log = createChildLogger('knowledge-tools');
@@ -19,10 +19,6 @@ const MAX_TEXT_PER_RESULT = 600;
 
 /** Max total results to return (after rerank/dedup). */
 const MAX_RESULTS = 8;
-
-function errorResult(error: string) {
-  return toolError({ error });
-}
 
 interface ParsedHit {
   id: string;

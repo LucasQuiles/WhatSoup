@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { shortHash } from '../lib/short-hash.ts';
 import { createChildLogger } from '../logger.ts';
 import { config } from '../config.ts';
 import type { LLMProvider } from '../runtimes/chat/providers/types.ts';
@@ -14,10 +14,6 @@ import type { MemoryCluster, ConsolidationResult } from './types.ts';
  */
 
 const log = createChildLogger('consolidation');
-
-function shortHash(text: string, length: number = 12): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, length);
-}
 
 const CONSOLIDATION_PROMPT = `You are a memory consolidation engine. Given a cluster of related memories from an AI agent's episodic history, identify which patterns represent durable knowledge worth keeping long-term.
 
