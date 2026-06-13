@@ -105,12 +105,24 @@ export function isUsageLimitMessage(text: string): boolean {
 }
 
 function isProviderCreditBalanceLimitMessage(lower: string): boolean {
+  const providerBillingContext = (
+    lower.includes('provider') ||
+    lower.includes('api') ||
+    lower.includes('billing') ||
+    lower.includes('quota') ||
+    lower.includes('error')
+  );
   return (
     lower.includes('insufficient_quota') ||
     lower.includes('billing quota exceeded') ||
-    lower.includes('insufficient credits') ||
-    lower.includes('no credits remaining') ||
-    lower.includes('credit balance exhausted') ||
+    (
+      providerBillingContext &&
+      (
+        lower.includes('insufficient credits') ||
+        lower.includes('no credits remaining') ||
+        lower.includes('credit balance exhausted')
+      )
+    ) ||
     (
       lower.includes('account balance') &&
       (lower.includes('provider') || lower.includes('api') || lower.includes('billing')) &&

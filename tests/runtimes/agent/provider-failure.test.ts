@@ -78,6 +78,7 @@ describe('classifyProviderFailure — negative cases (no false positives)', () =
       classifyProviderFailure('The customer has a low balance, but their credit account is still active.'),
     ).toBeNull();
     expect(classifyProviderFailure('Your account balance is too low to complete this transfer.')).toBeNull();
+    expect(classifyProviderFailure('The student has insufficient credits to graduate this semester.')).toBeNull();
   });
 
   it('empty text is not a failure', () => {
