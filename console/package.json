@@ -20,6 +20,7 @@
     "design:capture": "node scripts/capture-visual-matrix.mjs",
     "design:capture:validate": "node scripts/validate-visual-manifest.mjs",
     "design:contrast": "node scripts/check-contrast-matrix.mjs",
+    "design:token-drift": "node scripts/check-token-spec-drift.mjs",
     "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs",
     "design:metrics": "node scripts/design-metrics.mjs",
     "design:burndown": "node scripts/check-design-burndown.mjs",

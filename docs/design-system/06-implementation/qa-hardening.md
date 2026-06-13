@@ -456,7 +456,28 @@ This is not an axe gate. Do not claim axe coverage unless a separate dependency 
 browser a11y rows, unavailable Chromium, or masked browser output are **INCONCLUSIVE** and block
 interaction/accessibility packets.
 
-## 17. Done Means Durable
+### 17.2 Semantic Token Spec Drift Guard
+
+Semantic token value drift is checked by `console/scripts/check-token-spec-drift.mjs` and is exposed
+as:
+
+```bash
+npm --prefix console run design:token-drift
+```
+
+The guard derives expected per-theme values from `docs/design-system/03-spec/tokens-v3.md` §2.7 and
+§3, then compares them to `console/src/styles/tokens.semantic.css`. It covers explicit semantic
+assignments and derived status/mode wash, border, and foreground formulas. A missing token or value
+mismatch is a FAIL.
+
+The guard does not make the CSS file authoritative, does not cover primitive or component-layer token
+drift, and does not replace contrast or browser visual proof. Primitive/component drift remains under
+the report-only design-regression lanes until those token families are migrated and promoted.
+
+Masked output, unavailable files, or fixture-only proof without the live repository run is
+**INCONCLUSIVE** for token/CSS packets.
+
+## 18. Done Means Durable
 
 A slice is not done when it only:
 
