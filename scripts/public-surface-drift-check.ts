@@ -239,7 +239,7 @@ function loadPackageScripts(cwd: string): PackageScriptsReadResult {
 const NON_OPERATOR_SCRIPT_PATTERNS: RegExp[] = [
   /^_/,
   /^test(?:$|[:-])/,
-  /^coverage$/,
+  /^coverage(?:$|[:-])/,
   /^lint(?:$|[:-])/,
   /^typecheck(?:$|[:-])/,
   /^format(?:$|[:-])/,

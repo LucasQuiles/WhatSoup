@@ -120,6 +120,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:lint:src',
       'npm run typecheck:all',
       'npm test',
+      'npm run coverage:check',
       'npm --prefix console run build',
     ],
   },

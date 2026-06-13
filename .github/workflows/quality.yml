@@ -144,6 +144,9 @@ jobs:
       - name: Test suite
         run: npm test -- --pool=forks
 
+      - name: Coverage thresholds
+        run: npm run coverage:check
+
       - name: Failure-scenario drills
         run: npm run test:drills
 
