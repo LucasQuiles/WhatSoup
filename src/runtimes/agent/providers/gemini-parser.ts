@@ -80,7 +80,7 @@ export function parseGeminiEvent(line: string): AgentEvent | null {
           extractMessage(parsed['message']) ??
           (status ? `Gemini CLI result status: ${status}` : null);
 
-    return { type: 'result', text, inputTokens, outputTokens };
+    return { type: 'result', text, isError: text !== null, inputTokens, outputTokens };
   }
 
   if (eventType === 'error') {
@@ -91,6 +91,7 @@ export function parseGeminiEvent(line: string): AgentEvent | null {
         extractMessage(parsed['message']) ??
         stringifyValue(parsed) ??
         'Gemini CLI error',
+      isError: true,
     };
   }
 
