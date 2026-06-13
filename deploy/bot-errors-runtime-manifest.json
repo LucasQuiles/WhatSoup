@@ -153,12 +153,13 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "14ed92ebd227c56391fdab41b61c5e1aa1f39f068882b749e5bc1938e97fc68d",
+      "sha256": "d62148b8c0e16e943b01c62736dc51751946fa447510c4a32d1848109ffb5756",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
         ".config/secrets/",
         "AUTHORIZATION_BEARER_RE",
+        "WHATSAPP_SERVICE_UNIT_RE",
         "PEM_PRIVATE_KEY_RE"
       ]
     }

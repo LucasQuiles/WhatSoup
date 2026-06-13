@@ -4,6 +4,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { isRecord } from '../src/lib/type-guards.ts';
+
 export type RuntimeManifestFindingCode =
   | 'manifest-unreadable'
   | 'manifest-not-object'
@@ -50,10 +52,6 @@ export const REQUIRED_RUNTIME_MANIFEST_PATHS = [
   'deploy/scripts/lib/__init__.py',
   'deploy/scripts/lib/bot_errors_redaction.py',
 ] as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function finding(
   code: RuntimeManifestFindingCode,

@@ -11,7 +11,7 @@ KEYED_SECRET_RE = re.compile(
     r"(^|[^A-Za-z0-9_]|\\n)"
     r"([\"']?(?:(?:[A-Za-z0-9_.-]*api[_-]?key[A-Za-z0-9_.-]*)|client[_-]?secret|access[_-]?token|"
     r"refresh[_-]?token|auth[_-]?token|cookie|password|passphrase|secret|session|token|"
-    r"authorization|pat)[\"']?\s*[:=]\s*[\"']?)"
+    r"pat)[\"']?\s*[:=]\s*[\"']?)"
     r"([^\s\\,\"';}]+)([\"']?)",
     re.IGNORECASE,
 )
@@ -26,6 +26,7 @@ CREDENTIAL_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 WHATSAPP_JID_RE = re.compile(r"\b\d{5,}(?:-\d+)?@(s\.whatsapp\.net|g\.us|lid)\b", re.IGNORECASE)
+WHATSAPP_SERVICE_UNIT_RE = re.compile(r"\b(whatsoup@)(\d{8,16})(\.service)?\b", re.IGNORECASE)
 KEYED_PHONE_LIKE_RE = re.compile(
     r"(?<![A-Za-z0-9])(phone|phone[_-]?number|msisdn|line)(\s*[:=]\s*|[\s_-]+)(\+?\d{10,16})(?![A-Za-z0-9])",
     re.IGNORECASE,
@@ -70,6 +71,7 @@ def redact_bot_errors_text(
     text = PEM_PRIVATE_KEY_RE.sub(private_key_marker, text)
     text = CREDENTIAL_PATH_RE.sub(credential_path_marker, text)
     text = WHATSAPP_JID_RE.sub(jid_marker, text)
+    text = WHATSAPP_SERVICE_UNIT_RE.sub(lambda m: f"{m.group(1)}{phone_marker}{m.group(3) or ''}", text)
     text = URL_USERINFO_RE.sub(r"\1[REDACTED]@", text)
     text = AWS_ACCESS_KEY_ID_RE.sub(aws_marker, text)
     text = GITHUB_TOKEN_RE.sub(github_marker, text)
