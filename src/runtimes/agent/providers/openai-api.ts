@@ -20,7 +20,7 @@ import type {
   ProviderSessionOptions,
   ProviderTurnRequest,
 } from './types.ts';
-import { convertMcpToolsToOpenAI } from './mcp-bridge.ts';
+import { convertMcpToolsToOpenAI, executeBridgeTool } from './mcp-bridge.ts';
 import { resolveApiKey } from './api-key-resolver.ts';
 import { turnPartsToOpenAIContent } from './media-bridge.ts';
 import { readSseDataLines } from './sse.ts';
@@ -192,7 +192,7 @@ export class OpenAIApiProvider implements ProviderSession {
         });
 
         const toolResult = parsedToolInput.ok
-          ? await this.executeTool(tc.function.name, toolInput)
+          ? await executeBridgeTool(this.opts?.mcpBridge, tc.function.name, toolInput)
           : { content: parsedToolInput.content, isError: true };
 
         this.messages.push({
@@ -422,28 +422,6 @@ export class OpenAIApiProvider implements ProviderSession {
       inputTokens,
       outputTokens,
     };
-  }
-
-  private async executeTool(
-    name: string,
-    input: Record<string, unknown>,
-  ): Promise<ProviderMcpToolResult> {
-    if (!this.opts?.mcpBridge) {
-      return {
-        content: `Tool "${name}" failed: MCP bridge not configured`,
-        isError: true,
-      };
-    }
-
-    try {
-      return await this.opts.mcpBridge.executeTool(name, input);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        content: `Tool "${name}" failed: ${message}`,
-        isError: true,
-      };
-    }
   }
 
   private parseToolInput(toolCall: ToolCall, model: string): ParsedToolInput {

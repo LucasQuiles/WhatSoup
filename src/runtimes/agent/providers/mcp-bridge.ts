@@ -129,6 +129,33 @@ export function getMcpStrategy(providerId: string): McpMode {
 }
 
 /**
+ * Shared tool execution helper for provider classes that use a native MCP bridge.
+ * Replaces identical private `executeTool` methods in anthropic-api and openai-api.
+ */
+export async function executeBridgeTool(
+  bridge: ProviderMcpBridge | undefined,
+  name: string,
+  input: Record<string, unknown>,
+): Promise<ProviderMcpToolResult> {
+  if (!bridge) {
+    return {
+      content: `Tool "${name}" failed: MCP bridge not configured`,
+      isError: true,
+    };
+  }
+
+  try {
+    return await bridge.executeTool(name, input);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      content: `Tool "${name}" failed: ${message}`,
+      isError: true,
+    };
+  }
+}
+
+/**
  * Create a provider-native MCP bridge backed by WhatSoup's in-process registry.
  * Used by managed-loop HTTP providers to advertise and execute tools directly.
  */
