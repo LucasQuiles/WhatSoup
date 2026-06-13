@@ -1237,9 +1237,130 @@ describe('GET /health', () => {
 
     const { status, body } = await httpReq(port, '/health', 'GET');
     expect(status).toBe(200);
-    expect(JSON.parse(body).runtime).toEqual({
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.runtime).toEqual({
       agent: { sessions: 2, compact: { lastError: 'timeout' } },
     });
+    db2.close();
+  });
+
+  it('degrades agent health when turn capability reports a broken primary model', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: false,
+              modelUsabilityStatus: 'model-unavailable',
+              lastSuccessfulTurnAt: null,
+              lastTurnErrorClass: 'model-unavailable',
+              lastTurnErrorAt: 1_781_316_000_000,
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('degraded');
+    expect(json.turn_capability).toEqual({
+      model_usable: false,
+      model_usability_status: 'model-unavailable',
+      last_successful_turn_at: null,
+      last_turn_error_class: 'model-unavailable',
+      last_turn_error_at: 1_781_316_000_000,
+    });
+    db2.close();
+  });
+
+  it('keeps agent health healthy when turn capability has recovered', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: true,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: 1_781_316_030_000,
+              lastTurnErrorClass: null,
+              lastTurnErrorAt: null,
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.status).toBe('healthy');
+    expect(json.turn_capability).toEqual({
+      model_usable: true,
+      model_usability_status: 'usable',
+      last_successful_turn_at: 1_781_316_030_000,
+      last_turn_error_class: null,
+      last_turn_error_at: null,
+    });
+    db2.close();
+  });
+
+  it('sanitizes agent turn capability strings before exposing them in health', async () => {
+    db.close();
+    const db2 = makeDb();
+    const rawProviderText = 'selected model raw provider diagnostic should not appear';
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: false,
+              modelUsabilityStatus: rawProviderText,
+              lastSuccessfulTurnAt: null,
+              lastTurnErrorClass: rawProviderText,
+              lastTurnErrorAt: 1_781_316_000_000,
+            },
+          },
+        }),
+      } as any,
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    const json = JSON.parse(body);
+    expect(status).toBe(200);
+    expect(json.turn_capability).toEqual({
+      model_usable: false,
+      model_usability_status: null,
+      last_successful_turn_at: null,
+      last_turn_error_class: null,
+      last_turn_error_at: 1_781_316_000_000,
+    });
+    expect(json.runtime.agent.turnCapability).toEqual({
+      modelUsable: false,
+      modelUsabilityStatus: null,
+      lastSuccessfulTurnAt: null,
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: 1_781_316_000_000,
+    });
+    expect(body).not.toContain(rawProviderText);
     db2.close();
   });
 
