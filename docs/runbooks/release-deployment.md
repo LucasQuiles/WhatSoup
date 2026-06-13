@@ -76,6 +76,9 @@ when files are missing, changed, or unexpectedly present. It reads the manifest
 from `.whatsoup-release-manifest.json` inside the release by default; use
 `--manifest /absolute/path/to/manifest.json` only when auditing an archived
 manifest separately from its release directory.
+Older release snapshots without a manifest are reported as `manifest-missing`
+drift. That finding is evidence to re-cut from reviewed source; it is not
+approval to overwrite the release.
 
 Drift findings mean the release is no longer a faithful copy of reviewed source.
 They do not by themselves authorize deleting the release or replacing it. Decide

@@ -65,6 +65,7 @@ export interface ReleaseSnapshotPlan {
 
 export type ReleaseSnapshotDriftKind =
   | 'release-missing'
+  | 'manifest-missing'
   | 'manifest-release-path-mismatch'
   | 'file-missing'
   | 'file-type-drift'
@@ -84,7 +85,7 @@ export interface ReleaseSnapshotDriftReport {
   ok: boolean;
   releasePath: string;
   manifestPath: string;
-  source: ReleaseSnapshotManifest['source'];
+  source: ReleaseSnapshotManifest['source'] | null;
   issues: ReleaseSnapshotDriftIssue[];
 }
 
@@ -371,7 +372,20 @@ export function createReleaseSnapshotDriftReport(releasePath: string, manifestPa
     manifestPath ?? path.join(absoluteReleasePath, RELEASE_MANIFEST_FILE),
   );
   if (!existsSync(absoluteManifestPath)) {
-    throw new Error(`release manifest not found: ${absoluteManifestPath}`);
+    return {
+      check: 'release-drift',
+      ok: false,
+      releasePath: absoluteReleasePath,
+      manifestPath: absoluteManifestPath,
+      source: null,
+      issues: [
+        {
+          kind: 'manifest-missing',
+          path: RELEASE_MANIFEST_FILE,
+          message: `release manifest not found: ${absoluteManifestPath}`,
+        },
+      ],
+    };
   }
   const manifest = parseReleaseSnapshotManifest(JSON.parse(readFileSync(absoluteManifestPath, 'utf8')));
   const issues = collectReleaseSnapshotDrift(absoluteReleasePath, manifest);
@@ -455,10 +469,10 @@ export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd())
       console.log(JSON.stringify(report, null, 2));
     } else if (report.ok) {
       console.log(`release drift check passed: ${report.releasePath}`);
-      console.log(`source: ${report.source.ref} ${report.source.commit}`);
+      if (report.source) console.log(`source: ${report.source.ref} ${report.source.commit}`);
     } else {
       console.error(`release drift detected: ${report.releasePath}`);
-      console.error(`source: ${report.source.ref} ${report.source.commit}`);
+      if (report.source) console.error(`source: ${report.source.ref} ${report.source.commit}`);
       for (const issue of report.issues) console.error(`${issue.kind}: ${issue.path ?? '<release>'} ${issue.message}`);
     }
     if (!report.ok) process.exitCode = 1;

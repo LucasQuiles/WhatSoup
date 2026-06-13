@@ -236,6 +236,31 @@ describe('release snapshot planning', () => {
     expect(error.mock.calls.flat().join('\n')).toContain('file-sha256-drift: src/main.ts');
   });
 
+  it('CLI check-release mode reports pre-manifest releases as structured drift', () => {
+    const sourceRoot = makeFixtureSource();
+    const releasePath = path.join(tmpRoot, 'WhatSoup-release-pre-manifest');
+    mkdirSync(releasePath, { recursive: true });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const report = run(['--check-release', releasePath, '--json'], sourceRoot);
+
+    expect(process.exitCode).toBe(1);
+    expect(report).toMatchObject({
+      check: 'release-drift',
+      ok: false,
+      releasePath,
+      manifestPath: path.join(releasePath, '.whatsoup-release-manifest.json'),
+      source: null,
+      issues: [expect.objectContaining({ kind: 'manifest-missing' })],
+    });
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+      check: 'release-drift',
+      ok: false,
+      source: null,
+      issues: [expect.objectContaining({ kind: 'manifest-missing' })],
+    });
+  });
+
   it('CLI planning mode emits JSON when invoked through an absolute script path', () => {
     const sourceRoot = makeGitFixtureSource();
     const releaseRoot = path.join(tmpRoot, 'releases');
