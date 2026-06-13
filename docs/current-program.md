@@ -113,7 +113,11 @@ These epics declare `completed` at the state.md level but carry pending bead row
 | transport-hardening-20260404 | 6 | [`docs/sdlc/completed/transport-hardening-20260404/`](sdlc/completed/transport-hardening-20260404/) |
 | whatsoup-full-hardening-20260331 | 7 | [`docs/sdlc/completed/whatsoup-full-hardening-20260331/`](sdlc/completed/whatsoup-full-hardening-20260331/) |
 
-These 37 pending beads remain the primary candidate set for a future triage pass.
+These 37 pending beads were triaged in the 2026-06-13 reliability runner pass;
+[`docs/reliability-runner/pending-bead-dispositions.md`](reliability-runner/pending-bead-dispositions.md)
+is the tracked disposition ledger. The generated work index still preserves the
+historical `pending` markers in the source bead files unless those historical
+files are rewritten in a later cleanup.
 
 ---
 

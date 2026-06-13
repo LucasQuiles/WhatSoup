@@ -90,9 +90,9 @@
           "healthPort": 9096
         },
         {
-          "name": "secondary-bot",
+          "name": "personal",
           "expected": "always_on",
-          "service": "com.whatsoup.secondary-bot",
+          "service": "com.whatsoup.personal",
           "healthPort": 9095
         }
       ]

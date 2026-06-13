@@ -174,7 +174,7 @@ describe('parseEvent', () => {
           },
         }),
       );
-      expect(result).toEqual({ type: 'result', text: 'Unknown skill: sdlc' });
+      expect(result).toEqual({ type: 'result', text: 'Unknown skill: sdlc', isError: true });
     });
 
     it('maps tool_result block (is_error=false) to tool_result', () => {
@@ -250,21 +250,21 @@ describe('parseEvent', () => {
       const result = parseEvent(
         line({ type: 'result', result: 'Context window exceeded.', is_error: true }),
       );
-      expect(result).toEqual({ type: 'result', text: 'Context window exceeded.' });
+      expect(result).toEqual({ type: 'result', text: 'Context window exceeded.', isError: true });
     });
 
     it('returns text from string content field when is_error is true', () => {
       const result = parseEvent(
         line({ type: 'result', content: 'Turn error.', is_error: true }),
       );
-      expect(result).toEqual({ type: 'result', text: 'Turn error.' });
+      expect(result).toEqual({ type: 'result', text: 'Turn error.', isError: true });
     });
 
     it('returns text from content array text block when is_error is true', () => {
       const result = parseEvent(
         line({ type: 'result', content: [{ type: 'text', text: 'Error details.' }], is_error: true }),
       );
-      expect(result).toEqual({ type: 'result', text: 'Error details.' });
+      expect(result).toEqual({ type: 'result', text: 'Error details.', isError: true });
     });
 
     it('returns text: null for error result with no content', () => {
