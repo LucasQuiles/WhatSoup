@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 219
+**Total classification rows:** 220
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 219 |
+| PRIVATE-ARCHIVE | 220 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 219 |
+| Total | 220 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -30,6 +30,7 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/runbooks/objective-tracking.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/personal-line-watch.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/pinecone-transcription-bridge.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
+| `docs/runbooks/release-deployment.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/substrate-slice-1.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/runbooks/twilio-transport.md` | PRIVATE-ARCHIVE | Internal operational runbook; retained in the repository but excluded from public publication by default. |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC1-path-traversal.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
