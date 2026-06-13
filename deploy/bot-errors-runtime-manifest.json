@@ -84,7 +84,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "b443bc294cbdb286f6fc8a6fd2a426cbd149d8907bbf0f2ad6f96c6b48e3ae38",
+      "sha256": "25be556e8875a3cfaf8c3f31dd8760f8db894c67314271e90385558ea68faf80",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -127,7 +127,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "2705c873dd2af8e022bf9b2a8a29b57a8493a005625cde98abc799614c4831a9",
+      "sha256": "3cabdee9d053d57064af80de70e9d11faa8d74b134e6d197efc12006f2406e22",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
