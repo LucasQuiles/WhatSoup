@@ -1,12 +1,13 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   collectReleaseSnapshotDrift,
   createReleaseSnapshotPlan,
   parseReleaseSnapshotManifest,
+  run,
 } from '../../scripts/release-snapshot-plan.ts';
 
 let tmpRoot = '';
@@ -15,6 +16,7 @@ afterEach(() => {
   if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
   tmpRoot = '';
   process.exitCode = undefined;
+  vi.restoreAllMocks();
 });
 
 function makeFixtureSource(): string {
@@ -106,5 +108,78 @@ describe('release snapshot planning', () => {
       expect.objectContaining({ kind: 'file-sha256-drift', path: 'src/main.ts' }),
       expect.objectContaining({ kind: 'extra-file', path: 'src/hotpatch.ts' }),
     ]);
+  });
+
+  it('CLI check-release mode exits clean for a manifest-matching release', () => {
+    const sourceRoot = makeFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot,
+      buildTime: '2026-06-13T06:00:00.000Z',
+      trackedFiles: ['package.json', 'src/main.ts'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(path.join(releasePath, 'src/main.ts'), readFileSync(path.join(sourceRoot, 'src/main.ts')));
+    writeFileSync(
+      path.join(releasePath, '.whatsoup-release-manifest.json'),
+      `${JSON.stringify(plan.manifest, null, 2)}\n`,
+      'utf8',
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const report = run(['--check-release', releasePath, '--json'], sourceRoot);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(report).toMatchObject({
+      check: 'release-drift',
+      ok: true,
+      releasePath,
+      issues: [],
+    });
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+      check: 'release-drift',
+      ok: true,
+      releasePath,
+      issues: [],
+    });
+  });
+
+  it('CLI check-release mode exits nonzero and reports release drift', () => {
+    const sourceRoot = makeFixtureSource();
+    const releaseRoot = path.join(tmpRoot, 'releases');
+    const plan = createReleaseSnapshotPlan({
+      sourceRoot,
+      sourceRef: 'main',
+      sourceCommit: 'abc123def4567890',
+      releaseRoot,
+      buildTime: '2026-06-13T06:00:00.000Z',
+      trackedFiles: ['package.json', 'src/main.ts'],
+    });
+    const releasePath = plan.manifest.release.path;
+    mkdirSync(path.join(releasePath, 'src'), { recursive: true });
+    writeFileSync(path.join(releasePath, 'package.json'), readFileSync(path.join(sourceRoot, 'package.json')));
+    writeFileSync(path.join(releasePath, 'src/main.ts'), 'export const main = false;\n', 'utf8');
+    writeFileSync(
+      path.join(releasePath, '.whatsoup-release-manifest.json'),
+      `${JSON.stringify(plan.manifest, null, 2)}\n`,
+      'utf8',
+    );
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const report = run(['--check-release', releasePath], sourceRoot);
+
+    expect(process.exitCode).toBe(1);
+    expect(report).toMatchObject({
+      check: 'release-drift',
+      ok: false,
+      releasePath,
+      issues: [expect.objectContaining({ kind: 'file-sha256-drift', path: 'src/main.ts' })],
+    });
+    expect(error.mock.calls.flat().join('\n')).toContain('file-sha256-drift: src/main.ts');
   });
 });

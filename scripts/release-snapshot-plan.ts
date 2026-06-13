@@ -72,6 +72,15 @@ export interface ReleaseSnapshotDriftIssue {
   message: string;
 }
 
+export interface ReleaseSnapshotDriftReport {
+  check: 'release-drift';
+  ok: boolean;
+  releasePath: string;
+  manifestPath: string;
+  source: ReleaseSnapshotManifest['source'];
+  issues: ReleaseSnapshotDriftIssue[];
+}
+
 export interface CreateReleaseSnapshotPlanOptions {
   sourceRoot: string;
   sourceRef: string;
@@ -88,6 +97,8 @@ interface ParsedArgs {
   releaseRoot?: string;
   releaseName?: string;
   rollbackRoot?: string;
+  checkRelease?: string;
+  manifestPath?: string;
   sourceRef: string;
   buildTime: string;
   json: boolean;
@@ -317,6 +328,27 @@ export function collectReleaseSnapshotDrift(
   return issues;
 }
 
+export function createReleaseSnapshotDriftReport(releasePath: string, manifestPath?: string): ReleaseSnapshotDriftReport {
+  const absoluteReleasePath = requireAbsolute('check-release', releasePath);
+  const absoluteManifestPath = requireAbsolute(
+    'manifest',
+    manifestPath ?? path.join(absoluteReleasePath, RELEASE_MANIFEST_FILE),
+  );
+  if (!existsSync(absoluteManifestPath)) {
+    throw new Error(`release manifest not found: ${absoluteManifestPath}`);
+  }
+  const manifest = parseReleaseSnapshotManifest(JSON.parse(readFileSync(absoluteManifestPath, 'utf8')));
+  const issues = collectReleaseSnapshotDrift(absoluteReleasePath, manifest);
+  return {
+    check: 'release-drift',
+    ok: issues.length === 0,
+    releasePath: absoluteReleasePath,
+    manifestPath: absoluteManifestPath,
+    source: manifest.source,
+    issues,
+  };
+}
+
 function git(cwd: string, args: string[]): string {
   const proc = spawnSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
@@ -344,21 +376,41 @@ function parseArgs(argv: string[]): ParsedArgs {
     if (arg === '--release-root') options.releaseRoot = next();
     else if (arg === '--release-name') options.releaseName = next();
     else if (arg === '--rollback-root') options.rollbackRoot = next();
+    else if (arg === '--check-release') options.checkRelease = next();
+    else if (arg === '--manifest') options.manifestPath = next();
     else if (arg === '--source-ref') options.sourceRef = next();
     else if (arg === '--build-time') options.buildTime = next();
     else if (arg === '--json') options.json = true;
     else if (arg === '--help' || arg === '-h') {
-      throw new Error('Usage: scripts/release-snapshot-plan.ts --release-root /absolute/path [--release-name name] [--rollback-root /absolute/path] [--source-ref HEAD] [--build-time iso] [--json]');
+      throw new Error('Usage: scripts/release-snapshot-plan.ts --release-root /absolute/path [--release-name name] [--rollback-root /absolute/path] [--source-ref HEAD] [--build-time iso] [--json]\n       scripts/release-snapshot-plan.ts --check-release /absolute/path [--manifest /absolute/path] [--json]');
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
   }
+  if (options.checkRelease) return options;
+  if (options.manifestPath) throw new Error('--manifest requires --check-release');
   if (!options.releaseRoot) throw new Error('--release-root is required');
   return options;
 }
 
-export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd()): ReleaseSnapshotPlan {
+export function run(argv: string[] = process.argv.slice(2), cwd = process.cwd()): ReleaseSnapshotPlan | ReleaseSnapshotDriftReport {
   const options = parseArgs(argv);
+  if (options.checkRelease) {
+    const report = createReleaseSnapshotDriftReport(options.checkRelease, options.manifestPath);
+    if (options.json) {
+      console.log(JSON.stringify(report, null, 2));
+    } else if (report.ok) {
+      console.log(`release drift check passed: ${report.releasePath}`);
+      console.log(`source: ${report.source.ref} ${report.source.commit}`);
+    } else {
+      console.error(`release drift detected: ${report.releasePath}`);
+      console.error(`source: ${report.source.ref} ${report.source.commit}`);
+      for (const issue of report.issues) console.error(`${issue.kind}: ${issue.path ?? '<release>'} ${issue.message}`);
+    }
+    if (!report.ok) process.exitCode = 1;
+    return report;
+  }
+
   const releaseRoot = options.releaseRoot;
   if (!releaseRoot) throw new Error('--release-root is required');
   const sourceCommit = git(cwd, ['rev-parse', options.sourceRef]);
