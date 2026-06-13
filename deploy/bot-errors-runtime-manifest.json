@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-13T03:09:29Z",
+  "generatedAt": "2026-06-13T04:02:06Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "c8cc20b39eca4c49284bb144837aba174c3d0194360f1f049cf915917950a4d3",
+      "sha256": "8a278e507ebffdd4837f3bbdc459f61bd23233ce6c57ef86fe17c79ce6f61116",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -18,7 +18,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "06ed593843dbd92c0082f83758f2103f39e2f24f1cfb6bcf531b560c077c219e",
+      "sha256": "034b913afabad673d38486dfc5335b47d35f411e69ed7a14a8616c3ba17abae5",
       "mustContain": [
         "critical_file_problem",
         "mustContain",

@@ -1692,8 +1692,15 @@ _INSTANCE_FAIL_PREFIXES = {
 # the daily summary de-conflates from critical to warning. Per-instance critical
 # salient events (emit_per_instance_health_failures) still fire regardless.
 # Fail-safe: any category NOT in this set keeps the summary CRITICAL.
+#
+# Intentionally NARROW: only true host-environment categories belong here.
+# queue_inventory() emits FAIL lines prefixed outbox/processing/quarantine/
+# dispatcher_state/writefail — these are NOT listed, and stay CRITICAL on
+# purpose: a backed-up outbox or a writefail on the alert host means alerts
+# are not draining/writing, i.e. the alert pipeline itself is failing. (There
+# is no "queue" prefix emitter — do not re-add one; it would match nothing.)
 _DAILY_INFRA_FAIL_PREFIXES = frozenset({
-    "disk", "dns", "queue", "rustdesk", "clock",
+    "disk", "dns", "rustdesk", "clock",
 })
 
 

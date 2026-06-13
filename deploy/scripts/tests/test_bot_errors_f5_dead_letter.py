@@ -482,6 +482,25 @@ class TestDeadLetterMetaAlert:
             "meta_alert_dead_letter must not be flagged as a test leak"
         )
 
+    def test_real_meta_alert_event_survives_leak_filter_under_test_sandbox(self):
+        # Regression: the REAL meta-alert event (built by dead_letter_meta_event)
+        # must not self-match the test-leak filter even when the state root is a
+        # test sandbox path (/var/folders/.../T/, /tmp/whatsoup-vitest-bot-errors/).
+        # The dead-letter dir absolute path must NOT appear in any scannable field
+        # — otherwise the meta-alert is silently dropped in integration tests.
+        mod = _load_module()
+        for sandbox in (
+            "/tmp/whatsoup-vitest-bot-errors/run-xyz",
+            "/var/folders/ab/cd/T/state-root",
+            "/tmp/wa-test-auth-state",
+        ):
+            paths = {"dead_letter": Path(sandbox) / "dead-letter"}
+            event = mod.dead_letter_meta_event(paths, 1, "an undeliverable alert")
+            assert not mod.event_is_test_leak(event), (
+                f"real meta-alert leaked under sandbox {sandbox}: "
+                f"{mod.matched_test_leak_pattern(event)}"
+            )
+
     def test_meta_alert_evidence_contains_count(self, tmp_path):
         mod = _load_module({"BOT_ERRORS_STATE_DIR": str(tmp_path / "state")})
         paths = mod.setup_dirs()
