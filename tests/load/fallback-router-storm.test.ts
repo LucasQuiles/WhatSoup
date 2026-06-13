@@ -248,7 +248,10 @@ describe('fallback router storm harness', () => {
       Date.now() - RECHECK_MS,
     );
     expect(v.getFallbackState().lastProbeAt).toBeLessThanOrEqual(Date.now());
-    expect(alertsFor('fallback_recovery_stalled')).toHaveLength(1);
+    // Re-alert fires at T, 2T, 3T, ... — cadenced re-surfacing without per-probe noise.
+    // With T=12 and 52 total attempts: alerts at 12, 24, 36, 48 → 4 total.
+    const expectedStallAlerts = Math.floor((attempts - STALL_THRESHOLD) / STALL_THRESHOLD) + 1;
+    expect(alertsFor('fallback_recovery_stalled')).toHaveLength(expectedStallAlerts);
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(0);
     expect(v.effectiveProvider).toBe('opencode-cli');
     expect(v.fallbackActiveUntil).not.toBeNull();

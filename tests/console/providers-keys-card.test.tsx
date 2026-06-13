@@ -54,6 +54,7 @@ function fallbackStatus(
     effectiveProvider: null,
     turnsServed: null,
     turnsEmpty: null,
+    probeAttempts: null,
     lastFallbackTurnAt: null,
     activeEntry: null,
     chain: [],

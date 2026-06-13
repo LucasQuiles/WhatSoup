@@ -397,3 +397,89 @@ describe('zero-text fallback turn signal', () => {
     expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
   });
 });
+
+describe('fallback_empty_turn alert — per-chat dedup', () => {
+  const DEDUP_MS = 30 * 60 * 1000; // PROVIDER_FALLBACK_NOTICE_DEDUP_MS default
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-10T10:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function makeQ(chatJid: string) {
+    return {
+      targetChatJid: chatJid,
+      enqueueText: vi.fn(),
+      enqueueResultText: vi.fn(),
+      enqueueStreamingText: vi.fn(),
+      enqueueToolUpdate: vi.fn(),
+      markLastTerminal: vi.fn(),
+      flush: vi.fn(async () => {}),
+      getLastOpId: vi.fn(() => undefined),
+      clearLastOpId: vi.fn(),
+      indicateTyping: vi.fn(),
+    };
+  }
+
+  it('two empty turns for the same chat within the dedup window → ONE fallback_empty_turn alert, counters increment twice', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    v(runtime).activateProviderFallback(null);
+    vi.mocked(emitAlert).mockClear();
+
+    const queue = makeQ('chat-a@s.whatsapp.net');
+    v(runtime).handleEventWithContext({ type: 'result', text: null }, queue, null, 'conv', 1, 'mapkey');
+    v(runtime).handleEventWithContext({ type: 'result', text: null }, queue, null, 'conv', 2, 'mapkey');
+
+    const emptyAlerts = vi.mocked(emitAlert).mock.calls.filter((c) => c[1] === 'fallback_empty_turn');
+    expect(emptyAlerts).toHaveLength(1);
+    expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(2);
+  });
+
+  it('two empty turns for different chats within the dedup window → TWO fallback_empty_turn alerts', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    v(runtime).activateProviderFallback(null);
+    vi.mocked(emitAlert).mockClear();
+
+    const qA = makeQ('chat-a@s.whatsapp.net');
+    const qB = makeQ('chat-b@s.whatsapp.net');
+    v(runtime).handleEventWithContext({ type: 'result', text: null }, qA, null, 'conv-a', 1, 'key-a');
+    v(runtime).handleEventWithContext({ type: 'result', text: null }, qB, null, 'conv-b', 1, 'key-b');
+
+    const emptyAlerts = vi.mocked(emitAlert).mock.calls.filter((c) => c[1] === 'fallback_empty_turn');
+    expect(emptyAlerts).toHaveLength(2);
+  });
+
+  it('empty turn after the dedup window expires → second alert fires', () => {
+    const runtime = makeRuntime({
+      agentFallbackProvider: 'opencode-cli',
+      agentFallbackModel: 'minimax/minimax-m2',
+    });
+    v(runtime).activateProviderFallback(null);
+    vi.mocked(emitAlert).mockClear();
+
+    const queue = makeQ('chat-a@s.whatsapp.net');
+    v(runtime).handleEventWithContext({ type: 'result', text: null }, queue, null, 'conv', 1, 'mapkey');
+
+    // Advance past the dedup window.
+    vi.advanceTimersByTime(DEDUP_MS + 1);
+
+    v(runtime).handleEventWithContext({ type: 'result', text: null }, queue, null, 'conv', 2, 'mapkey');
+
+    const emptyAlerts = vi.mocked(emitAlert).mock.calls.filter((c) => c[1] === 'fallback_empty_turn');
+    expect(emptyAlerts).toHaveLength(2);
+    expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(2);
+  });
+});

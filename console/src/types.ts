@@ -285,6 +285,8 @@ export interface ProviderStatus {
     turnsServed: number | null;
     /** Process-local count of fallback turns with no visible output. */
     turnsEmpty: number | null;
+    /** Consecutive failed extension probes in the current stall episode; null when not yet exposed. */
+    probeAttempts: number | null;
     /** Epoch ms of the most recent fallback-served turn, or null when absent. */
     lastFallbackTurnAt: number | null;
     /** Selected fallback entry while a runtime window is active. */
