@@ -66,7 +66,38 @@ stream each script over ssh to the host's running location, then hash-verify on 
 - macOS hosts (mini1/4/7/8/9/10/11, mwlab, maclab): running copies at
   `~/LAB/WhatSoup/deploy/scripts/` (health job + bots read from this tree).
 - Linux hub (nucles): the collector/dispatcher/heartbeat copies under the hub's deploy path;
-  restart collector + dispatcher after deploy.
+  restart collector, dispatcher, and q-loop after deploying long-running code.
 
-Deploy + restart are **publish-boundary** actions: they are not performed by the
-corrections worktree run. See the run's `PUBLISH-REQUESTS.md`.
+Current close-out baseline: the 2026-06-13 C2/C3/C4 fleet pass streamed the
+manifest-tracked bot-errors runtime payload from
+`/private/tmp/whatsoup-c2c4-runtime-20260613T074101Z`, built from
+`289c5f7b77c86e64d2ee5ef820aabd7e21492a78`. At deploy time,
+`origin/main=2197bfdc`; the intervening diff did not touch bot-errors runtime,
+hook, profile, or manifest inputs.
+
+The deploy contract is:
+
+1. Take a per-host backup before mutation.
+2. Copy the manifest-tracked bot-errors scripts, `deploy/bot-errors-runtime-manifest.json`,
+   `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree.
+3. Write a host-local runtime manifest at
+   `~/.config/whatsoup/bot-errors-runtime-manifest.json` and point services at it with
+   `BOT_ERRORS_RUNTIME_MANIFEST`.
+4. On Git-backed hosts, stamp `expected_head_sha` with the host checkout's actual HEAD so
+   daily health detects real runtime skew without false mismatches from dirty host trees.
+   Non-Git runtime trees may report `git_head_sha: not_a_git_repository`.
+5. Activate the drift hook with `core.hooksPath=.husky` where the Git config and hooks
+   directory are writable.
+6. Restart long-running hub services after copying code. Timer-invoked health, deadman,
+   and heartbeat jobs load the new code on their next fire.
+7. Verify every active runtime path against the manifest, then check outbox/writefail
+   queues and service restart counters.
+
+Known residuals after the close-out pass:
+
+- One Git-backed macOS host has current runtime files and manifests, but hook activation
+  is blocked by root-owned `.git/config` and `.git/hooks/pre-commit`.
+- Non-Git mini runtime trees are not hook-capable; they can still run the copied runtime
+  payload and host-local manifest.
+- Stream-sync proves runtime payload currency. It does not imply that every dirty host
+  checkout was advanced to the latest `origin/main`.
