@@ -1,0 +1,178 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
+
+import type { AgentEvent } from '../../../../src/runtimes/agent/stream-parser.ts';
+import { AnthropicApiProvider } from '../../../../src/runtimes/agent/providers/anthropic-api.ts';
+import { OpenAIApiProvider } from '../../../../src/runtimes/agent/providers/openai-api.ts';
+import { providerPreview, sanitizeProviderPreviewText } from '../../../../src/runtimes/agent/provider-preview-sanitizer.ts';
+
+const { errorMock, warnMock } = vi.hoisted(() => ({
+  errorMock: vi.fn(),
+  warnMock: vi.fn(),
+}));
+
+vi.mock('../../../../src/logger.ts', () => ({
+  createChildLogger: () => ({
+    debug: vi.fn(),
+    error: errorMock,
+    info: vi.fn(),
+    warn: warnMock,
+  }),
+}));
+
+interface SecretFixtures {
+  bearer: string;
+  keyed: string;
+  email: string;
+  github: string;
+}
+
+function secretFixtures(): SecretFixtures {
+  return {
+    bearer: ['sk', 'live', 'a'.repeat(26)].join('-'),
+    keyed: ['token', 'b'.repeat(26)].join('-'),
+    email: `operator${'@'}example.com`,
+    github: `ghp_${'c'.repeat(26)}`,
+  };
+}
+
+function providerErrorText(fixtures = secretFixtures()): string {
+  return [
+    'invalid_request_error: upstream rejected request',
+    `Authorization: Bearer ${fixtures.bearer}`,
+    `api_key=${fixtures.keyed}`,
+    `account=${fixtures.email}`,
+    `github=${fixtures.github}`,
+  ].join('\n');
+}
+
+function providerErrorSseLine(fixtures = secretFixtures()): string {
+  return providerErrorText(fixtures).replace(/\n/g, ' ');
+}
+
+function makeSseResponse(lines: string[]): Response {
+  return new Response(lines.map((line) => `data: ${line}\n\n`).join(''), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+async function driveProviderTurn(provider: OpenAIApiProvider | AnthropicApiProvider): Promise<AgentEvent[]> {
+  const events: AgentEvent[] = [];
+  await provider.initialize({
+    cwd: '/tmp',
+    instanceName: 'test-instance',
+    onCrash: vi.fn(),
+    onEvent: (event) => events.push(event),
+    systemPrompt: 'System prompt',
+  });
+
+  await provider.sendTurn({
+    conversationKey: 'chat-key',
+    parts: [{ kind: 'text', text: 'hello' }],
+    role: 'user',
+  });
+
+  return events;
+}
+
+function previewFrom(mock: Mock, fieldName: 'errPreview' | 'dataPreview'): string {
+  for (const call of mock.mock.calls) {
+    const metadata = call[0];
+    if (metadata && typeof metadata === 'object' && fieldName in metadata) {
+      return String((metadata as Record<string, unknown>)[fieldName]);
+    }
+  }
+  throw new Error(`missing ${fieldName} log field`);
+}
+
+function expectPreviewRedacted(preview: string, fixtures: SecretFixtures): void {
+  expect(preview).toContain('invalid_request_error');
+  expect(preview).toContain('Bearer [REDACTED]');
+  expect(preview).toContain('api_key=[REDACTED]');
+  expect(preview).toContain('[REDACTED_EMAIL]');
+  expect(preview).not.toContain(fixtures.bearer);
+  expect(preview).not.toContain(fixtures.keyed);
+  expect(preview).not.toContain(fixtures.email);
+  expect(preview).not.toContain(fixtures.github);
+}
+
+describe('provider API preview redaction', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    warnMock.mockReset();
+    errorMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sanitizes provider previews before applying preview bounds', () => {
+    const fixtures = secretFixtures();
+    const text = providerErrorText(fixtures);
+
+    const sanitized = sanitizeProviderPreviewText(text);
+    expectPreviewRedacted(sanitized, fixtures);
+
+    const bounded = providerPreview(text, 80);
+    expect(bounded.length).toBeLessThanOrEqual(80);
+    expect(bounded).not.toContain(fixtures.bearer);
+    expect(bounded).not.toContain(fixtures.keyed);
+  });
+
+  it('redacts OpenAI-compatible HTTP error previews before logging', async () => {
+    const fixtures = secretFixtures();
+    fetchMock.mockResolvedValueOnce(new Response(providerErrorText(fixtures), { status: 400 }));
+
+    const events = await driveProviderTurn(new OpenAIApiProvider());
+
+    expect(events).toContainEqual(expect.objectContaining({
+      text: '_There was an issue with my conversation data. Please try again or send /new to start fresh._',
+      type: 'result',
+    }));
+    expectPreviewRedacted(previewFrom(errorMock, 'errPreview'), fixtures);
+  });
+
+  it('redacts Anthropic HTTP error previews before logging', async () => {
+    const fixtures = secretFixtures();
+    fetchMock.mockResolvedValueOnce(new Response(providerErrorText(fixtures), { status: 400 }));
+
+    const events = await driveProviderTurn(new AnthropicApiProvider());
+
+    expect(events).toContainEqual(expect.objectContaining({
+      text: '_There was an issue with my conversation data. Please try again or send /new to start fresh._',
+      type: 'result',
+    }));
+    expectPreviewRedacted(previewFrom(errorMock, 'errPreview'), fixtures);
+  });
+
+  it('redacts OpenAI-compatible malformed SSE data previews before logging', async () => {
+    const fixtures = secretFixtures();
+    fetchMock.mockResolvedValueOnce(makeSseResponse([
+      providerErrorSseLine(fixtures),
+      '{"choices":[{"delta":{"content":"done"}}]}',
+      '[DONE]',
+    ]));
+
+    await driveProviderTurn(new OpenAIApiProvider());
+
+    expectPreviewRedacted(previewFrom(warnMock, 'dataPreview'), fixtures);
+  });
+
+  it('redacts Anthropic malformed SSE data previews before logging', async () => {
+    const fixtures = secretFixtures();
+    fetchMock.mockResolvedValueOnce(makeSseResponse([
+      providerErrorSseLine(fixtures),
+      '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+      '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}',
+    ]));
+
+    await driveProviderTurn(new AnthropicApiProvider());
+
+    expectPreviewRedacted(previewFrom(warnMock, 'dataPreview'), fixtures);
+  });
+});

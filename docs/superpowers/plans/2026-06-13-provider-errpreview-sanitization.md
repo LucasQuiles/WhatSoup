@@ -181,7 +181,7 @@ npm test -- --pool=forks --fileParallelism=false tests/runtimes/agent/providers/
 - [ ] **Step 1:** Run Test Integrity on changed tests.
 - [ ] **Step 2:** Run `npm run typecheck:all`.
 - [ ] **Step 3:** Run `npm run verify:push:branch`.
-- [ ] **Step 4:** Review `rg -n "errPreview: .*slice|dataPreview: .*slice" src/runtimes/agent -g '*.ts'` and require zero provider API hits unless justified in the PR body.
+- [ ] **Step 4:** Review `rg -n "\b(?:errPreview|dataPreview): .*slice" src/runtimes/agent -g '*.ts'` and require zero provider API hits unless justified in the PR body.
 - [ ] **Step 5:** Request adversarial review focused on false confidence: redaction-before-truncation, test fixture realism without committed secret literals, and provider behavior invariance.
 
 **Commands:**
@@ -190,7 +190,7 @@ npm test -- --pool=forks --fileParallelism=false tests/runtimes/agent/providers/
 test-integrity scan --ci tests/runtimes/agent/provider-crash-diagnostics.test.ts tests/runtimes/agent/providers/api-preview-redaction.test.ts > /tmp/errpreview-ti.log 2>&1; echo "test-integrity exit=$?"
 npm run typecheck:all > /tmp/errpreview-typecheck.log 2>&1; echo "typecheck exit=$?"
 npm run verify:push:branch > /tmp/errpreview-verify.log 2>&1; echo "verify exit=$?"
-rg -n "errPreview: .*slice|dataPreview: .*slice" src/runtimes/agent -g '*.ts' > /tmp/errpreview-slice-scan.log 2>&1; echo "slice-scan exit=$?"
+rg -n "\b(?:errPreview|dataPreview): .*slice" src/runtimes/agent -g '*.ts' > /tmp/errpreview-slice-scan.log 2>&1; echo "slice-scan exit=$?"
 ```
 
 ## Acceptance Checklist
