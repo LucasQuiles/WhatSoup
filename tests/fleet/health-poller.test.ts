@@ -1448,6 +1448,54 @@ describe('HealthPoller', () => {
     expectEmitAlertSourceNotCalled('remote-1', 'instance_logged_out');
   });
 
+  it('keeps repeated parseable non-ok health bodies in degraded state instead of escalating to unreachable', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          account_jid: 'not connected',
+          connection: {
+            state: 'disconnected',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+            last_disconnect_reason: 'connectionReplaced',
+            last_status_code: 440,
+            auth_failure_class: 'none',
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(
+      () => instances,
+      'self',
+      vi.fn().mockReturnValue({}),
+      1_000,
+    );
+    poller.start();
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'degraded',
+      consecutiveFailures: 0,
+      error: null,
+      everReachable: true,
+      statusReason: 'whatsapp_backoff_zero_attempts_with_disconnect_without_auth_loss_signal',
+    });
+    expectEmitAlertSourceNotCalled('remote-1', 'instance_unreachable');
+
+    poller.stop();
+  });
+
   it('logs and continues when a status change listener throws', async () => {
     mockFetch.mockRejectedValue(new Error('connection refused'));
 
