@@ -94,14 +94,16 @@ describe('design system compliance — Shannon slice', () => {
     expect(source).not.toContain('role="dialog"')
   })
 
-  it('associates Field labels with their controls in wizard form primitives', () => {
-    const primitives = read('console/src/components/wizard/form-primitives.tsx')
+  it('associates Field labels with their controls in the FormControl primitive', () => {
+    const primitives = read('console/src/components/primitives/FormControl.tsx')
+    const shim = read('console/src/components/wizard/form-primitives.tsx')
     const configStep = read('console/src/components/wizard/ConfigStep.tsx')
 
     expect(primitives).toContain('useId')
     expect(primitives).toContain('htmlFor={id}')
     expect(primitives).toContain('children: (id: string) => ReactNode')
     expect(primitives).toContain('{children(id)}')
+    expect(shim).toContain("from '../primitives/FormControl'")
     expect(configStep).toContain('{(id) => (')
     expect(configStep).toContain('id={id}')
   })
@@ -203,11 +205,13 @@ describe('design system compliance — Shannon slice', () => {
     const exists = (() => { try { read('console/src/components/wizard/form-styles.ts'); return true } catch { return false } })()
     expect(exists).toBe(false)
 
-    const primitives = read('console/src/components/wizard/form-primitives.tsx')
+    const primitives = read('console/src/components/primitives/FormControl.tsx')
+    const shim = read('console/src/components/wizard/form-primitives.tsx')
     const identity = read('console/src/components/wizard/IdentityStep.tsx')
     const modelAuth = read('console/src/components/wizard/ModelAuthStep.tsx')
 
     expect(primitives).not.toContain('form-styles')
+    expect(shim).not.toContain('form-styles')
     expect(identity).not.toContain('form-styles')
     expect(modelAuth).not.toContain('form-styles')
   })

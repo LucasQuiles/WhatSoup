@@ -1,7 +1,7 @@
 /**
  * primitives/index.ts — barrel export for SOUP v3 primitive components.
  *
- * Badge (StatusCell + ModeBadge), Button, ActionButton, Modal, Pill,
+ * Badge (StatusCell + ModeBadge), Button, ActionButton, FormControl, Modal, Pill,
  * Table, Toolbar, LogStream, Drawer, Tabs, Popover.
  * All consumers import from this barrel; never import from individual files.
  */
@@ -13,6 +13,23 @@ export type { ButtonProps, ButtonVariant, ButtonSize } from './Button';
 
 export { ActionButton } from './ActionButton';
 export type { ActionButtonProps } from './ActionButton';
+
+export {
+  Field,
+  TextInput,
+  NumberInput,
+  SelectInput,
+  TextArea,
+  CheckboxField,
+} from './FormControl';
+export type {
+  FieldProps,
+  TextInputProps,
+  NumberInputProps,
+  SelectInputProps,
+  TextAreaProps,
+  CheckboxFieldProps,
+} from './FormControl';
 
 export { Modal, ModalHeader, ModalBody, ModalFooter } from './Modal';
 export type {

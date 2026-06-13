@@ -26,7 +26,7 @@ wizard surfaces (B2 or B3 scope decision at packet time); GroupDetailModal's is 
   LinePicker/ChatPicker/ContactSearchPicker explicitly. NOTE: a **Popover primitive does
   not exist yet** — it is net-new B2 work (build on useDismissable like Drawer did).
 - `03-spec/components/input.md`: ONE SearchInput component (inline re-implementations
-  banned); field kit promotion from `wizard/form-primitives.tsx` to `components/form/`
+  banned); field kit promoted from `wizard/form-primitives.tsx` to `components/primitives/FormControl.tsx`
   (DUP-12); error aria wiring; disabled = dashed border.
 - `03-spec/components/pill.md`: removable Pill is the TagInput chip target (labeled
   remove built-in, 24px hit floor).

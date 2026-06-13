@@ -121,7 +121,7 @@ are the shadow-baseline falls for that file.
 | wizard/LinkStep.tsx | none | raw `<button>`×2: 134, 160 — both `c-btn-primary` (ok-green accent-law violation, §4 F1); LT×5; hex 95 | 0/2 = 0% | yes |
 | wizard/ReviewStep.tsx | Field (×1) | raw `<button>`×2: 55, 211 (c-btn-primary 213); LT×1; legacy vars×5: 19, 20, 34, 45, 49 | 1/3 = 33% | yes |
 | wizard/WizardStep.tsx | none | LT×1: 26 | — | yes (token) |
-| wizard/form-primitives.tsx (the kit itself) | — | renders raw controls by design (exempt); LT×1: 115; legacy var 7; **still lives in wizard/, not shared/ — DUP-12 promotion not done; only ConfigStep+ModelAuthStep consume it** | kit | yes (kit gap) |
+| components/primitives/FormControl.tsx (the kit itself) | — | renders raw controls by design inside the primitive exemption; wizard/form-primitives.tsx is a shim; ConfigStep+ModelAuthStep now import the primitive barrel | kit | no (DUP-12 promotion done; consumer migrations remain) |
 
 ### 3.6 Pickers / shared
 

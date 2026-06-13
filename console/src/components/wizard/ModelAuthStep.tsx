@@ -2,7 +2,7 @@ import { type FC, useState } from 'react'
 import { Tabs, Tab } from '../primitives/Tabs'
 import { Button } from '../primitives/Button'
 import { Check, Eye, EyeOff } from 'lucide-react'
-import { SelectInput } from './form-primitives'
+import { SelectInput } from '../primitives'
 import WizardStep from './WizardStep'
 
 interface ModelAuthStepProps {

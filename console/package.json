@@ -22,7 +22,7 @@
     "design:capture:validate": "node scripts/validate-visual-manifest.mjs",
     "design:contrast": "node scripts/check-contrast-matrix.mjs",
     "design:color-semantics": "node scripts/check-color-semantics.mjs --fail-on-rule soup/no-component-local-palette",
-    "design:raw-form-control-inventory": "node scripts/check-raw-form-control-inventory.mjs --expected-total 36 --expected-consumer 31 --expected-exemption 5 --expected-input 25 --expected-select 3 --expected-textarea 8 --fail-on-mismatch",
+    "design:raw-form-control-inventory": "node scripts/check-raw-form-control-inventory.mjs --expected-total 31 --expected-consumer 31 --expected-exemption 0 --expected-input 22 --expected-select 2 --expected-textarea 7 --fail-on-mismatch",
     "design:font-assets": "node scripts/check-font-assets.mjs",
     "design:resilience": "node scripts/check-design-resilience.mjs",
     "design:lint-fixtures": "node scripts/check-design-lint-fixtures.mjs",

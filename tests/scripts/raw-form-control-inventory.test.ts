@@ -97,7 +97,7 @@ describe('check-raw-form-control-inventory.mjs', () => {
   it('classifies raw form-control hits by migration type, consumer group, and element', () => {
     const { eslintJson, root } = makeFixture(
       {
-        'console/src/components/wizard/form-primitives.tsx': `
+        'console/src/components/primitives/FormControl.tsx': `
 export function TextInput() {
   return <input className="c-input" />;
 }
@@ -112,9 +112,9 @@ export function TextArea() {
       [
         { file: 'console/src/pages/Inbox.tsx', line: 1 },
         { file: 'console/src/components/line-detail/GroupDetailModal.tsx', line: 1 },
-        { file: 'console/src/components/wizard/form-primitives.tsx', line: 3 },
+        { file: 'console/src/components/primitives/FormControl.tsx', line: 3 },
         { file: 'console/src/components/SaveContactDialog.tsx', line: 1 },
-        { file: 'console/src/components/wizard/form-primitives.tsx', line: 6 },
+        { file: 'console/src/components/primitives/FormControl.tsx', line: 6 },
       ],
     );
 

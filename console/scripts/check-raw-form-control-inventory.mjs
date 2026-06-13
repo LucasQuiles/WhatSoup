@@ -11,7 +11,7 @@ const consoleRoot = resolve(here, '..');
 const repoRoot = resolve(consoleRoot, '..');
 
 const RULE_TAG = 'soup/no-raw-form-control';
-const PRIMITIVE_SELF_MODULE = 'console/src/components/wizard/form-primitives.tsx';
+const PRIMITIVE_SELF_MODULE = 'console/src/components/primitives/FormControl.tsx';
 const DEFAULT_ESLINT_ARGS = ['eslint', '.', '-c', 'eslint.config.shadow.mjs', '--format', 'json'];
 const ELEMENTS = ['input', 'select', 'textarea'];
 

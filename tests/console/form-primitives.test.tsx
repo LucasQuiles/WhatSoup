@@ -1,5 +1,5 @@
 /**
- * Behavioral contract-lock for wizard form-primitives.
+ * Behavioral contract-lock for the FormControl primitive.
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -14,7 +14,7 @@ import {
   SelectInput,
   TextArea,
   CheckboxField,
-} from '../../console/src/components/wizard/form-primitives'
+} from '../../console/src/components/primitives/FormControl'
 
 afterEach(() => cleanup())
 
@@ -92,7 +92,7 @@ describe('TextInput', () => {
     expect(input.classList.contains('c-input')).toBe(true)
     expect(input.classList.contains('font-mono')).toBe(true)
     expect(input.classList.contains('extra-cls')).toBe(true)
-    expectBorderColor(input, 'var(--b2)')
+    expectBorderColor(input, 'var(--border-subtle)')
 
     await user.clear(input)
     await user.type(input, 'changed')
@@ -103,13 +103,13 @@ describe('TextInput', () => {
     const { rerender } = render(<TextInput aria-label="Status" value="" onChange={() => {}} error />)
     const input = screen.getByLabelText('Status') as HTMLInputElement
 
-    expectBorderColor(input, 'var(--color-s-crit)')
+    expectBorderColor(input, 'var(--status-crit-fg)')
 
     rerender(<TextInput aria-label="Status" value="" onChange={() => {}} confirmed />)
     expectBorderColor(input, 'var(--wizard-accent)')
 
     rerender(<TextInput aria-label="Status" value="" onChange={() => {}} error confirmed />)
-    expectBorderColor(input, 'var(--color-s-crit)')
+    expectBorderColor(input, 'var(--status-crit-fg)')
   })
 })
 
@@ -156,7 +156,7 @@ describe('NumberInput', () => {
     const { rerender } = render(<NumberInput aria-label="Amount" value={1} onChange={() => {}} error />)
     const input = screen.getByLabelText('Amount') as HTMLInputElement
 
-    expectBorderColor(input, 'var(--color-s-crit)')
+    expectBorderColor(input, 'var(--status-crit-fg)')
 
     rerender(<NumberInput aria-label="Amount" value={1} onChange={() => {}} confirmed />)
     expectBorderColor(input, 'var(--wizard-accent)')
@@ -207,7 +207,7 @@ describe('SelectInput', () => {
     )
     const select = screen.getByLabelText('Mode') as HTMLSelectElement
 
-    expectBorderColor(select, 'var(--color-s-crit)')
+    expectBorderColor(select, 'var(--status-crit-fg)')
 
     rerender(
       <SelectInput aria-label="Mode" value="" onChange={() => {}} confirmed>
@@ -260,7 +260,7 @@ describe('TextArea', () => {
     const textarea = screen.getByLabelText('Body') as HTMLTextAreaElement
 
     expect(textarea.getAttribute('style')).toContain('min-height: 80px')
-    expectBorderColor(textarea, 'var(--color-s-crit)')
+    expectBorderColor(textarea, 'var(--status-crit-fg)')
 
     rerender(<TextArea aria-label="Body" value="" onChange={() => {}} confirmed />)
     expectBorderColor(textarea, 'var(--wizard-accent)')

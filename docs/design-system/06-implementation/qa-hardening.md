@@ -691,10 +691,12 @@ counts. It emits deterministic JSON with no timestamps and records:
 - whether each finding is a consumer migration or a primitive self-hit that can only clear by
   moving the canonical primitive under `components/primitives/**`.
 
-The current enforced inventory is 36 total findings: 31 consumer migrations and 5 transitional
-form-kit self-hits, with an element split of 25 inputs, 3 selects, and 8 textareas. The package
-script runs with explicit expected counts and `--fail-on-mismatch`, and `verify:console-design`
-includes it after `lint:shadow:baseline`.
+The current enforced inventory is 31 total findings: 31 consumer migrations and 0 primitive
+self-hits, with an element split of 22 inputs, 2 selects, and 7 textareas. The former 5
+transitional form-kit self-hits cleared only through the D4.2 primitive promotion to
+`console/src/components/primitives/FormControl.tsx`. The package script runs with explicit expected
+counts and `--fail-on-mismatch`, and `verify:console-design` includes it after
+`lint:shadow:baseline`.
 
 This gate prevents biased or stale raw-form counts. It does not prove a migration is correct, does
 not authorize a baseline ratchet, and does not replace behavior tests, accessibility checks, or

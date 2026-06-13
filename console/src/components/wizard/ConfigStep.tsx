@@ -2,7 +2,7 @@ import { type FC, type ChangeEvent, type ReactNode, useCallback, useEffect, useM
 import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
-import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } from './form-primitives'
+import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } from '../primitives'
 // form-styles static exports replaced by CSS classes (c-field-label, c-helper)
 import { validatePhone } from '../../lib/validation'
 import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'

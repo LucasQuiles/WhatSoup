@@ -62,11 +62,11 @@ focus-visible on the proxy box.
 
 ## Migration notes
 
-Promote `wizard/form-primitives.tsx` (Field, TextInput, NumberInput, SelectInput, TextArea,
-CheckboxField) to `components/form/` as the canonical kit (DUP-12); migrate ConfigEditDialog,
-ScheduleComposerModal, CreateGroupModal, GroupDetailModal off raw `c-input`/`c-field-label`;
-adopt SearchInput in Inbox and Fleet (P2-4). Legacy `--input-h` carries; `--input-btn` →
-`--btn-h-sm`.
+`components/primitives/FormControl.tsx` is the canonical kit (Field, TextInput, NumberInput,
+SelectInput, TextArea, CheckboxField); `wizard/form-primitives.tsx` is only a compatibility shim.
+Migrate ConfigEditDialog, ScheduleComposerModal, CreateGroupModal, GroupDetailModal off raw
+`c-input`/`c-field-label`; adopt SearchInput in Inbox and Fleet (P2-4). Legacy `--input-h`
+carries; `--input-btn` → `--btn-h-sm`.
 
 ## Enforcement hooks
 

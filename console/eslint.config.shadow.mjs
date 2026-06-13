@@ -53,9 +53,10 @@ import soupPlugin from './eslint-rules/index.mjs'
 const shadowSyntaxRules = [
 
   // ── soup/no-raw-form-control (shadow) ────────────────────────────────────
-  // Flag raw <input>/<select>/<textarea>. Baseline: 27 inputs, 3 selects, 5+ textareas.
-  // type="file" sites get a named waiver at P6.
-  // NOT promoted: form kit not yet landed; TagInput/SaveContact carry their own input.
+  // Flag raw <input>/<select>/<textarea>. Baseline: 31 consumer findings after the
+  // FormControl primitive moved under components/primitives/** (22 inputs, 2 selects,
+  // 7 textareas). type="file" sites get a named waiver at P6.
+  // NOT promoted: remaining consumers still need one-file-at-a-time migration.
   {
     selector: 'JSXOpeningElement[name.name=/^(input|select|textarea)$/]',
     message:

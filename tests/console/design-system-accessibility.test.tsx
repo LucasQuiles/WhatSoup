@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import { createElement, type ReactNode } from 'react'
 
-import { Field, TextInput } from '../../console/src/components/wizard/form-primitives'
+import { Field, TextInput } from '../../console/src/components/primitives/FormControl'
 import HeartbeatStrip from '../../console/src/components/HeartbeatStrip'
 import { PipelineTab } from '../../console/src/components/line-detail/PipelineTab'
 import AddLineWizard from '../../console/src/components/AddLineWizard'
