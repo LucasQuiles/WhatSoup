@@ -3,13 +3,11 @@ import { createChildLogger } from '../../../logger.ts';
 import type { LLMProvider } from '../providers/types.ts';
 import type { StoredMessage } from '../../../core/messages.ts';
 import type { ExtractedFact } from './extractor.ts';
+import { RAW_OUTPUT_TRUNCATE, truncateRaw } from './raw-output.ts';
 
 const log = createChildLogger('enrichment');
 
-// P3.6-H1: match extractor truncation for PII hygiene.
-// Keep in sync with extractor.ts RAW_OUTPUT_TRUNCATE. PII hygiene for
-// ValidationError.details.rawOutput.
-const RAW_OUTPUT_TRUNCATE = 500;
+
 
 /**
  * P3.6-H1 strict-mode error for the validator stage.
@@ -56,10 +54,6 @@ export class ValidationError extends Error {
     this.details = details;
     this.name = 'ValidationError';
   }
-}
-
-function truncateRaw(raw: string): string {
-  return raw.length > RAW_OUTPUT_TRUNCATE ? raw.slice(0, RAW_OUTPUT_TRUNCATE) : raw;
 }
 
 export interface ValidateFactsOptions {
