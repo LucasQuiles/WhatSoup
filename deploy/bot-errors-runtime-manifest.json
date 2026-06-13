@@ -1,7 +1,8 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-13T01:42:48Z",
+  "generatedAt": "2026-06-13T02:24:18Z",
   "scope": "bot-errors-runtime-scripts",
+  "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
@@ -17,7 +18,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "302763943caf724f0725415dc504dd28e562d56a88e593d2589f0d217b164dc7",
+      "sha256": "b9a37da664f4de78b1044033e2538849aaa1c92fcceb857aade9a093e170e185",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -61,7 +62,11 @@
         "instance_fallback_reason",
         "runtime_agent_fallback_recovery_probe_required",
         "auth_bond_credential_write_inflight",
-        "BOT_ERRORS_AUTH_BOND_WRITE_INFLIGHT_GRACE_SECONDS"
+        "BOT_ERRORS_AUTH_BOND_WRITE_INFLIGHT_GRACE_SECONDS",
+        "git_head_sha_line",
+        "_run_git_rev_parse",
+        "git_head_sha_mismatch",
+        "expected_head_sha"
       ]
     },
     {
