@@ -173,7 +173,7 @@ git commit -m "test(bot-errors): make collector cooldown tests deterministic"
 **Files:**
 - Modify: `tests/scripts/fitness-file-size-warning-budget.test.ts`
 
-- [ ] **Step 1: Replace count-only budget with exact identity set**
+- [x] **Step 1: Replace count-only budget with exact identity set**
 
 Replace the comment and `BUDGET_MAX` block with:
 
@@ -201,7 +201,7 @@ const fileSizeWarningFiles = result.issues
 expect(fileSizeWarningFiles).toEqual(EXPECTED_FILE_SIZE_WARNING_FILES);
 ```
 
-- [ ] **Step 2: Run the file-size budget test**
+- [x] **Step 2: Run the file-size budget test**
 
 Run:
 
@@ -211,7 +211,9 @@ npm test -- --pool=forks --fileParallelism=false tests/scripts/fitness-file-size
 
 Expected: pass if the current identity set is still exact; fail if a +1/-1 swap or new oversized file exists.
 
-- [ ] **Step 3: Commit the file-size identity slice**
+Observed proof: `npm test -- --pool=forks --fileParallelism=false tests/scripts/fitness-file-size-warning-budget.test.ts` passed with 1 test after the assertion was changed from count-only to exact file identity.
+
+- [x] **Step 3: Commit the file-size identity slice**
 
 Run:
 
