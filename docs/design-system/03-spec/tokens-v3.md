@@ -200,7 +200,31 @@ per theme. Values marked **(must-fix)** replace the v2 value for AA — see `col
 Mode-passive and status-ok are **distinct tokens with distinct values** in both themes — the legacy
 `#2dd4a8` collision (P2-12) is resolved by construction.
 
-### 3.6a v2 mockup property → v3 SSOT name (renames at promotion)
+### 3.6a Provider identity and chart data palettes
+
+Provider identity is the only sanctioned chromatic exception outside accent, mode, and status
+(`color.md` §2.1). Provider tokens may identify providers only; chart/data-series tokens may identify
+non-provider data dimensions only.
+
+| Token | Dark | Light | Role |
+|---|---|---|---|
+| `--provider-claude-fg` | `#B8A6D9` | `#6B5A9E` | Claude provider identity text/legend/series |
+| `--provider-claude-wash` | `color-mix(in srgb, var(--provider-claude-fg) var(--wash), transparent)` | `color-mix(in srgb, var(--provider-claude-fg) var(--wash), transparent)` | Claude provider chip wash |
+| `--provider-codex-fg` | `#8FA8C8` | `#486985` | Codex provider identity text/legend/series |
+| `--provider-codex-wash` | `color-mix(in srgb, var(--provider-codex-fg) var(--wash), transparent)` | `color-mix(in srgb, var(--provider-codex-fg) var(--wash), transparent)` | Codex provider chip wash |
+| `--provider-gemini-fg` | `#C5A878` | `#7E6432` | Gemini provider identity text/legend/series |
+| `--provider-gemini-wash` | `color-mix(in srgb, var(--provider-gemini-fg) var(--wash), transparent)` | `color-mix(in srgb, var(--provider-gemini-fg) var(--wash), transparent)` | Gemini provider chip wash |
+| `--provider-openai-fg` | `#86AAA6` | `#3E6D68` | OpenAI provider identity text/legend/series |
+| `--provider-openai-wash` | `color-mix(in srgb, var(--provider-openai-fg) var(--wash), transparent)` | `color-mix(in srgb, var(--provider-openai-fg) var(--wash), transparent)` | OpenAI provider chip wash |
+| `--provider-anthropic-fg` | `#BBA593` | `#74604F` | Anthropic provider identity text/legend/series |
+| `--provider-anthropic-wash` | `color-mix(in srgb, var(--provider-anthropic-fg) var(--wash), transparent)` | `color-mix(in srgb, var(--provider-anthropic-fg) var(--wash), transparent)` | Anthropic provider chip wash |
+| `--provider-opencode-fg` | `#9FB3A6` | `#536F5C` | OpenCode provider identity text/legend/series |
+| `--provider-opencode-wash` | `color-mix(in srgb, var(--provider-opencode-fg) var(--wash), transparent)` | `color-mix(in srgb, var(--provider-opencode-fg) var(--wash), transparent)` | OpenCode provider chip wash |
+| `--data-inbound-solid` | `#6B8299` | `#456073` | inbound/message received chart series |
+| `--data-outbound-solid` | `#9AB2C4` | `#5E7E94` | outbound/message sent chart series |
+| `--data-media-solid` | `#B39B72` | `#7A6238` | media/message attachment chart series |
+
+### 3.6b v2 mockup property → v3 SSOT name (renames at promotion)
 
 The mockup used short channel names; v3 namespaces them. Disposition of every renamed v2 property:
 

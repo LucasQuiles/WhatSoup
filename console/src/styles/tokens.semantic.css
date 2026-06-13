@@ -70,6 +70,24 @@
   --mode-agent-wash:   color-mix(in srgb, var(--mode-agent-solid) var(--wash), transparent);
   --mode-agent-border: color-mix(in srgb, var(--mode-agent-solid) var(--chan-border), transparent);
 
+  /* §3.6a Provider identity and chart data palettes */
+  --provider-claude-fg:    #B8A6D9;
+  --provider-claude-wash:  color-mix(in srgb, var(--provider-claude-fg) var(--wash), transparent);
+  --provider-codex-fg:     #8FA8C8;
+  --provider-codex-wash:   color-mix(in srgb, var(--provider-codex-fg) var(--wash), transparent);
+  --provider-gemini-fg:    #C5A878;
+  --provider-gemini-wash:  color-mix(in srgb, var(--provider-gemini-fg) var(--wash), transparent);
+  --provider-openai-fg:    #86AAA6;
+  --provider-openai-wash:  color-mix(in srgb, var(--provider-openai-fg) var(--wash), transparent);
+  --provider-anthropic-fg:   #BBA593;
+  --provider-anthropic-wash: color-mix(in srgb, var(--provider-anthropic-fg) var(--wash), transparent);
+  --provider-opencode-fg:   #9FB3A6;
+  --provider-opencode-wash: color-mix(in srgb, var(--provider-opencode-fg) var(--wash), transparent);
+
+  --data-inbound-solid:  #6B8299;
+  --data-outbound-solid: #9AB2C4;
+  --data-media-solid:    #B39B72;
+
   /* §3.7 Focus, scrim, chrome glass, shadows */
   --focus-ring:   #6BA6FF;
   --scrim:        rgba(4,6,9,0.62);
@@ -145,6 +163,24 @@
   --mode-agent-wash:   color-mix(in srgb, var(--mode-agent-solid) var(--wash), transparent);
   --mode-agent-border: color-mix(in srgb, var(--mode-agent-solid) var(--chan-border), transparent);
 
+  /* §3.6a Provider identity and chart data palettes */
+  --provider-claude-fg:    #6B5A9E;
+  --provider-claude-wash:  color-mix(in srgb, var(--provider-claude-fg) var(--wash), transparent);
+  --provider-codex-fg:     #486985;
+  --provider-codex-wash:   color-mix(in srgb, var(--provider-codex-fg) var(--wash), transparent);
+  --provider-gemini-fg:    #7E6432;
+  --provider-gemini-wash:  color-mix(in srgb, var(--provider-gemini-fg) var(--wash), transparent);
+  --provider-openai-fg:    #3E6D68;
+  --provider-openai-wash:  color-mix(in srgb, var(--provider-openai-fg) var(--wash), transparent);
+  --provider-anthropic-fg:   #74604F;
+  --provider-anthropic-wash: color-mix(in srgb, var(--provider-anthropic-fg) var(--wash), transparent);
+  --provider-opencode-fg:   #536F5C;
+  --provider-opencode-wash: color-mix(in srgb, var(--provider-opencode-fg) var(--wash), transparent);
+
+  --data-inbound-solid:  #456073;
+  --data-outbound-solid: #5E7E94;
+  --data-media-solid:    #7A6238;
+
   /* §3.7 Focus, scrim, chrome glass, shadows */
   --focus-ring:   #2563EB;
   --scrim:        rgba(23,26,31,0.45);
@@ -206,6 +242,23 @@
   --color-mode-agent-fg:       var(--mode-agent-fg);
   --color-mode-agent-wash:     var(--mode-agent-wash);
   --color-mode-agent-border:   var(--mode-agent-border);
+
+  --color-provider-claude-fg:      var(--provider-claude-fg);
+  --color-provider-claude-wash:    var(--provider-claude-wash);
+  --color-provider-codex-fg:       var(--provider-codex-fg);
+  --color-provider-codex-wash:     var(--provider-codex-wash);
+  --color-provider-gemini-fg:      var(--provider-gemini-fg);
+  --color-provider-gemini-wash:    var(--provider-gemini-wash);
+  --color-provider-openai-fg:      var(--provider-openai-fg);
+  --color-provider-openai-wash:    var(--provider-openai-wash);
+  --color-provider-anthropic-fg:   var(--provider-anthropic-fg);
+  --color-provider-anthropic-wash: var(--provider-anthropic-wash);
+  --color-provider-opencode-fg:    var(--provider-opencode-fg);
+  --color-provider-opencode-wash:  var(--provider-opencode-wash);
+
+  --color-data-inbound-solid:  var(--data-inbound-solid);
+  --color-data-outbound-solid: var(--data-outbound-solid);
+  --color-data-media-solid:    var(--data-media-solid);
 
   --color-focus-ring:           var(--focus-ring);
   --color-scrim:                var(--scrim);

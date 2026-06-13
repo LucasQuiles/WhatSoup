@@ -40,12 +40,18 @@ Provider colours are **not** status, mode, or action colours. They may appear **
 datum being identified is the provider itself: provider labels, provider legends, provider chart
 series, and provider identity chips.
 
-Constraints: provider colours ride a dedicated **muted data-viz palette** (`--provider-*`), must be
-AA-checked wherever used as text, and stay visually subordinate to status and the action accent.
-They may **never** carry success, warning, failure, selected, focused, unread, or primary-action
-meaning, and may never reuse a `--color-s-*` / `--color-m-*` token. Message-volume and other
-non-provider chart series take a separate `--data-*` palette, also defined here before use — they
-must not borrow status/mode channels either.
+Constraints: provider colours ride a dedicated **muted data-viz palette** (`--provider-*`), defined
+in `tokens-v3.md` §3.6a as `--provider-{claude,codex,gemini,openai,anthropic,opencode}-fg` plus
+matching `-wash` tokens. Provider foreground tokens must be AA-checked wherever used as text and
+must stay visually subordinate to status and the action accent. They may **never** carry success,
+warning, failure, selected, focused, unread, or primary-action meaning, and may never reuse a
+`--color-s-*` / `--color-m-*` token.
+
+Message-volume and other non-provider chart series take the separate `--data-*` palette in
+`tokens-v3.md` §3.6a. The initial lawful series tokens are `--data-inbound-solid`,
+`--data-outbound-solid`, and `--data-media-solid`; they are non-text chart marks unless a future
+spec row adds explicit data foreground tokens. Data tokens must not borrow provider, status, or mode
+channels.
 
 Audit hook: `npm --prefix console run design:color-semantics` inventories four report-only drift
 classes until the provider/data tokens land: provider identity borrowing status/mode tokens,
