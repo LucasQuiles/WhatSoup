@@ -137,7 +137,6 @@ const shadowConfig = [
       'soup/no-brand-regression': 'warn',
 
       // Stub rules (zero-fire, but registered so the namespace is visible)
-      'soup/no-legacy-tokens': 'warn',
       'soup/no-duplicate-shell': 'warn',
       'soup/no-literal-status-colors': 'warn',
       'soup/focus-visible-required': 'warn',

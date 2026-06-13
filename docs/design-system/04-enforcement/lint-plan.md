@@ -47,6 +47,16 @@ Promotion gate: a rule may move up one state only when (a) its baseline count is
 waivered, and (b) it has run one full phase at the current state without a false-positive report.
 Demotion: two confirmed false positives in a week demote one state and open a fix task.
 
+Fixture gate: implemented `soup/*` rules must have a true-positive fixture, a false-positive fixture,
+and a lifecycle row before promotion. Promoted selector rules must also have an error-severity path
+probe proving the rule fires under the default config, not only in the shadow config. The gate is
+`npm --prefix console run design:lint-fixtures`, backed by
+`console/scripts/check-design-lint-fixtures.mjs`; it derives implemented rule ids from
+`console/eslint-rules/design-selectors.mjs`, `console/eslint.config.shadow.mjs`, and
+`console/eslint-rules/index.mjs`, then verifies coverage in `tests/console/design-lints.test.ts`.
+Stub rules are not required to fire, but they must remain documented in this plan until implemented
+or removed.
+
 ### Per-rule lifecycle tracking table
 
 This table is the registry. P6 updates the State column in place; every change is a one-line diff.
@@ -628,6 +638,10 @@ Integration points:
 - **Pre-commit (existing):** `lint-staged` → `eslint --max-warnings 0` on staged console TSX/TS
   (root `.husky/pre-commit`; `console/.husky/pre-commit`; config `console/package.json:6-10`).
   Unchanged — the soup/* rules ride this automatically once registered.
+- **Design lint fixture coverage:** `npm --prefix console run design:lint-fixtures` verifies that
+  implemented `soup/*` rules keep true-positive/false-positive fixtures and, when promoted, an
+  error-severity probe. It is a promotion gate and must pass in any packet that adds, promotes,
+  removes, or rewires a `soup/*` rule, selector, or lint-plan lifecycle row.
 - **Pre-push (existing):** root `.husky/pre-push` → `scripts/pre-push-guard.ts`. P6 adds
   `bash console/scripts/design-regression.sh` invocation gated to pushes touching `console/`
   (mirror of the staged-files gating in root pre-commit).
@@ -701,3 +715,10 @@ was located in either config by this audit — their cells keep the T7-recorded 
 discrepancy is flagged here rather than papered over), plus modal-must-restore-focus,
 focus-visible-required, motion-needs-reduced-variant, tabular-nums-required (proposed/shadow,
 no flip on record). Evidence: `06-implementation/d6-evidence.md`.
+
+Changelog: 2026-06-13 — D2.1 fixture coverage gate added. `design:lint-fixtures` now derives
+implemented rule ids from the selector/plugin/config sources and verifies each implemented rule has
+both firing and silent fixtures in `tests/console/design-lints.test.ts`; promoted selector rules also
+need default-config error probes. The packet also added the missing `soup/no-infinite-animation`
+shadow fixture suite, a primitives-exemption proof for `soup/no-raw-form-control`, and a guard
+against leaving an implemented selector rule registered as a zero-fire plugin stub.

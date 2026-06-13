@@ -191,6 +191,13 @@ const x = <InputField type="text" label="Name" />`
     )
     expect(hasWarning(messages, 'no-raw-form-control')).toBe(false)
   })
+
+  it('is silent inside components/primitives (canonical form renderer exemption)', async () => {
+    const messages = await lintWarningsPrimitives(
+      '<input type="text" className="field-base" />'
+    )
+    expect(hasWarning(messages, 'no-raw-form-control')).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -309,6 +316,36 @@ describe('soup/no-focus-suppression', () => {
       'const x = <button className="focus-visible:ring-2 px-4 py-2">Click</button>'
     )
     expect(hasWarning(messages, 'no-focus-suppression')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Rule 7a - soup/no-infinite-animation
+// Selector: Property[key.name="animation"][value.value=/infinite/]
+// TSX-side inline animation tripwire; CSS-side animations are covered by
+// design-regression check 13 and the waiver registry.
+// ---------------------------------------------------------------------------
+
+describe('soup/no-infinite-animation', () => {
+  it('fires on inline animation values containing infinite', async () => {
+    const messages = await lintWarnings(
+      'const x = <div style={{ animation: "spin 1s linear infinite" }} />'
+    )
+    expect(hasWarning(messages, 'no-infinite-animation')).toBe(true)
+  })
+
+  it('is silent on finite inline animation values', async () => {
+    const messages = await lintWarnings(
+      'const x = <div style={{ animation: "fade-in 120ms ease-out" }} />'
+    )
+    expect(hasWarning(messages, 'no-infinite-animation')).toBe(false)
+  })
+
+  it('is silent when animation is not declared inline', async () => {
+    const messages = await lintWarnings(
+      'const x = <div className="animate-pulse-once" />'
+    )
+    expect(hasWarning(messages, 'no-infinite-animation')).toBe(false)
   })
 })
 

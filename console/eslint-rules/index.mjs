@@ -9,7 +9,6 @@
  *                               + the split-span wordmark detector
  *
  * Rules stubbed (proposed / needs primitives / CSS-side):
- *   soup/no-legacy-tokens            — proposed; enabled at P2-complete
  *   soup/no-duplicate-shell          — heuristic, warn-ceiling
  *   soup/no-literal-status-colors    — shadow; P2
  *   soup/focus-visible-required      — shadow; primitives-first (P2)
@@ -205,12 +204,6 @@ function makeStub(description) {
   }
 }
 
-const noLegacyTokens = makeStub(
-  '[stub] soup/no-legacy-tokens — PROPOSED. Enabled at P2-complete once the alias layer and ' +
-    'primitives have landed. Selectors: var(--color-d*), var(--color-t*), var(--b1..4), ' +
-    'bg-d*, text-t* utilities.'
-)
-
 const noDuplicateShell = makeStub(
   '[stub] soup/no-duplicate-shell — SHADOW advisory. Full implementation is a warn-ceiling ' +
     'heuristic flagging surface+border+radius class combinations outside primitives. ' +
@@ -259,7 +252,6 @@ export default {
   },
   rules: {
     'no-brand-regression': noBrandRegression,
-    'no-legacy-tokens': noLegacyTokens,
     'no-duplicate-shell': noDuplicateShell,
     'no-literal-status-colors': noLiteralStatusColors,
     'focus-visible-required': focusVisibleRequired,
