@@ -168,6 +168,9 @@ jobs:
       - name: Console design metrics
         run: npm --prefix console run design:metrics
 
+      - name: Console design burndown
+        run: npm --prefix console run design:burndown
+
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:

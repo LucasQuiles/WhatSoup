@@ -18,3 +18,14 @@ npm --prefix console run design:metrics || {
   echo "design:metrics exited nonzero (expired waivers or parse error -- see output above)" >&2
   exit 1
 }
+
+# design:burndown — self-feeding burndown ratchet (fail-closed, UNCONDITIONAL).
+# Blocks on: any category count above design-burndown-baseline.json (new violation),
+# any count below it (ratchet fall — demands --update so baseline+queue shrink together),
+# queue drift (violations moved without count change), or any malformed/missing input
+# (scanners-fail-closed policy). Pure-node file scan: no eslint dependency, so there is
+# no degraded path — this gate never fails open.
+npm --prefix console run design:burndown || {
+  echo "design:burndown failed (new violation, ratchet fall, queue drift, or parse error -- see output above)" >&2
+  exit 1
+}
