@@ -53,7 +53,7 @@ async function waitFor(condition: () => boolean, maxMs = 500): Promise<void> {
 
 describe('B5 — modal exit motion (animated, no-reduce context)', () => {
   it('shell carries data-state="closing" and soup-modal-shell-out animation on close', async () => {
-    const { rerender } = render(
+    const { rerender } = await render(
       <Modal open onClose={() => {}}>
         <ModalHeader title="Exit motion test" />
         <ModalBody><span>content</span></ModalBody>
@@ -62,7 +62,7 @@ describe('B5 — modal exit motion (animated, no-reduce context)', () => {
 
     expect(document.querySelector('[role="dialog"]') ).not.toBeNull();
 
-    rerender(
+    await rerender(
       <Modal open={false} onClose={() => {}}>
         <ModalHeader title="Exit motion test" />
         <ModalBody><span>content</span></ModalBody>
@@ -83,14 +83,14 @@ describe('B5 — modal exit motion (animated, no-reduce context)', () => {
   });
 
   it('closing backdrop has pointer-events: none (motion.md §10)', async () => {
-    const { rerender } = render(
+    const { rerender } = await render(
       <Modal open onClose={() => {}}>
         <ModalHeader title="Pointer events test" />
         <ModalBody><span>content</span></ModalBody>
       </Modal>
     );
 
-    rerender(
+    await rerender(
       <Modal open={false} onClose={() => {}}>
         <ModalHeader title="Pointer events test" />
         <ModalBody><span>content</span></ModalBody>
@@ -111,7 +111,7 @@ describe('B5 — modal exit motion (animated, no-reduce context)', () => {
 
 describe('B5 — drawer exit motion (animated, no-reduce context)', () => {
   it('drawer shell carries data-state="closing" and soup-drawer-out animation on close', async () => {
-    const { rerender } = render(
+    const { rerender } = await render(
       <DrawerLayout
         drawer={
           <Drawer open onClose={() => {}} aria-label="inspector">
@@ -125,7 +125,7 @@ describe('B5 — drawer exit motion (animated, no-reduce context)', () => {
 
     expect(document.querySelector('.soup-drawer')).not.toBeNull();
 
-    rerender(
+    await rerender(
       <DrawerLayout
         drawer={
           <Drawer open={false} onClose={() => {}} aria-label="inspector">

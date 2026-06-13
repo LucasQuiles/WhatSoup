@@ -69,6 +69,21 @@ exit "$status"
   return script;
 }
 
+function writeFakeTailscaleStatus(root: string, status: Record<string, unknown>): string {
+  const script = join(root, 'fake-tailscale-status.sh');
+  writeFileSync(
+    script,
+    `#!/bin/sh
+cat <<'JSON'
+${JSON.stringify(status, null, 2)}
+JSON
+`,
+    { mode: 0o700 },
+  );
+  chmodSync(script, 0o700);
+  return script;
+}
+
 function writeHostSelectiveExecFakeSsh(root: string): string {
   const script = join(root, 'fake-host-selective-ssh.sh');
   writeFileSync(
@@ -121,7 +136,7 @@ function runCollector(fakeSsh: string, mode: 'fail' | 'success') {
       '--timeout',
       '2',
       '--alert-cooldown',
-      '1',
+      '3600',
     ],
     {
       cwd: process.cwd(),
@@ -129,6 +144,7 @@ function runCollector(fakeSsh: string, mode: 'fail' | 'success') {
         ...process.env,
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+        BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
         FAKE_SSH_MODE: mode,
         BOT_ERRORS_COLLECTOR_RECOVERY_SUCCESSES: '1',
       },
@@ -157,6 +173,7 @@ function runCollectorWithRemote(fakeSsh: string, remoteRoot: string, env: Record
         ...process.env,
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+        BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
         ...env,
       },
       encoding: 'utf8',
@@ -248,6 +265,7 @@ describe('bot-errors-collector', () => {
           ...process.env,
           BOT_ERRORS_STATE_DIR: tmpRoot,
           BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+          BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
         },
         encoding: 'utf8',
       },
@@ -264,6 +282,76 @@ describe('bot-errors-collector', () => {
     };
     expect(relayed.diagnostics?.relay?.remoteHost).toBe('mini6');
     expect(readdirSync(join(healthyRemote, 'outbox')).filter((file) => file.endsWith('.json'))).toHaveLength(0);
+  });
+
+  it('preflights an offline Tailscale peer and skips the secondary writefail probe', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-collector-'));
+    const failedRemote = join(tmpRoot, 'remote-failed');
+    const healthyRemote = join(tmpRoot, 'remote-healthy');
+    mkdirSync(join(failedRemote, 'outbox'), { recursive: true, mode: 0o700 });
+    writeRemoteEvent(join(healthyRemote, 'outbox'), 'mini6-relay-while-mini5-tailscale-offline');
+    const fakeSsh = writeHostSelectiveExecFakeSsh(tmpRoot);
+    const fakeTailscale = writeFakeTailscaleStatus(tmpRoot, {
+      Self: { HostName: 'collector', DNSName: 'collector.tailnet.example.ts.net', Online: true },
+      Peer: {
+        mini5: {
+          HostName: 'mini5',
+          DNSName: 'mini5.tailnet.example.ts.net',
+          TailscaleIPs: ['100.64.0.5'],
+          Online: false,
+          Active: false,
+          OS: 'macOS',
+        },
+        mini6: {
+          HostName: 'mini6',
+          DNSName: 'mini6.tailnet.example.ts.net',
+          TailscaleIPs: ['100.64.0.6'],
+          Online: true,
+          Active: true,
+          OS: 'macOS',
+        },
+      },
+    });
+
+    const result = spawnSync(
+      'python3',
+      [
+        'deploy/scripts/bot-errors-collector.py',
+        '--remote',
+        `mini5:${failedRemote}`,
+        '--remote',
+        `mini6:${healthyRemote}`,
+        '--max-events',
+        '5',
+        '--timeout',
+        '5',
+        '--alert-cooldown',
+        '1',
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          BOT_ERRORS_STATE_DIR: tmpRoot,
+          BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
+          BOT_ERRORS_TAILSCALE_STATUS_COMMAND: fakeTailscale,
+        },
+        encoding: 'utf8',
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ processed: 1, remotesSucceeded: 1, isolatedFailures: 1 });
+    const events = outboxEvents();
+    expect(events).toHaveLength(2);
+    expect(events.some((event) => String(event.summary).includes('BOT ERRORS collector cannot claim remote outbox: mini5'))).toBe(true);
+    expect(events.some((event) => event.source === 'remote-writefail-harvest-failed')).toBe(false);
+    expect(events.some((event) => event.id === 'mini6-relay-while-mini5-tailscale-offline')).toBe(true);
+
+    const logText = readFileSync(join(tmpRoot, 'logs', 'collector.jsonl'), 'utf8');
+    expect(logText).toContain('"type": "remote_writefail_claim_skipped_unreachable"');
+    expect(logText).toContain('"reason": "tailscale_offline"');
+    expect(logText).not.toContain('"type": "remote_writefail_claim_failed"');
   });
 
   it('keeps one open remote-claim incident and emits recovery on the next success', () => {

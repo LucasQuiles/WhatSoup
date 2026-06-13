@@ -125,8 +125,8 @@ function makeRuntime(): Runtime {
 function makeIncomingMessage(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
     messageId: `msg-${randomBytes(3).toString('hex')}`,
-    chatJid: '15184194479@s.whatsapp.net',
-    senderJid: '15184194479@s.whatsapp.net',
+    chatJid: '15551230008@s.whatsapp.net',
+    senderJid: '15551230008@s.whatsapp.net',
     senderName: 'Alice',
     content: 'hello bot',
     contentType: 'text',
@@ -141,7 +141,7 @@ function makeIncomingMessage(overrides: Partial<IncomingMessage> = {}): Incoming
   };
 }
 
-const BOT_JID = '18455943112@s.whatsapp.net';
+const BOT_JID = '15551230004@s.whatsapp.net';
 const BOT_LID = '81536414179557@lid';
 
 /** Create an ingest handler with given db, messenger, and runtime. */
@@ -666,8 +666,8 @@ describe('Echo correlation: isFromMe messages', () => {
 
     // Seed a submitted outbound_op with a known wa_message_id
     const opId = durability.createOutboundOp({
-      conversationKey: '15184194479',
-      chatJid: '15184194479@s.whatsapp.net',
+      conversationKey: '15551230008',
+      chatJid: '15551230008@s.whatsapp.net',
       opType: 'send_message',
       payload: 'hello',
       replayPolicy: 'safe',

@@ -19,6 +19,7 @@
  *   npx vitest run --config vitest.browser.motion.config.ts
  */
 import { defineConfig } from 'vitest/config';
+import { playwright } from '@vitest/browser-playwright';
 import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
@@ -65,7 +66,7 @@ export default defineConfig({
 
     browser: {
       enabled: true,
-      provider: 'playwright',
+      provider: playwright(),
       headless: true,
       instances: [
         {

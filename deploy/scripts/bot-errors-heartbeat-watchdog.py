@@ -185,7 +185,7 @@ SECRET_ASSIGNMENT_RE = re.compile(
     re.I,
 )
 CREDENTIAL_PATH_RE = re.compile(
-    r"(?:~|/[^\s\"',;}]+)*(?:"
+    r"(?:~/|/(?:[^/\s\"',;}]+/)*)?(?:"
     r"\.config/secrets/[^\s\"',;}]+|"
     r"\.config/whatsoup/[^\s\"',;}]+|"
     r"\.local/share/whatsoup/instances/[^\s\"',;}]*/auth(?:/[^\s\"',;}]+)?|"

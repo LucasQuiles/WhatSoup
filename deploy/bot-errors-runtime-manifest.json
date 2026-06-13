@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-12T22:26:50Z",
+  "generatedAt": "2026-06-13T00:30:00Z",
   "scope": "bot-errors-runtime-scripts",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "0507fb3411a9e836e934b4cbd0904e5971e6cf99fb6ccc6465e76c0bd75db829",
+      "sha256": "e5a44324494a26b3da5c7448d0641042663c25c6afb1523ac6e1b98f2aacbb72",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -17,7 +17,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "7e26bcee23e9cccfc112b824def5893a09727aa180823808afb817eaf11c6ca5",
+      "sha256": "8ebf03b3a512979d546f08c6cf33c27bfd567f516a78bc6b6fd862b89a20780b",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -66,7 +66,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "e328e9105dfdf4611540c27654a40a67a330e79b2475697f73a5358eb31777d8",
+      "sha256": "6643a3cdad9482e2fe3824cd5a47f2504288bd27c24e6dc8fef624f6319058e2",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "critical_file_problem",
@@ -101,7 +101,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "f3ce989cd6967c852b034c1bd34cc964d5e49db8aadda3602d13b01afde3f397",
+      "sha256": "c0289cdc959d0af9d67784b777bed73673e4812e73940fe97ddc6c7b7d4c92e8",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -109,6 +109,11 @@
         "meta_alert_recovery_deferred",
         "recovery_successes_required",
         "tailscale_online_ssh_timeout",
+        "tailscale_online_ssh_remote_error",
+        "preflight_remote_unreachable",
+        "remote_writefail_claim_skipped_unreachable",
+        "reset_tailscale_cache",
+        "_is_ssh_transport_failure",
         "best-effort-remote",
         "redact_collector_text"
       ]

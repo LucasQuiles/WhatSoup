@@ -2,11 +2,53 @@
   "role": "central",
   "expectDispatcher": true,
   "expectQLoop": true,
+  "expectFleetApi": true,
+  "fleetApiUrl": "http://100.91.13.7:9099",
+  "fleetApiTokenFile": "~/.config/whatsoup/fleet-tokens.json",
   "expectPersonalSocket": true,
   "expectPersonalTools": true,
   "expectConfigInventory": true,
-  "expectPrimaryPhoneVerification": false,
+  "requiredConfigMaxMode": "600",
+  "expectAlertTarget": true,
+  "expectRuntimeManifest": true,
+  "sourceUpdateAccessMode": "enforce",
+  "expectPrimaryPhoneVerification": true,
+  "expectRustDesk": true,
+  "rustDeskCommand": "/usr/bin/rustdesk",
+  "rustDeskService": "rustdesk.service",
+  "rustDeskServiceScope": "system",
+  "rustDeskDirectPort": 21118,
+  "rustDeskRendezvous": "rs-ny.rustdesk.com:21116",
   "requiredCredentialFiles": [
-    "bot-errors.env"
+    "bot-errors.env",
+    "fleet-tokens.json",
+    "instances/primary/tokens.env",
+    "instances/secondary/tokens.env",
+    "instances/automation/tokens.env"
+  ],
+  "instances": [
+    {
+      "name": "primary",
+      "expected": "always_on",
+      "service": "whatsoup-primary.service",
+      "healthPort": 9092,
+      "primaryPhoneOwner": "instance:primary",
+      "expectProviderProbe": true,
+      "providerProbeCommand": "/usr/local/bin/claude"
+    },
+    {
+      "name": "secondary",
+      "expected": "always_on",
+      "service": "whatsoup-secondary.service",
+      "healthPort": 9094,
+      "primaryPhoneOwner": "instance:secondary"
+    },
+    {
+      "name": "automation",
+      "expected": "always_on",
+      "service": "whatsoup-automation.service",
+      "healthPort": 9095,
+      "primaryPhoneOwner": "instance:automation"
+    }
   ]
 }

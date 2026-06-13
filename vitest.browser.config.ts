@@ -17,6 +17,7 @@
  * subtree runs ONLY through npm run test:browser.
  */
 import { defineConfig } from 'vitest/config';
+import { playwright } from '@vitest/browser-playwright';
 import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
@@ -85,7 +86,7 @@ export default defineConfig({
     // Single chromium instance, sequential files — deterministic geometry.
     browser: {
       enabled: true,
-      provider: 'playwright',
+      provider: playwright(),
       headless: true,
       instances: [
         {

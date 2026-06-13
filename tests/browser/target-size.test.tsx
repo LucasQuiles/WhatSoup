@@ -129,7 +129,7 @@ describe('DD-10 Button variants — computed height ≥ token floor', () => {
   describe('md size (token floor 32px)', () => {
     for (const variant of variants) {
       it(`${variant}/md height ≥ 32`, async () => {
-        const { getByRole } = render(<Button variant={variant} size="md">Label</Button>);
+        const { getByRole } = await render(<Button variant={variant} size="md">Label</Button>);
         const { height } = getRect(getByRole('button').element());
         expect(height).toBeGreaterThanOrEqual(32);
       });
@@ -139,7 +139,7 @@ describe('DD-10 Button variants — computed height ≥ token floor', () => {
   describe('sm size (token floor 28px)', () => {
     for (const variant of variants) {
       it(`${variant}/sm height ≥ 28`, async () => {
-        const { getByRole } = render(<Button variant={variant} size="sm">Label</Button>);
+        const { getByRole } = await render(<Button variant={variant} size="sm">Label</Button>);
         const { height } = getRect(getByRole('button').element());
         expect(height).toBeGreaterThanOrEqual(28);
       });
@@ -149,7 +149,7 @@ describe('DD-10 Button variants — computed height ≥ token floor', () => {
   describe('xs size (WCAG floor 24px)', () => {
     for (const variant of variants) {
       it(`${variant}/xs height ≥ 24 (WCAG floor)`, async () => {
-        const { getByRole } = render(<Button variant={variant} size="xs">Label</Button>);
+        const { getByRole } = await render(<Button variant={variant} size="xs">Label</Button>);
         const { height } = getRect(getByRole('button').element());
         expect(height).toBeGreaterThanOrEqual(WCAG_FLOOR_PX);
       });
@@ -157,7 +157,7 @@ describe('DD-10 Button variants — computed height ≥ token floor', () => {
   });
 
   it('all three sizes meet the WCAG 24px floor (width dimension)', async () => {
-    const { container } = render(
+    const { container } = await render(
       <div>
         <Button size="md">A</Button>
         <Button size="sm">B</Button>
@@ -179,19 +179,19 @@ describe('DD-10 Button variants — computed height ≥ token floor', () => {
 
 describe('DD-10 ActionButton — computed box ≥ 28×28px', () => {
   it('height ≥ 28 (--input-btn floor)', async () => {
-    const { getByRole } = render(<ActionButton label="Edit" />);
+    const { getByRole } = await render(<ActionButton label="Edit" />);
     const { height } = getRect(getByRole('button').element());
     expect(height).toBeGreaterThanOrEqual(ACTBTN_FLOOR_PX);
   });
 
   it('width ≥ 28 (--input-btn floor)', async () => {
-    const { getByRole } = render(<ActionButton label="Edit" />);
+    const { getByRole } = await render(<ActionButton label="Edit" />);
     const { width } = getRect(getByRole('button').element());
     expect(width).toBeGreaterThanOrEqual(ACTBTN_FLOOR_PX);
   });
 
   it('danger variant: height ≥ 28', async () => {
-    const { getByRole } = render(<ActionButton label="Delete" danger />);
+    const { getByRole } = await render(<ActionButton label="Delete" danger />);
     const { height } = getRect(getByRole('button').element());
     expect(height).toBeGreaterThanOrEqual(ACTBTN_FLOOR_PX);
   });
@@ -204,7 +204,7 @@ describe('DD-10 ActionButton — computed box ≥ 28×28px', () => {
 
 describe('DD-10 Pill interactive/md — computed height ≥ 24px', () => {
   it('md interactive pill height ≥ 24 (WCAG floor)', async () => {
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <Pill variant="interactive" pressed={false} tone="neutral">Filter</Pill>,
     );
     const { height } = getRect(getByRole('button').element());
@@ -212,7 +212,7 @@ describe('DD-10 Pill interactive/md — computed height ≥ 24px', () => {
   });
 
   it('md interactive pill pressed state height ≥ 24', async () => {
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <Pill variant="interactive" pressed tone="accent">Active</Pill>,
     );
     const { height } = getRect(getByRole('button').element());
@@ -242,7 +242,7 @@ describe('DD-10 Pill interactive/md — computed height ≥ 24px', () => {
 
 describe('DD-10 Pill interactive/sm — pseudo-element hit area (partial proof + finding)', () => {
   it('visual height < 24px — the 24px target relies on ::before expansion', async () => {
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <Pill variant="interactive" size="sm" pressed={false} tone="neutral">Sm</Pill>,
     );
     const { height } = getRect(getByRole('button').element());
@@ -253,7 +253,7 @@ describe('DD-10 Pill interactive/sm — pseudo-element hit area (partial proof +
   });
 
   it('elementFromPoint 2px ABOVE visual rect resolves to pill (top ::before confirmed)', async () => {
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <div style={{ padding: '40px', display: 'block' }}>
         <Pill variant="interactive" size="sm" pressed={false} tone="neutral">Hit</Pill>
       </div>,
@@ -271,7 +271,7 @@ describe('DD-10 Pill interactive/sm — pseudo-element hit area (partial proof +
 
   it('sm pill ::before top expansion: probe at rect.top-2 resolves to pill (numeric confirmation)', async () => {
     // Additional numeric confirmation — measures effective reach above the visual box.
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <div style={{ padding: '40px', display: 'block' }}>
         <Pill variant="interactive" size="sm" pressed={false} tone="neutral">Sm</Pill>
       </div>,
@@ -313,7 +313,7 @@ describe('DD-10 Pill removable remove-button — hit area (partial proof + findi
   }
 
   it('remove-X visual height ≤ 20px (visual box is below WCAG floor — relies on ::before)', async () => {
-    const { container } = render(
+    const { container } = await render(
       <Pill variant="removable" tone="neutral" onRemove={() => undefined}>Tag</Pill>,
     );
     const removeBtn = findRemoveBtn(container);
@@ -327,7 +327,7 @@ describe('DD-10 Pill removable remove-button — hit area (partial proof + findi
   });
 
   it('elementFromPoint 2px ABOVE rect resolves to remove-button (top ::before confirmed)', async () => {
-    const { container } = render(
+    const { container } = await render(
       <div style={{ padding: '40px', display: 'block' }}>
         <Pill variant="removable" tone="neutral" onRemove={() => undefined}>Tag</Pill>
       </div>,
@@ -343,7 +343,7 @@ describe('DD-10 Pill removable remove-button — hit area (partial proof + findi
   });
 
   it('remove-X top expansion: 2px above rect resolves to button (numeric confirmation)', async () => {
-    const { container } = render(
+    const { container } = await render(
       <div style={{ padding: '40px', display: 'block' }}>
         <Pill variant="removable" tone="neutral" onRemove={() => undefined}>Tag</Pill>
       </div>,
@@ -377,7 +377,7 @@ describe('DD-10 Tabs — tab element height ≥ 24px', () => {
   }
 
   it('each tab button height ≥ 24px', async () => {
-    const { container } = render(<ControlledTabs count={3} />);
+    const { container } = await render(<ControlledTabs count={3} />);
     const tabs = queryAllByRole(container, 'tab') as HTMLButtonElement[];
     expect(tabs.length).toBe(3);
     for (const tab of tabs) {
@@ -387,7 +387,7 @@ describe('DD-10 Tabs — tab element height ≥ 24px', () => {
   });
 
   it('disabled tab height ≥ 24px (tabs.md: disabled tabs are arrow-reachable)', async () => {
-    const { container } = render(
+    const { container } = await render(
       <Tabs label="Test" value="tab-0" onChange={() => undefined}>
         <Tab id="tab-0">Active</Tab>
         <Tab id="tab-1" disabled disabledReason="Coming soon">Disabled</Tab>
@@ -415,7 +415,7 @@ describe('DD-10 ToolbarTimeRange seg buttons — height ≥ 24px', () => {
   ];
 
   it('all seg buttons height ≥ 24px (WCAG floor)', async () => {
-    const { container } = render(
+    const { container } = await render(
       <ToolbarTimeRange
         label="Time range"
         options={SEG_OPTIONS}
@@ -432,7 +432,7 @@ describe('DD-10 ToolbarTimeRange seg buttons — height ≥ 24px', () => {
   });
 
   it('disabled seg buttons height ≥ 24px', async () => {
-    const { container } = render(
+    const { container } = await render(
       <ToolbarTimeRange
         label="Time range"
         options={SEG_OPTIONS}
@@ -496,7 +496,7 @@ describe('DD-10 Table sort buttons — effective hit area ≥ 24px (DD-10 closur
     // The ::before with inset: calc(-1 * var(--sp-1)) = 4px extends 4px above the
     // visual box. A probe at 2px above the visual rect must resolve to the button
     // (the same proof technique as the removable-X in §5).
-    const { container } = render(
+    const { container } = await render(
       <div style={{ padding: '40px', display: 'block' }}>
         <SortableTable />
       </div>,
@@ -523,7 +523,7 @@ describe('DD-10 Table sort buttons — effective hit area ≥ 24px (DD-10 closur
     // to Chromium inline-occlusion (FINDING 2 of this suite) so we confirm via spec
     // math: 16px visual + 4px top + 4px bottom = 24px ≥ WCAG_FLOOR_PX.
     const SP1_PX = 4; // --sp-1 (tokens.primitive.css:83)
-    const { container } = render(
+    const { container } = await render(
       <div style={{ padding: '40px', display: 'block' }}>
         <SortableTable />
       </div>,
@@ -576,7 +576,7 @@ describe('DD-10 Popover option rows — height ≥ 24px', () => {
   }
 
   it('each option row height ≥ 24px', async () => {
-    const { container: _c } = render(<OpenPopover />);
+    const { container: _c } = await render(<OpenPopover />);
     // Options portal to document.body — query from document, not container.
     const options = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'));
     expect(options.length).toBe(3);
@@ -594,7 +594,7 @@ describe('DD-10 Popover option rows — height ≥ 24px', () => {
 
 describe('DD-10 SearchInput — input height ≥ 24px', () => {
   it('search input field height ≥ 24px', async () => {
-    const { container } = render(
+    const { container } = await render(
       <SearchInput value="" onChange={() => undefined} aria-label="Search" />,
     );
     const input = container.querySelector<HTMLInputElement>('input[type="text"]');

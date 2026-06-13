@@ -147,6 +147,50 @@ def test_backoff_constants_present():
 
 
 # ---------------------------------------------------------------------------
+# Test 0a/0b: reachability preflight — an already-offline Tailscale peer should
+# not trigger redundant SSH/writefail probes on the same collector cycle.
+# ---------------------------------------------------------------------------
+
+def test_ssh_json_lines_preflight_skips_subprocess_when_tailscale_offline(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    with patch.object(mod, "preflight_remote_unreachable", return_value={"status": "found", "online": False}), \
+         patch.object(mod.subprocess, "run") as run:
+        with pytest.raises(RuntimeError, match="preflight skipped ssh deadhost: tailscale_offline"):
+            mod.ssh_json_lines("deadhost", "print('unused')", [], 5)
+
+    run.assert_not_called()
+
+
+def test_unreachable_outbox_failure_skips_writefail_harvest(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    remote = "deadhost:/srv/whatsoup/bot-errors"
+    ssh_calls: list[str] = []
+
+    def fake_ssh_json_lines(h, script, args, timeout):
+        ssh_calls.append(script)
+        raise RuntimeError("preflight skipped ssh deadhost: tailscale_offline")
+
+    reachability = {"reachabilityDiagnosis": "tailscale_offline", "tailscale": {"status": "found", "online": False}}
+
+    with _env(state_dir, outbox_dir), \
+         patch.object(mod, "ssh_json_lines", side_effect=fake_ssh_json_lines), \
+         patch.object(mod, "remote_failure_context", return_value=(["reachabilityDiagnosis=tailscale_offline"], reachability)):
+        result = _run_once_defaults(mod, [remote])
+
+    assert ssh_calls == [mod.REMOTE_CLAIM_SCRIPT]
+    assert result.get("failed") == 1
+    assert result.get("isolatedFailures") == 1
+
+    logs = (state_dir / "logs" / "collector.jsonl").read_text()
+    assert '"type": "remote_writefail_claim_skipped_unreachable"' in logs
+    assert '"reason": "tailscale_offline"' in logs
+
+
+# ---------------------------------------------------------------------------
 # Test 1: threshold crossing — exactly one relay_host_down, SSH skipped in window
 # ---------------------------------------------------------------------------
 

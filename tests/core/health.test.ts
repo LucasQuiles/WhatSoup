@@ -122,7 +122,7 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
   return {
     db,
     connectionManager: {
-      botJid: '18455943112@s.whatsapp.net',
+      botJid: '15551230004@s.whatsapp.net',
       botLid: null,
       sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
@@ -1537,7 +1537,7 @@ describe('POST /agent/compact', () => {
     const handleAgentCommand = vi.fn().mockResolvedValue({
       ok: true,
       command: 'compact',
-      chatJid: '120363410094619161@g.us',
+      chatJid: '120363555555555003@g.us',
       silent: true,
     });
     ({ server, port } = await buildTestServer(makeDeps(db, {
@@ -1551,7 +1551,7 @@ describe('POST /agent/compact', () => {
       port,
       '/agent/compact',
       'POST',
-      JSON.stringify({ chatJid: '120363410094619161@g.us' }),
+      JSON.stringify({ chatJid: '120363555555555003@g.us' }),
       { authorization: 'Bearer secret-token' },
     );
 
@@ -1559,12 +1559,12 @@ describe('POST /agent/compact', () => {
     expect(JSON.parse(body)).toEqual({
       ok: true,
       command: 'compact',
-      chatJid: '120363410094619161@g.us',
+      chatJid: '120363555555555003@g.us',
       silent: true,
     });
     expect(handleAgentCommand).toHaveBeenCalledWith({
       command: 'compact',
-      chatJid: '120363410094619161@g.us',
+      chatJid: '120363555555555003@g.us',
       silent: true,
     });
   });
@@ -1573,7 +1573,7 @@ describe('POST /agent/compact', () => {
     const handleAgentCommand = vi.fn().mockResolvedValue({
       ok: true,
       command: 'compact',
-      chatJid: '120363410094619161@g.us',
+      chatJid: '120363555555555003@g.us',
       silent: false,
     });
     ({ server, port } = await buildTestServer(makeDeps(db, {
@@ -1587,14 +1587,14 @@ describe('POST /agent/compact', () => {
       port,
       '/agent/compact',
       'POST',
-      JSON.stringify({ chatJid: '120363410094619161@g.us', silent: false }),
+      JSON.stringify({ chatJid: '120363555555555003@g.us', silent: false }),
       { authorization: 'Bearer secret-token' },
     );
 
     expect(status).toBe(200);
     expect(handleAgentCommand).toHaveBeenCalledWith({
       command: 'compact',
-      chatJid: '120363410094619161@g.us',
+      chatJid: '120363555555555003@g.us',
       silent: false,
     });
   });

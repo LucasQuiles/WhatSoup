@@ -57,7 +57,7 @@ describe('B5 — reduced-motion exit: modal removed instantly on close', () => {
     // Under reducedMotion: 'reduce' the browser emits prefers-reduced-motion: reduce.
     // The CSS block sets animation: none on [data-state="closing"] → computed duration
     // is 0s → the presence hook takes the instant path → unmount is synchronous.
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <Modal open onClose={() => {}}>
         <ModalHeader title="Reduced motion test" />
         <ModalBody><button type="button">inside</button></ModalBody>
@@ -90,7 +90,7 @@ describe('B5 — background inert: #root inert while modal open', () => {
       root.appendChild(bgButton);
 
       // Render modal (portals to body — outside #root).
-      const { rerender } = render(
+      const { rerender } = await render(
         <Modal open onClose={() => {}}>
           <ModalHeader title="Inert test" />
           <ModalBody><span>modal content</span></ModalBody>
@@ -105,7 +105,7 @@ describe('B5 — background inert: #root inert while modal open', () => {
       expect(document.activeElement).not.toBe(bgButton);
 
       // Close the modal.
-      rerender(
+      await rerender(
         <Modal open={false} onClose={() => {}}>
           <ModalHeader title="Inert test" />
           <ModalBody><span>modal content</span></ModalBody>
@@ -147,7 +147,7 @@ describe('B5 — toast liveness: toast outside inert subtree while modal is open
         return null;
       };
 
-      render(
+      await render(
         <ToastProvider>
           <ToastAutoFire />
           <Modal open onClose={() => {}}>

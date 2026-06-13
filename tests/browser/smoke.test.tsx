@@ -52,7 +52,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
-import { userEvent } from '@vitest/browser/context';
+import { userEvent } from 'vitest/browser';
 import { Button } from '../../console/src/components/primitives/index.ts';
 
 // ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ describe('C-D7-1: browser-mode smoke gate', () => {
 
   it('(B1) Tab moves focus to a Button — trusted keyboard focus confirmed', async () => {
     // Render a focusable Button in the real browser DOM.
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <Button variant="primary" onClick={mockClickHandler}>
         Focus target
       </Button>,
@@ -127,7 +127,7 @@ describe('C-D7-1: browser-mode smoke gate', () => {
 
   it('(B2) After Tab, :focus-visible is active on the Button — jsdom cannot prove this', async () => {
     // Render the Button and tab to it.
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <Button variant="primary" onClick={mockClickHandler}>
         Keyboard target
       </Button>,
@@ -155,7 +155,7 @@ describe('C-D7-1: browser-mode smoke gate', () => {
   it('(B3) Enter on a focused Button fires a trusted click (isTrusted: true)', async () => {
     // Render the Button wired to the hoisted click spy.
     let capturedEvent: MouseEvent | null = null;
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <Button
         variant="primary"
         onClick={(e: React.MouseEvent<HTMLButtonElement>) => {

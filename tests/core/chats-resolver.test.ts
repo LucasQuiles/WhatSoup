@@ -67,17 +67,17 @@ describe('ChatResolver contract -- chatJid passthrough', () => {
   });
 
   it('returns the raw chatJid unchanged when target = { chatJid }', () => {
-    const result = resolver.resolve({ chatJid: '120363406944965248@g.us' });
-    expect(result).toBe('120363406944965248@g.us');
+    const result = resolver.resolve({ chatJid: '120363555555555002@g.us' });
+    expect(result).toBe('120363555555555002@g.us');
   });
 
   it('returns the raw chatJid for an individual JID (s.whatsapp.net)', () => {
-    const result = resolver.resolve({ chatJid: '18454174651@s.whatsapp.net' });
-    expect(result).toBe('18454174651@s.whatsapp.net');
+    const result = resolver.resolve({ chatJid: '15551230001@s.whatsapp.net' });
+    expect(result).toBe('15551230001@s.whatsapp.net');
   });
 
   it('does NOT consult the alias table when chatJid is provided', () => {
-    seedAlias(db, 'kio', '120363406944965248@g.us');
+    seedAlias(db, 'kio', '120363555555555002@g.us');
     // Pass a different chatJid; resolver must return the chatJid as-is.
     const result = resolver.resolve({ chatJid: '99999999999@s.whatsapp.net' });
     expect(result).toBe('99999999999@s.whatsapp.net');
@@ -96,16 +96,16 @@ describe('ChatResolver contract -- alias resolution', () => {
   });
 
   it('resolves a known alias to its chatJid', () => {
-    seedAlias(db, 'kio', '120363406944965248@g.us');
+    seedAlias(db, 'kio', '120363555555555002@g.us');
     const result = resolver.resolve({ to: 'kio' });
-    expect(result).toBe('120363406944965248@g.us');
+    expect(result).toBe('120363555555555002@g.us');
   });
 
   it('resolves multiple distinct aliases independently', () => {
-    seedAlias(db, 'kio', '120363406944965248@g.us');
-    seedAlias(db, 'flow-bots', '120363426051828737@g.us');
-    expect(resolver.resolve({ to: 'kio' })).toBe('120363406944965248@g.us');
-    expect(resolver.resolve({ to: 'flow-bots' })).toBe('120363426051828737@g.us');
+    seedAlias(db, 'kio', '120363555555555002@g.us');
+    seedAlias(db, 'flow-bots', '120363555555555004@g.us');
+    expect(resolver.resolve({ to: 'kio' })).toBe('120363555555555002@g.us');
+    expect(resolver.resolve({ to: 'flow-bots' })).toBe('120363555555555004@g.us');
   });
 
   it('throws AliasNotFoundError when alias is unknown', () => {
@@ -115,7 +115,7 @@ describe('ChatResolver contract -- alias resolution', () => {
   });
 
   it('treats alias lookup as exact-match (case-sensitive)', () => {
-    seedAlias(db, 'kio', '120363406944965248@g.us');
+    seedAlias(db, 'kio', '120363555555555002@g.us');
     expect(() => resolver.resolve({ to: 'KIO' })).toThrow(AliasNotFoundError);
   });
 });
@@ -130,10 +130,10 @@ describe('ChatResolver contract -- per-DB isolation', () => {
     const resolverB = createChatResolver({ db: dbB });
 
     // Seed only into DB-A.
-    seedAlias(dbA, 'kio', '120363406944965248@g.us');
+    seedAlias(dbA, 'kio', '120363555555555002@g.us');
 
     // Resolver-A sees its own alias.
-    expect(resolverA.resolve({ to: 'kio' })).toBe('120363406944965248@g.us');
+    expect(resolverA.resolve({ to: 'kio' })).toBe('120363555555555002@g.us');
 
     // Resolver-B does NOT see DB-A's alias. Locks the contract that the
     // resolver caches nothing at module scope and queries its own DB
@@ -157,7 +157,7 @@ describe('ChatResolver contract -- mutual exclusion', () => {
   it('throws MutuallyExclusiveError when both chatJid and to are provided (inconsistent)', () => {
     // Seed kio -> JID-A, then call with chatJid = JID-B and to = 'kio'.
     // The two refer to different chats; resolver must NOT silently pick one.
-    seedAlias(db, 'kio', '120363406944965248@g.us');
+    seedAlias(db, 'kio', '120363555555555002@g.us');
     expect(() =>
       resolver.resolve({
         chatJid: '99999999999@s.whatsapp.net',
@@ -170,10 +170,10 @@ describe('ChatResolver contract -- mutual exclusion', () => {
     // Seed kio -> JID-A, then call with chatJid = JID-A and to = 'kio'.
     // The two refer to the same chat; the rule still rejects. Caller must
     // commit to exactly one form. Locks: consistency does not relax mutex.
-    seedAlias(db, 'kio', '120363406944965248@g.us');
+    seedAlias(db, 'kio', '120363555555555002@g.us');
     expect(() =>
       resolver.resolve({
-        chatJid: '120363406944965248@g.us',
+        chatJid: '120363555555555002@g.us',
         to: 'kio',
       }),
     ).toThrow(MutuallyExclusiveError);
@@ -233,7 +233,7 @@ describe('ChatResolver contract -- error type discrimination', () => {
   });
 
   it('all resolver errors extend Error (instanceof Error)', () => {
-    seedAlias(db, 'kio', '120363406944965248@g.us');
+    seedAlias(db, 'kio', '120363555555555002@g.us');
 
     let caughtAliasNotFound: Error | undefined;
     try {

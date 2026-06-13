@@ -69,20 +69,20 @@ function makeDeps(instance: DiscoveredInstance): OpsDeps {
 
 describe('normalizePhoneE164', () => {
   it('prepends "1" for a 10-digit NANP number', () => {
-    expect(normalizePhoneE164('8459780919')).toBe('18459780919');
+    expect(normalizePhoneE164('5551230006')).toBe('15551230006');
   });
 
   it('leaves an 11-digit number unchanged', () => {
-    expect(normalizePhoneE164('18459780919')).toBe('18459780919');
+    expect(normalizePhoneE164('15551230006')).toBe('15551230006');
   });
 
   it('strips formatting characters before normalizing', () => {
-    // "+1 (845) 978-0919" → digits "18459780919" (11 digits) → returned as-is
-    expect(normalizePhoneE164('+1 (845) 978-0919')).toBe('18459780919');
-    // "(845) 978-0919" → digits "8459780919" (10 digits) → prepend 1
-    expect(normalizePhoneE164('(845) 978-0919')).toBe('18459780919');
-    // Dashes stripped: "845-978-0919" → "8459780919" (10 digits) → prepend 1
-    expect(normalizePhoneE164('845-978-0919')).toBe('18459780919');
+    // "+1 (555) 123-0006" → digits "15551230006" (11 digits) → returned as-is
+    expect(normalizePhoneE164('+1 (555) 123-0006')).toBe('15551230006');
+    // "(555) 123-0006" → digits "5551230006" (10 digits) → prepend 1
+    expect(normalizePhoneE164('(555) 123-0006')).toBe('15551230006');
+    // Dashes stripped: "555-123-0006" → "5551230006" (10 digits) → prepend 1
+    expect(normalizePhoneE164('555-123-0006')).toBe('15551230006');
   });
 
   it('leaves a 14-digit number (international) unchanged', () => {
@@ -99,7 +99,7 @@ describe('normalizePhoneE164', () => {
     expect(normalizePhone(undefined)).toBe('');
     expect(normalizePhoneE164(null)).toBe('');
     expect(normalizePhoneE164(undefined)).toBe('');
-    expect(normalizePhoneE164(8459780919)).toBe('18459780919');
+    expect(normalizePhoneE164(5551230006)).toBe('15551230006');
   });
 });
 
@@ -109,19 +109,19 @@ describe('normalizePhoneE164', () => {
 
 describe('isAdminPhone', () => {
   it('returns true for an exact match', () => {
-    const admins = new Set(['18459780919']);
-    expect(isAdminPhone('18459780919', admins)).toBe(true);
+    const admins = new Set(['15551230006']);
+    expect(isAdminPhone('15551230006', admins)).toBe(true);
   });
 
   it('returns true for suffix match: 10-digit admin, 11-digit phone', () => {
     // Admin stored without country code, JID has full number
-    const admins = new Set(['8459780919']);
-    expect(isAdminPhone('18459780919', admins)).toBe(true);
+    const admins = new Set(['5551230006']);
+    expect(isAdminPhone('15551230006', admins)).toBe(true);
   });
 
   it('returns true for reverse suffix match: 11-digit admin, 10-digit phone', () => {
-    const admins = new Set(['18459780919']);
-    expect(isAdminPhone('8459780919', admins)).toBe(true);
+    const admins = new Set(['15551230006']);
+    expect(isAdminPhone('5551230006', admins)).toBe(true);
   });
 
   it('requires a minimum of 7 digits for suffix matching (non-exact path)', () => {
@@ -134,21 +134,21 @@ describe('isAdminPhone', () => {
   it('skips admin entries shorter than 7 digits', () => {
     // Even if phone is long enough, a short admin entry is ignored
     const admins = new Set(['123456']);
-    expect(isAdminPhone('18459780919', admins)).toBe(false);
+    expect(isAdminPhone('15551230006', admins)).toBe(false);
   });
 
   it('does not produce false positives for unrelated numbers', () => {
-    const admins = new Set(['18459780919', '12125550100']);
+    const admins = new Set(['15551230006', '12125550100']);
     expect(isAdminPhone('19995551234', admins)).toBe(false);
   });
 
   it('returns false for empty admin set', () => {
-    expect(isAdminPhone('18459780919', new Set())).toBe(false);
+    expect(isAdminPhone('15551230006', new Set())).toBe(false);
   });
 
   it('returns false instead of throwing for malformed phone values', () => {
-    expect(isAdminPhone(null, new Set(['18459780919']))).toBe(false);
-    expect(isAdminPhone(undefined, new Set(['18459780919']))).toBe(false);
+    expect(isAdminPhone(null, new Set(['15551230006']))).toBe(false);
+    expect(isAdminPhone(undefined, new Set(['15551230006']))).toBe(false);
   });
 });
 
@@ -232,7 +232,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ adminPhones: '8459780919' })),
+      mockReq(JSON.stringify({ adminPhones: '5551230006' })),
       res, deps, { name: 'test-line' },
     );
 
@@ -247,7 +247,7 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ adminPhones: ['8459780919', ''] })),
+      mockReq(JSON.stringify({ adminPhones: ['5551230006', ''] })),
       res, deps, { name: 'test-line' },
     );
 
@@ -262,14 +262,14 @@ describe('handleConfigUpdate PATCH validation', () => {
 
     const res = mockRes();
     await handleConfigUpdate(
-      mockReq(JSON.stringify({ adminPhones: ['8459780919', '(212) 555-0100'] })),
+      mockReq(JSON.stringify({ adminPhones: ['5551230006', '(212) 555-0100'] })),
       res, deps, { name: 'test-line' },
     );
 
     expect(res._status).toBe(200);
     const body = JSON.parse(res._body);
     // Both 10-digit → prepend 1
-    expect(body.adminPhones).toContain('18459780919');
+    expect(body.adminPhones).toContain('15551230006');
     expect(body.adminPhones).toContain('12125550100');
   });
 
@@ -281,14 +281,14 @@ describe('handleConfigUpdate PATCH validation', () => {
     const res = mockRes();
     await handleConfigUpdate(
       // Two representations of the same number
-      mockReq(JSON.stringify({ adminPhones: ['8459780919', '(845) 978-0919'] })),
+      mockReq(JSON.stringify({ adminPhones: ['5551230006', '(555) 123-0006'] })),
       res, deps, { name: 'test-line' },
     );
 
     expect(res._status).toBe(200);
     const body = JSON.parse(res._body);
     expect(body.adminPhones).toHaveLength(1);
-    expect(body.adminPhones[0]).toBe('18459780919');
+    expect(body.adminPhones[0]).toBe('15551230006');
   });
 
   // -- model (passthrough) --
@@ -367,7 +367,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     await handleConfigUpdate(
       mockReq(JSON.stringify({
         accessMode: 'allowlist',
-        adminPhones: ['18459780919'],
+        adminPhones: ['15551230006'],
         model: 'claude-haiku-3-5',
       })),
       res, deps, { name: 'test-line' },
@@ -376,7 +376,7 @@ describe('handleConfigUpdate PATCH validation', () => {
     expect(res._status).toBe(200);
     const body = JSON.parse(res._body);
     expect(body.accessMode).toBe('allowlist');
-    expect(body.adminPhones).toEqual(['18459780919']);
+    expect(body.adminPhones).toEqual(['15551230006']);
     expect(body.model).toBe('claude-haiku-3-5');
   });
 });

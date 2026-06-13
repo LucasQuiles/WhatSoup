@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
-import { runPublicationGuard } from '../../scripts/publication-guard.ts';
+import { isInternalPublicationPath, runPublicationGuard } from '../../scripts/publication-guard.ts';
 
 const internalDocPath = 'docs/sdlc/closed/example/state.md';
 
@@ -131,5 +131,43 @@ describe('publication guard staged mode', () => {
     vi.stubEnv('GIT_WORK_TREE', process.cwd());
 
     expect(runPublicationGuard(['--release'], repo)).toBe(0);
+  });
+});
+
+describe('publication guard root classification', () => {
+  it('classifies docs/runbooks/ files as internal', () => {
+    expect(isInternalPublicationPath('docs/runbooks/objective-tracking.md')).toBe(true);
+    expect(isInternalPublicationPath('docs/runbooks/host-maintenance.md')).toBe(true);
+  });
+
+  it('fails staged mode when a docs/runbooks/ file is staged without audit classification', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'publication-guard-rb-'));
+    repos.push(repo);
+
+    mkdirSync(join(repo, 'docs/runbooks'), { recursive: true });
+    const runbookPath = 'docs/runbooks/example-runbook.md';
+    writeFileSync(join(repo, runbookPath), 'Internal operator runbook.\n');
+    writeFileSync(join(repo, 'docs/publication-audit.md'), `# Publication Audit
+
+**Total classification rows:** 0
+
+| Classification | Count |
+|---|---:|
+| PUBLIC | 0 |
+| PRIVATE-ARCHIVE | 0 |
+| SANITIZE | 0 |
+| DELETE | 0 |
+| Total | 0 |
+
+| Path | Classification | Rationale |
+|---|---|---|
+`);
+
+    git(repo, ['init']);
+    git(repo, ['add', runbookPath]);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--staged'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('staged-internal-doc-unclassified');
   });
 });

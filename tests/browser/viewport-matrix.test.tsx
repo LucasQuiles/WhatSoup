@@ -75,7 +75,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
-import { page } from '@vitest/browser/context';
+import { page } from 'vitest/browser';
 import React from 'react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -360,7 +360,7 @@ describe('Viewport matrix — Fleet (SoupKitchen)', () => {
      */
     it('at 1023px width: fleet main area has flex-direction = column (stacked)', async () => {
       await page.viewport(1023, 768);
-      const { container } = render(wrapPage(<SoupKitchen />));
+      const { container } = await render(wrapPage(<SoupKitchen />));
 
       // The main area div is the first element with both "flex-col" and "flex-1".
       // At narrow widths tailwind-generated CSS keeps flex-direction: column.
@@ -385,7 +385,7 @@ describe('Viewport matrix — Fleet (SoupKitchen)', () => {
 
     it('at 1024px width: fleet main area has flex-direction = row (side-by-side)', async () => {
       await page.viewport(1024, 768);
-      const { container } = render(wrapPage(<SoupKitchen />));
+      const { container } = await render(wrapPage(<SoupKitchen />));
 
       // At ≥1024px tailwind `lg:flex-row` activates. Find the element that carries
       // the stacking class and has flex-direction: row in computed style.
@@ -416,7 +416,7 @@ describe('Viewport matrix — Fleet (SoupKitchen)', () => {
     for (const vp of VIEWPORTS) {
       it(`no horizontal overflow at ${vp.label}`, async () => {
         await page.viewport(vp.width, vp.height);
-        const { container } = render(wrapPage(<SoupKitchen />));
+        const { container } = await render(wrapPage(<SoupKitchen />));
         const root = container.firstElementChild as HTMLElement;
         if (!root) return;
         // Allow 1px subpixel rounding tolerance.
@@ -427,7 +427,7 @@ describe('Viewport matrix — Fleet (SoupKitchen)', () => {
 
   it('short-height 1440×500: document is taller than the viewport (content scrollable)', async () => {
     await page.viewport(1440, 500);
-    render(wrapPage(<SoupKitchen />));
+    await render(wrapPage(<SoupKitchen />));
     // At 500px height the KPI band forces vertical overflow.
     // document.documentElement is the reliable measure across browser mode.
     expect(document.documentElement.scrollHeight).toBeGreaterThan(500);
@@ -447,7 +447,7 @@ describe('Viewport matrix — LineDetail', () => {
     // This is the computed proof jsdom cannot provide.
     // LineDetail.tsx:154: <h1 className="… truncate min-w-0 flex-1">
     await page.viewport(390, 844);
-    const { container } = render(wrapLineDetail(LONG_NAME));
+    const { container } = await render(wrapLineDetail(LONG_NAME));
 
     const h1 = container.querySelector('h1') as HTMLElement | null;
     if (!h1) {
@@ -462,7 +462,7 @@ describe('Viewport matrix — LineDetail', () => {
   it('9-tab passive-mode row at 390px: tablist scrollWidth > clientWidth', async () => {
     // passive mode gives 9 tabs (LineDetail.tsx:120–127: hasMcpSocket=true for passive).
     await page.viewport(390, 844);
-    const { container } = render(wrapLineDetail(LONG_NAME));
+    const { container } = await render(wrapLineDetail(LONG_NAME));
 
     const tablist = container.querySelector('[role="tablist"]') as HTMLElement | null;
     if (!tablist) {
@@ -477,7 +477,7 @@ describe('Viewport matrix — LineDetail', () => {
     for (const vp of VIEWPORTS) {
       it(`no horizontal overflow at ${vp.label}`, async () => {
         await page.viewport(vp.width, vp.height);
-        const { container } = render(wrapLineDetail(LONG_NAME));
+        const { container } = await render(wrapLineDetail(LONG_NAME));
         const root = container.firstElementChild as HTMLElement;
         if (!root) return;
         expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
@@ -495,7 +495,7 @@ describe('Viewport matrix — Ops', () => {
     for (const vp of VIEWPORTS) {
       it(`no horizontal overflow at ${vp.label}`, async () => {
         await page.viewport(vp.width, vp.height);
-        const { container } = render(wrapPage(<Ops />));
+        const { container } = await render(wrapPage(<Ops />));
         const root = container.firstElementChild as HTMLElement;
         if (!root) return;
         expect(root.scrollWidth).toBeLessThanOrEqual(root.clientWidth + 1);
@@ -546,7 +546,7 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
      */
     it('contact pane present (display != none) at 1280px container width', async () => {
       await page.viewport(1440, 900);
-      const { container } = render(wrapInbox(1280));
+      const { container } = await render(wrapInbox(1280));
 
       const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
       if (!contactPane) {
@@ -562,7 +562,7 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
       // The @container (max-width: 1079px) rule collapses the pane at <1080px.
       // We use 1200px (safely above) to avoid subpixel boundary ambiguity.
       await page.viewport(1440, 900);
-      const { container } = render(wrapInbox(1200));
+      const { container } = await render(wrapInbox(1200));
 
       const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
       if (!contactPane) {
@@ -575,7 +575,7 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
 
     it('contact pane collapsed (display = none) at 1079px container width (just below threshold)', async () => {
       await page.viewport(1440, 900);
-      const { container } = render(wrapInbox(1079));
+      const { container } = await render(wrapInbox(1079));
 
       const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
       if (!contactPane) {
@@ -588,7 +588,7 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
 
     it('contact pane collapsed (display = none) at 768px container width', async () => {
       await page.viewport(1440, 900);
-      const { container } = render(wrapInbox(768));
+      const { container } = await render(wrapInbox(768));
 
       const contactPane = container.querySelector('.soup-inbox-contact') as HTMLElement | null;
       if (!contactPane) {
@@ -602,7 +602,7 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
   describe('chat-list and thread panes present', () => {
     it('chat-list pane present at 1280px container', async () => {
       await page.viewport(1440, 900);
-      const { container } = render(wrapInbox(1280));
+      const { container } = await render(wrapInbox(1280));
       // Chat-list pane carries the --inbox-pane-chats width class; the ChatList
       // stub renders inside it.
       const chatListStub = container.querySelector('[data-testid="chat-list-stub"]');
@@ -611,7 +611,7 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
 
     it('chat-list pane present at 768px container', async () => {
       await page.viewport(1440, 900);
-      const { container } = render(wrapInbox(768));
+      const { container } = await render(wrapInbox(768));
       const chatListStub = container.querySelector('[data-testid="chat-list-stub"]');
       expect(chatListStub).not.toBeNull();
     });
@@ -621,7 +621,7 @@ describe('Viewport matrix — Inbox (C-D7-4)', () => {
     for (const vp of VIEWPORTS) {
       it(`Inbox: no horizontal overflow at ${vp.label}`, async () => {
         await page.viewport(vp.width, vp.height);
-        const { container } = render(wrapInbox(vp.width));
+        const { container } = await render(wrapInbox(vp.width));
         const root = container.firstElementChild as HTMLElement;
         if (!root) return;
         // Allow 1px subpixel rounding tolerance (C-D7-6).
@@ -660,7 +660,7 @@ describe('Drawer squeeze flip — container query at 900px (DD-18r)', () => {
   it('at 899px wrapper: .soup-drawer is position=absolute (overlay mode)', async () => {
     await page.viewport(1440, 900);
 
-    const { container } = render(
+    const { container } = await render(
       <div style={{ width: '899px' }}>
         <DrawerLayout
           drawer={
@@ -687,7 +687,7 @@ describe('Drawer squeeze flip — container query at 900px (DD-18r)', () => {
   it('at 900px wrapper: .soup-drawer is position=static (squeeze / flex-sibling mode)', async () => {
     await page.viewport(1440, 900);
 
-    const { container } = render(
+    const { container } = await render(
       <div style={{ width: '900px' }}>
         <DrawerLayout
           drawer={
@@ -714,7 +714,7 @@ describe('Drawer squeeze flip — container query at 900px (DD-18r)', () => {
   it('at 899px wrapper: scrim is visible (display != none)', async () => {
     await page.viewport(1440, 900);
 
-    const { container } = render(
+    const { container } = await render(
       <div style={{ width: '899px' }}>
         <DrawerLayout
           drawer={
@@ -741,7 +741,7 @@ describe('Drawer squeeze flip — container query at 900px (DD-18r)', () => {
   it('at 900px wrapper: scrim is display=none (squeeze mode — no scrim)', async () => {
     await page.viewport(1440, 900);
 
-    const { container } = render(
+    const { container } = await render(
       <div style={{ width: '900px' }}>
         <DrawerLayout
           drawer={

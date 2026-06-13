@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { normalizePhoneE164 } from './lib/phone.ts';
+import { asRecord } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import type { Profile } from './core/profiles.ts';
 import { VALID_ACCESS_MODES, type AccessMode } from './instance-loader.ts';
@@ -143,12 +144,6 @@ function positiveIntEnv(key: string, fallback: number): number {
   return parseInt(trimmed, 10);
 }
 
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
 function stringProp(source: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = source?.[key];
   return typeof value === 'string' && value.trim() !== '' ? value : undefined;
@@ -214,7 +209,7 @@ function stringArrayProp(source: Record<string, unknown> | undefined, key: strin
 function stringRecordProp(source: Record<string, unknown> | null | undefined, key: string): Record<string, string> {
   const value = source?.[key];
   if (value === undefined) return {};
-  const obj = record(value);
+  const obj = asRecord(value);
   if (!obj) {
     throw new Error(`${key} must be an object of non-empty string values`);
   }
@@ -236,7 +231,7 @@ function stringRecordProp(source: Record<string, unknown> | null | undefined, ke
 function profileRecordProp(source: Record<string, unknown> | null | undefined, key: string): Record<string, Profile> {
   const value = source?.[key];
   if (value === undefined) return {};
-  const obj = record(value);
+  const obj = asRecord(value);
   if (!obj) {
     throw new Error(`${key} must be an object of profile names to profile objects`);
   }
@@ -252,7 +247,7 @@ function profileRecordProp(source: Record<string, unknown> | null | undefined, k
       throw new Error(`${key} contains duplicate profile after trimming: ${profileName}`);
     }
 
-    const profileObj = record(rawProfile);
+    const profileObj = asRecord(rawProfile);
     if (!profileObj) {
       throw new Error(`${key}.${profileName} must be an object`);
     }
@@ -414,7 +409,7 @@ const rawAdminPhones: string[] = instance
       ? (instance.adminPhones as string[])
       : [])
   : (process.env.ADMIN_PHONES ?? '').split(',').map(p => p.trim()).filter(Boolean);
-// Normalize to E.164 digits — "845-978-0919" → "18459780919", "+1 845 978 0919" → "18459780919"
+// Normalize to E.164 digits — "555-123-0006" → "15551230006", "+1 555 123 0006" → "15551230006"
 const resolvedAdminPhones = rawAdminPhones.map(normalizePhoneE164);
 
 // ---------------------------------------------------------------------------
@@ -572,7 +567,7 @@ function mergeKnowledgeProfiles(
 ): Record<string, KnowledgeProfileConfig> {
   const profiles = defaultKnowledgeProfiles(namespaces, defaultEmbedUrl);
   for (const [indexName, value] of Object.entries(source ?? {})) {
-    const override = record(value);
+    const override = asRecord(value);
     if (!override) continue;
     const base = profiles[indexName] ?? {
       namespace: '',
@@ -599,7 +594,7 @@ function mergeKnowledgeProfiles(
 export function resolveTwilioSmsConfig(
   rawSource: Record<string, unknown> | null | undefined,
 ): TwilioSmsConfig | undefined {
-  const src = record(rawSource ?? undefined);
+  const src = asRecord(rawSource ?? undefined);
   if (!src) return undefined;
 
   // Required discriminator: abort if 'account' is absent (not a twilioConfig block)
@@ -621,11 +616,11 @@ export function resolveTwilioSmsConfig(
   const pollIntervalMs = numberProp(src, 'pollIntervalMs', DEFAULT_TWILIO_SMS.pollIntervalMs);
 
   // rateLimit: nested object with smsPerMinute
-  const rateLimitSrc = record(src['rateLimit']);
+  const rateLimitSrc = asRecord(src['rateLimit']);
   const smsPerMinute = numberProp(rateLimitSrc, 'smsPerMinute', DEFAULT_TWILIO_SMS.rateLimit.smsPerMinute);
 
   // webhook block: pass through when present, normalize trailing slash in publicBaseUrl
-  const webhookSrc = record(src['webhook']);
+  const webhookSrc = asRecord(src['webhook']);
   let webhookConfig: TwilioWebhookConfig | undefined;
   if (webhookSrc !== undefined) {
     const rawBaseUrl = stringProp(webhookSrc, 'publicBaseUrl') ?? '';
@@ -640,7 +635,7 @@ export function resolveTwilioSmsConfig(
   }
 
   // voice block: merge with DEFAULT_TWILIO_VOICE defaults
-  const voiceSrc = record(src['voice']);
+  const voiceSrc = asRecord(src['voice']);
   let voiceConfig: TwilioVoiceConfig | undefined;
   if (voiceSrc !== undefined) {
     const enabled =
@@ -679,19 +674,19 @@ export function resolveTwilioSmsConfig(
 
 export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | undefined): MemoryConfig {
   const migrated = migrateLegacyMemoryConfig(rawSource ?? {}, { removeLegacy: false }).config;
-  const memoryRoot = record(migrated.memory);
-  const sweep = record(memoryRoot?.sweep);
-  const watchTtl = record(memoryRoot?.watch_ttl);
-  const conversation = record(memoryRoot?.conversation);
-  const retention = record(memoryRoot?.retention);
-  const consolidation = record(memoryRoot?.consolidation);
+  const memoryRoot = asRecord(migrated.memory);
+  const sweep = asRecord(memoryRoot?.sweep);
+  const watchTtl = asRecord(memoryRoot?.watch_ttl);
+  const conversation = asRecord(memoryRoot?.conversation);
+  const retention = asRecord(memoryRoot?.retention);
+  const consolidation = asRecord(memoryRoot?.consolidation);
   const invalidConsolidationSchedule =
     hasInvalidBoundedIntProp(consolidation, 'intervalHours', 1, 168) ||
     hasInvalidBoundedIntProp(consolidation, 'lookbackDays', 1, 90);
-  const enrichment = record(memoryRoot?.enrichment);
-  const pinecone = record(memoryRoot?.pinecone);
+  const enrichment = asRecord(memoryRoot?.enrichment);
+  const pinecone = asRecord(memoryRoot?.pinecone);
   const index = stringProp(pinecone, 'index') ?? process.env.PINECONE_INDEX ?? DEFAULT_PINECONE_INDEX;
-  const namespaces = resolvePineconeNamespaces(record(pinecone?.namespaces));
+  const namespaces = resolvePineconeNamespaces(asRecord(pinecone?.namespaces));
   const pineconeEmbedUrl = stringProp(pinecone, 'embedUrl');
   const embedUrl =
     pineconeEmbedUrl ??
@@ -709,9 +704,9 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     );
   }
   const defaultMode: PineconeSearchMode = index === DEFAULT_PINECONE_INDEX ? 'memory' : 'entity';
-  const knowledgeSearch = record(pinecone?.knowledgeSearch);
+  const knowledgeSearch = asRecord(pinecone?.knowledgeSearch);
   const allowedIndexes = stringArrayProp(pinecone, 'allowedIndexes');
-  const rawKnowledgeProfiles = record(pinecone?.knowledgeProfiles);
+  const rawKnowledgeProfiles = asRecord(pinecone?.knowledgeProfiles);
   const declaredProfiles = new Set(Object.keys(rawKnowledgeProfiles ?? {}));
   for (const profileName of allowedIndexes) {
     if (BUILTIN_KNOWLEDGE_PROFILE_NAMES.has(profileName) && !declaredProfiles.has(profileName)) {
@@ -801,7 +796,7 @@ const resolvedTransport: TransportId = (() => {
 // twilioConfig on other transports, and this gate keeps the invariant
 // self-documenting at the resolution site too.
 const resolvedTwilioConfig: TwilioSmsConfig | undefined =
-  resolvedTransport === 'twilio' && record(instance?.twilioConfig) != null
+  resolvedTransport === 'twilio' && asRecord(instance?.twilioConfig) != null
     ? resolveTwilioSmsConfig(instance?.twilioConfig as Record<string, unknown>)
     : undefined;
 
@@ -937,7 +932,7 @@ export const config = {
   },
 
   // Paused chats — messages are stored but never dispatched to runtime.
-  // Toggle groups on/off without losing messages. Add JIDs like "120363406944965248@g.us".
+  // Toggle groups on/off without losing messages. Add JIDs like "120363555555555002@g.us".
   pausedChats: new Set<string>(
     (Array.isArray(instance?.pausedChats) ? instance.pausedChats : [])
       .filter((j: unknown) => typeof j === 'string' && (j as string).trim() !== ''),

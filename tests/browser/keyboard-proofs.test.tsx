@@ -79,7 +79,7 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
-import { userEvent } from '@vitest/browser/context';
+import { userEvent } from 'vitest/browser';
 import React from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -166,7 +166,7 @@ const THREE_CHATS: ChatItem[] = [
 describe('B2 deferred: ChatPicker ArrowDown — panel + active option (trusted events)', () => {
   it('clicking the SearchInput opens the panel (aria-expanded = true)', async () => {
     const onSelect = vi.fn();
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <ChatPicker
         chats={THREE_CHATS}
         selected={null}
@@ -187,7 +187,7 @@ describe('B2 deferred: ChatPicker ArrowDown — panel + active option (trusted e
 
   it('ArrowDown with open panel sets aria-activedescendant to first option', async () => {
     const onSelect = vi.fn();
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <ChatPicker
         chats={THREE_CHATS}
         selected={null}
@@ -217,7 +217,7 @@ describe('B2 deferred: ChatPicker ArrowDown — panel + active option (trusted e
     // The false-P1 report: "ArrowDown closes the composer".
     // Exoneration: with real focus on the input, ArrowDown sets active option —
     // the dialog/wrapper stays mounted. (b2-evidence.md §Live-QA)
-    const { getByRole, container } = render(
+    const { getByRole, container } = await render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
         <MemoryRouter>
           <div data-testid="outer-wrapper">
@@ -262,7 +262,7 @@ describe('B2 deferred: ChatPicker ArrowDown — panel + active option (trusted e
 describe('B2 deferred: ChatPicker Enter selects active option (trusted events)', () => {
   it('click + ArrowDown + Enter calls onSelect with the first option', async () => {
     const onSelect = vi.fn();
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <ChatPicker
         chats={THREE_CHATS}
         selected={null}
@@ -286,7 +286,7 @@ describe('B2 deferred: ChatPicker Enter selects active option (trusted events)',
 
   it('ArrowDown twice + Enter selects the second option (not always first)', async () => {
     const onSelect = vi.fn();
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <ChatPicker
         chats={THREE_CHATS}
         selected={null}
@@ -312,7 +312,7 @@ describe('B2 deferred: ChatPicker Enter selects active option (trusted events)',
 
   it('Escape with panel open does not call onSelect (panel closes, no selection)', async () => {
     const onSelect = vi.fn();
-    const { getByRole } = render(
+    const { getByRole } = await render(
       <ChatPicker
         chats={THREE_CHATS}
         selected={null}
@@ -412,7 +412,7 @@ describe('C-B3W3-7: Modal focus-trap edge — loading-body Tab escape (confirmed
 
   it('modal opens with focus inside the dialog', async () => {
     const onClose = vi.fn();
-    render(
+    await render(
       <MemoryRouter>
         <ModalWithTabsAndEmptyBody onClose={onClose} />
       </MemoryRouter>,
@@ -427,7 +427,7 @@ describe('C-B3W3-7: Modal focus-trap edge — loading-body Tab escape (confirmed
 
   it('Escape closes the modal from initial focus position', async () => {
     const onClose = vi.fn();
-    render(
+    await render(
       <MemoryRouter>
         <ModalWithTabsAndEmptyBody onClose={onClose} />
       </MemoryRouter>,
@@ -455,7 +455,7 @@ describe('C-B3W3-7: Modal focus-trap edge — loading-body Tab escape (confirmed
     // Debt: fix use-dismissable.ts handleTab to use capture-phase listener or an
     // alternative recapture strategy (see DEBT REGISTER NOTE in file header).
     const onClose = vi.fn();
-    render(
+    await render(
       <MemoryRouter>
         {/* Focusable elements outside the modal — provide landing targets for escaped focus. */}
         <button type="button" id="before-modal">Before modal</button>

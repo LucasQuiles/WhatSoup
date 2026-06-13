@@ -1,12 +1,34 @@
 {
-  "role": "relay-only",
+  "role": "bot-host",
   "expectDispatcher": false,
   "expectQLoop": false,
   "expectPersonalSocket": false,
   "expectPersonalTools": false,
-  "expectConfigInventory": false,
+  "expectConfigInventory": true,
+  "requiredConfigMaxMode": "600",
+  "expectAlertTarget": true,
+  "expectRuntimeManifest": true,
+  "expectPrimaryPhoneVerification": true,
   "requiredCredentialFiles": [
-    "fleet-token"
+    "fleet-token",
+    "instances/primary-bot/tokens.env",
+    "instances/secondary-bot/tokens.env"
   ],
-  "expectPrimaryPhoneVerification": false
+  "instances": [
+    {
+      "name": "primary-bot",
+      "expected": "always_on",
+      "service": "com.whatsoup.primary-bot",
+      "healthPort": 9090,
+      "primaryPhoneOwner": "instance:primary-bot",
+      "expectProviderProbe": true
+    },
+    {
+      "name": "secondary-bot",
+      "expected": "always_on",
+      "service": "com.whatsoup.secondary-bot",
+      "healthPort": 9190,
+      "primaryPhoneOwner": "instance:secondary-bot"
+    }
+  ]
 }

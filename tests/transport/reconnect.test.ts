@@ -123,7 +123,7 @@ function makeMockSocket() {
     end: vi.fn(),
     ws: { isOpen: true },
     user: {
-      id: '18455943112:1@s.whatsapp.net',
+      id: '15551230004:1@s.whatsapp.net',
       lid: '81536414179557:2@lid',
       name: 'WhatSoup',
     },
@@ -161,7 +161,7 @@ async function flushAsyncReconnect(): Promise<void> {
   }
 }
 
-function writeValidTestAuth(id = '18455943112:1@s.whatsapp.net'): void {
+function writeValidTestAuth(id = '15551230004:1@s.whatsapp.net'): void {
   mkdirSync('/tmp/wa-test-auth', { recursive: true, mode: 0o700 });
   chmodSync('/tmp/wa-test-auth', 0o700);
   writeFileSync(join('/tmp/wa-test-auth', 'creds.json'), JSON.stringify({
@@ -1202,7 +1202,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       },
     });
     expect(persisted.diagnostics.stateFileFingerprint).toMatch(/^[0-9a-f]{20}$/);
-    expect(persistedText).not.toContain('18455943112');
+    expect(persistedText).not.toContain('15551230004');
     expect(persistedText).not.toContain('/tmp/wa-test-auth');
     expect(persistedText).not.toContain('/tmp/wa-test-state');
     expect(persistedText).not.toContain(testDataRoot);
@@ -1442,7 +1442,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
       writeFileSync(join('/tmp/wa-test-auth', 'creds.json'), '');
     });
     const nextCreds = {
-      me: { id: '18455943112:1@s.whatsapp.net', lid: '81536414179557:2@lid' },
+      me: { id: '15551230004:1@s.whatsapp.net', lid: '81536414179557:2@lid' },
       registrationId: 42,
     };
     vi.mocked(useMultiFileAuthState).mockResolvedValueOnce({
@@ -1459,7 +1459,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(truncatingSaveCreds).not.toHaveBeenCalled();
     expect(statSync(join('/tmp/wa-test-auth', 'creds.json')).size).toBeGreaterThan(0);
     expect(readTestCreds()).toMatchObject({
-      me: { id: '18455943112:1@s.whatsapp.net' },
+      me: { id: '15551230004:1@s.whatsapp.net' },
       registrationId: 42,
     });
     expect(emitAlertMock).not.toHaveBeenCalledWith(
@@ -1508,7 +1508,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
   });
 
   it('creds.update preserves previous creds when the protected writer refuses an unsafe target', async () => {
-    writeValidTestAuth('18455940001:1@s.whatsapp.net');
+    writeValidTestAuth('15551230009:1@s.whatsapp.net');
     const credsPath = join('/tmp/wa-test-auth', 'creds.json');
     const outside = join('/tmp/wa-test-auth', 'outside-creds.json');
     const previousCreds = readFileSync(credsPath, 'utf-8');
@@ -1521,7 +1521,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     vi.mocked(useMultiFileAuthState).mockResolvedValueOnce({
       state: {
         creds: {
-          me: { id: '18455943112:1@s.whatsapp.net', lid: '81536414179557:2@lid' },
+          me: { id: '15551230004:1@s.whatsapp.net', lid: '81536414179557:2@lid' },
           registrationId: 99,
         },
         keys: {},
@@ -1539,7 +1539,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(lstatSync(credsPath).isSymbolicLink()).toBe(true);
     expect(statSync(outside).size).toBeGreaterThan(0);
     expect(readTestCreds()).toMatchObject({
-      me: { id: '18455940001:1@s.whatsapp.net' },
+      me: { id: '15551230009:1@s.whatsapp.net' },
       registrationId: 1,
     });
 

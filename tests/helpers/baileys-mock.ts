@@ -1,13 +1,13 @@
-import { vi } from 'vitest';
+import { vi, type Mock } from 'vitest';
 
 export interface MockSocket {
   ev: {
-    process: ReturnType<typeof vi.fn>;
+    process: Mock<(cb: (events: Record<string, unknown>) => void) => void>;
   };
-  sendMessage: ReturnType<typeof vi.fn>;
-  sendPresenceUpdate: ReturnType<typeof vi.fn>;
-  query: ReturnType<typeof vi.fn>;
-  end: ReturnType<typeof vi.fn>;
+  sendMessage: Mock<(...args: unknown[]) => unknown>;
+  sendPresenceUpdate: Mock<() => Promise<void>>;
+  query: Mock<() => Promise<Record<string, unknown>>>;
+  end: Mock<() => void>;
   ws: { isOpen: boolean };
   user: {
     id: string;
@@ -48,17 +48,17 @@ export function makeMockSocket() {
 
   const mockSock: MockSocket = {
     ev: {
-      process: vi.fn((cb: (events: Record<string, unknown>) => void) => {
+      process: vi.fn<(cb: (events: Record<string, unknown>) => void) => void>((cb) => {
         evProcessCallback = cb;
       }),
     },
-    sendMessage: vi.fn(),
-    sendPresenceUpdate: vi.fn().mockResolvedValue(undefined),
-    query: vi.fn().mockResolvedValue({}),
-    end: vi.fn(),
+    sendMessage: vi.fn<(...args: unknown[]) => unknown>(),
+    sendPresenceUpdate: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    query: vi.fn<() => Promise<Record<string, unknown>>>().mockResolvedValue({}),
+    end: vi.fn<() => void>(),
     ws: { isOpen: true },
     user: {
-      id: '18455943112:1@s.whatsapp.net',
+      id: '15551230004:1@s.whatsapp.net',
       lid: '81536414179557:2@lid',
       name: 'WhatSoup',
     },

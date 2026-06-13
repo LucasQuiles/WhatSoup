@@ -80,8 +80,8 @@ function makeMessenger(): Messenger {
 function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
     messageId: `msg-${randomBytes(4).toString('hex')}`,
-    chatJid: '15184194479@s.whatsapp.net',
-    senderJid: '15184194479@s.whatsapp.net',
+    chatJid: '15551230008@s.whatsapp.net',
+    senderJid: '15551230008@s.whatsapp.net',
     senderName: 'Alice',
     content: 'hello',
     contentType: 'text',
@@ -96,7 +96,7 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   };
 }
 
-const BOT_JID = '18455943112@s.whatsapp.net';
+const BOT_JID = '15551230004@s.whatsapp.net';
 
 /**
  * Build an ingest handler with the standard mock deps.

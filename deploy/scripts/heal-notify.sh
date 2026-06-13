@@ -6,13 +6,31 @@ INSTANCE="${1:?Usage: heal-notify.sh <instance-name>}"
 CONTEXT=$(journalctl --user -u "whatsoup@${INSTANCE}" -n 20 --no-pager -o cat 2>/dev/null || echo "no logs available")
 ERROR_LINE=$(echo "$CONTEXT" | grep -oE '"msg":"[^"]*"' | tail -1 || echo "unknown error")
 
-# Try the internal heal path first
-TOKEN=$(secret-tool lookup service whatsoup-health-token user "$INSTANCE" 2>/dev/null || echo "")
+# Resolve this instance's own healthPort from its config.json.
+# Config root mirrors src/fleet/paths.ts: ${XDG_CONFIG_HOME:-~/.config}/whatsoup/instances/<name>/
+INSTANCE_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/${INSTANCE}"
+HEALTH_PORT=$(jq -r '.healthPort // empty' "${INSTANCE_CONFIG_ROOT}/config.json" 2>/dev/null || echo "")
+if [ -z "$HEALTH_PORT" ] || ! printf '%s' "$HEALTH_PORT" | grep -qE '^[0-9]+$'; then
+    HEALTH_PORT=9090
+fi
+
+# Read the instance's own health token from tokens.env (written by generate-health-tokens.sh).
+# Fall back to the legacy keyring lookup for hosts that have not migrated.
+TOKEN=""
+TOKENS_ENV="${INSTANCE_CONFIG_ROOT}/tokens.env"
+if [ -f "$TOKENS_ENV" ]; then
+    TOKEN=$(grep -E '^WHATSOUP_HEALTH_TOKEN=' "$TOKENS_ENV" 2>/dev/null \
+        | head -1 | cut -d= -f2- | tr -d '[:space:]') || TOKEN=""
+fi
+if [ -z "$TOKEN" ]; then
+    TOKEN=$(secret-tool lookup service whatsoup-health-token user "$INSTANCE" 2>/dev/null || echo "")
+fi
 if [ -z "$TOKEN" ]; then
     TOKEN=$(secret-tool lookup service whatsoup_health 2>/dev/null || echo "")
 fi
+
 if [ -n "$TOKEN" ]; then
-    HEAL_URL="http://127.0.0.1:9092/heal"
+    HEAL_URL="http://127.0.0.1:${HEALTH_PORT}/heal"
     PAYLOAD=$(jq -n --arg inst "$INSTANCE" --arg ctx "$CONTEXT" --arg err "$ERROR_LINE" \
         '{type:"service_crash",instance:$inst,context:$ctx,errorHint:$err}')
 
@@ -29,6 +47,10 @@ fi
 # Heal path failed or unavailable — fall back to WhatsApp alert lane
 EVIDENCE=$(echo "$CONTEXT" | tail -3)
 ALERT_BIN="${WHATSOUP_ALERT_BIN:-$HOME/.local/bin/whatsapp-alert}"
+if [ ! -x "$ALERT_BIN" ]; then
+    echo "heal-notify: alert binary not found or not executable: $ALERT_BIN" >&2
+    exit 1
+fi
 exec "$ALERT_BIN" \
     --instance "$INSTANCE" --source service_crash \
     --summary "whatsoup@${INSTANCE} service failed (systemd OnFailure)" \

@@ -2482,7 +2482,7 @@ describe('AgentRuntime', () => {
   it('per_chat handleAgentCommand silently sends /compact to the target session', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const groupJid = '120363410094619161@g.us';
+    const groupJid = '120363555555555003@g.us';
 
     mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() });
 
@@ -2521,7 +2521,7 @@ describe('AgentRuntime', () => {
   it('per_chat handleAgentCommand rejects compact while the target chat has a turn in progress', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const groupJid = '120363410094619161@g.us';
+    const groupJid = '120363555555555003@g.us';
 
     mockSession.getStatus.mockReturnValue({ active: true, pid: 123, sessionId: 'ses_x', startedAt: new Date(Date.now() - 60_000).toISOString(), messageCount: 1, lastMessageAt: new Date(Date.now() - 10_000).toISOString() });
 
@@ -5640,11 +5640,11 @@ describe('AgentRuntime', () => {
       const mockDurability = {
         getResumableCheckpoints: vi.fn(() => [
           { conversation_key: '111111100000000001_at_g.us' },
-          { conversation_key: '18459780919' },
+          { conversation_key: '15551230006' },
         ]),
         getSessionCheckpoint: vi.fn((key: string) => {
           if (key === '111111100000000001_at_g.us') return { session_id: 'group-sess-1' };
-          if (key === '18459780919') return { session_id: 'dm-sess-1' };
+          if (key === '15551230006') return { session_id: 'dm-sess-1' };
           return null;
         }),
         upsertSessionCheckpoint: vi.fn(),
@@ -5678,7 +5678,7 @@ describe('AgentRuntime', () => {
 
       const mockDurability = {
         getResumableCheckpoints: vi.fn(() => [
-          { conversation_key: '18459780919' },
+          { conversation_key: '15551230006' },
         ]),
         getSessionCheckpoint: vi.fn((_key: string) => ({ session_id: 'dm-sess-2' })),
         upsertSessionCheckpoint: vi.fn(),
@@ -5692,7 +5692,7 @@ describe('AgentRuntime', () => {
 
       // No tombstoning should have occurred for DMs
       expect(mockDurability.upsertSessionCheckpoint).not.toHaveBeenCalledWith(
-        '18459780919',
+        '15551230006',
         { sessionStatus: 'ended' },
       );
     });

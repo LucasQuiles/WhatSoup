@@ -90,7 +90,7 @@ function makeStoredMsg(overrides?: Partial<StoredMessage>): StoredMessage {
   return {
     pk: 1,
     chatJid: 'chat1@g.us',
-    senderJid: '15184194479@s.whatsapp.net',
+    senderJid: '15551230008@s.whatsapp.net',
     senderName: 'TestUser',
     messageId: 'msg-1',
     content: 'I just moved to London',
@@ -179,7 +179,7 @@ describe('EnrichmentPoller', () => {
     const extractedFact = {
       text: 'Lives in London',
       chatJid: 'chat1@g.us',
-      senderJid: '15184194479@s.whatsapp.net',
+      senderJid: '15551230008@s.whatsapp.net',
       senderName: 'TestUser',
       memoryType: 'user_fact' as const,
       confidence: 0.9,
@@ -253,7 +253,7 @@ describe('EnrichmentPoller', () => {
     vi.mocked(extractFacts).mockResolvedValue([{
       text: 'Some fact',
       chatJid: 'chat1@g.us',
-      senderJid: '15184194479@s.whatsapp.net',
+      senderJid: '15551230008@s.whatsapp.net',
       senderName: 'TestUser',
       memoryType: 'user_fact',
       confidence: 0.9,
@@ -493,19 +493,19 @@ describe('EnrichmentPoller', () => {
     const extracted = [
       {
         text: 'Fact A', chatJid: 'chatFail@g.us',
-        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        senderJid: '15551230008@s.whatsapp.net', senderName: 'TestUser',
         memoryType: 'user_fact' as const, confidence: 0.9,
         supersedesText: '', sourceMessagePks: [101],
       },
       {
         text: 'Fact B', chatJid: 'chatFail@g.us',
-        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        senderJid: '15551230008@s.whatsapp.net', senderName: 'TestUser',
         memoryType: 'user_fact' as const, confidence: 0.9,
         supersedesText: '', sourceMessagePks: [102],
       },
       {
         text: 'Fact C', chatJid: 'chatFail@g.us',
-        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        senderJid: '15551230008@s.whatsapp.net', senderName: 'TestUser',
         memoryType: 'user_fact' as const, confidence: 0.9,
         supersedesText: '', sourceMessagePks: [103],
       },
@@ -549,21 +549,21 @@ describe('EnrichmentPoller', () => {
     const validated = [
       {
         text: 'A', chatJid: 'chatOK@g.us',
-        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        senderJid: '15551230008@s.whatsapp.net', senderName: 'TestUser',
         memoryType: 'user_fact' as const, confidence: 0.9,
         supersedesText: '', sourceMessagePks: [201],
         adjustedConfidence: 0.9,
       },
       {
         text: 'B', chatJid: 'chatOK@g.us',
-        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        senderJid: '15551230008@s.whatsapp.net', senderName: 'TestUser',
         memoryType: 'user_fact' as const, confidence: 0.9,
         supersedesText: '', sourceMessagePks: [202],
         adjustedConfidence: 0.9,
       },
       {
         text: 'C', chatJid: 'chatOK@g.us',
-        senderJid: '15184194479@s.whatsapp.net', senderName: 'TestUser',
+        senderJid: '15551230008@s.whatsapp.net', senderName: 'TestUser',
         memoryType: 'user_fact' as const, confidence: 0.9,
         supersedesText: '', sourceMessagePks: [203],
         adjustedConfidence: 0.9,

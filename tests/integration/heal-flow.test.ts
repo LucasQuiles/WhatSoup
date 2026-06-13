@@ -30,7 +30,7 @@ import { drainIngest } from '../core/_helpers/ingest-drain.ts';
 const PEER_PHONE = '15559998888';
 const PEER_JID = `${PEER_PHONE}@s.whatsapp.net`;
 const NON_PEER_JID = '19991234567@s.whatsapp.net';
-const BOT_JID = '18455943112@s.whatsapp.net';
+const BOT_JID = '15551230004@s.whatsapp.net';
 
 vi.mock('../../src/config.ts', () => ({
   config: {

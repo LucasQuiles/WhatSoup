@@ -6,7 +6,7 @@ After=network-online.target bot-errors-dispatcher.service
 Type=simple
 WorkingDirectory=%h/LAB/WhatSoup
 EnvironmentFile=%h/.config/whatsoup/bot-errors.env
-ExecStart=/usr/bin/python3 %h/LAB/WhatSoup/deploy/scripts/bot-errors-collector.py --daemon --interval 30 --max-events 25 --remote maclab --remote mwlab --remote mini1 --remote mini2 --remote mini3 --remote mini4 --remote mini5 --remote mini6 --remote mini7 --remote mini8 --remote mini9 --remote mini10 --remote mini11
+ExecStart=/usr/bin/python3 %h/LAB/WhatSoup/deploy/scripts/bot-errors-collector.py --daemon --interval 30 --max-events 25 --remote maclab --remote mwlab --remote gupta --remote mini1 --remote mini2 --remote mini3 --remote mini4 --remote mini5 --remote mini6 --remote mini7 --remote mini8 --remote mini9 --remote mini10 --remote mini11
 Restart=always
 RestartSec=10
 

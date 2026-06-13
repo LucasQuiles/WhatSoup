@@ -21,6 +21,18 @@ TAILSCALE_STATUS_CACHE: dict[str, Any] | None = None
 TAILSCALE_STATUS_ERROR: str | None = None
 REMOTE_HOST_TARGETS_CACHE: dict[str, list[str]] = {}
 
+
+def reset_tailscale_cache() -> None:
+    """Clear the module-level Tailscale status memo.
+
+    Called at the start of each collection cycle so that load_tailscale_status()
+    re-fetches a fresh snapshot.  Within a single cycle the memo still avoids
+    redundant subprocess calls (N hosts → 1 call per cycle).
+    """
+    global TAILSCALE_STATUS_CACHE, TAILSCALE_STATUS_ERROR
+    TAILSCALE_STATUS_CACHE = None
+    TAILSCALE_STATUS_ERROR = None
+
 RELAY_BACKOFF_FAILURE_THRESHOLD: int = 3
 RELAY_BACKOFF_SCHEDULE_S: list[int] = [300, 900, 3600]
 
@@ -843,7 +855,55 @@ def tailscale_evidence_lines(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _is_ssh_transport_failure(normalized_error: str) -> bool:
+    """Return True when the error string indicates a transport-level SSH failure.
+
+    Transport failures mean the TCP/TLS handshake never completed or SSH's own
+    authentication (key / host-key) was rejected — the remote host is unreachable
+    or the SSH layer itself cannot establish a session.  These are distinct from
+    remote-command failures (nonzero exit, missing script, file permission errors)
+    where the SSH tunnel was established successfully.
+
+    Transport patterns (any of):
+    - connection refused / reset
+    - no route to host / network is unreachable
+    - ssh: connect to host …  (generic SSH connect error prefix)
+    - permission denied (publickey) / (password) / (gssapi…)  — SSH auth failure
+    - host key verification failed / known_hosts mismatch
+    - timed out / operation timed out / connection timed out (handled separately
+      as tailscale_online_ssh_timeout; listed here so the caller need not repeat
+      the check, but this helper is not called for timeouts — see ssh_failure_diagnosis)
+    """
+    return (
+        "connection refused" in normalized_error
+        or "connection reset by peer" in normalized_error
+        or "no route to host" in normalized_error
+        or "network is unreachable" in normalized_error
+        or normalized_error.startswith("ssh: connect to host")
+        or "permission denied (publickey" in normalized_error
+        or "permission denied (password" in normalized_error
+        or "permission denied (gssapi" in normalized_error
+        or "host key verification failed" in normalized_error
+        or "known_hosts" in normalized_error
+    )
+
+
 def ssh_failure_diagnosis(error: str, tailscale: dict[str, Any]) -> str | None:
+    """Classify an SSH failure into one of three reachability diagnoses.
+
+    Classification table:
+    | Condition                               | Diagnosis                          |
+    |-----------------------------------------|------------------------------------|
+    | peer online + timeout variant           | tailscale_online_ssh_timeout       |
+    | peer online + transport-level failure   | tailscale_online_ssh_failed        |
+    | peer online + remote-command failure    | tailscale_online_ssh_remote_error  |
+    | peer offline                            | tailscale_offline                  |
+    | peer status unknown / not found         | None                               |
+
+    Only tailscale_offline, tailscale_online_ssh_timeout, and
+    tailscale_online_ssh_failed are genuine unreachability signals — callers must
+    NOT skip secondary probes for tailscale_online_ssh_remote_error.
+    """
     if not tailscale or tailscale.get("status") != "found":
         return None
     normalized_error = error.lower()
@@ -854,7 +914,9 @@ def ssh_failure_diagnosis(error: str, tailscale: dict[str, Any]) -> str | None:
     ):
         return "tailscale_online_ssh_timeout"
     if tailscale.get("online") is True:
-        return "tailscale_online_ssh_failed"
+        if _is_ssh_transport_failure(normalized_error):
+            return "tailscale_online_ssh_failed"
+        return "tailscale_online_ssh_remote_error"
     if tailscale.get("online") is False:
         return "tailscale_offline"
     return None
@@ -871,6 +933,26 @@ def remote_failure_context(host: str, error: str = "") -> tuple[list[str], dict[
         diagnostics["reachabilityDiagnosis"] = diagnosis
         lines.append(f"reachability_diagnosis={diagnosis}")
     return lines, diagnostics
+
+
+def preflight_remote_unreachable(host: str) -> dict[str, Any] | None:
+    tailscale = tailscale_peer_summary(host)
+    if tailscale.get("status") == "found" and tailscale.get("online") is False:
+        return tailscale
+    return None
+
+
+def reachability_diagnosis(diagnostics: dict[str, Any]) -> str | None:
+    value = diagnostics.get("reachabilityDiagnosis")
+    return value if isinstance(value, str) and value else None
+
+
+def skip_writefail_after_outbox_failure(diagnostics: dict[str, Any]) -> bool:
+    return reachability_diagnosis(diagnostics) in {
+        "tailscale_offline",
+        "tailscale_online_ssh_timeout",
+        "tailscale_online_ssh_failed",
+    }
 
 
 def legacy_open_record(state: dict[str, Any], key: str, remote: str, source: str) -> dict[str, Any] | None:
@@ -1194,6 +1276,9 @@ def default_recovery_successes() -> int:
 
 
 def ssh_json_lines(host: str, script: str, args: list[str], timeout: int) -> list[dict[str, Any]]:
+    unreachable = preflight_remote_unreachable(host)
+    if unreachable is not None:
+        raise RuntimeError(f"preflight skipped ssh {host}: tailscale_offline")
     proc = subprocess.run(
         remote_python_command(host, args),
         input=script,
@@ -1668,6 +1753,7 @@ def run_once(
     alert_cooldown: int,
     recovery_successes: int,
 ) -> dict[str, Any]:
+    reset_tailscale_cache()
     state = load_state()
     state["configuredRemotes"] = list(remotes)
     state["configuredRemoteHosts"] = configured_remote_hosts(remotes)
@@ -1695,6 +1781,7 @@ def run_once(
         outbox_claim_succeeded = False
         outbox_relay_failed = False
         writefail_claim_failed = False
+        skip_writefail_claim = False
 
         # --- Dead-host backoff guard ---
         # Read persisted backoff fields (all default-zero on first cycle).
@@ -1736,6 +1823,7 @@ def run_once(
             remote_record["lastFailureIso"] = now_iso()
             if reachability_diagnostics:
                 remote_record["lastReachability"] = reachability_diagnostics
+                skip_writefail_claim = skip_writefail_after_outbox_failure(reachability_diagnostics)
             # Update consecutive-failure counter and backoff schedule.
             new_consecutive_failures = consecutive_failures_pre + 1
             remote_record["consecutiveFailures"] = new_consecutive_failures
@@ -1837,66 +1925,74 @@ def run_once(
                 remote_record["outboxRecoveryConsecutiveSuccesses"] = 0
                 remote_record["outboxRecoverySuccessesRequired"] = recovery_successes
 
-        try:
-            writefail_records = ssh_json_lines(
-                host,
-                REMOTE_WRITEFAIL_CLAIM_SCRIPT,
-                [remote_root, str(max_events), str(lease_seconds)],
-                timeout,
-            )
-            enqueue_meta_recovery(
-                remote,
-                "remote-writefail-harvest-failed",
-                f"BOT ERRORS collector remote writefail harvest recovered: {remote}",
-                f"remote={remote}\nremote_root={remote_root}\nharvest_status=success",
-                state,
-            )
-        except Exception as exc:  # noqa: BLE001 - outbox relay must not be blocked by B6 harvest.
-            failed += 1
-            if is_best_effort:
-                best_effort_failures += 1
-            writefail_claim_failed = True
-            if outbox_claim_failed:
-                isolated_failures += 1
-                if is_best_effort:
-                    best_effort_isolated_failures += 1
+        if skip_writefail_claim:
             writefail_records = []
-            error = str(exc)
-            reachability_lines, reachability_diagnostics = remote_failure_context(host, error)
-            remote_record = remote_state.setdefault(remote, {})
-            remote_record["consecutiveSuccesses"] = 0
-            remote_record["lastError"] = error
-            remote_record["lastFailureAt"] = int(time.time())
-            remote_record["lastFailureIso"] = now_iso()
-            if reachability_diagnostics:
-                remote_record["lastReachability"] = reachability_diagnostics
-            clear_meta_recovery_progress(state, remote, "remote-claim-failed")
-            clear_meta_recovery_progress(state, remote, "remote-drain-stale")
-            # Check current down state (may have been updated by outbox claim failure above).
-            cur_consecutive_failures = int(remote_record.get("consecutiveFailures") or 0)
-            is_now_host_down = cur_consecutive_failures >= RELAY_BACKOFF_FAILURE_THRESHOLD
             append_log({
-                "type": "remote_writefail_claim_failed",
+                "type": "remote_writefail_claim_skipped_unreachable",
                 "remote": remote,
-                "error": error,
-                "reachability": reachability_diagnostics,
+                "reason": reachability_diagnosis(remote_state.setdefault(remote, {}).get("lastReachability", {})) or "outbox_claim_unreachable",
             })
-            if not outbox_claim_failed and not is_now_host_down:
-                enqueue_meta_alert(
+        else:
+            try:
+                writefail_records = ssh_json_lines(
+                    host,
+                    REMOTE_WRITEFAIL_CLAIM_SCRIPT,
+                    [remote_root, str(max_events), str(lease_seconds)],
+                    timeout,
+                )
+                enqueue_meta_recovery(
                     remote,
                     "remote-writefail-harvest-failed",
-                    f"BOT ERRORS collector cannot claim remote writefail crumbs: {remote}",
-                    "\n".join([
-                        f"remote={remote}",
-                        f"remote_root={remote_root}",
-                        f"error={error}",
-                        *reachability_lines,
-                        f"collector_log={state_root() / 'logs/collector.jsonl'}",
-                    ]),
+                    f"BOT ERRORS collector remote writefail harvest recovered: {remote}",
+                    f"remote={remote}\nremote_root={remote_root}\nharvest_status=success",
                     state,
-                    alert_cooldown,
-                    reachability_diagnostics,
                 )
+            except Exception as exc:  # noqa: BLE001 - outbox relay must not be blocked by B6 harvest.
+                failed += 1
+                if is_best_effort:
+                    best_effort_failures += 1
+                writefail_claim_failed = True
+                if outbox_claim_failed:
+                    isolated_failures += 1
+                    if is_best_effort:
+                        best_effort_isolated_failures += 1
+                writefail_records = []
+                error = str(exc)
+                reachability_lines, reachability_diagnostics = remote_failure_context(host, error)
+                remote_record = remote_state.setdefault(remote, {})
+                remote_record["consecutiveSuccesses"] = 0
+                remote_record["lastError"] = error
+                remote_record["lastFailureAt"] = int(time.time())
+                remote_record["lastFailureIso"] = now_iso()
+                if reachability_diagnostics:
+                    remote_record["lastReachability"] = reachability_diagnostics
+                clear_meta_recovery_progress(state, remote, "remote-claim-failed")
+                clear_meta_recovery_progress(state, remote, "remote-drain-stale")
+                # Check current down state (may have been updated by outbox claim failure above).
+                cur_consecutive_failures = int(remote_record.get("consecutiveFailures") or 0)
+                is_now_host_down = cur_consecutive_failures >= RELAY_BACKOFF_FAILURE_THRESHOLD
+                append_log({
+                    "type": "remote_writefail_claim_failed",
+                    "remote": remote,
+                    "error": error,
+                    "reachability": reachability_diagnostics,
+                })
+                if not outbox_claim_failed and not is_now_host_down:
+                    enqueue_meta_alert(
+                        remote,
+                        "remote-writefail-harvest-failed",
+                        f"BOT ERRORS collector cannot claim remote writefail crumbs: {remote}",
+                        "\n".join([
+                            f"remote={remote}",
+                            f"remote_root={remote_root}",
+                            f"error={error}",
+                            *reachability_lines,
+                            f"collector_log={state_root() / 'logs/collector.jsonl'}",
+                        ]),
+                        state,
+                        alert_cooldown,
+                        reachability_diagnostics,
+                    )
         if outbox_claim_succeeded and not writefail_claim_failed:
             remotes_succeeded += 1
             if not is_best_effort:

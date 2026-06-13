@@ -101,8 +101,7 @@
         "name": "mcp-servers",
         "mode": "detect-only",
         "commands": [
-          "claude mcp list",
-          "npx @playwright/mcp@latest"
+          "claude mcp list"
         ]
       },
       {
@@ -150,12 +149,12 @@
     ]
   },
   "protective_services": {
-    "description": "macOS LaunchAgent services that guard bot availability and data durability. Each entry documents the template in deploy/templates/, the install path pattern, and the liveness probe.",
+    "description": "macOS LaunchAgent services that guard bot availability and data durability. Each entry documents the repo template path, the install path pattern, and the liveness probe.",
     "entries": [
       {
         "name": "BOT-watchdog",
         "label_pattern": "com.whatsoup.{BOT_NAME}-watchdog",
-        "template": "deploy/templates/com.whatsoup.BOT-watchdog.plist",
+        "template": "deploy/templates/com.whatsoup.__BOT_NAME__-watchdog.plist",
         "script_template": "deploy/templates/watchdog-script.sh",
         "install_path": "~/Library/LaunchAgents/com.whatsoup.{BOT_NAME}-watchdog.plist",
         "script_install_path": "~/.local/bin/{BOT_NAME}-watchdog",
@@ -173,7 +172,7 @@
       {
         "name": "reply-guarantee",
         "label_pattern": "com.whatsoup.reply-guarantee",
-        "template": "deploy/templates/com.whatsoup.reply-guarantee.plist",
+        "template": "deploy/com.whatsoup.reply-guarantee.plist",
         "install_path": "~/Library/LaunchAgents/com.whatsoup.reply-guarantee.plist",
         "schedule": "StartInterval 60s",
         "run_at_load": true,

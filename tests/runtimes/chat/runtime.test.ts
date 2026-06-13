@@ -211,8 +211,8 @@ const makeFallbackProvider = (): LLMProvider => ({
 function makeIncomingMessage(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
     messageId: 'msg-001',
-    chatJid: '15184194479@s.whatsapp.net',
-    senderJid: '15184194479@s.whatsapp.net',
+    chatJid: '15551230008@s.whatsapp.net',
+    senderJid: '15551230008@s.whatsapp.net',
     senderName: 'Alice',
     content: 'hello bot',
     contentType: 'text',
@@ -294,7 +294,7 @@ describe('Happy path', () => {
 
     // 1. Rate limit checked
     // Rate limit uses conversation key (not raw JID) to normalize LID/phone variants
-    expect(mockCheckRateLimit).toHaveBeenCalledWith(expect.anything(), '15184194479');
+    expect(mockCheckRateLimit).toHaveBeenCalledWith(expect.anything(), '15551230008');
 
     // 2. Context and window loaded
     expect(mockLoadContext).toHaveBeenCalled();
@@ -310,7 +310,7 @@ describe('Happy path', () => {
     //    — no direct storeMessage call in the runtime
 
     // 6. Rate limit recorded
-    expect(mockRecordResponse).toHaveBeenCalledWith(expect.anything(), '15184194479');
+    expect(mockRecordResponse).toHaveBeenCalledWith(expect.anything(), '15551230008');
   });
 
   it('response content matches LLM output', async () => {
@@ -553,7 +553,7 @@ describe('Concurrency', () => {
   it('two messages from the same chat → both processed, both responses sent', async () => {
     const { handler, messenger, primary } = makeHandler();
 
-    const chatJid = '15184194479@s.whatsapp.net';
+    const chatJid = '15551230008@s.whatsapp.net';
     const msg1 = makeIncomingMessage({ messageId: 'msg-001', chatJid });
     const msg2 = makeIncomingMessage({ messageId: 'msg-002', chatJid });
 
