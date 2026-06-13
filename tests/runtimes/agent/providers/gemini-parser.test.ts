@@ -185,11 +185,13 @@ describe('parseGeminiEvent — result branch', () => {
     const event = parseGeminiEvent(
       JSON.stringify({ type: 'result', status: 'failed', error: 'API timeout' }),
     );
+    expect(event).toMatchObject({ type: 'result', isError: true });
     expect((event as { text: string | null }).text).toBe('API timeout');
   });
 
   it('falls back to status-derived message when no error/message fields present', () => {
     const event = parseGeminiEvent(JSON.stringify({ type: 'result', status: 'timeout' }));
+    expect(event).toMatchObject({ type: 'result', isError: true });
     expect((event as { text: string | null }).text).toContain('timeout');
   });
 });
@@ -199,12 +201,12 @@ describe('parseGeminiEvent — error event branch', () => {
     const event = parseGeminiEvent(
       JSON.stringify({ type: 'error', error: 'quota exhausted' }),
     );
-    expect(event).toMatchObject({ type: 'result', text: 'quota exhausted' });
+    expect(event).toMatchObject({ type: 'result', text: 'quota exhausted', isError: true });
   });
 
   it('falls back to "Gemini CLI error" when no error/message field is present', () => {
     const event = parseGeminiEvent(JSON.stringify({ type: 'error' }));
-    expect(event).toMatchObject({ type: 'result' });
+    expect(event).toMatchObject({ type: 'result', isError: true });
     expect((event as { text: string | null }).text).not.toBe(null);
   });
 });

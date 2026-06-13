@@ -8,13 +8,7 @@ import type { DurabilityEngine } from '../../core/durability.ts';
 import type { AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
-  providerFailureArmsFallback,
-  isUsageLimitMessage,
   isProviderAuthRequiredMessage,
-  isRateLimitResultMessage,
-  isProviderPolicyBlockMessage,
-  isPromptTooLongMessage,
-  isProviderModelUnavailableMessage,
 } from './provider-failure.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
@@ -1100,7 +1094,7 @@ export {
   isProviderPolicyBlockMessage,
   isPromptTooLongMessage,
   isProviderModelUnavailableMessage,
-};
+} from './provider-failure.ts';
 
 function providerDisplayName(provider: string): string {
   switch (provider) {
@@ -4811,8 +4805,9 @@ export class AgentRuntime implements Runtime {
         }
 
         if (event.text && !hasPendingPoll) {
+          const providerFailureKind = classifyProviderFailure(event.text);
           // Suppress usage-limit messages — log and skip instead of forwarding
-          if (isUsageLimitMessage(event.text)) {
+          if (providerFailureKind === 'usage-limit') {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
@@ -4843,7 +4838,7 @@ export class AgentRuntime implements Runtime {
             }
             break;
           }
-          if (isProviderPolicyBlockMessage(event.text)) {
+          if (providerFailureKind === 'policy-block') {
             log.error({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq,
@@ -4853,7 +4848,7 @@ export class AgentRuntime implements Runtime {
             session?.shutdown();
             break;
           }
-          if (isProviderAuthRequiredMessage(event.text)) {
+          if (providerFailureKind === 'auth-required') {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
             const activation = this.activateProviderFallback(null, 'auth-required');
             const replayScheduled = activation
@@ -4879,7 +4874,7 @@ export class AgentRuntime implements Runtime {
             if (!replayScheduled) session?.shutdown();
             break;
           }
-          if (isRateLimitResultMessage(event.text)) {
+          if (providerFailureKind === 'rate-limit') {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
             const activation = this.activateProviderFallback(null, 'rate-limit');
             const replayScheduled = activation
@@ -4905,7 +4900,7 @@ export class AgentRuntime implements Runtime {
             if (!replayScheduled) session?.shutdown();
             break;
           }
-          if (isProviderModelUnavailableMessage(event.text)) {
+          if (providerFailureKind === 'model-unavailable') {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
             const activation = this.activateProviderFallback(null, 'model-unavailable');
             const replayScheduled = activation
@@ -4932,7 +4927,7 @@ export class AgentRuntime implements Runtime {
             break;
           }
           // Context overflow — session is unsalvageable, kill and let next message respawn
-          if (isPromptTooLongMessage(event.text)) {
+          if (providerFailureKind === 'context-overflow') {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
             queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
             this.cleanupUsageLimitTurn(queue, {
@@ -7624,8 +7619,9 @@ export class AgentRuntime implements Runtime {
 
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
+          const providerFailureKind = classifyProviderFailure(event.text);
           // Suppress usage-limit messages — log and kill session instead of forwarding
-          if (isUsageLimitMessage(event.text)) {
+          if (providerFailureKind === 'usage-limit') {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
@@ -7656,7 +7652,7 @@ export class AgentRuntime implements Runtime {
             this.singleTurnHadToolActivity = false;
             break;
           }
-          if (isProviderPolicyBlockMessage(event.text)) {
+          if (providerFailureKind === 'policy-block') {
             log.error({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider policy-block message from result — session will be killed');
             this.cleanupUsageLimitTurn(queue, {
               inboundSeq: this.currentInboundSeq,
@@ -7666,7 +7662,7 @@ export class AgentRuntime implements Runtime {
             this.session?.shutdown();
             break;
           }
-          if (isProviderAuthRequiredMessage(event.text)) {
+          if (providerFailureKind === 'auth-required') {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
             const activation = this.activateProviderFallback(null, 'auth-required');
             const replayScheduled = activation
@@ -7692,7 +7688,7 @@ export class AgentRuntime implements Runtime {
             this.singleTurnHadToolActivity = false;
             break;
           }
-          if (isRateLimitResultMessage(event.text)) {
+          if (providerFailureKind === 'rate-limit') {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
             const activation = this.activateProviderFallback(null, 'rate-limit');
             const replayScheduled = activation
@@ -7718,7 +7714,7 @@ export class AgentRuntime implements Runtime {
             this.singleTurnHadToolActivity = false;
             break;
           }
-          if (isProviderModelUnavailableMessage(event.text)) {
+          if (providerFailureKind === 'model-unavailable') {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider model-unavailable message from result — session will be shut down');
             const activation = this.activateProviderFallback(null, 'model-unavailable');
             const replayScheduled = activation
@@ -7745,7 +7741,7 @@ export class AgentRuntime implements Runtime {
             break;
           }
           // Context overflow — session is unsalvageable, kill and let next message respawn
-          if (isPromptTooLongMessage(event.text)) {
+          if (providerFailureKind === 'context-overflow') {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'prompt too long — killing session');
             queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
             this.cleanupUsageLimitTurn(queue, {
