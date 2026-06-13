@@ -118,6 +118,30 @@ The expected successful shape is:
   match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
   not enforcing.
 
+## Manual drift-hook simulation
+
+If a host's Git config cannot activate `.husky/pre-commit`, prove the copied hook behavior
+with a temporary index instead of waiting for a real commit. This exercises the staged-file
+trigger and leaves the real index/worktree untouched:
+
+```bash
+ssh <mac-host> 'cd ~/LAB/WhatSoup &&
+  before=$(git status --short --branch | shasum | awk "{print \$1}") &&
+  tmp=$(mktemp /tmp/whatsoup-precommit-index.XXXXXX) &&
+  trap '"'"'rm -f "$tmp"'"'"' EXIT &&
+  GIT_INDEX_FILE="$tmp" git read-tree HEAD &&
+  blob=$(git rev-parse HEAD:package.json) &&
+  GIT_INDEX_FILE="$tmp" git update-index --cacheinfo 100755,"$blob",package.json &&
+  GIT_INDEX_FILE="$tmp" .husky/pre-commit &&
+  after=$(git status --short --branch | shasum | awk "{print \$1}") &&
+  test "$before" = "$after"'
+```
+
+The expected successful shape is: `guard:repo:staged` passes, the architectural-drift
+block runs, drift failures are printed as warn-only recommendations, the hook exits 0,
+and the real status hash is unchanged. This is behavior evidence only; it does not replace
+`core.hooksPath=.husky` on writable Git-backed hosts.
+
 Known residuals after the close-out pass:
 
 - One Git-backed macOS host has current runtime files and manifests, but hook activation
