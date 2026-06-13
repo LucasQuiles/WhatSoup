@@ -365,3 +365,63 @@ and this audit.
 
 ---
 Audit produced 2026-06-12. Read-only against code; this file is the only write.
+
+## 10. Self-feeding burndown layer (mechanization of this audit)
+
+The violation taxonomy above is mechanized by a fail-closed scanner + ratchet so the
+burndown queue regenerates itself on every run, new violations block, and fixes shrink
+the queue. **The queue JSON is the canonical machine-readable burndown; this document
+remains the human analysis.**
+
+Artifacts (all committed):
+
+| Artifact | Role |
+|---|---|
+| `console/scripts/check-design-burndown.mjs` | scanner + ratchet (deterministic, fail-closed: parse errors and missing inputs RAISE — never silently empty) |
+| `console/design-burndown-queue.json` | the live queue — items `{id, category, severity, count, files[{path,count,lines}], owner}` + summary `{total, blocking, byCategory}` |
+| `console/design-burndown-baseline.json` | per-category ceiling `{category: count}` (fall-only ratchet) |
+
+Sources, by category:
+- **Consumed from `lint-shadow-baseline.json`** (never re-counted — the shadow ratchet
+  owns TSX enforcement; `lines` are `null`, line detail lives in the ESLint shadow run):
+  `raw-button` (B2), `raw-form-control` (B3), `legacy-token-tsx` (B1),
+  `focus-suppression` (B7), `brand-regression` (B5), `base-wall` (B5/B6),
+  `utility-smell` (polish).
+- **CSS-side scans** (what ESLint cannot see, §6 census mechanized, with file:line):
+  `legacy-var-css` (B1 — legacy-name list DERIVED from the tokens.semantic.css
+  "Legacy aliases" block, same derivation as §6), `accent-law` (B4 — F1 action-control
+  selectors binding status-channel colors + M9 `accent-color:` status tokens; the
+  status-semantic `-danger/-success/-warning` variants are excluded by name),
+  `raw-color-css` (raw hex/rgb/hsl/oklch outside the value-owning tiers
+  tokens.primitive.css/tokens.semantic.css; current count = the WVR-013 literal),
+  `half-step` (DD-9 — CSS *and* TSX/TS, since no ESLint rule covers the half-steps).
+  Note: accent-law hits using alias names also count under legacy-var-css —
+  intentional overlap, two remediation lenses (B4 law fix vs B1 vocabulary burn).
+
+Regen / check commands:
+- `npm --prefix console run design:burndown` — check (default; never writes). Exit 1 on:
+  any category above its ceiling (message names category, delta, new file:lines);
+  any category below it ("ratchet fall — run with `--update` to lower the baseline");
+  queue drift (counts equal but violations moved → committed queue no longer byte-matches
+  the live scan); or any malformed/missing input.
+- `npm --prefix console run design:burndown -- --update` — rewrites baseline AND queue
+  together (ride the same commit as the fix, with justification — same discipline as
+  the shadow ratchet).
+
+Wired unconditionally (fail-open forbidden) into: `.husky/pre-push`, root
+`verify:push:branch` / `verify:release` (after `design:metrics`), and the
+"Console design burndown" step in `.github/workflows/quality.yml`. Tests (negative
+fixtures proving every scan fires, ratchet rise/fall/drift, fail-closed raises):
+`tests/scripts/design-burndown-check.test.ts`.
+
+Counting-rule notes vs this audit's census (initial queue, 2026-06-12): the ESLint-side
+categories reconcile exactly with §5 (486 = 354+70+36+22+2+1+1). `legacy-var-css` counts
+260 occurrences over 183 lines of composites.css — the §6 strict-vars subset agrees
+exactly (97 lines), and the surplus over the "~153" extended figure is per-occurrence
+counting (multiple `var()` per line) plus the motion aliases `--ease` (64) and
+`--dur-norm` (18), which the derived alias list legitimately includes. `half-step`
+counts occurrences (CSS 27/25 lines — composites 19 + primitives 6 lines, exact match
+with §6; TSX/TS 41 occurrences/35 lines vs the census's 26-28 lines: occurrence
+counting + .ts files included). `accent-law` counts 11 CSS binding declarations
+(.c-btn-primary ×2, .c-btn-send ×4, .c-btn-add ×4, accent-color ×1) where F1 lists 10
+TSX consumer *sites* — different basis, both lenses are recorded.
