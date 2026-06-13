@@ -585,6 +585,37 @@ asset is known bad. `--fail-on-findings` exists for the later promotion packet a
 badge, PWA, and maskable assets are replaced and visually proven. A report-only PASS must never be
 cited as visual approval or 16px legibility proof.
 
+### 17.7 Color Semantics Audit
+
+Provider identity, chart data palettes, traffic quantity ink, and component-local palettes are
+inventoried by `console/scripts/check-color-semantics.mjs` and exposed as:
+
+```bash
+npm --prefix console run design:color-semantics
+```
+
+The audit scans `console/src` for report-only findings:
+
+- `soup/provider-palette-only` candidates: provider identity colour maps or provider display
+  contexts borrowing status/mode tokens or literal colours instead of `--provider-*`;
+- `soup/data-series-token-only` candidates: chart and heatmap series borrowing status/mode/literal
+  colours instead of `--data-*`, unless the series is explicitly provider identity;
+- `soup/traffic-neutrality` candidates: non-status traffic quantities such as sent, received,
+  sessions, and media rendered with chromatic status/mode ink;
+- `soup/no-component-local-palette` candidates: component-local colour maps that duplicate design
+  truth outside documented provider/data/status token maps.
+
+Default mode is deliberately report-only: findings are emitted as structured JSON with `verdict:
+PASS`, `mode: report-only`, per-rule counts, and sample file/line evidence. `--fail-on-findings`
+exists only for later promotion packets after provider tokens, data-series tokens, traffic-neutral
+classification, contrast proof, and both-theme screenshots exist.
+
+A report-only PASS means the audit ran and produced an inventory. It does not prove the provider
+palette is implemented, does not prove message-volume charts use lawful data colours, does not
+prove traffic quantities are neutral, does not replace contrast checks or screenshots, and must
+never be cited as colour-system compliance unless `finding_count` is actually `0` under the
+appropriate promotion mode.
+
 ## 18. Done Means Durable
 
 A slice is not done when it only:

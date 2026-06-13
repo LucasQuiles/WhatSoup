@@ -47,6 +47,13 @@ meaning, and may never reuse a `--color-s-*` / `--color-m-*` token. Message-volu
 non-provider chart series take a separate `--data-*` palette, also defined here before use — they
 must not borrow status/mode channels either.
 
+Audit hook: `npm --prefix console run design:color-semantics` inventories four report-only drift
+classes until the provider/data tokens land: provider identity borrowing status/mode tokens,
+chart data series borrowing provider/status/mode tokens, traffic quantities rendered with
+chromatic ink, and component-local palette maps. Report-only PASS means "inventory captured", not
+"colour semantics are compliant"; hard-error promotion waits for token implementation, contrast
+proof, both-theme screenshots, and false-positive fixtures.
+
 ## 3. Per-theme derivation laws
 
 - **Dark elevates by lightening.** The surface ladder steps up in luminance

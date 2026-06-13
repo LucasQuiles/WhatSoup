@@ -46,6 +46,7 @@ const qaFiles = [
   /^console\/scripts\/capture-visual-matrix\.mjs$/,
   /^console\/scripts\/validate-visual-manifest\.mjs$/,
   /^console\/scripts\/check-brand-assets\.mjs$/,
+  /^console\/scripts\/check-color-semantics\.mjs$/,
   /^console\/scripts\/check-contrast-matrix\.mjs$/,
   /^console\/scripts\/check-design-resilience\.mjs$/,
   /^console\/scripts\/check-font-assets\.mjs$/,
@@ -91,7 +92,7 @@ const rules: GuardRule[] = [
   },
   {
     code: 'qa-harness-missing-docs',
-    description: 'staged visual, contrast, browser, font, resilience, or token-drift harness changes must update QA hardening docs',
+    description: 'staged visual, contrast, color-semantics, browser, font, resilience, or token-drift harness changes must update QA hardening docs',
     required: [qaHardening],
     matches: (filePath) => pathMatches(filePath, qaFiles),
   },

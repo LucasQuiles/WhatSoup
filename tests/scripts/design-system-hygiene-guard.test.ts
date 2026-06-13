@@ -103,18 +103,18 @@ describe('design-system hygiene guard', () => {
     expect(findDesignSystemHygieneIssues(repo)).toEqual([]);
   });
 
-  it('fails visual, brand, contrast, resilience, or font harness changes without QA hardening docs', () => {
+  it('fails visual, brand, color-semantics, contrast, resilience, or font harness changes without QA hardening docs', () => {
     const repo = makeRepo();
-    stageFile(repo, 'console/scripts/check-brand-assets.mjs', 'console.log("brand");\n');
+    stageFile(repo, 'console/scripts/check-color-semantics.mjs', 'console.log("color");\n');
 
     expect(findDesignSystemHygieneIssues(repo).map((issue) => issue.code)).toEqual([
       'qa-harness-missing-docs',
     ]);
   });
 
-  it('passes visual, brand, contrast, resilience, or font harness changes when qa-hardening.md is staged too', () => {
+  it('passes visual, brand, color-semantics, contrast, resilience, or font harness changes when qa-hardening.md is staged too', () => {
     const repo = makeRepo();
-    stageFile(repo, 'console/scripts/check-brand-assets.mjs', 'console.log("brand");\n');
+    stageFile(repo, 'console/scripts/check-color-semantics.mjs', 'console.log("color");\n');
     stageFile(repo, 'docs/design-system/06-implementation/qa-hardening.md', '# QA hardening\n');
 
     expect(findDesignSystemHygieneIssues(repo)).toEqual([]);
