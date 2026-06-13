@@ -93,6 +93,31 @@ The deploy contract is:
 7. Verify every active runtime path against the manifest, then check outbox/writefail
    queues and service restart counters.
 
+## Manual daily-health validation
+
+Do not wait for the randomized systemd timer when validating a deploy or close-out fix.
+Trigger the same oneshot service the timer uses, then prove the dispatcher drained the
+events:
+
+```bash
+ssh <hub-host> 'systemctl --user start bot-errors-health-check.service'
+ssh <hub-host> 'journalctl --user -u bot-errors-health-check.service -u bot-errors-dispatcher.service --since "10 minutes ago" --no-pager'
+```
+
+The expected successful shape is:
+
+- `bot-errors-health-check.service` exits `status=0/SUCCESS`.
+- The health check emits the daily-health summary, per-instance `daily-health-fail`
+  events, and any reachable-source clear events into the production outbox.
+- The dispatcher logs the same event count with `failed=0`; the hub queue directories
+  `outbox`, `processing`, `dead-letter`, `writefail`, and `quarantine` are empty after
+  the drain.
+- Sent and suppressed archives use lifecycle suffixes such as `.json.<epoch>.sent` and
+  `.json.<epoch>.suppressed`; count files with `find`, not `*.json` globs.
+- A stamped Git-backed runtime manifest should produce a `git_head_sha: ... expected=...
+  match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
+  not enforcing.
+
 Known residuals after the close-out pass:
 
 - One Git-backed macOS host has current runtime files and manifests, but hook activation
