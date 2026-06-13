@@ -330,6 +330,18 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
     expect(snapshot.details['activeSessions']).toBe(0);
   });
 
+  it('reports degraded while a provider fallback window is active', () => {
+    const state = runtime as unknown as {
+      fallbackActiveUntil: number | null;
+      activeFallbackEntry: { provider: string; model?: string } | null;
+    };
+    state.fallbackActiveUntil = Date.now() + 60_000;
+    state.activeFallbackEntry = { provider: 'openai-api', model: 'gpt-5.5' };
+
+    const snapshot = runtime.getHealthSnapshot();
+    expect(snapshot.status).toBe('degraded');
+  });
+
   it('snapshot has a valid status string', () => {
     const snapshot = runtime.getHealthSnapshot();
     expect(['healthy', 'degraded', 'unhealthy']).toContain(snapshot.status);

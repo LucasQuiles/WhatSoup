@@ -56,6 +56,7 @@ vi.mock('../../../src/config.ts', () => {
     agentProviderConfig: undefined,
     agentFallbackProvider: undefined,
     agentFallbackModel: undefined,
+    agentFallbacks: undefined,
   };
   (globalThis as Record<string, unknown>)['__fallbackUsageLimitCascadeConfig__'] = config;
   return { config };
@@ -93,6 +94,7 @@ vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
 // safe fail-open value (no alert, no version log).
 vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
   probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+  probeBinaryAuthStatus: vi.fn(() => Promise.resolve({ status: 'unknown', raw: null })),
   probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
 }));
 
@@ -101,6 +103,7 @@ vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -126,11 +129,12 @@ function makeMessenger(): Messenger {
   } as unknown as Messenger;
 }
 
-function makeRuntime(): AgentRuntime {
+function makeRuntime(agentFallbacks?: Array<{ provider: string; model?: string }>): AgentRuntime {
   const config = mockConfigRef();
   config['agentProvider'] = 'claude-cli';
-  config['agentFallbackProvider'] = 'opencode-cli';
-  config['agentFallbackModel'] = 'minimax/minimax-m2';
+  config['agentFallbacks'] = agentFallbacks;
+  config['agentFallbackProvider'] = agentFallbacks ? undefined : 'opencode-cli';
+  config['agentFallbackModel'] = agentFallbacks ? undefined : 'minimax/minimax-m2';
   return new AgentRuntime(makeDb(), makeMessenger(), 'test', {
     model: 'claude-opus-4-8[1m]',
   });
@@ -138,8 +142,17 @@ function makeRuntime(): AgentRuntime {
 
 type CascadeView = {
   effectiveProvider: string;
+  effectiveModel: string | undefined;
+  failedFallbackEntryKeys: Set<string>;
   fallbackActiveUntil: number | null;
-  activateProviderFallback(resetAt: Date | null): void;
+  activateProviderFallback(
+    resetAt: Date | null,
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required',
+  ): void;
+  getFallbackState(): {
+    activeFallbackEntry: { provider: string; model?: string } | null;
+    fallbackChain: Array<{ provider: string; model?: string; eligible: boolean | null }>;
+  };
   handleEventWithContext(
     event: unknown,
     queue: unknown,
@@ -171,6 +184,7 @@ function makeFakeQueue(targetChatJid = 'user@s.whatsapp.net') {
 
 // Provider-agnostic usage-limit notice text (matches the runtime's detector).
 const USAGE_LIMIT_TEXT = 'Claude usage limit reached. Your limit will reset at 3pm.';
+const ANTHROPIC_LOW_CREDIT_TEXT = 'Insufficient credits for Anthropic API request.';
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -255,20 +269,15 @@ describe('fallback-provider usage-limit cascade', () => {
       'mapkey-notice-check',
     );
 
-    // The user should get a notice about the usage limit (re-enqueued).
     const allEnqueued = [
       ...queue.enqueueText.mock.calls.map((c: unknown[]) => c[0]),
       ...queue.enqueueResultText.mock.calls.map((c: unknown[]) => c[0]),
     ];
-    const hasNotice = allEnqueued.some(
-      (t: unknown) => typeof t === 'string' && (
-        t.toLowerCase().includes('limit') ||
-        t.toLowerCase().includes('backup') ||
-        t.toLowerCase().includes('switching') ||
-        t.toLowerCase().includes('usage')
-      ),
-    );
-    expect(hasNotice).toBe(true);
+    expect(allEnqueued).toHaveLength(1);
+    const notice = String(allEnqueued[0]);
+    expect(notice).toContain('Primary model hit a token/quota limit; switching until about');
+    expect(notice).toContain('Backup: OpenCode / minimax/minimax-m2.');
+    expect(notice).toContain('Please resend the last message here.');
   });
 
   it('does not throw when fallback provider hits usage limit during active fallback window', () => {
@@ -288,5 +297,58 @@ describe('fallback-provider usage-limit cascade', () => {
         'mapkey-no-throw',
       );
     }).not.toThrow();
+  });
+
+  it('advances to the next eligible fallback when the active managed fallback hits a billing limit', () => {
+    const runtime = makeRuntime([
+      { provider: 'anthropic-api', model: 'claude-opus-4-8' },
+      { provider: 'openai-api', model: 'gpt-5.5' },
+    ]);
+    cv(runtime).activateProviderFallback(null, 'auth-required');
+    expect(cv(runtime).effectiveProvider).toBe('anthropic-api');
+    vi.mocked(emitAlertChecked).mockClear();
+
+    vi.advanceTimersByTime(60 * 60 * 1000);
+
+    const queue = makeFakeQueue();
+    const fallbackSession = {
+      getStatus: vi.fn(() => ({
+        active: true,
+        pid: null,
+        sessionId: 'anthropic-api-123',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: new Date().toISOString(),
+      })),
+      getDbRowId: vi.fn(() => null),
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(async () => {}),
+    };
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: ANTHROPIC_LOW_CREDIT_TEXT },
+      queue,
+      fallbackSession,
+      'conv-key',
+      1,
+      'mapkey-managed-fallback-billing',
+    );
+
+    expect(cv(runtime).effectiveProvider).toBe('openai-api');
+    expect(cv(runtime).effectiveModel).toBe('gpt-5.5');
+    expect(cv(runtime).failedFallbackEntryKeys.has('anthropic-api\u0000claude-opus-4-8')).toBe(true);
+    expect(emitAlertChecked).toHaveBeenCalledWith(
+      'test',
+      'fallback_provider_failed',
+      'Active fallback provider failed during fallback window',
+      expect.stringContaining('provider=anthropic-api model=claude-opus-4-8 reason=usage-limit'),
+    );
+    expect(cv(runtime).getFallbackState().activeFallbackEntry).toEqual({
+      provider: 'openai-api',
+      model: 'gpt-5.5',
+    });
+    expect(cv(runtime).getFallbackState().fallbackChain).toEqual([
+      { provider: 'anthropic-api', model: 'claude-opus-4-8', eligible: false },
+      { provider: 'openai-api', model: 'gpt-5.5', eligible: true },
+    ]);
   });
 });

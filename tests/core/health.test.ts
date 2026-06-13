@@ -1096,6 +1096,64 @@ describe('GET /health', () => {
     db2.close();
   });
 
+  it('propagates degraded runtime snapshots to the top-level health status', async () => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'degraded',
+        details: {
+          activeSessions: 1,
+          effectiveProvider: 'openai-api',
+          fallbackActiveUntil: Date.now() + 600_000,
+          fallbackReason: 'usage-limit',
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.runtime.agent.effectiveProvider).toBe('openai-api');
+    db2.close();
+  });
+
+  it('propagates unhealthy runtime snapshots to the top-level health status', async () => {
+    db.close();
+    const db2 = makeDb();
+    const fakeAgentRuntime = {
+      getHealthSnapshot: () => ({
+        status: 'unhealthy',
+        details: {
+          activeSessions: 0,
+          lastTurnErrorClass: 'auth-required',
+        },
+      }),
+      getFallbackState: () => null,
+    };
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: fakeAgentRuntime as unknown as HealthDeps['runtime'],
+    });
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(503);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('unhealthy');
+    expect(json.runtime.agent.lastTurnErrorClass).toBe('auth-required');
+    db2.close();
+  });
+
   it('includes instance block with expected fields', async () => {
     const { status, body } = await httpReq(port, '/health', 'GET');
     expect(status).toBe(200);

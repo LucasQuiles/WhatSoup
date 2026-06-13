@@ -1419,6 +1419,7 @@ export class AgentRuntime implements Runtime {
   private fallbackTurnsEmptyAtArm = 0;
   private lastFallbackTurnAt: number | null = null;
   private activeFallbackEntry: AgentFallbackEntry | null = null;
+  private failedFallbackEntryKeys = new Set<string>();
   private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -4840,7 +4841,12 @@ export class AgentRuntime implements Runtime {
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
-            const activation = this.activateProviderFallback(extractUsageLimitResetTime(event.text), 'usage-limit');
+            const activation = this.activateProviderFallbackAfterTerminalResult(
+              extractUsageLimitResetTime(event.text),
+              'usage-limit',
+              session,
+              event.text,
+            );
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
@@ -4881,7 +4887,12 @@ export class AgentRuntime implements Runtime {
           if (providerFailureKind === 'auth-required') {
             recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
-            const activation = this.activateProviderFallback(null, 'auth-required');
+            const activation = this.activateProviderFallbackAfterTerminalResult(
+              null,
+              'auth-required',
+              session,
+              event.text,
+            );
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
@@ -4908,7 +4919,12 @@ export class AgentRuntime implements Runtime {
           if (providerFailureKind === 'rate-limit') {
             recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
-            const activation = this.activateProviderFallback(null, 'rate-limit');
+            const activation = this.activateProviderFallbackAfterTerminalResult(
+              null,
+              'rate-limit',
+              session,
+              event.text,
+            );
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
@@ -5192,6 +5208,9 @@ export class AgentRuntime implements Runtime {
       if (recentCrashCount > 0 && healthStatus === 'healthy') {
         healthStatus = 'degraded';
       }
+      if (fallbackState.fallbackActiveUntil !== null && healthStatus === 'healthy') {
+        healthStatus = 'degraded';
+      }
       return {
         status: healthStatus,
         details: {
@@ -5213,7 +5232,11 @@ export class AgentRuntime implements Runtime {
     const status = this.session?.getStatus();
     // If a session exists but its child process is not active, it has crashed
     const healthStatus: RuntimeHealth['status'] =
-      this.session !== null && status?.active === false ? 'degraded' : 'healthy';
+      this.session !== null && status?.active === false
+        ? 'degraded'
+        : fallbackState.fallbackActiveUntil !== null
+          ? 'degraded'
+          : 'healthy';
     return {
       status: healthStatus,
       details: {
@@ -5821,6 +5844,10 @@ export class AgentRuntime implements Runtime {
     return this.agentFallbacks.map((entry) => ({ ...entry, eligible: null }));
   }
 
+  private fallbackEntryKey(entry: AgentFallbackEntry): string {
+    return `${entry.provider}\u0000${entry.model ?? ''}`;
+  }
+
   private selectFallbackEntryForWindow(reason?: string): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
     if (this.agentFallbacks.length === 0) {
       this.fallbackChainState = [];
@@ -5834,6 +5861,10 @@ export class AgentRuntime implements Runtime {
     for (let i = 0; i < this.agentFallbacks.length; i++) {
       const entry = this.agentFallbacks[i]!;
       if (requireIndependentProvider && entry.provider === this.agentProvider) {
+        state.push({ ...entry, eligible: false });
+        continue;
+      }
+      if (this.failedFallbackEntryKeys.has(this.fallbackEntryKey(entry))) {
         state.push({ ...entry, eligible: false });
         continue;
       }
@@ -5876,6 +5907,46 @@ export class AgentRuntime implements Runtime {
       entry: this.agentFallbacks[selectedIndex]!,
       selectedHadMissingCredential: state[selectedIndex]?.eligible === false,
     };
+  }
+
+  private markActiveFallbackFailed(
+    session: SessionManager | null,
+    reason: ProviderFallbackReason,
+    evidenceText?: string,
+  ): string | null {
+    if (!this.isFallbackWindowActive || !this.activeFallbackEntry || !session) return null;
+    const sessionId = session.getStatus().sessionId;
+    if (!sessionId?.startsWith(`${this.activeFallbackEntry.provider}-`)) return null;
+
+    const key = this.fallbackEntryKey(this.activeFallbackEntry);
+    if (!this.failedFallbackEntryKeys.has(key)) {
+      this.failedFallbackEntryKeys.add(key);
+      emitAlertChecked(
+        this.instanceName,
+        'fallback_provider_failed',
+        'Active fallback provider failed during fallback window',
+        `provider=${this.activeFallbackEntry.provider} model=${this.activeFallbackEntry.model ?? 'default'}`
+          + ` reason=${reason}`
+          + (evidenceText ? ` evidence=${evidenceText.slice(0, 160)}` : ''),
+      );
+    }
+    return key;
+  }
+
+  private activateProviderFallbackAfterTerminalResult(
+    resetAt: Date | null,
+    reason: ProviderFallbackReason,
+    session: SessionManager | null,
+    evidenceText?: string,
+  ): ProviderFallbackActivation | null {
+    const failedKey = this.markActiveFallbackFailed(session, reason, evidenceText);
+    const activation = this.activateProviderFallback(resetAt, reason);
+    if (activation || !failedKey) return activation;
+
+    // Preserve previous single-fallback behavior when no alternate exists:
+    // keep the current fallback window instead of reverting to a known-bad primary.
+    this.failedFallbackEntryKeys.delete(failedKey);
+    return this.activateProviderFallback(resetAt, reason);
   }
 
   /**
@@ -6015,6 +6086,7 @@ export class AgentRuntime implements Runtime {
     // Reset reason so armFallbackWindow stores 'admin-forced' as the new
     // original cause, replacing any prior reason (e.g. 'usage-limit').
     this.fallbackArmReason = null;
+    this.failedFallbackEntryKeys.clear();
     this.armFallbackWindow(until, 'admin-forced');
     log.info({ activeUntil: new Date(until).toISOString() }, 'fallback window forced by admin');
     return { ok: true, activeUntil: until, clamped: dur !== requested };
@@ -6475,6 +6547,7 @@ export class AgentRuntime implements Runtime {
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
     this.activeFallbackEntry = null;
+    this.failedFallbackEntryKeys.clear();
     this.fallbackResetAt = null;
     this.fallbackRecoveryProbeRequired = false;
     // End of the stall episode (covers both successful-probe reverts and
@@ -7839,7 +7912,12 @@ export class AgentRuntime implements Runtime {
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed usage-limit message from result — session will be killed');
             // Route the auto-respawned next session to the fallback provider
             // (if configured) until the limit resets, before tearing down.
-            const activation = this.activateProviderFallback(extractUsageLimitResetTime(event.text), 'usage-limit');
+            const activation = this.activateProviderFallbackAfterTerminalResult(
+              extractUsageLimitResetTime(event.text),
+              'usage-limit',
+              this.session,
+              event.text,
+            );
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
@@ -7880,7 +7958,12 @@ export class AgentRuntime implements Runtime {
           if (providerFailureKind === 'auth-required') {
             recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'suppressed provider auth-required message from result — session will be shut down');
-            const activation = this.activateProviderFallback(null, 'auth-required');
+            const activation = this.activateProviderFallbackAfterTerminalResult(
+              null,
+              'auth-required',
+              this.session,
+              event.text,
+            );
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
@@ -7907,7 +7990,12 @@ export class AgentRuntime implements Runtime {
           if (providerFailureKind === 'rate-limit') {
             recordTurnFailure(providerFailureKind);
             log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'terminal provider rate-limit result observed');
-            const activation = this.activateProviderFallback(null, 'rate-limit');
+            const activation = this.activateProviderFallbackAfterTerminalResult(
+              null,
+              'rate-limit',
+              this.session,
+              event.text,
+            );
             const replayScheduled = activation
               ? this.scheduleFallbackReplay({
                   activation,
