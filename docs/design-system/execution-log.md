@@ -955,3 +955,24 @@ zero unhandled errors; the EventSource rejections it also surfaced fixed in the 
 C-B5-7 met with recorded deviation (motion config delivered; npm script deliberately unwired
 pending the gate-placement decision). Deferred debt: DD-25 re-homed to C3, DD-30 escalated
 per c3-investigation (make-live), escape-while-closing pin + header corrections bundled to C3.
+
+---
+
+## B3 wave 4 — ACCEPTANCE — 2026-06-12
+
+**Verdict: Pass with deferred debt** (supersedes the wave-4 "Inconclusive — committed;
+acceptance evidence packet outstanding" entry; dialog burn-down acceptance now packet-backed).
+
+`b3-wave4-evidence.md`: all nine C-B3W4-* constraints verified fresh with file:line evidence —
+the option-α discard pin (handleConfirmDiscard contains no deleteLine; confirm branches with
+"Save and close" primary post-creation), latched lazy mount in SoupKitchen, static
+data-line-type accent block replacing the runtime injection (WVR-014 retirement reproduced
+post-commit: regression check 19 count=0), baseline diff removing exactly the five predicted
+wizard buckets (501→486), ad-hoc-modal shadow set empty console-wide. Fresh runs: wave suites
+179/179 (add-line-wizard exactly 23), consumed-contract primitives 61/61, eslint exit 0.
+Live QA via matrix rows 8/10/11/12 PASS; row 9 environment-INCONCLUSIVE (502 path) with the
+fail-visible banner + jsdom compensations. Honest gaps recorded: four §8 consumer-level pins
+absent (primitive-level compensations cited), one suite-header overclaim, one stale Modal.tsx
+comment, the `--panel-shortcuts` zero-consumer orphan — all routed to C3. Register delta
+executed by the integrator: DD-18r modal-sizing leg STRUCK (all four consumed panel tokens
+verified deleted).
