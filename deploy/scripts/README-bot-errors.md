@@ -102,6 +102,10 @@ Current stability evidence, refreshed read-only on 2026-06-13 14:03 ET:
 - Dev and relay hosts had the expected health or dispatcher launchd jobs loaded.
 - Non-Git runtime trees still report `git_head_sha: not_a_git_repository`; that is
   expected for stream-synced non-Git trees with a source SHA in the host-local manifest.
+- An isolated daily CLI simulation can prove runtime-skew event classification without
+  touching live queues: match should write a temp-outbox `info` event, and a synthetic
+  mismatch should write a temp-outbox `critical` event containing
+  `git_head_sha_mismatch`.
 
 ## Manual daily-health validation
 
@@ -127,6 +131,51 @@ The expected successful shape is:
 - A stamped Git-backed runtime manifest should produce a `git_head_sha: ... expected=...
   match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
   not enforcing.
+
+## No-post runtime-skew simulation
+
+Use this when validating #809/C4a without posting to the production outbox. It exercises
+the same `--daily` CLI path that writes daily-health events, but isolates `HOME`,
+`BOT_ERRORS_STATE_DIR`, and `BOT_ERRORS_OUTBOX_DIR` under a temp directory.
+
+```bash
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-c4a-no-post.XXXXXX")
+head=$(git rev-parse HEAD)
+profile='{"_explicitProfile":true,"role":"simulation","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"expectRuntimeManifest":true,"expectAlertTarget":false,"expectRustDesk":false,"expectFleetApi":false,"expectSourceUpdateAccess":false,"expectProviderProbe":false,"treeProvenanceFetch":false,"instances":[],"requiredCredentialFiles":[]}'
+
+run_runtime_skew_case() {
+  case_name="$1"
+  expected_sha="$2"
+  state="$tmp/$case_name/state"
+  mkdir -p "$tmp/home" "$tmp/tmp" "$state/outbox"
+  manifest='{"schemaVersion":1,"expected_head_sha":"'"$expected_sha"'","files":[]}'
+
+  env -i \
+    PATH="${PATH:-/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin}" \
+    HOME="$tmp/home" \
+    TMPDIR="$tmp/tmp" \
+    BOT_ERRORS_STATE_DIR="$state" \
+    BOT_ERRORS_OUTBOX_DIR="$state/outbox" \
+    BOT_ERRORS_RUNTIME_MANIFEST_JSON="$manifest" \
+    BOT_ERRORS_HEALTH_PROFILE_JSON="$profile" \
+    BOT_ERRORS_DRY_SERVICE_STATUS=inactive \
+    BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+    BOT_ERRORS_DRY_CLOCK_OFFSET_MS=0 \
+    BOT_ERRORS_DRY_DISK_FREE_BYTES=10737418240 \
+    BOT_ERRORS_DRY_DISK_TOTAL_BYTES=107374182400 \
+    python3 deploy/scripts/bot-errors-health-check.py --daily
+}
+
+run_runtime_skew_case match "$head"
+run_runtime_skew_case mismatch "0000000000000000000000000000000000000000"
+rg -n 'git_head_sha|git_head_sha_mismatch|"severity"|"summary"|outboxPolicy' "$tmp"
+```
+
+The expected successful shape is: the match case writes one temp event with severity
+`info` and `git_head_sha ... match`; the mismatch case writes one temp event with
+severity `critical` and `FAIL git_head_sha ... git_head_sha_mismatch`; both events report
+`outboxPolicy` as `explicit-outbox`. This proves runtime-skew event classification only.
+Use the deploy contract and host manifest verification above to prove file-hash parity.
 
 ## Manual drift-hook simulation
 
