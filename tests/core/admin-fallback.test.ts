@@ -68,6 +68,11 @@ interface AgentRuntimeOpts {
   fallbackActiveUntil?: number | null;
   fallbackTurnsServed?: number;
   fallbackTurnsEmpty?: number;
+  probeAttempts?: number;
+  activations?: number;
+  reverts?: number;
+  lastFallbackTurnAt?: number | null;
+  windowCostUsd?: number | null;
   forceResult?: ForceResult;
 }
 
@@ -82,7 +87,11 @@ function makeAgentRuntime(opts: AgentRuntimeOpts = {}): Runtime {
     fallbackActiveUntil: activeUntil,
     fallbackTurnsServed: opts.fallbackTurnsServed ?? 3,
     fallbackTurnsEmpty: opts.fallbackTurnsEmpty ?? 1,
-    lastFallbackTurnAt: null as number | null,
+    lastFallbackTurnAt: opts.lastFallbackTurnAt ?? null,
+    probeAttempts: opts.probeAttempts ?? 0,
+    fallbackActivations: opts.activations ?? 0,
+    fallbackReverts: opts.reverts ?? 0,
+    fallbackWindowCostUsd: opts.windowCostUsd ?? 0,
   };
 
   const forceResult: ForceResult = opts.forceResult
@@ -172,6 +181,48 @@ describe('handleFallbackCommand -- FALLBACK STATUS', () => {
 
     const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
     expect(reply).toContain('not supported');
+  });
+
+  it('includes probeAttempts in the reply when non-zero', async () => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    const runtime = makeAgentRuntime({ probeAttempts: 5 });
+
+    await handleFallbackCommand(runtime, messenger, statusCmd, ADMIN_CHAT_JID);
+
+    const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
+    expect(reply).toContain('probes: 5');
+  });
+
+  it('includes activations and reverts in the reply', async () => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    const runtime = makeAgentRuntime({ activations: 3, reverts: 2 });
+
+    await handleFallbackCommand(runtime, messenger, statusCmd, ADMIN_CHAT_JID);
+
+    const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
+    expect(reply).toContain('activations: 3');
+    expect(reply).toContain('reverts: 2');
+  });
+
+  it('includes cost line when windowCostUsd is non-null and non-zero', async () => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    const runtime = makeAgentRuntime({ windowCostUsd: 1.23 });
+
+    await handleFallbackCommand(runtime, messenger, statusCmd, ADMIN_CHAT_JID);
+
+    const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
+    expect(reply).toContain('$1.23');
+  });
+
+  it('omits cost line when windowCostUsd is null/absent (non-agent runtime graceful)', async () => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    // windowCostUsd = 0 → treated as absent (no meaningful cost)
+    const runtime = makeAgentRuntime({ windowCostUsd: 0 });
+
+    await handleFallbackCommand(runtime, messenger, statusCmd, ADMIN_CHAT_JID);
+
+    const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
+    expect(reply).not.toContain('cost');
   });
 });
 

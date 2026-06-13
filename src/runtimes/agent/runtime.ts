@@ -1510,6 +1510,7 @@ export class AgentRuntime implements Runtime {
   private activeToolNames = new Map<string, Map<string, string>>();
   private nextToolScopeOrdinal = 0;
   private recentProviderFallbackNotices = new Map<string, number>();
+  private recentFallbackEmptyTurnAlerts = new Map<string, number>();
   private recentToolFailureAlerts = new Map<string, number>();
 
   /**
@@ -6014,12 +6015,21 @@ export class AgentRuntime implements Runtime {
       served: this.fallbackTurnsServed,
       empty: this.fallbackTurnsEmpty,
     }, 'fallback turn completed with zero visible output');
-    emitAlertChecked(
-      this.instanceName,
-      'fallback_empty_turn',
-      'Fallback turn produced no visible output',
-      `provider=${entry?.provider} model=${entry?.model} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
-    );
+    // Per-chat dedup: reuse PROVIDER_FALLBACK_NOTICE_DEDUP_MS window to avoid
+    // one alert per empty turn in a sustained silent-bot episode.
+    const emptyAlertNow = Date.now();
+    for (const [k, ts] of this.recentFallbackEmptyTurnAlerts) {
+      if (emptyAlertNow - ts > PROVIDER_FALLBACK_NOTICE_DEDUP_MS) this.recentFallbackEmptyTurnAlerts.delete(k);
+    }
+    if (!this.recentFallbackEmptyTurnAlerts.has(queue.targetChatJid)) {
+      this.recentFallbackEmptyTurnAlerts.set(queue.targetChatJid, emptyAlertNow);
+      emitAlertChecked(
+        this.instanceName,
+        'fallback_empty_turn',
+        'Fallback turn produced no visible output',
+        `provider=${entry?.provider} model=${entry?.model} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
+      );
+    }
   }
 
   /** Arm (or move) the fallback window to `until`, schedule the revert timer,
@@ -6429,16 +6439,19 @@ export class AgentRuntime implements Runtime {
         } catch (err) {
           log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
         }
-        // Exactly-once-at-threshold stall alert. The counter only resets on
-        // deactivation, so attempts > threshold never re-alerts within the same
-        // stall episode. Extension continues regardless — surfacing must never
+        // Stall alert at threshold and every subsequent multiple (T, 2T, 3T ...).
+        // Re-alerting on multiples surfaces a long-running stall without
+        // drowning operators with per-probe noise. The counter only resets on
+        // deactivation. Extension continues regardless — surfacing must never
         // strand the instance on a dead primary.
-        if (this.fallbackProbeAttempts === PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD) {
+        const T = PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD;
+        const atts = this.fallbackProbeAttempts;
+        if (atts === T || (atts > T && (atts - T) % T === 0)) {
           emitAlertChecked(
             this.instanceName,
             'fallback_recovery_stalled',
             'Primary provider recovery probe is stalled — fallback window extending indefinitely',
-            `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${this.fallbackProbeAttempts} `
+            `reason=${this.fallbackArmReason ?? 'auth-required'} attempts=${atts} `
               + `windowEnd=${new Date(until).toISOString()} primaryProvider=${this.agentProvider}`,
           );
         }

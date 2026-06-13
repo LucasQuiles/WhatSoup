@@ -46,6 +46,10 @@ export interface Runtime {
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
+    probeAttempts?: number;
+    fallbackActivations?: number;
+    fallbackReverts?: number;
+    fallbackWindowCostUsd?: number;
     activeFallbackEntry?: AgentFallbackEntry | null;
     fallbackChain?: Array<AgentFallbackEntry & { eligible: boolean | null }>;
   };
