@@ -124,20 +124,20 @@ describe('isAdminMessage -- negative', () => {
 
 describe('parseAdminCommand -- phone positive', () => {
   it('parses ALLOW command', () => {
-    expect(parseAdminCommand('ALLOW 15184194479')).toEqual({ action: 'allow', subjectType: 'phone', subjectId: '15184194479' });
+    expect(parseAdminCommand('ALLOW 15551230008')).toEqual({ action: 'allow', subjectType: 'phone', subjectId: '15551230008' });
   });
 
   it('parses BLOCK command', () => {
-    expect(parseAdminCommand('BLOCK 15184194479')).toEqual({ action: 'block', subjectType: 'phone', subjectId: '15184194479' });
+    expect(parseAdminCommand('BLOCK 15551230008')).toEqual({ action: 'block', subjectType: 'phone', subjectId: '15551230008' });
   });
 
   it('is case insensitive', () => {
-    expect(parseAdminCommand('allow 15184194479')).toEqual({ action: 'allow', subjectType: 'phone', subjectId: '15184194479' });
-    expect(parseAdminCommand('Block 15184194479')).toEqual({ action: 'block', subjectType: 'phone', subjectId: '15184194479' });
+    expect(parseAdminCommand('allow 15551230008')).toEqual({ action: 'allow', subjectType: 'phone', subjectId: '15551230008' });
+    expect(parseAdminCommand('Block 15551230008')).toEqual({ action: 'block', subjectType: 'phone', subjectId: '15551230008' });
   });
 
   it('handles trailing whitespace', () => {
-    expect(parseAdminCommand('ALLOW 15184194479   ')).toEqual({ action: 'allow', subjectType: 'phone', subjectId: '15184194479' });
+    expect(parseAdminCommand('ALLOW 15551230008   ')).toEqual({ action: 'allow', subjectType: 'phone', subjectId: '15551230008' });
   });
 });
 

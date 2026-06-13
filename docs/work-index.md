@@ -183,7 +183,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/closed/session-leak-audit-20260406/beads/SILENT-02-spawn-per-turn-exit-no-result.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
 | `docs/sdlc/closed/session-leak-audit-20260406/beads/SILENT-03-global-crash-count.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
 | `docs/sdlc/closed/session-leak-audit-20260406/beads/SILENT-04-usage-limit-dirty-state.md` | bead | completed | body-marker | session-leak-audit | 2026-04-08 |  |
-| `docs/sdlc/closed/session-leak-audit-20260406/orchestrator-handoff.md` | doc | completed | state-md-status | session-leak-audit | 2026-04-08 |  |
+| `docs/sdlc/closed/session-leak-audit-20260406/orchestrator-handoff.md` | doc | completed | state-md-status | session-leak-audit | 2026-06-12 |  |
 | `docs/sdlc/closed/session-leak-audit-20260406/state.md` | state | completed | state-md-status | session-leak-audit | 2026-04-08 |  |
 
 ### docs/sdlc/closed/whatsapp-mcp-features  _(3 entries)_
@@ -202,7 +202,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC2-fts-injection.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/beads/SEC3-ssrf-dns.md` | bead | completed | bead-manifest | agent-layer-hardening | 2026-05-31 |  |
 | `docs/sdlc/completed/agent-layer-hardening-20260405/evidence-reconnect.md` | doc | closed | state-md-status | agent-layer-hardening | 2026-05-31 |  |
-| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | closed | state-md-status | agent-layer-hardening | 2026-06-11 |  |
+| `docs/sdlc/completed/agent-layer-hardening-20260405/state.md` | state | closed | state-md-status | agent-layer-hardening | 2026-06-12 |  |
 
 ### docs/sdlc/completed/audit-remediation-20260330  _(1 entries)_
 
@@ -338,7 +338,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md` | plan | completed | body-marker | sp3-search-enhancement | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md` | plan | completed | body-marker | sp4-two-way-voice | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | unknown | fallback | scheduled-groups-tabs | 2026-04-06 |  |
-| `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | completed | body-marker | anti-echo-session-controls | 2026-05-12 |  |
+| `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | completed | body-marker | anti-echo-session-controls | 2026-06-12 |  |
 | `docs/superpowers/plans/2026-04-07-fleet-charts.md` | plan | deferred | body-marker | fleet-charts | 2026-04-24 |  |
 | `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | completed | body-marker | operation-tracker | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-04-25-pr-0a-transport-contract-foundation.md` | plan | completed | body-marker | pr-0a-transport-contract-foundation | 2026-05-12 |  |
@@ -350,7 +350,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | completed | body-marker | anti-echo-review-handoff | 2026-05-12 |  |
+| `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | review | completed | body-marker | anti-echo-review-handoff | 2026-06-12 |  |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | unknown | fallback | bot-errors-tool-call-audit | 2026-06-12 |  |
 
 ### docs/superpowers/specs  _(13 entries)_
@@ -361,7 +361,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-04-04-mcp-feature-gaps-design.md` | spec | completed | body-marker | mcp-feature-gaps-design | 2026-04-24 |  |
 | `docs/superpowers/specs/2026-04-05-phase2-mcp-features-design.md` | spec | completed | body-marker | phase2-mcp-features-design | 2026-04-24 |  |
 | `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | unknown | body-marker | scheduled-groups-tabs-design | 2026-04-06 |  |
-| `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md` | spec | completed | body-marker | anti-echo-session-controls-design | 2026-05-12 |  |
+| `docs/superpowers/specs/2026-04-07-anti-echo-session-controls-design.md` | spec | completed | body-marker | anti-echo-session-controls-design | 2026-06-12 |  |
 | `docs/superpowers/specs/2026-04-07-provider-attribution.md` | spec | completed | body-marker | provider-attribution | 2026-05-12 |  |
 | `docs/superpowers/specs/2026-04-07-soup-kitchen-fleet-charts.md` | spec | deferred | body-marker | soup-kitchen-fleet-charts | 2026-04-24 |  |
 | `docs/superpowers/specs/2026-04-25-baseline-test-failures.md` | spec | closed | body-marker | baseline-test-failures | 2026-05-12 |  |
@@ -374,4 +374,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-12T22:26:41Z from commit `2cd4c4d84c0d9656f31a8adce69ea4fad5a0788b`
+- Generated at 2026-06-12T23:31:52Z from commit `e47276a4bb7ba006f74bcb5702547a04728bef26`

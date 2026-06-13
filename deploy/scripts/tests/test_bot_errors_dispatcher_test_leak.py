@@ -171,6 +171,28 @@ class TestEventIsTestLeak:
         )
         assert event_is_test_leak(event), "should detect /var/folders/.../T/ in summary"
 
+    def test_macos_writefail_fallback_path_is_not_a_leak(self):
+        """The dispatcher's OWN TMPDIR writefail fallback dir must never be
+        classified as a test leak: every real macOS daily-health event embeds
+        it in the writefail inventory line, and matching it silently dropped
+        legitimate host alerts."""
+        event = _make_event(
+            evidence=(
+                "writefail: count=0 paths=/home/testuser/.local/state/bot-errors/writefail,"
+                "/var/folders/mq/s3m40vj1/T/bot-errors-writefail,/home/testuser/.bot-errors-writefail"
+            ),
+        )
+        assert not event_is_test_leak(event), (
+            "macOS TMPDIR bot-errors-writefail fallback must not be dropped as a test leak"
+        )
+
+    def test_macos_temp_vitest_subpath_still_detected(self):
+        """Tightening the macOS pattern must not lose real vitest temp leaks."""
+        event = _make_event(
+            evidence="authDir: /var/folders/mq/s3m40vj1/T/bot-errors-health-Ab12Cd/auth",
+        )
+        assert event_is_test_leak(event), "vitest mkdtemp subpaths must still be detected"
+
     def test_evidence_vitest_redirect_outbox(self):
         """The vitest redirect outbox root path in evidence."""
         event = _make_event(

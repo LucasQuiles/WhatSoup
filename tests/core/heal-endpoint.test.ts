@@ -123,7 +123,7 @@ function makeDeps(db: Database, overrides: Partial<HealthDeps> = {}): HealthDeps
   return {
     db,
     connectionManager: {
-      botJid: '18455943112@s.whatsapp.net',
+      botJid: '15551230004@s.whatsapp.net',
       botLid: null,
       sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
       sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),

@@ -53,7 +53,7 @@ Harden the WhatsApp agent layer across stability, safety, correctness, and obser
 |------|------|--------|--------|-------|
 | CFG1-sibling-phones | config | **complete** | Q | All 6 instances configured |
 | CFG2-group-auto-respond | config | **complete** | Q | Removed from all multi-agent groups |
-| CFG3-phantom-service | ops | **complete** | Q | whatsoup@18454179470 stopped |
+| CFG3-phantom-service | ops | **complete** | Q | whatsoup@15551230003 stopped |
 | CFG4-mention-lid-fix | implement | **merged** | Q | LID-aware formatMentions (cfc03b6) |
 
 ### Phase 6B — Correctness

@@ -64,7 +64,7 @@ function makeMockSocket() {
     sendMessage: vi.fn(),
     end: vi.fn(),
     user: {
-      id: '18455943112:1@s.whatsapp.net',
+      id: '15551230004:1@s.whatsapp.net',
       lid: '81536414179557:2@lid',
       name: 'WhatSoup',
     },

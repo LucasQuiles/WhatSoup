@@ -46,7 +46,7 @@ function makeStoredMsg(overrides?: Partial<StoredMessage>): StoredMessage {
   return {
     pk: 1,
     chatJid: 'chat1@g.us',
-    senderJid: '15184194479@s.whatsapp.net',
+    senderJid: '15551230008@s.whatsapp.net',
     senderName: 'TestUser',
     messageId: 'msg-1',
     content: 'I just moved to London',
@@ -67,7 +67,7 @@ function makeStoredMsg(overrides?: Partial<StoredMessage>): StoredMessage {
 function validFactJson(overrides?: Record<string, unknown>): object {
   return {
     text: 'Lives in London',
-    sender_jid: '15184194479@s.whatsapp.net',
+    sender_jid: '15551230008@s.whatsapp.net',
     sender_name: 'TestUser',
     memory_type: 'user_fact',
     confidence: 0.9,
@@ -94,7 +94,7 @@ describe('extractFacts', () => {
 
     expect(facts).toHaveLength(1);
     expect(facts[0].text).toBe('Lives in London');
-    expect(facts[0].senderJid).toBe('15184194479@s.whatsapp.net');
+    expect(facts[0].senderJid).toBe('15551230008@s.whatsapp.net');
     expect(facts[0].senderName).toBe('TestUser');
     expect(facts[0].memoryType).toBe('user_fact');
     expect(facts[0].confidence).toBe(0.9);

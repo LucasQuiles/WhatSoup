@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-06-12T22:26:41Z",
+  "generated_at": "2026-06-12T23:31:52Z",
   "repo": "WhatSoup",
-  "git_head": "2cd4c4d84c0d9656f31a8adce69ea4fad5a0788b",
+  "git_head": "e47276a4bb7ba006f74bcb5702547a04728bef26",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 183,
   "schema_version": 5,
@@ -807,8 +807,8 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/closed/session-leak-audit-20260406",
       "supersedes_hint": null,
-      "last_modified": "2026-04-08",
-      "size_bytes": 25416
+      "last_modified": "2026-06-12",
+      "size_bytes": 25433
     },
     {
       "path": "docs/sdlc/closed/session-leak-audit-20260406/state.md",
@@ -915,7 +915,7 @@
       "status_source": "state-md-status",
       "canonical_parent": "docs/sdlc/completed/agent-layer-hardening-20260405",
       "supersedes_hint": null,
-      "last_modified": "2026-06-11",
+      "last_modified": "2026-06-12",
       "size_bytes": 5355
     },
     {
@@ -1947,7 +1947,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-05-12",
+      "last_modified": "2026-06-12",
       "size_bytes": 36688
     },
     {
@@ -2031,7 +2031,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/reviews",
       "supersedes_hint": null,
-      "last_modified": "2026-05-12",
+      "last_modified": "2026-06-12",
       "size_bytes": 13939
     },
     {
@@ -2103,7 +2103,7 @@
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-05-12",
+      "last_modified": "2026-06-12",
       "size_bytes": 45427
     },
     {

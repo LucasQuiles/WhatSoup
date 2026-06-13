@@ -80,8 +80,8 @@ function makeMessenger(): Messenger {
 function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
     messageId: `msg-${randomBytes(4).toString('hex')}`,
-    chatJid: '15184194479@s.whatsapp.net',
-    senderJid: '15184194479@s.whatsapp.net',
+    chatJid: '15551230008@s.whatsapp.net',
+    senderJid: '15551230008@s.whatsapp.net',
     senderName: 'Alice',
     content: 'hello',
     contentType: 'text',
@@ -96,7 +96,7 @@ function makeMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   };
 }
 
-const BOT_JID = '18455943112@s.whatsapp.net';
+const BOT_JID = '15551230004@s.whatsapp.net';
 
 function makeIngest(opts?: { durability?: Record<string, unknown>; runtimeOverrides?: Partial<Runtime> }) {
   const db = makeDb();
@@ -161,13 +161,13 @@ describe('pausedChats — ingest short-circuit', () => {
   // 1. Paused group: message from paused group → runtime.handleMessage NOT called
   // -------------------------------------------------------------------------
   it('skips dispatch for a message from a paused group', async () => {
-    const groupJid = '120363406689931730@g.us';
+    const groupJid = '120363555555555001@g.us';
     setPausedChats([groupJid]);
 
     const { handler, runtime } = makeIngest();
     const msg = makeMsg({
       chatJid: groupJid,
-      senderJid: '15184194479@s.whatsapp.net',
+      senderJid: '15551230008@s.whatsapp.net',
       isGroup: true,
     });
 
@@ -180,11 +180,11 @@ describe('pausedChats — ingest short-circuit', () => {
   // 2. Non-paused: message from unlisted chat → runtime.handleMessage IS called
   // -------------------------------------------------------------------------
   it('dispatches message from a non-paused chat normally', async () => {
-    setPausedChats(['120363406689931730@g.us']); // some other chat is paused
+    setPausedChats(['120363555555555001@g.us']); // some other chat is paused
 
     const { handler, runtime } = makeIngest();
     const msg = makeMsg({
-      chatJid: '15184194479@s.whatsapp.net',
+      chatJid: '15551230008@s.whatsapp.net',
       isGroup: false,
     });
 
@@ -198,7 +198,7 @@ describe('pausedChats — ingest short-circuit', () => {
   // 3. Durability: paused message gets journalInbound + markInboundSkipped
   // -------------------------------------------------------------------------
   it('journals paused messages as chat_paused when durability is present', async () => {
-    const groupJid = '120363406689931730@g.us';
+    const groupJid = '120363555555555001@g.us';
     setPausedChats([groupJid]);
 
     const journalInbound = vi.fn().mockReturnValue(42);
@@ -212,7 +212,7 @@ describe('pausedChats — ingest short-circuit', () => {
     const { handler, runtime } = makeIngest({ durability });
     const msg = makeMsg({
       chatJid: groupJid,
-      senderJid: '15184194479@s.whatsapp.net',
+      senderJid: '15551230008@s.whatsapp.net',
       isGroup: true,
     });
 
@@ -220,10 +220,10 @@ describe('pausedChats — ingest short-circuit', () => {
 
     expect(runtime.handleMessage).not.toHaveBeenCalled();
     expect(journalInbound).toHaveBeenCalledOnce();
-    // conversationKey for group JID = "120363406689931730_at_g.us"
+    // conversationKey for group JID = "120363555555555001_at_g.us"
     expect(journalInbound).toHaveBeenCalledWith(
       msg.messageId,
-      '120363406689931730_at_g.us',
+      '120363555555555001_at_g.us',
       groupJid,
       'none',
     );
@@ -232,7 +232,7 @@ describe('pausedChats — ingest short-circuit', () => {
   });
 
   it('handles admin commands from paused chats instead of dropping them', async () => {
-    const groupJid = '120363406689931730@g.us';
+    const groupJid = '120363555555555001@g.us';
     setPausedChats([groupJid]);
     mockIsAdminMessage.mockReturnValue(true);
     mockParseAdminCommand.mockReturnValue({ action: 'block', subjectType: 'phone', subjectId: '15559876543' });
@@ -248,7 +248,7 @@ describe('pausedChats — ingest short-circuit', () => {
     const { handler, runtime, messenger, db } = makeIngest({ durability });
     const msg = makeMsg({
       chatJid: groupJid,
-      senderJid: '15184194479@s.whatsapp.net',
+      senderJid: '15551230008@s.whatsapp.net',
       content: 'block 15559876543',
       isGroup: true,
     });
@@ -268,7 +268,7 @@ describe('pausedChats — ingest short-circuit', () => {
     );
     expect(journalInbound).toHaveBeenCalledWith(
       msg.messageId,
-      '120363406689931730_at_g.us',
+      '120363555555555001_at_g.us',
       groupJid,
       'admin',
     );
@@ -280,13 +280,13 @@ describe('pausedChats — ingest short-circuit', () => {
   // 4. Both keys checked: either conversationKey or chatJid match triggers pause
   // -------------------------------------------------------------------------
   it('pauses when conversationKey matches (even if chatJid is not in the set)', async () => {
-    // For DM jid "15184194479@s.whatsapp.net", conversationKey = "15184194479"
+    // For DM jid "15551230008@s.whatsapp.net", conversationKey = "15551230008"
     // Pause using the conversationKey form
-    setPausedChats(['15184194479']);
+    setPausedChats(['15551230008']);
 
     const { handler, runtime } = makeIngest();
     const msg = makeMsg({
-      chatJid: '15184194479@s.whatsapp.net',
+      chatJid: '15551230008@s.whatsapp.net',
       isGroup: false,
     });
 
@@ -297,11 +297,11 @@ describe('pausedChats — ingest short-circuit', () => {
 
   it('pauses when chatJid matches (even if conversationKey is not in the set)', async () => {
     // Pause using the raw chatJid
-    setPausedChats(['15184194479@s.whatsapp.net']);
+    setPausedChats(['15551230008@s.whatsapp.net']);
 
     const { handler, runtime } = makeIngest();
     const msg = makeMsg({
-      chatJid: '15184194479@s.whatsapp.net',
+      chatJid: '15551230008@s.whatsapp.net',
       isGroup: false,
     });
 
@@ -317,8 +317,8 @@ describe('pausedChats — ingest short-circuit', () => {
     setPausedChats([]);
 
     const { handler, runtime } = makeIngest();
-    const msg1 = makeMsg({ chatJid: '15184194479@s.whatsapp.net', isGroup: false });
-    const msg2 = makeMsg({ chatJid: '120363406689931730@g.us', senderJid: '15184194479@s.whatsapp.net', isGroup: true });
+    const msg1 = makeMsg({ chatJid: '15551230008@s.whatsapp.net', isGroup: false });
+    const msg2 = makeMsg({ chatJid: '120363555555555001@g.us', senderJid: '15551230008@s.whatsapp.net', isGroup: true });
 
     await runIngest(handler, msg1);
     await runIngest(handler, msg2);
@@ -330,13 +330,13 @@ describe('pausedChats — ingest short-circuit', () => {
   // Extra: no durability — paused still skips dispatch without crashing
   // -------------------------------------------------------------------------
   it('skips dispatch without crashing when durability is absent', async () => {
-    const groupJid = '120363406689931730@g.us';
+    const groupJid = '120363555555555001@g.us';
     setPausedChats([groupJid]);
 
     const { handler, runtime } = makeIngest(); // no durability
     const msg = makeMsg({
       chatJid: groupJid,
-      senderJid: '15184194479@s.whatsapp.net',
+      senderJid: '15551230008@s.whatsapp.net',
       isGroup: true,
     });
 

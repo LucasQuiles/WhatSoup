@@ -70,11 +70,11 @@ describe('handleAdminCommand ALLOW phone', () => {
   it('updates access status to allowed', async () => {
     const db = openDb();
     const messenger = makeMockMessenger();
-    insertPending(db, 'phone', '15184194479', 'Test User');
+    insertPending(db, 'phone', '15551230008', 'Test User');
 
-    await handleAdminCommand(db, messenger, 'allow', 'phone', '15184194479', ADMIN_CHAT_JID, vi.fn().mockResolvedValue(undefined));
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15551230008', ADMIN_CHAT_JID, vi.fn().mockResolvedValue(undefined));
 
-    const entry = lookupAccess(db, 'phone', '15184194479');
+    const entry = lookupAccess(db, 'phone', '15551230008');
     expect(entry!.status).toBe('allowed');
   });
 
@@ -82,9 +82,9 @@ describe('handleAdminCommand ALLOW phone', () => {
     const db = openDb();
     const messenger = makeMockMessenger();
 
-    await handleAdminCommand(db, messenger, 'allow', 'phone', '15184194479', ADMIN_CHAT_JID, vi.fn().mockResolvedValue(undefined));
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15551230008', ADMIN_CHAT_JID, vi.fn().mockResolvedValue(undefined));
 
-    expect(messenger.sendMessage).toHaveBeenCalledWith(ADMIN_CHAT_JID, expect.stringContaining('15184194479'));
+    expect(messenger.sendMessage).toHaveBeenCalledWith(ADMIN_CHAT_JID, expect.stringContaining('15551230008'));
   });
 
   it('processes queued messages for the newly allowed sender', async () => {
@@ -92,9 +92,9 @@ describe('handleAdminCommand ALLOW phone', () => {
     const messenger = makeMockMessenger();
 
     storeMessageIfNew(db, {
-      chatJid: '15184194479@s.whatsapp.net',
-      conversationKey: '15184194479',
-      senderJid: '15184194479@s.whatsapp.net',
+      chatJid: '15551230008@s.whatsapp.net',
+      conversationKey: '15551230008',
+      senderJid: '15551230008@s.whatsapp.net',
       senderName: 'Queued User',
       messageId: 'queued-msg-001',
       content: 'pending content',
@@ -104,7 +104,7 @@ describe('handleAdminCommand ALLOW phone', () => {
     });
 
     const handleMessageFn = vi.fn().mockResolvedValue(undefined);
-    await handleAdminCommand(db, messenger, 'allow', 'phone', '15184194479', ADMIN_CHAT_JID, handleMessageFn);
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15551230008', ADMIN_CHAT_JID, handleMessageFn);
 
     expect(handleMessageFn).toHaveBeenCalledWith(
       expect.objectContaining({ messageId: 'queued-msg-001', content: 'pending content' }),
@@ -120,18 +120,18 @@ describe('handleAdminCommand BLOCK phone', () => {
   it('updates access status to blocked', async () => {
     const db = openDb();
     const messenger = makeMockMessenger();
-    insertPending(db, 'phone', '15184194479', 'BlockMe');
+    insertPending(db, 'phone', '15551230008', 'BlockMe');
 
-    await handleAdminCommand(db, messenger, 'block', 'phone', '15184194479', ADMIN_CHAT_JID, vi.fn().mockResolvedValue(undefined));
+    await handleAdminCommand(db, messenger, 'block', 'phone', '15551230008', ADMIN_CHAT_JID, vi.fn().mockResolvedValue(undefined));
 
-    expect(lookupAccess(db, 'phone', '15184194479')!.status).toBe('blocked');
+    expect(lookupAccess(db, 'phone', '15551230008')!.status).toBe('blocked');
   });
 
   it('sends confirmation to admin', async () => {
     const db = openDb();
     const messenger = makeMockMessenger();
 
-    await handleAdminCommand(db, messenger, 'block', 'phone', '15184194479', ADMIN_CHAT_JID, vi.fn().mockResolvedValue(undefined));
+    await handleAdminCommand(db, messenger, 'block', 'phone', '15551230008', ADMIN_CHAT_JID, vi.fn().mockResolvedValue(undefined));
 
     expect(messenger.sendMessage).toHaveBeenCalledWith(ADMIN_CHAT_JID, expect.stringContaining('Blocked'));
   });
@@ -141,7 +141,7 @@ describe('handleAdminCommand BLOCK phone', () => {
     const messenger = makeMockMessenger();
     const handleMessageFn = vi.fn();
 
-    await handleAdminCommand(db, messenger, 'block', 'phone', '15184194479', ADMIN_CHAT_JID, handleMessageFn);
+    await handleAdminCommand(db, messenger, 'block', 'phone', '15551230008', ADMIN_CHAT_JID, handleMessageFn);
 
     expect(handleMessageFn).not.toHaveBeenCalled();
   });

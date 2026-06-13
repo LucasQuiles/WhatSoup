@@ -4,7 +4,7 @@
 **Prepared:** 2026-04-06
 **For:** Q (Orchestrator) or any future conductor assuming this workstream
 **Project:** WhatSoup (`/home/q/LAB/WhatSoup`)
-**Colony group:** `120363406689931730@g.us`
+**Colony group:** `120363555555555001@g.us`
 
 ---
 
@@ -12,7 +12,7 @@
 
 Remediate 30 verified issues across the WhatSoup agent runtime: memory leaks, error handling gaps, race conditions, silent failures, observability blind spots, and performance bottlenecks. Every issue is traced to exact file + line number, has a full implementation spec, a "Maybe I'm Wrong" validation section, required tests with GIVEN/WHEN/THEN assertions, and an assigned loop depth for the backpressure review cycle.
 
-**What this is NOT:** A greenfield build. Every bead is a surgical fix to existing production code running Q, L, BES Bot, Shannon, and Personal instances right now.
+**What this is NOT:** A greenfield build. Every bead is a surgical fix to existing production code running Q, L, Agent C, Shannon, and Personal instances right now.
 
 ---
 
@@ -62,9 +62,9 @@ All in `docs/sdlc/active/session-leak-audit-20260406/beads/`:
 ### Supporting Documentation
 | File | Purpose |
 |------|---------|
-| `/home/q/agents/PROTOCOL.md` | WhatsApp Group Protocol v2 — roles, assignment format, result format |
-| `/home/q/agents/q/CLAUDE.md` | Q's role summary, group JID, agent roster |
-| `/home/q/agents/q/.claude/CLAUDE.md` | Q's detailed identity, service rules, collaboration protocol |
+| `__HOME__/agents/PROTOCOL.md` | WhatsApp Group Protocol v2 — roles, assignment format, result format |
+| `__HOME__/agents/q/CLAUDE.md` | Q's role summary, group JID, agent roster |
+| `__HOME__/agents/q/.claude/CLAUDE.md` | Q's detailed identity, service rules, collaboration protocol |
 | `/home/q/LAB/sdlc-os/colony/conductor-prompt.md` | Full conductor session types (DISPATCH, EVALUATE, SYNTHESIZE, RECOVER, DISCOVER) |
 | `/home/q/LAB/sdlc-os/colony/bridge-cli.ts` | Bridge CLI arguments and usage |
 | `/home/q/LAB/sdlc-os/colony/bridge.ts` | Status transition map, safety constraints, compare-and-swap |
@@ -78,19 +78,19 @@ All in `docs/sdlc/active/session-leak-audit-20260406/beads/`:
 
 | Agent | Phone | Model | WhatSoup Instance | Working Dir | Use For |
 |-------|-------|-------|-------------------|-------------|---------|
-| **Q** | 18454174651 | Claude (native) | `whatsoup@q` | `/home/q/agents/q` | Orchestration only — NEVER assign beads to self |
-| **L** | 18454433572 | Claude (native) | `whatsoup@lab` | `/home/q/agents/lab` | L0 implementation, L1 review of Codex work |
-| **BES Bot** | 19297905323 | Codex | `whatsoup@besbot` | `/home/q/agents/besbot` | L0 implementation, L1 review of Claude work |
-| **Shannon** | 18454179470 | Codex | `whatsoup@shandroid` | `/home/q/agents/shandroid` | L0 implementation, L1 review of Claude work |
-| **Lucas** | 18459780919 | Human | N/A | N/A | Direction, decisions, tie-breaking only |
+| **Q** | 15551230001 | Claude (native) | `whatsoup@agent-a` | `__HOME__/agents/q` | Orchestration only — NEVER assign beads to self |
+| **L** | 15551230002 | Claude (native) | `whatsoup@agent-b` | `__HOME__/agents/lab` | L0 implementation, L1 review of Codex work |
+| **Agent C** | 15551230005 | Codex | `whatsoup@agent-c` | `__HOME__/agents/besbot` | L0 implementation, L1 review of Claude work |
+| **Shannon** | 15551230003 | Codex | `whatsoup@agent-d` | `__HOME__/agents/shandroid` | L0 implementation, L1 review of Claude work |
+| **Lucas** | 15551230006 | Human | N/A | N/A | Direction, decisions, tie-breaking only |
 
 ### Cross-Model Review Matrix
 
 | L0 Runner | L1 Reviewer | L2 Oracle |
 |-----------|-------------|-----------|
-| L (Claude) | BES Bot or Shannon (Codex) | L (Claude) |
-| BES Bot (Codex) | L (Claude) | Shannon (Codex) |
-| Shannon (Codex) | L (Claude) | BES Bot (Codex) |
+| L (Claude) | Agent C or Shannon (Codex) | L (Claude) |
+| Agent C (Codex) | L (Claude) | Shannon (Codex) |
+| Shannon (Codex) | L (Claude) | Agent C (Codex) |
 
 **Rule:** L1 reviewer MUST be a different model family than L0 implementer. L2 oracle alternates again.
 
@@ -106,7 +106,7 @@ Fix bugs shipping in production right now. No dependencies between them.
 |------|-----------|-----------|
 | SILENT-01 | L | Trivial arg fix in session.ts — Claude-native for quick turnaround |
 | SILENT-04 | Shannon | Clear scope, isolated in runtime.ts result handler |
-| ERR-02 | BES Bot | Small guard replacement, no behavioral change |
+| ERR-02 | Agent C | Small guard replacement, no behavioral change |
 | RACE-04 | L | Touches runtime.ts event dispatch — benefits from Claude's context |
 | SILENT-02 | Shannon | Complicated (L0+L1+L2+L2.5), needs synthesized result event — start early |
 
@@ -118,10 +118,10 @@ Error handling and exception safety. No dependencies.
 
 | Bead | Assign To | Rationale |
 |------|-----------|-----------|
-| ERR-01 | BES Bot | Control session try/catch — contained scope |
+| ERR-01 | Agent C | Control session try/catch — contained scope |
 | ERR-03 | L | Complicated (workspace provisioning) — benefits from Claude's fs knowledge |
 | ERR-04 | Shannon | Shutdown loop wrapping — mechanical |
-| ERR-05 | BES Bot | Ingest slot safety — isolated in ingest.ts |
+| ERR-05 | Agent C | Ingest slot safety — isolated in ingest.ts |
 | RACE-03 | L | SQLITE_BUSY orphan — complicated, touches session.ts spawn path |
 
 ### Phase 3 — Leak Foundation (3 beads, sequential then parallel)
@@ -131,7 +131,7 @@ Error handling and exception safety. No dependencies.
 | Order | Bead | Assign To |
 |-------|------|-----------|
 | First | LEAK-01 | L (foundation helper — must be right) |
-| Then parallel | LEAK-02 | BES Bot (wire into crash paths) |
+| Then parallel | LEAK-02 | Agent C (wire into crash paths) |
 | Then parallel | LEAK-03 | Shannon (wire into shutdown) |
 
 ### Phase 4 — Leak Resources (6 beads, all parallel)
@@ -140,24 +140,24 @@ Error handling and exception safety. No dependencies.
 |------|-----------|
 | LEAK-04 | L (complicated — workspace eviction) |
 | LEAK-05 | Shannon (shared queue pruning) |
-| LEAK-06 | BES Bot (socket destroy) |
+| LEAK-06 | Agent C (socket destroy) |
 | LEAK-07 | Shannon (respawn timer tracking) |
 | LEAK-08 | L (complicated — SIGTERM grace) |
-| SILENT-03 | BES Bot (per-chat crash count) |
+| SILENT-03 | Agent C (per-chat crash count) |
 
 ### Phase 5 — Races (2 beads, parallel)
 
 | Bead | Assign To | Note |
 |------|-----------|------|
 | RACE-01 | L | Complex — full loop (L0+L1+L2+L2.5+L2.75). Highest-risk bead. |
-| RACE-02 | BES Bot | May be wontfix — needs pre-implementation verification first |
+| RACE-02 | Agent C | May be wontfix — needs pre-implementation verification first |
 
 ### Phase 6 — Observability (2 beads, parallel)
 
 | Bead | Assign To |
 |------|-----------|
 | LOG-01 | Shannon |
-| LOG-02 | BES Bot |
+| LOG-02 | Agent C |
 
 ### Phase 7 — Performance (3 beads, PERF-01 first)
 
@@ -165,7 +165,7 @@ Error handling and exception safety. No dependencies.
 |-------|------|-----------|
 | First | PERF-01 | L (40 prepared statements — mechanical but large) |
 | Then parallel | PERF-02 | Shannon (buffer optimization) |
-| Then parallel | PERF-03 | BES Bot (transaction batching — depends on PERF-01 cached stmts) |
+| Then parallel | PERF-03 | Agent C (transaction batching — depends on PERF-01 cached stmts) |
 
 ### Phase 8 — Cleanup (4 beads, all parallel, lowest priority)
 
@@ -183,7 +183,7 @@ Error handling and exception safety. No dependencies.
 ### Message Format (WhatsApp)
 
 ```
-@18454433572 L — LEAK-01: Add cleanupPerChatState(mapKey) private method to AgentRuntime.
+@15551230002 L — LEAK-01: Add cleanupPerChatState(mapKey) private method to AgentRuntime.
 Files: src/runtimes/agent/runtime.ts
 Branch: fix/leak-01-cleanup-helper
 Acceptance: method deletes from all 6 per-chat maps, typecheck + vitest pass, 3 new tests.
@@ -209,7 +209,7 @@ When an agent posts `@Q — done. LEAK-01 [commit abc1234] [summary]`:
    ```
 3. **Dispatch L1 review** to a DIFFERENT-MODEL agent:
    ```
-   @19297905323 BES Bot — LEAK-01 L1 review: Review commit abc1234 against spec LEAK-01-cleanup-helper.md.
+   @15551230005 Agent C — LEAK-01 L1 review: Review commit abc1234 against spec LEAK-01-cleanup-helper.md.
    Validate: code matches spec, tests are durable/repeatable/observable/provable, no regressions.
    Run: npm run typecheck && npx vitest run
    Spec: docs/sdlc/active/session-leak-audit-20260406/beads/LEAK-01-cleanup-helper.md
@@ -423,7 +423,7 @@ git diff main..HEAD
 
 4. **Every task has a bead ID** — no informal "hey can you also fix this" assignments.
 
-5. **Cross-model review is mandatory** — if L (Claude) wrote the code, BES Bot or Shannon (Codex) reviews it. Never same-model review.
+5. **Cross-model review is mandatory** — if L (Claude) wrote the code, Agent C or Shannon (Codex) reviews it. Never same-model review.
 
 6. **Bridge is the source of truth for status** — don't manually edit bead status fields. Run the bridge CLI.
 
@@ -533,13 +533,13 @@ To begin execution of this task:
 ├── types.ts                              # Type definitions
 └── README.md                             # Full operational reference
 
-/home/q/agents/
+__HOME__/agents/
 ├── PROTOCOL.md                           # WhatsApp Group Protocol v2
 ├── q/                                    # Q orchestrator
 │   ├── CLAUDE.md                         # Role summary
 │   └── .claude/CLAUDE.md                 # Detailed instructions
 ├── lab/                                  # L agent
-├── besbot/                               # BES Bot agent
+├── besbot/                               # Agent C agent
 └── shandroid/                            # Shannon agent
 ```
 

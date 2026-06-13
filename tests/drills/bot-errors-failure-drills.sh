@@ -27,7 +27,11 @@ HEALTH="$REPO_ROOT/deploy/scripts/bot-errors-health-check.py"
 HEARTBEAT="$REPO_ROOT/deploy/scripts/bot-errors-heartbeat-watchdog.py"
 COLLECTOR="$REPO_ROOT/deploy/scripts/bot-errors-collector.py"
 
-SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/bot-errors-drill.XXXXXX")"
+# Pin the sandbox under /tmp: the dispatcher's test-leak defense drops events
+# whose text contains macOS user temp paths (/var/folders/.../T/), and drill
+# evidence embeds sandbox paths by design. /tmp/bot-errors-drill.* is outside
+# every default leak pattern on both macOS and Linux CI.
+SANDBOX="$(mktemp -d "/tmp/bot-errors-drill.XXXXXX")"
 CAPTURE="$SANDBOX/sent.log"
 ALL_CAPTURE="$SANDBOX/all-sent.log"
 CAPTURE_BYTES=0
@@ -36,7 +40,9 @@ export BOT_ERRORS_STATE_DIR="$SANDBOX/state"
 export BOT_ERRORS_OUTBOX_DIR="$BOT_ERRORS_STATE_DIR/outbox"
 export BOT_ERRORS_DRY_SEND_CAPTURE="$CAPTURE"
 # Deterministic platform string so logHints assertions are stable.
-export BOT_ERRORS_DRY_PLATFORM="linux"
+export BOT_ERRORS_DRY_SYS_PLATFORM="linux"
+export BOT_ERRORS_DRY_PLATFORM_SYSTEM="Linux"
+export BOT_ERRORS_DRY_PLATFORM="linux"  # legacy name, kept for older script revisions
 export BOT_ERRORS_DRY_PLATFORM_RELEASE="6.0.0-drill"
 
 PASS=0

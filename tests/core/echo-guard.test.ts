@@ -33,13 +33,13 @@ describe('echo-guard', () => {
   });
 
   it('always allows DM sends regardless of cooldown', () => {
-    const dmJid = '18459780919@s.whatsapp.net';
+    const dmJid = '15551230006@s.whatsapp.net';
     recordGroupOutbound(dmJid);
     expect(canSendToGroup(dmJid, DEFAULT_CFG)).toBe(true);
   });
 
   it('always allows LID DM sends', () => {
-    const lidJid = '49079279169655@lid';
+    const lidJid = '11111110000008@lid';
     recordGroupOutbound(lidJid);
     expect(canSendToGroup(lidJid, DEFAULT_CFG)).toBe(true);
   });

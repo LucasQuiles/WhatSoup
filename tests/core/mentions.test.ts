@@ -14,32 +14,32 @@ describe('formatMentions (no contacts)', () => {
   });
 
   it('detects bare @number mention — emits only @s.whatsapp.net (no @lid)', () => {
-    const result = formatMentions('Hey @15184194479 check this');
+    const result = formatMentions('Hey @15551230008 check this');
     expect(result.hasMentions).toBe(true);
-    expect(result.jids).toContain('15184194479@s.whatsapp.net');
+    expect(result.jids).toContain('15551230008@s.whatsapp.net');
     // @lid variant is NOT emitted
-    expect(result.jids).not.toContain('15184194479@lid');
+    expect(result.jids).not.toContain('15551230008@lid');
     expect(result.jids).toHaveLength(1);
-    expect(result.text).toBe('Hey @15184194479 check this');
+    expect(result.text).toBe('Hey @15551230008 check this');
   });
 
   it('detects @+number with leading plus and rewrites to bare number', () => {
-    const result = formatMentions('Hey @+15184194479 check this');
+    const result = formatMentions('Hey @+15551230008 check this');
     expect(result.hasMentions).toBe(true);
-    expect(result.jids).toContain('15184194479@s.whatsapp.net');
-    expect(result.text).toBe('Hey @15184194479 check this');
+    expect(result.jids).toContain('15551230008@s.whatsapp.net');
+    expect(result.text).toBe('Hey @15551230008 check this');
   });
 
   it('detects multiple number mentions — one JID per phone', () => {
-    const result = formatMentions('@15184194479 and @18455943112 are here');
+    const result = formatMentions('@15551230008 and @15551230004 are here');
     expect(result.hasMentions).toBe(true);
     expect(result.jids).toHaveLength(2); // 1 JID per phone (no @lid)
-    expect(result.jids).toContain('15184194479@s.whatsapp.net');
-    expect(result.jids).toContain('18455943112@s.whatsapp.net');
+    expect(result.jids).toContain('15551230008@s.whatsapp.net');
+    expect(result.jids).toContain('15551230004@s.whatsapp.net');
   });
 
   it('deduplicates repeated mentions of the same number', () => {
-    const result = formatMentions('@15184194479 said hi, @15184194479 again');
+    const result = formatMentions('@15551230008 said hi, @15551230008 again');
     expect(result.hasMentions).toBe(true);
     expect(result.jids).toHaveLength(1); // one set only
   });
@@ -50,9 +50,9 @@ describe('formatMentions (no contacts)', () => {
   });
 
   it('handles mention followed by punctuation', () => {
-    const result = formatMentions('Hey @15184194479, what do you think?');
+    const result = formatMentions('Hey @15551230008, what do you think?');
     expect(result.hasMentions).toBe(true);
-    expect(result.jids).toContain('15184194479@s.whatsapp.net');
+    expect(result.jids).toContain('15551230008@s.whatsapp.net');
   });
 
   it('leaves unresolved @name patterns unchanged when no contacts', () => {
@@ -70,7 +70,7 @@ describe('formatMentions (with contacts)', () => {
   function buildContacts(): ContactsDirectory {
     const dir = new ContactsDirectory();
     dir.observe('15550100001@s.whatsapp.net', 'Q');
-    dir.observe('18455943112@s.whatsapp.net', 'Loops');
+    dir.observe('15551230004@s.whatsapp.net', 'Loops');
     dir.observe('15551234567@s.whatsapp.net', 'Jason Bradshaw');
     return dir;
   }
@@ -88,8 +88,8 @@ describe('formatMentions (with contacts)', () => {
   it('is case-insensitive for name lookup', () => {
     const dir = buildContacts();
     const result = formatMentions('Hey @loops whats up', dir.contacts);
-    expect(result.text).toBe('Hey @18455943112 whats up');
-    expect(result.jids).toContain('18455943112@s.whatsapp.net');
+    expect(result.text).toBe('Hey @15551230004 whats up');
+    expect(result.jids).toContain('15551230004@s.whatsapp.net');
   });
 
   it('resolves first name from multi-word display name', () => {
@@ -107,8 +107,8 @@ describe('formatMentions (with contacts)', () => {
 
   it('handles mix of @number and @name in same message', () => {
     const dir = buildContacts();
-    const result2 = formatMentions('@Q and @18455943112 should both see this', dir.contacts);
-    expect(result2.text).toBe('@15550100001 and @18455943112 should both see this');
+    const result2 = formatMentions('@Q and @15551230004 should both see this', dir.contacts);
+    expect(result2.text).toBe('@15550100001 and @15551230004 should both see this');
     expect(result2.jids).toHaveLength(2); // 2 phones * 1 suffix each
   });
 

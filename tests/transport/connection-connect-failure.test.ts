@@ -85,7 +85,7 @@ describe('ConnectionManager — connect() failure path', () => {
       query: vi.fn(),
       end: vi.fn(),
       ws: { isOpen: true },
-      user: { id: '18455943112:1@s.whatsapp.net', lid: '81536414179557:2@lid', name: 'WhatSoup' },
+      user: { id: '15551230004:1@s.whatsapp.net', lid: '81536414179557:2@lid', name: 'WhatSoup' },
     };
     vi.mocked(makeWASocket).mockReturnValueOnce(mockSock as any);
 
