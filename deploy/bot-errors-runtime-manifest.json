@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-13T00:47:34Z",
+  "generatedAt": "2026-06-13T01:42:48Z",
   "scope": "bot-errors-runtime-scripts",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "396cc465fa804caa27918fc0c0b9b467aeec0ee52d87616567d7bd02a7ec5498",
+      "sha256": "1ca2abf2853ad47615c8bce9bb5dc7ea95001c0ff531b70997b609ed4174b28b",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -17,7 +17,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "2e45715cfdd1e9f83573fa36453346a79769ab62bcd094e0649e6f9cfe48fdff",
+      "sha256": "302763943caf724f0725415dc504dd28e562d56a88e593d2589f0d217b164dc7",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
