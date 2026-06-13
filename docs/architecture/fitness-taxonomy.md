@@ -21,11 +21,15 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 
 | id | detect | severity | rings | purpose |
 |----|--------|----------|-------|---------|
-| `arch.file-size` | mechanical | block | hook, eslint, guard, ci | Ratchet file line counts so known large files can shrink but not keep growing. |
+| `arch.file-size` | mechanical | block† | hook, eslint, guard, ci | Ratchet file line counts so known large files can shrink but not keep growing. |
 | `arch.god-class` | ast | warn | eslint | Warn when a class owns too many unrelated runtime responsibilities. |
 | `arch.test-colocation-churn` | mechanical | advisory | guard | Surface test files whose churn suggests an unstable production boundary. |
 | `arch.defense-both-layers` | semantic | advisory | sdlc | Ensure service-layer protections are also threaded through route or caller boundaries. |
 | `arch.import-boundaries` | mechanical | block | guard, ci | Ratchet import direction between src/ layers so known violations can shrink but new cross-layer reach is blocked. |
+
+† `arch.file-size` severity is `block` for the **hook, guard, and ci rings** (enforced via `.claude/fitness/baseline.json` ratchet).
+  The **eslint ring** mirrors it at `warn` severity only — an advisory copy per `meta.no-redundant-gates`.
+  The warning count must not grow; see `tests/scripts/fitness-file-size-warning-budget.test.ts`.
 
 ## Invariant
 
@@ -116,3 +120,5 @@ Because the ring is warn-only, the known violations are intentionally **not**
 baseline-suppressed here — they stay visible in the lint output. Local runs use
 `node --experimental-strip-types`; Node 24/25 (the supported engines range) is
 authoritative via CI.
+
+The ESLint ring warning count for `arch.file-size` is ratcheted by `tests/scripts/fitness-file-size-warning-budget.test.ts`.
