@@ -17,6 +17,12 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+
 
 DEFAULT_CHECKS = "q_loop,dispatcher,collector,daily_health,queue_backlog,local_services,local_instance_health"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -175,47 +181,12 @@ def append_private_jsonl(path: Path, record: dict[str, Any]) -> None:
     fsync_parent(path)
 
 
-REDACTED = "[REDACTED]"
-REDACTED_CREDENTIAL_PATH = "[REDACTED_CREDENTIAL_PATH]"
-AUTHORIZATION_BEARER_RE = re.compile(r"\b(authorization\s*[:=]\s*bearer\s+)[^\s\"',;}]+", re.I)
-BEARER_VALUE_RE = re.compile(r"\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.I)
-SECRET_ASSIGNMENT_RE = re.compile(
-    r"\b((?:(?:[A-Za-z0-9_.-]*(?:api[_-]?key|cookie|credential|password|secret|session|token)"
-    r"[A-Za-z0-9_.-]*)|pat)\s*[:=]\s*)([\"']?)([^\"'\s,;}]+)([\"']?)",
-    re.I,
-)
-CREDENTIAL_PATH_RE = re.compile(
-    r"(?:~/|/(?:[^/\s\"',;}]+/)*)?(?:"
-    r"\.config/secrets/[^\s\"',;}]+|"
-    r"\.config/whatsoup/[^\s\"',;}]+|"
-    r"\.local/share/whatsoup/instances/[^\s\"',;}]*/auth(?:/[^\s\"',;}]+)?|"
-    r"auth-bond-backups/[^\s\"',;}]+|"
-    r"/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env|\.env(?:\.[^\s\"',;}]+)?)"
-    r")",
-    re.I,
-)
-
-
 def redact_watchdog_text(value: Any) -> str:
-    text = str(value)
-    text = AUTHORIZATION_BEARER_RE.sub(r"\1" + REDACTED, text)
-    text = BEARER_VALUE_RE.sub(r"\1" + REDACTED, text)
-
-    def redact_assignment(match: re.Match[str]) -> str:
-        return f"{match.group(1)}{match.group(2)}{REDACTED}{match.group(4)}"
-
-    text = SECRET_ASSIGNMENT_RE.sub(redact_assignment, text)
-    return CREDENTIAL_PATH_RE.sub(REDACTED_CREDENTIAL_PATH, text)
+    return redact_bot_errors_text(value, credential_path_marker="[REDACTED_CREDENTIAL_PATH]")
 
 
 def redacted_watchdog_payload(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_watchdog_text(value)
-    if isinstance(value, list):
-        return [redacted_watchdog_payload(item) for item in value]
-    if isinstance(value, dict):
-        return {key: redacted_watchdog_payload(item) for key, item in value.items()}
-    return value
+    return redact_shared_json_value(value, redact_watchdog_text)
 
 
 def append_log(kind: str, payload: dict[str, Any]) -> None:

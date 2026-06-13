@@ -20,7 +20,9 @@ def _load_module(script_name: str):
 
 _REDACTORS: list[tuple[str, str, str]] = [
     ("bot-errors-collector.py", "redact_collector_text", "[REDACTED_CREDENTIAL_PATH]"),
+    ("bot-errors-dispatcher.py", "redact", "[REDACTED CREDENTIAL PATH]"),
     ("bot-errors-emit.py", "redact", "[REDACTED CREDENTIAL PATH]"),
+    ("bot-errors-health-check.py", "redact_event_text", "[REDACTED_CREDENTIAL_PATH]"),
     ("bot-errors-heartbeat-watchdog.py", "redact_watchdog_text", "[REDACTED_CREDENTIAL_PATH]"),
     ("bot-errors-q-loop.py", "redact_text", "[REDACTED CREDENTIAL PATH]"),
     ("bot-errors-runner.py", "redact", "[REDACTED CREDENTIAL PATH]"),
@@ -39,6 +41,48 @@ def test_deep_home_credential_paths_still_redact(script_name: str, func_name: st
     assert "creds.json" not in redacted
 
 
+@pytest.mark.parametrize(("script_name", "func_name", "marker"), _REDACTORS)
+def test_config_secrets_paths_still_redact(script_name: str, func_name: str, marker: str):
+    mod = _load_module(script_name)
+    redact: Callable[[str], str] = getattr(mod, func_name)
+
+    text = "source=/srv/operator/.config/secrets/provider.env token=visible"
+    redacted = redact(text)
+
+    assert marker in redacted
+    assert ".config/secrets" not in redacted
+    assert "provider.env" not in redacted
+
+
+@pytest.mark.parametrize(("script_name", "func_name", "_marker"), _REDACTORS)
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Authorization: Bearer " + "sk-" + "live-" + "a" * 26,
+        "token='" + "sk-" + "live-" + "b" * 26 + "'",
+        "github=" + "ghp_" + "c" * 26,
+        "aws=" + "AKIA" + "1" * 16,
+        "jwt=" + "eyJ" + "a" * 12 + "." + "eyJ" + "b" * 12 + "." + "c" * 16,
+        "url=https://user:password" + "@" + "host.invalid/path",
+        "key=-----BEGIN " + "PRIVATE KEY-----\\nabc\\n-----END " + "PRIVATE KEY-----",
+        "jid=" + "14155551234" + "@" + "s.whatsapp.net",
+    ],
+)
+def test_common_secret_fixtures_redact_across_consumers(script_name: str, func_name: str, _marker: str, raw: str):
+    mod = _load_module(script_name)
+    redact: Callable[[str], str] = getattr(mod, func_name)
+
+    redacted = redact(raw)
+
+    assert "sk-live" not in redacted
+    assert "ghp_" not in redacted
+    assert "AKIA1111111111111111" not in redacted
+    assert "eyJabcdefghijk" not in redacted
+    assert "user:password@" not in redacted
+    assert "BEGIN " + "PRIVATE KEY" not in redacted
+    assert "14155551234" not in redacted
+
+
 @pytest.mark.parametrize(("script_name", "func_name", "_marker"), _REDACTORS)
 def test_repeated_pathlike_nonmatches_do_not_backtrack(script_name: str, func_name: str, _marker: str):
     mod = _load_module(script_name)
@@ -50,3 +94,17 @@ def test_repeated_pathlike_nonmatches_do_not_backtrack(script_name: str, func_na
     elapsed = time.monotonic() - started
 
     assert elapsed < 0.5
+
+
+@pytest.mark.parametrize(("script_name", "func_name", "_marker"), _REDACTORS)
+def test_operational_diagnostics_remain_actionable(script_name: str, func_name: str, _marker: str):
+    mod = _load_module(script_name)
+    redact: Callable[[str], str] = getattr(mod, func_name)
+
+    samples = [
+        "credential: credential_requirement=fleet-token credential_path_redacted=true",
+        "baileys_version=2.3000.1020194169",
+        "outbound_success_at=2026-06-11 10:15:02",
+    ]
+    for raw in samples:
+        assert redact(raw) == raw
