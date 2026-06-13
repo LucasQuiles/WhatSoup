@@ -54,6 +54,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | Rule id | State (current — see changelog) | Target | Owning phase | Notes |
 |---|---|---|---|---|
 | soup/no-brand-regression | shadow | global-error | P4 | flips to error the same PR as the P4 copy flip |
+| soup/no-channel-specific-copy | proposed | global-error | P4/G7 | flags generic visible "WhatsApp" copy after the multi-channel positioning lock; protocol/runtime prompts stay allowlisted |
 | soup/protected-identifiers | scoped-error | global-error | P1 | cheap, zero current violations — start strict |
 | soup/no-raw-button | scoped-error (M list) | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
 | soup/no-raw-form-control | shadow | scoped-error per dir | P2 | 27 raw inputs, 3 selects, 5+ textareas (control-catalogue §2-3) |
@@ -90,7 +91,7 @@ cannot express the check).
 ### soup/no-brand-regression
 
 - **Purpose:** prevent "WhatSoup" re-entering user-facing UI after the P4 branding flip; the locked
-  vocabulary is SOUP / Fleet / Line (`docs/design-system/02-directions/decision-log.md`, G1).
+  vocabulary is SOUP / Fleet / Line (`docs/design-system/02-directions/decision-log.md`, G1/C3).
 - **Mechanism:** custom rule. Flag the string `WhatSoup` (case-sensitive) when it appears in
   (a) `JSXText`, (b) a `Literal`/`TemplateLiteral` assigned to a JSX attribute that is not in the
   identifier allowlist, (c) `document.title` assignments. Also flag adjacent split-text spans whose
@@ -118,6 +119,31 @@ cannot express the check).
 - **Autofix:** none (copy changes need human/spec review).
 - **Phase:** P4. **Entry state:** shadow (baseline = the dispositions above).
 
+### soup/no-channel-specific-copy
+
+- **Purpose:** preserve the C3 follow-on decision #5: SOUP is multi-channel/global. Generic
+  user-visible copy must not position the product as WhatsApp-only; it must say conversational
+  agents, Lines, channels, or Fleet operations. Technical substrate names remain allowed where they
+  describe a concrete integration/runtime path.
+- **Mechanism:** custom rule paired with the section 5 grep. Flag the string `WhatsApp`
+  (case-sensitive) when it appears in JSX text, user-visible JSX attributes (`title`, `aria-label`,
+  button labels, placeholders, document titles), or copy-bearing string literals used by rendered
+  UI. Do not flag comments, import paths, protocol helpers, or generated agent/system prompt
+  templates.
+- **Scope:** `console/src/**` TSX/TS plus `console/index.html` via the regression script. Tests flip
+  in the same G7 copy packet. Future explicit channel-picker labels may be allowlisted only when the
+  UI is naming a concrete channel option rather than describing the product.
+- **Protected contexts:** generated prompts in `console/src/components/wizard/ConfigStep.tsx`
+  (`You are ... on WhatsApp`, `running on WhatsApp via WhatSoup`, delivered via WhatsApp);
+  protocol/runtime vocabulary (`@s.whatsapp.net`, Baileys, JID, `conversation_key`); and any
+  future setup copy that is explicitly scoped to a selected WhatsApp channel integration.
+- **Violation / valid:** `operations console for WhatsApp agents` →
+  `operations console for conversational agents`; `Provision WhatsApp agents` → `Provision Lines`.
+- **FP strategy:** the rule must carry true-positive fixtures for visible copy and false-positive
+  fixtures for ConfigStep prompt templates, Baileys/JID/protocol literals, comments, and explicit
+  channel-option labels before promotion beyond shadow/proposed.
+- **Autofix:** none (word choice is semantic copy work). **Phase:** P4/G7. **Entry state:** proposed.
+
 ### soup/protected-identifiers
 
 - **Purpose:** inverse guard — prevent an over-eager rebrand from renaming protocol contracts.
@@ -127,7 +153,8 @@ cannot express the check).
   are `~/.local/share/whatsoup/instances/...` (`console/src/lib/agent-cwd.ts:17`), whose
   localStorage namespace is `whatsoup:` (`console/src/lib/preferences.ts:5`), whose config dir is
   `~/.config/whatsoup/` (`docs/console-guide.md:163`), and whose MCP tool prefix is
-  `mcp__whatsoup__*` (`console/src/components/wizard/ConfigStep.tsx:693`).
+  `mcp__whatsoup__*` (`console/src/components/wizard/ConfigStep.tsx:693`). Channel substrate
+  identifiers are protected too: `@s.whatsapp.net`, Baileys, JID, and `conversation_key`.
 - **Mechanism:** custom rule with a frozen contract list. Two checks: (a) error if any contract
   string is *edited into a near-miss* — i.e. a literal matching `soup:`/`/run/soup/`/`SoupError`/
   `~/.local/share/soup/` appears where the contract list expects the whatsoup form; (b) a
@@ -579,6 +606,7 @@ repo root):
 | 5 | WhatSoup in UI copy | `rg -n "WhatSoup" console/src --glob '!**/*.test.*'` then filter to non-comment, non-contract lines via the script's allowlist (contract list from soup/protected-identifiers) | only EXEMPT-PROTECTED sites after P4 |
 | 6 | Split-wordmark evasion | `rg -n -U ">What<.{0,80}>Soup<" console/src` | zero after P4 |
 | 7 | Soup Kitchen label | `rg -n "Soup Kitchen" console/src docs/console-guide.md` | zero after P4 (vocabulary: Fleet) |
+| 7a | Channel-specific generic copy | `rg -n "WhatsApp" console/src console/index.html docs/console-guide.md` then filter to protected runtime/prompt contexts via the `soup/no-channel-specific-copy` allowlist | only EXEMPT-PROTECTED protocol/runtime/setup-prompt contexts after G7 |
 | 8 | index.html title | `rg -n "<title>" console/index.html` | equals the P4-specced title |
 | 9 | Theme parity | `node console/scripts/check-theme-parity.mjs` | both theme scopes define identical semantic-token name sets |
 | 10 | Protected contracts still present | `rg -c "whatsoup:" console/src/lib/preferences.ts && rg -c "/run/whatsoup/" console/src/mock-data.ts && rg -c "whatsoup/instances" console/src/lib/agent-cwd.ts` | each count >= 1 (presence check) |
@@ -591,9 +619,9 @@ repo root):
 Each rule must also carry either a negative fixture or a documented negative example before it moves
 to `scoped-error`. The required trap list is maintained in
 `docs/design-system/06-implementation/qa-hardening.md` and includes raw colors, raw controls,
-UI-facing WhatSoup copy, protected-identifier over-renames, missing modal focus restoration, missing
-focus-visible treatment, color-only status, missing light-theme token values, deprecated tokens in
-migrated directories, and utility/spec-smell classes.
+UI-facing WhatSoup copy, user-visible channel-specific copy, protected-identifier over-renames,
+missing modal focus restoration, missing focus-visible treatment, color-only status, missing
+light-theme token values, deprecated tokens in migrated directories, and utility/spec-smell classes.
 
 Integration points:
 

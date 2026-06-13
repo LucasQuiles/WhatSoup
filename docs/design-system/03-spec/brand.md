@@ -1,4 +1,4 @@
-# Brand — the SOUP nameplate, locked vocabulary, microcopy voice, and the protected WhatSoup boundary
+# Brand — the SOUP nameplate, locked vocabulary, microcopy voice, and protected identity boundaries
 
 v3.0.0-draft · G2-locked direction · pending G3
 
@@ -65,6 +65,18 @@ forbidden treatments still bind: no bowls, mascots, gradients, glow, or second a
 single electric-blue accent stays locked, and warmth comes from warmer neutral surfaces, not chroma.
 Reference exploration: standalone identity showcase (not wired to the product).
 
+### 1.5 Multi-channel positioning (2026-06-13 follow-on decision #5)
+
+SOUP is positioned as **multi-channel/global fleet infrastructure**, not as a WhatsApp-only console.
+Brand, marketing, navigation, empty-state, and generic UI copy must describe **conversational agents**,
+**Lines**, **channels**, and **fleet operations**. Generic user-visible copy must not say "WhatsApp"
+when the product concept is channel-agnostic.
+
+The copy rule is deliberately scoped: runtime/protocol surfaces may still name the actual substrate.
+Agent-facing generated prompts, channel-specific setup instructions, protocol identifiers, and future
+channel-picker labels may say "WhatsApp" when they are naming a concrete integration rather than
+positioning the product. The G7 copy sweep must classify each hit before editing it.
+
 ## 2. Locked vocabulary (G1)
 
 | Concept | Was | Locked term |
@@ -72,6 +84,7 @@ Reference exploration: standalone identity showcase (not wired to the product).
 | Product | WhatSoup | **SOUP** — the nameplate carries the playfulness |
 | Dashboard | Soup Kitchen | **Fleet** |
 | Managed object | line / instance (mixed) | **Line** — the single user-facing noun; "instance" demoted to process-level copy only |
+| Channel scope | WhatsApp agents / WhatsApp console (generic copy) | **conversational agents**, **channels**, or **Lines** — channel names appear only in concrete integration/runtime contexts |
 | Messages surface | Inbox | **Inbox** (kept) |
 | Operations surface | Ops | **Ops** (kept) |
 | Alerts | two competing definitions | one **attention** metric: lines not online; always a click-through |
@@ -96,11 +109,19 @@ in the copy. Rules with examples:
 | No exclamation marks in operational copy; at most one in a success toast | "Line billing created and linked." | "Success!!!" |
 | Time/identity rendered in data lane | `14:32:07` · `+1 555-0104` (mono, tabular) | prose-formatted timestamps in tables |
 
-## 4. Protected WhatSoup boundary
+## 4. Protected product and channel boundary
 
 "SOUP" is the **console-facing brand**. The platform, repo, packages, service units, and protocol
 surface remain **WhatSoup** — renaming those is out of this program's scope and partially breaking.
-The six `console/src` occurrences (inconsistency-register P2-11) are classified:
+The C4/G7 copy sweep uses three identifier classes:
+
+| Class | Visible-copy action | Protected substrate |
+|---|---|---|
+| Product name | `WhatSoup` → `SOUP` in user-visible copy | `whatsoup:`, `mcp__whatsoup__`, `WhatSoupError`, service units, package/repo names, filesystem/socket paths |
+| Channel name | generic "WhatsApp" positioning → channel-agnostic copy | `@s.whatsapp.net`, Baileys, JID, `conversation_key`, generated runtime prompts, concrete channel setup labels |
+| Retired vocabulary | `Soup Kitchen` → `Fleet` | none |
+
+The six `console/src` WhatSoup occurrences (inconsistency-register P2-11) are classified:
 
 | Occurrence | Class | Action |
 |---|---|---|
@@ -115,9 +136,17 @@ Rule: user-visible strings say SOUP after P4; code identifiers, API contracts, a
 prompt text say WhatSoup until a separate, explicitly approved platform-rename program exists. The
 P4 sweep must verify each flip is render-only (no identifier, storage key, or protocol string).
 
+Channel rule: generic user-visible strings say "channel", "conversational agents", "Line", or
+"Fleet" after G7; protocol code and generated agent/runtime prompts may continue to say WhatsApp
+when they describe the actual channel. In particular, the `ConfigStep.tsx` default agent prompts
+(`You are ... on WhatsApp`, `running on WhatsApp via WhatSoup`, delivered via WhatsApp) are
+**PROTECTED** until a separate channel-platform rewrite changes the runtime contract. Baileys, JID,
+`@s.whatsapp.net`, and `conversation_key` are also protected runtime vocabulary, not brand copy.
+
 ## 5. Enforcement hooks
 
 `nameplate-reserved` (type token + class), vocabulary-drift review lane (grep list: "instance" in
 user-visible strings outside process-level copy, "Soup Kitchen", "WhatSoup" outside the §4
-PROTECTED list), forbidden-treatment review in the QA matrix (no gradient/illustration assets in
-the console bundle).
+PROTECTED list), `no-channel-specific-copy` / channel vocabulary guard (generic visible "WhatsApp"
+outside the §4 protected channel contexts), forbidden-treatment review in the QA matrix (no
+gradient/illustration assets in the console bundle).

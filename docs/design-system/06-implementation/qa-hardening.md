@@ -221,7 +221,9 @@ Each enforcement rule should include a negative fixture or documented negative e
 | sample component with raw color | fails raw-color rule |
 | raw button outside primitive | fails after scoped rule is enabled |
 | UI-facing WhatSoup copy where SOUP is required | fails brand-regression rule |
+| generic UI-facing WhatsApp copy where channel-agnostic positioning is required | fails channel-specific-copy rule |
 | protected internal WhatSoup identifier renamed | fails protected-identifier rule |
+| protected channel/runtime identifier renamed (`@s.whatsapp.net`, Baileys, JID, `conversation_key`, generated prompts) | fails protected-identifier or channel-specific-copy false-positive fixture |
 | modal without focus restoration | fails modal-restore rule/test |
 | missing focus-visible treatment | fails focus-visible rule/test |
 | status chip without text label | fails status law rule/test |

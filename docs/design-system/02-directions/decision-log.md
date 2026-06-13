@@ -175,7 +175,7 @@ T6, T7, and T8 remain blocked until explicit G2 approval and, for T8, separate e
 ## C3 follow-on decisions — colour and brand — APPROVED 2026-06-13
 
 Approved follow-on direction for the post-`raw-button` / post-`accent-law` burndown waves
-(queue 826 → 702; both categories at zero). Four decisions, locked:
+(queue 826 → 702; both categories at zero). Five decisions, locked:
 
 1. **Provider identity → muted data-viz palette.** Provider colours use a dedicated `--provider-*`
    palette and may not borrow status or mode channels. Codified in `color.md §2.1`.
@@ -187,7 +187,15 @@ Approved follow-on direction for the post-`raw-button` / post-`accent-law` burnd
    dense, and tightly spaced on friendlier brand surfaces. Codified in `brand.md §1.4`.
 4. **Warmth from neutrals, not chroma.** The electric-blue action accent stays locked; the
    "serious but not sterile" warmth comes from a subtly warmer neutral surface ramp.
+5. **SOUP is multi-channel/global.** Generic user-visible brand, marketing, navigation, and UI copy
+   must not position the product as WhatsApp-only. Use channel-agnostic language: conversational
+   agents, Lines, channels, and Fleet operations. Protocol/runtime identifiers stay protected:
+   `whatsoup:`, `mcp__whatsoup__`, `@s.whatsapp.net`, Baileys, JID, `conversation_key`, service
+   units, and generated agent/runtime prompts that describe the concrete WhatsApp substrate.
+   Codified in `brand.md §1.5` and `§4`.
 
 Implementation note: provider/`--data-*` tokens require the `color.md §2.1` amendment (landed in the
-same lock) before any code consumes them. Reference exploration: a standalone identity showcase
-(both themes) — not wired to the product.
+same lock) before any code consumes them. G7 expands to include the channel-agnostic copy sweep plus
+a visible-copy guard (`no-channel-specific-copy`, or the equivalent vocabulary-drift extension) with
+allowlists for protected protocol/system-prompt contexts. Reference exploration: a standalone identity
+showcase (both themes) — not wired to the product.
