@@ -964,6 +964,19 @@ describe('entity mode', () => {
     expect(details.durationMs).toEqual(expect.any(Number));
   });
 
+  it('searchEntitiesDetailed marks retry recovery without losing entity results', async () => {
+    mockSearchRecords.mockRejectedValueOnce(new Error('transient entity index error'));
+    mockSearchRecords.mockResolvedValueOnce({
+      result: { hits: [makeEntityHit('entity-retry-hit', 0.82)] },
+    });
+
+    const details = await memory.searchEntitiesDetailed('query');
+
+    expect(details.status).toBe('ok');
+    expect(details.retried).toBe(true);
+    expect(details.results.map((r) => r.id)).toEqual(['entity-retry-hit']);
+  });
+
   // ── fromPineconeHitEntity — field mapping ──────────────────────────────────
 
   it('fromPineconeHitEntity maps entity fields correctly (building)', async () => {
