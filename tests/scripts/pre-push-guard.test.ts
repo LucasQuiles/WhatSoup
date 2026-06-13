@@ -144,6 +144,19 @@ describe('verify chain composition (package.json)', () => {
     }
   });
 
+  it('verify:push:branch invokes branch-diff repo hygiene after staged smoke', () => {
+    const chain = packageJson.scripts['verify:push:branch'];
+    expect(chain, 'verify:push:branch script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run guard:repo:staged\b/);
+    expect(chain).toMatch(/\bnpm run guard:repo:branch-diff\b/);
+    expect(chain.indexOf('npm run guard:repo:staged')).toBeLessThan(
+      chain.indexOf('npm run guard:repo:branch-diff'),
+    );
+    expect(chain.indexOf('npm run guard:repo:branch-diff')).toBeLessThan(
+      chain.indexOf('npm run guard:repo:commit-authors'),
+    );
+  });
+
   it('verify chains invoke BOT ERRORS runtime-source, runtime-manifest, and simulation-matrix guards', () => {
     for (const scriptName of ['verify:push:branch', 'verify:release']) {
       const chain = packageJson.scripts[scriptName];
@@ -225,6 +238,15 @@ describe('quality workflow composition', () => {
 
   it('runs the commit-author guard in CI quality workflow', () => {
     expect(qualityWorkflow).toContain('npm run guard:repo:commit-authors');
+  });
+
+  it('runs branch-diff repo hygiene in CI before commit-author scanning', () => {
+    const branchDiffIndex = qualityWorkflow.indexOf('npm run guard:repo:branch-diff');
+    const commitAuthorIndex = qualityWorkflow.indexOf('npm run guard:repo:commit-authors');
+
+    expect(branchDiffIndex).toBeGreaterThanOrEqual(0);
+    expect(commitAuthorIndex).toBeGreaterThan(branchDiffIndex);
+    expect(qualityWorkflow).toContain('--base "origin/$GITHUB_BASE_REF"');
   });
 
   it('runs BOT ERRORS runtime manifest verification before the simulation matrix in CI', () => {

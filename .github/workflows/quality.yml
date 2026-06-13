@@ -51,6 +51,15 @@ jobs:
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
 
+      - name: Repo hygiene branch diff
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+            npm run guard:repo:branch-diff -- --base "origin/$GITHUB_BASE_REF"
+          else
+            npm run guard:repo:branch-diff
+          fi
+
       - name: Repo hygiene commit-author guard
         run: |
           if [ -n "${GITHUB_BASE_REF:-}" ]; then

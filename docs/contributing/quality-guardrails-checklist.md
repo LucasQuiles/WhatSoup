@@ -12,6 +12,7 @@ The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on ev
 | Typecheck scripts/ | `npm run typecheck:scripts` | scripts/ build tooling (tsconfig.scripts.json) |
 | **Typecheck (all)** | `npm run typecheck:all` | **src/ + tests/ + console/src/ (tsconfig.test.json) — broader scope than `typecheck`** |
 | Repo hygiene (staged) | `npm run guard:repo:staged` | hygiene-guard.ts rules — synthetic JIDs, API-key shapes, real names, etc. |
+| Repo hygiene (branch diff) | `npm run guard:repo:branch-diff` | same added-line rules over merge-base(base, HEAD)..HEAD so PR/clean-index contexts are not staged-only smoke tests |
 | Repo hygiene (commit-msg) | `npm run guard:repo:commit-msg <msg>` | hygiene rules on commit messages too |
 | Documentation drift | `npm run guard:doc-drift` | docs ↔ code coupling check |
 | Public surface drift | `npm run guard:public-surface-drift` | exported API surface stability check |
@@ -40,7 +41,7 @@ Pre-push hook routes through `scripts/pre-push-guard.ts`:
 
 | Push target | Composite script | Required checks |
 |---|---|---|
-| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, and the targeted guard test list below |
+| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, and the targeted guard test list below |
 | `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks --fileParallelism=false`, and coverage thresholds |
 
 `verify:push:branch` runs this targeted guard-test list:

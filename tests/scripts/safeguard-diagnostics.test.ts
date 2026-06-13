@@ -22,6 +22,7 @@ const requiredPackageScripts = {
   'guard:publication:release': 'npm run guard:publication -- --release',
   'guard:publication:staged': 'npm run guard:publication -- --staged',
   'guard:repo:staged': 'npm run guard:repo -- --staged',
+  'guard:repo:branch-diff': 'npm run guard:repo -- --branch-diff',
   'guard:repo:commit-authors': 'npm run guard:repo -- --commit-authors',
   'guard:repo:release-hygiene': 'npm run guard:repo -- --release-hygiene',
   'guard:test-integrity': 'bash scripts/test-integrity-ci.sh',
@@ -32,6 +33,7 @@ const requiredPackageScripts = {
   'guard:bot-errors-runtime-manifest': 'node scripts/check-bot-errors-runtime-manifest.ts',
   'verify:push:branch': [
     'npm run guard:repo:staged',
+    'npm run guard:repo:branch-diff',
     'npm run guard:repo:commit-authors',
     'npm run guard:publication:staged',
     'npm run guard:doc-drift',
