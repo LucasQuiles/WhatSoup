@@ -31,6 +31,7 @@ import {
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import { createHash } from 'node:crypto';
+import { shortHash } from '../lib/short-hash.ts';
 
 import { config } from '../config.ts';
 import { createChildLogger } from '../logger.ts';
@@ -334,16 +335,8 @@ function compactJson(value: unknown): string {
   }
 }
 
-function shortDiagnosticHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 20);
-}
-
 function shortHashOrNull(value: string | null | undefined): string | null {
   return value ? value.slice(0, 20) : null;
-}
-
-function shortHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 20);
 }
 
 function isSensitiveDiagnosticKey(key: string): boolean {
@@ -352,8 +345,8 @@ function isSensitiveDiagnosticKey(key: string): boolean {
 
 function redactDiagnosticString(value: string): string {
   return value
-    .replace(/\b\d{5,}(?::\d+)?@(s\.whatsapp\.net|lid|g\.us)\b/g, (match) => `<jid:${shortDiagnosticHash(match)}>`)
-    .replace(/\b\d{10,16}\b/g, (match) => `<number:${shortDiagnosticHash(match)}>`);
+    .replace(/\b\d{5,}(?::\d+)?@(s\.whatsapp\.net|lid|g\.us)\b/g, (match) => `<jid:${shortHash(match, 20)}>`)
+    .replace(/\b\d{10,16}\b/g, (match) => `<number:${shortHash(match, 20)}>`);
 }
 
 function redactDiagnosticValue(value: unknown, key = '', depth = 0): unknown {
@@ -1264,7 +1257,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       },
       diagnostics: {
         stateFile: 'connection-state.json',
-        stateFileFingerprint: shortHash(join(config.dataRoot, 'connection-state.json')),
+        stateFileFingerprint: shortHash(join(config.dataRoot, 'connection-state.json'), 20),
       },
     };
 

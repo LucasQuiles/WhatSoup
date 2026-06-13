@@ -19,6 +19,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { DEFAULT_FRESH_INVALID_GRACE_MS } from '../lib/auth-bond-policy.ts';
 import { forceEnsurePrivateDirectorySync, privateWriteError } from '../lib/private-fs.ts';
+import { shortHash } from '../lib/short-hash.ts';
 
 export type AuthBondStatus = 'present' | 'missing' | 'invalid';
 
@@ -115,10 +116,6 @@ function safeName(value: string): string {
   return cleaned === '' ? 'unknown' : cleaned;
 }
 
-function shortHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 20);
-}
-
 function hashBuffer(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
 }
@@ -186,7 +183,7 @@ function extractMeHash(parsed: unknown): string | null {
     : typeof record['lid'] === 'string'
       ? record['lid']
       : null;
-  return id ? shortHash(id) : null;
+  return id ? shortHash(id, 20) : null;
 }
 
 function walkAuthFiles(root: string): string[] {
