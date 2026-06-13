@@ -233,9 +233,9 @@ def ensure_private_dir(path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
     else:
         if path.is_symlink():
-            raise OSError(f"refusing to use q-loop state directory through symlink: {path}")
+            raise RuntimeError(f"refusing to use q-loop state directory through symlink: {path}")
         if not os.path.isdir(path):
-            raise OSError(f"refusing to use q-loop state directory over non-directory path: {path}")
+            raise RuntimeError(f"refusing to use q-loop state directory over non-directory path: {path}")
     try:
         path.chmod(0o700)
     except OSError:
