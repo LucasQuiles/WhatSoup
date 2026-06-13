@@ -786,6 +786,70 @@ def load_runtime_manifest() -> tuple[dict[str, Any] | None, str | None]:
     return loaded, None
 
 
+def _run_git_rev_parse(repo_root: Path) -> tuple[str, str, int]:
+    """Run ``git -C <repo_root> rev-parse HEAD`` and return (stdout, stderr, returncode).
+
+    Raises FileNotFoundError if git is not on PATH, subprocess.TimeoutExpired on timeout.
+    Callers are responsible for catching those exceptions.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    return proc.stdout, proc.stderr, proc.returncode
+
+
+def git_head_sha_line(manifest: dict[str, Any]) -> str:
+    """Return a single observability/status line for the host git HEAD sha.
+
+    Prefixed with ``WARN `` on transient git problems, ``FAIL `` on a confirmed
+    expected/actual mismatch, and no prefix for normal observability output.
+    All lines begin with ``git_head_sha`` so they sit under the
+    runtime_manifest umbrella in health output.
+    """
+    raw_expected = manifest.get("expected_head_sha")
+
+    # Validate expected_head_sha shape when present.
+    expected_sha: str | None = None
+    if raw_expected is not None:
+        if not isinstance(raw_expected, str) or not re.fullmatch(r"[a-fA-F0-9]{7,64}", raw_expected):
+            return "WARN git_head_sha: invalid expected_head_sha=<redacted>"
+        expected_sha = raw_expected.lower()
+
+    # Resolve the host HEAD sha.
+    try:
+        stdout, stderr, rc = _run_git_rev_parse(REPO_ROOT)
+    except FileNotFoundError:
+        return "WARN git_head_sha: git_unavailable"
+    except subprocess.TimeoutExpired:
+        return "WARN git_head_sha: git_rev_parse_timeout"
+
+    if rc != 0:
+        reason = stderr.strip().replace("\n", " ")[:120] or f"rc={rc}"
+        if "not a git repository" in reason.lower():
+            return "WARN git_head_sha: not_a_git_repository"
+        return f"WARN git_head_sha: git_rev_parse_failed rc={rc}"
+
+    actual_sha = stdout.strip()
+    if not re.fullmatch(r"[a-fA-F0-9]{7,64}", actual_sha):
+        return f"WARN git_head_sha: unexpected_output={actual_sha[:40]!r}"
+
+    actual_sha = actual_sha.lower()
+
+    if expected_sha is None:
+        return f"git_head_sha: {actual_sha} expected=unset"
+
+    # Prefix match: allow expected to be a short sha (>= 7 hex chars) that is a
+    # prefix of the actual 40-char sha, as well as full equality.
+    if actual_sha.startswith(expected_sha) or expected_sha.startswith(actual_sha):
+        return f"git_head_sha: {actual_sha} expected={expected_sha} match"
+
+    return f"FAIL git_head_sha: {actual_sha} expected={expected_sha} git_head_sha_mismatch"
+
+
 def runtime_manifest_inventory(profile: dict[str, Any]) -> list[str]:
     if not profile_bool(profile, "expectRuntimeManifest", False):
         return ["runtime_manifest: skipped by health profile"]
@@ -862,6 +926,7 @@ def runtime_manifest_inventory(profile: dict[str, Any]) -> list[str]:
             lines.append(
                 f"FAIL runtime_manifest {raw_path}: missing_marker={redact_evidence_string(marker, 120)} path={path}"
             )
+    lines.append(git_head_sha_line(manifest))
     return lines
 
 
