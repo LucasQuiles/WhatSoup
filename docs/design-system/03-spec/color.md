@@ -48,10 +48,13 @@ warning, failure, selected, focused, unread, or primary-action meaning, and may 
 `--color-s-*` / `--color-m-*` token.
 
 Message-volume and other non-provider chart series take the separate `--data-*` palette in
-`tokens-v3.md` §3.6a. The initial lawful series tokens are `--data-inbound-solid`,
-`--data-outbound-solid`, and `--data-media-solid`; they are non-text chart marks unless a future
-spec row adds explicit data foreground tokens. Data tokens must not borrow provider, status, or mode
-channels.
+`tokens-v3.md` §3.6a. Lawful data-series tokens are:
+`--data-inbound-solid`, `--data-outbound-solid`, `--data-media-solid`,
+`--data-activity-solid`, `--data-token-input-solid`, `--data-token-output-solid`,
+`--data-session-active-solid`, and `--data-session-started-solid`. These are non-text chart marks
+unless a future spec row adds explicit data foreground tokens. The activity token is an intensity
+anchor: lower heatmap buckets derive by mixing it into the chart bed, not by borrowing mode/chat
+or status colors. Data tokens must not borrow provider, status, or mode channels.
 
 Audit hook: `npm --prefix console run design:color-semantics` inventories four report-only drift
 classes until the provider/data tokens land: provider identity borrowing status/mode tokens,

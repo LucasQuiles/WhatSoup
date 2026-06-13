@@ -87,6 +87,11 @@
   --data-inbound-solid:  #6B8299;
   --data-outbound-solid: #9AB2C4;
   --data-media-solid:    #B39B72;
+  --data-activity-solid: #7B9487;
+  --data-token-input-solid:  #8798B8;
+  --data-token-output-solid: #B99AA8;
+  --data-session-active-solid:  #83A7B0;
+  --data-session-started-solid: #B4A477;
 
   /* §3.7 Focus, scrim, chrome glass, shadows */
   --focus-ring:   #6BA6FF;
@@ -180,6 +185,11 @@
   --data-inbound-solid:  #456073;
   --data-outbound-solid: #5E7E94;
   --data-media-solid:    #7A6238;
+  --data-activity-solid: #4E6C5E;
+  --data-token-input-solid:  #536985;
+  --data-token-output-solid: #785C68;
+  --data-session-active-solid:  #4E7280;
+  --data-session-started-solid: #76653F;
 
   /* §3.7 Focus, scrim, chrome glass, shadows */
   --focus-ring:   #2563EB;
@@ -259,6 +269,11 @@
   --color-data-inbound-solid:  var(--data-inbound-solid);
   --color-data-outbound-solid: var(--data-outbound-solid);
   --color-data-media-solid:    var(--data-media-solid);
+  --color-data-activity-solid: var(--data-activity-solid);
+  --color-data-token-input-solid:  var(--data-token-input-solid);
+  --color-data-token-output-solid: var(--data-token-output-solid);
+  --color-data-session-active-solid:  var(--data-session-active-solid);
+  --color-data-session-started-solid: var(--data-session-started-solid);
 
   --color-focus-ring:           var(--focus-ring);
   --color-scrim:                var(--scrim);

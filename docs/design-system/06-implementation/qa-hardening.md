@@ -655,7 +655,10 @@ until their named prerequisites are complete.
 - `soup/provider-palette-only` candidates: provider identity colour maps or provider display
   contexts borrowing status/mode tokens or literal colours instead of `--provider-*`;
 - `soup/data-series-token-only` candidates: chart and heatmap series borrowing status/mode/literal
-  colours instead of `--data-*`, unless the series is explicitly provider identity;
+  colours instead of `--data-*`, unless the series is explicitly provider identity. The tracked
+  data-token law now names message volume, active-hours intensity, token input/output, and session
+  active/started series; a consumer retarget packet must still prove the current findings fall for
+  those intended reasons only.
 - `soup/traffic-neutrality` candidates: non-status traffic quantities such as sent, received,
   sessions, and media rendered with chromatic status/mode ink;
 - `soup/traffic-neutrality` neutral paths: `KpiCard color="neutral"` and direct semantic `--text-2`

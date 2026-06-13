@@ -223,6 +223,11 @@ non-provider data dimensions only.
 | `--data-inbound-solid` | `#6B8299` | `#456073` | inbound/message received chart series |
 | `--data-outbound-solid` | `#9AB2C4` | `#5E7E94` | outbound/message sent chart series |
 | `--data-media-solid` | `#B39B72` | `#7A6238` | media/message attachment chart series |
+| `--data-activity-solid` | `#7B9487` | `#4E6C5E` | active-hours heatmap intensity anchor; mix with surface for lower buckets |
+| `--data-token-input-solid` | `#8798B8` | `#536985` | token input / prompt-side volume series |
+| `--data-token-output-solid` | `#B99AA8` | `#785C68` | token output / completion-side volume series |
+| `--data-session-active-solid` | `#83A7B0` | `#4E7280` | active sessions area series |
+| `--data-session-started-solid` | `#B4A477` | `#76653F` | sessions started event series |
 
 ### 3.6b v2 mockup property → v3 SSOT name (renames at promotion)
 
