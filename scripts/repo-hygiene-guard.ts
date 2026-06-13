@@ -144,6 +144,9 @@ const srcConsoleAllowedFiles = new Set([
   'src/bootstrap.ts',
   'src/bootstrap-auth.ts',
   'src/config.ts',
+  // Wraps console.{info,log,debug,warn} to drop libsignal's direct key dumps —
+  // referencing console here is the module's entire purpose.
+  'src/lib/console-guard.ts',
   'src/fleet/standalone.ts',
   'src/transport/auth.ts',
 ]);
