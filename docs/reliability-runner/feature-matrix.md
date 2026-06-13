@@ -20,6 +20,7 @@ Last updated: 2026-06-13.
 | RR-012 | TRIAGED | Historical pending-bead reconciliation | 90% | `docs/reliability-runner/pending-bead-dispositions.md`; `docs/current-program.md`; `docs/work-index.json` | Decide whether to rewrite historical bead markers or leave the tracked disposition ledger as the active source. |
 | RR-013 | TRIAGED | Coverage ratchet to requested target | 0% | `vitest.config.ts`; latest `verify:release` coverage summary | Coverage is at least 98% for statements, branches, functions, and lines, and thresholds enforce it. |
 | RR-014 | TRIAGED | Open PR/source landing | 80% | GitHub PR queue; local release gate | #804, #813, and #816 are merged; `fix/mini1-health-profile-personal` and this docs branch are PR'd, merged, or retired, and no tracked work remains only local. |
+| RR-015 | RESOLVED | D18 fleet health-poller HTTP error policy | 100% | `tests/fleet/health-poller.test.ts` | A parseable non-OK `/health` body is reachability evidence: the poller preserves the body-derived `degraded` or `logged_out` state with `consecutiveFailures=0`; only unparseable/generic transport failures increment toward `unreachable`. |
 
 ## Current Gate Snapshot
 
