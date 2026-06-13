@@ -230,6 +230,7 @@ export class FleetDiscovery {
 
   /** Start 60-second refresh interval */
   startAutoRefresh(): void {
+    if (this.refreshInterval) return;
     this.scan();
     this.refreshInterval = setInterval(() => this.scan(), 60_000);
     this.refreshInterval.unref();

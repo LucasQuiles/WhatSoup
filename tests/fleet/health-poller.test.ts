@@ -211,6 +211,23 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('start() is idempotent — a second start does not double-poll', async () => {
+    const getSelfHealth = vi.fn().mockReturnValue({ status: 'healthy', uptime_seconds: 1 });
+    const instances = makeInstances(['self', makeInstance({ name: 'self' })]);
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    void poller.start(); // must be a no-op, not a second immediate poll + interval
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getSelfHealth).toHaveBeenCalledTimes(1); // one immediate poll, not two
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(getSelfHealth).toHaveBeenCalledTimes(2); // one interval tick, not two
+
+    poller.stop();
+  });
+
   // Self-instance health must be CLASSIFIED with the same semantics as a
   // remote payload — a degraded/logged-out self snapshot was previously
   // forced to status 'online' with confirmed confidence.
