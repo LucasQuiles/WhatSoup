@@ -146,6 +146,13 @@ const requiredFiles: Record<string, string> = {
     'GITHUB_ACTIONS=true',
     'baseline --check --ci',
   ].join('\n'),
+  'scripts/check-bot-errors-runtime-manifest.ts': [
+    'REQUIRED_RUNTIME_MANIFEST_PATHS',
+    'missing-required-path',
+    'deploy/scripts/bot-errors-health-check.py',
+    'deploy/scripts/bot-errors-emit.py',
+    'src/lib/bot-errors-outbox.ts',
+  ].join('\n'),
 };
 
 function git(cwd: string, args: string[]): void {

@@ -667,6 +667,58 @@ export function scanCommitHistory(cwd: string, depth: number): GuardIssue[] {
   return issues;
 }
 
+function branchCommitShas(cwd: string, mergeBase: string): string[] {
+  return git(['log', '--reverse', '--format=%H', `${mergeBase}..HEAD`], cwd)
+    .split(/\r?\n/)
+    .filter(Boolean);
+}
+
+function scanBranchCommitSecretLines(cwd: string, sha: string): GuardIssue[] {
+  const issues: GuardIssue[] = [];
+  const diff = git(['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha], cwd);
+
+  for (const line of parseUnifiedDiffAddedLines(diff)) {
+    const filePath = normalizeRepoPath(line.filePath);
+    if (fixtureFiles.has(filePath)) continue;
+    for (const pattern of secretPatterns) {
+      if (findDisallowedMatch(filePath, pattern, line.text)) {
+        issues.push({
+          code: pattern.code,
+          message: `[branch history ${sha.slice(0, 12)}] ${pattern.message}`,
+          filePath: line.filePath,
+          line: line.line,
+        });
+      }
+    }
+  }
+
+  return issues;
+}
+
+function scanBranchCommitSensitiveArtifacts(cwd: string, sha: string): GuardIssue[] {
+  const changedFiles = git(['diff-tree', '--no-commit-id', '--name-only', '--diff-filter=ACMR', '-r', sha], cwd)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(normalizeRepoPath);
+
+  return sensitiveArtifactIssues(
+    changedFiles,
+    'branch-history-sensitive-artifact',
+    `Runtime credential, database, key, workspace, or scratch artifact was committed in branch history ${sha.slice(0, 12)}.`,
+  );
+}
+
+export function scanBranchSecretHistory(cwd: string, mergeBase: string): GuardIssue[] {
+  const issues: GuardIssue[] = [];
+  for (const sha of branchCommitShas(cwd, mergeBase)) {
+    issues.push(
+      ...scanBranchCommitSensitiveArtifacts(cwd, sha),
+      ...scanBranchCommitSecretLines(cwd, sha),
+    );
+  }
+  return issues;
+}
+
 export function parseCommitAuthorLog(log: string): CommitAuthor[] {
   return log
     .split('\x1e')
@@ -772,7 +824,7 @@ export function scanBranchDiff(cwd: string, requestedBaseRef?: string): GuardIss
     .map(normalizeRepoPath);
   const diff = git(['diff', '--unified=0', '--no-ext-diff', `${mergeBase}..HEAD`], cwd);
 
-  return [
+  const finalDiffIssues = [
     ...sensitiveArtifactIssues(
       changedFiles,
       'branch-sensitive-artifact',
@@ -780,6 +832,28 @@ export function scanBranchDiff(cwd: string, requestedBaseRef?: string): GuardIss
     ),
     ...scanAddedLines(parseUnifiedDiffAddedLines(diff)),
   ];
+  const finalSensitiveArtifactPaths = new Set(
+    finalDiffIssues
+      .filter((issue) => issue.code === 'branch-sensitive-artifact' && issue.filePath)
+      .map((issue) => issue.filePath),
+  );
+  const seen = new Set(finalDiffIssues.map((issue) => `${issue.code}:${issue.filePath ?? ''}:${issue.line ?? 0}`));
+  const historyIssues = scanBranchSecretHistory(cwd, mergeBase)
+    .filter((issue) => {
+      if (
+        issue.code === 'branch-history-sensitive-artifact'
+        && issue.filePath
+        && finalSensitiveArtifactPaths.has(issue.filePath)
+      ) {
+        return false;
+      }
+      const key = `${issue.code}:${issue.filePath ?? ''}:${issue.line ?? 0}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+  return [...finalDiffIssues, ...historyIssues];
 }
 
 function commitAuthorBaseRef(cwd: string): string | null {

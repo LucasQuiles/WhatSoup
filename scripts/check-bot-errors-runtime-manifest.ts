@@ -15,6 +15,7 @@ export type RuntimeManifestFindingCode =
   | 'invalid-sha256'
   | 'invalid-must-contain'
   | 'duplicate-path'
+  | 'missing-required-path'
   | 'missing-file'
   | 'hash-drift'
   | 'missing-marker';
@@ -36,6 +37,17 @@ interface ManifestFileEntry {
   sha256: string;
   mustContain: string[];
 }
+
+export const REQUIRED_RUNTIME_MANIFEST_PATHS = [
+  'deploy/scripts/bot-errors-dispatcher.py',
+  'deploy/scripts/bot-errors-health-check.py',
+  'deploy/scripts/bot-errors-heartbeat-watchdog.py',
+  'deploy/scripts/bot-errors-q-loop.py',
+  'src/lib/bot-errors-outbox.ts',
+  'deploy/scripts/bot-errors-collector.py',
+  'deploy/scripts/bot-errors-emit.py',
+  'deploy/scripts/bot-errors-runner.py',
+] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -129,6 +141,7 @@ function parseManifestEntries(payload: unknown): {
 export function checkBotErrorsRuntimeManifest(
   cwd = process.cwd(),
   manifestPath = 'deploy/bot-errors-runtime-manifest.json',
+  requiredPaths: readonly string[] = REQUIRED_RUNTIME_MANIFEST_PATHS,
 ): RuntimeManifestCheckResult {
   const absoluteManifestPath = path.resolve(cwd, manifestPath);
   let payload: unknown;
@@ -143,6 +156,17 @@ export function checkBotErrorsRuntimeManifest(
   }
 
   const { entries, findings } = parseManifestEntries(payload);
+  const entryPaths = new Set(entries.map((entry) => entry.path));
+  for (const requiredPath of requiredPaths) {
+    if (!entryPaths.has(requiredPath)) {
+      findings.push(finding(
+        'missing-required-path',
+        `runtime manifest is missing required BOT ERRORS entry: ${requiredPath}`,
+        requiredPath,
+      ));
+    }
+  }
+
   for (const entry of entries) {
     const absoluteFilePath = path.resolve(cwd, entry.path);
     if (!absoluteFilePath.startsWith(path.resolve(cwd) + path.sep) && absoluteFilePath !== path.resolve(cwd)) {

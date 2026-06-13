@@ -257,6 +257,19 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     ],
     remediation: 'Restore CI fail-closed behavior for missing test-integrity tooling.',
   },
+  {
+    id: 'bot-errors-runtime-manifest-required-paths',
+    category: 'guard-chain',
+    file: 'scripts/check-bot-errors-runtime-manifest.ts',
+    anchors: [
+      'REQUIRED_RUNTIME_MANIFEST_PATHS',
+      'missing-required-path',
+      'deploy/scripts/bot-errors-health-check.py',
+      'deploy/scripts/bot-errors-emit.py',
+      'src/lib/bot-errors-outbox.ts',
+    ],
+    remediation: 'Restore required BOT ERRORS runtime manifest path enforcement before deploying runtime scripts.',
+  },
 ];
 
 function loadPackageScripts(cwd: string): Record<string, string> {

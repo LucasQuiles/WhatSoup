@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   checkBotErrorsRuntimeManifest,
+  REQUIRED_RUNTIME_MANIFEST_PATHS,
   run,
 } from '../../scripts/check-bot-errors-runtime-manifest.ts';
 
@@ -44,7 +45,7 @@ describe('check-bot-errors-runtime-manifest guard', () => {
 
     expect(result.ok).toBe(true);
     expect(result.findings).toEqual([]);
-    expect(result.checked).toBeGreaterThan(0);
+    expect(result.checked).toBe(REQUIRED_RUNTIME_MANIFEST_PATHS.length);
   });
 
   it('fails closed when a manifest file hash drifts', () => {
@@ -58,7 +59,7 @@ describe('check-bot-errors-runtime-manifest guard', () => {
       },
     ]);
 
-    const result = checkBotErrorsRuntimeManifest(root);
+    const result = checkBotErrorsRuntimeManifest(root, 'deploy/bot-errors-runtime-manifest.json', ['deploy/scripts/probe.py']);
 
     expect(result.ok).toBe(false);
     expect(result.findings).toEqual([
@@ -79,7 +80,7 @@ describe('check-bot-errors-runtime-manifest guard', () => {
       },
     ]);
 
-    const result = checkBotErrorsRuntimeManifest(root);
+    const result = checkBotErrorsRuntimeManifest(root, 'deploy/bot-errors-runtime-manifest.json', ['deploy/scripts/probe.py']);
 
     expect(result.ok).toBe(false);
     expect(result.findings).toEqual([
@@ -96,7 +97,7 @@ describe('check-bot-errors-runtime-manifest guard', () => {
       },
     ]);
 
-    const result = checkBotErrorsRuntimeManifest(root);
+    const result = checkBotErrorsRuntimeManifest(root, 'deploy/bot-errors-runtime-manifest.json', []);
 
     expect(result.ok).toBe(false);
     expect(result.findings).toEqual([
@@ -114,7 +115,7 @@ describe('check-bot-errors-runtime-manifest guard', () => {
       { path: 'deploy/scripts/probe.py', sha256: sha256(body) },
     ]);
 
-    const result = checkBotErrorsRuntimeManifest(root);
+    const result = checkBotErrorsRuntimeManifest(root, 'deploy/bot-errors-runtime-manifest.json', ['deploy/scripts/probe.py']);
 
     expect(result.ok).toBe(false);
     expect(result.findings).toEqual([
@@ -139,5 +140,26 @@ describe('check-bot-errors-runtime-manifest guard', () => {
     expect(result.ok).toBe(false);
     expect(process.exitCode).toBe(1);
     expect(error.mock.calls.flat().join('\n')).toContain('hash-drift');
+  });
+
+  it('fails closed when a required BOT ERRORS runtime file is omitted from the manifest', () => {
+    const root = makeRoot();
+    mkdirSync(path.join(root, 'deploy', 'scripts'), { recursive: true });
+    const body = 'same\n';
+    writeFileSync(path.join(root, 'deploy', 'scripts', 'present.py'), body, 'utf8');
+    writeFileSync(path.join(root, 'deploy', 'scripts', 'missing.py'), body, 'utf8');
+    writeManifest(root, [
+      { path: 'deploy/scripts/present.py', sha256: sha256(body) },
+    ]);
+
+    const result = checkBotErrorsRuntimeManifest(root, 'deploy/bot-errors-runtime-manifest.json', [
+      'deploy/scripts/present.py',
+      'deploy/scripts/missing.py',
+    ]);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual([
+      expect.objectContaining({ code: 'missing-required-path', path: 'deploy/scripts/missing.py' }),
+    ]);
   });
 });

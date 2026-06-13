@@ -12,7 +12,7 @@ The `Quality` workflow (`.github/workflows/quality.yml`) runs all of these on ev
 | Typecheck scripts/ | `npm run typecheck:scripts` | scripts/ build tooling (tsconfig.scripts.json) |
 | **Typecheck (all)** | `npm run typecheck:all` | **src/ + tests/ + console/src/ (tsconfig.test.json) — broader scope than `typecheck`** |
 | Repo hygiene (staged) | `npm run guard:repo:staged` | hygiene-guard.ts rules — synthetic JIDs, API-key shapes, real names, etc. |
-| Repo hygiene (branch diff) | `npm run guard:repo:branch-diff` | same added-line rules over merge-base(base, HEAD)..HEAD so PR/clean-index contexts are not staged-only smoke tests |
+| Repo hygiene (branch diff) | `npm run guard:repo:branch-diff` | same added-line rules over merge-base(base, HEAD)..HEAD so PR/clean-index contexts are not staged-only smoke tests, plus branch-history secret/artifact checks for add-then-remove leaks |
 | Repo hygiene (commit-msg) | `npm run guard:repo:commit-msg <msg>` | hygiene rules on commit messages too |
 | Documentation drift | `npm run guard:doc-drift` | docs ↔ code coupling check |
 | Public surface drift | `npm run guard:public-surface-drift` | exported API surface stability check |

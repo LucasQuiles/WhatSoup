@@ -562,6 +562,35 @@ The migrated group was 1203631234567890@g.us.
     expect(process.exitCode).toBe(1);
   });
 
+  it('flags secret-shaped content added and removed before the final branch diff', () => {
+    const repo = makeBranchRepo();
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'transient.ts'), 'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\n');
+    git(repo, ['add', 'src/transient.ts']);
+    git(repo, ['commit', '-m', 'test: transient secret fixture']);
+    git(repo, ['rm', 'src/transient.ts']);
+    git(repo, ['commit', '-m', 'test: remove transient secret fixture']);
+
+    const issues = scanBranchDiff(repo, 'main');
+
+    expect(issues.map((issue) => issue.code)).toEqual(['secret-assignment']);
+    expect(issues[0].message).toContain('[branch history');
+  });
+
+  it('flags sensitive artifacts added and removed before the final branch diff', () => {
+    const repo = makeBranchRepo();
+    writeFileSync(join(repo, '.env.local'), "TOKEN='fixture'\n");
+    git(repo, ['add', '.env.local']);
+    git(repo, ['commit', '-m', 'test: transient artifact fixture']);
+    git(repo, ['rm', '.env.local']);
+    git(repo, ['commit', '-m', 'test: remove transient artifact fixture']);
+
+    const issues = scanBranchDiff(repo, 'main');
+
+    expect(issues.map((issue) => issue.code)).toEqual(['branch-history-sensitive-artifact']);
+    expect(issues[0].message).toContain('branch history');
+  });
+
   it('parses scan-history mode with optional depth and rejects bad depth', () => {
     expect(parseArgs(['--scan-history'])).toEqual({ mode: 'scan-history', help: false });
     expect(parseArgs(['--scan-history', '25'])).toEqual({
