@@ -61,6 +61,18 @@ describe('classifyAgentFailure', () => {
       expected: 'provider_context_overflow' as const,
     },
     {
+      label: 'model unavailable',
+      source: 'provider_result' as const,
+      message: 'The model inaccessible-model-for-test does not exist or you do not have access to it.',
+      expected: 'provider_model_unavailable' as const,
+    },
+    {
+      label: 'policy block',
+      source: 'provider_result' as const,
+      message: 'This request violates our policy.',
+      expected: 'provider_policy_block' as const,
+    },
+    {
       label: 'rate limit',
       source: 'provider_error' as const,
       error: new WhatSoupError('openai rate limited', 'LLM_RATE_LIMITED'),
@@ -188,6 +200,7 @@ describe('classifyAgentFailure', () => {
       'provider_usage_limit',
       'provider_rate_limit',
       'provider_server_error',
+      'provider_model_unavailable',
       'provider_cli_crash',
       'provider_timeout',
       'provider_network_error',
@@ -211,8 +224,9 @@ describe('classifyAgentFailure', () => {
     })).toBe(true);
   });
 
-  it('keeps config, auth, tool, MCP, binary-missing, and permission-denied failures page-only even with an independent backup', () => {
+  it('keeps policy, config, auth, tool, MCP, binary-missing, and permission-denied failures page-only even with an independent backup', () => {
     for (const failureClass of [
+      'provider_policy_block',
       'config_or_capability_missing',
       'provider_auth_required',
       'mcp_transport_failure',

@@ -6,6 +6,8 @@ export type AgentFailureClass =
   | 'provider_rate_limit'
   | 'provider_server_error'
   | 'provider_context_overflow'
+  | 'provider_model_unavailable'
+  | 'provider_policy_block'
   | 'provider_cli_crash'
   | 'provider_timeout'
   | 'provider_network_error'
@@ -64,6 +66,14 @@ export interface AgentFailureClassification {
   severity: 'critical' | 'warning';
 }
 
+export type ProviderFailureKind =
+  | 'usage-limit'
+  | 'rate-limit'
+  | 'auth-required'
+  | 'model-unavailable'
+  | 'policy-block'
+  | 'context-overflow';
+
 /**
  * Detect provider usage-limit / quota-exceeded messages that should not be
  * forwarded as normal user-visible agent output.
@@ -115,7 +125,67 @@ export function isRateLimitResultMessage(text: string): boolean {
     normalized.includes('provider rate limited') ||
     normalized.includes('api rate limited') ||
     /\b429\b/.test(normalized)
+  ) && !isUsageLimitMessage(text);
+}
+
+export function isProviderAuthRequiredMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('not logged in') ||
+    lower.includes('please run /login') ||
+    lower.includes('please login') ||
+    lower.includes('authentication required') ||
+    lower.includes('auth required') ||
+    lower.includes('invalid api key') ||
+    lower.includes('missing api key') ||
+    lower.includes('no api key') ||
+    (lower.includes('oauth') && lower.includes('expired'))
   );
+}
+
+export function isProviderPolicyBlockMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('usage policy') ||
+    lower.includes('policy violation') ||
+    lower.includes('violates our policy') ||
+    lower.includes('violative') ||
+    lower.includes('blocked by policy')
+  );
+}
+
+export function isProviderModelUnavailableMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    (lower.includes('issue with the selected model') &&
+      lower.includes('may not exist') &&
+      lower.includes('may not have access')) ||
+    lower.includes('does not exist or you do not have access') ||
+    lower.includes('model not found in provider catalog') ||
+    (lower.includes('unknown model') && lower.includes('provider'))
+  );
+}
+
+export function classifyProviderFailure(text: string): ProviderFailureKind | null {
+  if (!text) return null;
+  if (isPromptTooLongMessage(text)) return 'context-overflow';
+  if (isUsageLimitMessage(text)) return 'usage-limit';
+  if (isProviderAuthRequiredMessage(text)) return 'auth-required';
+  if (isRateLimitResultMessage(text)) return 'rate-limit';
+  if (isProviderPolicyBlockMessage(text)) return 'policy-block';
+  if (isProviderModelUnavailableMessage(text)) return 'model-unavailable';
+  return null;
+}
+
+const FALLBACK_PROVIDER_FAILURE_KINDS: ReadonlySet<ProviderFailureKind> = new Set<ProviderFailureKind>([
+  'usage-limit',
+  'rate-limit',
+  'auth-required',
+  'model-unavailable',
+]);
+
+export function providerFailureArmsFallback(kind: ProviderFailureKind): boolean {
+  return FALLBACK_PROVIDER_FAILURE_KINDS.has(kind);
 }
 
 export function isExpectedProviderShutdown(input: {
@@ -177,9 +247,11 @@ export function isFallbackEligibleForFailureClass(
     case 'provider_network_error':
     case 'provider_silent_hang':
     case 'provider_stream_corrupt':
+    case 'provider_model_unavailable':
       return independent;
     case 'provider_context_overflow':
       return independent && policy.contextWindow === 'larger';
+    case 'provider_policy_block':
     case 'provider_binary_missing':
     case 'provider_permission_denied':
     case 'provider_auth_required':
@@ -207,6 +279,9 @@ function classifyFailureClass(input: AgentFailureInput, message: string): AgentF
   if (isPromptTooLongMessage(message)) return 'provider_context_overflow';
   if (isUsageLimitMessage(message)) return 'provider_usage_limit';
   if (isRateLimitResultMessage(message)) return 'provider_rate_limit';
+  if (isProviderAuthRequiredMessage(message)) return 'provider_auth_required';
+  if (isProviderModelUnavailableMessage(message)) return 'provider_model_unavailable';
+  if (isProviderPolicyBlockMessage(message)) return 'provider_policy_block';
 
   if (input.error instanceof WhatSoupError) {
     switch (input.error.code) {

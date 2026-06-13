@@ -2766,7 +2766,7 @@ describe('AgentRuntime', () => {
         chatJid: 'test@s.whatsapp.net',
         textPreview: expect.stringContaining('out of extra usage'),
       }),
-      'suppressed usage-limit message from assistant_text',
+      'suppressed provider-failure message from assistant_text',
     );
   });
 
@@ -2920,6 +2920,70 @@ describe('AgentRuntime', () => {
     const calls = mockQueue.enqueueResultText.mock.calls.map((args) => args[0] as string);
     expect(calls).toContain('Context limit reached');
     expect(mockQueue.flush).toHaveBeenCalled();
+  });
+
+  it('model-unavailable result is not forwarded raw to the user (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = "There's an issue with the selected model (some-test-model). It may not exist or you may not have access to it. Run --model to pick a different model.";
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() =>
+      expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ textPreview: expect.stringContaining('issue with the selected model') }),
+        'suppressed provider model-unavailable message from result — session will be shut down',
+      ),
+    );
+    const forwarded = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
+    expect(forwarded).not.toContain(raw);
+  });
+
+  it('unknown terminal (is_error) result is default-denied: generic notice, never raw', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const raw = 'Unexpected provider explosion exposing internal-detail-xyz';
+    capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
+
+    await vi.waitFor(() =>
+      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('an operator has been notified')),
+    );
+    const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
+    expect(forwardedRaw).not.toContain(raw);
+    const allText = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string).join('\n');
+    expect(allText).not.toContain('internal-detail-xyz');
+  });
+
+  it('non-error result with text is still forwarded (no over-suppression)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({ type: 'result', text: 'a genuine terminal reply', isError: false });
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('a genuine terminal reply'));
+  });
+
+  it('model-unavailable assistant_text is suppressed from streaming (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({
+      type: 'assistant_text',
+      text: "There's an issue with the selected model (m). It may not exist or you may not have access to it.",
+    });
+    expect(mockQueue.enqueueStreamingText).not.toHaveBeenCalled();
   });
 
   it('assistant_text after result event is suppressed (post-turn gate)', async () => {
@@ -5450,6 +5514,39 @@ describe('AgentRuntime', () => {
     expect(disarm).not.toHaveBeenCalled();
     // Token/checkpoint accounting still runs for the system turn.
     expect(arg.sessionTokens).toEqual({ dbRowId: 41, inputTokens: 3, outputTokens: 5 });
+  });
+
+  it('shared model-unavailable result is not forwarded raw to the user (shared path)', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { shared: true });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+
+    const state = runtime as unknown as {
+      durability: {
+        completeTurn: ReturnType<typeof vi.fn>;
+        upsertSessionCheckpoint: ReturnType<typeof vi.fn>;
+        completeInbound: ReturnType<typeof vi.fn>;
+      };
+      session: typeof mockSession;
+      activeChatJid: string | null;
+      currentTurnChatJid: string | null;
+      currentInboundSeq: number | undefined;
+      outboundQueues: Map<string, IOutboundQueue>;
+      handleEvent: (event: AgentEvent) => void;
+    };
+    state.durability = { completeTurn: vi.fn(), upsertSessionCheckpoint: vi.fn(), completeInbound: vi.fn() };
+    state.session = Object.assign({}, mockSession, { shutdown: vi.fn(), clearTurnWatchdog: vi.fn() });
+    state.activeChatJid = '111@s.whatsapp.net';
+    state.currentTurnChatJid = '111@s.whatsapp.net';
+    state.currentInboundSeq = 1;
+    state.outboundQueues.set('111@s.whatsapp.net', queue);
+
+    const raw = "There's an issue with the selected model (x). It may not exist or you may not have access to it.";
+    state.handleEvent({ type: 'result', text: raw, isError: true });
+
+    const forwarded = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a) => a[0] as string);
+    expect(forwarded).not.toContain(raw);
   });
 
   it('shared result batches turn completion writes through durability.completeTurn', () => {
