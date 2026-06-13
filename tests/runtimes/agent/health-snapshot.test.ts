@@ -236,6 +236,13 @@ function expectedFallbackDetails(): Record<string, unknown> {
     fallbackReplays: 0,
     fallbackWindowCostUsd: 0,
     primaryModelUsability: null,
+    turnCapability: {
+      modelUsable: null,
+      modelUsabilityStatus: null,
+      lastSuccessfulTurnAt: null,
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: null,
+    },
     activeFallbackEntry: null,
     fallbackChain: [],
   };

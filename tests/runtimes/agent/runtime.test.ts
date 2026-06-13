@@ -3024,6 +3024,10 @@ describe('AgentRuntime', () => {
     );
     const forwarded = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
     expect(forwarded).not.toContain(raw);
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('model-unavailable');
+    expect(turnCapability.lastTurnErrorAt).toEqual(expect.any(Number));
+    expect(JSON.stringify(turnCapability)).not.toContain(raw);
   });
 
   it('unknown terminal (is_error) result is default-denied: generic notice, never raw', async () => {
@@ -3043,6 +3047,28 @@ describe('AgentRuntime', () => {
     expect(forwardedRaw).not.toContain(raw);
     const allText = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string).join('\n');
     expect(allText).not.toContain('internal-detail-xyz');
+
+    let turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('unknown-terminal');
+    expect(turnCapability.lastTurnErrorAt).toEqual(expect.any(Number));
+    expect(JSON.stringify(turnCapability)).not.toContain('internal-detail-xyz');
+    const failedAt = turnCapability.lastTurnErrorAt as number;
+
+    mockQueue.enqueueResultText.mockClear();
+    await runtime.handleMessage(makeMsg({ content: 'follow up' }));
+    capturedOnEventRef.current!({ type: 'result', text: 'Recovered reply', isError: false });
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Recovered reply'));
+
+    turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastSuccessfulTurnAt).toEqual(expect.any(Number));
+    expect(turnCapability.lastSuccessfulTurnAt).toBeGreaterThanOrEqual(failedAt);
+    expect({
+      lastTurnErrorClass: turnCapability.lastTurnErrorClass,
+      lastTurnErrorAt: turnCapability.lastTurnErrorAt,
+    }).toEqual({
+      lastTurnErrorClass: null,
+      lastTurnErrorAt: null,
+    });
   });
 
   it('non-error result with text is still forwarded (no over-suppression)', async () => {
@@ -5687,6 +5713,10 @@ describe('AgentRuntime', () => {
 
     const forwarded = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a) => a[0] as string);
     expect(forwarded).not.toContain(raw);
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('model-unavailable');
+    expect(turnCapability.lastTurnErrorAt).toEqual(expect.any(Number));
+    expect(JSON.stringify(turnCapability)).not.toContain(raw);
   });
 
   it('shared result batches turn completion writes through durability.completeTurn', () => {
