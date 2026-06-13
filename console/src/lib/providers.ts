@@ -96,12 +96,12 @@ export function getProviderConfigFields(providerId: string): ConfigFieldDef[] {
 }
 
 export const PROVIDER_COLORS: Record<string, { stroke: string; fill: string }> = {
-  'claude-cli':    { stroke: 'var(--color-m-agt)', fill: 'var(--color-m-agt)' },
-  'codex-cli':     { stroke: 'var(--color-s-ok)',  fill: 'var(--color-s-ok)' },
-  'gemini-cli':    { stroke: 'var(--color-s-warn)', fill: 'var(--color-s-warn)' },
-  'openai-api':    { stroke: 'var(--color-m-cht)', fill: 'var(--color-m-cht)' },
-  'anthropic-api': { stroke: 'var(--color-m-pas)', fill: 'var(--color-m-pas)' },
-  'opencode-cli':  { stroke: 'var(--color-t2)',    fill: 'var(--color-t2)' },
+  'claude-cli':    { stroke: 'var(--provider-claude-fg)',    fill: 'var(--provider-claude-fg)' },
+  'codex-cli':     { stroke: 'var(--provider-codex-fg)',     fill: 'var(--provider-codex-fg)' },
+  'gemini-cli':    { stroke: 'var(--provider-gemini-fg)',    fill: 'var(--provider-gemini-fg)' },
+  'openai-api':    { stroke: 'var(--provider-openai-fg)',    fill: 'var(--provider-openai-fg)' },
+  'anthropic-api': { stroke: 'var(--provider-anthropic-fg)', fill: 'var(--provider-anthropic-fg)' },
+  'opencode-cli':  { stroke: 'var(--provider-opencode-fg)',  fill: 'var(--provider-opencode-fg)' },
 };
 
 export function getProviderColor(id: string): { stroke: string; fill: string } {

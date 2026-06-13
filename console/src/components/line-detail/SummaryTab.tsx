@@ -4,7 +4,7 @@ import { RotateCw, SlidersHorizontal, GitBranch, Power } from 'lucide-react'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
 import { formatRelative } from '../../lib/format-time'
-import { getProvider, DEFAULT_PROVIDER_ID } from '../../lib/providers'
+import { getProvider, getProviderColor, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { statusTextClass } from '../../lib/status-severity'
 import ConfirmDialog from '../ConfirmDialog'
 import { Button } from '../primitives/Button'
@@ -34,6 +34,8 @@ export function SummaryTab({
     typeof agentOptions?.provider === 'string' ? agentOptions.provider : DEFAULT_PROVIDER_ID
   const providerId = line.provider ?? line.health?.instance?.provider ?? configProvider
   const providerDisplay = getProvider(providerId)?.displayName ?? providerId
+  const providerInk = getProviderColor(providerId).stroke
+  const configProviderInk = getProviderColor(configProvider).stroke
 
   // All instance KPIs in one row — health, runtime, identity, tokens
   // Resolve connection state via the single-owner map (DD-11).
@@ -62,7 +64,7 @@ export function SummaryTab({
       { label: 'ENRICHMENT', value: String(line.enrichmentUnprocessed ?? 0), color: (line.enrichmentUnprocessed ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
     ] : []),
     ...(line.mode === 'agent' ? [
-      { label: 'PROVIDER', value: providerDisplay, color: 'text-m-agt' },
+      { label: 'PROVIDER', value: providerDisplay, color: '', style: { color: providerInk } },
       { label: 'SESSIONS', value: String(line.activeSessions ?? 0), color: (line.activeSessions ?? 0) > 0 ? 'text-m-agt' : 'text-t3' },
       ...(line.health?.runtime?.agent?.lastSessionStatus
         ? [{ label: 'LAST SESSION', value: line.health.runtime.agent.lastSessionStatus, color: line.health.runtime.agent.lastSessionStatus === 'success' ? 'text-s-ok' : 'text-s-warn' }]
@@ -127,7 +129,10 @@ export function SummaryTab({
             <div className="c-col-header text-t4 mb-[var(--sp-1)]">
               {card.label}
             </div>
-            <div className={`font-mono font-semibold ${card.color} tracking-[var(--tracking-tight)] text-lg`}>
+            <div
+              className={`font-mono font-semibold ${card.color} tracking-[var(--tracking-tight)] text-lg`}
+              style={card.style}
+            >
               {card.value}
             </div>
           </motion.div>
@@ -180,7 +185,7 @@ export function SummaryTab({
               {line.mode === 'agent' && (
                 <div className={`flex items-center justify-between py-[var(--sp-1h)] px-0${config.length > 0 ? ' c-border-b' : ''}`}>
                   <span className="c-label">provider</span>
-                  <span className="font-mono text-m-agt text-data">
+                  <span className="font-mono text-data" style={{ color: configProviderInk }}>
                     {getProvider(
                       ((rawConfig.agentOptions as Record<string, unknown> | undefined)?.provider as string) ?? DEFAULT_PROVIDER_ID
                     )?.displayName ?? DEFAULT_PROVIDER_ID}

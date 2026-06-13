@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PROVIDERS, getProvider, getProviderConfigFields, type ProviderDef } from '../../console/src/lib/providers.ts';
+import { PROVIDERS, getProvider, getProviderColor, getProviderConfigFields, type ProviderDef } from '../../console/src/lib/providers.ts';
 
 describe('PROVIDERS', () => {
   it('has 6 providers', () => {
@@ -26,6 +26,26 @@ describe('getProvider', () => {
 
   it('returns undefined for unknown ID', () => {
     expect(getProvider('nope')).toBeUndefined();
+  });
+});
+
+describe('getProviderColor', () => {
+  it('uses dedicated provider tokens instead of status or mode channels', () => {
+    const borrowedChannel = /var\(--(?:color-[ms]-|status-|mode-|data-)/;
+
+    for (const provider of PROVIDERS) {
+      const color = getProviderColor(provider.id);
+      expect(color.stroke).toMatch(/^var\(--provider-[a-z]+-fg\)$/);
+      expect(color.fill).toBe(color.stroke);
+      expect(color.stroke).not.toMatch(borrowedChannel);
+    }
+  });
+
+  it('keeps unknown providers neutral', () => {
+    expect(getProviderColor('unknown-provider')).toEqual({
+      stroke: 'var(--color-t3)',
+      fill: 'var(--color-t3)',
+    });
   });
 });
 

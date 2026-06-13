@@ -3,7 +3,7 @@ import { motion } from 'framer-motion'
 import { KeyRound, ShieldOff, ShieldCheck, Zap } from 'lucide-react'
 import { useProviders, useProviderStatus } from '../../hooks/use-fleet'
 import { formatRelative } from '../../lib/format-time'
-import { getProvider } from '../../lib/providers'
+import { getProvider, getProviderColor } from '../../lib/providers'
 import type { ProviderCatalogEntry, ProviderSlotStatus, ProviderStatus } from '../../types'
 
 /**
@@ -75,16 +75,19 @@ const SlotRow: FC<{
   slot: ProviderSlotStatus
   catalog: ProviderCatalogEntry[] | undefined
   border?: boolean
-}> = ({ label, slot, catalog, border }) => (
-  <div className={`flex items-center justify-between py-[var(--sp-1h)] px-0${border ? ' c-border-b' : ''}`}>
-    <span className="c-label">{label}</span>
-    <span className="flex items-center gap-[var(--sp-2)]">
-      <span className="font-mono text-m-agt text-data">{displayName(slot.provider, catalog)}</span>
-      <span className="font-mono text-t3 text-data">{slot.model ?? '—'}</span>
-      <KeyBadge keyPresent={slot.keyPresent} />
-    </span>
-  </div>
-)
+}> = ({ label, slot, catalog, border }) => {
+  const providerColor = getProviderColor(slot.provider ?? '').stroke
+  return (
+    <div className={`flex items-center justify-between py-[var(--sp-1h)] px-0${border ? ' c-border-b' : ''}`}>
+      <span className="c-label">{label}</span>
+      <span className="flex items-center gap-[var(--sp-2)]">
+        <span className="font-mono text-data" style={{ color: providerColor }}>{displayName(slot.provider, catalog)}</span>
+        <span className="font-mono text-t3 text-data">{slot.model ?? '—'}</span>
+        <KeyBadge keyPresent={slot.keyPresent} />
+      </span>
+    </div>
+  )
+}
 
 type FallbackChainEntry = ProviderStatus['fallback']['chain'][number]
 
@@ -92,13 +95,14 @@ const ChainEntry: FC<{
   entry: FallbackChainEntry
   catalog: ProviderCatalogEntry[] | undefined
 }> = ({ entry, catalog }) => {
+  const providerColor = getProviderColor(entry.provider ?? '').stroke
   const status =
     entry.eligible === true ? 'ready' :
     entry.eligible === false ? 'unavailable' :
     'unknown'
   return (
     <span className="inline-flex items-center gap-[var(--sp-0h)] text-xs font-mono text-t4">
-      <span className="text-data">{displayName(entry.provider, catalog)}</span>
+      <span className="text-data" style={{ color: providerColor }}>{displayName(entry.provider, catalog)}</span>
       {entry.model && <span>{entry.model}</span>}
       <span>{status}</span>
     </span>
