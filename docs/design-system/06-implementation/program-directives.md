@@ -101,7 +101,7 @@ actionable without reopening locked direction via a user gate.
 | QA law per slice | `docs/design-system/06-implementation/qa-hardening.md` |
 | Debt | `docs/design-system/06-implementation/design-debt-register.md` |
 | Conformance | `docs/design-system/06-implementation/conformance-manifest.md` |
-| Program history | `docs/design-system/06-implementation/execution-log.md` |
+| Program history | `docs/design-system/execution-log.md` |
 | Enforcement lifecycle | `docs/design-system/04-enforcement/lint-plan.md` |
 | Waivers/exceptions | `console/eslint-waivers.yaml` |
 | Cutover + branding | `docs/design-system/05-cutover/{cutover-plan,branding-touchpoints}.md` |
