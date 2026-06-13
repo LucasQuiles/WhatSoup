@@ -52,6 +52,19 @@ mark. No lowercase or mixed-case rendering. No action-accent or status-colored t
 `--type-nameplate` for anything except this lockup (lint: `nameplate-reserved`). The kitchen
 metaphor may survive only in naming history, never in imagery.
 
+### 1.4 Identity-system extension (2026-06-13 follow-on direction)
+
+The identity is a small **system**, not a single lockup: a favicon, minimal icon/badge marks, and
+the text wordmark. The in-product **nameplate stays the locked instrument label** (§1.1–§1.3,
+Geist-Mono engraved style) for console chrome. For friendlier brand-signal surfaces — landing,
+identity, marketing — the wordmark may move toward a **round, dense, tightly-spaced** display read
+(heavy round grotesque, **uppercase** — the §1.3 case discipline still binds — tracking ≈ −0.05 to
+−0.06em) where the context calls for it. The favicon
+and badge resolve to one legible glyph at 16px (primary: the round "S" monogram). All §1.3
+forbidden treatments still bind: no bowls, mascots, gradients, glow, or second action accent; the
+single electric-blue accent stays locked, and warmth comes from warmer neutral surfaces, not chroma.
+Reference exploration: standalone identity showcase (not wired to the product).
+
 ## 2. Locked vocabulary (G1)
 
 | Concept | Was | Locked term |

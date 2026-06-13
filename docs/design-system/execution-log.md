@@ -976,3 +976,19 @@ absent (primitive-level compensations cited), one suite-header overclaim, one st
 comment, the `--panel-shortcuts` zero-consumer orphan — all routed to C3. Register delta
 executed by the integrator: DD-18r modal-sizing leg STRUCK (all four consumed panel tokens
 verified deleted).
+
+## 2026-06-13 — raw-button + accent-law burndown checkpoint; colour/brand decision lock
+
+- `171a6d2c` cleared **raw-button → 0**: 70 raw `<button>` across 29 files migrated to
+  `Button` / `ActionButton`; the Button primitive gained an object `ref` (React 19 ref-as-prop),
+  unblocking LinePicker's Popover-anchored triggers.
+- `100287db` cleared **accent-law → 0**: green action accents rebound `var(--color-s-ok)` →
+  `var(--accent)` / `--accent-fg`; dead `.c-btn-send` / `.c-btn-add` recipes deleted. Ride-along:
+  legacy-var-css 260 → 221, half-step 68 → 64.
+- Self-feeding queue moved **826 → 702** (blocking 756 → 636); two blocking categories eliminated.
+- **Validation lesson:** scoped eslint/tsc was insufficient — the first raw-button commit shipped
+  4 stale assertions still pinning legacy `c-btn` classes, caught only by the full repo suite.
+  Migration commits now require full `npm test` (or full console) validation before commit.
+- **Decision lock (this entry):** the four colour/brand follow-on decisions are recorded in
+  `02-directions/decision-log.md` and codified in `color.md §2.1` + `brand.md §1.4`, so the colour
+  waves no longer depend on agent memory. See those docs for the binding text.

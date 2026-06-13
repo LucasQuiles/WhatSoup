@@ -28,9 +28,24 @@ Chrome is monochrome. On a healthy screen the only chromatic pixels are:
    status color may appear only in position-stable slots — shape indicator, status label, row
    left-edge + wash, KPI attention card, log level tag, toast edge. Never decorative tint.
 
-That is six chromatic channels plus one accent; nothing else in the product may be chromatic.
+That is six chromatic channels plus one accent; nothing else in the product may be chromatic —
+save the single constrained provider-identity exception defined in §2.1.
 ok-green is mostly absence: healthy rows do not shout (calm-by-default). The nameplate tick uses
 `--mode-passive-solid` (brand heritage), not the action accent — see `brand.md`.
+
+### 2.1 Provider identity palette (constrained data-viz exception)
+
+Approved 2026-06-13. Provider identity is the one sanctioned exception to the six-channel law.
+Provider colours are **not** status, mode, or action colours. They may appear **only** where the
+datum being identified is the provider itself: provider labels, provider legends, provider chart
+series, and provider identity chips.
+
+Constraints: provider colours ride a dedicated **muted data-viz palette** (`--provider-*`), must be
+AA-checked wherever used as text, and stay visually subordinate to status and the action accent.
+They may **never** carry success, warning, failure, selected, focused, unread, or primary-action
+meaning, and may never reuse a `--color-s-*` / `--color-m-*` token. Message-volume and other
+non-provider chart series take a separate `--data-*` palette, also defined here before use — they
+must not borrow status/mode channels either.
 
 ## 3. Per-theme derivation laws
 

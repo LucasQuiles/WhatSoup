@@ -171,3 +171,23 @@ Decisions required:
 - Any specific visual/spec refinements to carry into T6/T7 or a targeted Round 2.
 
 T6, T7, and T8 remain blocked until explicit G2 approval and, for T8, separate explicit approval.
+
+## C3 follow-on decisions — colour and brand — APPROVED 2026-06-13
+
+Approved follow-on direction for the post-`raw-button` / post-`accent-law` burndown waves
+(queue 826 → 702; both categories at zero). Four decisions, locked:
+
+1. **Provider identity → muted data-viz palette.** Provider colours use a dedicated `--provider-*`
+   palette and may not borrow status or mode channels. Codified in `color.md §2.1`.
+2. **Traffic quantities → neutral data ink.** Fleet Sent / Received / Sessions / Media render as
+   neutral ink unless explicitly carrying a status or attention state. Colour stays reserved for
+   meaning (color-for-meaning law).
+3. **SOUP identity is a system.** Favicon + minimal icon/badge marks + the text wordmark. The
+   in-product nameplate keeps the locked instrument-label discipline; the wordmark may read round,
+   dense, and tightly spaced on friendlier brand surfaces. Codified in `brand.md §1.4`.
+4. **Warmth from neutrals, not chroma.** The electric-blue action accent stays locked; the
+   "serious but not sterile" warmth comes from a subtly warmer neutral surface ramp.
+
+Implementation note: provider/`--data-*` tokens require the `color.md §2.1` amendment (landed in the
+same lock) before any code consumes them. Reference exploration: a standalone identity showcase
+(both themes) — not wired to the product.
