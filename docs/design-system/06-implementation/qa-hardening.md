@@ -504,6 +504,39 @@ classified. A PASS means only that the staged packet included the required track
 owner; it does not prove the documentation is substantively correct. Reviewers still inspect the
 diff and the packet evidence.
 
+### 17.4 Design Resilience Audit
+
+Layout, text, scroll, layer, and interaction resilience risks are inventoried by
+`console/scripts/check-design-resilience.mjs` and exposed as:
+
+```bash
+npm --prefix console run design:resilience
+```
+
+The audit scans `console/src` for report-only findings:
+
+- `soup/no-unsafe-truncation` candidates: `truncate`, `whitespace-nowrap`, or ellipsis patterns
+  without a same-line/adjacent full-value path (`title`, `aria-label`, `aria-describedby`,
+  `data-full-value`) or documented exception;
+- `soup/scroll-owner-required` candidates: scrollable regions without axis min-size proof
+  (`min-h-0` / `min-w-0`) or a declared scroll-owner exception;
+- `soup/no-layout-shift-interaction` candidates: hover/focus state classes or CSS that change
+  width, height, padding, gap, basis, or min/max dimensions;
+- `soup/no-hover-only-content` candidates: hover/group-hover reveal without focus parity or an
+  explicit exception;
+- `soup/no-vw-font-size` candidates: viewport-width typography;
+- `soup/layer-owner-required` candidates: raw z-index utilities that do not consume `--z-*` tokens.
+
+Default mode is deliberately report-only: findings are emitted as structured JSON with `verdict:
+PASS`, `mode: report-only`, per-rule counts, and sample file/line evidence. `--fail-on-findings`
+exists only for future promotion packets after the current inventory is burned down or documented
+with sanctioned exceptions.
+
+A PASS in report-only mode means the audit ran and produced an inventory. It does not prove the UI is
+resilient, does not replace long-string screenshots, reduced-height screenshots, keyboard/touch
+tests, focus-ring checks, or reviewer inspection, and must never be cited as "zero findings" unless
+`finding_count` is actually `0`.
+
 ## 18. Done Means Durable
 
 A slice is not done when it only:

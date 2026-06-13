@@ -45,6 +45,11 @@ Hover is enhancement, never the only path (coarse pointers, touch, keyboard):
 - Tooltips never carry sole information; anything tooltip-only must also exist in a detail surface.
 - `any-pointer`/`any-hover` thinking (seed-4): no critical interaction may depend on hover or on
   fine pointing.
+- Hover-revealed content and action labels must reserve their geometry before reveal. The hidden
+  state may change opacity or transform, but it may not add width, padding, or gap that moves
+  neighboring controls.
+- Any hover reveal path must have a keyboard/touch peer: `focus-within`, `focus-visible`, an
+  always-visible control at narrow/coarse-pointer breakpoints, or a reachable detail surface.
 
 ## 4. Toolbar anatomy law
 
@@ -104,3 +109,8 @@ rows must carry `aria-label`s describing their action.
 `interactive-needs-focus-visible`, `modal-must-restore-focus`, `no-focus-outline-suppression`,
 `single-toolbar-pattern` (import restriction), `confirm-on-destructive` (review checklist +
 `useConfirm` helper adoption), dead-affordance review lane in the QA matrix.
+
+`design:resilience` is the report-only source audit for hover-only reveal risks, interaction geometry
+shifts, and raw layer ownership. It does not replace browser keyboard/focus tests; it only produces
+the current inventory that must be burned down or explicitly exempted before a hard lint rule is
+promoted.

@@ -42,6 +42,7 @@ const qaFiles = [
   /^console\/scripts\/capture-visual-matrix\.mjs$/,
   /^console\/scripts\/validate-visual-manifest\.mjs$/,
   /^console\/scripts\/check-contrast-matrix\.mjs$/,
+  /^console\/scripts\/check-design-resilience\.mjs$/,
   /^console\/scripts\/check-token-spec-drift\.mjs$/,
   /^tests\/browser\/.+$/,
   /^vitest\.browser(?:\.motion)?\.config\.ts$/,

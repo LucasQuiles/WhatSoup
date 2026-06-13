@@ -83,7 +83,28 @@ Component-owned width tokens (tokens-v3 §4): drawer `min(360px, 86%)`; modal 48
 side column 320px; Inbox panes 264px (chats) / 248px (contact). Panels are content-height; only
 scroll regions (table wraps, log beds, chat lists, drawer body) scroll internally.
 
-## 8. Migration notes
+## 8. Resilience rules of thumb
+
+These rules are binding design law before they become hard lint:
+
+- **Text wraps by default.** Operator names, provider names, routes, sockets, paths, errors, IDs,
+  user-authored text, and protocol-adjacent labels may truncate only when a full-value path exists
+  (`title`, `aria-label`, `aria-describedby`, `data-full-value`, or a documented details surface).
+- **One scroll owner per axis.** Pages, modals, drawers, tables, logs, and chat panes declare the
+  element that owns vertical and horizontal scrolling. Scrollable flex/grid children carry the
+  matching min-size escape (`min-h-0` for vertical, `min-w-0` for horizontal) or a documented
+  exception.
+- **Interaction states reserve geometry.** Hover, focus, loading, badge count, reveal-label, and
+  validation states do not change sibling layout. Reserve stable width/height/gap/padding in the
+  base state; state changes may alter color, opacity, transform, or content inside the reserved box.
+- **Typography never scales with viewport width.** Compact layouts use the type scale and density
+  tokens, not `vw` font sizes or viewport-based `clamp()` math.
+- **Layering is named.** Floating UI uses layer tokens (`--z-*`) or a documented layer owner. Raw
+  numeric `z-*` values are temporary findings until the layer owner is encoded.
+- **Reduced-height viewports are first-class.** 1440x500 and 390x844 must keep primary actions,
+  focus rings, validation text, and one-axis scroll reachable without hiding the only exit path.
+
+## 9. Migration notes
 
 - Legacy half-steps and the 60+ globalized component dimensions: dispositions in tokens-v3 §6.11–12.
 - The legacy `--sk-col-*` fixed column widths are replaced by content-sized columns + the collapse
@@ -91,8 +112,14 @@ scroll regions (table wraps, log beds, chat lists, drawer body) scroll internall
 - Route-level layout (4 pages + line-detail tabs) is unchanged — this program reskins, it does not
   restructure IA.
 
-## 9. Enforcement hooks
+## 10. Enforcement hooks
 
 `no-margin-utilities`, `no-magic-width`, `no-off-grid-values`, `density-as-prop` (no font-size
 overrides on table/list internals), and the 320px reflow check in the visual QA matrix (both
 themes, per cutover plan).
+
+Report-only resilience inventory begins with `design:resilience` and covers unsafe truncation,
+scroll-owner proof, layout-shifting interaction states, viewport-width typography, and raw layer
+values. Hard-error promotion is forbidden until current findings are inventoried, false positives are
+classified, visual/behavior proof exists for the affected surfaces, and sanctioned exceptions are
+documented.
