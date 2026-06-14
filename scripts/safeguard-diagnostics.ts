@@ -90,6 +90,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm --prefix console run design:token-drift',
       'npm --prefix console run design:contrast',
       'npm --prefix console run lint:shadow:baseline',
+      'npm --prefix console run design:raw-form-control-inventory',
       'npm --prefix console run design:regression',
       'npm --prefix console run design:metrics',
       'npm --prefix console run design:burndown',

@@ -6,12 +6,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   findDocDrift,
+  findRawFormControlInventory,
   findToolRegistrations,
   run,
 } from '../../scripts/doc-drift-check.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const currentToolCount = findToolRegistrations(repoRoot).length;
+const currentRawFormControlInventory = findRawFormControlInventory(repoRoot);
 
 describe('doc drift check', () => {
   afterEach(() => {
@@ -19,7 +21,7 @@ describe('doc drift check', () => {
     process.exitCode = undefined;
   });
 
-  it('passes for current MCP tool and module count docs', () => {
+  it('passes for current MCP tool, module count, and design inventory docs', () => {
     expect(findDocDrift({ cwd: repoRoot })).toEqual([]);
   });
 
@@ -150,6 +152,56 @@ describe('doc drift check', () => {
         claimed: 2,
         actual: 2,
         expected: 'migration 2 row to mention `recovery_runs`',
+      },
+    ]);
+  });
+
+  it('flags stale current raw form-control inventory claims', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'design.md');
+    writeFileSync(
+      staleDoc,
+      [
+        'The current enforced inventory is 28 total findings: 28 consumer migrations and 0 primitive',
+        'self-hits, with an element split of 19 inputs, 2 selects, and 7 textareas.',
+        'Current generated manifest',
+        'manifest is exactly 28 consumer hits.',
+      ].join('\n'),
+      'utf8',
+    );
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toMatchObject([
+      {
+        actual: currentRawFormControlInventory.total,
+        claimed: 28,
+        filePath: staleDoc,
+        kind: 'raw-form-control-inventory',
+        line: 1,
+        expected: 'raw form-control total from console/design-raw-form-control-inventory.json',
+      },
+      {
+        actual: currentRawFormControlInventory.consumerMigrations,
+        claimed: 28,
+        filePath: staleDoc,
+        kind: 'raw-form-control-inventory',
+        line: 1,
+        expected: 'raw form-control consumer migrations from console/design-raw-form-control-inventory.json',
+      },
+      {
+        actual: currentRawFormControlInventory.input,
+        claimed: 19,
+        filePath: staleDoc,
+        kind: 'raw-form-control-inventory',
+        line: 1,
+        expected: 'raw form-control input count from console/design-raw-form-control-inventory.json',
+      },
+      {
+        actual: currentRawFormControlInventory.consumerMigrations,
+        claimed: 28,
+        filePath: staleDoc,
+        kind: 'raw-form-control-inventory',
+        line: 3,
+        expected: 'raw form-control consumer migrations from console/design-raw-form-control-inventory.json',
       },
     ]);
   });

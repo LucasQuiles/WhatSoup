@@ -701,8 +701,8 @@ counts. It emits deterministic JSON with no timestamps and records:
 - whether each finding is a consumer migration or a primitive self-hit that can only clear by
   moving the canonical primitive under `components/primitives/**`.
 
-The current enforced inventory is 28 total findings: 28 consumer migrations and 0 primitive
-self-hits, with an element split of 19 inputs, 2 selects, and 7 textareas. The former 5
+The current enforced inventory is 26 total findings: 26 consumer migrations and 0 primitive
+self-hits, with an element split of 17 inputs, 2 selects, and 7 textareas. The former 5
 transitional form-kit self-hits cleared only through the D4.2 primitive promotion to
 `console/src/components/primitives/FormControl.tsx`; D4.3a cleared the shared `SearchInput`
 producer, D4.3b cleared `UnlockScreen`, and D4.3c cleared `TagInput` by routing each through
@@ -721,6 +721,10 @@ The generated inventory update belongs in the same packet as the source/rule cha
 movement, with the same exemption-vs-migration classification used for the shadow and burndown
 ratchets. `verify:console-design` includes the compare-mode inventory gate after
 `lint:shadow:baseline`.
+
+Root `guard:doc-drift` also checks the current inventory claims in this section and
+`lint-plan.md` against the generated manifest, so prose counts move with the same packet as the
+inventory baseline.
 
 This gate prevents biased or stale raw-form counts. It does not prove a migration is correct, does
 not authorize a baseline ratchet, and does not replace behavior tests, accessibility checks, or

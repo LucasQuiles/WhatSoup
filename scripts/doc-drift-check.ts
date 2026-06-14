@@ -3,7 +3,11 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { normalizeRepoPath } from './lib/guard-core.ts';
 
-export type DocDriftKind = 'tool-count' | 'module-count' | 'migration-history';
+export type DocDriftKind =
+  | 'tool-count'
+  | 'module-count'
+  | 'migration-history'
+  | 'raw-form-control-inventory';
 
 export interface DocDriftIssue {
   filePath: string;
@@ -32,11 +36,22 @@ interface ModuleImport {
   modulePath: string;
 }
 
+export interface RawFormControlInventory {
+  total: number;
+  consumerMigrations: number;
+  primitiveSelfHits: number;
+  input: number;
+  select: number;
+  textarea: number;
+}
+
 const defaultDocPaths = [
   'CLAUDE.md',
   'README.md',
   'docs/tools.md',
   'docs/configuration.md',
+  'docs/design-system/04-enforcement/lint-plan.md',
+  'docs/design-system/06-implementation/qa-hardening.md',
 ];
 
 const claimContextPattern = /\b(?:MCP|Tool registry|tool API reference|MCP Tool Reference|docs\/tools\.md|register imports?)\b/i;
@@ -54,6 +69,15 @@ const migrationRequiredFragments = new Map<number, string[]>([
   [1, ['`messages`', '`contacts`', '`access_list`', '`agent_sessions`', '`rate_limits`', '`enrichment_runs`']],
   [2, ['`inbound_events`', '`outbound_ops`', '`tool_calls`', '`session_checkpoints`', '`recovery_runs`']],
 ]);
+
+const currentRawFormContextPattern =
+  /\bcurrent\b.*\b(?:raw[ -]form-control|soup\/no-raw-form-control|generated manifest|enforced inventory)\b/i;
+const rawFormTotalPattern =
+  /\b(\d+)\s+total(?: findings)?\b.*?\b(\d+)\s+consumer(?:-migration| migrations?)\b.*?\b(\d+)\s+primitive\s+self-?hits?\b/i;
+const rawFormConsumerHitsPattern =
+  /\bmanifest\s+is\s+exactly\s+(\d+)\s+consumer\s+hits?\b/i;
+const rawFormElementSplitPattern =
+  /\belement split of\s+(\d+)\s+inputs?,\s+(\d+)\s+selects?,\s+and\s+(\d+)\s+textareas?\b/i;
 
 function lineForOffset(text: string, offset: number): number {
   let line = 1;
@@ -167,6 +191,29 @@ function findMigrationRegistryVersions(cwd: string): number[] {
   return versions;
 }
 
+export function findRawFormControlInventory(cwd: string = process.cwd()): RawFormControlInventory {
+  const inventoryPath = path.resolve(cwd, 'console/design-raw-form-control-inventory.json');
+  const inventory = JSON.parse(readFileSync(inventoryPath, 'utf8')) as {
+    totals?: {
+      total?: number;
+      by_classification?: Record<string, number>;
+      by_element?: Record<string, number>;
+    };
+  };
+  const totals = inventory.totals ?? {};
+  const byClassification = totals.by_classification ?? {};
+  const byElement = totals.by_element ?? {};
+
+  return {
+    total: totals.total ?? 0,
+    consumerMigrations: byClassification.consumer_migration ?? 0,
+    primitiveSelfHits: byClassification.exemption_movement ?? 0,
+    input: byElement.input ?? 0,
+    select: byElement.select ?? 0,
+    textarea: byElement.textarea ?? 0,
+  };
+}
+
 function checkMigrationHistoryTable(
   filePath: string,
   lines: string[],
@@ -243,6 +290,119 @@ function checkMigrationHistoryTable(
   return issues;
 }
 
+function addCountIssue(
+  issues: DocDriftIssue[],
+  filePath: string,
+  line: number,
+  claimed: number,
+  actual: number,
+  text: string,
+  expected: string,
+): void {
+  if (claimed === actual) return;
+
+  issues.push({
+    filePath,
+    line,
+    kind: 'raw-form-control-inventory',
+    claimed,
+    actual,
+    text,
+    expected,
+  });
+}
+
+function checkRawFormControlInventoryClaims(
+  filePath: string,
+  lines: string[],
+  actual: RawFormControlInventory,
+): DocDriftIssue[] {
+  const issues: DocDriftIssue[] = [];
+
+  lines.forEach((lineText, index) => {
+    const span = `${lineText} ${lines[index + 1] ?? ''}`.replace(/\s+/g, ' ').trim();
+    if (!currentRawFormContextPattern.test(lineText)) return;
+
+    const line = index + 1;
+    const totalMatch = span.match(rawFormTotalPattern);
+    if (totalMatch) {
+      addCountIssue(
+        issues,
+        filePath,
+        line,
+        Number(totalMatch[1]),
+        actual.total,
+        span,
+        'raw form-control total from console/design-raw-form-control-inventory.json',
+      );
+      addCountIssue(
+        issues,
+        filePath,
+        line,
+        Number(totalMatch[2]),
+        actual.consumerMigrations,
+        span,
+        'raw form-control consumer migrations from console/design-raw-form-control-inventory.json',
+      );
+      addCountIssue(
+        issues,
+        filePath,
+        line,
+        Number(totalMatch[3]),
+        actual.primitiveSelfHits,
+        span,
+        'raw form-control primitive self-hits from console/design-raw-form-control-inventory.json',
+      );
+    }
+
+    const consumerHitsMatch = span.match(rawFormConsumerHitsPattern);
+    if (consumerHitsMatch) {
+      addCountIssue(
+        issues,
+        filePath,
+        line,
+        Number(consumerHitsMatch[1]),
+        actual.consumerMigrations,
+        span,
+        'raw form-control consumer migrations from console/design-raw-form-control-inventory.json',
+      );
+    }
+
+    const elementSplitMatch = span.match(rawFormElementSplitPattern);
+    if (elementSplitMatch) {
+      addCountIssue(
+        issues,
+        filePath,
+        line,
+        Number(elementSplitMatch[1]),
+        actual.input,
+        span,
+        'raw form-control input count from console/design-raw-form-control-inventory.json',
+      );
+      addCountIssue(
+        issues,
+        filePath,
+        line,
+        Number(elementSplitMatch[2]),
+        actual.select,
+        span,
+        'raw form-control select count from console/design-raw-form-control-inventory.json',
+      );
+      addCountIssue(
+        issues,
+        filePath,
+        line,
+        Number(elementSplitMatch[3]),
+        actual.textarea,
+        span,
+        'raw form-control textarea count from console/design-raw-form-control-inventory.json',
+      );
+    }
+  });
+
+  return issues;
+}
+
 export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const cwd = options.cwd ?? process.cwd();
   const docPaths = options.docPaths ?? existingDefaultDocs(cwd);
@@ -250,6 +410,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const toolCount = registrations.length;
   const moduleCount = findRegisterModuleImports(cwd).length;
   const migrationVersions = findMigrationRegistryVersions(cwd);
+  const rawFormControlInventory = findRawFormControlInventory(cwd);
   const toolCountsByModule = new Map<string, number>();
   for (const registration of registrations) {
     const moduleName = path.basename(registration.filePath);
@@ -266,6 +427,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
     const toolsTableModules = new Set<string>();
 
     issues.push(...checkMigrationHistoryTable(filePath, lines, migrationVersions));
+    issues.push(...checkRawFormControlInventoryClaims(filePath, lines, rawFormControlInventory));
 
     lines.forEach((lineText, index) => {
       if (claimContextPattern.test(lineText)) {
@@ -375,7 +537,7 @@ function printHelp(): void {
   console.log(`Usage: npm run guard:doc-drift
        npm run guard:doc-drift -- --doc <file>
 
-Checks explicit MCP tool/module count claims in docs against source registrations.
+Checks explicit MCP tool/module count claims and current design inventory claims in docs against source registrations.
 
 Options:
   --doc <file>  Check a specific documentation file. May be repeated.
