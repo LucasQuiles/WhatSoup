@@ -552,13 +552,16 @@ cannot express the check).
   provider/model labels are operational data, not decorative copy.
 - **Mechanism:** report-only resilience script first. Flag `truncate`, `whitespace-nowrap`, and
   ellipsis patterns unless the same element or adjacent wrapper provides `title`, `aria-label`,
-  `aria-describedby`, `data-full-value`, or a documented `data-truncation-exception`.
+  `data-full-value`, or a documented `data-truncation-exception`. Generic `aria-describedby`
+  helper/error text is not a proven full-value path; if a described node carries the full value,
+  mark that node with `data-full-value`.
 - **Scope:** `console/src/**` TSX/CSS. Exempt purely decorative brand marks and intentionally clipped
   generated visual assets when the exception names the visual proof artifact.
 - **Violation / valid:** `className="truncate"` on a line name → add a full-value path, wrapping
   strategy, or primitive that owns the disclosure.
-- **FP strategy:** fixtures must include a valid `title`/`aria-describedby` case, an invalid bare
-  truncation case, and an allowed visual-brand exception.
+- **FP strategy:** fixtures must include a valid `title`/`data-full-value` case, a generic
+  `aria-describedby` false-negative trap, an invalid bare truncation case, and an allowed
+  visual-brand exception.
 - **Autofix:** no. **Phase:** P4/G7. **Entry:** report-only script.
 
 ### soup/scroll-owner-required

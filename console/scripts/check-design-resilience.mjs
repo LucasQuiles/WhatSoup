@@ -103,7 +103,9 @@ function addFinding(findings, rule, file, line, evidence, message) {
 }
 
 function hasFullValuePath(context) {
-  return /\b(?:aria-label|aria-describedby|title|data-full-value|data-truncation-exception|data-wrap-exception)\s*=/.test(context)
+  // Generic aria-describedby often points at helper/error text; require an explicit
+  // full-value marker instead of treating every description as disclosure.
+  return /\b(?:aria-label|title|data-full-value|data-truncation-exception|data-wrap-exception)\s*=/.test(context)
     || /soup-(?:truncate|wrap)-ok/.test(context);
 }
 

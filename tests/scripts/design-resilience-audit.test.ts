@@ -142,6 +142,7 @@ export function Fixture({ name }: { name: string }) {
   return (
     <section>
       <div title={name} className="truncate text-t1">{name}</div>
+      <div data-full-value={name} className="truncate text-t1">{name}</div>
       <div className="flex-1 min-h-0 overflow-y-auto p-[var(--sp-3)]">log</div>
       <button className="px-[var(--sp-2)] hover:bg-[var(--surface-inset)] focus-visible:outline-none">Action</button>
       <span className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">Hidden action</span>
@@ -172,6 +173,23 @@ export function Fixture() {
     expect(result.status).toBe(1);
     expect(output.verdict).toBe('FAIL');
     expect(output.mode).toBe('fail-on-findings');
+    expect(output.by_rule).toEqual({ 'soup/no-unsafe-truncation': 1 });
+  });
+
+  it('does not treat generic aria-describedby as a proven full-value disclosure path', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return (
+    <div>
+      <div aria-describedby="field-helper" className="truncate">clipped model id</div>
+      <p id="field-helper">Choose a model preset or enter a custom value.</p>
+    </div>
+  )
+}
+`);
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
     expect(output.by_rule).toEqual({ 'soup/no-unsafe-truncation': 1 });
   });
 

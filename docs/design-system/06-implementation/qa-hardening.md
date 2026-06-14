@@ -563,8 +563,9 @@ npm --prefix console run design:resilience
 The audit scans `console/src` for report-only findings:
 
 - `soup/no-unsafe-truncation` candidates: `truncate`, `whitespace-nowrap`, or ellipsis patterns
-  without a same-line/adjacent full-value path (`title`, `aria-label`, `aria-describedby`,
-  `data-full-value`) or documented exception;
+  without a same-line/adjacent full-value path (`title`, `aria-label`, `data-full-value`) or
+  documented exception; generic `aria-describedby` helper/error text is not sufficient unless the
+  described node itself is marked as the full-value disclosure;
 - `soup/scroll-owner-required` candidates: scrollable regions without axis min-size proof
   (`min-h-0` / `min-w-0`) or a declared scroll-owner exception;
 - `soup/no-layout-shift-interaction` candidates: hover/focus state classes or CSS that change
@@ -578,7 +579,7 @@ Reviewers apply these rule-of-thumb checks before accepting any migrated surface
 
 | Area | Required principle | Blocking evidence gap |
 |---|---|---|
-| Text wrapping | User data must either wrap within its column or expose a full-value path through `title`, `aria-label`, `aria-describedby`, `data-full-value`, or an approved disclosure primitive. | Long names, IDs, timestamps, model names, or log lines are clipped with no full-value path. |
+| Text wrapping | User data must either wrap within its column or expose a full-value path through `title`, `aria-label`, `data-full-value`, a described full-value node, or an approved disclosure primitive. | Long names, IDs, timestamps, model names, or log lines are clipped with no full-value path. |
 | Numeric sizing | Metric values use stable tabular sizing and reserve room for the longest realistic value plus suffix. | KPI/card/table cells resize the layout when values change or suffixes appear. |
 | Control sizing | Buttons, tabs, chips, and icon controls have stable min/max dimensions across default, hover, focus, active, selected, disabled, loading, and error states. | Interaction states change padding, gap, width, height, border width, or grid tracks. |
 | Scroll ownership | Every scrollable region declares one content owner and has axis min-size proof (`min-h-0` for vertical, `min-w-0` for horizontal). | Nested scroll areas compete, the owner is ambiguous, or a reduced-height viewport traps content. |

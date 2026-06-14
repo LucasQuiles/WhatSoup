@@ -89,7 +89,9 @@ These rules are binding design law before they become hard lint:
 
 - **Text wraps by default.** Operator names, provider names, routes, sockets, paths, errors, IDs,
   user-authored text, and protocol-adjacent labels may truncate only when a full-value path exists
-  (`title`, `aria-label`, `aria-describedby`, `data-full-value`, or a documented details surface).
+  (`title`, `aria-label`, `data-full-value`, a documented details surface, or `aria-describedby`
+  only when the described node itself carries the full value; generic helper/error descriptions do
+  not qualify).
 - **One scroll owner per axis.** Pages, modals, drawers, tables, logs, and chat panes declare the
   element that owns vertical and horizontal scrolling. Scrollable flex/grid children carry the
   matching min-size escape (`min-h-0` for vertical, `min-w-0` for horizontal) or a documented
