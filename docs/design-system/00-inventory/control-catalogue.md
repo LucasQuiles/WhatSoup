@@ -202,8 +202,8 @@ Inconsistency: dropdown panel chrome differs — LinePicker panels use `bg-d6 c-
 
 - **`.c-toggle` (`console/src/index.css:1162-1168`) has ZERO consumers** — grep over all of
   `console/src` finds only the definition. Dead class; there is no switch control anywhere in the UI.
-- Checkboxes: global accent styling at `console/src/index.css:240-243`
-  (`input[type="checkbox"], input[type="radio"] { accent-color: var(--color-s-ok); }`). Four raw
+- Checkboxes: global accent styling at `console/src/styles/composites.css:22`
+  (`input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }`). Four raw
   checkbox sites (§2c) of which two override the global accent differently
   (`console/src/components/UpdateModal.tsx:406` → m-cht; `console/src/components/line-detail/ConfigEditDialog.tsx:132`
   → `accent-current`). `CheckboxField`/`.c-checkbox-row` has a single registration point

@@ -62,7 +62,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           <span className="max-sm:sr-only">Soup Kitchen</span>
           {isFleetActive && (
             <span
-              className="absolute h-[var(--bw-accent)] bg-s-ok rounded-sm"
+              className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm"
               style={{
                 bottom: "-1px",
                 left: "var(--sp-3)",
@@ -88,14 +88,14 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               <span className="max-sm:sr-only">Inbox</span>
               {unreadCount > 0 && (
                 <span
-                  className="text-xs font-mono font-semibold rounded-md min-w-[var(--sp-4)] text-center ml-[var(--sp-0h)] bg-[var(--color-s-warn)] text-d0 py-[var(--sp-0h)] px-[var(--sp-1)]"
+                  className="text-xs font-mono font-semibold rounded-md min-w-[var(--sp-4)] text-center ml-[var(--sp-0h)] bg-[var(--accent)] text-[var(--accent-fg)] py-[var(--sp-0h)] px-[var(--sp-1)]"
                 >
                   {unreadCount > 99 ? "99+" : unreadCount}
                 </span>
               )}
               {isActive && (
                 <span
-                  className="absolute h-[var(--bw-accent)] bg-s-ok rounded-sm"
+                  className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm"
                   style={{
                     bottom: "-1px",
                     left: "var(--sp-3)",
@@ -123,7 +123,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               <span className="max-sm:sr-only">Ops</span>
               {isActive && (
                 <span
-                  className="absolute h-[var(--bw-accent)] bg-s-ok rounded-sm"
+                  className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm"
                   style={{
                     bottom: "-1px",
                     left: "var(--sp-3)",

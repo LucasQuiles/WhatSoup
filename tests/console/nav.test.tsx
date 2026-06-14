@@ -40,6 +40,12 @@ function expectCurrentLink(name: string | RegExp) {
   expect(currentLinks[0]).toBe(navLink(name));
 }
 
+function activeUnderline(link: HTMLElement) {
+  const underline = link.querySelector('span.absolute.h-\\[var\\(--bw-accent\\)\\]');
+  expect(underline).not.toBeNull();
+  return underline as HTMLElement;
+}
+
 beforeEach(() => {
   wsConnected = false;
 });
@@ -86,6 +92,14 @@ describe('Nav route state', () => {
     expect(navLink('Soup Kitchen').getAttribute('aria-current')).toBeNull();
     expect(navLink('Inbox').getAttribute('aria-current')).toBeNull();
   });
+
+  it('uses the action accent, not status green, for active-route underlines', () => {
+    renderNav({}, '/inbox');
+
+    const underline = activeUnderline(navLink('Inbox'));
+    expect(underline.className).toContain('bg-[var(--accent)]');
+    expect(underline.className).not.toContain('bg-s-ok');
+  });
 });
 
 describe('Nav unread badge placement', () => {
@@ -95,6 +109,15 @@ describe('Nav unread badge placement', () => {
     expect(within(navLink(/Inbox/)).getByText('7')).toBeDefined();
     expect(within(navLink('Soup Kitchen')).queryByText('7')).toBeNull();
     expect(within(navLink('Ops')).queryByText('7')).toBeNull();
+  });
+
+  it('uses the action accent, not warning status color, for unread count badges', () => {
+    renderNav({ unreadCount: 7 });
+
+    const badge = within(navLink(/Inbox/)).getByText('7');
+    expect(badge.className).toContain('bg-[var(--accent)]');
+    expect(badge.className).toContain('text-[var(--accent-fg)]');
+    expect(badge.className).not.toContain('color-s-warn');
   });
 });
 

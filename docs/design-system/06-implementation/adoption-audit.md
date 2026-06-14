@@ -80,7 +80,7 @@ are the shadow-baseline falls for that file.
 
 | Surface | Spec source | Primitives used | Legacy remnants | Adopt % | Blocks |
 |---|---|---|---|---|---|
-| components/Nav.tsx (top bar) | brand.md §1 (nameplate+tick), tokens-v3 chrome glass | none | split "What"+"Soup" wordmark (brand-regression fall); raw `<button>`×3: 139 (theme toggle, DD-5), 174, 193; LT×15: 39-196; sp-half×6; no-restricted-syntax×6 | 0/3 = 0% | yes (C3/C4 nameplate slice) |
+| components/Nav.tsx (top bar) | brand.md §1 (nameplate+tick), tokens-v3 chrome glass | none | split "What"+"Soup" wordmark (brand-regression fall); active underlines + unread badge closed to `--accent`/`--accent-fg`; raw `<button>`×3: 139 (theme toggle, DD-5), 174, 193; LT×15: 39-196; sp-half×6; no-restricted-syntax×6 | 0/3 = 0% | yes (C4 nameplate slice + DD-5 buttons) |
 | components/UnlockScreen.tsx | input.md, button.md | TextInput, Button | closed 2026-06-14: no raw controls; no LT findings; caller uses semantic surface classes and primitive-owned input/button styling | 2/2 = 100% | no |
 | App.tsx | tokens-v3 | MotionConfig reducedMotion (DD-20 closure) | LT×2: 25, 60 | — | yes (token refs) |
 | components/ErrorBoundary.tsx | state-taxonomy | composes EmptyState; tokenized | none | — | no |
@@ -126,7 +126,7 @@ are the shadow-baseline falls for that file.
 | wizard/ConfigStep.tsx | form kit (TextInput/SelectInput/NumberInput/TextArea/CheckboxField/Field), Tabs/Tab | raw `<button>`×5: 644, 652, 663, 884, 937; raw `<input>`×3: 435 (file 436), 691 (checkbox 692), 751 (file 752) — file inputs waivered (no FileInput primitive planned, lint-plan §3); LT×21 (largest wizard debt); legacy vars 891, 893; sp-half 698 | 47/55 = 85% | yes |
 | wizard/ModelAuthStep.tsx | SelectInput, Tabs/Tab | raw `<button>` 171; raw `<input>`×3: 161, 261 (radio 262), 271 (radio 272); LT×6; legacy var 168 | 6/10 = 60% | yes |
 | wizard/IdentityStep.tsx | none (form kit NOT used) | raw `<input>`×2: 116, 154; LT×4; legacy vars 124, 161 | 0/2 = 0% | yes |
-| wizard/LinkStep.tsx | none | raw `<button>`×2: 134, 160 — both `c-btn-primary` (ok-green accent-law violation, §4 F1); LT×5; hex 95 | 0/2 = 0% | yes |
+| wizard/LinkStep.tsx | none | raw `<button>`×2: 134, 160 — legacy recipe sites were accent-safe by the F1 close; LT×5; hex 95 | 0/2 = 0% | yes |
 | wizard/ReviewStep.tsx | Field (×1) | raw `<button>`×2: 55, 211 (c-btn-primary 213); LT×1; legacy vars×5: 19, 20, 34, 45, 49 | 1/3 = 33% | yes |
 | wizard/WizardStep.tsx | none | LT×1: 26 | — | yes (token) |
 | components/primitives/FormControl.tsx (the kit itself) | — | renders raw controls by design inside the primitive exemption; wizard/form-primitives.tsx is a shim; ConfigStep+ModelAuthStep now import the primitive barrel | kit | no (DUP-12 promotion done; consumer migrations remain) |
@@ -208,7 +208,7 @@ was not decomposed).
 | M6 | Pagination: HistoryTab cursor pagination is raw buttons; no pagination pattern spec | HistoryTab.tsx (cursor state ~35-40, load-more controls) | no pagination spec/primitive (Table spec has no pagination section) | Rides the HistoryTab composer slice (C-B4-6); rule whether load-more is Button-enough or needs a pattern entry |
 | M7 | kbd hints: KeyboardShortcutsHelp renders `<kbd>` with legacy tier classes; no kbd treatment in typography spec | KeyboardShortcutsHelp.tsx:36-57 | no spec home for kbd chips | Token pass + one-line typography.md amendment at C3 |
 | M8 | Scrollbar theming uses legacy vars: global webkit scrollbar thumb `var(--b2)`/`var(--b3)` | composites.css:73-76 | tokens exist (`--border-*`); CSS-side, unguarded by ESLint (lint-plan §1) | Mechanical retoken with the composites.css burndown (B1) |
-| M9 | Native control theming: `accent-color: var(--color-s-ok)` themes every checkbox/radio/range/progress OK-GREEN, while G2 locked electric-blue as the single action accent (conformance row: accent re-pointed from old ok-green); also a legacy alias ref | composites.css:22; consumers: UpdateModal.tsx:422, ConfigStep.tsx:692, form-primitives.tsx:110, ModelAuthStep.tsx:262/272, ConfigEditDialog.tsx:162 | select.md/input.md exist; no spec sentence assigns the native-control accent channel | Re-point to `--accent` (or a designed control token) — same law family as F1 below; needs a one-line spec ruling |
+| ~~M9~~ | **DONE** — native control theming now uses `accent-color: var(--accent)`, aligning checkbox/radio/range/progress accent with the locked electric-blue action channel instead of OK-GREEN. | composites.css:22; consumers: UpdateModal.tsx:422, ConfigStep.tsx:692, form-primitives.tsx:110, ModelAuthStep.tsx:262/272, ConfigEditDialog.tsx:162 | select.md/input.md exist; the global rule now carries the action-accent channel. | Closed; same law family as F1, with no remaining `accent-law` burndown findings. |
 | M10 | Date/time input: `datetime-local` native picker chrome unthemed and unspecced (file inputs, by contrast, hold a named waiver) | ScheduleComposerModal.tsx:304 | input.md has no date/time section; no waiver | Either waiver it like file inputs or spec the treatment at C3 |
 | M11 | Menus/dropdowns/context-menus/switches/breadcrumbs: NONE EXIST in the console (`role="menu"`, `aria-haspopup="menu"`, breadcrumb, `role="switch"` — zero hits). All popup pickers are listbox Popovers | n/a | no gap — confirmed absence | No action; note in spec that menu patterns are out-of-vocabulary until a consumer exists |
 | M12 | Empty/error states: EmptyState on ghost-tier legacy classes (DD-8 explicitly names empty-state tiering); AlertBanner error chips are raw buttons with inline crit washes; ErrorBoundary clean | EmptyState.tsx:38-66; AlertBanner.tsx:37-45 | state-taxonomy + DD-8 decision package cover it | Already owned by DD-8 per-screen corrections — listed here so the surfaces are named, not just the rule |
@@ -230,7 +230,7 @@ was not decomposed).
 Reconciliation: my independent scan found 70 raw buttons and the same file set — exact match.
 Raw form controls: scan found 36 sites in the same 15 files — match. Focus suppression: scan
 confirms `outline-none` exists ONLY at HistoryTab.tsx:206 console-wide; the old Inbox.tsx:434
-site now reads `c-btn c-btn-primary c-btn-send` (carve-out retirement real, not just config).
+site is now the textarea change handler, and the composer send action uses `ActionButton`.
 eslint.config.js verified: Group F excludes HistoryTab only (block 2, files list line 719);
 the lint-plan changelog's "stale Inbox comment at :704" is FIXED on the current tree — line 704
 now reads "excludes HistoryTab only — Inbox carve-out retired at B4 close".
@@ -257,17 +257,14 @@ Consumption outside the token tier (current tree):
 Component CSS defining its own colors: tokens.semantic.css hex literals are the sanctioned
 per-theme token tier; composites.css does not introduce raw hex but does keep one literal
 `rgba(0,0,0,0.6)` as `--overlay-badge` inside the alias block (alias-tier literal — dies with
-the aliases). `c-btn-primary` (composites.css:729) hard-binds primary buttons to
-`var(--color-s-ok)` — see F1.
+the aliases). `c-btn-primary` (composites.css:733) now binds primary buttons to
+`var(--accent)` / `var(--accent-fg)`.
 
-**F1 — accent-law violation in the legacy button recipe (new finding, blocking):**
-`.c-btn-primary { background: var(--color-s-ok) … }` renders OK-GREEN primary actions at 8 live
-sites while the locked law (color.md §2; conformance row 6) is electric-blue as the single
-action accent: LinkStep.tsx:134, 160 · GroupsTab.tsx:50 ·
-ScheduledTab.tsx:111 · Inbox.tsx:434 · HistoryTab.tsx:227 · EmptyState.tsx:66 ·
-ReviewStep.tsx:213. The conformance manifest's PASS on the accent row is true for the Button
-primitive but the legacy recipe path contradicts the law on every unmigrated send/confirm
-button. Related: M9 (`accent-color` ok-green on native controls).
+**F1 — accent-law violation in the legacy button recipe (closed; C4 brand residue remains):**
+`.c-btn-primary` now binds to `--accent`/`--accent-fg`, native `accent-color` binds to
+`--accent`, and Nav active-route underlines / unread badges now use the action accent. The
+remaining green in Nav is the legacy split wordmark ("Soup"), which is tracked by the C4
+SOUP nameplate / brand-regression lane rather than the action-accent lane.
 
 ## 7. Adoption scorecard
 
@@ -311,10 +308,10 @@ Blocking items (14 tracked; B12 now closed):
    then migrate the 31 raw controls (ConfigEditDialog 7, ScheduleComposerModal 5,
    GroupDetailModal 3, ModelAuthStep 3, IdentityStep 2, +9 singles incl. TagInput, SearchInput,
    SaveContactDialog, CreateGroupModal, UpdateModal, UnlockScreen, Inbox, HistoryTab).
-4. **B4 — F1 accent-law fix**: retire `c-btn-primary` ok-green recipe (10 sites §6) + M9
-   `accent-color` re-point. Cheap interim: re-point composites.css:729 to `--accent` in one
-   commit if the spec ruling allows; full fix rides B2.
-5. **B5 — Nav/brand slice (C3/C4)**: nameplate + teal tick, split-wordmark + UpdateModal title
+4. ~~**B4 — F1 accent-law fix**~~ — **DONE / RE-NARROWED**: `c-btn-primary`, native
+   `accent-color`, Nav active underlines, and unread badges now use `--accent`; the
+   remaining green wordmark is C4 brand/nameplate work.
+5. **B5 — Nav/brand slice (C4)**: nameplate + teal tick, split-wordmark + UpdateModal title
    flips, theme toggle (DD-5), Nav's 3 raw buttons + 15 token refs + 6 base-wall falls.
 6. **B6 — Inbox completion**: composer (textarea+send), header band → Toolbar, 8 raw buttons,
    25 token refs, DD-24 narrow-width action path, DD-8 meta-lane tiering.
@@ -345,11 +342,11 @@ register · WizardStepper extraction · type-ramp definition (DD-26).
 Claims re-verified before publication:
 - "486 = 354+70+36+22+2+1+1" — recomputed from the baseline JSON; sums match the declared total.
 - "outline-none only at HistoryTab:206" — independent whole-tree grep, plus eslint block-2 read,
-  plus the retired Inbox site read in context (now c-btn classes). Three-way agreement.
+  plus the retired Inbox site read in context (now `ActionButton`). Three-way agreement.
 - "70 raw buttons / 31 raw form controls" — my scan matched the shadow baseline file-for-file.
-- "c-btn-primary = ok-green ×10 sites" — definition read at composites.css:729; all consumer
-  sites grepped and listed. The *visual* claim (renders green) assumes the alias
-  `--color-s-ok → --status-ok-solid` resolves as written — not pixel-verified.
+- "former c-btn-primary ok-green sites" — closed before this snapshot; definition now reads
+  `background: var(--accent); border-color: var(--accent); color: var(--accent-fg);` at
+  composites.css:733, and the live burndown queue reports `accent-law: 0`.
 - "3 direct semantic var() refs in TSX" — single regex over a name subset (surface/text-1..3/
   border-*/status-*/mode-*/accent/focus-ring/scrim); a consumer using another semantic name
   (e.g. `--row-hover`) would be missed. Treat as "order of magnitude: screens don't use the
@@ -403,8 +400,8 @@ Sources, by category:
 - **CSS-side scans** (what ESLint cannot see, §6 census mechanized, with file:line):
   `legacy-var-css` (B1 — legacy-name list DERIVED from the tokens.semantic.css
   "Legacy aliases" block, same derivation as §6), `accent-law` (B4 — F1 action-control
-  selectors binding status-channel colors + M9 `accent-color:` status tokens; the
-  status-semantic `-danger/-success/-warning` variants are excluded by name),
+  selectors binding status-channel colors + M9 `accent-color:` status tokens; current
+  committed queue is zero; the status-semantic `-danger/-success/-warning` variants are excluded by name),
   `raw-color-css` (raw hex/rgb/hsl/oklch outside the value-owning tiers
   tokens.primitive.css/tokens.semantic.css; zero ceiling),
   `raw-font-size-css` (raw non-token `font-size:` literals outside the primitive type scale;
@@ -440,6 +437,6 @@ counting (multiple `var()` per line) plus the motion aliases `--ease` (64) and
 `--dur-norm` (18), which the derived alias list legitimately includes. `half-step`
 counts occurrences (CSS 27/25 lines — composites 19 + primitives 6 lines, exact match
 with §6; TSX/TS 41 occurrences/35 lines vs the census's 26-28 lines: occurrence
-counting + .ts files included). `accent-law` counts 11 CSS binding declarations
-(.c-btn-primary ×2, .c-btn-send ×4, .c-btn-add ×4, accent-color ×1) where F1 lists 10
-TSX consumer *sites* — different basis, both lenses are recorded.
+counting + .ts files included). `accent-law` previously counted CSS binding declarations
+where F1 listed TSX consumer *sites*; the live queue now reports `accent-law: 0`, so that
+historical basis mismatch is closed.
