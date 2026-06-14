@@ -79,6 +79,16 @@ describe('messages', () => {
     expect(stored.timestamp).toBe(BASE_TS);
   });
 
+  it('normalizes millisecond timestamps before writing messages', () => {
+    const msg = makeMsg({ content: 'millisecond timestamp', timestamp: 1_777_824_570_676 });
+    storeMessageIfNew(db, msg);
+
+    const row = db.raw
+      .prepare('SELECT timestamp FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { timestamp: number };
+    expect(row.timestamp).toBe(1_777_824_570);
+  });
+
   it('INSERT OR IGNORE: duplicate message_id is ignored', () => {
     const id = `msg-${randomBytes(4).toString('hex')}`;
     const inserted1 = storeMessageIfNew(db, makeMsg({ messageId: id, content: 'original' }));

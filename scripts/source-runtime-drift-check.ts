@@ -147,6 +147,9 @@ function sha256(body: Buffer | string): string {
   return createHash('sha256').update(body).digest('hex');
 }
 
+// Intentional local wrapper: this guard needs status/stdout/stderr together to
+// distinguish untracked, dirty, staged, and git-error states. guard-core's
+// gitList/readText helpers intentionally expose narrower contracts.
 function git(cwd: string, args: string[]): { status: number | null; stdout: string; stderr: string; error?: string } {
   const proc = spawnSync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',

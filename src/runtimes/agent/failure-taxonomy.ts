@@ -82,6 +82,7 @@ export function isUsageLimitMessage(text: string): boolean {
   if (isPromptTooLongMessage(text)) return false;
 
   const lower = text.toLowerCase();
+  if (isProviderCreditBalanceLimitMessage(lower)) return true;
   if (
     lower.includes('out of extra usage') ||
     lower.includes('usage limit reached') ||
@@ -100,6 +101,32 @@ export function isUsageLimitMessage(text: string): boolean {
     lower.includes('usage cap') ||
     lower.includes('plan limit') ||
     lower.includes('quota exceeded')
+  );
+}
+
+function isProviderCreditBalanceLimitMessage(lower: string): boolean {
+  const providerBillingContext = (
+    lower.includes('provider') ||
+    lower.includes('api') ||
+    lower.includes('billing') ||
+    lower.includes('quota')
+  );
+  return (
+    lower.includes('insufficient_quota') ||
+    lower.includes('billing quota exceeded') ||
+    (
+      providerBillingContext &&
+      (
+        lower.includes('insufficient credits') ||
+        lower.includes('no credits remaining') ||
+        lower.includes('credit balance exhausted')
+      )
+    ) ||
+    (
+      lower.includes('account balance') &&
+      (lower.includes('provider') || lower.includes('api') || lower.includes('billing')) &&
+      (lower.includes('too low') || lower.includes('insufficient') || lower.includes('exhausted'))
+    )
   );
 }
 

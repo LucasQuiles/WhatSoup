@@ -11,7 +11,7 @@
 import { type WAMessage, isJidGroup, jidNormalizedUser } from '@whiskeysockets/baileys';
 import type { IncomingMessage } from './types.ts';
 import { bareNumber, isLidJid } from './jid-constants.ts';
-import { nowUnixSec } from '../fleet/time-utils.ts';
+import { normalizeUnixTimestampSeconds } from '../fleet/time-utils.ts';
 import { stripLoneSurrogates } from './sanitize-surrogates.ts';
 
 /**
@@ -212,8 +212,7 @@ export function parseIncomingMessage(msg: WAMessage): IncomingMessage | null {
   }
 
   // --- Timestamp ---
-  const timestamp =
-    msg.messageTimestamp != null ? Number(msg.messageTimestamp) : nowUnixSec();
+  const timestamp = normalizeUnixTimestampSeconds(msg.messageTimestamp);
 
   // --- Sender resolution ---
   // Groups: participant field carries the real sender JID

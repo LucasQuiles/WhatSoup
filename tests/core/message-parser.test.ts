@@ -162,6 +162,13 @@ describe('parseIncomingMessage — positive cases', () => {
     expect(result!.timestamp).toBe(1700000000);
   });
 
+  it('timestamp milliseconds → normalized to unix seconds', () => {
+    const msg = msgWith({ conversation: 'hi' }, { messageTimestamp: BigInt(1_777_824_570_676) });
+    const result = parseIncomingMessage(msg);
+    expect(result).not.toBeNull();
+    expect(result!.timestamp).toBe(1_777_824_570);
+  });
+
   it('group sender: participant field used as senderJid', () => {
     const msg = msgWith(
       { conversation: 'group msg' },

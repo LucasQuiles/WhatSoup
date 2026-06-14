@@ -39,7 +39,7 @@ and the release manifest itself.
 Generate a deterministic plan before a re-cut:
 
 ```bash
-bash scripts/run-with-pinned-node.sh scripts/release-snapshot-plan.ts \
+npm --silent run release:snapshot -- \
   --release-root "$HOME/LAB" \
   --source-ref HEAD \
   --json
@@ -62,6 +62,23 @@ auth, logs, DBs, token files, and keychain material outside the release tree.
 Use the manifest to compare a release snapshot against the source commit used
 to build it. A code edit inside a release snapshot is drift. Mutable state under
 the manifest's exclusion list is not code drift.
+
+Run the check in read-only mode:
+
+```bash
+npm --silent run release:snapshot -- \
+  --check-release "$HOME/LAB/WhatSoup-release-<commit>" \
+  --json
+```
+
+The command exits `0` when the release matches its manifest and exits nonzero
+when files are missing, changed, or unexpectedly present. It reads the manifest
+from `.whatsoup-release-manifest.json` inside the release by default; use
+`--manifest /absolute/path/to/manifest.json` only when auditing an archived
+manifest separately from its release directory.
+Older release snapshots without a manifest are reported as `manifest-missing`
+drift. That finding is evidence to re-cut from reviewed source; it is not
+approval to overwrite the release.
 
 Drift findings mean the release is no longer a faithful copy of reviewed source.
 They do not by themselves authorize deleting the release or replacing it. Decide

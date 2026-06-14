@@ -24,6 +24,12 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
+
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
 BOT_ERRORS_EXPECTED_JID = os.environ.get("BOT_ERRORS_EXPECTED_JID", "").strip()
@@ -61,38 +67,6 @@ AUTH_BOND_REINSPECT_ATTEMPTS: int = 3
 AUTH_BOND_REINSPECT_DELAY_S: float = 1.0
 AUTH_BOND_STUCK_MTIME_S: int = 60
 GROUP_JID_RE = re.compile(r"^\d+@g\.us$")
-WHATSAPP_JID_RE = re.compile(r"\b\d{5,}(?:-\d+)?@(s\.whatsapp\.net|g\.us|lid)\b", re.IGNORECASE)
-KEYED_PHONE_RE = re.compile(
-    r"(?<![A-Za-z0-9])(phone|phone[_-]?number|msisdn|line)(\s*[:=]\s*|[\s_-]+)(\+?\d{10,16})(?![A-Za-z0-9])",
-    re.IGNORECASE,
-)
-CONTEXT_PHONE_RE = re.compile(r"(?<![A-Za-z0-9])(for)([\s_-]+)(\+?\d{10,16})(?![A-Za-z0-9])", re.IGNORECASE)
-PHONE_LIKE_RE = re.compile(r"(^|[^\w])(\+?(?:\d[\d\s().-]{8,}\d))(?![\w])")
-AUTHORIZATION_SECRET_RE = re.compile(
-    r"(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s\\\"',}]+",
-    re.IGNORECASE,
-)
-BEARER_SECRET_RE = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE)
-KEYED_SECRET_RE = re.compile(
-    r"(^|[^A-Za-z0-9_]|\\n)([\"']?(?:token|secret|password|passphrase|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|authorization|cookie)[\"']?\s*[:=]\s*[\"']?)([^\s\\,\"';}]+)([\"']?)",
-    re.IGNORECASE,
-)
-AWS_ACCESS_KEY_ID_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
-GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
-JWT_VALUE_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
-PEM_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN [^-]+ PRIVATE KEY-----[\s\S]*?-----END [^-]+ PRIVATE KEY-----",
-)
-URL_USERINFO_RE = re.compile(r"\b(https?://)[^\s/@]+@", re.IGNORECASE)
-CREDENTIAL_PATH_RE = re.compile(
-    r"(?:(?<![A-Za-z0-9._~-])~|(?<![A-Za-z0-9._~-])/)[^\s\"',}]*?(?:"
-    r"\.config/whatsoup/[^\s\"',}]+|"
-    r"\.local/share/whatsoup/instances/[^\s\"',}]*/auth(?:/[^\s\"',}]*)?|"
-    r"auth-bond-backups/[^\s\"',}]+|"
-    r"/(?:bot-errors\.env|fleet-token|fleet\.env|fleet-tokens\.json|tokens\.env|secrets\.env)"
-    r")\b",
-    re.IGNORECASE,
-)
 PROVIDER_PROBE_FAILURE_RE = re.compile(
     r"(?m)^FAIL provider_probe\s+([^:\s]+):.*?\bfailure_class=([A-Za-z0-9_.:-]+)"
 )
@@ -203,35 +177,16 @@ def now_iso() -> str:
 
 
 def redact_event_text(value: str) -> str:
-    redacted = PEM_PRIVATE_KEY_RE.sub("[REDACTED_PRIVATE_KEY]", value)
-    redacted = CREDENTIAL_PATH_RE.sub("[REDACTED_CREDENTIAL_PATH]", redacted)
-    redacted = WHATSAPP_JID_RE.sub("[REDACTED_JID]", redacted)
-    redacted = KEYED_PHONE_RE.sub(r"\1\2[REDACTED_PHONE]", redacted)
-    redacted = CONTEXT_PHONE_RE.sub(r"\1\2[REDACTED_PHONE]", redacted)
-    redacted = PHONE_LIKE_RE.sub(redact_phone_like_match, redacted)
-    redacted = URL_USERINFO_RE.sub(r"\1[REDACTED]@", redacted)
-    redacted = AUTHORIZATION_SECRET_RE.sub(r"\1[REDACTED]", redacted)
-    redacted = BEARER_SECRET_RE.sub(r"\1[REDACTED]", redacted)
-    redacted = KEYED_SECRET_RE.sub(r"\1\2[REDACTED]\4", redacted)
-    redacted = AWS_ACCESS_KEY_ID_RE.sub("[REDACTED_AWS_ACCESS_KEY]", redacted)
-    redacted = GITHUB_TOKEN_RE.sub("[REDACTED_GITHUB_TOKEN]", redacted)
-    redacted = JWT_VALUE_RE.sub("[REDACTED_JWT]", redacted)
-    return redacted
-
-
-def redact_phone_like_match(match: re.Match[str]) -> str:
-    prefix = match.group(1)
-    candidate = match.group(2)
-    stripped = candidate.strip()
-    if re.fullmatch(r"\d+(?:\.\d+){2,}(?:[-+~][A-Za-z0-9.-]+)?", stripped):
-        return match.group(0)
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2})?", stripped):
-        return match.group(0)
-    digits = re.sub(r"\D", "", candidate)
-    has_phone_syntax = stripped.startswith("+") or bool(re.search(r"[\s().-]", candidate))
-    if has_phone_syntax and 10 <= len(digits) <= 15:
-        return f"{prefix}[REDACTED_PHONE]"
-    return match.group(0)
+    return redact_bot_errors_text(
+        value,
+        credential_path_marker="[REDACTED_CREDENTIAL_PATH]",
+        jid_marker="[REDACTED_JID]",
+        phone_marker="[REDACTED_PHONE]",
+        private_key_marker="[REDACTED_PRIVATE_KEY]",
+        aws_marker="[REDACTED_AWS_ACCESS_KEY]",
+        github_marker="[REDACTED_GITHUB_TOKEN]",
+        jwt_marker="[REDACTED_JWT]",
+    )
 
 
 def redact_evidence_string(value: str, max_len: int = 160) -> str:
@@ -241,13 +196,7 @@ def redact_evidence_string(value: str, max_len: int = 160) -> str:
 
 
 def redact_json_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_event_text(value)
-    if isinstance(value, list):
-        return [redact_json_value(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): redact_json_value(item) for key, item in value.items()}
-    return value
+    return redact_shared_json_value(value, redact_event_text)
 
 
 def path_fingerprint(value: str | Path) -> str:
@@ -3182,6 +3131,14 @@ def provider_keychain_unlock_status(keychain_path: Path, timeout_seconds: int) -
     return provider_keychain_status("\n".join(part for part in [stdout, stderr] if part), rc)
 
 
+def provider_keychain_unlock_allowed(profile: dict[str, Any], item: dict[str, Any]) -> bool:
+    if "providerCredentialUnlockKeychain" in item:
+        return profile_bool(item, "providerCredentialUnlockKeychain", False)
+    if "providerCredentialUnlockKeychain" in profile:
+        return profile_bool(profile, "providerCredentialUnlockKeychain", False)
+    return env_flag("BOT_ERRORS_PROVIDER_KEYCHAIN_UNLOCK", False)
+
+
 def provider_host_uptime_seconds() -> int | None:
     dry_uptime = os.environ.get("BOT_ERRORS_DRY_UPTIME_SECONDS")
     if dry_uptime is not None:
@@ -3504,7 +3461,12 @@ def provider_credential_fragments(profile: dict[str, Any], item: dict[str, Any],
         f"credential_account={redact_evidence_string(account, 80)}",
     ]
     keychain_path = Path.home() / "Library" / "Keychains" / "login.keychain-db"
-    fragments.append(f"keychain_unlock_status={provider_keychain_unlock_status(keychain_path, timeout_seconds)}")
+    if provider_keychain_unlock_allowed(profile, item):
+        fragments.append("keychain_unlock_policy=enabled")
+        fragments.append(f"keychain_unlock_status={provider_keychain_unlock_status(keychain_path, timeout_seconds)}")
+    else:
+        fragments.append("keychain_unlock_policy=observe_only")
+        fragments.append("keychain_unlock_status=skipped")
 
     try:
         stdout, stderr, rc, _ = provider_command_output(

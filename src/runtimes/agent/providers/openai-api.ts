@@ -27,6 +27,7 @@ import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
+import { providerPreview } from '../provider-preview-sanitizer.ts';
 
 const log = createChildLogger('openai-api-provider');
 
@@ -318,7 +319,7 @@ export class OpenAIApiProvider implements ProviderSession {
 
       // Self-heal: surrogate corruption
       if (response.status === 400 && isSurrogateError(errText) && !selfHealAttempt) {
-        log.warn({ model, errPreview: errText.slice(0, 200) }, 'surrogate corruption detected — sanitizing and retrying');
+        log.warn({ model, errPreview: providerPreview(errText, 200) }, 'surrogate corruption detected — sanitizing and retrying');
         sanitizeMessageHistory(this.messages as Array<{ role: string; content: unknown }>);
         return this.callApi(model, true);
       }
@@ -327,7 +328,7 @@ export class OpenAIApiProvider implements ProviderSession {
       let friendlyMsg: string;
       if (response.status === 400) {
         friendlyMsg = '_There was an issue with my conversation data. Please try again or send /new to start fresh._';
-        log.error({ status: 400, errPreview: errText.slice(0, 500), model, selfHealAttempt }, 'API 400 error');
+        log.error({ status: 400, errPreview: providerPreview(errText, 500), model, selfHealAttempt }, 'API 400 error');
       } else if (response.status === 429) {
         const retryAfterMs = boundedRetryAfterMs(response.headers);
         if (!rateLimitRetryAttempt && retryAfterMs !== null) {
@@ -366,7 +367,7 @@ export class OpenAIApiProvider implements ProviderSession {
         chunk = JSON.parse(data) as Record<string, unknown>;
       } catch (err) {
         // Malformed SSE chunk - skip, but preserve observability.
-        log.warn({ err, dataPreview: data.slice(0, 200), model }, 'malformed SSE chunk from OpenAI-compatible API');
+        log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from OpenAI-compatible API');
         continue;
       }
 

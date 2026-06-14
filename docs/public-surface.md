@@ -251,6 +251,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.token-window` | `npm run token-window` | `package.json` | beta | active | Tokenomics pilot helper; reports rolling agent-token totals from an instance `bot.db` |
 | `cli:npm.migrate-memory-config` | `npm run migrate-memory-config` | `package.json` | stable | active | Migrate legacy flat `pinecone*` config to `memory.*` |
 | `cli:npm.fleet-rotate-token` | `npm run fleet:rotate-token` | `package.json` | stable | active | Rotate the root fleet token; preserves accept-list |
+| `cli:npm.release-snapshot` | `npm run release:snapshot` | `package.json` | beta | active | Read-only release snapshot planner and manifest-backed drift checker; live release mutation still requires separate approval |
 | `cli:npm.leaks-anonymize` | `npm run leaks:anonymize` | `package.json` | stable | active | Report-first private literal anonymizer; pass `--write` to update files |
 | `cli:npm.guard-publication` | `npm run guard:publication` | `package.json` | stable | active | Publication audit guard (default mode) |
 | `cli:npm.guard-publication-all` | `npm run guard:publication:all` | `package.json` | stable | active | Verify tracked internal docs are represented in `docs/publication-audit.md` |
@@ -260,10 +261,12 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-doc-drift` | `npm run guard:doc-drift` | `package.json` | stable | active | Verify cross-doc references resolve on disk |
 | `cli:npm.guard-public-surface-drift` | `npm run guard:public-surface-drift` | `package.json` | stable | active | Verify `docs/public-surface.md` and package.json scripts agree |
 | `cli:npm.guard-source-runtime-drift` | `npm run guard:source-runtime-drift` | `package.json` | stable | active | Verify deployed runtime scripts match their checked-in sources against `deploy/source-runtime-manifest.json` |
+| `cli:npm.guard-bot-errors-runtime-manifest` | `npm run guard:bot-errors-runtime-manifest` | `package.json` | stable | active | Verify BOT ERRORS runtime manifest hashes and capability markers match checked-in deploy scripts |
 | `cli:npm.guard-work-index` | `npm run guard:work-index` | `package.json` | stable | active | Verify `docs/work-index.md` is up to date |
 | `cli:npm.guard-repo` | `npm run guard:repo` | `package.json` | stable | active | Repo hygiene guard (default mode) |
 | `cli:npm.guard-repo-release-hygiene` | `npm run guard:repo:release-hygiene` | `package.json` | stable | active | Repo hygiene guard over the release-hygiene file set |
 | `cli:npm.guard-repo-staged` | `npm run guard:repo:staged` | `package.json` | stable | active | Repo hygiene guard over the staged diff |
+| `cli:npm.guard-repo-branch-diff` | `npm run guard:repo:branch-diff` | `package.json` | stable | active | Repo hygiene guard over the branch/base diff |
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
 | `cli:npm.guard-repo-commit-authors` | `npm run guard:repo:commit-authors` | `package.json` | stable | active | Repo hygiene guard over branch-range commit authors |
 | `cli:npm.guard-harness-maintenance` | `npm run guard:harness-maintenance` | `package.json` | internal | active | Validate harness-maintenance manifest and npm cooldown gates |
@@ -282,6 +285,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-safeguard-diagnostics` | `npm run guard:safeguard-diagnostics` | `package.json` | stable | active | Deterministic diagnostic map for guard-chain wiring, sensitive-publication anchors, runtime-boundary anchors, public-exposure guards, and portability blockers |
 | `cli:npm.guard-test-integrity` | `npm run guard:test-integrity` | `package.json` | internal | active | CI wrapper for test-integrity baseline check (refs #511); skips when the plugin is absent only outside CI |
 | `cli:npm.guard-lint-src` | `npm run guard:lint:src` | `package.json` | stable | active | ESLint architectural-fitness ring over src/scripts/tests; warns (non-blocking), fails only on errors/config faults |
+| `cli:npm.guard-coverage-headroom` | `npm run guard:coverage-headroom` | `package.json` | internal | active | Manual coverage threshold headroom diagnostic; run after `coverage:check` has generated `coverage/coverage-summary.json` |
 | `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |
 | `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |

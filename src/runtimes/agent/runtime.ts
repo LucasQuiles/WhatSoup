@@ -78,7 +78,12 @@ import type { SessionContext } from '../../mcp/types.ts';
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { registerAllTools } from '../../mcp/register-all.ts';
 import { startMediaBridge, setMediaBridgeChat, type MediaBridge } from './media-bridge.ts';
-import { createProviderMcpBridge, writeProviderMcpConfig, writeProviderMcpConfigTarget } from './providers/mcp-bridge.ts';
+import {
+  createProviderMcpBridge,
+  writeProviderMcpConfig,
+  writeProviderMcpConfigTarget,
+  type OpencodeProviderConfig,
+} from './providers/mcp-bridge.ts';
 import { verifyFallbackCredential } from './providers/credential-verify.ts';
 import { probeFallbackBinary, probeModelCatalog, probeBinaryAuthStatus } from './providers/binary-preflight.ts';
 import {
@@ -427,6 +432,9 @@ type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
 const POLL_QUESTION_MAX_CHARS = 900;
 const POLL_OPTION_MAX_CHARS = 95;  // leave margin under WhatsApp's ~100 char limit
 const POLL_DETAIL_DESCRIPTION_MIN_CHARS = 72;
+const DEFAULT_POLL_TIMEOUT_MS = 3_600_000;
+const MIN_POLL_TIMEOUT_MS = 1_000;
+const MAX_POLL_TIMEOUT_MS = 86_400_000;
 const ASKUSER_OTHER_OPTION_LABEL = 'Other — propose a different option';
 
 type AskUserOption = { label: string; description: string };
@@ -796,6 +804,24 @@ function normalizeAskUserQuestions(questions: AskUserQuestion[]): AskUserQuestio
       ],
     };
   });
+}
+
+function clampPollTimeoutMs(timeoutMs: number): number {
+  return Math.min(Math.max(timeoutMs, MIN_POLL_TIMEOUT_MS), MAX_POLL_TIMEOUT_MS);
+}
+
+function configuredDefaultPollTimeoutMs(): number {
+  const raw = Number(config.pollResolution?.defaultTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0
+    ? clampPollTimeoutMs(raw)
+    : DEFAULT_POLL_TIMEOUT_MS;
+}
+
+function normalizePendingPollTimeoutMs(timeoutMs: unknown): number {
+  const raw = Number(timeoutMs);
+  return Number.isFinite(raw) && raw > 0
+    ? clampPollTimeoutMs(raw)
+    : configuredDefaultPollTimeoutMs();
 }
 
 function formatOptionLine(
@@ -2604,18 +2630,7 @@ export class AgentRuntime implements Runtime {
           }
         };
 
-        const primaryOpencodeProviderConfig =
-          this.agentProvider === 'opencode-cli' && this.agentProviderConfig
-            ? {
-                baseUrl: typeof this.agentProviderConfig['baseUrl'] === 'string'
-                  ? (this.agentProviderConfig['baseUrl'] as string)
-                  : undefined,
-                model: this.model,
-                apiKeyService: typeof this.agentProviderConfig['apiKeyService'] === 'string'
-                  ? (this.agentProviderConfig['apiKeyService'] as string)
-                  : undefined,
-              }
-            : undefined;
+        const primaryOpencodeProviderConfig = this.primaryOpencodeProviderConfig();
         writeFor(this.agentProvider, primaryOpencodeProviderConfig);
         for (const entry of this.agentFallbacks) {
           if (entry.provider === this.agentProvider) continue;
@@ -3869,10 +3884,12 @@ export class AgentRuntime implements Runtime {
    */
   private persistPendingPoll(mapKey: string, pending: PendingPollQuestion): void {
     try {
+      const timeoutMs = normalizePendingPollTimeoutMs(pending.timeoutMs);
+      pending.timeoutMs = timeoutMs;
       const serialized = serializePendingPoll(pending);
       const payload = JSON.stringify(serialized);
-      const closesAt = pending.createdAt + pending.timeoutMs;
-      const hardClosesAt = pending.createdAt + pending.timeoutMs * 2;
+      const closesAt = pending.createdAt + timeoutMs;
+      const hardClosesAt = pending.createdAt + timeoutMs * 2;
       this.db.raw
         .prepare(
           `INSERT INTO pending_polls (map_key, chat_jid, tool_id, source, resolution, payload, created_at, closes_at, hard_closes_at)
@@ -3997,8 +4014,10 @@ export class AgentRuntime implements Runtime {
   }
 
   private startPendingPollExpiry(mapKey: string, pending: PendingPollQuestion): void {
-    const softMs = pending.timeoutMs;
-    const hardMs = pending.timeoutMs * 2;
+    const timeoutMs = normalizePendingPollTimeoutMs(pending.timeoutMs);
+    pending.timeoutMs = timeoutMs;
+    const softMs = timeoutMs;
+    const hardMs = timeoutMs * 2;
 
     if (pending.mode === 'poll' && !pending.softExpiryTimer) {
       pending.softExpiryTimer = setTimeout(() => {
@@ -4393,10 +4412,7 @@ export class AgentRuntime implements Runtime {
       answersCollected: {},
       createdAt: Date.now(),
       resolution: resolvedStrategy,
-      timeoutMs: Math.min(
-        Math.max(instanceConfig?.defaultTimeoutMs ?? 3_600_000, 1_000),
-        86_400_000,
-      ),
+      timeoutMs: configuredDefaultPollTimeoutMs(),
       votesByQuestion: new Map(),
       adminJids,
       sentPollMessageIds: [],
@@ -6025,6 +6041,24 @@ export class AgentRuntime implements Runtime {
     return this.fallbackProviderConfigFor(fallbackEntry.provider) ?? this.agentProviderConfig;
   }
 
+  private primaryOpencodeProviderConfig(): OpencodeProviderConfig | undefined {
+    if (this.agentProvider !== 'opencode-cli' || !this.agentProviderConfig) return undefined;
+
+    const providerConfig: OpencodeProviderConfig = {};
+    const baseUrl = this.agentProviderConfig['baseUrl'];
+    if (typeof baseUrl === 'string') {
+      providerConfig.baseUrl = baseUrl;
+    }
+    if (this.model) {
+      providerConfig.model = this.model;
+    }
+    const apiKeyService = this.agentProviderConfig['apiKeyService'];
+    if (typeof apiKeyService === 'string') {
+      providerConfig.apiKeyService = apiKeyService;
+    }
+    return providerConfig;
+  }
+
   /**
    * Whether the keyring holds an API key for the configured fallback target.
    *
@@ -7020,10 +7054,15 @@ export class AgentRuntime implements Runtime {
         const mcpServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/whatsoup-proxy.ts');
         const sendMediaServerPath = resolve(new URL('.', import.meta.url).pathname, '../../../deploy/mcp/send-media-server.ts');
         const chatScopedToolNames = this.registry.getChatScopedToolNames();
+        const providerConfig =
+          this.effectiveProvider === 'opencode-cli' && this.effectiveFallbackEntry === null
+            ? this.primaryOpencodeProviderConfig()
+            : undefined;
         const socketPath = provisionWorkspace({
           workspacePath,
           instanceCwd: this.cwd ?? homedir(),
           provider: this.effectiveProvider,
+          providerConfig,
           sandbox: this.sandbox!,
           hookPath,
           pollLintHookPath,

@@ -18,6 +18,7 @@ import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
 import {
   writeProviderMcpConfig,
   type AdditionalMcpServerConfig,
+  type OpencodeProviderConfig,
 } from './provider-mcp-config.ts';
 import { createChildLogger } from '../logger.ts';
 import {
@@ -76,6 +77,7 @@ export interface ProvisionOptions {
   workspacePath: string;
   instanceCwd: string;           // parent dir for CLAUDE.md symlink target
   provider?: string;             // agent provider whose CLI config shape should be written
+  providerConfig?: OpencodeProviderConfig; // opencode custom endpoint/model config, when applicable
   sandbox: SandboxConfig;        // instance-level config to inherit non-path fields from
   hookPath: string;              // absolute path to agent-sandbox.sh
   mcpServerPath: string;         // absolute path to whatsoup-proxy.ts
@@ -105,6 +107,7 @@ function writeWorkspaceMcpConfig(
   mcpServerPath: string,
   mediaBridgeSocketPath: string,
   sendMediaServerPath?: string,
+  providerConfig?: OpencodeProviderConfig,
 ): void {
   const additionalServers: AdditionalMcpServerConfig[] = [];
   if (sendMediaServerPath) {
@@ -114,7 +117,7 @@ function writeWorkspaceMcpConfig(
       env: { MEDIA_BRIDGE_SOCKET: mediaBridgeSocketPath },
     });
   }
-  writeProviderMcpConfig(provider, workspacePath, socketPath, mcpServerPath, undefined, additionalServers);
+  writeProviderMcpConfig(provider, workspacePath, socketPath, mcpServerPath, providerConfig, additionalServers);
 }
 
 /**
@@ -267,7 +270,7 @@ export function ensurePermissionsSettings(
  * Deterministic — always overwrites existing files.
  */
 export function provisionWorkspace(opts: ProvisionOptions): string {
-  const { workspacePath, instanceCwd, provider = 'claude-cli', sandbox, hookPath, pollLintHookPath, postToolUseLogHookPath, mcpServerPath, sendMediaServerPath } = opts;
+  const { workspacePath, instanceCwd, provider = 'claude-cli', providerConfig, sandbox, hookPath, pollLintHookPath, postToolUseLogHookPath, mcpServerPath, sendMediaServerPath } = opts;
 
   try {
     // 1. Ensure .claude/ directory exists without following directory symlinks.
@@ -294,7 +297,7 @@ export function provisionWorkspace(opts: ProvisionOptions): string {
 
     // 4. Write provider-specific MCP config — whatsoup-proxy + optional send-media entry
     const mediaBridgeSocketPath = join(claudeDir, 'media-bridge.sock');
-    writeWorkspaceMcpConfig(provider, workspacePath, socketPath, mcpServerPath, mediaBridgeSocketPath, sendMediaServerPath);
+    writeWorkspaceMcpConfig(provider, workspacePath, socketPath, mcpServerPath, mediaBridgeSocketPath, sendMediaServerPath, providerConfig);
 
     // 5. Symlink CLAUDE.md -> instanceCwd/CLAUDE.md (recreate if already exists)
     const symlinkPath = join(workspacePath, 'CLAUDE.md');
