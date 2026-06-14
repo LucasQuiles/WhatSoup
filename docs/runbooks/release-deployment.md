@@ -103,6 +103,10 @@ bash scripts/run-with-pinned-node.sh scripts/live-release-drift-alert.ts \
   --json
 ```
 
+The checked-in macOS template is
+`deploy/com.whatsoup.release-drift-check.plist`; replace its install-time
+placeholders before loading it.
+
 Installing a launchd/cron schedule for this command is a live alerting change and
 needs separate named approval. The scheduled job must use the pinned Node runtime
 and either an explicit reviewed release path or the active bot plist's
