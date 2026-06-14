@@ -39,7 +39,7 @@ describe('render-release-drift-launchd.sh', () => {
 
     const result = runRenderer([
       '--instance',
-      'release-bot',
+      'sample-bot',
       '--repo-root',
       repoRoot,
       '--home',
@@ -50,7 +50,8 @@ describe('render-release-drift-launchd.sh', () => {
     expect(result.stdout).toContain('<string>com.whatsoup.release-drift-check</string>');
     expect(result.stdout).toContain(`${repoRoot}/scripts/run-with-pinned-node.sh`);
     expect(result.stdout).toContain(`${repoRoot}/scripts/live-release-drift-alert.ts`);
-    expect(result.stdout).toContain(`${home}/Library/LaunchAgents/com.whatsoup.release-bot.plist`);
+    expect(result.stdout).toContain(`${home}/Library/LaunchAgents/com.whatsoup.sample-bot.plist`);
+    expect(result.stdout).toContain('<string>--instance</string>\n    <string>sample-bot</string>');
     expect(result.stdout).not.toContain('__WHATSOUP_REPO_ROOT__');
     expect(result.stdout).not.toContain('__HOME__');
     expect(result.stdout).not.toContain('__INSTANCE__');

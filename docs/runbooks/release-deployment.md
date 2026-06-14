@@ -104,16 +104,20 @@ bash scripts/run-with-pinned-node.sh scripts/live-release-drift-alert.ts \
 ```
 
 The checked-in macOS template is
-`deploy/com.whatsoup.release-drift-check.plist`; replace its install-time
-placeholders before loading it. To render it without touching the live
-LaunchAgents directory:
+`deploy/com.whatsoup.release-drift-check.plist`. Render it to a staging path
+before any install/load step:
 
 ```bash
 bash deploy/scripts/render-release-drift-launchd.sh \
-  --instance release-bot \
+  --instance <instance> \
   --repo-root "$PWD" \
-  --output "$PWD/.local-rendered-release-drift-check.plist"
+  --home "$HOME" \
+  --output /tmp/com.whatsoup.release-drift-check.plist
 ```
+
+The renderer substitutes install-time placeholders only. It refuses direct
+writes into `~/Library/LaunchAgents`; copying the staged plist there and loading
+it is the live alerting change.
 
 Installing a launchd/cron schedule for this command is a live alerting change and
 needs separate named approval. The scheduled job must use the pinned Node runtime

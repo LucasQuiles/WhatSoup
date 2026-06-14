@@ -13,7 +13,7 @@
     <string>--launchd-plist</string>
     <string>__HOME__/Library/LaunchAgents/com.whatsoup.__INSTANCE__.plist</string>
     <string>--instance</string>
-    <string>release-bot</string>
+    <string>__INSTANCE__</string>
     <string>--source</string>
     <string>release-drift</string>
   </array>

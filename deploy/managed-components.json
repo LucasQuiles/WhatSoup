@@ -186,6 +186,7 @@
         "name": "release-drift-check",
         "label_pattern": "com.whatsoup.release-drift-check",
         "template": "deploy/com.whatsoup.release-drift-check.plist",
+        "render_script": "deploy/scripts/render-release-drift-launchd.sh",
         "install_path": "~/Library/LaunchAgents/com.whatsoup.release-drift-check.plist",
         "schedule": "StartInterval 300s",
         "run_at_load": false,

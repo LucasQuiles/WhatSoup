@@ -201,6 +201,7 @@ describe('deploy launchd timer plists', () => {
     expect(plist).toContain('scripts/live-release-drift-alert.ts');
     expect(plist).toContain('--launchd-plist');
     expect(plist).toContain('com.whatsoup.__INSTANCE__.plist');
+    expect(plist).toContain('<string>__INSTANCE__</string>');
     expect(plist).toMatch(/<key>StartInterval<\/key>\s*<integer>300<\/integer>/);
   });
 
