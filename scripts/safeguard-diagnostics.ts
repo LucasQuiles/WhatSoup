@@ -162,6 +162,11 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
   },
 ];
 
+const CONSOLE_DESIGN_CHAIN_EXEMPTIONS = new Set([
+  'design:capture',
+  'design:capture:validate',
+]);
+
 const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
   {
     id: 'repo-hygiene-sensitive-patterns',
@@ -316,9 +321,9 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
   },
 ];
 
-function loadPackageScripts(cwd: string): Record<string, string> {
-  const text = readText(cwd, 'package.json');
-  if (text === null) throw new Error('package.json is missing');
+function loadPackageScripts(cwd: string, packagePath = 'package.json'): Record<string, string> {
+  const text = readText(cwd, packagePath);
+  if (text === null) throw new Error(`${packagePath} is missing`);
   const parsed = JSON.parse(text) as { scripts?: Record<string, unknown> };
   const scripts: Record<string, string> = {};
   for (const [name, value] of Object.entries(parsed.scripts ?? {})) {
@@ -465,6 +470,41 @@ function checkChainRequirement(scripts: Record<string, string>, requirement: Cha
   };
 }
 
+function consoleDesignScriptSteps(consoleScripts: Record<string, string>): string[] {
+  return Object.keys(consoleScripts)
+    .filter((scriptName) => scriptName.startsWith('design:'))
+    .filter((scriptName) => !CONSOLE_DESIGN_CHAIN_EXEMPTIONS.has(scriptName))
+    .sort()
+    .map((scriptName) => `npm --prefix console run ${scriptName}`);
+}
+
+function checkConsoleDesignScriptCoverage(rootScripts: Record<string, string>, consoleScripts: Record<string, string>): DiagnosticCheck {
+  const chain = rootScripts['verify:console-design'];
+  if (!chain) {
+    return {
+      id: 'console-design-script-coverage',
+      category: 'guard-chain',
+      status: 'fail',
+      message: 'verify:console-design is missing.',
+      evidence: ['verify:console-design'],
+      remediation: 'Restore verify:console-design before relying on console design guard coverage.',
+    };
+  }
+
+  const requiredSteps = consoleDesignScriptSteps(consoleScripts);
+  const missing = requiredSteps.filter((step) => !chain.includes(step));
+  return {
+    id: 'console-design-script-coverage',
+    category: 'guard-chain',
+    status: missing.length === 0 ? 'pass' : 'fail',
+    message: missing.length === 0
+      ? 'All non-capture console design scripts are wired into verify:console-design.'
+      : `verify:console-design omits ${missing.length} console design script(s).`,
+    evidence: missing.length === 0 ? requiredSteps : missing.map((step) => `missing ${step}`),
+    remediation: 'Add the missing console design guard scripts to verify:console-design, or explicitly classify them as visual capture-only.',
+  };
+}
+
 function checkAnchors(cwd: string, requirement: AnchorRequirement): DiagnosticCheck {
   const text = readText(cwd, requirement.file);
   if (text === null) {
@@ -570,9 +610,11 @@ function summarize(checks: DiagnosticCheck[]): Record<DiagnosticStatus, number> 
 
 export function checkSafeguards(cwd = process.cwd(), strict = false): SafeguardDiagnosticsReport {
   const scripts = loadPackageScripts(cwd);
+  const consoleScripts = loadPackageScripts(cwd, 'console/package.json');
   const gitContext = collectGitContext(cwd);
   const checks = [
     checkScriptPresence(scripts),
+    checkConsoleDesignScriptCoverage(scripts, consoleScripts),
     ...CHAIN_REQUIREMENTS.map((requirement) => checkChainRequirement(scripts, requirement)),
     ...ANCHOR_REQUIREMENTS.map((requirement) => checkAnchors(cwd, requirement)),
     ...portableArtifactChecks(gitContext),

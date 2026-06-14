@@ -94,6 +94,25 @@ const requiredPackageScripts = {
   ].join(' && '),
 };
 
+const requiredConsolePackageScripts = {
+  'design:brand-assets': 'node scripts/check-brand-assets.mjs --fail-on-rule soup/brand-favicon-link-required',
+  'design:burndown': 'node scripts/check-design-burndown.mjs',
+  'design:capture': 'node scripts/capture-visual-matrix.mjs',
+  'design:capture:validate': 'node scripts/validate-visual-manifest.mjs',
+  'design:color-semantics': 'node scripts/check-color-semantics.mjs --fail-on-rule soup/no-component-local-palette --fail-on-rule soup/provider-palette-only --fail-on-rule soup/data-series-token-only --fail-on-rule soup/traffic-neutrality',
+  'design:contrast': 'node scripts/check-contrast-matrix.mjs',
+  'design:font-assets': 'node scripts/check-font-assets.mjs',
+  'design:lint-fixtures': 'node scripts/check-design-lint-fixtures.mjs',
+  'design:metrics': 'node scripts/design-metrics.mjs',
+  'design:raw-form-control-inventory': 'node scripts/check-raw-form-control-inventory.mjs',
+  'design:regression': 'bash scripts/design-regression.sh',
+  'design:resilience': 'node scripts/check-design-resilience.mjs --fail-on-rule soup/layer-owner-required --fail-on-rule soup/no-hover-only-content --fail-on-rule soup/no-layout-shift-interaction --fail-on-rule soup/no-unsafe-truncation --fail-on-rule soup/no-vw-font-size --fail-on-rule soup/scroll-owner-required',
+  'design:shadow-frozen-inventory': 'node scripts/check-shadow-frozen-inventory.mjs',
+  'design:theme-parity': 'node scripts/check-theme-parity.mjs',
+  'design:token-drift': 'node scripts/check-token-spec-drift.mjs',
+  'lint:shadow:baseline': 'node scripts/check-shadow-baseline.mjs',
+};
+
 const requiredFiles: Record<string, string> = {
   'scripts/repo-hygiene-guard.ts': [
     'model-attribution',
@@ -192,6 +211,7 @@ function writeRepoFile(repo: string, relativePath: string, text: string): void {
 }
 
 function makeRepo(options: {
+  consoleScripts?: Record<string, string | undefined>;
   scripts?: Record<string, string | undefined>;
   files?: Record<string, string | undefined>;
   trackedExtras?: Record<string, string>;
@@ -203,6 +223,12 @@ function makeRepo(options: {
     if (value === undefined) delete scripts[name as keyof typeof scripts];
   }
   writeRepoFile(repo, 'package.json', JSON.stringify({ scripts }, null, 2));
+
+  const consoleScripts = { ...requiredConsolePackageScripts, ...(options.consoleScripts ?? {}) };
+  for (const [name, value] of Object.entries(consoleScripts)) {
+    if (value === undefined) delete consoleScripts[name as keyof typeof consoleScripts];
+  }
+  writeRepoFile(repo, 'console/package.json', JSON.stringify({ scripts: consoleScripts }, null, 2));
 
   const files = { ...requiredFiles, ...(options.files ?? {}) };
   for (const [filePath, text] of Object.entries(files)) {
@@ -224,6 +250,7 @@ function makeNonGitTree(): string {
   const repo = mkdtempSync(path.join(tmpdir(), 'safeguard-diagnostics-nongit-'));
   tempRepos.push(repo);
   writeRepoFile(repo, 'package.json', JSON.stringify({ scripts: requiredPackageScripts }, null, 2));
+  writeRepoFile(repo, 'console/package.json', JSON.stringify({ scripts: requiredConsolePackageScripts }, null, 2));
   for (const [filePath, text] of Object.entries(requiredFiles)) {
     writeRepoFile(repo, filePath, `${text}\n`);
   }
@@ -324,6 +351,29 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
       .toContain('missing npm --prefix console run design:shadow-frozen-inventory');
+  });
+
+  it('fails when a new non-capture console design script is not wired into shared verification', () => {
+    const fixture = makeRepo({
+      consoleScripts: {
+        'design:new-audit': 'node scripts/check-new-audit.mjs',
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-design-script-coverage')?.evidence)
+      .toContain('missing npm --prefix console run design:new-audit');
+  });
+
+  it('does not require visual capture-only scripts in shared console design verification', () => {
+    const fixture = makeRepo();
+    const result = checkSafeguards(fixture);
+    const coverage = result.checks.find((check) => check.id === 'console-design-script-coverage');
+
+    expect(coverage).toMatchObject({ status: 'pass' });
+    expect(coverage?.evidence).not.toContain('npm --prefix console run design:capture');
+    expect(coverage?.evidence).not.toContain('npm --prefix console run design:capture:validate');
   });
 
   it('fails when the pre-commit hook omits design-system documentation hygiene', () => {
