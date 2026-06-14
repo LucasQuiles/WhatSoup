@@ -296,6 +296,7 @@ export function ConfigEditDialog({
               type="text"
               value={typeof val === 'string' && !enumOpts.includes(val) ? val : ''}
               onChange={e => setField(key, e.target.value)}
+              aria-label="Custom model ID"
               placeholder="Enter custom model ID"
               className="text-m-pas"
               aria-describedby={describedBy}

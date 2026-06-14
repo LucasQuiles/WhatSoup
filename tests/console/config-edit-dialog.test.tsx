@@ -905,6 +905,23 @@ describe('ConfigEditDialog — enum and custom-enum field', () => {
 
     expect(screen.getByPlaceholderText('Enter custom model ID')).toBeDefined()
   })
+
+  it('gives the custom model text input an explicit accessible name', () => {
+    const configWithModel: Record<string, unknown> = {
+      model: 'claude-sonnet-4-6',
+    }
+
+    render(withProviders(
+      <ConfigEditDialog open={true} config={configWithModel} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const selects = screen.getAllByRole('combobox')
+    const modelSelect = selects.find(s => (s as HTMLSelectElement).value === 'claude-sonnet-4-6')
+    fireEvent.change(modelSelect as Element, { target: { value: '__custom__' } })
+
+    const customInput = screen.getByRole('textbox', { name: 'Custom model ID' })
+    expect(customInput).toBe(screen.getByPlaceholderText('Enter custom model ID'))
+  })
 })
 
 // ---------------------------------------------------------------------------
