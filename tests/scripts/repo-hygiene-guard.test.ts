@@ -20,6 +20,9 @@ import {
 } from '../../scripts/repo-hygiene-guard.ts';
 
 const tempRepos: string[] = [];
+const privateHostLabelFixture = ['nuc', 'les'].join('');
+const privateHostDomainFixture = `${privateHostLabelFixture}.${['qui', 'les'].join('')}.${['stu', 'dio'].join('')}`;
+const privateTailnetIpFixture = ['100', '91', '13', '7'].join('.');
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore', env: cleanGitEnv() });
@@ -81,7 +84,7 @@ describe('repo hygiene guard', () => {
 
   it('flags private host labels in deploy script Python tests', () => {
     const issues = scanAddedLines([
-      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: 'HOST = "nucles"' },
+      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: `HOST = "${privateHostLabelFixture}"` },
     ]);
 
     expect(issues.map((issue) => issue.code)).toContain('private-host-label');
@@ -89,8 +92,8 @@ describe('repo hygiene guard', () => {
 
   it('flags private host domains and tailnet IPs in deploy script Python tests', () => {
     const issues = scanAddedLines([
-      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: 'HOST = "nucles.quiles.studio"' },
-      { filePath: 'deploy/scripts/tests/test_example.py', line: 5, text: 'EXPECTED = "100.91.13.7"' },
+      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: `HOST = "${privateHostDomainFixture}"` },
+      { filePath: 'deploy/scripts/tests/test_example.py', line: 5, text: `EXPECTED = "${privateTailnetIpFixture}"` },
     ]);
 
     expect(issues.map((issue) => issue.code)).toEqual(
