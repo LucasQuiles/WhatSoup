@@ -986,7 +986,7 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "FAIL credential: [REDACTED] missing required" "$CAPTURE" "D22a missing required credential fails"
+assert_in "FAIL credential: credential_requirement=tokens.env missing required expected_path_redacted=true expected_path_basename=tokens.env" "$CAPTURE" "D22a missing required credential fails"
 assert_not_in "D22_SECRET" "$CAPTURE" "D22a no credential body leaked"
 
 reset_sandbox
@@ -1003,7 +1003,7 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 chmod 600 "$D22_HOME/.config/whatsoup/tokens.env"
 dispatch_once
-assert_in "FAIL credential: [REDACTED] unreadable" "$CAPTURE" "D22b unreadable required credential fails"
+assert_in "FAIL credential: credential_requirement=tokens.env unreadable credential_path_redacted=true credential_path_basename=tokens.env" "$CAPTURE" "D22b unreadable required credential fails"
 assert_not_in "D22_SECRET_UNREADABLE" "$CAPTURE" "D22b unreadable credential contents not leaked"
 
 reset_sandbox
@@ -1020,7 +1020,7 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
 assert_in "BOT ERROR" "$CAPTURE" "D22c credential 0644 fails closed"
-assert_in "FAIL credential: [REDACTED] mode>600" "$CAPTURE" "D22c credential 0644 critical line"
+assert_in "FAIL credential: credential_requirement=tokens.env mode>600 credential_path_redacted=true credential_path_basename=tokens.env" "$CAPTURE" "D22c credential 0644 critical line"
 assert_not_in "credential_meta" "$CAPTURE" "D22c required credential does not duplicate metadata line"
 assert_not_in "D22_SECRET_MODE_WARN" "$CAPTURE" "D22c warning credential contents not leaked"
 
@@ -1037,8 +1037,8 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "FAIL credential: [REDACTED] world_writable" "$CAPTURE" "D22c credential world-writable fails"
-d22c_fail_count=$(grep -cF "FAIL credential: [REDACTED]" "$CAPTURE" 2>/dev/null | tr -d ' ')
+assert_in "FAIL credential: credential_requirement=tokens.env world_writable credential_path_redacted=true credential_path_basename=tokens.env" "$CAPTURE" "D22c credential world-writable fails"
+d22c_fail_count=$(grep -cF "FAIL credential: credential_requirement=tokens.env" "$CAPTURE" 2>/dev/null | tr -d ' ')
 [ "$d22c_fail_count" = "1" ] && pass "D22c world-writable required credential fails once" \
   || fail "D22c expected one required credential FAIL, got $d22c_fail_count"
 assert_not_in "credential_meta" "$CAPTURE" "D22c world-writable required credential does not duplicate metadata line"
