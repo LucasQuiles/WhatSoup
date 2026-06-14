@@ -44,10 +44,10 @@ original implementation scope:
 - corpus validation after fleet propagation;
 - estate, rollback-anchor, and human-gated close-out.
 
-The operator-local close-out SSOT lives under
-`~/.claude/plans/whatsoup-stabilization/` (`RESUME-NOTE.md`,
-`CURRENT-SNAPSHOT.md`, `NEXT-PHASE-GOALS.md`, and `STATUS-LEDGER.md`). Keep this
-repo packet as historical evidence; do not use it as the active queue.
+The active tracked trunk is `docs/reliability-runner/README.md`, with status rows
+in `docs/reliability-runner/feature-matrix.md`. Operator-local notes are
+supplemental working evidence only until promoted into the repo. Keep this packet
+as historical evidence; do not use it as the active queue.
 
 ## Phase Log
 
@@ -58,7 +58,7 @@ repo packet as historical evidence; do not use it as the active queue.
 | Scout | complete | Tool-result, PostToolUse, dispatcher rendering, stale numeric identity, and operator-command gaps identified. |
 | Architect | closed | Superseded by the landed PR train and consolidation notes above. |
 | Execute | closed | Bot-errors alert-pipeline hardening landed; residual fleet propagation is tracked as C2/C3/C4 close-out. |
-| Synthesize | closed | Runtime evidence and closure certificates moved to the operator-local close-out SSOT. |
+| Synthesize | closed | Runtime evidence and closure certificates moved to the reliability-runner trunk and feature matrix. |
 
 ## Current Verification Evidence
 

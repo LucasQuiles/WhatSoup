@@ -3,8 +3,9 @@
 Status: closed — superseded by the 2026-06-13 bot-errors consolidation close-out.
 
 This file is retained as historical planning evidence. It is not the active
-implementation queue. The active close-out tracker is operator-local under
-`~/.claude/plans/whatsoup-stabilization/`, with the C1-C10 consolidation lanes.
+implementation queue. The active tracked trunk is
+`docs/reliability-runner/README.md`, with current status rows in
+`docs/reliability-runner/feature-matrix.md`.
 
 ## Bead Manifest
 
