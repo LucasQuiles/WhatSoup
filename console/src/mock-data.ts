@@ -107,10 +107,7 @@ export const MOCK_LINES: LineInstance[] = [
         provider: 'claude-cli',
       },
     },
-    heartbeat: hb([
-      'up','up','up','up','up','up','up','up','up','up',
-      'up','up','up','up','up','up','up','up','up','up',
-    ]),
+    heartbeat: hb(['up']),
     lastActive: ago(120),
     error: null,
     unread: 47,
@@ -632,13 +629,13 @@ export function generateMetrics(name: string, range: MetricsRange): LineMetrics 
   };
 }
 
-export function generateFleetMetrics(range: MetricsRange): FleetMetrics {
-  const allCfgs = Object.values(LINE_CONFIGS);
+export function generateFleetMetrics(range: MetricsRange, configs: Record<string, LineConfig> = LINE_CONFIGS): FleetMetrics {
+  const allCfgs = Object.values(configs);
   const isHourly = range === '24h';
   const buckets = range === '24h' ? 24 : range === '7d' ? 7 : 30;
 
   // Aggregate message volume across all lines
-  const allMsgVolumes = Object.keys(LINE_CONFIGS).map(n => buildMessageVolume(buckets, isHourly, LINE_CONFIGS[n].msgScale));
+  const allMsgVolumes = Object.values(configs).map(c => buildMessageVolume(buckets, isHourly, c.msgScale));
   const messageVolume: MessageVolumeBucket[] = allMsgVolumes[0].map((_, bi) => ({
     bucket: allMsgVolumes[0][bi].bucket,
     inbound: allMsgVolumes.reduce((s, v) => s + v[bi].inbound, 0),
@@ -647,7 +644,7 @@ export function generateFleetMetrics(range: MetricsRange): FleetMetrics {
   }));
 
   // Aggregate token usage
-  const tokenLines = Object.entries(LINE_CONFIGS).filter(([, c]) => c.tokenInputScale > 0);
+  const tokenLines = Object.entries(configs).filter(([, c]) => c.tokenInputScale > 0);
   const allTokenData = tokenLines.map(([, c]) => buildTokenUsage(buckets, isHourly, c.tokenInputScale));
   const tokenUsage: TokenUsageBucket[] = allTokenData[0]?.map((_, bi) => ({
     bucket: allTokenData[0][bi].bucket,
@@ -656,7 +653,7 @@ export function generateFleetMetrics(range: MetricsRange): FleetMetrics {
   })) ?? messageVolume.map(b => ({ bucket: b.bucket, input: 0, output: 0 }));
 
   // Aggregate session activity
-  const sessionLines = Object.entries(LINE_CONFIGS).filter(([, c]) => c.sessionScale > 0);
+  const sessionLines = Object.entries(configs).filter(([, c]) => c.sessionScale > 0);
   const allSessionData = sessionLines.map(([, c]) => buildSessionActivity(buckets, isHourly, c.sessionScale));
   const sessionActivity: SessionActivityBucket[] = allSessionData[0]?.map((_, bi) => ({
     bucket: allSessionData[0][bi].bucket,
@@ -671,7 +668,7 @@ export function generateFleetMetrics(range: MetricsRange): FleetMetrics {
   const sessionActivityByProvider: Record<string, SessionActivityBucket[]> = {};
 
   for (const prov of providers) {
-    const provCfgs = Object.values(LINE_CONFIGS).filter(c => c.provider === prov);
+    const provCfgs = Object.values(configs).filter(c => c.provider === prov);
     const totalTokenScale = provCfgs.reduce((s, c) => s + c.tokenInputScale, 0);
     const totalSessionScale = provCfgs.reduce((s, c) => s + c.sessionScale, 0);
     if (totalTokenScale > 0) {
@@ -688,7 +685,7 @@ export function generateFleetMetrics(range: MetricsRange): FleetMetrics {
   return {
     range,
     meta: {
-      instancesQueried: 8,
+      instancesQueried: Object.keys(configs).length,
       instancesFailed: 1,
       hasMessageData: true,
       hasTokenData: hasAnyToken,
