@@ -44,6 +44,15 @@ function mintResponse(ticket: string, audience: 'api' | 'sse', expiresIn = 60): 
   return jsonResponse({ ticket, audience, expiresIn });
 }
 
+function errorResponse(status: number, text: string): Response {
+  return {
+    ok: false,
+    status,
+    json: async () => ({}),
+    text: async () => text,
+  } as Response;
+}
+
 describe('console api-ticket -- apiFetch threads api-audience ticket', () => {
   it('mints an api ticket before the first API call and Bearers it', async () => {
     stubProductionConsole(true);
@@ -205,5 +214,50 @@ describe('console api-ticket -- single-use ticket minting', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('rejects non-401 ticket mint failures with the audience and server text', async () => {
+    stubProductionConsole(true);
+    const fetchMock = vi.fn().mockResolvedValue(errorResponse(503, 'ticket service down'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { getApiTicket } = await import('../../console/src/lib/api.ts');
+
+    await expect(getApiTicket('api')).rejects.toThrow('auth-ticket api 503: ticket service down');
+  });
+
+  it('rejects malformed ticket mint responses before returning an empty credential', async () => {
+    stubProductionConsole(true);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ticket: '', expiresIn: 60 }))
+      .mockResolvedValueOnce(jsonResponse({ expiresIn: 60 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { getApiTicket } = await import('../../console/src/lib/api.ts');
+
+    await expect(getApiTicket('api')).rejects.toThrow('auth-ticket api: malformed server response');
+    await expect(getApiTicket('sse')).rejects.toThrow('auth-ticket sse: malformed server response');
+  });
+});
+
+describe('console api-ticket -- websocket ticket failures', () => {
+  it('maps a 401 websocket-ticket response to ConsoleLockedError', async () => {
+    stubProductionConsole(true);
+    const fetchMock = vi.fn().mockResolvedValue(errorResponse(401, 'locked'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { api: freshApi, ConsoleLockedError } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getWsTicket()).rejects.toBeInstanceOf(ConsoleLockedError);
+  });
+
+  it('surfaces non-401 websocket-ticket failures with response text', async () => {
+    stubProductionConsole(true);
+    const fetchMock = vi.fn().mockResolvedValue(errorResponse(502, 'bad gateway'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.getWsTicket()).rejects.toThrow('API 502: bad gateway');
   });
 });

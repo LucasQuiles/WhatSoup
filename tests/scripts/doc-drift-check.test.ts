@@ -196,6 +196,22 @@ describe('doc drift check', () => {
         expected: 'raw form-control input count from console/design-raw-form-control-inventory.json',
       },
       {
+        actual: currentRawFormControlInventory.select,
+        claimed: 2,
+        filePath: staleDoc,
+        kind: 'raw-form-control-inventory',
+        line: 1,
+        expected: 'raw form-control select count from console/design-raw-form-control-inventory.json',
+      },
+      {
+        actual: currentRawFormControlInventory.textarea,
+        claimed: 7,
+        filePath: staleDoc,
+        kind: 'raw-form-control-inventory',
+        line: 1,
+        expected: 'raw form-control textarea count from console/design-raw-form-control-inventory.json',
+      },
+      {
         actual: currentRawFormControlInventory.consumerMigrations,
         claimed: 28,
         filePath: staleDoc,

@@ -96,4 +96,22 @@ describe('useConsoleSession probe-failure → locked (lines 27–32)', () => {
 
     expect(result.current.state).toBe('unlocked')
   })
+
+  it('does not update state when a successful probe resolves after unmount', async () => {
+    let resolveTicket!: (ticket: string) => void
+    mockGetApiTicket.mockReturnValue(new Promise<string>((resolve) => {
+      resolveTicket = resolve
+    }))
+
+    const { result, unmount } = renderHook(() => useConsoleSession())
+    expect(result.current.state).toBe('checking')
+
+    unmount()
+    await act(async () => {
+      resolveTicket('ticket-after-unmount')
+      await Promise.resolve()
+    })
+
+    expect(mockGetApiTicket).toHaveBeenCalledOnce()
+  })
 })

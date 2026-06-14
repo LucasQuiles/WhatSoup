@@ -29,7 +29,7 @@
  *   - Public prop interface, tab-reset derivation, query, admin resolution, API
  *     handlers, toasts, nested ConfirmDialogs unchanged.
  */
-import { useState, useEffect, useRef, useCallback, useId } from 'react'
+import { useState, useEffect, useCallback, useId } from 'react'
 import { X, Copy, Link, LogOut, UserMinus, ShieldCheck, ShieldOff, UserPlus } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api.js'
@@ -748,21 +748,22 @@ function SettingsTab({
 // ── Main modal ────────────────────────────────────────────────────────────────
 
 export function GroupDetailModal({ open, group, lineName, myJid, onClose }: GroupDetailModalProps) {
-  const [activeTab, setActiveTab] = useState<TabId>('info')
-  const prevGroupId = useRef<string | undefined>(undefined)
+  const groupId = group?.id
+  const [tabState, setTabState] = useState<{ groupId?: string; activeTab: TabId }>({
+    groupId: undefined,
+    activeTab: 'info',
+  })
+  const activeTab = tabState.groupId === groupId ? tabState.activeTab : 'info'
+  const handleTabChange = useCallback((id: string) => {
+    setTabState({ groupId, activeTab: id as TabId })
+  }, [groupId])
 
   const { data: detail, isLoading, error, refetch } = useQuery({
-    queryKey: ['group-detail', lineName, group?.id],
+    queryKey: ['group-detail', lineName, groupId],
     queryFn: () => api.getGroupDetail(lineName, group!.id),
     enabled: open && !!group,
     staleTime: 30_000,
   })
-
-  // Reset tab when group changes — render-time derivation avoids setState-in-effect
-  if (group?.id !== prevGroupId.current) {
-    prevGroupId.current = group?.id
-    if (activeTab !== 'info') setActiveTab('info')
-  }
 
   // `if (!group) return null` guard stays — header/body cannot render without group.
   // Modal owns the open gate (the `open` half of the legacy guard dies).
@@ -819,7 +820,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
       <Tabs
         label="Group detail sections"
         value={activeTab}
-        onChange={(id) => setActiveTab(id as TabId)}
+        onChange={handleTabChange}
         inset
       >
         <Tab id="info">{capitalize('info')}</Tab>

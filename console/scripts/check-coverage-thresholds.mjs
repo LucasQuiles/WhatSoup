@@ -1,26 +1,27 @@
 #!/usr/bin/env node
 // console/scripts/check-coverage-thresholds.mjs
 //
-// Per-directory coverage ratchet — report-only until the D6 enforcement promotion wave.
+// Per-directory coverage ratchet. The root `npm run coverage:check` command runs
+// Vitest coverage first, then invokes this checker in --strict mode.
 // Spec: docs/design-system/06-implementation/test-coverage-audit.md §Coverage ratchet proposal
 //
 // Consumes a vitest v8 coverage-summary.json, evaluates per-area glob-keyed thresholds,
 // and emits a deterministic machine-readable report (sorted keys, no timestamps) with
 // per-area actual-vs-threshold and a pass/fail flag per area.
 //
-// ALWAYS exits 0 in report-only mode (this commit).  Pass --strict to enable enforcement
-// exit codes (reserved for the D6 promotion wave; tested but not wired into any gate).
+// Default mode is report-only for diagnostics. Pass --strict to enforce non-zero
+// exit codes on threshold regressions; the root coverage gate uses --strict.
 //
 // Fail-closed parsing:
 //   - missing summary file  -> exit 2, named error "coverage-not-run"
 //   - malformed JSON        -> exit 2, named error "parse-error"
 //   - wrong schema shape    -> exit 2, named error "schema-error"
-//   - below threshold       -> exit 0 (report-only), stderr WARN; exit 1 under --strict
+//   - below threshold       -> exit 0 in report-only, stderr WARN; exit 1 under --strict
 //
 // Usage:
 //   node console/scripts/check-coverage-thresholds.mjs
 //   node console/scripts/check-coverage-thresholds.mjs /path/to/coverage-summary.json
-//   node console/scripts/check-coverage-thresholds.mjs --strict   (D6 promotion -- reserved)
+//   node console/scripts/check-coverage-thresholds.mjs --strict
 //   node console/scripts/check-coverage-thresholds.mjs --strict /path/to/coverage-summary.json
 //
 // Prerequisites:

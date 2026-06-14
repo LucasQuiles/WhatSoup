@@ -26,8 +26,18 @@ function stubProductionConsole(enabled: boolean): void {
 function jsonResponse(data: unknown): Response {
   return {
     ok: true,
+    status: 200,
     json: async () => data,
     text: async () => '',
+  } as Response;
+}
+
+function errorResponse(status: number, text: string): Response {
+  return {
+    ok: false,
+    status,
+    json: async () => ({}),
+    text: async () => text,
   } as Response;
 }
 
@@ -80,6 +90,47 @@ describe('api write operations', () => {
   it('deleteLine is a function accepting (name)', () => {
     expect(typeof api.deleteLine).toBe('function');
     expect(api.deleteLine.length).toBe(1);
+  });
+});
+
+describe('console session endpoints', () => {
+  it('unlockConsole posts the operator token through Authorization and returns expiry', async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ expiresIn: 900 }));
+    vi.stubGlobal('fetch', fetch);
+
+    const { unlockConsole } = await import('../../console/src/lib/api.ts');
+
+    await expect(unlockConsole('root-token')).resolves.toEqual({ expiresIn: 900 });
+    expect(fetch).toHaveBeenCalledWith('/api/console-session', expect.objectContaining({
+      method: 'POST',
+      headers: { Authorization: 'Bearer root-token' },
+      credentials: 'same-origin',
+    }));
+  });
+
+  it('unlockConsole reports invalid token for 401 and status-specific errors otherwise', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(errorResponse(401, 'unauthorized'))
+      .mockResolvedValueOnce(errorResponse(503, 'down'));
+    vi.stubGlobal('fetch', fetch);
+
+    const { unlockConsole } = await import('../../console/src/lib/api.ts');
+
+    await expect(unlockConsole('bad-token')).rejects.toThrow('invalid token');
+    await expect(unlockConsole('root-token')).rejects.toThrow('unlock failed (503)');
+  });
+
+  it('lockConsole revokes the session cookie with a DELETE request', async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ ok: true }));
+    vi.stubGlobal('fetch', fetch);
+
+    const { lockConsole } = await import('../../console/src/lib/api.ts');
+
+    await expect(lockConsole()).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledWith('/api/console-session', expect.objectContaining({
+      method: 'DELETE',
+      credentials: 'same-origin',
+    }));
   });
 });
 
@@ -417,5 +468,102 @@ describe('api read operations', () => {
       total: 1,
       query: '',
     });
+  });
+
+  it('normalizes a history search response that omits the results array', async () => {
+    stubProductionConsole(false);
+    const fetch = vi.fn().mockResolvedValueOnce(jsonResponse({ query: 'receipt' }));
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    await expect(freshApi.searchMessages('line-a', 'receipt')).resolves.toEqual({
+      results: [],
+      total: 0,
+      query: 'receipt',
+    });
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/lines/line-a/messages/search?q=receipt');
+  });
+
+  it('threads encoded URLs, methods, and bodies through direct API wrappers', async () => {
+    vi.stubEnv('PROD', true);
+    vi.stubEnv('VITE_MOCK_MODE', '');
+    stubProductionConsole(false);
+    const fetch = vi.fn(async (url: string) => {
+      if (url.includes('/messages?')) return jsonResponse([]);
+      if (url.endsWith('/providers')) return jsonResponse([]);
+      if (url.endsWith('/access')) return jsonResponse([]);
+      if (url.endsWith('/logs')) return jsonResponse([]);
+      if (url.endsWith('/feed')) return jsonResponse([]);
+      if (url.endsWith('/typing')) return jsonResponse([]);
+      return jsonResponse({ results: [], messages: [], groups: [], contacts: [] });
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    const { api: freshApi } = await import('../../console/src/lib/api.ts');
+
+    const cases: Array<{
+      invoke: () => Promise<unknown>;
+      path: string;
+      method?: string;
+      body?: unknown;
+    }> = [
+      { invoke: () => freshApi.getLine('line a'), path: '/api/lines/line%20a' },
+      { invoke: () => freshApi.getMessages('line a', 'chat jid', 99), path: '/api/lines/line%20a/messages?conversation_key=chat%20jid&before_pk=99' },
+      { invoke: () => freshApi.getMetrics('line a', '24h'), path: '/api/lines/line%20a/metrics?range=24h' },
+      { invoke: () => freshApi.getFleetMetrics('7d'), path: '/api/metrics?range=7d' },
+      { invoke: () => freshApi.saveContact('line a', { jid: '1555000001@s.whatsapp.net', firstName: 'Ada' }), path: '/api/lines/line%20a/contacts', method: 'POST', body: { jid: '1555000001@s.whatsapp.net', firstName: 'Ada' } },
+      { invoke: () => freshApi.getAccess('line a'), path: '/api/lines/line%20a/access' },
+      { invoke: () => freshApi.getLogs('line a'), path: '/api/lines/line%20a/logs' },
+      { invoke: () => freshApi.getFeed(), path: '/api/feed' },
+      { invoke: () => freshApi.getTyping(), path: '/api/typing' },
+      { invoke: () => freshApi.stopInstance('line a'), path: '/api/lines/line%20a/stop', method: 'POST' },
+      { invoke: () => freshApi.deleteLine('line a'), path: '/api/lines/line%20a', method: 'DELETE' },
+      { invoke: () => freshApi.sendMessage('line a', 'chat jid', 'hello'), path: '/api/lines/line%20a/send', method: 'POST', body: { chatJid: 'chat jid', text: 'hello' } },
+      { invoke: () => freshApi.accessDecision('line a', 'phone', '1555000001', 'allow'), path: '/api/lines/line%20a/access', method: 'POST', body: { subjectType: 'phone', subjectId: '1555000001', action: 'allow' } },
+      { invoke: () => freshApi.markRead('line a', 'chat jid'), path: '/api/lines/line%20a/mark-read', method: 'POST', body: { conversation_key: 'chat jid' } },
+      { invoke: () => freshApi.updateConfig('line a', { enabled: true }), path: '/api/lines/line%20a/config', method: 'PATCH', body: { enabled: true } },
+      { invoke: () => freshApi.createLine({ name: 'line a' }), path: '/api/lines', method: 'POST', body: { name: 'line a' } },
+      { invoke: () => freshApi.checkExists('line a'), path: '/api/lines/line%20a/exists' },
+      { invoke: () => freshApi.checkDirectory('/tmp/line a'), path: '/api/directories/check?path=%2Ftmp%2Fline%20a' },
+      { invoke: () => freshApi.getVersion(), path: '/api/version' },
+      { invoke: () => freshApi.getProviders(), path: '/api/providers' },
+      { invoke: () => freshApi.getProviderStatus('line a'), path: '/api/lines/line%20a/provider-status' },
+      { invoke: () => freshApi.getScheduled('line a', 'pending'), path: '/api/lines/line%20a/scheduled?status=pending' },
+      { invoke: () => freshApi.getScheduled('line a'), path: '/api/lines/line%20a/scheduled' },
+      { invoke: () => freshApi.cancelScheduled('line a', 42), path: '/api/lines/line%20a/scheduled/42', method: 'DELETE' },
+      { invoke: () => freshApi.getGroups('line a'), path: '/api/lines/line%20a/groups' },
+      { invoke: () => freshApi.searchContacts('line a', 'Ada Lovelace'), path: '/api/lines/line%20a/contacts/search?q=Ada%20Lovelace' },
+      { invoke: () => freshApi.createScheduled('line a', { text: 'hello' }), path: '/api/lines/line%20a/scheduled', method: 'POST', body: { text: 'hello' } },
+      { invoke: () => freshApi.updateScheduled('line a', 42, { text: 'hello' }), path: '/api/lines/line%20a/scheduled/42', method: 'PUT', body: { text: 'hello' } },
+      { invoke: () => freshApi.getScheduledById('line a', 42), path: '/api/lines/line%20a/scheduled/42' },
+      { invoke: () => freshApi.getGroupDetail('line a', '1555100001@g.us'), path: '/api/lines/line%20a/groups/1555100001%40g.us' },
+      { invoke: () => freshApi.createGroup('line a', 'Team A', ['1555000001@s.whatsapp.net']), path: '/api/lines/line%20a/groups', method: 'POST', body: { subject: 'Team A', participants: ['1555000001@s.whatsapp.net'] } },
+      { invoke: () => freshApi.leaveGroup('line a', '1555100001@g.us'), path: '/api/lines/line%20a/groups/1555100001%40g.us', method: 'DELETE' },
+      { invoke: () => freshApi.updateGroupSubject('line a', '1555100001@g.us', 'Team A'), path: '/api/lines/line%20a/groups/1555100001%40g.us/subject', method: 'PUT', body: { subject: 'Team A' } },
+      { invoke: () => freshApi.updateGroupDescription('line a', '1555100001@g.us', undefined), path: '/api/lines/line%20a/groups/1555100001%40g.us/description', method: 'PUT', body: {} },
+      { invoke: () => freshApi.updateGroupParticipants('line a', '1555100001@g.us', ['1555000001@s.whatsapp.net'], 'promote'), path: '/api/lines/line%20a/groups/1555100001%40g.us/participants', method: 'POST', body: { participants: ['1555000001@s.whatsapp.net'], action: 'promote' } },
+      { invoke: () => freshApi.updateGroupSettings('line a', '1555100001@g.us', 'announcement'), path: '/api/lines/line%20a/groups/1555100001%40g.us/settings', method: 'PUT', body: { setting: 'announcement' } },
+      { invoke: () => freshApi.getGroupInviteLink('line a', '1555100001@g.us'), path: '/api/lines/line%20a/groups/1555100001%40g.us/invite' },
+      { invoke: () => freshApi.revokeGroupInvite('line a', '1555100001@g.us'), path: '/api/lines/line%20a/groups/1555100001%40g.us/invite/revoke', method: 'POST' },
+      { invoke: () => freshApi.updateGroupEphemeral('line a', '1555100001@g.us', 86400), path: '/api/lines/line%20a/groups/1555100001%40g.us/ephemeral', method: 'PUT', body: { expiration: 86400 } },
+      { invoke: () => freshApi.updateGroupMemberAddMode('line a', '1555100001@g.us', 'admin_add'), path: '/api/lines/line%20a/groups/1555100001%40g.us/member-add-mode', method: 'PUT', body: { mode: 'admin_add' } },
+      { invoke: () => freshApi.updateGroupJoinApproval('line a', '1555100001@g.us', 'on'), path: '/api/lines/line%20a/groups/1555100001%40g.us/join-approval', method: 'PUT', body: { mode: 'on' } },
+    ];
+
+    for (const [index, entry] of cases.entries()) {
+      await entry.invoke();
+      const call = fetch.mock.calls[index] as unknown as [string, RequestInit?];
+      expect(call).toBeDefined();
+      const path = call[0];
+      const init = call[1] ?? {};
+      expect(path).toBe(entry.path);
+      expect(init.method ?? 'GET').toBe(entry.method ?? 'GET');
+      if (entry.body !== undefined) {
+        expect(JSON.parse(init.body as string)).toEqual(entry.body);
+      } else {
+        expect(init.body).toBeUndefined();
+      }
+    }
   });
 });

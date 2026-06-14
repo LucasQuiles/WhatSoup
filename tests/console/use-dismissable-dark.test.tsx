@@ -19,7 +19,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, act } from '@testing-library/react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { FC } from 'react'
 import { Modal, ModalHeader, ModalBody } from '../../console/src/components/primitives/Modal'
 
@@ -126,6 +126,52 @@ describe('useDismissable — Shift+Tab recovery when focus is outside container 
     // The recovery arm calls e.preventDefault() and last.focus()
     expect(preventDefaultSpy).toHaveBeenCalled()
     expect(document.activeElement).toBe(btnLast)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Initial focus target selection:
+// caller-provided contained refs win; outside refs fall back to first focusable.
+// ---------------------------------------------------------------------------
+
+describe('useDismissable — initial focus target selection', () => {
+  it('focuses a caller-provided initialFocus ref when it is inside the modal', () => {
+    const InitialFocusFixture: FC = () => {
+      const preferredRef = useRef<HTMLButtonElement>(null)
+      return (
+        <Modal open onClose={() => {}} initialFocus={preferredRef}>
+          <ModalBody>
+            <button type="button">First</button>
+            <button ref={preferredRef} type="button" data-testid="preferred">Preferred</button>
+          </ModalBody>
+        </Modal>
+      )
+    }
+
+    render(<InitialFocusFixture />)
+
+    expect(document.activeElement).toBe(screen.getByTestId('preferred'))
+  })
+
+  it('ignores an initialFocus ref outside the modal and focuses the first element inside', () => {
+    const OutsideInitialFocusFixture: FC = () => {
+      const outsideRef = useRef<HTMLButtonElement>(null)
+      return (
+        <>
+          <button ref={outsideRef} type="button" data-testid="outside">Outside</button>
+          <Modal open onClose={() => {}} initialFocus={outsideRef}>
+            <ModalBody>
+              <button type="button" data-testid="first-inside">First inside</button>
+              <button type="button">Second inside</button>
+            </ModalBody>
+          </Modal>
+        </>
+      )
+    }
+
+    render(<OutsideInitialFocusFixture />)
+
+    expect(document.activeElement).toBe(screen.getByTestId('first-inside'))
   })
 })
 

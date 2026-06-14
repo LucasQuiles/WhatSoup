@@ -157,10 +157,10 @@ context-terminated lane and live-fire verified per the commit record.
   stays shadow until the C4 copy-flip PR; pickers/LinePicker raw-button, `no-raw-form-control`
   everywhere, and `no-legacy-tokens`/`no-utility-smell` outside primitives stay unflipped per
   packet §4 (not at zero, or their landing gate has not fired).
-- **`--strict` coverage gating is unwired.** The checker exists, is fixture-proven, and all four
-  floors were green at landing — but strict mode waits on the gate-placement decision, and the
-  hooks floor is currently FAILING on B5's two undertested hooks. Strict promotion is blocked
-  until the B5 lane pays that debt (its test file is in flight, uncommitted).
+- **Historical D6 note:** `--strict` coverage gating was unwired at D6 landing. Current tree
+  promotes it through root `npm run coverage:check`: Vitest coverage runs first, then the
+  per-directory checker runs with `--strict`, so threshold regressions fail `verify:release`
+  and the quality workflow.
 - **File-size block-severity is an open operator decision.** `f09f5dc3` stopped the fitness
   taxonomy claiming a blocking file-size ratchet guard that does not exist (the eslint mirror is
   warn-only, no guard reads the baseline); implement-or-demote is recorded as needs-decision and

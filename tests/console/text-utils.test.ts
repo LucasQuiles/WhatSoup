@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   capitalize,
   displayInstanceName,
+  formatCompact,
   formatCount,
   formatPhone,
   getInitials,
@@ -43,6 +44,21 @@ describe('console text utilities', () => {
     expect(getInitials('Ada Lovelace')).toBe('AL')
     expect(stripMarkdown('**hello** `world`')).toBe('hello world')
     expect(resolveDisplayName('15551234567@s.whatsapp.net')).toBe('+1 555-123-4567')
+  })
+
+  it('formats linked IDs and non-US phone-like identifiers for display', () => {
+    expect(resolveDisplayName('123456789012345')).toBe('Contact 2345')
+    expect(resolveDisplayName('abc123456789012345@lid')).toBe('Contact 2345')
+    expect(formatPhone('441234567890')).toBe('+44 123-456-7890')
+    expect(formatPhone('12345678901234567890')).toBe('#567890')
+    expect(formatPhone('12345')).toBe('+12345')
+  })
+
+  it('formats compact counts by magnitude', () => {
+    expect(formatCompact(999)).toBe('999')
+    expect(formatCompact(1_234)).toBe('1.2K')
+    expect(formatCompact(12_345)).toBe('12K')
+    expect(formatCompact(2_450_000)).toBe('2.5M')
   })
 
   it('formats exact counts through the shared helper', () => {

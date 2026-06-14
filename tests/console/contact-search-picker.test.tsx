@@ -310,6 +310,68 @@ describe('ContactSearchPicker in-flight guard', () => {
     expect(errorSpy).not.toHaveBeenCalled()
     errorSpy.mockRestore()
   })
+
+  it('successful response after Escape close is discarded and does not reopen results', async () => {
+    let resolveSecond!: (v: { contacts: ContactResult[] }) => void
+    searchContactsMock
+      .mockResolvedValueOnce({ contacts: [alice] })
+      .mockReturnValueOnce(
+        new Promise<{ contacts: ContactResult[] }>((res) => {
+          resolveSecond = res
+        }),
+      )
+    render(<ContactSearchPicker {...defaultProps()} />)
+
+    const input = getInput()
+    fireEvent.change(input, { target: { value: 'al' } })
+    await advanceTimers(300)
+    await vi.waitFor(() => expect(screen.queryByRole('listbox')).not.toBeNull())
+
+    fireEvent.change(input, { target: { value: 'bo' } })
+    await advanceTimers(300)
+    await vi.waitFor(() => expect(searchContactsMock).toHaveBeenCalledTimes(2))
+    fireEvent.keyDown(input, { key: 'Escape' })
+    await vi.waitFor(() => expect(screen.queryByRole('listbox')).toBeNull())
+
+    await act(async () => {
+      resolveSecond({ contacts: [bob] })
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByText('BobNotify')).toBeNull()
+    expect(input.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('rejected response after Escape close is discarded without changing visible state', async () => {
+    let rejectSecond!: (reason: Error) => void
+    searchContactsMock
+      .mockResolvedValueOnce({ contacts: [alice] })
+      .mockReturnValueOnce(
+        new Promise<{ contacts: ContactResult[] }>((_, reject) => {
+          rejectSecond = reject
+        }),
+      )
+    render(<ContactSearchPicker {...defaultProps()} />)
+
+    const input = getInput()
+    fireEvent.change(input, { target: { value: 'al' } })
+    await advanceTimers(300)
+    await vi.waitFor(() => expect(screen.queryByRole('listbox')).not.toBeNull())
+
+    fireEvent.change(input, { target: { value: 'bo' } })
+    await advanceTimers(300)
+    await vi.waitFor(() => expect(searchContactsMock).toHaveBeenCalledTimes(2))
+    fireEvent.keyDown(input, { key: 'Escape' })
+    await vi.waitFor(() => expect(screen.queryByRole('listbox')).toBeNull())
+
+    await act(async () => {
+      rejectSecond(new Error('offline'))
+      await Promise.resolve()
+    })
+
+    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(input.getAttribute('aria-expanded')).toBe('false')
+  })
 })
 
 // ---------------------------------------------------------------------------

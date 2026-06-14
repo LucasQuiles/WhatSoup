@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 // Path to the script under test (resolved from repo root = process.cwd())
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-coverage-thresholds.mjs');
+const ROOT_PACKAGE_JSON = resolve(process.cwd(), 'package.json');
+const ROOT_COVERAGE_WRAPPER = resolve(process.cwd(), 'scripts/run-coverage-check.sh');
 
 const tmpDirs: string[] = [];
 
@@ -327,6 +329,18 @@ describe('check-coverage-thresholds.mjs', () => {
   // ---------------------------------------------------------------------------
 
   describe('--strict flag', () => {
+    it('is wired into the root coverage:check gate after Vitest coverage generation', () => {
+      const pkg = JSON.parse(readFileSync(ROOT_PACKAGE_JSON, 'utf8')) as {
+        scripts: Record<string, string>;
+      };
+      const wrapper = readFileSync(ROOT_COVERAGE_WRAPPER, 'utf8');
+
+      expect(pkg.scripts['coverage:check']).toBe('bash scripts/run-coverage-check.sh');
+      expect(wrapper).toContain('set -euo pipefail');
+      expect(wrapper).toContain('"$VITEST_BIN" run --coverage "$@"');
+      expect(wrapper).toContain('npm --prefix console run coverage:check -- --strict');
+    });
+
     it('exits 0 under --strict when all areas pass', () => {
       const summary = makePassingSummary();
       const result = runScript(summary, ['--strict']);

@@ -276,7 +276,7 @@ baseline's 46.9% br, but the file and its new shell test are the in-flight wizar
 lane's mid-slice state (13 failing tests); re-audit at that lane's evidence
 acceptance, do not treat this number as settled.
 
-### Coverage-ratchet evaluation (report-only, `check-coverage-thresholds.mjs`)
+### Coverage-ratchet evaluation (`check-coverage-thresholds.mjs`)
 
 | Area | Threshold (st/br) | Actual (st/br) | Verdict |
 |---|---|---|---|
@@ -285,10 +285,9 @@ acceptance, do not treat this number as settled.
 | lib | 84 / 88 | 85.93 / 90.73 | PASS |
 | hooks | 97 / 93 | 91.79 / 94.61 | FAIL (statements) |
 
-Overall: 3/4 areas pass. The hooks failure is wholly attributable to the two new
-B5 hook files named above; the ratchet is doing exactly its job (catching new
-untested exports on a contract surface). Disposition: B5 lane owes
-`use-exit-presence`/`use-background-inert` tests before the D6 strict promotion.
+Historical snapshot: 3/4 areas passed, with hooks failing on the then-new B5 hook
+files. Current tree has paid that debt and root `npm run coverage:check` now runs
+Vitest coverage followed by `check-coverage-thresholds.mjs --strict`.
 
 ### DD-15 toggle-pair survey
 
