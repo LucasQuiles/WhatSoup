@@ -83,6 +83,37 @@ describe('useDismissable — Tab trap: empty container (lines 170–173)', () =>
   })
 })
 
+describe('useDismissable — Tab trap: roving tabIndex boundary', () => {
+  it('ignores tabIndex=-1 roving buttons when detecting the forward-Tab boundary', () => {
+    const onClose = vi.fn()
+    render(
+      <>
+        <button type="button" data-testid="outside">Outside</button>
+        <Modal open onClose={onClose}>
+          <ModalHeader title="Roving Trap" onClose={onClose} />
+          <ModalBody>
+            <button type="button" data-testid="active-tab">Active tab</button>
+            <button type="button" tabIndex={-1} data-testid="roving-tab">
+              Inactive roving tab
+            </button>
+          </ModalBody>
+        </Modal>
+      </>,
+    )
+
+    const activeTab = screen.getByTestId('active-tab')
+    const closeBtn = screen.getByRole('button', { name: 'Close dialog' })
+    act(() => { activeTab.focus() })
+
+    const tabEvent = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    const preventDefaultSpy = vi.spyOn(tabEvent, 'preventDefault')
+    document.dispatchEvent(tabEvent)
+
+    expect(preventDefaultSpy).toHaveBeenCalled()
+    expect(document.activeElement).toBe(closeBtn)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // (b) Shift+Tab recovery arm (line 177): focus escaped container → re-enter
 // ---------------------------------------------------------------------------

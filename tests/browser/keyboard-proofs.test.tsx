@@ -18,19 +18,15 @@
  *   native traversal — recorded as a known edge owned by the D7 trusted-keyboard
  *   lane."
  *
- *   D7 FINDING (C-B3W3-7 VERDICT): The self-healing claim does NOT hold in real
- *   Chromium with Playwright CDP-driven Tab. The document-level keydown listener
- *   in use-dismissable.ts (handleTab, line 167) calls e.preventDefault() +
- *   first.focus() when !container.contains(activeElement), but in Chromium the
- *   native Tab traversal (driven via CDP Input.dispatchKeyEvent) completes AFTER
- *   the re-focus, overriding it. The recapture branch at use-dismissable.ts:182
- *   is ineffective under real browser Tab. This is a REAL DEFECT, not a test
- *   artifact. See DEBT REGISTER NOTE below.
+ *   D7 FINDING (C-B3W3-7 VERDICT): The self-healing claim did NOT hold in real
+ *   Chromium with Playwright CDP-driven Tab. Root cause was the trap's focusable
+ *   set: the selector matched roving-tabindex buttons through the generic
+ *   `button:not([disabled])` arm even when they had tabIndex=-1, so the trap's
+ *   boundary and the browser's native Tab order disagreed.
  *
- *   The test below is rewritten to characterize the actual behavior: Tab can
- *   escape the modal after the loading-edge, and the next Tab does NOT reliably
- *   recapture. The disposition "self-healing" from b3-wave3-investigation §7.2
- *   was INCORRECT — the edge is real and NOT self-healing in Chromium.
+ *   DD-27 RESOLUTION: use-dismissable filters focusable candidates to native
+ *   Tab stops (`tabIndex >= 0`). The test below now proves the loading-edge modal
+ *   keeps repeated trusted Tab presses inside the dialog.
  *
  * WHY THESE PROOFS REQUIRE THE BROWSER RUNNER
  * =============================================
@@ -58,23 +54,19 @@
  *    holds with trusted events.
  *    (b2-evidence.md §Live-QA disposition)
  *
- * 3. C-B3W3-7: Modal + loading-body edge — one Tab escapes; recapture is NOT
- *    guaranteed. Test characterises the escape edge as a confirmed gap.
- *    (b3-wave3-investigation §7.2 — "self-healing" disposition REVISED by D7)
+ * 3. C-B3W3-7: Modal + loading-body edge — repeated trusted Tab presses stay
+ *    inside the dialog after DD-27 aligned the trap boundary with native Tab order.
+ *    (b3-wave3-investigation §7.2 — "self-healing" disposition REVISED by D7,
+ *    then closed by the tabIndex filter in use-dismissable)
  *
  * DEBT REGISTER NOTE (C-B3W3-7)
  * ==============================
  * The `!container.contains(document.activeElement)` recapture branch in
- * use-dismissable.ts handleTab (line 182) does not work in real Chromium.
- * Cause: CDP-driven Tab fires keydown, the document-level handler calls
- * first.focus(), but Chromium's native Tab traversal runs after the handler
- * and overrides the programmatic focus. Fix options:
- *   A. Register handleTab in CAPTURE phase (document.addEventListener('keydown',
- *      handleTab, { capture: true })) so it fires before element handlers.
- *   B. Set tabIndex=0 on all tab buttons and rely on the container-edge wrap,
- *      removing the tabIndex=-1 buttons from FOCUSABLE_SELECTOR.
- *   C. Switch the recapture to a pointerdown / focus event instead.
- * This is a P2 accessibility defect. File against use-dismissable.ts:182.
+ * use-dismissable.ts handleTab cannot be the primary browser-Tab defense:
+ * Chromium's native Tab traversal runs after keydown and can override a
+ * programmatic focus() call. DD-27 closes the real edge earlier by excluding
+ * tabIndex=-1 candidates from the trap's focusable set, so the trap boundary
+ * matches native Tab traversal before focus can leave the dialog.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -335,7 +327,7 @@ describe('B2 deferred: ChatPicker Enter selects active option (trusted events)',
 });
 
 // ---------------------------------------------------------------------------
-// C-B3W3-7: Focus-trap boundary edge — loading-body Tab escape
+// C-B3W3-7: Focus-trap boundary edge — loading-body Tab trap
 //
 // SCENARIO (b3-wave3-investigation §7.2)
 // ========================================
@@ -357,26 +349,25 @@ describe('B2 deferred: ChatPicker Enter selects active option (trusted events)',
 //     in the page — possibly outside the portal for one stop.
 //
 // D7 VERDICT: The `!container.contains(activeElement)` recapture branch
-// (use-dismissable.ts:182) does NOT work in real Chromium with Playwright CDP.
-// After an escape, the following Tab does NOT bring focus back inside the modal.
-// This is a confirmed P2 accessibility defect. See DEBT REGISTER NOTE in the
-// file header.
+// (use-dismissable.ts:182) does NOT work as the primary real-browser defense
+// because native Tab traversal can override the programmatic focus() call.
+// DD-27 closes the edge by excluding roving tabIndex=-1 buttons from the trap
+// boundary set, so the boundary matches native Tab traversal.
 //
 // WHAT THIS TEST PROVES
 // ======================
 // • Modal opens with focus inside.
 // • Escape closes the modal from inside.
-// • Tab can escape from the modal on the loading-body edge (confirmed gap).
-//   After escape, focus is outside the modal and does NOT self-heal on the next Tab.
+// • Repeated trusted Tab presses remain inside the modal on the loading-body edge.
 //
 // The original "self-healing" contract from b3-wave3-investigation §7.2 is
-// REVISED: the edge is NOT self-healing in real Chromium.
+// REVISED: the edge needed a trap-boundary fix rather than relying on recapture.
 //
 // Modal portals to document.body (createPortal in Modal.tsx) — queries must
 // use document.querySelector, not container.querySelector.
 // ---------------------------------------------------------------------------
 
-describe('C-B3W3-7: Modal focus-trap edge — loading-body Tab escape (confirmed gap)', () => {
+describe('C-B3W3-7: Modal focus-trap edge — loading-body Tab trap', () => {
   /**
    * A Modal with Tabs in the body (first tab selected) and no other focusable
    * content — the "loading / empty state" scenario.
@@ -442,18 +433,7 @@ describe('C-B3W3-7: Modal focus-trap edge — loading-body Tab escape (confirmed
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('C-B3W3-7 (confirmed gap): Tab can escape the modal; focus does not self-heal on the next Tab', async () => {
-    // D7 FINDING: The recapture branch in use-dismissable.ts handleTab (line 182)
-    // — `!container.contains(document.activeElement)` — is ineffective in real
-    // Chromium with Playwright CDP-driven Tab. The programmatic first.focus() call
-    // inside the keydown handler is overridden by Chromium's native Tab traversal
-    // which completes after the handler returns.
-    //
-    // This test characterises the ACTUAL behavior: Tab escapes the modal, and the
-    // next Tab does NOT return focus inside.
-    //
-    // Debt: fix use-dismissable.ts handleTab to use capture-phase listener or an
-    // alternative recapture strategy (see DEBT REGISTER NOTE in file header).
+  it('C-B3W3-7: repeated trusted Tab presses stay trapped inside the modal', async () => {
     const onClose = vi.fn();
     await render(
       <MemoryRouter>
@@ -467,33 +447,11 @@ describe('C-B3W3-7: Modal focus-trap edge — loading-body Tab escape (confirmed
     const modalEl = document.querySelector('[role="dialog"]') as HTMLElement | null;
     expect(modalEl).not.toBeNull();
 
-    // Tab through the modal elements until focus escapes or we exhaust 10 presses.
-    let escaped = false;
+    // Repeated trusted Tab presses cycle between the close button and the selected
+    // tab; roving tabIndex=-1 tabs must not become the trap boundary.
     for (let i = 0; i < 10; i++) {
       await userEvent.tab();
-      if (!modalEl!.contains(document.activeElement)) {
-        escaped = true;
-        break;
-      }
-    }
-
-    // The C-B3W3-7 edge: one Tab stop DOES escape the portal on the loading-body
-    // variant (roving-tabindex tabs, no other body content).
-    // Characterise the actual escape — if the trap is ever strengthened and no
-    // escape occurs in 10 presses, that is also an acceptable outcome (trap fixed).
-    if (!escaped) {
-      // Trap held for all 10 presses — focus stayed inside. Acceptable.
       expect(modalEl!.contains(document.activeElement)).toBe(true);
-      return;
     }
-
-    // Escape confirmed. Verify the confirmed gap: the next Tab does NOT recapture.
-    // (This is the D7 finding that revises the b3-wave3-investigation §7.2 claim.)
-    await userEvent.tab();
-    const recaptured = modalEl!.contains(document.activeElement);
-    // CONFIRMED GAP: recapture does NOT happen in real Chromium.
-    // If this assertion ever flips to true, use-dismissable has been fixed — update
-    // the test to assert recapture and remove this comment.
-    expect(recaptured).toBe(false);
   });
 });

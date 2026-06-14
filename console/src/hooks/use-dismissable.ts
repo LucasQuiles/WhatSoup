@@ -65,7 +65,9 @@ function getFocusableElements(container: HTMLElement): HTMLElement[] {
     (el) =>
       !el.closest('[aria-hidden="true"]') &&
       !el.closest('[hidden]') &&
-      el.getAttribute('aria-hidden') !== 'true',
+      el.getAttribute('aria-hidden') !== 'true' &&
+      // Match native Tab order; button selectors also match roving tabIndex=-1 items.
+      el.tabIndex >= 0,
   );
 }
 
