@@ -36,7 +36,19 @@
 | Python standalone deploy architecture | Still open | Recommended direction is a manifest-tracked `deploy/scripts/lib/` module; fallback is an explicit N-copy equivalence guard if host deployment proves standalone imports cannot ship safely. |
 | Collector cooldown flake | Still needs current CI-history verification | Confirm whether the flake remains merge-blocking; if yes, fix with deterministic fake timers, not retry/skip. |
 | Older runtime decisions | Need current-main revalidation | Recheck heal restart suppression, lock TOCTOU, detailed APIs wire-or-excise, HTTP-error degraded-forever, keychain unlock behavior, and errPreview sanitization against landed #807/#813/#815/#816/#818/#820. |
-| Parallel worktrees/branches | Active preservation concern | Classify by owner/status; use `git cherry -v` or `git range-diff` before deleting anything claimed superseded. |
+| Parallel worktrees/branches | Active preservation concern; current inventory recorded below | Preserve all named branches until owner approval; use `git cherry -v` or `git range-diff` before deleting anything claimed superseded. |
+
+## Parallel Worktree Inventory
+
+Fresh read on 2026-06-13/14 against `origin/main` `f65c3990f8c203978bd4b51affe7ee5f97e79024`; all entries below were inspected read-only.
+
+| Surface | State | Evidence | Classification | Next action |
+|---|---|---|---|---|
+| `credential-write` worktree (`feat/credential-write-api`) | Clean; old upstream `origin/feat/provider-management-console` gone | `rev-list` vs main: `12/183`; `git cherry -v` shows 11 patch-positive commits and 1 already represented commit | Owner-gated feature/API branch | Keep; decide keep/land/discard with owner. Do not delete as stale merely because the old upstream is gone. |
+| `alert-truth` worktree (`fix/alert-truth-corrections`) | Clean; remote branch gone | `rev-list` vs main: `6/165`; `git cherry -v` shows 6 patch-positive commits | Bot-errors reliability workstream | Keep; owner triage required before landing or pruning. |
+| `soup-design` worktree (`design/soup-rebrand`) | Clean; tracks `origin/main`; diverged | `status`: ahead 69 / behind 131; `git cherry -v` shows design-program commits not on main | Long-running SOUP design branch | Preserve; rebase/land/discard only by SOUP owner decision. |
+| `soup-impl` worktree (`feat/soup-v3-foundation`) | Clean; tracks `origin/main`; ahead-only at this snapshot | `status`: ahead 272; `git cherry -v` shows implementation + design commits not on main | Long-running SOUP implementation branch | Preserve; this is substantial live work, not cleanup debris. |
+| Detached compose worktree for #828/#829 | Clean detached HEAD `9fac46bc` | 6 commits ahead / 0 behind main; contains PR #828 + #829 heads merged locally; changed files overlap runtime, db time parsing, and provider usability | Peer/draft integration surface | Read-only unless owner hands over. Do not delete while #828/#829 remain open drafts. |
 
 ## Guardrail Audit Addendum
 
