@@ -40,6 +40,7 @@ describe('silence-manager corrupt-file handling', () => {
   afterEach(() => {
     vi.doUnmock('node:os');
     vi.doUnmock('../../src/logger.ts');
+    vi.doUnmock('node:fs');
     vi.resetModules();
     rmSync(homeDir, { recursive: true, force: true });
   });
@@ -76,6 +77,25 @@ describe('silence-manager corrupt-file handling', () => {
     expect(isInstanceSilenced('primary-line')).toBe(false);
   });
 
+  it('logs non-Error load failures without assuming an Error shape', async () => {
+    vi.doMock('node:fs', async (importOriginal: () => Promise<typeof import('node:fs')>) => {
+      const actual = await importOriginal();
+      return {
+        ...actual,
+        readFileSync: () => {
+          throw 'non-error read failure';
+        },
+      };
+    });
+    const { listActiveSilences } = await importManager();
+
+    expect(listActiveSilences()).toEqual([]);
+    expect(logWarn).toHaveBeenCalledOnce();
+    const [fields, msg] = logWarn.mock.calls[0] as [Record<string, unknown>, string];
+    expect(fields.err).toBe('non-error read failure');
+    expect(msg).toMatch(/failed to load silence file/i);
+  });
+
   it('returns empty array and warns when the file is valid JSON but not an array', async () => {
     mkdirSync(configDir(), { recursive: true });
     writeFileSync(silencesFile(), '{"not": "an array"}');
@@ -85,5 +105,33 @@ describe('silence-manager corrupt-file handling', () => {
     expect(logWarn).toHaveBeenCalledOnce();
     const [fields] = logWarn.mock.calls[0] as [Record<string, unknown>, string];
     expect(fields).toHaveProperty('file');
+  });
+
+  it('recognizes only matching, unexpired silences as active', async () => {
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(
+      silencesFile(),
+      JSON.stringify([
+        {
+          instance: 'primary-line',
+          until: new Date(Date.now() + 60_000).toISOString(),
+          reason: 'maintenance',
+          silencedBy: 'operator',
+          createdAt: '2026-06-14T00:00:00.000Z',
+        },
+        {
+          instance: 'expired-line',
+          until: new Date(Date.now() - 60_000).toISOString(),
+          reason: 'stale',
+          silencedBy: 'operator',
+          createdAt: '2026-06-13T00:00:00.000Z',
+        },
+      ]),
+    );
+    const { isInstanceSilenced } = await importManager();
+
+    expect(isInstanceSilenced('primary-line')).toBe(true);
+    expect(isInstanceSilenced('expired-line')).toBe(false);
+    expect(isInstanceSilenced('missing-line')).toBe(false);
   });
 });
