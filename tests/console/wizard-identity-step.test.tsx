@@ -364,6 +364,17 @@ describe('type selection', () => {
     expect(screen.getByText('Type is required')).toBeDefined()
   })
 
+  it('marks the type radiogroup invalid and describes it with the type error', () => {
+    renderStep({ errors: { type: 'Type is required' } })
+
+    const group = screen.getByRole('radiogroup', { name: 'Line Type' })
+    const error = screen.getByText('Type is required')
+
+    expect(error.id).toBeTruthy()
+    expect(group.getAttribute('aria-invalid')).toBe('true')
+    expect(group.getAttribute('aria-describedby')).toBe(error.id)
+  })
+
   it('renders all three type option descriptions', () => {
     renderStep()
     expect(screen.getByText('Listen & store messages. No AI responses.')).toBeDefined()
@@ -450,6 +461,20 @@ describe('admin phones field', () => {
   it('shows adminPhones error when errors.adminPhones is set', () => {
     renderStep({ errors: { adminPhones: 'At least one admin required' } })
     expect(screen.getByText('At least one admin required')).toBeDefined()
+  })
+
+  it('labels the admin phone input and describes it with helper and error text', () => {
+    renderStep({ errors: { adminPhones: 'At least one admin required' } })
+
+    const input = screen.getByLabelText('Admin Phones') as HTMLInputElement
+    const helper = screen.getByText(/Phone numbers with full admin access/)
+    const error = screen.getByText('At least one admin required')
+    const describedBy = input.getAttribute('aria-describedby')?.split(' ') ?? []
+
+    expect(helper.id).toBeTruthy()
+    expect(error.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(describedBy).toEqual(expect.arrayContaining([helper.id, error.id]))
   })
 
   it('renders existing phone tags in the display', () => {

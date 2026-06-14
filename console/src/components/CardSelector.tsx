@@ -14,6 +14,8 @@ interface CardSelectorProps {
   options: CardOption[]
   selected: string | null
   onChange: (value: string) => void
+  'aria-describedby'?: string
+  'aria-invalid'?: true
 }
 
 /** Derives a wash-opacity background from a CSS var color string. */
@@ -29,7 +31,14 @@ function colorToWash(color: string): string {
   return map[color] ?? 'var(--color-d4)'
 }
 
-const CardSelector: FC<CardSelectorProps> = ({ label, options, selected, onChange }) => {
+const CardSelector: FC<CardSelectorProps> = ({
+  label,
+  options,
+  selected,
+  onChange,
+  'aria-describedby': ariaDescribedBy,
+  'aria-invalid': ariaInvalid,
+}) => {
   const groupRef = useRef<HTMLDivElement | null>(null)
 
   // WAI radiogroup: Arrow keys move focus AND select (selection follows focus).
@@ -69,6 +78,8 @@ const CardSelector: FC<CardSelectorProps> = ({ label, options, selected, onChang
       ref={groupRef}
       role="radiogroup"
       aria-label={label}
+      aria-describedby={ariaDescribedBy}
+      aria-invalid={ariaInvalid}
       className="flex flex-wrap gap-[var(--sp-3)]"
       onKeyDown={handleKeyDown}
     >

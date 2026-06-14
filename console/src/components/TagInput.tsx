@@ -47,15 +47,29 @@ function resolveTone(accentColor: string | undefined): PillTone {
 interface TagInputProps {
   values: string[]
   onChange: (values: string[]) => void
+  id?: string
   placeholder?: string
   validate?: (value: string) => boolean
   normalizeValue?: (value: string) => string
   accentColor?: string  // CSS var for pill accent, e.g. 'var(--wizard-accent)'
   /** Optional display labels for values. Map from value → display string. */
   displayLabels?: Record<string, string>
+  'aria-describedby'?: string
+  'aria-invalid'?: true
 }
 
-const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, normalizeValue, accentColor, displayLabels }) => {
+const TagInput: FC<TagInputProps> = ({
+  values,
+  onChange,
+  id,
+  placeholder,
+  validate,
+  normalizeValue,
+  accentColor,
+  displayLabels,
+  'aria-describedby': ariaDescribedBy,
+  'aria-invalid': ariaInvalid,
+}) => {
   const [input, setInput] = useState('')
 
   const tone = resolveTone(accentColor)
@@ -87,12 +101,15 @@ const TagInput: FC<TagInputProps> = ({ values, onChange, placeholder, validate, 
   return (
     <div>
       <TextInput
+        id={id}
         type="text"
         value={input}
         onChange={e => setInput(e.target.value)}
         onKeyDown={handleKeyDown}
         onBlur={() => addTag(input)}
         placeholder={placeholder ? `${placeholder} (press Enter to add)` : 'Press Enter to add'}
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={ariaInvalid}
         className="w-full"
       />
       {values.length > 0 && (

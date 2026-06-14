@@ -60,6 +60,26 @@ describe('CardSelector rendering', () => {
     expect(group.getAttribute('aria-label')).toBe('Card type')
   })
 
+  it('forwards validation aria attributes to the radiogroup', () => {
+    render(
+      <>
+        <CardSelector
+          label="Card type"
+          options={makeOptions()}
+          selected={null}
+          onChange={vi.fn()}
+          aria-invalid
+          aria-describedby="card-type-error"
+        />
+        <div id="card-type-error">Card type is required</div>
+      </>,
+    )
+
+    const group = screen.getByRole('radiogroup', { name: 'Card type' })
+    expect(group.getAttribute('aria-invalid')).toBe('true')
+    expect(group.getAttribute('aria-describedby')).toBe('card-type-error')
+  })
+
   it('renders one radio per option with label, description, and icon', () => {
     render(<CardSelector label="Card type" options={makeOptions()} selected={null} onChange={vi.fn()} />)
     const radios = screen.getAllByRole('radio')

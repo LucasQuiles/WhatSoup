@@ -45,6 +45,18 @@ describe('TagInput', () => {
     expect(input().classList.contains('font-mono')).toBe(true)
   })
 
+  it('forwards id and validation aria attributes to the text input', () => {
+    const { input } = setup([], {
+      id: 'admin-phones-input',
+      'aria-invalid': true,
+      'aria-describedby': 'admin-phones-error',
+    })
+
+    expect(input().id).toBe('admin-phones-input')
+    expect(input().getAttribute('aria-invalid')).toBe('true')
+    expect(input().getAttribute('aria-describedby')).toBe('admin-phones-error')
+  })
+
   it('adds a tag on Enter, clears the input, and emits the new values', () => {
     const { onChange, input } = setup([])
     fireEvent.change(input(), { target: { value: 'alpha' } })

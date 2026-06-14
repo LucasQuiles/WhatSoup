@@ -45,11 +45,15 @@ type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'
 const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocked }) => {
   const [nameStatus, setNameStatus] = useState<NameStatus>('idle')
   const [showConfirmed, setShowConfirmed] = useState(false)
+  const typeErrorId = useId()
   const nameInputId = useId()
   const nameLockedHelperId = useId()
   const nameTakenErrorId = useId()
   const nameErrorId = useId()
   const descriptionInputId = useId()
+  const adminPhonesInputId = useId()
+  const adminPhonesHelperId = useId()
+  const adminPhonesErrorId = useId()
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -63,6 +67,15 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
   const description = (data.description as string) ?? ''
   const type = (data.type as string) ?? 'chat'
   const adminPhones = (data.adminPhones as string[]) ?? []
+  const adminPhonesHelperText = adminPhones.length === 0
+    ? 'Phone numbers with full admin access to this line. Use international format without the +.'
+    : adminPhones.length === 1
+      ? 'Add another number for shared admin access, or continue with one.'
+      : `${adminPhones.length} admin numbers configured.`
+  const adminPhonesDescribedBy = [
+    adminPhonesHelperId,
+    errors.adminPhones ? adminPhonesErrorId : undefined,
+  ].filter(Boolean).join(' ')
   const hasNameTakenError = !nameLocked && nameStatus === 'taken'
   const nameDescribedBy = [
     nameLocked ? nameLockedHelperId : undefined,
@@ -115,8 +128,10 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
           options={TYPE_OPTIONS}
           selected={type}
           onChange={(value) => onChange({ type: value })}
+          aria-invalid={errors.type ? true : undefined}
+          aria-describedby={errors.type ? typeErrorId : undefined}
         />
-        {errors.type && <div className="c-error">{errors.type}</div>}
+        {errors.type && <div id={typeErrorId} className="c-error">{errors.type}</div>}
       </div>
 
       {/* Name */}
@@ -181,29 +196,26 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
 
       {/* Admin Phones */}
       <div>
-        <label className="c-heading block mb-[var(--sp-1)]">Admin Phones</label>
-        <div className="c-helper">{
-          adminPhones.length === 0
-            ? 'Phone numbers with full admin access to this line. Use international format without the +.'
-            : adminPhones.length === 1
-              ? 'Add another number for shared admin access, or continue with one.'
-              : `${adminPhones.length} admin numbers configured.`
-        }</div>
+        <label htmlFor={adminPhonesInputId} className="c-heading block mb-[var(--sp-1)]">Admin Phones</label>
+        <div id={adminPhonesHelperId} className="c-helper">{adminPhonesHelperText}</div>
         <div className="flex items-start gap-[var(--sp-2)] mt-[var(--sp-2)]">
           <div className="flex-1 min-w-0">
             <TagInput
+              id={adminPhonesInputId}
               values={adminPhones}
               onChange={(values) => onChange({ adminPhones: values.map(v => v.replace(/\D/g, '')) })}
               placeholder="Enter phone number"
               validate={validatePhone}
               accentColor={showConfirmed && adminPhones.length > 0 ? 'var(--wizard-accent)' : undefined}
+              aria-invalid={errors.adminPhones ? true : undefined}
+              aria-describedby={adminPhonesDescribedBy}
             />
           </div>
           {showConfirmed && !errors.adminPhones && adminPhones.length > 0 && (
             <Check size={16} className="wizard-check mt-[var(--sp-2)]" />
           )}
         </div>
-        {errors.adminPhones && <div className="c-error">{errors.adminPhones}</div>}
+        {errors.adminPhones && <div id={adminPhonesErrorId} className="c-error">{errors.adminPhones}</div>}
       </div>
     </WizardStep>
   )
