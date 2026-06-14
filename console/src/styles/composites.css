@@ -687,6 +687,10 @@ body::before {
   margin-top: var(--sp-1);
 }
 
+.c-required-marker {
+  color: var(--status-crit-fg);
+}
+
 .c-checkbox-row {
   display: flex;
   align-items: center;

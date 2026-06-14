@@ -1,8 +1,11 @@
 import { Check } from 'lucide-react';
 import {
+  cloneElement,
   type FC,
   type CSSProperties,
   type InputHTMLAttributes,
+  isValidElement,
+  type ReactElement,
   type ReactNode,
   type RefObject,
   type SelectHTMLAttributes,
@@ -16,27 +19,66 @@ function borderColor(error?: boolean, confirmed?: boolean): string {
   return 'var(--border-subtle)';
 }
 
+interface FieldControlProps {
+  'aria-describedby'?: string;
+  'aria-invalid'?: true;
+  'aria-required'?: true;
+}
+
+function joinIds(...ids: Array<string | undefined>): string | undefined {
+  const joined = ids.filter(Boolean).join(' ');
+  return joined.length > 0 ? joined : undefined;
+}
+
+function injectFieldControlProps(control: ReactNode, fieldProps: FieldControlProps): ReactNode {
+  if (!isValidElement(control)) return control;
+
+  const element = control as ReactElement<Record<string, unknown>>;
+  const existingDescription = typeof element.props['aria-describedby'] === 'string'
+    ? element.props['aria-describedby']
+    : undefined;
+  const describedBy = joinIds(existingDescription, fieldProps['aria-describedby']);
+
+  return cloneElement(element, {
+    ...fieldProps,
+    ...(describedBy ? { 'aria-describedby': describedBy } : {}),
+  });
+}
+
 export interface FieldProps {
   label: string;
   error?: string;
   helper?: string;
   confirmed?: boolean;
+  required?: boolean;
   children: (id: string) => ReactNode;
 }
 
-export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, children }) => {
+export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, required, children }) => {
   const id = useId();
+  const errorId = error ? `${id}-error` : undefined;
+  const helperId = !error && helper ? `${id}-helper` : undefined;
+  const fieldProps: FieldControlProps = {
+    ...(errorId ?? helperId ? { 'aria-describedby': errorId ?? helperId } : {}),
+    ...(error ? { 'aria-invalid': true } : {}),
+    ...(required ? { 'aria-required': true } : {}),
+  };
+  const control = injectFieldControlProps(children(id), fieldProps);
+
   return (
     <div>
-      <label htmlFor={id} className="c-heading c-field-label">{label}</label>
+      <div>
+        <label htmlFor={id} className="c-heading c-field-label">{label}</label>
+        {required && <span aria-hidden="true" className="c-required-marker"> *</span>}
+      </div>
       <div className="flex items-center gap-[var(--sp-2)]">
-        <div className="flex-1 min-w-0">{children(id)}</div>
+        <div className="flex-1 min-w-0">{control}</div>
         {!error && confirmed && (
           <Check size={16} className="wizard-check" />
         )}
       </div>
-      {error && <div className="c-error">{error}</div>}
-      {!error && helper && <div className="c-helper">{helper}</div>}
+      {error && <div id={errorId} className="c-error">{error}</div>}
+      {!error && helper && <div id={helperId} className="c-helper">{helper}</div>}
     </div>
   );
 };

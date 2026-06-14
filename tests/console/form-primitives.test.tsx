@@ -48,7 +48,13 @@ describe('Field', () => {
       </Field>,
     )
 
-    expect(screen.getByText('bad value')).toBeDefined()
+    const input = screen.getByLabelText('Field') as HTMLInputElement
+    const error = screen.getByText('bad value')
+
+    expect(error).toBeDefined()
+    expect(error.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(input.getAttribute('aria-describedby')).toBe(error.id)
     expect(screen.queryByText('should be hidden')).toBeNull()
     expect(container.querySelector('.wizard-check')).toBeNull()
   })
@@ -60,8 +66,41 @@ describe('Field', () => {
       </Field>,
     )
 
-    expect(screen.getByText('try this')).toBeDefined()
+    const input = screen.getByLabelText('Field') as HTMLInputElement
+    const helper = screen.getByText('try this')
+
+    expect(helper).toBeDefined()
+    expect(helper.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBeNull()
+    expect(input.getAttribute('aria-describedby')).toBe(helper.id)
     expect(container.querySelector('.wizard-check')).toBeDefined()
+  })
+
+  it('merges existing control descriptions with Field helper text', () => {
+    render(
+      <Field label="Field" helper="try this">
+        {id => <TextInput id={id} aria-describedby="external-note" value="" onChange={() => {}} />}
+      </Field>,
+    )
+
+    const input = screen.getByLabelText('Field') as HTMLInputElement
+    const helper = screen.getByText('try this')
+
+    expect(input.getAttribute('aria-describedby')).toBe(`external-note ${helper.id}`)
+  })
+
+  it('marks required controls without invoking native validation', () => {
+    render(
+      <Field label="Field" required>
+        {id => <TextInput id={id} value="" onChange={() => {}} />}
+      </Field>,
+    )
+
+    const input = screen.getByLabelText('Field') as HTMLInputElement
+
+    expect(input.getAttribute('aria-required')).toBe('true')
+    expect(input.required).toBe(false)
+    expect(screen.getByText('*').getAttribute('aria-hidden')).toBe('true')
   })
 })
 
