@@ -7,7 +7,7 @@ import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
 import { formatCount } from '../../lib/text-utils'
-import { ToolbarTimeRange, Tabs, Tab } from '../primitives'
+import { ToolbarTimeRange, Tabs, Tab, TabPanel } from '../primitives'
 import { Button } from '../primitives/Button'
 import type { MetricsRange, LineMetrics, LineInstance } from './types'
 
@@ -117,24 +117,24 @@ export function MetricsTab({
               </Tabs>
               <div className="h-[var(--chart-min-h)]">
                 {activeDetailTab === 'tokens' && metrics?.hasTokenData && (
-                  <div role="tabpanel" id="tabpanel-tokens" aria-labelledby="tab-tokens" className="h-full">
+                  <TabPanel id="tokens" active={activeDetailTab} className="h-full">
                     <FleetTokenChart
                       data={metrics.tokenUsage}
                       byProvider={metrics.tokenUsageByProvider}
                       providers={metrics.providers}
                       range={metricsRange}
                     />
-                  </div>
+                  </TabPanel>
                 )}
                 {activeDetailTab === 'sessions' && metrics?.hasSessionData && (
-                  <div role="tabpanel" id="tabpanel-sessions" aria-labelledby="tab-sessions" className="h-full">
+                  <TabPanel id="sessions" active={activeDetailTab} className="h-full">
                     <FleetSessionChart
                       data={metrics.sessionActivity}
                       byProvider={metrics.sessionActivityByProvider}
                       providers={metrics.providers}
                       range={metricsRange}
                     />
-                  </div>
+                  </TabPanel>
                 )}
               </div>
             </section>
