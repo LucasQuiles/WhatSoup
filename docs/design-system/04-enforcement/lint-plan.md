@@ -323,7 +323,8 @@ cannot express the check).
   recharts non-`style` prop hole: `wrapperStyle`/`contentStyle` (4 Legend copies, DUP-09).
 - **CSS-side coverage:** `check-design-burndown.mjs` owns CSS-only gaps that ESLint cannot see,
   including `raw-font-size-css` (zero ceiling) for non-token `font-size:` literals outside the
-  primitive type scale.
+  primitive type scale and `transition-all-css` (zero ceiling) for CSS shorthand/longhand
+  transition declarations that target `all`.
 - **Mechanism:** keep the selector wall; add a custom rule for the closures: (a) visit
   `ConditionalExpression` string branches under style-value positions; (b) track numeric-literal
   constants flowing into style props within the same file (one-hop identifier resolution — no
@@ -344,8 +345,9 @@ cannot express the check).
 - **Purpose:** `transition-all` repaints everything and bypasses the motion token contract; banned.
   Already live: `console/eslint.config.js:126-128` (plus `transition-colors` `:122-124`,
   `transition-opacity` `:130-132`, `duration-*` `:134-136`).
-- **Mechanism:** keep existing selectors; add `TemplateLiteral` quasi variant; CSS-side `rg`
-  pattern in section 5 for `transition: all`.
+- **Mechanism:** keep existing selectors; add `TemplateLiteral` quasi variant; CSS-side
+  parser-backed `transition-all-css` burndown category for `transition: all` and
+  `transition-property: all`.
 - **Scope:** all TSX + CSS check. No exemptions.
 - **Violation / valid:** `className="transition-all hover:bg-d3"` → motion class from the v3
   interaction spec (`c-hover` family today; `03-spec/motion.md` names at P5).
@@ -888,8 +890,9 @@ landed `ba4ed643`):
   eleven checks fail the run; check 12 promoted after the final focus-suppression carve-out was
   removed, check 15 promoted after the dead `useExitPresence` suppression was removed, and check 17
   promoted after `.c-kpi-hover` moved to `--shadow-hover` and `raw-color-css` ratcheted to zero. The
-  burndown scanner also carries a zeroed
-  `raw-font-size-css` category for CSS type-scale re-entry. Checks 18–20 remain report-only per the
+  burndown scanner also carries zeroed
+  `raw-font-size-css` and `transition-all-css` categories for CSS type-scale and motion-law
+  re-entry. Checks 18–20 remain report-only per the
   §2 lifecycle, and the remaining immature checks each sit behind a named landing gate in the
   script's justification block. Workflow drift for the shared design chain is pinned by
   `guard:safeguard-diagnostics`. `tests/scripts/design-regression-guards.test.ts` pins the promoted

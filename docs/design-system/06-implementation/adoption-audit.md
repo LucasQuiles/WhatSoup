@@ -399,7 +399,10 @@ Sources, by category:
   selectors binding status-channel colors + M9 `accent-color:` status tokens; the
   status-semantic `-danger/-success/-warning` variants are excluded by name),
   `raw-color-css` (raw hex/rgb/hsl/oklch outside the value-owning tiers
-  tokens.primitive.css/tokens.semantic.css; current count = the WVR-013 literal),
+  tokens.primitive.css/tokens.semantic.css; zero ceiling),
+  `raw-font-size-css` (raw non-token `font-size:` literals outside the primitive type scale;
+  zero ceiling), `transition-all-css` (CSS `transition` / `transition-property` declarations
+  targeting `all`; zero ceiling),
   `half-step` (DD-9 — CSS *and* TSX/TS, since no ESLint rule covers the half-steps).
   Note: accent-law hits using alias names also count under legacy-var-css —
   intentional overlap, two remediation lenses (B4 law fix vs B1 vocabulary burn).

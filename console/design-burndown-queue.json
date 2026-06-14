@@ -14,6 +14,7 @@
       "raw-color-css": 0,
       "raw-font-size-css": 0,
       "raw-form-control": 2,
+      "transition-all-css": 0,
       "utility-smell": 1
     }
   },
@@ -588,6 +589,15 @@
       ],
       "owner": "B3 — form-control kit completion (DUP-12)",
       "source": "lint-shadow-baseline.json (line detail lives in the ESLint shadow run)"
+    },
+    {
+      "id": "burndown:transition-all-css",
+      "category": "transition-all-css",
+      "severity": "blocking",
+      "count": 0,
+      "files": [],
+      "owner": "P5 motion law — CSS transition-all parity with soup/no-transition-all",
+      "source": "css-scan (check-design-burndown.mjs)"
     },
     {
       "id": "burndown:half-step",

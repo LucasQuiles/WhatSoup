@@ -23,6 +23,8 @@
 //                           permitted to own raw color values per tokens-v3 §1/§3).
 //         raw-font-size-css — raw font-size declarations in non-token CSS; component
 //                           and composite CSS must consume the type scale instead.
+//         transition-all-css — CSS transition shorthands/longhands that target "all";
+//                           CSS must name explicit properties, same as the TSX rule.
 //         half-step       — var(--sp-0h/--sp-1h/--sp-2h) usage outside their
 //                           definitions, across CSS *and* TSX/TS (DD-9 feed; the
 //                           half-steps have no ESLint rule, so both sides live here).
@@ -129,6 +131,7 @@ const CATEGORY_META = {
   'accent-law': { severity: 'blocking', owner: 'B4 — F1 accent-law fix + M9 accent-color re-point' },
   'raw-color-css': { severity: 'polish', owner: 'CSS tier-boundary — raw component-tier colors must move to semantic tokens' },
   'raw-font-size-css': { severity: 'polish', owner: 'CSS type scale — raw font-size declarations must move to type tokens' },
+  'transition-all-css': { severity: 'blocking', owner: 'P5 motion law — CSS transition-all parity with soup/no-transition-all' },
   'half-step': { severity: 'polish', owner: 'DD-9 — half-step spacing retirement' },
 };
 
@@ -307,6 +310,7 @@ const scanCategories = {
   'accent-law': {},
   'raw-color-css': {},
   'raw-font-size-css': {},
+  'transition-all-css': {},
   'half-step': {},
 };
 
@@ -327,6 +331,7 @@ const ACTION_CONTROL_SELECTOR = /(^|[\s,>+~(])(\.c-btn(?![a-zA-Z0-9-]*(?:danger|
 const COLOR_BINDING_PROPERTY = /^(background|background-color|border|border-color|border-top-color|border-bottom-color|border-left-color|border-right-color|color|box-shadow|outline-color|fill|stroke)$/;
 const RAW_COLOR = /#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3,4}\b|\brgba?\(|\bhsla?\(|\boklch\(/g;
 const RAW_FONT_SIZE_VALUE = /(?:^|[\s,(])\d*\.?\d+(?:px|rem|em|vw|vh|vmin|vmax|ch)\b/;
+const TRANSITION_ALL_VALUE = /(?:^|,)\s*all(?:\s|,|$)/i;
 const HALF_STEP_REF = /--sp-[012]h\b/g;
 const HALF_STEP_DEF_LINE = /^\s*--sp-[012]h\s*:/;
 
@@ -387,6 +392,11 @@ for (const name of styleEntries) {
       && !RAW_FONT_SIZE_ALLOWLIST.has(name)
       && RAW_FONT_SIZE_VALUE.test(decl.value)) {
       addHit('raw-font-size-css', filePath, decl.line);
+    }
+
+    if ((decl.property === 'transition' || decl.property === 'transition-property')
+      && TRANSITION_ALL_VALUE.test(decl.value)) {
+      addHit('transition-all-css', filePath, decl.line);
     }
   }
 }

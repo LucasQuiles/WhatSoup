@@ -255,6 +255,46 @@ describe('check-design-burndown.mjs', () => {
       ]);
     });
 
+    it('transition-all-css fires on CSS transition-all shorthand and longhand declarations', () => {
+      const fixture = makeFixture({
+        compositesCss: [
+          '.c-hover { transition: all 120ms var(--ease); }',
+          '.c-panel { transition-property: opacity, all; }',
+          '.c-safe { transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }',
+          '',
+        ].join('\n'),
+        tsx: null,
+      });
+      const result = runScript(fixture, ['--update']);
+      expect(result.status).toBe(0);
+
+      const item = itemOf(readQueue(fixture), 'transition-all-css');
+      expect(item.severity).toBe('blocking');
+      expect(item.count).toBe(2);
+      expect(item.files).toEqual([
+        { path: 'src/styles/composites.css', count: 2, lines: [1, 2] },
+      ]);
+    });
+
+    it('transition-all-css ignores comments, transition:none, and explicit property lists', () => {
+      const fixture = makeFixture({
+        compositesCss: [
+          '/* no transition: all here */',
+          '.c-none { transition: none; }',
+          '.c-safe { transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }',
+          '.c-prop { transition-property: opacity, transform; }',
+          '',
+        ].join('\n'),
+        tsx: null,
+      });
+      const result = runScript(fixture, ['--update']);
+      expect(result.status).toBe(0);
+
+      const item = itemOf(readQueue(fixture), 'transition-all-css');
+      expect(item.count).toBe(0);
+      expect(item.files).toEqual([]);
+    });
+
     it('half-step fires on CSS and TSX usage but not on the definitions', () => {
       const fixture = makeFixture();
       const result = runScript(fixture, ['--update']);
