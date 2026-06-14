@@ -19,6 +19,7 @@ import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown
 import { SearchInput } from '../components/shared/SearchInput.js'
 import { Button } from '../components/primitives/Button'
 import { ActionButton } from '../components/primitives/ActionButton'
+import { TextArea } from '../components/primitives'
 import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
@@ -412,15 +413,15 @@ export default function Inbox() {
               className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] border-t border-[var(--b1)] bg-d2"
               style={{ borderTopWidth: 'var(--bw)' }}
             >
-              <textarea
+              <TextArea
                 ref={textareaRef}
-                className="flex-1 text-t2 font-sans placeholder-t5 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-body"
+                className="flex-1 text-t2 placeholder-t5 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
                 rows={1}
-                style={{
-                  maxHeight: 'var(--feed-preview-max)',
-                  resize: 'none',
-                  overflow: 'hidden',
-                }}
+                minHeight={0}
+                maxHeight="var(--feed-preview-max)"
+                resize="none"
+                overflow="hidden"
+                textFace="sans"
                 placeholder="Type a message..."
                 aria-label="Type a message"
                 value={msgText}

@@ -2,14 +2,14 @@
   "generated": "design burndown per-category ceiling (fall-only ratchet)",
   "categories": {
     "accent-law": 0,
-    "base-wall": 21,
+    "base-wall": 20,
     "brand-regression": 2,
     "half-step": 64,
     "legacy-token-tsx": 334,
     "legacy-var-css": 220,
     "raw-color-css": 0,
     "raw-font-size-css": 0,
-    "raw-form-control": 10,
+    "raw-form-control": 9,
     "utility-smell": 1
   }
 }

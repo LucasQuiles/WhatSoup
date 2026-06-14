@@ -16,7 +16,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type ReactNode } from 'react'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 // ---------------------------------------------------------------------------
@@ -292,26 +292,13 @@ describe('Inbox — listbox renders chats from the hook', () => {
 
 describe('Inbox — search row uses shared SearchInput (B4 adoption)', () => {
   it('search input is reachable by aria-label once a chat is selected', () => {
-    // A chat must be selected to render the search row
     mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
-    const { container } = renderInbox()
 
-    // Simulate a selected chat by re-rendering with a selected chat — the
-    // search row is inside the conditional selectedChat && currentChat branch.
-    // Because selecting requires a click event that drives internal state, we
-    // verify the structural contract at the component level: when chats are
-    // present the listbox renders options that carry the expected attributes.
-    const options = screen.getAllByRole('option')
-    expect(options.length).toBe(1)
-    expect(options[0].getAttribute('data-conv-key')).toBe('conv-a')
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
 
-    // SearchInput renders a c-input c-input-search input; the container class
-    // from SearchInput's wrapper must appear when a chat is selected.
-    // Since jsdom cannot drive the click-to-select flow without full event
-    // wiring, the structural check is the option renders (above) and the
-    // container renders without a raw c-input-search div above the shared
-    // component boundary (the shared component IS the only consumer now).
-    expect(container.innerHTML).not.toContain('panel-chat-list') // token check
+    const search = screen.getByLabelText('Search messages in this conversation') as HTMLInputElement
+    expect(search.classList.contains('c-input-search')).toBe(true)
   })
 
   it('no raw c-input without SearchInput wrapper renders in the document', () => {
@@ -335,21 +322,17 @@ describe('Inbox — search row uses shared SearchInput (B4 adoption)', () => {
 // ---------------------------------------------------------------------------
 
 describe('Inbox — composer textarea has no outline-none (B4 composer fix)', () => {
-  it('composer textarea does not carry outline-none when a chat is selected', () => {
-    // The composer is inside the selectedChat && currentChat conditional block;
-    // it is only rendered when a chat is both present and selected.
-    // We verify the class contract at the module level by importing the raw
-    // component source (the test file lints against the edited file on disk).
-    //
-    // Class-contract methodology: assert the absence of the banned token in
-    // the rendered output, mirroring the way token-absence assertions work in
-    // the pane-width tests above (negative selector proof).
-    mockChats = []
-    const { container } = renderInbox()
+  it('routes the selected-chat composer through TextArea without suppressing focus outlines', () => {
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
 
-    // With no chat selected the composer is not in the DOM — assert nothing
-    // carries outline-none in the overall rendered output.
-    const allElements = container.querySelectorAll('[class*="outline-none"]')
-    expect(allElements.length).toBe(0)
+    const textarea = screen.getByLabelText('Type a message') as HTMLTextAreaElement
+    expect(textarea.classList.contains('c-input')).toBe(true)
+    expect(textarea.classList.contains('font-sans')).toBe(true)
+    expect(textarea.classList.contains('font-mono')).toBe(false)
+    expect(textarea.classList.contains('outline-none')).toBe(false)
+    expect(textarea.getAttribute('style')).toContain('resize: none')
+    expect(textarea.getAttribute('style')).toContain('max-height: var(--feed-preview-max)')
   })
 })

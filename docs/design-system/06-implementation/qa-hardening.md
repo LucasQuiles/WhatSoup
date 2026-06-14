@@ -701,8 +701,8 @@ counts. It emits deterministic JSON with no timestamps and records:
 - whether each finding is a consumer migration or a primitive self-hit that can only clear by
   moving the canonical primitive under `components/primitives/**`.
 
-The current enforced inventory is 10 total findings: 10 consumer migrations and 0 primitive
-self-hits, with an element split of 6 inputs, 1 select, and 3 textareas. The former 5
+The current enforced inventory is 9 total findings: 9 consumer migrations and 0 primitive
+self-hits, with an element split of 6 inputs, 1 select, and 2 textareas. The former 5
 transitional form-kit self-hits cleared only through the D4.2 primitive promotion to
 `console/src/components/primitives/FormControl.tsx`; D4.3a cleared the shared `SearchInput`
 producer, D4.3b cleared `UnlockScreen`, and D4.3c cleared `TagInput` by routing each through
@@ -711,7 +711,8 @@ auth-method radios through `RadioField`; D4.3k cleared `GroupDetailModal` by rou
 subject/description/ephemeral controls through the promoted primitives; D4.3l cleared the
 ConfigStep enabled-plugin checkbox through `CheckboxField`; D4.3m cleared ScheduleComposerModal's
 text, media, datetime, and cron fields through the promoted primitives; D4.3n cleared `HistoryTab`
-by routing its reply composer through `TextArea`.
+by routing its reply composer through `TextArea`; D4.3o cleared `Inbox` by routing its message
+composer through `TextArea`.
 
 The current inventory baseline is the generated file
 `console/design-raw-form-control-inventory.json`. The package script does not carry manual expected

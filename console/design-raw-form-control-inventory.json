@@ -21,20 +21,19 @@
   },
   "totals": {
     "by_classification": {
-      "consumer_migration": 10
+      "consumer_migration": 9
     },
     "by_consumer_group": {
       "line_detail_and_modals": 7,
-      "pages": 1,
       "wizard_consumers": 2
     },
     "by_element": {
       "input": 6,
       "select": 1,
-      "textarea": 3
+      "textarea": 2
     },
-    "files": 3,
-    "total": 10
+    "files": 2,
+    "total": 9
   },
   "by_file": [
     {
@@ -69,18 +68,6 @@
         752
       ],
       "total": 2
-    },
-    {
-      "by_element": {
-        "textarea": 1
-      },
-      "classification": "consumer_migration",
-      "consumer_group": "pages",
-      "file": "console/src/pages/Inbox.tsx",
-      "lines": [
-        415
-      ],
-      "total": 1
     }
   ],
   "hits": [
@@ -173,16 +160,6 @@
       "line": 752,
       "rule": "soup/no-raw-form-control",
       "snippet": "<input"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 15,
-      "consumer_group": "pages",
-      "element": "textarea",
-      "file": "console/src/pages/Inbox.tsx",
-      "line": 415,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<textarea"
     }
   ]
 }
