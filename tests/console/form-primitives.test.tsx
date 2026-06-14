@@ -256,6 +256,24 @@ describe('TextArea', () => {
     expect(textarea.value).toBe('updated')
   })
 
+  it('supports tokenized sizing and dimmed styling for read-only inspection fields', () => {
+    render(
+      <TextArea
+        aria-label="JSON"
+        value="{}"
+        onChange={() => {}}
+        readOnly
+        minHeight="calc(var(--sp-10) + var(--sp-5))"
+        dimmed
+      />,
+    )
+
+    const textarea = screen.getByLabelText('JSON') as HTMLTextAreaElement
+    expect(textarea.readOnly).toBe(true)
+    expect(textarea.getAttribute('style')).toContain('min-height: calc(var(--sp-10) + var(--sp-5))')
+    expect(textarea.getAttribute('style')).toContain('filter: brightness(0.7)')
+  })
+
   it('defaults minHeight and uses error and confirmed border styling', () => {
     const { rerender } = render(<TextArea aria-label="Body" value="" onChange={() => {}} error />)
     const textarea = screen.getByLabelText('Body') as HTMLTextAreaElement

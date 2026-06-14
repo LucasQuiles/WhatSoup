@@ -93,10 +93,11 @@ export interface TextAreaProps extends Omit<TextareaHTMLAttributes<HTMLTextAreaE
   ref?: RefObject<HTMLTextAreaElement | null>;
   error?: boolean;
   confirmed?: boolean;
-  minHeight?: number;
+  minHeight?: CSSProperties['minHeight'];
   maxHeight?: CSSProperties['maxHeight'];
   overflow?: CSSProperties['overflow'];
   resize?: CSSProperties['resize'];
+  dimmed?: boolean;
   textFace?: 'mono' | 'sans';
 }
 
@@ -107,6 +108,7 @@ export const TextArea: FC<TextAreaProps> = ({
   maxHeight,
   overflow,
   resize,
+  dimmed,
   textFace = 'mono',
   className,
   ref,
@@ -121,6 +123,7 @@ export const TextArea: FC<TextAreaProps> = ({
       maxHeight,
       overflow,
       resize: resize ?? 'vertical',
+      filter: dimmed ? 'brightness(0.7)' : undefined,
       borderColor: borderColor(error, confirmed),
     }}
   />

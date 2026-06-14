@@ -295,6 +295,27 @@ describe('ConfigEditDialog — field type rendering', () => {
     expect(readOnly).not.toBeNull()
     expect((readOnly as HTMLTextAreaElement).value).toContain('"nested"')
   })
+
+  it('routes scalar controls through shared form primitives', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const enabledCheckbox = screen.getAllByRole('checkbox').find(
+      checkbox => (checkbox as HTMLInputElement).checked === true,
+    )
+    expect(enabledCheckbox).not.toBeNull()
+    expect(enabledCheckbox!.closest('.c-checkbox-row')).not.toBeNull()
+
+    const numberInput = screen.getAllByRole('spinbutton')[0]
+    expect(numberInput.classList.contains('c-input-number')).toBe(true)
+
+    const accessModeSelect = screen.getAllByRole('combobox').find(
+      select => (select as HTMLSelectElement).value === 'self_only',
+    )
+    expect(accessModeSelect).not.toBeNull()
+    expect(accessModeSelect!.classList.contains('c-select')).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------

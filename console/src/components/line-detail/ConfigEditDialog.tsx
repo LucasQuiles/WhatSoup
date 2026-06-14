@@ -24,7 +24,17 @@ import TagInput from '../TagInput'
 import { normalizePhoneInput, validatePhone } from '../../lib/validation'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
-import { Modal, ModalHeader, ModalBody, ModalFooter } from '../primitives'
+import {
+  CheckboxField,
+  Modal,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+  NumberInput,
+  SelectInput,
+  TextArea,
+  TextInput,
+} from '../primitives'
 import { Button } from '../primitives/Button'
 import {
   CONFIG_EXCLUDE_KEYS,
@@ -157,28 +167,27 @@ export function ConfigEditDialog({
     // Boolean -> checkbox
     if (typeof originalValue === 'boolean') {
       return (
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={val as boolean}
-            onChange={e => setField(key, e.target.checked)}
-            className="accent-current w-[var(--feed-col-icon)] h-[var(--feed-col-icon)]"
-          />
-          <span className="font-mono text-m-agt text-data">
-            {String(val)}
-          </span>
-        </label>
+        <CheckboxField
+          checked={val as boolean}
+          onChange={checked => setField(key, checked)}
+          className="cursor-pointer"
+          inputClassName="accent-current w-[var(--feed-col-icon)] h-[var(--feed-col-icon)]"
+          label={(
+            <span className="font-mono text-m-agt text-data">
+              {String(val)}
+            </span>
+          )}
+        />
       )
     }
 
     // Number -> number input
     if (typeof originalValue === 'number') {
       return (
-        <input
-          type="number"
+        <NumberInput
           value={val as number}
           onChange={e => setField(key, Number(e.target.value))}
-          className="c-input font-mono text-s-warn"
+          className="text-s-warn"
         />
       )
     }
@@ -202,11 +211,13 @@ export function ConfigEditDialog({
     // Object -> read-only JSON textarea
     if (typeof originalValue === 'object' && originalValue !== null) {
       return (
-        <textarea
+        <TextArea
           readOnly
           value={JSON.stringify(val, null, 2)}
-          className="c-input font-mono text-t3"
-          style={{ resize: 'vertical', minHeight: 'calc(var(--sp-10) + var(--sp-5))', filter: 'brightness(0.7)' }}
+          className="text-t3"
+          minHeight="calc(var(--sp-10) + var(--sp-5))"
+          resize="vertical"
+          dimmed
         />
       )
     }
@@ -229,7 +240,7 @@ export function ConfigEditDialog({
 
       return (
         <div className="flex flex-col gap-[var(--sp-2)]">
-          <select
+          <SelectInput
             value={customEnumActive ? CUSTOM_ENUM_OPTION : val as string}
             onChange={e => {
               const nextValue = e.target.value
@@ -241,7 +252,7 @@ export function ConfigEditDialog({
               clearCustomEnum()
               setField(key, nextValue)
             }}
-            className="c-input font-mono cursor-pointer text-m-pas pr-[var(--sp-8)]"
+            className="font-mono cursor-pointer text-m-pas pr-[var(--sp-8)]"
           >
             {enumOpts.map(opt => (
               <option key={opt} value={opt}>{opt || '(default)'}</option>
@@ -249,14 +260,14 @@ export function ConfigEditDialog({
             {CUSTOMIZABLE_ENUM_KEYS.has(key) && (
               <option value={CUSTOM_ENUM_OPTION}>Custom…</option>
             )}
-          </select>
+          </SelectInput>
           {customEnumActive && (
-            <input
+            <TextInput
               type="text"
               value={typeof val === 'string' && !enumOpts.includes(val) ? val : ''}
               onChange={e => setField(key, e.target.value)}
               placeholder="Enter custom model ID"
-              className="c-input font-mono text-m-pas"
+              className="text-m-pas"
             />
           )}
         </div>
@@ -266,22 +277,23 @@ export function ConfigEditDialog({
     // String (long) -> textarea
     if (typeof originalValue === 'string' && (originalValue as string).length > 80) {
       return (
-        <textarea
+        <TextArea
           value={val as string}
           onChange={e => setField(key, e.target.value)}
-          className="c-input font-mono text-m-pas"
-          style={{ resize: 'vertical', minHeight: 'calc(var(--sp-10) * 2)' }}
+          className="text-m-pas"
+          minHeight="calc(var(--sp-10) * 2)"
+          resize="vertical"
         />
       )
     }
 
     // String (short) -> text input
     return (
-      <input
+      <TextInput
         type="text"
         value={val as string}
         onChange={e => setField(key, e.target.value)}
-        className="c-input font-mono text-m-pas"
+        className="text-m-pas"
       />
     )
   }
