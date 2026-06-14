@@ -66,16 +66,16 @@ const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
 
 /* ── Key-value row ── */
 
-const KV: FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+const KV: FC<{ label: string; value: React.ReactNode; fullValue?: string }> = ({ label, value, fullValue }) => (
   <div style={kvRowStyle}>
     <span className="text-label" style={kvLabelStyle}>{label}</span>
-    <span className="font-mono text-data" style={kvValueStyle}>{value}</span>
+    <span title={fullValue} className="font-mono text-data" style={kvValueStyle}>{value}</span>
   </div>
 )
 
-/* ── Truncate helper ── */
+/* ── First-line preview helper ── */
 
-function truncate(text: string, max: number): string {
+function previewFirstLine(text: string, max: number): string {
   const firstLine = text.split('\n')[0] ?? ''
   if (firstLine.length <= max) return firstLine
   return firstLine.slice(0, max) + '...'
@@ -171,7 +171,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
         </div>
         <KV label="Access mode" value={ACCESS_MODE_LABELS[accessMode as keyof typeof ACCESS_MODE_LABELS] ?? accessMode} />
         {type !== 'passive' && systemPrompt && (
-          <KV label="System prompt" value={truncate(systemPrompt, 60)} />
+          <KV label="System prompt" value={previewFirstLine(systemPrompt, 60)} fullValue={systemPrompt} />
         )}
         <KV label="Rate limit" value={`${rateLimitPerHour}/hr`} />
         <KV label="Token budget" value={formatCount(tokenBudget)} />

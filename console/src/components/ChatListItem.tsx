@@ -15,6 +15,8 @@ interface ChatListItemProps {
 
 const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabIndex = 0, isTyping }) => {
   const displayName = resolveDisplayName(chat.name)
+  const lastMessageTime = formatChatTime(chat.lastMessageAt)
+  const previewText = stripMarkdown(chat.lastMessagePreview ?? '')
 
   return (
     <div
@@ -40,12 +42,13 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabInd
         {/* Row 1: Name + Time */}
         <div className="flex items-baseline gap-[var(--sp-2)] mb-[var(--sp-0h)]">
           <span
+            title={displayName}
             className="text-t1 font-medium flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-body"
           >
             {displayName}
           </span>
-          <span className="c-label flex-shrink-0 whitespace-nowrap">
-            {formatChatTime(chat.lastMessageAt)}
+          <span title={lastMessageTime} className="c-label flex-shrink-0 whitespace-nowrap">
+            {lastMessageTime}
           </span>
         </div>
 
@@ -60,9 +63,10 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabInd
             </span>
           ) : (
           <span
+            title={previewText || undefined}
             className="text-t4 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-data"
           >
-            {stripMarkdown(chat.lastMessagePreview ?? '')}
+            {previewText}
           </span>
           )}
           {chat.unreadCount > 0 && (

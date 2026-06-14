@@ -565,7 +565,7 @@ The audit scans `console/src` for promoted and report-only findings:
 - `soup/no-unsafe-truncation` candidates: `truncate`, `whitespace-nowrap`, or ellipsis patterns
   without a same-line/adjacent full-value path (`title`, `aria-label`, `data-full-value`) or
   documented exception; generic `aria-describedby` helper/error text is not sufficient unless the
-  described node itself is marked as the full-value disclosure;
+  described node itself is marked as the full-value disclosure (promoted: fails the package script);
 - `soup/scroll-owner-required` candidates: scrollable regions without axis min-size proof
   (`min-h-0` / `min-w-0`) or a declared scroll-owner exception (promoted: fails the package
   script);
@@ -591,12 +591,13 @@ Reviewers apply these rule-of-thumb checks before accepting any migrated surface
 | Empty/loading/error states | Empty, loading, error, and degraded states preserve the same space ownership and focus model as loaded states. | State changes remove landmarks, focus targets, or scroll owners. |
 | Motion and reveal | Motion clarifies state changes but does not carry required information; reduced motion has an equivalent static state. | Information appears only during animation or reveal timing. |
 
-The package script currently promotes `soup/layer-owner-required` and `soup/scroll-owner-required`
-with explicit `--fail-on-rule` flags; raw `z-*` / `z-[N]` layering and missing scroll-owner
-min-size proof are blocking once their inventories are zero. The remaining resilience lanes stay
-report-only: findings are emitted as structured JSON with per-rule counts and sample file/line
-evidence. `--fail-on-findings` exists only for future promotion packets after the remaining
-inventory is burned down or documented with sanctioned exceptions.
+The package script currently promotes `soup/layer-owner-required`, `soup/no-unsafe-truncation`, and
+`soup/scroll-owner-required` with explicit `--fail-on-rule` flags; raw `z-*` / `z-[N]` layering,
+missing full-value paths for clipped text, and missing scroll-owner min-size proof are blocking once
+their inventories are zero. The remaining resilience lanes stay report-only: findings are emitted as
+structured JSON with per-rule counts and sample file/line evidence. `--fail-on-findings` exists only
+for future promotion packets after the remaining inventory is burned down or documented with
+sanctioned exceptions.
 
 A PASS with report-only lanes still present means the audit ran and no promoted rule failed. It does
 not prove the UI is resilient, does not replace long-string screenshots, reduced-height screenshots,

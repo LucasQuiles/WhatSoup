@@ -29,6 +29,7 @@ const DetailCard: FC<{ msg: Message; placement: CardPlacement; rightAnchored: bo
   rightAnchored,
 }) => {
   const fullTime = formatFullTime(msg.timestamp)
+  const senderDisplayName = resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '—')
 
   const style: React.CSSProperties =
     placement === 'below'
@@ -44,14 +45,14 @@ const DetailCard: FC<{ msg: Message; placement: CardPlacement; rightAnchored: bo
       <div className="flex flex-col gap-[var(--sp-2)]">
         {[
           { label: 'Time', value: fullTime },
-          { label: 'Sender', value: resolveDisplayName(msg.senderName) || (msg.fromMe ? 'You' : '—') },
+          { label: 'Sender', value: senderDisplayName },
           ...(msg.senderJid ? [{ label: 'JID', value: msg.senderJid, muted: true }] : []),
           { label: 'Type', value: msg.type },
           { label: 'Direction', value: msg.fromMe ? 'Outbound' : 'Inbound' },
         ].map(({ label, value, muted }) => (
           <div key={label} className="flex justify-between gap-[var(--sp-4)]">
             <span className="c-label flex-shrink-0">{label}</span>
-            <span className={`c-data truncate max-w-[var(--tooltip-val-max)] ${muted ? 'text-t5' : ''}`}>
+            <span title={value} className={`c-data truncate max-w-[var(--tooltip-val-max)] ${muted ? 'text-t5' : ''}`}>
               {value}
             </span>
           </div>
@@ -112,6 +113,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
   const wrapperRef = useRef<HTMLDivElement>(null)
 
   const showDetail = showByHover || showByFocus
+  const senderDisplayName = resolveDisplayName(msg.senderName)
 
   /**
    * Measure the wrapper position and resolve card placement + right-anchor.
@@ -182,12 +184,12 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
       {/* Sender label (incoming only) */}
       {!msg.fromMe && (
         <div className="flex items-center mb-[var(--bw-accent)] pl-[var(--sp-1)] gap-[var(--sp-2)] max-w-full">
-          <span className="c-label truncate">{resolveDisplayName(msg.senderName)}</span>
+          <span title={senderDisplayName} className="c-label truncate">{senderDisplayName}</span>
           {onCreateContact && isRawJid(msg.senderName ?? '') && (
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => onCreateContact(resolveDisplayName(msg.senderName))}
+              onClick={() => onCreateContact(senderDisplayName)}
               aria-label="Save as contact"
               title="Save as contact"
             >

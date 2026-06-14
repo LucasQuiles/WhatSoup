@@ -85,7 +85,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/traffic-neutrality | blocking script | scoped-error / blocking script | P4/G5 | sent/received/sessions/media quantities stay neutral ink unless reclassified as status |
 | soup/no-component-local-palette | blocking script | keep blocking script / later scoped-error | P4/G5 | component-local colour maps collapse into documented provider/data/status token maps or explicit exceptions |
 | soup/tabular-nums-required | proposed | scoped-error (Table/metric) | P4 | zero current usage — needs spec landing first |
-| soup/no-unsafe-truncation | report-only script | warn-on-changed-files | P4/G7 | truncation needs full-value access or documented exception |
+| soup/no-unsafe-truncation | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | truncation needs full-value access or documented exception |
 | soup/scroll-owner-required | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | scrollable regions need axis min-size proof and one declared owner |
 | soup/no-layout-shift-interaction | report-only script | scoped-error / blocking script | P4/G7 | hover/focus/active states must not change layout dimensions |
 | soup/no-hover-only-content | report-only script | scoped-error / blocking script | P4/G7 | hover-revealed content needs keyboard/focus parity |
@@ -550,11 +550,11 @@ cannot express the check).
 
 - **Purpose:** truncated text must still expose the full value. Long IDs, names, timestamps, and
   provider/model labels are operational data, not decorative copy.
-- **Mechanism:** report-only resilience script first. Flag `truncate`, `whitespace-nowrap`, and
+- **Mechanism:** package-script fail-on-rule resilience script. Flag `truncate`, `whitespace-nowrap`, and
   ellipsis patterns unless the same element or adjacent wrapper provides `title`, `aria-label`,
-  `data-full-value`, or a documented `data-truncation-exception`. Generic `aria-describedby`
-  helper/error text is not a proven full-value path; if a described node carries the full value,
-  mark that node with `data-full-value`.
+  `data-full-value`, or a documented `data-truncation-exception` / `data-wrap-exception`.
+  Generic `aria-describedby` helper/error text is not a proven full-value path; if a described
+  node carries the full value, mark that node with `data-full-value`.
 - **Scope:** `console/src/**` TSX/CSS. Exempt purely decorative brand marks and intentionally clipped
   generated visual assets when the exception names the visual proof artifact.
 - **Violation / valid:** `className="truncate"` on a line name → add a full-value path, wrapping
@@ -562,7 +562,8 @@ cannot express the check).
 - **FP strategy:** fixtures must include a valid `title`/`data-full-value` case, a generic
   `aria-describedby` false-negative trap, an invalid bare truncation case, and an allowed
   visual-brand exception.
-- **Autofix:** no. **Phase:** P4/G7. **Entry:** report-only script.
+- **Autofix:** no. **Phase:** P4/G7. **Entry:** package-script fail-on-rule; promoted
+  2026-06-14 after the inventory reached zero.
 
 ### soup/scroll-owner-required
 

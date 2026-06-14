@@ -631,8 +631,8 @@
           "path": "src/components/ChatListItem.tsx",
           "count": 2,
           "lines": [
-            41,
-            55
+            43,
+            58
           ]
         },
         {
@@ -682,18 +682,18 @@
           "path": "src/components/line-detail/ProvidersKeysCard.tsx",
           "count": 5,
           "lines": [
-            65,
-            82,
-            105,
-            167
+            66,
+            83,
+            106,
+            168
           ]
         },
         {
           "path": "src/components/line-detail/ScheduledMessageRow.tsx",
           "count": 2,
           "lines": [
-            106,
-            134
+            107,
+            135
           ]
         },
         {
@@ -708,15 +708,15 @@
           "path": "src/components/LineTags.tsx",
           "count": 3,
           "lines": [
-            58,
-            92
+            59,
+            93
           ]
         },
         {
           "path": "src/components/MessageBubble.tsx",
           "count": 1,
           "lines": [
-            216
+            218
           ]
         },
         {
@@ -771,7 +771,7 @@
           "path": "src/pages/Inbox.tsx",
           "count": 1,
           "lines": [
-            418
+            420
           ]
         },
         {

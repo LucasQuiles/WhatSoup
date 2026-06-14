@@ -113,6 +113,7 @@ export default function Inbox() {
   const searchTotal = searchData?.total ?? 0
   const searchError = searchQueryError ? (searchQueryError instanceof Error ? searchQueryError.message : String(searchQueryError)) : null
   const isSearchBusy = searchLoading || isDebouncingSearch
+  const searchStatusText = isSearchBusy ? 'Searching…' : `${searchTotal} result${searchTotal === 1 ? '' : 's'}`
 
   const renderedMessages = useMemo(() => toChronologicalMessages(messages ?? []), [messages])
 
@@ -128,6 +129,7 @@ export default function Inbox() {
   })
   const virtualMessageRows = selectVirtualMessageRows(renderedMessages, messageVirtualizer.getVirtualItems())
   const virtualSearchRows = selectVirtualMessageRows(searchResults, searchVirtualizer.getVirtualItems())
+  const currentChatDisplayName = currentChat ? resolveDisplayName(currentChat.name) : ''
 
   const handleLoadOlder = async () => {
     if (!selectedChat || loadingOlder) return
@@ -294,8 +296,8 @@ export default function Inbox() {
                 }
               />
               {isSearchMode && (
-                <span className="c-label whitespace-nowrap">
-                  {isSearchBusy ? 'Searching…' : `${searchTotal} result${searchTotal === 1 ? '' : 's'}`}
+                <span title={searchStatusText} className="c-label whitespace-nowrap">
+                  {searchStatusText}
                 </span>
               )}
             </div>
@@ -475,8 +477,8 @@ export default function Inbox() {
                 }
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-t1 font-medium truncate text-body">{resolveDisplayName(currentChat.name)}</div>
-                <div className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
+                <div title={currentChatDisplayName} className="text-t1 font-medium truncate text-body">{currentChatDisplayName}</div>
+                <div title={currentChat.conversationKey} className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
               </div>
             </div>
 

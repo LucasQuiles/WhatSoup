@@ -102,7 +102,7 @@ export default function LinePicker({
       renderOption: () => (
         <span className="flex items-center gap-[var(--sp-2)] w-full min-w-0">
           <StatusCell status={line.status} />
-          <span className="flex-1 min-w-0 truncate">{line.name}</span>
+          <span title={line.name} className="flex-1 min-w-0 truncate">{line.name}</span>
           <ModeBadge mode={line.mode} />
           <span className="c-label ml-auto flex-shrink-0">{line.phone}</span>
         </span>
@@ -118,7 +118,7 @@ export default function LinePicker({
       renderOption: () => (
         <span className="flex items-center gap-2 min-w-0">
           <StatusCell status={line.status} />
-          <span className="font-mono min-w-0 truncate">
+          <span title={line.name} className="font-mono min-w-0 truncate">
             {displayInstanceName(line.name)}
           </span>
           <ModeBadge mode={line.mode} />

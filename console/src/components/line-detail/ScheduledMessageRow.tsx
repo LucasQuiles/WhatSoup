@@ -81,6 +81,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           {/* Top line: preview + status badge */}
           <div className="flex items-center gap-2 flex-wrap">
             <span
+              title={preview || undefined}
               className="c-data truncate flex-1 min-w-0"
             >
               {preview || <span className="text-t4 italic">(no preview)</span>}

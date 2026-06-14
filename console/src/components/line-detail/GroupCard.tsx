@@ -39,7 +39,7 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
       {/* Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="c-body truncate">
+          <span title={group.subject} className="c-body truncate">
             {group.subject}
           </span>
           {badge && (

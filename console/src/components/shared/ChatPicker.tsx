@@ -82,7 +82,7 @@ export function ChatPicker({
         ) : (
           <MessageSquare size={14} className="text-t4 flex-shrink-0" />
         )}
-        <span className="c-data truncate">{chatLabel(chat)}</span>
+        <span title={chatLabel(chat)} className="c-data truncate">{chatLabel(chat)}</span>
       </span>
     ),
   }));
@@ -124,7 +124,7 @@ export function ChatPicker({
         ) : (
           <MessageSquare size={14} className="text-t4" />
         )}
-        <span className="c-data flex-1 truncate">{chatLabel(selected)}</span>
+        <span title={chatLabel(selected)} className="c-data flex-1 truncate">{chatLabel(selected)}</span>
         <Button
           variant="ghost"
           size="sm"

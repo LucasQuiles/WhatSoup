@@ -5,7 +5,11 @@ import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-design-resilience.mjs');
-const PROMOTED_RULES = ['soup/layer-owner-required', 'soup/scroll-owner-required'];
+const PROMOTED_RULES = [
+  'soup/layer-owner-required',
+  'soup/no-unsafe-truncation',
+  'soup/scroll-owner-required',
+];
 
 const tmpDirs: string[] = [];
 
@@ -54,12 +58,13 @@ function parsedOutput(result: ReturnType<typeof runScript>) {
 }
 
 describe('check-design-resilience.mjs', () => {
-  it('promotes zeroed layer-owner and scroll-owner lanes through the package script', () => {
+  it('promotes zeroed layer-owner, truncation, and scroll-owner lanes through the package script', () => {
     const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'console/package.json'), 'utf8')) as {
       scripts?: Record<string, string>;
     };
 
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/layer-owner-required');
+    expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-unsafe-truncation');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/scroll-owner-required');
   });
 
@@ -100,7 +105,6 @@ export function Fixture() {
 export function Fixture() {
   return (
     <section>
-      <div className="truncate text-t1">long id</div>
       <div className="fixed z-50">Overlay</div>
     </section>
   )
@@ -114,10 +118,24 @@ export function Fixture() {
     expect(output.mode).toBe('fail-on-rule');
     expect(output.enforced_rules).toEqual(PROMOTED_RULES);
     expect(output.failed_rules).toEqual(['soup/layer-owner-required']);
-    expect(output.by_rule).toMatchObject({
-      'soup/layer-owner-required': 1,
-      'soup/no-unsafe-truncation': 1,
-    });
+    expect(output.by_rule).toEqual({ 'soup/layer-owner-required': 1 });
+  });
+
+  it('fails when a promoted truncation rule has findings', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return <div className="truncate text-t1">long id</div>
+}
+`);
+    const result = runScript(root, promotedRuleArgs());
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.enforced_rules).toEqual(PROMOTED_RULES);
+    expect(output.failed_rules).toEqual(['soup/no-unsafe-truncation']);
+    expect(output.by_rule).toEqual({ 'soup/no-unsafe-truncation': 1 });
   });
 
   it('fails when a promoted scroll-owner rule has findings', () => {
@@ -137,10 +155,10 @@ export function Fixture() {
     expect(output.by_rule).toEqual({ 'soup/scroll-owner-required': 1 });
   });
 
-  it('keeps unrelated resilience findings report-only when layer-owner is clean', () => {
+  it('keeps unrelated resilience findings report-only when promoted rules are clean', () => {
     const root = makeFixture(`
 export function Fixture() {
-  return <div className="truncate text-t1">long id</div>
+  return <span className="opacity-0 group-hover:opacity-100">Hidden action</span>
 }
 `);
     const result = runScript(root, promotedRuleArgs());
@@ -151,7 +169,7 @@ export function Fixture() {
     expect(output.mode).toBe('fail-on-rule');
     expect(output.enforced_rules).toEqual(PROMOTED_RULES);
     expect(output.failed_rules).toEqual([]);
-    expect(output.by_rule).toEqual({ 'soup/no-unsafe-truncation': 1 });
+    expect(output.by_rule).toEqual({ 'soup/no-hover-only-content': 1 });
   });
 
   it('stays silent for documented full-value, scroll-owner, stable-state, focus-parity, type-scale, and layer-token patterns', () => {

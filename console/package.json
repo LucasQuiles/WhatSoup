@@ -25,7 +25,7 @@
     "design:raw-form-control-inventory": "node scripts/check-raw-form-control-inventory.mjs",
     "design:shadow-frozen-inventory": "node scripts/check-shadow-frozen-inventory.mjs",
     "design:font-assets": "node scripts/check-font-assets.mjs",
-    "design:resilience": "node scripts/check-design-resilience.mjs --fail-on-rule soup/layer-owner-required --fail-on-rule soup/scroll-owner-required",
+    "design:resilience": "node scripts/check-design-resilience.mjs --fail-on-rule soup/layer-owner-required --fail-on-rule soup/no-unsafe-truncation --fail-on-rule soup/scroll-owner-required",
     "design:lint-fixtures": "node scripts/check-design-lint-fixtures.mjs",
     "design:token-drift": "node scripts/check-token-spec-drift.mjs",
     "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs",

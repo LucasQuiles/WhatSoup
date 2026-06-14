@@ -39,6 +39,7 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
             key={alert.line}
             variant="ghost"
             onClick={() => onAlertClick?.(alert)}
+            title={`${alert.line}: ${alert.message}`}
             className="inline-flex items-center gap-1 text-s-crit font-mono c-hover rounded cursor-pointer whitespace-nowrap hover:bg-[var(--s-crit-soft)] py-[var(--sp-1)] px-[var(--sp-3)] text-sm"
             style={{ backgroundColor: "var(--s-crit-wash)" }}
           >

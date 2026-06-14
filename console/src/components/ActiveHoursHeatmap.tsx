@@ -119,7 +119,11 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
           {/* Date header row */}
           <div />
           {byDate.map(({ date }, i) => (
-            <div key={`d-${date}`} className="text-t5 font-mono leading-tight text-center text-xs truncate">
+            <div
+              key={`d-${date}`}
+              title={i % labelEvery === 0 ? dateLabels[i] : undefined}
+              className="text-t5 font-mono leading-tight text-center text-xs truncate"
+            >
               {i % labelEvery === 0 ? dateLabels[i] : ''}
             </div>
           ))}

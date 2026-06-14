@@ -894,6 +894,7 @@ const SoupKitchen: FC = () => {
                       const isCurrent = selectedName === line.name;
                       const sent = line.messageStats?.sent ?? 0;
                       const recv = line.messageStats?.received ?? 0;
+                      const lastActiveLabel = line.lastActive ? formatRelative(line.lastActive) : "Never";
 
                       return (
                         <TableRow
@@ -997,10 +998,11 @@ const SoupKitchen: FC = () => {
                           </TableCell>
                           <TableCell numeric>
                             <span
+                              title={lastActiveLabel}
                               className={`c-data whitespace-nowrap ${isError ? "text-s-crit" : "text-t4"}`}
                             >
                               {line.lastActive ? (
-                                formatRelative(line.lastActive)
+                                lastActiveLabel
                               ) : (
                                 <EM_DASH />
                               )}

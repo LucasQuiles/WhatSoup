@@ -229,6 +229,7 @@ function InfoTab({
         {inviteLink ? (
           <div className="flex flex-col gap-[var(--sp-2)]">
             <div
+              title={inviteLink}
               className="c-data text-t3 truncate py-[var(--sp-2)] px-[var(--sp-3)] bg-d1 rounded-md [border:var(--bw)_solid_var(--b1)]"
             >
               {inviteLink}
@@ -400,7 +401,7 @@ function ParticipantsTab({
           <div className="flex flex-col gap-[var(--sp-1)]">
             {pendingRequests.map(req => (
               <div key={req.jid} className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] bg-[var(--s-warn-wash)] rounded-md">
-                <span className="c-data flex-1 truncate">{req.jid}</span>
+                <span title={req.jid} className="c-data flex-1 truncate">{req.jid}</span>
                 <Button
                   variant="primary"
                   size="sm"
@@ -442,7 +443,7 @@ function ParticipantsTab({
               key={p.id}
               className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] rounded-md"
             >
-              <span className="c-data flex-1 truncate">
+              <span title={p.id} className="c-data flex-1 truncate">
                 {p.id}
                 {isMe && <span className="text-t4 ml-[var(--sp-1)]">(you)</span>}
               </span>
@@ -799,7 +800,7 @@ export function GroupDetailModal({ open, group, lineName, myJid, onClose }: Grou
           {initials}
         </div>
         <div className="flex-1 min-w-0">
-          <div id="group-detail-dialog-title" className="soup-modal-title truncate">
+          <div id="group-detail-dialog-title" title={group.subject} className="soup-modal-title truncate">
             {group.subject}
           </div>
           <div className="c-label">

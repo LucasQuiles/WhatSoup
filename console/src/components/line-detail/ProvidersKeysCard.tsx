@@ -62,6 +62,7 @@ const KeyBadge: FC<{ keyPresent: boolean | null }> = ({ keyPresent }) => {
   const Icon = spec.icon
   return (
     <span
+      title={spec.label}
       className="text-xs inline-flex items-center font-mono font-medium rounded-sm tracking-[var(--tracking-pill)] whitespace-nowrap gap-[var(--sp-0h)] py-[var(--bw)] px-[var(--sp-1h)]"
       style={{ color: spec.color, backgroundColor: spec.bg }}
     >
