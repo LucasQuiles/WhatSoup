@@ -657,6 +657,11 @@ deterministic guards plus theme parity conditioned on the semantic tokens file b
 fitness taxonomy stops claiming a blocking file-size ratchet guard that does not exist;
 implement-or-demote recorded as an open operator decision.
 
+2026-06-14 follow-up: the shared design chain (`npm run verify:console-design`) replaces the partial
+quality.yml design mini-list and is also wired into tag-release CI. It covers the former four/five
+gates plus token drift, contrast, raw-form inventory, color semantics, resilience, font assets,
+brand assets, and design-lint fixtures. `guard:safeguard-diagnostics` now pins both workflow calls.
+
 ---
 
 ## Per-directory coverage ratchet (report-only) — 2026-06-12

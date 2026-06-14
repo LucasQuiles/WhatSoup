@@ -271,6 +271,30 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     remediation: 'Restore CI fail-closed behavior for missing test-integrity tooling.',
   },
   {
+    id: 'quality-ci-console-design-chain',
+    category: 'guard-chain',
+    file: '.github/workflows/quality.yml',
+    anchors: [
+      'name: Install console dependencies',
+      'name: Console build',
+      'name: Console design verification',
+      'run: npm run verify:console-design',
+    ],
+    remediation: 'Restore the shared console design verification chain in quality.yml CI.',
+  },
+  {
+    id: 'tag-release-console-design-chain',
+    category: 'guard-chain',
+    file: '.github/workflows/tag-release-gate.yml',
+    anchors: [
+      'name: Install console dependencies',
+      'name: Console build',
+      'name: Console design verification',
+      'run: npm run verify:console-design',
+    ],
+    remediation: 'Restore the shared console design verification chain in tag-release-gate.yml.',
+  },
+  {
     id: 'pre-commit-design-system-hygiene',
     category: 'guard-chain',
     file: '.husky/pre-commit',

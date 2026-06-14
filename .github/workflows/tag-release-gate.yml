@@ -90,3 +90,6 @@ jobs:
 
       - name: Console build
         run: npm --prefix console run build
+
+      - name: Console design verification
+        run: npm run verify:console-design

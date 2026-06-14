@@ -873,8 +873,10 @@ landed `ba4ed643`):
   EMPTY console-wide since wave 4. Both rules remain shadow-tracked outside the M list.
 - **Group P** (soup/no-legacy-tokens, soup/no-utility-smell): scoped-error inside
   `components/primitives/**` (born-clean tier); both remain shadow outside primitives.
-- **theme-parity script**: CI-blocking — `design:theme-parity` runs in `verify:push:branch`,
-  `verify:release`, and quality.yml CI (wired `44897b16`, parity completed `f09f5dc3`).
+- **Shared design verification chain**: CI-blocking — `npm run verify:console-design` runs in
+  `verify:push:branch`, `verify:release`, quality.yml CI, and tag-release CI. It owns theme parity,
+  token drift, contrast, shadow baseline, raw-form inventory, design regression/metrics/burndown,
+  color semantics, resilience, font assets, brand assets, and design-lint fixture coverage.
 - **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
   Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 13 14 15 16 17)` — ten
@@ -883,7 +885,8 @@ landed `ba4ed643`):
   `raw-color-css` ratcheted to zero. The burndown scanner also carries a zeroed
   `raw-font-size-css` category for CSS type-scale re-entry. Checks 18–20 remain report-only per the
   §2 lifecycle, and the remaining immature checks each sit behind a named landing gate in the
-  script's justification block.
+  script's justification block. Workflow drift for the shared design chain is pinned by
+  `guard:safeguard-diagnostics`.
 All other rule rows are unchanged: states verified still accurate against the live configs
 (brand-regression, raw-form-control, infinite-animation, literal-status-colors,
 inline-dismiss-handler, format-bypass, duplicate-shell remain in the shadow config;

@@ -154,6 +154,18 @@ const requiredFiles: Record<string, string> = {
     'GITHUB_ACTIONS=true',
     'baseline --check --ci',
   ].join('\n'),
+  '.github/workflows/quality.yml': [
+    'name: Install console dependencies',
+    'name: Console build',
+    'name: Console design verification',
+    'run: npm run verify:console-design',
+  ].join('\n'),
+  '.github/workflows/tag-release-gate.yml': [
+    'name: Install console dependencies',
+    'name: Console build',
+    'name: Console design verification',
+    'run: npm run verify:console-design',
+  ].join('\n'),
   '.husky/pre-commit': [
     'npm run guard:repo:staged',
     'npm run guard:publication:staged',
@@ -278,6 +290,34 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'pre-commit-design-system-hygiene'))
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['npm run guard:design-system-hygiene']) });
+  });
+
+  it('fails when CI omits the shared console design verification chain', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': requiredFiles['.github/workflows/quality.yml']
+          .replace('run: npm run verify:console-design', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
+  });
+
+  it('fails when tag release CI omits the shared console design verification chain', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/tag-release-gate.yml': requiredFiles['.github/workflows/tag-release-gate.yml']
+          .replace('run: npm run verify:console-design', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
   });
 
   it('fails when a sensitive-surface anchor is removed', () => {

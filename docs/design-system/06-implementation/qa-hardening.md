@@ -522,8 +522,8 @@ The root verification scripts call one shared design-system audit tail:
 npm run verify:console-design
 ```
 
-This chain is the DRY owner for non-browser console design checks in `verify:push:branch` and
-`verify:release`. It currently runs, in order:
+This chain is the DRY owner for non-browser console design checks in `verify:push:branch`,
+`verify:release`, quality.yml CI, and tag-release CI. It currently runs, in order:
 
 1. `npm --prefix console run design:theme-parity`
 2. `npm --prefix console run design:token-drift`
@@ -538,11 +538,12 @@ This chain is the DRY owner for non-browser console design checks in `verify:pus
 11. `npm --prefix console run design:brand-assets`
 12. `npm --prefix console run design:lint-fixtures`
 
-`scripts/safeguard-diagnostics.ts` enforces both the shared chain and the fact that push/release
-verification call it. Removing, reordering, or bypassing this chain is a guard-chain failure.
+`scripts/safeguard-diagnostics.ts` enforces the shared chain and the fact that push/release
+verification plus CI workflows call it. Removing, reordering, or bypassing this chain is a
+guard-chain failure.
 
-Report-only audits inside this chain remain report-only. Their presence in `verify:*` proves that a
-structured inventory was generated during the verification run; it does not prove the inventory is
+Report-only audits inside this chain remain report-only. Their presence in the shared chain proves
+that a structured inventory was generated during the verification run; it does not prove the inventory is
 empty. Any final acceptance claim must cite the finding counts and promotion mode, not merely the
 script exit code.
 

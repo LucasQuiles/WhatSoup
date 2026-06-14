@@ -159,23 +159,8 @@ jobs:
       - name: Console build
         run: npm --prefix console run build
 
-      - name: Console lint
-        run: npm --prefix console run lint
-
-      - name: Console design theme parity
-        run: npm --prefix console run design:theme-parity
-
-      - name: Console design shadow baseline
-        run: npm --prefix console run lint:shadow:baseline
-
-      - name: Console design regression
-        run: npm --prefix console run design:regression
-
-      - name: Console design metrics
-        run: npm --prefix console run design:metrics
-
-      - name: Console design burndown
-        run: npm --prefix console run design:burndown
+      - name: Console design verification
+        run: npm run verify:console-design
 
       - name: Cache Playwright browsers
         uses: actions/cache@v4
