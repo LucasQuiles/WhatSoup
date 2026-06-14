@@ -1,12 +1,11 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 356,
+  "total": 355,
   "rules": {
     "no-restricted-syntax :: src/components/line-detail/ModeTab.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/PipelineTab.tsx": 1,
     "no-restricted-syntax :: src/components/MessageContent.tsx": 5,
     "no-restricted-syntax :: src/components/Nav.tsx": 6,
-    "no-restricted-syntax :: src/components/wizard/ModelAuthStep.tsx": 1,
     "no-restricted-syntax :: src/hooks/use-toast.tsx": 1,
     "no-restricted-syntax :: src/mock-data.ts": 5,
     "soup/no-brand-regression :: src/components/Nav.tsx": 1,

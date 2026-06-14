@@ -2,7 +2,7 @@
   "generated": "design burndown per-category ceiling (fall-only ratchet)",
   "categories": {
     "accent-law": 0,
-    "base-wall": 20,
+    "base-wall": 19,
     "brand-regression": 2,
     "half-step": 64,
     "legacy-token-tsx": 331,
