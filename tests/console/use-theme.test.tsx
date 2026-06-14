@@ -3,6 +3,8 @@
  */
 // Theme hook behavior: default, hydration from persisted preference, toggling,
 // invalid stored values, and data-theme attribute application (tokens-v3 §5 mechanics).
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { useTheme } from '../../console/src/hooks/use-theme'
@@ -94,7 +96,7 @@ describe('useTheme', () => {
     // or the page flashes the wrong theme before hydration.
     const html = readIndexHtml()
     const colors = readSurfaceBaseTokens()
-    const initialThemeColor = /<meta\s+name="theme-color"\s+content="([^"]+)"\s*\/?>/.exec(html)?.[1]
+    const initialThemeColor = readInitialThemeColor(html)
 
     expect(html).toContain(THEME_STORAGE_KEY)
     expect(html).toContain('data-theme')
@@ -104,11 +106,13 @@ describe('useTheme', () => {
   })
 })
 
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 const repoRoot = resolve(import.meta.dirname, '../..')
 function readIndexHtml(): string {
   return readFileSync(resolve(repoRoot, 'console/index.html'), 'utf8')
+}
+
+function readInitialThemeColor(html: string): string | undefined {
+  return /<meta\s+name="theme-color"\s+content="([^"]+)"\s*\/?>/.exec(html)?.[1]
 }
 
 function readSurfaceBaseTokens(): { dark: string; light: string } {
