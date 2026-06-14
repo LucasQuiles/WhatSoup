@@ -3131,6 +3131,14 @@ def provider_keychain_unlock_status(keychain_path: Path, timeout_seconds: int) -
     return provider_keychain_status("\n".join(part for part in [stdout, stderr] if part), rc)
 
 
+def provider_keychain_unlock_allowed(profile: dict[str, Any], item: dict[str, Any]) -> bool:
+    if "providerCredentialUnlockKeychain" in item:
+        return profile_bool(item, "providerCredentialUnlockKeychain", False)
+    if "providerCredentialUnlockKeychain" in profile:
+        return profile_bool(profile, "providerCredentialUnlockKeychain", False)
+    return env_flag("BOT_ERRORS_PROVIDER_KEYCHAIN_UNLOCK", False)
+
+
 def provider_host_uptime_seconds() -> int | None:
     dry_uptime = os.environ.get("BOT_ERRORS_DRY_UPTIME_SECONDS")
     if dry_uptime is not None:
@@ -3453,7 +3461,12 @@ def provider_credential_fragments(profile: dict[str, Any], item: dict[str, Any],
         f"credential_account={redact_evidence_string(account, 80)}",
     ]
     keychain_path = Path.home() / "Library" / "Keychains" / "login.keychain-db"
-    fragments.append(f"keychain_unlock_status={provider_keychain_unlock_status(keychain_path, timeout_seconds)}")
+    if provider_keychain_unlock_allowed(profile, item):
+        fragments.append("keychain_unlock_policy=enabled")
+        fragments.append(f"keychain_unlock_status={provider_keychain_unlock_status(keychain_path, timeout_seconds)}")
+    else:
+        fragments.append("keychain_unlock_policy=observe_only")
+        fragments.append("keychain_unlock_status=skipped")
 
     try:
         stdout, stderr, rc, _ = provider_command_output(

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 standard library, pytest, Vitest health-check integration tests, BOT ERRORS runtime-manifest guard.
 
-**Status:** active decision package; not implemented on `main` and not implemented in the local compose branch.
+**Status:** active — implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. The approval boundary now applies to publishing/merging the compose branch, not to reimplementing this plan.
 
 ---
 
@@ -25,6 +25,14 @@
 ## Risk Statement
 
 The current probe is useful but overconfident: a read-only health check can unlock the login keychain as a side effect, then present later credential probes as if they were observed in the original runtime state. That makes headless credential failures harder to reason about, changes host state during diagnostics, and turns an evidence-gathering path into an implicit remediation path.
+
+## Local Compose Outcome
+
+- Default provider credential diagnostics now emit `keychain_unlock_policy=observe_only` and `keychain_unlock_status=skipped`.
+- `security unlock-keychain -p "" ~/Library/Keychains/login.keychain-db` is only called when `BOT_ERRORS_PROVIDER_KEYCHAIN_UNLOCK=1` or `providerCredentialUnlockKeychain` is true on the profile/item.
+- Item-level `providerCredentialUnlockKeychain: false` overrides profile and environment opt-ins.
+- Existing credential item, secret, keychain access, Claude state, and GUI-session probes remain active in observe-only mode.
+- `deploy/bot-errors-runtime-manifest.json` tracks the changed `bot-errors-health-check.py` hash.
 
 ## Decision Record
 
