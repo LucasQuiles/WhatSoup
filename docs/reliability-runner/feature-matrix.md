@@ -6,7 +6,7 @@ Last updated: 2026-06-14.
 
 | ID | Status | Feature / work item | Completion | Evidence | Completion gate |
 |---|---|---:|---:|---|---|
-| RR-001 | TRIAGED | BOT ERRORS reliability protocol finalization | 85% | `docs/sdlc/closed/bot-errors-reliability-20260531/state.md`; `docs/sdlc/closed/bot-errors-reliability-20260531/implementation-plan.md`; `deploy/scripts/README-bot-errors.md` | Finish remaining C4b/C10 residuals and publish the local close-out docs branch. |
+| RR-001 | TRIAGED | BOT ERRORS reliability protocol finalization | 85% | `docs/sdlc/closed/bot-errors-reliability-20260531/state.md`; `docs/sdlc/closed/bot-errors-reliability-20260531/implementation-plan.md`; `deploy/scripts/README-bot-errors.md` | Finish remaining C4b/C10 residuals, then mark RR-001 resolved with final fleet evidence. |
 | RR-002 | TRIAGED | Fleet evidence matrix completion | 75% | runtime probes and current health evidence | Every reachable fleet row has runtime auth, provider, linked-device, and source/deploy proof. |
 | RR-003 | TRIAGED | Linked-device/auth-bond lifecycle hardening | 60% | `src/transport/auth-bond.ts`; `src/lib/auth-bond-policy.ts`; BOT ERRORS health-check tests | Physical relink is recommended only after restore paths fail and terminal auth evidence exists. |
 | RR-004 | TRIAGED | Provider fallback and health taxonomy completion | 75% | provider health/fallback tests; PR #829 merged as `95bee767` | Active fallback degrades health, terminal fallback failures escalate, and quota/auth/keychain/billing/missing-credential classes are distinct. |
