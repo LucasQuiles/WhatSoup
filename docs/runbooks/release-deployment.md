@@ -97,7 +97,7 @@ Example one-shot command:
 
 ```bash
 bash scripts/run-with-pinned-node.sh scripts/live-release-drift-alert.ts \
-  --release "$HOME/LAB/WhatSoup-release-<commit>" \
+  --launchd-plist "$HOME/Library/LaunchAgents/com.whatsoup.<instance>.plist" \
   --instance release-bot \
   --source release-drift \
   --json
@@ -105,8 +105,10 @@ bash scripts/run-with-pinned-node.sh scripts/live-release-drift-alert.ts \
 
 Installing a launchd/cron schedule for this command is a live alerting change and
 needs separate named approval. The scheduled job must use the pinned Node runtime
-and the running release path, and it must remain read-only: no apply, re-cut,
-plist mutation, restart, cleanup, WhatsApp turn, or credential change.
+and either an explicit reviewed release path or the active bot plist's
+`WorkingDirectory` via `--launchd-plist`; the latter is preferred so the check
+tracks future re-cuts. It must remain read-only: no apply, re-cut, plist
+mutation, restart, cleanup, WhatsApp turn, or credential change.
 
 ## Live Acceptance
 

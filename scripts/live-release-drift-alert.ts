@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { parsePlist } from './check-service-units.ts';
 import {
   createReleaseSnapshotDriftReport,
   type ReleaseSnapshotDriftReport,
@@ -39,6 +41,7 @@ export interface LiveReleaseDriftAlertResult {
 
 interface ParsedArgs {
   releasePath?: string;
+  launchdPlistPath?: string;
   manifestPath?: string;
   repoRoot: string;
   instance: string;
@@ -80,9 +83,10 @@ const EMIT_ENV_KEYS = [
 
 function usage(): string {
   return [
-    'Usage: scripts/live-release-drift-alert.ts --release /absolute/release/path [options]',
+    'Usage: scripts/live-release-drift-alert.ts (--release /absolute/release/path | --launchd-plist /absolute/plist) [options]',
     '',
     'Options:',
+    '  --launchd-plist /absolute/plist     Read the current release path from plist WorkingDirectory',
     '  --manifest /absolute/manifest.json   Override manifest path for archived checks',
     '  --repo-root /absolute/repo            Repo root containing deploy/scripts/bot-errors-emit.py',
     '  --instance name                      BOT ERRORS instance label (default: release-bot)',
@@ -119,6 +123,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       return value;
     };
     if (arg === '--release') parsed.releasePath = next();
+    else if (arg === '--launchd-plist') parsed.launchdPlistPath = next();
     else if (arg === '--manifest') parsed.manifestPath = next();
     else if (arg === '--repo-root') parsed.repoRoot = next();
     else if (arg === '--instance') parsed.instance = next();
@@ -131,13 +136,24 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--help' || arg === '-h') throw new Error(usage());
     else throw new Error(`unknown argument: ${arg}`);
   }
-  if (!parsed.releasePath) throw new Error('--release is required');
-  parsed.releasePath = requireAbsolute('--release', parsed.releasePath);
+  if (!parsed.releasePath && !parsed.launchdPlistPath) throw new Error('one of --release or --launchd-plist is required');
+  if (parsed.releasePath && parsed.launchdPlistPath) throw new Error('--release and --launchd-plist are mutually exclusive');
+  if (parsed.releasePath) parsed.releasePath = requireAbsolute('--release', parsed.releasePath);
+  if (parsed.launchdPlistPath) parsed.launchdPlistPath = requireAbsolute('--launchd-plist', parsed.launchdPlistPath);
   parsed.repoRoot = requireAbsolute('--repo-root', parsed.repoRoot);
   if (parsed.manifestPath) parsed.manifestPath = requireAbsolute('--manifest', parsed.manifestPath);
   if (!parsed.instance.trim()) throw new Error('--instance must be non-empty');
   if (!parsed.source.trim()) throw new Error('--source must be non-empty');
   return parsed;
+}
+
+export function resolveReleasePathFromLaunchdPlist(plistPath: string): string {
+  const absolutePlistPath = requireAbsolute('--launchd-plist', plistPath);
+  const parsed = parsePlist(readFileSync(absolutePlistPath, 'utf8'));
+  if (!parsed) throw new Error(`invalid launchd plist: ${absolutePlistPath}`);
+  const workingDirectory = parsed.scalarKeys['WorkingDirectory']?.trim();
+  if (!workingDirectory) throw new Error(`launchd plist missing WorkingDirectory: ${absolutePlistPath}`);
+  return requireAbsolute('WorkingDirectory', workingDirectory);
 }
 
 function defaultEmitHelper(repoRoot: string): string {
@@ -233,9 +249,10 @@ export function checkLiveReleaseDrift(options: LiveReleaseDriftAlertOptions): Li
 }
 
 function toOptions(parsed: ParsedArgs): LiveReleaseDriftAlertOptions {
+  const releasePath = parsed.releasePath ?? resolveReleasePathFromLaunchdPlist(parsed.launchdPlistPath!);
   return {
     repoRoot: parsed.repoRoot,
-    releasePath: parsed.releasePath!,
+    releasePath,
     manifestPath: parsed.manifestPath,
     instance: parsed.instance,
     source: parsed.source,
