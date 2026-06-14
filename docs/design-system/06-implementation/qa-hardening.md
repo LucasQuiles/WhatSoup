@@ -454,6 +454,7 @@ It proves browser-only behavior that jsdom cannot establish:
 - one app-owned `main` landmark per route shell and one labeled primary navigation region, using
   mocked route sentinels to prove shell ownership without asserting real-page heading copy;
 - trusted keyboard `:focus-visible` activation through Chromium-driven Tab events;
+- ChatList `role="option"` rows expose a visible focus treatment under trusted Tab focus;
 - focused controls and their outline boxes remain inside reduced-height viewports;
 - Escape closes only the topmost overlay layer when a Popover is open inside a Modal.
 

@@ -162,8 +162,8 @@ are the shadow-baseline falls for that file.
 
 | Surface | Primitives used | Legacy remnants | Adopt % | Blocks |
 |---|---|---|---|---|
-| ChatList.tsx | listbox roving contract implemented (DD-17 traversal half — register row still open; see §4 M2) | none in-file | — | no (in-file) |
-| ChatListItem.tsx | none | div `role="option"` rows have NO focus-visible treatment (M2 — global ring covers button/input/select/textarea/a only; `.c-chat-item` defines hover/active only, composites.css:1016-1020); LT×3: 33, 43, 63; sp-half 41, 55; typing-dot animationDelay literals 0/150/300ms | — | yes (focus ring) |
+| ChatList.tsx | listbox roving contract implemented (DD-17 traversal + visible row focus proof closed) | none in-file | — | no (in-file) |
+| ChatListItem.tsx | none | `.c-chat-item:focus-visible` now provides a visible ring under trusted Tab focus; LT×3: 33, 43, 63; sp-half 41, 55; typing-dot animationDelay literals 0/150/300ms | — | yes (tokens) |
 | MessageBubble.tsx | none | raw `<button>`×2: 81 (retry, c-btn recipe), 186; hand-rolled hover detail card via `c-card--detail` composite (40; DD-18r positioning leg, M1); LT×8; sp-half 215 | 0/2 | yes |
 | MessageContent.tsx | none | LT×15: 44-258 (second-largest component token debt); sp-half 163; no-restricted-syntax×5 | — | yes (tokens) |
 | EmptyState.tsx | none (TableEmpty exists separately in Table primitive) | LT×3: 38, 47, 56 (text-t5/t4 essential-text tiering — DD-8 names empty-state tiering); c-btn-primary retry 66; framer-motion entrance | — | yes (DD-8) |
@@ -199,7 +199,7 @@ was not decomposed).
 | # | What | Where | Spec / primitive gap | Proposed disposition |
 |---|---|---|---|---|
 | M1 | Hover-cards & tooltips: 63 native `title=` attributes (unthemed native browser tooltips) + one hand-rolled hover detail card (`c-card--detail`) | title= across components/pages (63 occurrences); MessageBubble.tsx:40 | interaction-patterns.md §"Tooltips never carry sole information" is the ONLY tooltip law; no tooltip/hover-card component spec in 03-spec/components/, no primitive | Spec decision at C3: either a Tooltip/HoverCard spec+primitive or an explicit ruling that native titles are sanctioned redundant affordances; MessageBubble card rides DD-18r positioning leg |
-| M2 | Focus ring missing on non-element interactives: ChatListItem rows (`div role="option" tabIndex`) get no focus-visible indicator — global outline reset (composites.css:14, :1004) removes outlines, restoration block (composites.css:999-1003) covers button/input/select/textarea/a only, `.c-chat-item` defines hover/active but no :focus-visible | ChatListItem.tsx:21; composites.css:999-1004, 1016-1020 | focus-visible-required rule is shadow/primitives-first; this row family is keyboard-navigable (DD-17 roving) but visually focus-silent | Add `.c-chat-item:focus-visible` ring (or migrate rows to a listbox primitive); flip the DD-17 register row only after this lands — the register's open DD-17 is half-stale (roving implemented in ChatList.tsx, ring missing) |
+| ~~M2~~ | **DONE** — ChatListItem rows (`div role="option" tabIndex`) now receive `.c-chat-item:focus-visible`, with an inset tokenized ring and a real-browser trusted-Tab proof that the focused option has non-`none` `box-shadow`. | ChatListItem.tsx; composites.css `.c-chat-item:focus-visible`; `tests/browser/a11y-contracts.test.tsx` | focus-visible-required rule remains shadow/primitives-first; this closes the known keyboard-visible consumer gap for the chat list row family. | Closed; DD-17 is no longer half-stale on the focus-visibility leg. |
 | M3 | Loading/skeleton states: TableSkeleton hardcodes inline px widths; no skeleton component spec | Skeleton.tsx (~line 19, `${140 + i * 20}px`) | state-taxonomy covers loading as a state; no skeleton spec/primitive; shimmer waivered WVR-005 pending C5 motion disposition | Tokenize widths or rule skeleton geometry exempt; fold into C5 shimmer disposition |
 | M4 | Charts family unspecced: 4 chart wrappers + ChartPanel render recharts with legacy-token axis/series/tooltip styling | FleetMetricsChart/FleetSessionChart/FleetTokenChart/MetricsChart, chart-utils.ts:7-20 | no chart spec in 03-spec/components/; WVR-001 covers margins only, not the legacy color refs | C3 chart surface slice (already named as WVR-001's cleanup_trigger): chart token adapter + retoken axis/tooltip styles |
 | M5 | UnlockScreen never sliced: raw password input, raw submit button, legacy tokens; appears in NO migration packet, M list, or burndown register — only in test-coverage docs | UnlockScreen.tsx:33-48 | input.md/button.md specs exist; nothing adopted | Add to C3 as a (small) screen slice; it is a first-run/locked-state surface the operator sees |
@@ -297,7 +297,7 @@ final token/brand burn.**
 
 ## 8. Prioritized burndown (blocks-100% first)
 
-Blocking items (14):
+Blocking items (14 tracked; B12 now closed):
 
 1. **B1 — Legacy token vocabulary burn** (354 TSX falls ×61 files; 153 composites.css refs;
    scrollbar M8; `--overlay-badge` literal). Largest debts first: Inbox 25, ConfigStep 21,
@@ -326,7 +326,7 @@ Blocking items (14):
    ConfigStep's 5 raw buttons; ModelAuthStep radios.
 10. **B10 — UnlockScreen slice (M5)** — currently sliced nowhere.
 11. **B11 — MetricsTab Tokens/Sessions → Tabs (DD-15)** + its 3 raw buttons.
-12. **B12 — M2 focus ring on ChatListItem rows** (+ then close DD-17 honestly).
+12. ~~**B12 — M2 focus ring on ChatListItem rows**~~ — **DONE** with `.c-chat-item:focus-visible` and trusted browser proof.
 13. **B13 — DD-10 sort-button 24px floor fix** (register: blocks final acceptance).
 14. **B14 — DD-18r remaining responsive legs** (Inbox viewport rows, drawer-flip case, legacy
     modal sizing SSOT, nav width pressure, MessageBubble hover-card positioning, non-Fleet

@@ -83,6 +83,7 @@ vi.mock('../../console/src/lib/api', () => ({
 
 import App from '../../console/src/App';
 import { ChatPicker } from '../../console/src/components/shared/ChatPicker';
+import ChatList from '../../console/src/components/ChatList';
 import { Button, Modal, ModalBody, ModalFooter, ModalHeader } from '../../console/src/components/primitives';
 import type { ChatItem } from '../../console/src/types';
 
@@ -240,5 +241,19 @@ describe('D1.3 trusted focus-visible and clipping contract', () => {
     const active = document.activeElement as HTMLElement | null;
     expect(active?.tagName).toBe('BUTTON');
     assertVisibleFocusBox(active!);
+  });
+
+  it('ChatList option rows expose a visible focus treatment under trusted Tab focus', async () => {
+    const { getByRole } = await render(
+      <ChatList chats={CHATS} selectedChat={null} onSelect={vi.fn()} />,
+    );
+
+    await userEvent.tab();
+    const row = getByRole('option', { name: 'Open conversation with Alice' }).element() as HTMLElement;
+    const styles = window.getComputedStyle(row);
+
+    expect(document.activeElement).toBe(row);
+    expect(row.matches(':focus-visible')).toBe(true);
+    expect(styles.boxShadow).not.toBe('none');
   });
 });
