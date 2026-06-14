@@ -108,6 +108,43 @@ export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, class
   />
 );
 
+export interface RadioFieldProps {
+  label: ReactNode;
+  name: string;
+  value: string;
+  checked: boolean;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  className?: string;
+  inputClassName?: string;
+  labelClassName?: string;
+}
+
+export const RadioField: FC<RadioFieldProps> = ({
+  label,
+  name,
+  value,
+  checked,
+  onChange,
+  disabled,
+  className,
+  inputClassName,
+  labelClassName,
+}) => (
+  <label className={`c-checkbox-row ${className ?? ''}`}>
+    <input
+      type="radio"
+      name={name}
+      value={value}
+      checked={checked}
+      disabled={disabled}
+      onChange={event => onChange(event.target.value)}
+      className={inputClassName}
+    />
+    <span className={`text-data ${labelClassName ?? ''}`} style={{ color: 'var(--text-2)' }}>{label}</span>
+  </label>
+);
+
 export interface CheckboxFieldProps {
   label: ReactNode;
   checked: boolean;

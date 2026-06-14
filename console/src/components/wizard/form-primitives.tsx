@@ -4,6 +4,7 @@ export {
   NumberInput,
   SelectInput,
   TextArea,
+  RadioField,
   CheckboxField,
 } from '../primitives/FormControl';
 export type {
@@ -12,5 +13,6 @@ export type {
   NumberInputProps,
   SelectInputProps,
   TextAreaProps,
+  RadioFieldProps,
   CheckboxFieldProps,
 } from '../primitives/FormControl';

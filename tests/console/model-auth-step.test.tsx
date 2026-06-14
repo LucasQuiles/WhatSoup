@@ -40,6 +40,7 @@ describe('ModelAuthStep — view dispatch by data.type', () => {
     renderStep({ data: { type: 'agent' } })
 
     expect(screen.getByText('Anthropic Auth')).toBeDefined()
+    expect(screen.getByRole('radiogroup', { name: 'Anthropic Auth' })).toBeDefined()
     expect(screen.getByRole('radio', { name: /API Key/ })).toBeDefined()
     expect(screen.getByRole('radio', { name: /Existing Claude session/ })).toBeDefined()
     expect(screen.getByRole('tab', { name: 'Anthropic' })).toBeDefined()
@@ -75,6 +76,7 @@ describe('ModelAuthStep — chat view: Anthropic tab is active by default', () =
 
     const apiInput = screen.getByPlaceholderText('sk-ant-...') as HTMLInputElement
     expect(apiInput).toBeDefined()
+    expect(screen.getByLabelText('API Key')).toBe(apiInput)
     expect(apiInput.type).toBe('password')
   })
 
@@ -165,10 +167,7 @@ describe('ModelAuthStep — ApiKeyInput visibility toggle', () => {
     const input = screen.getByPlaceholderText('sk-ant-...') as HTMLInputElement
     expect(input.type).toBe('password')
 
-    // The toggle button is the eye/eye-off button adjacent to the input — it is the only
-    // <button> inside the Anthropic key row that has no name and no role attribute.
-    const toggle = input.parentElement!.querySelector('button') as HTMLButtonElement
-    expect(toggle).toBeTruthy()
+    const toggle = screen.getByRole('button', { name: 'Show API key' }) as HTMLButtonElement
 
     fireEvent.click(toggle)
     expect(input.type).toBe('text')

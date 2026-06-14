@@ -1,8 +1,8 @@
-import { type FC, useState } from 'react'
+import { type FC, useId, useState } from 'react'
 import { Tabs, Tab } from '../primitives/Tabs'
 import { Button } from '../primitives/Button'
 import { Check, Eye, EyeOff } from 'lucide-react'
-import { SelectInput } from '../primitives'
+import { RadioField, SelectInput, TextInput } from '../primitives'
 import WizardStep from './WizardStep'
 
 interface ModelAuthStepProps {
@@ -151,23 +151,24 @@ const ApiKeyInput: FC<{
   helper?: string
   error?: string
 }> = ({ label, value, onChange, placeholder, helper, error }) => {
+  const inputId = useId()
   const [visible, setVisible] = useState(false)
   const filled = value.trim().length > 0
 
   return (
     <div className="flex flex-col gap-[var(--sp-1)]">
-      <label className="c-label c-field-label">{label}</label>
+      <label htmlFor={inputId} className="c-label c-field-label">{label}</label>
       <div className="flex items-center gap-[var(--sp-2)]">
         <div className="relative flex-1 min-w-0">
-          <input
+          <TextInput
+            id={inputId}
             type={visible ? 'text' : 'password'}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             placeholder={placeholder}
-            className="c-input w-full font-mono pr-[var(--sp-8)]"
-            style={{
-              borderColor: error ? 'var(--color-s-crit)' : filled ? 'var(--wizard-accent)' : 'var(--b2)',
-            }}
+            className="w-full pr-[var(--sp-8)]"
+            error={Boolean(error)}
+            confirmed={filled}
           />
           <Button
             variant="ghost"
@@ -258,27 +259,25 @@ const AgentView: FC<{
       <div className="flex flex-col gap-[var(--sp-2)]">
         <span className="c-heading">Anthropic Auth</span>
         <div className="flex items-center gap-[var(--sp-2)]">
-          <div className="flex flex-1 min-w-0 gap-[var(--sp-4)]">
-            <label className="flex items-center cursor-pointer gap-[var(--sp-2)] text-t2">
-              <input
-                type="radio"
-                name="authMethod"
-                value="api_key"
-                checked={authMethod === 'api_key'}
-                onChange={() => onChange({ authMethod: 'api_key' })}
-              />
-              <span className="c-body">API Key</span>
-            </label>
-            <label className="flex items-center cursor-pointer gap-[var(--sp-2)] text-t2">
-              <input
-                type="radio"
-                name="authMethod"
-                value="oauth"
-                checked={authMethod === 'oauth'}
-                onChange={() => onChange({ authMethod: 'oauth' })}
-              />
-              <span className="c-body">Existing Claude session</span>
-            </label>
+          <div className="flex flex-1 min-w-0 gap-[var(--sp-4)]" role="radiogroup" aria-label="Anthropic Auth">
+            <RadioField
+              name="authMethod"
+              value="api_key"
+              checked={authMethod === 'api_key'}
+              onChange={() => onChange({ authMethod: 'api_key' })}
+              label="API Key"
+              className="cursor-pointer"
+              labelClassName="c-body"
+            />
+            <RadioField
+              name="authMethod"
+              value="oauth"
+              checked={authMethod === 'oauth'}
+              onChange={() => onChange({ authMethod: 'oauth' })}
+              label="Existing Claude session"
+              className="cursor-pointer"
+              labelClassName="c-body"
+            />
           </div>
           <Check size={16} className="wizard-check" />
         </div>

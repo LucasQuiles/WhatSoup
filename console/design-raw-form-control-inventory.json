@@ -21,20 +21,20 @@
   },
   "totals": {
     "by_classification": {
-      "consumer_migration": 23
+      "consumer_migration": 20
     },
     "by_consumer_group": {
       "line_detail_and_modals": 16,
       "pages": 1,
-      "wizard_consumers": 6
+      "wizard_consumers": 3
     },
     "by_element": {
-      "input": 14,
+      "input": 11,
       "select": 2,
       "textarea": 7
     },
-    "files": 7,
-    "total": 23
+    "files": 6,
+    "total": 20
   },
   "by_file": [
     {
@@ -113,20 +113,6 @@
         436,
         692,
         752
-      ],
-      "total": 3
-    },
-    {
-      "by_element": {
-        "input": 3
-      },
-      "classification": "consumer_migration",
-      "consumer_group": "wizard_consumers",
-      "file": "console/src/components/wizard/ModelAuthStep.tsx",
-      "lines": [
-        162,
-        263,
-        273
       ],
       "total": 3
     },
@@ -331,36 +317,6 @@
       "element": "input",
       "file": "console/src/components/wizard/ConfigStep.tsx",
       "line": 752,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<input"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 11,
-      "consumer_group": "wizard_consumers",
-      "element": "input",
-      "file": "console/src/components/wizard/ModelAuthStep.tsx",
-      "line": 162,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<input"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 15,
-      "consumer_group": "wizard_consumers",
-      "element": "input",
-      "file": "console/src/components/wizard/ModelAuthStep.tsx",
-      "line": 263,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<input"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 15,
-      "consumer_group": "wizard_consumers",
-      "element": "input",
-      "file": "console/src/components/wizard/ModelAuthStep.tsx",
-      "line": 273,
       "rule": "soup/no-raw-form-control",
       "snippet": "<input"
     },

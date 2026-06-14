@@ -6,11 +6,11 @@
     "brand-regression": 2,
     "focus-suppression": 1,
     "half-step": 64,
-    "legacy-token-tsx": 337,
+    "legacy-token-tsx": 334,
     "legacy-var-css": 220,
     "raw-color-css": 0,
     "raw-font-size-css": 0,
-    "raw-form-control": 23,
+    "raw-form-control": 20,
     "utility-smell": 1
   }
 }

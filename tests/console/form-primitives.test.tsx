@@ -13,6 +13,7 @@ import {
   NumberInput,
   SelectInput,
   TextArea,
+  RadioField,
   CheckboxField,
 } from '../../console/src/components/primitives/FormControl'
 
@@ -264,6 +265,81 @@ describe('TextArea', () => {
 
     rerender(<TextArea aria-label="Body" value="" onChange={() => {}} confirmed />)
     expectBorderColor(textarea, 'var(--wizard-accent)')
+  })
+})
+
+// RadioField
+
+describe('RadioField', () => {
+  it('renders checked state, label text, value, and optional classes', () => {
+    render(
+      <RadioField
+        label="API key"
+        name="authMethod"
+        value="api_key"
+        checked
+        onChange={() => {}}
+        className="row-extra"
+        inputClassName="accent-extra"
+        labelClassName="label-extra"
+      />,
+    )
+
+    const radio = screen.getByRole('radio', { name: 'API key' }) as HTMLInputElement
+    const row = radio.closest('label')
+    const labelText = screen.getByText('API key')
+
+    expect(radio.checked).toBe(true)
+    expect(radio.name).toBe('authMethod')
+    expect(radio.value).toBe('api_key')
+    expect(radio.classList.contains('accent-extra')).toBe(true)
+    expect(row?.classList.contains('c-checkbox-row')).toBe(true)
+    expect(row?.classList.contains('row-extra')).toBe(true)
+    expect(labelText.classList.contains('label-extra')).toBe(true)
+  })
+
+  it('emits the selected value through user interaction', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+
+    function Harness() {
+      const [selected, setSelected] = useState('api_key')
+      const handleChange = (next: string) => {
+        onChange(next)
+        setSelected(next)
+      }
+
+      return (
+        <div role="radiogroup" aria-label="Auth method">
+          <RadioField
+            label="API key"
+            name="authMethod"
+            value="api_key"
+            checked={selected === 'api_key'}
+            onChange={handleChange}
+          />
+          <RadioField
+            label="Existing session"
+            name="authMethod"
+            value="oauth"
+            checked={selected === 'oauth'}
+            onChange={handleChange}
+          />
+        </div>
+      )
+    }
+
+    render(<Harness />)
+
+    const apiKey = screen.getByRole('radio', { name: 'API key' }) as HTMLInputElement
+    const oauth = screen.getByRole('radio', { name: 'Existing session' }) as HTMLInputElement
+    expect(apiKey.checked).toBe(true)
+    expect(oauth.checked).toBe(false)
+
+    await user.click(oauth)
+    expect(apiKey.checked).toBe(false)
+    expect(oauth.checked).toBe(true)
+    expect(onChange).toHaveBeenLastCalledWith('oauth')
   })
 })
 

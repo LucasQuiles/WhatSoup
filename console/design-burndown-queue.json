@@ -2,19 +2,19 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 670,
-    "blocking": 605,
+    "total": 664,
+    "blocking": 599,
     "byCategory": {
       "accent-law": 0,
       "base-wall": 22,
       "brand-regression": 2,
       "focus-suppression": 1,
       "half-step": 64,
-      "legacy-token-tsx": 337,
+      "legacy-token-tsx": 334,
       "legacy-var-css": 220,
       "raw-color-css": 0,
       "raw-font-size-css": 0,
-      "raw-form-control": 23,
+      "raw-form-control": 20,
       "utility-smell": 1
     }
   },
@@ -122,7 +122,7 @@
       "id": "burndown:legacy-token-tsx",
       "category": "legacy-token-tsx",
       "severity": "blocking",
-      "count": 337,
+      "count": 334,
       "files": [
         {
           "path": "src/App.tsx",
@@ -361,7 +361,7 @@
         },
         {
           "path": "src/components/wizard/ModelAuthStep.tsx",
-          "count": 6,
+          "count": 3,
           "lines": null
         },
         {
@@ -604,7 +604,7 @@
       "id": "burndown:raw-form-control",
       "category": "raw-form-control",
       "severity": "blocking",
-      "count": 23,
+      "count": 20,
       "files": [
         {
           "path": "src/components/line-detail/ConfigEditDialog.tsx",
@@ -628,11 +628,6 @@
         },
         {
           "path": "src/components/wizard/ConfigStep.tsx",
-          "count": 3,
-          "lines": null
-        },
-        {
-          "path": "src/components/wizard/ModelAuthStep.tsx",
           "count": 3,
           "lines": null
         },
