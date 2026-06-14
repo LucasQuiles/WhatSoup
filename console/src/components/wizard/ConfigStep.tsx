@@ -685,28 +685,28 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                     const current = agentOptions.enabledPlugins ?? {}
                     const isEnabled = current[plugin.key] ?? true // default: inherit (enabled)
                     return (
-                      <label
+                      <CheckboxField
                         key={plugin.key}
-                        className="flex items-start cursor-pointer gap-[var(--sp-2)] py-[var(--sp-1)] px-0"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isEnabled}
-                          onChange={(e) => {
-                            const updated = { ...current, [plugin.key]: e.target.checked }
-                            handleAgentOption('enabledPlugins', updated)
-                          }}
-                          className="mt-[var(--sp-0h)]"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className={`${isEnabled ? 'text-t1' : 'text-t4'} text-data`}>
-                            {plugin.label}
-                          </div>
-                          <div className="text-t5 text-xs">
-                            {plugin.description}
-                          </div>
-                        </div>
-                      </label>
+                        checked={isEnabled}
+                        onChange={(checked) => {
+                          const updated = { ...current, [plugin.key]: checked }
+                          handleAgentOption('enabledPlugins', updated)
+                        }}
+                        className="cursor-pointer py-[var(--sp-1)] px-0"
+                        inputClassName="self-start mt-[var(--sp-0h)]"
+                        labelClassName="flex-1 min-w-0"
+                        label={(
+                          <span className="block flex-1 min-w-0">
+                            <span className={`${isEnabled ? 'text-t1' : 'text-t4'} text-data block`}>
+                              {plugin.label}
+                            </span>
+                            {' '}
+                            <span className="text-t5 text-xs block">
+                              {plugin.description}
+                            </span>
+                          </span>
+                        )}
+                      />
                     )
                   })}
                 </div>

@@ -318,6 +318,32 @@ describe('ConfigStep — real React handler wiring', () => {
     })
   })
 
+  describe('enabled plugin checkboxes', () => {
+    it('renders plugin toggles through CheckboxField and patches enabledPlugins', () => {
+      const { onChange } = renderConfigStep({
+        initialData: { type: 'agent', name: 'sage' },
+      })
+      openPermissionsTab()
+      onChange.mockClear()
+
+      const checkbox = screen.getByRole('checkbox', {
+        name: /Superpowers Brainstorming, TDD, debugging, plans, verification/,
+      }) as HTMLInputElement
+      const row = checkbox.closest('label')
+
+      expect(checkbox.checked).toBe(true)
+      expect(row?.classList.contains('c-checkbox-row')).toBe(true)
+
+      fireEvent.click(checkbox)
+
+      expect(onChange).toHaveBeenCalledTimes(1)
+      const patch = onChange.mock.calls[0][0] as {
+        agentOptions: { enabledPlugins: Record<string, boolean> }
+      }
+      expect(patch.agentOptions.enabledPlugins['superpowers@superpowers-marketplace']).toBe(false)
+    })
+  })
+
   // ──────────────────────────────────────────────────────────────────────
   // Contract 2: form validation error rendering
   // ──────────────────────────────────────────────────────────────────────

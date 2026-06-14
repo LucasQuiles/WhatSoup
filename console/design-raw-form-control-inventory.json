@@ -21,20 +21,20 @@
   },
   "totals": {
     "by_classification": {
-      "consumer_migration": 17
+      "consumer_migration": 16
     },
     "by_consumer_group": {
       "line_detail_and_modals": 13,
       "pages": 1,
-      "wizard_consumers": 3
+      "wizard_consumers": 2
     },
     "by_element": {
-      "input": 10,
+      "input": 9,
       "select": 1,
       "textarea": 6
     },
     "files": 5,
-    "total": 17
+    "total": 16
   },
   "by_file": [
     {
@@ -88,17 +88,16 @@
     },
     {
       "by_element": {
-        "input": 3
+        "input": 2
       },
       "classification": "consumer_migration",
       "consumer_group": "wizard_consumers",
       "file": "console/src/components/wizard/ConfigStep.tsx",
       "lines": [
         436,
-        692,
         752
       ],
-      "total": 3
+      "total": 2
     },
     {
       "by_element": {
@@ -251,16 +250,6 @@
       "element": "input",
       "file": "console/src/components/wizard/ConfigStep.tsx",
       "line": 436,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<input"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 25,
-      "consumer_group": "wizard_consumers",
-      "element": "input",
-      "file": "console/src/components/wizard/ConfigStep.tsx",
-      "line": 692,
       "rule": "soup/no-raw-form-control",
       "snippet": "<input"
     },
