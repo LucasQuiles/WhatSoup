@@ -8,6 +8,7 @@ import {
   findDocDrift,
   findDesignBurndownSummary,
   findDesignGuardTestInventory,
+  findDesignRegressionBlockingChecks,
   findDesignRegressionCheckCount,
   findRawFormControlInventory,
   findShadowBaselineInventory,
@@ -24,6 +25,7 @@ const currentDesignRegressionCheckCount = findDesignRegressionCheckCount(repoRoo
 const currentDesignGuardTestInventory = findDesignGuardTestInventory(repoRoot);
 const currentThemeParityTokenCount = findThemeParityTokenCount(repoRoot);
 const currentDesignBurndownSummary = findDesignBurndownSummary(repoRoot);
+const currentDesignRegressionBlockingChecks = findDesignRegressionBlockingChecks(repoRoot);
 
 describe('doc drift check', () => {
   afterEach(() => {
@@ -268,6 +270,39 @@ describe('doc drift check', () => {
         line: 1,
         text: 'The current design-enforcement run has design-regression 16 checks.',
         expected: 'design-regression check count from console/scripts/design-regression.sh',
+      },
+    ]);
+  });
+
+  it('flags stale current design-regression blocking sets', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'current-design.md');
+    const missingCheck = currentDesignRegressionBlockingChecks[0] ?? 1;
+    const extraCheck = Math.max(currentDesignRegressionCheckCount, ...currentDesignRegressionBlockingChecks) + 1;
+    const staleBlockingSet = currentDesignRegressionBlockingChecks
+      .map((check) => (check === missingCheck ? extraCheck : check))
+      .join(' ');
+    const text = `The current design-enforcement run has design-regression ${currentDesignRegressionCheckCount} checks with blocking set \`${staleBlockingSet}\` PASS.`;
+    writeFileSync(staleDoc, `${text}\n`, 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: missingCheck,
+        claimed: 0,
+        filePath: staleDoc,
+        kind: 'design-regression-blocking-check',
+        line: 1,
+        text,
+        expected: 'design-regression blocking check from console/scripts/design-regression.sh EXIT_ON_FAIL',
+      },
+      {
+        actual: 0,
+        claimed: extraCheck,
+        filePath: staleDoc,
+        kind: 'design-regression-blocking-check',
+        line: 1,
+        text,
+        expected: 'no undocumented design-regression blocking check',
       },
     ]);
   });

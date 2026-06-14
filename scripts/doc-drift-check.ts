@@ -12,6 +12,7 @@ export type DocDriftKind =
   | 'theme-parity-token-count'
   | 'shadow-baseline-total'
   | 'design-regression-check-count'
+  | 'design-regression-blocking-check'
   | 'design-burndown-total'
   | 'design-burndown-blocking-count'
   | 'design-guard-test-file-count'
@@ -115,6 +116,8 @@ const themeParityTokenCountPattern =
   /\btheme parity\b[^\n]*?\b(\d+)\b/i;
 const designRegressionCheckCountPattern =
   /\bdesign-regression\b[^\n]*?\b(\d+)\s+checks?\b/i;
+const designRegressionBlockingSetPattern =
+  /\bdesign-regression\b[^\n]*?\bblocking set\s+`([^`]+)`/i;
 const designBurndownSummaryPattern =
   /\bburndown\b[^\n]*?\b(\d+)\s+total\s*\/\s*(\d+)\s+blocking\b/i;
 const designGuardTestInventoryPattern =
@@ -280,6 +283,26 @@ export function findDesignRegressionCheckCount(cwd: string = process.cwd()): num
     throw new Error('ERROR(schema:design-regression.sh): check headers are not contiguous');
   }
   return uniqueChecks.size;
+}
+
+function integerSetFromText(text: string, label: string): number[] {
+  const values = [...text.matchAll(/\b\d+\b/g)]
+    .map((match) => Number(match[0]))
+    .filter(Number.isInteger);
+  if (values.length === 0) {
+    throw new Error(`ERROR(schema:${label}): no numeric checks found`);
+  }
+  return [...new Set(values)].sort((left, right) => left - right);
+}
+
+export function findDesignRegressionBlockingChecks(cwd: string = process.cwd()): number[] {
+  const scriptPath = path.resolve(cwd, 'console/scripts/design-regression.sh');
+  const text = readFileSync(scriptPath, 'utf8');
+  const match = text.match(/^EXIT_ON_FAIL=\(([^)]*)\)/m);
+  if (!match?.[1]) {
+    throw new Error('ERROR(schema:design-regression.sh): missing EXIT_ON_FAIL set');
+  }
+  return integerSetFromText(match[1], 'design-regression.sh EXIT_ON_FAIL');
 }
 
 function scopeTokens(css: string, scopeMatcher: (selector: string) => boolean): Set<string> {
@@ -646,6 +669,7 @@ function checkDesignEnforcementClaims(
   themeParityTokenCount: number,
   shadowBaseline: ShadowBaselineInventory,
   designRegressionCheckCount: number,
+  designRegressionBlockingChecks: number[],
   designBurndownSummary: DesignBurndownSummary,
   designGuardTestInventory: DesignGuardTestInventory,
 ): DocDriftIssue[] {
@@ -695,6 +719,40 @@ function checkDesignEnforcementClaims(
         lineText,
         'design-regression check count from console/scripts/design-regression.sh',
       );
+    }
+
+    const designRegressionBlockingSetMatch = lineText.match(designRegressionBlockingSetPattern);
+    if (designRegressionBlockingSetMatch?.[1]) {
+      const claimed = integerSetFromText(
+        designRegressionBlockingSetMatch[1],
+        `${filePath}:${line} design-regression blocking set`,
+      );
+      const claimedSet = new Set(claimed);
+      const actualSet = new Set(designRegressionBlockingChecks);
+      for (const actual of designRegressionBlockingChecks) {
+        if (claimedSet.has(actual)) continue;
+        issues.push({
+          filePath,
+          line,
+          kind: 'design-regression-blocking-check',
+          claimed: 0,
+          actual,
+          text: lineText,
+          expected: 'design-regression blocking check from console/scripts/design-regression.sh EXIT_ON_FAIL',
+        });
+      }
+      for (const claimedCheck of claimed) {
+        if (actualSet.has(claimedCheck)) continue;
+        issues.push({
+          filePath,
+          line,
+          kind: 'design-regression-blocking-check',
+          claimed: claimedCheck,
+          actual: 0,
+          text: lineText,
+          expected: 'no undocumented design-regression blocking check',
+        });
+      }
     }
 
     const designBurndownMatch = lineText.match(designBurndownSummaryPattern);
@@ -760,6 +818,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const themeParityTokenCount = findThemeParityTokenCount(cwd);
   const shadowBaselineInventory = findShadowBaselineInventory(cwd);
   const designRegressionCheckCount = findDesignRegressionCheckCount(cwd);
+  const designRegressionBlockingChecks = findDesignRegressionBlockingChecks(cwd);
   const designBurndownSummary = findDesignBurndownSummary(cwd);
   const designGuardTestInventory = findDesignGuardTestInventory(cwd);
   const toolCountsByModule = new Map<string, number>();
@@ -785,6 +844,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
       themeParityTokenCount,
       shadowBaselineInventory,
       designRegressionCheckCount,
+      designRegressionBlockingChecks,
       designBurndownSummary,
       designGuardTestInventory,
     ));
