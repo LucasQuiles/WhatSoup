@@ -75,6 +75,7 @@ const REQUIRED_SCRIPTS = [
   'guard:claude-settings',
   'guard:agent-decision-polls',
   'guard:safeguard-diagnostics',
+  'test:design-guards',
   'verify:console-design',
   'verify:push:branch',
   'verify:release',
@@ -100,6 +101,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm --prefix console run design:font-assets',
       'npm --prefix console run design:brand-assets',
       'npm --prefix console run design:lint-fixtures',
+      'npm run test:design-guards',
     ],
   },
   {

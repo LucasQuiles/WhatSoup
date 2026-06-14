@@ -30,6 +30,7 @@ const requiredPackageScripts = {
   'guard:claude-settings': 'node scripts/claude-settings-guard.ts --check',
   'guard:agent-decision-polls': 'node scripts/agent-decision-polls-guard.ts',
   'guard:safeguard-diagnostics': 'node scripts/safeguard-diagnostics.ts',
+  'test:design-guards': 'npm test -- tests/scripts/theme-parity.test.ts tests/scripts/token-spec-drift.test.ts tests/scripts/contrast-matrix.test.ts tests/scripts/shadow-baseline.test.ts tests/scripts/shadow-frozen-inventory.test.ts tests/scripts/raw-form-control-inventory.test.ts tests/scripts/design-regression-guards.test.ts tests/scripts/design-metrics.test.ts tests/scripts/design-burndown-check.test.ts tests/scripts/color-semantics.test.ts tests/scripts/design-resilience-audit.test.ts tests/scripts/font-assets.test.ts tests/scripts/brand-assets.test.ts tests/scripts/design-lint-fixtures.test.ts --pool=forks',
   'verify:console-design': [
     'npm --prefix console run design:theme-parity',
     'npm --prefix console run design:token-drift',
@@ -45,6 +46,7 @@ const requiredPackageScripts = {
     'npm --prefix console run design:font-assets',
     'npm --prefix console run design:brand-assets',
     'npm --prefix console run design:lint-fixtures',
+    'npm run test:design-guards',
   ].join(' && '),
   'verify:push:branch': [
     'npm run guard:repo:staged',
@@ -294,6 +296,20 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
       .toContain('missing npm --prefix console run design:raw-form-control-inventory');
+  });
+
+  it('fails when the shared console design verification chain omits scanner fixture tests', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:console-design': requiredPackageScripts['verify:console-design']
+          .replace(' && npm run test:design-guards', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+      .toContain('missing npm run test:design-guards');
   });
 
   it('fails when the shared console design verification chain omits frozen shadow inventory coverage', () => {
