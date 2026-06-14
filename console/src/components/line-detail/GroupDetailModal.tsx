@@ -29,7 +29,7 @@
  *   - Public prop interface, tab-reset derivation, query, admin resolution, API
  *     handlers, toasts, nested ConfirmDialogs unchanged.
  */
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useId } from 'react'
 import { X, Copy, Link, LogOut, UserMinus, ShieldCheck, ShieldOff, UserPlus } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api.js'
@@ -48,7 +48,7 @@ import {
 } from './groups-utils.js'
 import { getInitials, capitalize } from '../../lib/text-utils.js'
 import type { GroupInfo, GroupDetail, GroupParticipant } from '../../types.js'
-import { Modal, ModalBody } from '../primitives'
+import { Modal, ModalBody, SelectInput, TextArea, TextInput } from '../primitives'
 import { Button } from '../primitives/Button'
 import { ActionButton } from '../primitives/ActionButton'
 import { Tabs, Tab } from '../primitives/Tabs'
@@ -87,6 +87,8 @@ function InfoTab({
   const [inviteLink, setInviteLink] = useState(detail.inviteLink ?? '')
   const [loadingLink, setLoadingLink] = useState(false)
   const [confirmRevoke, setConfirmRevoke] = useState(false)
+  const subjectInputId = useId()
+  const descriptionInputId = useId()
 
   useEffect(() => {
     setSubject(detail.subject)
@@ -159,16 +161,17 @@ function InfoTab({
 
       {/* Subject */}
       <div>
-        <label className="c-field-label">
+        <label htmlFor={isAdmin ? subjectInputId : undefined} className="c-field-label">
           Subject
         </label>
         {isAdmin ? (
-          <input
+          <TextInput
+            id={subjectInputId}
             type="text"
             value={subject}
             onChange={e => setSubject(e.target.value)}
             onBlur={handleSubjectSave}
-            className="c-input font-mono text-t2"
+            className="text-t2"
           />
         ) : (
           <div className="c-body">{detail.subject}</div>
@@ -177,17 +180,19 @@ function InfoTab({
 
       {/* Description */}
       <div>
-        <label className="c-field-label">
+        <label htmlFor={isAdmin ? descriptionInputId : undefined} className="c-field-label">
           Description
         </label>
         {isAdmin ? (
-          <textarea
+          <TextArea
+            id={descriptionInputId}
             value={desc}
             onChange={e => setDesc(e.target.value)}
             onBlur={handleDescSave}
             rows={3}
             placeholder="Group description..."
-            className="c-input font-mono text-t2 resize-vertical min-h-[var(--sp-16,calc(var(--sp-12)+var(--sp-6)))] h-auto"
+            minHeight={72}
+            className="text-t2 h-auto"
           />
         ) : (
           <div className="c-body text-t3">
@@ -533,6 +538,7 @@ function SettingsTab({
   const queryClient = useQueryClient()
   const [confirmLeave, setConfirmLeave] = useState(false)
   const [saving, setSaving] = useState<string | null>(null)
+  const ephemeralSelectId = useId()
 
   const handleSetting = async (setting: string, key: string) => {
     setSaving(key)
@@ -692,22 +698,23 @@ function SettingsTab({
       {/* Disappearing messages */}
       <div style={rowStyle}>
         <div>
-          <div className="c-body">Disappearing messages</div>
+          <label htmlFor={isAdmin ? ephemeralSelectId : undefined} className="c-body">Disappearing messages</label>
           <div className="c-body text-t4">
             {ephemeralLabel(detail.ephemeralDuration)}
           </div>
         </div>
         {isAdmin && (
-          <select
+          <SelectInput
+            id={ephemeralSelectId}
             value={detail.ephemeralDuration ?? 0}
             disabled={saving === 'ephemeral'}
             onChange={e => handleEphemeral(Number(e.target.value))}
-            className="c-input c-select font-mono text-t2 bg-d1 max-w-[var(--input-number-w)] shrink-0"
+            className="font-mono text-t2 bg-d1 max-w-[var(--input-number-w)] shrink-0"
           >
             {EPHEMERAL_OPTIONS.map(opt => (
               <option key={opt.seconds} value={opt.seconds}>{opt.label}</option>
             ))}
-          </select>
+          </SelectInput>
         )}
       </div>
 

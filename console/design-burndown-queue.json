@@ -2,8 +2,8 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 664,
-    "blocking": 599,
+    "total": 661,
+    "blocking": 596,
     "byCategory": {
       "accent-law": 0,
       "base-wall": 22,
@@ -14,7 +14,7 @@
       "legacy-var-css": 220,
       "raw-color-css": 0,
       "raw-font-size-css": 0,
-      "raw-form-control": 20,
+      "raw-form-control": 17,
       "utility-smell": 1
     }
   },
@@ -604,16 +604,11 @@
       "id": "burndown:raw-form-control",
       "category": "raw-form-control",
       "severity": "blocking",
-      "count": 20,
+      "count": 17,
       "files": [
         {
           "path": "src/components/line-detail/ConfigEditDialog.tsx",
           "count": 7,
-          "lines": null
-        },
-        {
-          "path": "src/components/line-detail/GroupDetailModal.tsx",
-          "count": 3,
           "lines": null
         },
         {

@@ -237,6 +237,44 @@ describe('GroupDetailModal — open state', () => {
     await screen.findByRole('dialog')
     expect(screen.getByText(/2 participant/)).toBeDefined()
   })
+
+  it('labels the editable subject input and preserves save-on-blur behavior', async () => {
+    renderModal()
+    await screen.findByRole('dialog')
+    await waitFor(() => expect(mockGetGroupDetail).toHaveBeenCalled())
+
+    const subject = screen.getByLabelText('Subject') as HTMLInputElement
+    expect(subject.className).toContain('c-input')
+    expect(subject.className).toContain('font-mono')
+
+    fireEvent.change(subject, { target: { value: 'Team Alpha Prime' } })
+    fireEvent.blur(subject)
+
+    await waitFor(() => {
+      expect(mockUpdateGroupSubject).toHaveBeenCalledWith(LINE, GROUP_ID, 'Team Alpha Prime')
+    })
+  })
+
+  it('labels the editable description textarea and preserves save-on-blur behavior', async () => {
+    renderModal()
+    await screen.findByRole('dialog')
+    await waitFor(() => expect(mockGetGroupDetail).toHaveBeenCalled())
+
+    const description = screen.getByLabelText('Description') as HTMLTextAreaElement
+    expect(description.className).toContain('c-input')
+    expect(description.className).toContain('font-mono')
+
+    fireEvent.change(description, { target: { value: 'Updated alpha squad description' } })
+    fireEvent.blur(description)
+
+    await waitFor(() => {
+      expect(mockUpdateGroupDescription).toHaveBeenCalledWith(
+        LINE,
+        GROUP_ID,
+        'Updated alpha squad description',
+      )
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -431,7 +469,7 @@ describe('GroupDetailModal — settings seg pairs', () => {
   it('disappearing messages select uses form-control classes and preserves change behavior', async () => {
     await openSettingsAsAdmin()
 
-    const select = screen.getByRole('combobox') as HTMLSelectElement
+    const select = screen.getByRole('combobox', { name: 'Disappearing messages' }) as HTMLSelectElement
     expect(select.className).toContain('c-input')
     expect(select.className).toContain('c-select')
     expect(select.className).not.toContain('c-btn')

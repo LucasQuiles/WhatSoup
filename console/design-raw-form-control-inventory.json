@@ -21,20 +21,20 @@
   },
   "totals": {
     "by_classification": {
-      "consumer_migration": 20
+      "consumer_migration": 17
     },
     "by_consumer_group": {
-      "line_detail_and_modals": 16,
+      "line_detail_and_modals": 13,
       "pages": 1,
       "wizard_consumers": 3
     },
     "by_element": {
-      "input": 11,
-      "select": 2,
-      "textarea": 7
+      "input": 10,
+      "select": 1,
+      "textarea": 6
     },
-    "files": 6,
-    "total": 20
+    "files": 5,
+    "total": 17
   },
   "by_file": [
     {
@@ -56,22 +56,6 @@
         280
       ],
       "total": 7
-    },
-    {
-      "by_element": {
-        "input": 1,
-        "select": 1,
-        "textarea": 1
-      },
-      "classification": "consumer_migration",
-      "consumer_group": "line_detail_and_modals",
-      "file": "console/src/components/line-detail/GroupDetailModal.tsx",
-      "lines": [
-        166,
-        184,
-        701
-      ],
-      "total": 3
     },
     {
       "by_element": {
@@ -199,36 +183,6 @@
       "line": 280,
       "rule": "soup/no-raw-form-control",
       "snippet": "<input"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 11,
-      "consumer_group": "line_detail_and_modals",
-      "element": "input",
-      "file": "console/src/components/line-detail/GroupDetailModal.tsx",
-      "line": 166,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<input"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 11,
-      "consumer_group": "line_detail_and_modals",
-      "element": "textarea",
-      "file": "console/src/components/line-detail/GroupDetailModal.tsx",
-      "line": 184,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<textarea"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 11,
-      "consumer_group": "line_detail_and_modals",
-      "element": "select",
-      "file": "console/src/components/line-detail/GroupDetailModal.tsx",
-      "line": 701,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<select"
     },
     {
       "classification": "consumer_migration",
