@@ -36,7 +36,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       'opencode',
       ['run', '--format', 'json', '--pure', '-m', 'configured-primary', 'Reply with OK only.'],
       expect.any(Object),
-      { cwd: '/agent-cwd' },
+      { cwd: '/agent-cwd', timeoutMs: 15_000 },
     );
   });
 
@@ -63,7 +63,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       'opencode',
       ['run', '--format', 'json', '--pure', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
-      { cwd: '/agent-cwd' },
+      { cwd: '/agent-cwd', timeoutMs: 15_000 },
     );
   });
 
