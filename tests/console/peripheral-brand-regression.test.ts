@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 
 // The TSX brand-regression guard scans `console/src` only, so brand/channel copy
 // in peripheral artifacts (the document shell, PWA manifest) escapes it entirely.
@@ -21,6 +21,28 @@ function peripheralTextArtifacts(): string[] {
     }
   }
   return files.filter(existsSync)
+}
+
+function textFilesUnder(dir: string): string[] {
+  if (!existsSync(dir)) return []
+  const files: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = resolve(dir, entry.name)
+    if (entry.isDirectory()) {
+      files.push(...textFilesUnder(path))
+    } else if (/\.(?:css|html|json|ts|tsx|webmanifest)$/.test(entry.name)) {
+      files.push(path)
+    }
+  }
+  return files
+}
+
+function publicSvgAssets(): string[] {
+  const publicDir = resolve(consoleRoot, 'public')
+  if (!existsSync(publicDir)) return []
+  return readdirSync(publicDir)
+    .filter((entry) => entry.endsWith('.svg'))
+    .map((entry) => resolve(publicDir, entry))
 }
 
 // Legacy product name retired in favour of "Fleet" / "SOUP"; channel-bound copy
@@ -50,5 +72,17 @@ describe('peripheral brand regression (artifacts outside console/src)', () => {
     const html = readFileSync(resolve(consoleRoot, 'index.html'), 'utf8')
     expect(html).toMatch(/<title>[^<]+<\/title>/)
     expect(html).toMatch(/<link[^>]+rel="icon"/)
+  })
+
+  it('does not ship unreferenced public SVG assets', () => {
+    const referenceText = [
+      ...peripheralTextArtifacts(),
+      ...textFilesUnder(resolve(consoleRoot, 'src')),
+    ].map((file) => readFileSync(file, 'utf8')).join('\n')
+    const orphaned = publicSvgAssets()
+      .filter((file) => !referenceText.includes(basename(file)))
+      .map((file) => file.replace(`${consoleRoot}/`, 'console/'))
+
+    expect(orphaned).toEqual([])
   })
 })

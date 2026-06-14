@@ -68,7 +68,7 @@ six files, off-by-one/representative line citations. P2-11 also does not list th
 | # | Location | Content | Tag | Disposition |
 |---|---|---|---|---|
 | 21 | `console/public/favicon.svg` | purple/blue bolt-style mark (fills `#863bff`, `#7e14ff`, `#47bfff`) — contains no brand string; visually unrelated to the locked SOUP identity (Geist nameplate, teal tick, electric-blue accent) | UI-copy (asset) | C4: replace per `03-spec/brand.md` favicon spec; `console/index.html:6` link tag unchanged |
-| 22 | `console/public/icons.svg` | icon sprite; no brand strings found | internal-keep | verify at C4 that no embedded title/desc carries brand text |
+| 22 | `console/public/icons.svg` | retired orphan icon sprite; no `console/src` or `index.html` references | internal-retired | removed before C4; public SVG reachability is pinned by `tests/console/peripheral-brand-regression.test.ts` |
 
 ## 3. Soup Kitchen / SoupKitchen — console/src
 
