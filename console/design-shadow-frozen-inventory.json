@@ -22,11 +22,11 @@
   ],
   "totals": {
     "by_category": {
-      "base-wall": 20,
+      "base-wall": 19,
       "brand-regression": 2
     },
-    "files": 8,
-    "total": 22
+    "files": 7,
+    "total": 21
   },
   "by_file": [
     {
@@ -90,17 +90,6 @@
       "file": "console/src/components/UpdateModal.tsx",
       "lines": [
         357
-      ],
-      "total": 1
-    },
-    {
-      "by_category": {
-        "base-wall": 1,
-        "brand-regression": 0
-      },
-      "file": "console/src/components/wizard/ModelAuthStep.tsx",
-      "lines": [
-        181
       ],
       "total": 1
     },
@@ -233,14 +222,6 @@
       "column": 21,
       "file": "console/src/components/Nav.tsx",
       "line": 130,
-      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 15,
-      "file": "console/src/components/wizard/ModelAuthStep.tsx",
-      "line": 181,
       "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
       "rule": "no-restricted-syntax"
     },

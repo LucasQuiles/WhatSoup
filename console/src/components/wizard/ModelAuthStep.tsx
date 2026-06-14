@@ -152,6 +152,8 @@ const ApiKeyInput: FC<{
   error?: string
 }> = ({ label, value, onChange, placeholder, helper, error }) => {
   const inputId = useId()
+  const errorId = error ? `${inputId}-error` : undefined
+  const helperId = !error && helper ? `${inputId}-helper` : undefined
   const [visible, setVisible] = useState(false)
   const filled = value.trim().length > 0
 
@@ -167,6 +169,8 @@ const ApiKeyInput: FC<{
             onChange={(e) => onChange(e.target.value)}
             placeholder={placeholder}
             className="w-full pr-[var(--sp-8)]"
+            aria-invalid={error ? true : undefined}
+            aria-describedby={errorId ?? helperId}
             error={Boolean(error)}
             confirmed={filled}
           />
@@ -176,11 +180,8 @@ const ApiKeyInput: FC<{
             aria-label={visible ? 'Hide API key' : 'Show API key'}
             onClick={() => setVisible((v) => !v)}
             icon={visible ? <EyeOff size={16} /> : <Eye size={16} />}
-            className="absolute cursor-pointer text-t3"
+            className="absolute right-[var(--sp-2)] top-1/2 -translate-y-1/2 cursor-pointer text-t3"
             style={{
-              right: 'var(--sp-2)',
-              top: '50%',
-              transform: 'translateY(-50%)',
               background: 'none',
               border: 'none',
               padding: 0,
@@ -191,8 +192,8 @@ const ApiKeyInput: FC<{
           <Check size={16} className="wizard-check" />
         )}
       </div>
-      {error && <div className="c-error">{error}</div>}
-      {helper && <span className="c-helper">{helper}</span>}
+      {error && <div id={errorId} className="c-error">{error}</div>}
+      {!error && helper && <span id={helperId} className="c-helper">{helper}</span>}
     </div>
   )
 }

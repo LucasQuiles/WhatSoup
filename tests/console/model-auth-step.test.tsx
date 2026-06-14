@@ -184,12 +184,35 @@ describe('ModelAuthStep — ApiKeyInput error rendering', () => {
     expect(screen.getByText('Anthropic key required')).toBeDefined()
   })
 
+  it('marks the Anthropic API key input invalid and describes it with its error', () => {
+    renderStep({ data: { type: 'chat' }, errors: { apiKey: 'Anthropic key required' } })
+
+    const input = screen.getByPlaceholderText('sk-ant-...') as HTMLInputElement
+    const error = screen.getByText('Anthropic key required')
+
+    expect(error.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(input.getAttribute('aria-describedby')).toBe(error.id)
+  })
+
   it('renders the OpenAI key error only after switching to the OpenAI tab', () => {
     renderStep({ data: { type: 'chat' }, errors: { openaiKey: 'OpenAI key invalid' } })
 
     expect(screen.queryByText('OpenAI key invalid')).toBeNull()
     fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
     expect(screen.getByText('OpenAI key invalid')).toBeDefined()
+  })
+
+  it('marks the OpenAI key input invalid and describes it with its error', () => {
+    renderStep({ data: { type: 'chat' }, errors: { openaiKey: 'OpenAI key invalid' } })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'OpenAI' }))
+    const input = screen.getByPlaceholderText('sk-...') as HTMLInputElement
+    const error = screen.getByText('OpenAI key invalid')
+
+    expect(error.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(input.getAttribute('aria-describedby')).toBe(error.id)
   })
 })
 
