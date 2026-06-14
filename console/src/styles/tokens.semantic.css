@@ -97,7 +97,7 @@
   /* §3.7 Focus, scrim, chrome glass, shadows */
   --focus-ring:   #6BA6FF;
   --scrim:        rgba(4,6,9,0.62);
-  --chrome-glass: color-mix(in srgb, #0E1013 86%, transparent);
+  --chrome-glass: color-mix(in srgb, var(--surface-base) 86%, transparent);
   --shadow-raised:  none;
   --shadow-overlay: 0 16px 48px rgba(0,0,0,0.5);
   --shadow-xs:      none;
@@ -197,7 +197,7 @@
   /* §3.7 Focus, scrim, chrome glass, shadows */
   --focus-ring:   #2563EB;
   --scrim:        rgba(23,26,31,0.45);
-  --chrome-glass: color-mix(in srgb, #FAFAFA 86%, transparent);
+  --chrome-glass: color-mix(in srgb, var(--surface-base) 86%, transparent);
   --shadow-raised:  0 1px 2px rgba(16,18,22,0.06), 0 2px 8px rgba(16,18,22,0.05);
   --shadow-overlay: 0 4px 12px rgba(16,18,22,0.08), 0 24px 64px rgba(16,18,22,0.18);
   --shadow-xs:      0 1px 2px rgba(16,18,22,0.07);

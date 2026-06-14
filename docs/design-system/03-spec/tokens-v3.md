@@ -252,14 +252,15 @@ All other v2 properties keep their names (§2, §3.1–3.5, §3.7–3.8).
 |---|---|---|
 | `--focus-ring` | `#6BA6FF` | `#2563EB` |
 | `--scrim` | `rgba(4,6,9,0.62)` | `rgba(23,26,31,0.45)` |
-| `--chrome-glass` | `color-mix(in srgb, #0E1013 86%, transparent)` | `color-mix(in srgb, #FAFAFA 86%, transparent)` |
+| `--chrome-glass` | `color-mix(in srgb, var(--surface-base) 86%, transparent)` | `color-mix(in srgb, var(--surface-base) 86%, transparent)` |
 | `--shadow-raised` | `none` | `0 1px 2px rgba(16,18,22,0.06), 0 2px 8px rgba(16,18,22,0.05)` |
 | `--shadow-overlay` | `0 16px 48px rgba(0,0,0,0.5)` | `0 4px 12px rgba(16,18,22,0.08), 0 24px 64px rgba(16,18,22,0.18)` |
 | `--shadow-xs` | `none` | `0 1px 2px rgba(16,18,22,0.07)` |
 | `--shadow-hover` | `0 4px 12px rgba(0,0,0,0.3)` | `0 4px 12px rgba(16,18,22,0.10)` |
 
 `--chrome-glass` is the only sanctioned translucent substrate; it may back the sticky header chrome
-only. `--scrim` is the only other translucency. Glass under data is banned (seed 2).
+only. It derives from `--surface-base` so surface-ramp decisions carry glass with the ramp.
+`--scrim` is the only other translucency. Glass under data is banned (seed 2).
 
 ### 3.8 Interaction washes
 
