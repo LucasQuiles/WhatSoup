@@ -193,6 +193,29 @@ export function Fixture() {
     expect(output.by_rule).toEqual({ 'soup/no-unsafe-truncation': 1 });
   });
 
+  it('flags interaction-state margin, grid, and border-width geometry changes', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return (
+    <section>
+      <button className="mt-[var(--sp-1)] hover:mt-[var(--sp-3)]">Move</button>
+      <button className="border border-transparent focus-visible:border-2">Grow</button>
+      <div className="grid grid-cols-2 active:grid-cols-3">Columns</div>
+    </section>
+  )
+}
+`);
+    const cssPath = join(root, 'console/src/fixture.css');
+    writeFileSync(cssPath, `
+.card:hover { margin-left: var(--sp-2); }
+.card:active { grid-template-columns: 1fr 2fr; }
+`);
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule['soup/no-layout-shift-interaction']).toBe(5);
+  });
+
   it('supports repeated scan directories for focused inventories', () => {
     const root = makeFixture('<div className="truncate">src</div>');
     const other = join(root, 'console/tests/Fixture.tsx');

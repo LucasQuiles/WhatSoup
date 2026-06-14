@@ -115,6 +115,9 @@ function hasAxisMin(context, axis) {
   return /\bmin-h-0\b/.test(context) && /\bmin-w-0\b/.test(context);
 }
 
+const interactionLayoutUtilityPattern = /\b(?:hover|focus|focus-visible|focus-within|active):(?:(?:w|h|min-w|max-w|min-h|max-h|p|px|py|pt|pr|pb|pl|m|mx|my|mt|mr|mb|ml|gap|basis|grid-cols|grid-rows)-|border(?:-[xytrblse])?(?:-\d|-\[|(?=\s|["'`}])))/;
+const interactionLayoutCssPattern = /:(?:hover|focus|focus-visible|focus-within|active)[^{]*\{[^}]*\b(?:width|height|min-width|max-width|min-height|max-height|padding|padding-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|margin|margin-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|gap|row-gap|column-gap|flex-basis|grid-template-columns|grid-template-rows|border-width|border-(?:top|right|bottom|left)-width)\s*:/;
+
 function scanLine(findings, file, lines, index) {
   const line = lines[index];
   const trimmed = line.trim();
@@ -151,8 +154,7 @@ function scanLine(findings, file, lines, index) {
     }
   }
 
-  if (/\b(?:hover|focus|focus-visible|focus-within):(?:w|h|min-w|max-w|min-h|max-h|p|px|py|pt|pr|pb|pl|gap|basis)-/.test(line)
-    || /:(?:hover|focus-visible|focus-within)[^{]*\{[^}]*\b(?:width|height|min-width|max-width|min-height|max-height|padding|gap)\s*:/.test(line)) {
+  if (interactionLayoutUtilityPattern.test(line) || interactionLayoutCssPattern.test(line)) {
     addFinding(
       findings,
       'soup/no-layout-shift-interaction',

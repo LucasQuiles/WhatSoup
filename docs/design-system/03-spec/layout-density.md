@@ -96,9 +96,10 @@ These rules are binding design law before they become hard lint:
   element that owns vertical and horizontal scrolling. Scrollable flex/grid children carry the
   matching min-size escape (`min-h-0` for vertical, `min-w-0` for horizontal) or a documented
   exception.
-- **Interaction states reserve geometry.** Hover, focus, loading, badge count, reveal-label, and
-  validation states do not change sibling layout. Reserve stable width/height/gap/padding in the
-  base state; state changes may alter color, opacity, transform, or content inside the reserved box.
+- **Interaction states reserve geometry.** Hover, focus, active, loading, badge count, reveal-label,
+  and validation states do not change sibling layout. Reserve stable width/height/gap/padding,
+  margin, border width, and grid tracks in the base state; state changes may alter color, opacity,
+  transform, or content inside the reserved box.
 - **Typography never scales with viewport width.** Compact layouts use the type scale and density
   tokens, not `vw` font sizes or viewport-based `clamp()` math.
 - **Layering is named.** Floating UI uses layer tokens (`--z-*`) or a documented layer owner. Raw

@@ -585,7 +585,8 @@ cannot express the check).
 - **Purpose:** hover, focus, active, selected, and pressed states must not change component geometry.
   Stable controls are required for dense operational scanning and keyboard use.
 - **Mechanism:** report-only resilience script. Flag hover/focus/active classes or CSS selectors that
-  change width, height, min/max dimensions, padding, gap, basis, grid tracks, or border width.
+  change width, height, min/max dimensions, margin, padding, gap, basis, grid tracks, or border
+  width.
 - **Scope:** buttons, cards, rows, tabs, chips, toolbar controls, table rows, and list items. Motion
   transforms are evaluated separately by reduced-motion rules.
 - **Violation / valid:** `hover:px-[var(--sp-4)]` → reserve the expanded width up front or reveal
