@@ -67,15 +67,17 @@ vi.mock('../../console/src/lib/api', () => ({
   api: mockApi,
 }))
 
+const mockToast = vi.hoisted(() => ({
+  toast: vi.fn(),
+  success: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  dismiss: vi.fn(),
+  clear: vi.fn(),
+}))
+
 vi.mock('../../console/src/hooks/toast-context', () => ({
-  useToast: () => ({
-    toast: vi.fn(),
-    success: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-    dismiss: vi.fn(),
-    clear: vi.fn(),
-  }),
+  useToast: () => mockToast,
   ToastContext: {
     Provider: ({ children }: { children?: ReactNode }) => children,
   },
@@ -461,5 +463,41 @@ describe('Ops page — delete confirm flow', () => {
     await act(async () => { fireEvent.click(cancelBtn) })
 
     expect(mockApi.deleteLine).not.toHaveBeenCalled()
+  })
+
+  it('delete failure reports non-Error rejection text to the operator', async () => {
+    mockApi.deleteLine.mockRejectedValue('database unavailable')
+    const line = makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })
+    renderOps({ lines: [line] })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    const confirmBtn = await screen.findByRole('button', { name: /Delete permanently/i })
+    await act(async () => { fireEvent.click(confirmBtn) })
+
+    await waitFor(() => {
+      expect(mockToast.error).toHaveBeenCalledWith('Delete failed: database unavailable')
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 8. Restart action failure reporting
+// ---------------------------------------------------------------------------
+
+describe('Ops page — restart action flow', () => {
+  it('restart failure reports non-Error rejection text to the operator', async () => {
+    mockApi.restart.mockRejectedValue('supervisor refused restart')
+    const line = makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })
+    renderOps({ lines: [line] })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Restart' }))
+    })
+
+    expect(mockApi.restart).toHaveBeenCalledWith('alpha')
+    expect(mockToast.info).toHaveBeenCalledWith('Restarting alpha...')
+    await waitFor(() => {
+      expect(mockToast.error).toHaveBeenCalledWith('Failed: supervisor refused restart')
+    })
   })
 })

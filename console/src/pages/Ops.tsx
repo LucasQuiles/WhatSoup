@@ -210,7 +210,7 @@ export default function Ops() {
                           toast.info(`Restarting ${line.name}...`)
                           api.restart(line.name)
                             .then(() => toast.success(`${line.name} restart requested`))
-                            .catch(err => toast.error(`Failed: ${err.message}`))
+                            .catch(err => toast.error(`Failed: ${err instanceof Error ? err.message : String(err)}`))
                         }}
                       >
                         Restart
