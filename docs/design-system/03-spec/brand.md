@@ -89,7 +89,7 @@ positioning the product. The G7 copy sweep must classify each hit before editing
 | Operations surface | Ops | **Ops** (kept) |
 | Alerts | two competing definitions | one **attention** metric: lines not online; always a click-through |
 | Modes | passive / chat / agent | unchanged — load-bearing |
-| Status | online / degraded / unreachable / unlinked | locked taxonomy (shape-coded; badge.md) |
+| Status | online / degraded / unreachable / logged_out / config_error / unknown; unlinked linkage marker | locked taxonomy (shape-coded; badge.md) |
 
 One term per concept; synonyms in UI copy are lint-findable vocabulary drift.
 

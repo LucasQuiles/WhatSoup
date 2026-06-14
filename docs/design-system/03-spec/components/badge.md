@@ -14,6 +14,9 @@ Status is shape + color + label, always travelling together — never color-only
 | online | **disc** (8px, 50% radius) | `--status-ok-solid` | "online" |
 | degraded | **diamond** (8px square rotated 45°, scaled 0.92) | `--status-warn-solid` | "degraded" (warn ink) |
 | unreachable | **square** (8px, 1px radius) | `--status-crit-solid` | "unreachable" (crit ink) |
+| logged_out | **square** (8px, 1px radius) | `--status-crit-solid` | "logged out" (crit ink) |
+| config_error | **square** (8px, 1px radius) | `--status-crit-solid` | "configuration error" (crit ink) |
+| unknown | **diamond** (8px square rotated 45°, scaled 0.92) | `--status-warn-solid` | "awaiting health signal" (warn ink) |
 | unlinked | **outline disc** (transparent, 1px `--border-strong`) | — | "unlinked" |
 
 The live online disc may carry the breathing halo — the system's only ambient loop (motion.md §8);
@@ -33,8 +36,8 @@ summary), unread count (accent disc, 18px, mono tabular), KPI attention tile (ca
 
 One TypeScript module exports the status→{shape, token, label} and mode→{token, label} maps keyed
 to **semantic tokens**. Every renderer imports it; literal status hexes/classes outside the module
-are lint errors. Status taxonomy is closed: online · degraded · unreachable · unlinked (G2 state
-taxonomy lock).
+are lint errors. Line-health taxonomy is closed: online · degraded · unreachable · logged_out ·
+config_error · unknown. The same shape law also renders the visual linkage marker unlinked.
 
 ## Conceptual props
 
@@ -59,7 +62,7 @@ toast edge) pass 3:1 against their surface in both themes (color.md §4); heartb
 - Do: `[disc] support · online`; `[diamond] sales · degraded` with warn ink.
 - Don't: a dot without a label in any data surface; recoloring shapes outside the map; inline
   `getModeColor` copies; sizing dots with non-Badge tokens (the radius-as-width bug); inventing a
-  fifth status without a spec change.
+  status without a spec change.
 
 ## Migration notes
 

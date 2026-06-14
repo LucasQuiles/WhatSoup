@@ -6,16 +6,22 @@
  * (badge.md "One canonical map", DUP-06/07).
  *
  * Taxonomy is closed (G2 state taxonomy lock):
- *   Status: online | degraded | unreachable | unlinked
+ *   Line status: online | degraded | unreachable | logged_out | config_error | unknown
+ *   Link marker:  unlinked
  *   Mode:   passive | chat | agent
  */
+import type { Status as LineStatus } from '../types';
 
 // ---------------------------------------------------------------------------
 // Closed union types
 // ---------------------------------------------------------------------------
 
-/** The four recognised connection states. */
-export type Status = 'online' | 'degraded' | 'unreachable' | 'unlinked';
+/**
+ * Recognised status entries rendered by Badge.
+ * `LineStatus` is the health taxonomy from types.ts; `unlinked` is a visual
+ * linkage marker used by the same shape law but is not a line health value.
+ */
+export type Status = LineStatus | 'unlinked';
 
 /** The three operating modes. */
 export type Mode = 'passive' | 'chat' | 'agent';
@@ -71,6 +77,30 @@ export const STATUS_MAP: Readonly<Record<Status, StatusEntry>> = {
     labelToken: '--status-crit-fg',
     shapeClass: 'soup-shape soup-shape--crit',
     labelClass: 'soup-status-cell__lbl soup-status-cell__lbl--crit',
+  },
+  logged_out: {
+    shape: 'square',
+    token: '--status-crit-solid',
+    label: 'logged out',
+    labelToken: '--status-crit-fg',
+    shapeClass: 'soup-shape soup-shape--crit',
+    labelClass: 'soup-status-cell__lbl soup-status-cell__lbl--crit',
+  },
+  config_error: {
+    shape: 'square',
+    token: '--status-crit-solid',
+    label: 'configuration error',
+    labelToken: '--status-crit-fg',
+    shapeClass: 'soup-shape soup-shape--crit',
+    labelClass: 'soup-status-cell__lbl soup-status-cell__lbl--crit',
+  },
+  unknown: {
+    shape: 'diamond',
+    token: '--status-warn-solid',
+    label: 'awaiting health signal',
+    labelToken: '--status-warn-fg',
+    shapeClass: 'soup-shape soup-shape--warn',
+    labelClass: 'soup-status-cell__lbl soup-status-cell__lbl--warn',
   },
   unlinked: {
     shape: 'outline',

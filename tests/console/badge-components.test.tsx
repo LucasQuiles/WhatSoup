@@ -8,6 +8,9 @@
  *   online      -> disc (soup-shape--ok, 50% radius)
  *   degraded    -> diamond (soup-shape--warn, rotate45 scale0.92)
  *   unreachable -> square (soup-shape--crit, 1px radius)
+ *   logged_out  -> square (soup-shape--crit, 1px radius)
+ *   config_error-> square (soup-shape--crit, 1px radius)
+ *   unknown     -> diamond (soup-shape--warn, rotate45 scale0.92)
  *   unlinked    -> outline disc (soup-shape--off, transparent + border-strong)
  *
  * Labels ALWAYS travel with the shape — no color-only status rendering.
@@ -32,6 +35,7 @@ import { StatusCell, ModeBadge as ModeBadgePrimitive } from '../../console/src/c
 import ModeBadge from '../../console/src/components/ModeBadge.tsx';
 import StatusDot from '../../console/src/components/StatusDot.tsx';
 import { STATUS_MAP, MODE_MAP, resolveStatus, resolveMode, CONNECTION_MAP, resolveConnection } from '../../console/src/lib/status-map.ts';
+import { statusAlertMessage, statusSeverity } from '../../console/src/lib/status-severity.ts';
 
 
 afterEach(() => {
@@ -43,9 +47,9 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('STATUS_MAP', () => {
-  it('contains exactly four closed-set statuses', () => {
+  it('contains the complete line-health set plus the unlinked visual marker', () => {
     const keys = Object.keys(STATUS_MAP);
-    expect(keys.sort()).toEqual(['degraded', 'online', 'unlinked', 'unreachable']);
+    expect(keys.sort()).toEqual(['config_error', 'degraded', 'logged_out', 'online', 'unknown', 'unlinked', 'unreachable']);
   });
 
   it('maps online to disc shape', () => {
@@ -65,6 +69,22 @@ describe('STATUS_MAP', () => {
     expect(STATUS_MAP.unreachable.shape).toBe('square');
     expect(STATUS_MAP.unreachable.label).toBe('unreachable');
     expect(STATUS_MAP.unreachable.labelToken).toBe('--status-crit-fg');
+  });
+
+  it('maps logged-out and config-error statuses to crit square labels', () => {
+    for (const status of ['logged_out', 'config_error'] as const) {
+      expect(STATUS_MAP[status].shape).toBe('square');
+      expect(STATUS_MAP[status].label).toBe(statusAlertMessage(status));
+      expect(STATUS_MAP[status].labelToken).toBe('--status-crit-fg');
+      expect(statusSeverity(status)).toBe('crit');
+    }
+  });
+
+  it('maps unknown line-health status to warn diamond with the status alert label', () => {
+    expect(STATUS_MAP.unknown.shape).toBe('diamond');
+    expect(STATUS_MAP.unknown.label).toBe(statusAlertMessage('unknown'));
+    expect(STATUS_MAP.unknown.labelToken).toBe('--status-warn-fg');
+    expect(statusSeverity('unknown')).toBe('warn');
   });
 
   it('maps unlinked to outline shape, no fill token', () => {
@@ -93,6 +113,9 @@ describe('resolveStatus', () => {
     expect(resolveStatus('online').shape).toBe('disc');
     expect(resolveStatus('degraded').shape).toBe('diamond');
     expect(resolveStatus('unreachable').shape).toBe('square');
+    expect(resolveStatus('logged_out').shape).toBe('square');
+    expect(resolveStatus('config_error').shape).toBe('square');
+    expect(resolveStatus('unknown').shape).toBe('diamond');
     expect(resolveStatus('unlinked').shape).toBe('outline');
   });
 
@@ -132,6 +155,9 @@ describe('StatusCell shape law', () => {
     { status: 'online',      expectedShapeClass: 'soup-shape--ok',   expectedLabel: 'online' },
     { status: 'degraded',    expectedShapeClass: 'soup-shape--warn',  expectedLabel: 'degraded' },
     { status: 'unreachable', expectedShapeClass: 'soup-shape--crit',  expectedLabel: 'unreachable' },
+    { status: 'logged_out',  expectedShapeClass: 'soup-shape--crit',  expectedLabel: 'logged out' },
+    { status: 'config_error', expectedShapeClass: 'soup-shape--crit', expectedLabel: 'configuration error' },
+    { status: 'unknown',     expectedShapeClass: 'soup-shape--warn',  expectedLabel: 'awaiting health signal' },
     { status: 'unlinked',    expectedShapeClass: 'soup-shape--off',   expectedLabel: 'unlinked' },
 
   ];
