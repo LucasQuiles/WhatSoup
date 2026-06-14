@@ -16,6 +16,36 @@ function tsxFiles(dir: string): string[] {
   })
 }
 
+// Legacy consumer classes migrated to zero. Single source of truth for the
+// re-entry guards below — both the className scan and the class-map scan read
+// this map, so adding a class here extends every guard at once (no second
+// design-law source).
+const LEGACY_CONSUMER_CLASS = {
+  'c-btn': /\bc-btn(?:\b|-)/,
+  'c-pill': /\bc-pill(?:\b|-)/,
+  'c-chip': /\bc-chip(?:\b|-)/,
+} as const
+
+// A source line that is wholly a comment (line, block, or JSDoc continuation).
+// JSDoc prose like "* - Raw c-btn buttons → Button primitives" documents past
+// migrations and must never trip a re-entry guard.
+function isCommentLine(line: string): boolean {
+  const trimmed = line.trim()
+  return trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')
+}
+
+// Extract the contents of every string literal (single/double/template) on a
+// line. Detecting legacy classes *inside string literals* is what catches const
+// class-maps, array/tuple elements, and clsx() operands that carry no
+// `className=` on their line — the blind spot of classNameOffenders.
+function stringLiteralsOf(line: string): string[] {
+  const out: string[] = []
+  const re = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(line)) !== null) out.push(m[2])
+  return out
+}
+
 // Re-entry guards: legacy patterns migrated to zero. Pin each so it cannot
 // silently creep back during parallel development.
 function classNameOffenders(pattern: RegExp): string[] {
@@ -26,6 +56,22 @@ function classNameOffenders(pattern: RegExp): string[] {
       .flatMap((line, index) => (
         line.includes('className=')
           && pattern.test(line)
+          ? [`${relative(repoRoot, resolve(repoRoot, path))}:${index + 1}: ${line.trim()}`]
+          : []
+      )))
+}
+
+// Class-map scan: a legacy class hiding inside a string literal on any
+// non-comment line (const maps, arrays, clsx operands, template literals) —
+// regardless of whether `className=` appears on that line.
+function classMapOffenders(pattern: RegExp): string[] {
+  return sourceRoots
+    .flatMap(tsxFiles)
+    .flatMap(path => read(path)
+      .split('\n')
+      .flatMap((line, index) => (
+        !isCommentLine(line)
+          && stringLiteralsOf(line).some(literal => pattern.test(literal))
           ? [`${relative(repoRoot, resolve(repoRoot, path))}:${index + 1}: ${line.trim()}`]
           : []
       )))
@@ -53,13 +99,41 @@ const readTokenCss = () => [
 
 describe('design system compliance — Shannon slice', () => {
   it('keeps legacy c-btn classes out of source consumers', () => {
-    expect(classNameOffenders(/\bc-btn(?:\b|-)/)).toEqual([])
+    expect(classNameOffenders(LEGACY_CONSUMER_CLASS['c-btn'])).toEqual([])
   })
 
   it('keeps other migrated-away legacy utility classes out of source consumers', () => {
     // c-pill / c-chip migrated to the Pill / Badge primitives — re-entry guards.
-    expect(classNameOffenders(/\bc-pill(?:\b|-)/)).toEqual([])
-    expect(classNameOffenders(/\bc-chip(?:\b|-)/)).toEqual([])
+    expect(classNameOffenders(LEGACY_CONSUMER_CLASS['c-pill'])).toEqual([])
+    expect(classNameOffenders(LEGACY_CONSUMER_CLASS['c-chip'])).toEqual([])
+  })
+
+  it('keeps legacy classes out of const class-maps, arrays, and clsx operands (className-scan blind spot)', () => {
+    // RED PROOF — a const class-map / clsx operand carries no `className=` on its
+    // line, so the className-gated scan is blind to it; the class-map scan is not.
+    const classNameGated = (src: string, pattern: RegExp) =>
+      src.split('\n').some(line => line.includes('className=') && pattern.test(line))
+    const classMapGated = (src: string, pattern: RegExp) =>
+      src.split('\n').some(line => !isCommentLine(line) && stringLiteralsOf(line).some(s => pattern.test(s)))
+
+    const planted = [
+      "const VARIANT = { ok: 'c-pill', warn: 'c-chip' }",
+      "export const cls = clsx('c-btn', base)",
+      "const arr = ['c-chip']",
+      'const tpl = `c-btn ${active ? \'on\' : \'\'}`',
+    ].join('\n')
+
+    for (const pattern of Object.values(LEGACY_CONSUMER_CLASS)) {
+      expect(classNameGated(planted, pattern)).toBe(false) // old scan misses it
+      expect(classMapGated(planted, pattern)).toBe(true) // new scan catches it
+    }
+    // JSDoc/comment prose that mentions a legacy class must NOT be flagged.
+    expect(classMapGated(' *   - Raw c-btn buttons → Button primitives', LEGACY_CONSUMER_CLASS['c-btn'])).toBe(false)
+
+    // GREEN — the real source tree carries zero class-map offenders.
+    for (const pattern of Object.values(LEGACY_CONSUMER_CLASS)) {
+      expect(classMapOffenders(pattern)).toEqual([])
+    }
   })
 
   it('keeps raw motion.button out of source consumers', () => {
