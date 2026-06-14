@@ -35,6 +35,8 @@ CONSOLE_DIR="$REPO_ROOT/console"
 #   - Check 13: live PASS (exactly 5 infinite occurrences, all sanctioned/waivered); FAIL on new.
 #   - Check 14: live PASS (no expired waivers); deterministic date check, zero FP surface.
 #   - Check 16: live PASS (zero legacy lane vars); FAIL on reintroduction.
+#   - Check 17: live PASS (zero component-tier CSS raw colors after --shadow-hover);
+#               FAIL on raw hex/rgb/hsl/oklch reintroduction outside token tiers.
 # Immature checks remaining report-only (d6-investigation.md §5):
 #   - Checks 3,4: post-P2 gate (alias-layer not complete).
 #   - Checks 5,7: post-P4 gate (copy flip not landed).
@@ -42,7 +44,7 @@ CONSOLE_DIR="$REPO_ROOT/console"
 #   - Check 11: utility-smell; warn-on-changed-files ceiling only.
 #   - Check 12: focus-suppression carve-out (B4 wave composers).
 #   - Check 15: waiver-tag hygiene; WARN non-blocking.
-EXIT_ON_FAIL=(1 2 6 8 10 13 14 16)
+EXIT_ON_FAIL=(1 2 6 8 10 13 14 16 17)
 
 FAILED_CHECKS=()
 PASS=0
@@ -448,12 +450,9 @@ CSS_TIER_SEMANTIC_FILE="$CONSOLE_SRC/styles/tokens.semantic.css"
 #   printf '.c { box-shadow: var(--shadow-overlay); }\n' > /tmp/f17c.css
 #   rg 'rgba?\(' /tmp/f17c.css                           # exits 1, 0 hits
 #
-# Live-tree violations (1):
-#   composites.css:959  .c-kpi-hover:hover {
-#                         box-shadow: var(--shadow-inset), 0 4px 12px rgba(0,0,0,0.3); }
-#   WVR-013 (filed): no semantic shadow token covers this elevation level.
-#   Burndown: migrate to var(--shadow-overlay) or add a new --shadow-float semantic
-#   token at P1 shadow token completion. Owner: console-maintainer.
+# Live-tree violations: 0 after .c-kpi-hover moved to --shadow-hover.
+# Burndown: raw-color-css ceiling is 0; any future component-tier raw color must
+# move to a semantic token in the same packet.
 # ---------------------------------------------------------------------------
 check_start "17" "CSS tier-boundary: raw color values in component/primitives/composites CSS"
 C17_RGB_HITS=""
@@ -483,9 +482,12 @@ if [ "$C17_HEX_COUNT" -gt 0 ]; then
   printf '%s\n' "$C17_HEX_HITS" | head -5 | sed "s|$CONSOLE_SRC/||" | sed 's/^/    /'
 fi
 echo "    Spec: tokens-v3 §1 (component tier must not own raw color values)"
-echo "    WVR-013 (eslint-waivers.yaml): composites.css rgba shadow literal in .c-kpi-hover"
-echo "    Lifecycle: REPORT-ONLY (shadow); promote after all raw colors migrate to semantic tokens"
-check_result "17" "$C17_TOTAL" "zero raw colors in component-tier CSS (report-only baseline)" "WARN"
+echo "    Lifecycle: BLOCKING — raw-color-css is zeroed and token-tier ownership is pinned"
+if [ "$C17_TOTAL" -eq 0 ]; then
+  check_result "17" "$C17_TOTAL" "zero raw colors in component-tier CSS" "OK"
+else
+  check_result "17" "$C17_TOTAL" "raw component-tier CSS colors found -- move to semantic tokens" "FAIL"
+fi
 
 # ---------------------------------------------------------------------------
 # Check 18: Legacy alias names defined inside tokens.primitive.css

@@ -28,7 +28,8 @@
 #   WVR-012 expiration_phase re-pointed: D6→D-series-close (retirement triggers not yet fired).
 # B3W4 changes (2026-06-12):
 #   WVR-014 RETIRED — static data-line-type accent definitions replace runtime injection (grep-verified; B3 wave 4).
-# Remaining: 10 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011..WVR-013).
+#   WVR-013 RETIRED — .c-kpi-hover shadow migrated to --shadow-hover (raw-color-css 1→0).
+# Remaining: 9 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011..WVR-012).
 
 waivers:
   - id: WVR-001
@@ -185,23 +186,4 @@ waivers:
       second consumer. Next review: D-series close or C4.
       Retire if react-refresh capability changes or helper extraction happens.
     safer_alternative_considered: separate popover-keyboard.ts module — rejected as spec-orphan fragmentation.
-    status: temporary
-
-  - id: WVR-013
-    rule: design-regression check 17 (raw color values in component-tier CSS)
-    owner: console-maintainer
-    reason: >
-      composites.css .c-kpi-hover box-shadow carries rgba(0,0,0,0.3) as the drop
-      half of a layered shadow; no --shadow-float semantic token exists yet to
-      express a translucent black at component tier.
-    scope:
-      - console/src/styles/composites.css
-    expiry: 2026-12-31
-    replacement_plan: >
-      Define a --shadow-float (or extend the elevation ladder) in the semantic
-      tier during the C3 polish stage and migrate the literal; check 17 then
-      counts zero and can promote.
-    safer_alternative_considered: >
-      Reusing --shadow-inset alone — rejected: loses the elevation the hover
-      state encodes.
     status: temporary

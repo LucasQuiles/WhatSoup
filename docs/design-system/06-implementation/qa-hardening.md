@@ -219,6 +219,7 @@ Each enforcement rule should include a negative fixture or documented negative e
 | Trap | Expected failure |
 |---|---|
 | sample component with raw color | fails raw-color rule |
+| component-tier CSS `box-shadow` with raw `rgba()` | fails design-regression check 17 and the `raw-color-css` burndown zero ceiling |
 | raw button outside primitive | fails after scoped rule is enabled |
 | UI-facing WhatSoup copy where SOUP is required | fails brand-regression rule |
 | generic UI-facing WhatsApp copy where channel-agnostic positioning is required | fails channel-specific-copy rule |

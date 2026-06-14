@@ -874,9 +874,10 @@ landed `ba4ed643`):
   `verify:release`, and quality.yml CI (wired `44897b16`, parity completed `f09f5dc3`).
 - **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
-  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 13 14 16)` — eight
-  checks fail the run; checks 17–20 are report-only per the §2 lifecycle, and the remaining
-  immature checks each sit behind a named landing gate in the script's justification block.
+  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 13 14 16 17)` — nine
+  checks fail the run; check 17 promoted after `.c-kpi-hover` moved to `--shadow-hover` and
+  `raw-color-css` ratcheted to zero. Checks 18–20 remain report-only per the §2 lifecycle, and the
+  remaining immature checks each sit behind a named landing gate in the script's justification block.
 All other rule rows are unchanged: states verified still accurate against the live configs
 (brand-regression, raw-form-control, infinite-animation, literal-status-colors,
 inline-dismiss-handler, format-bypass, duplicate-shell remain in the shadow config;

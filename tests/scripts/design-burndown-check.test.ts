@@ -224,6 +224,21 @@ describe('check-design-burndown.mjs', () => {
       expect(item.files.some((f) => f.path === 'src/styles/tokens.semantic.css')).toBe(false);
     });
 
+    it('raw-color-css fires on rgba() inside CSS box-shadow declarations', () => {
+      const fixture = makeFixture({
+        compositesCss: `.c-kpi-hover:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.3); }\n`,
+        tsx: null,
+      });
+      const result = runScript(fixture, ['--update']);
+      expect(result.status).toBe(0);
+
+      const item = itemOf(readQueue(fixture), 'raw-color-css');
+      expect(item.count).toBe(1);
+      expect(item.files).toEqual([
+        { path: 'src/styles/composites.css', count: 1, lines: [1] },
+      ]);
+    });
+
     it('half-step fires on CSS and TSX usage but not on the definitions', () => {
       const fixture = makeFixture();
       const result = runScript(fixture, ['--update']);

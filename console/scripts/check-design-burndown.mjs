@@ -125,7 +125,7 @@ const CATEGORY_META = {
   'base-wall': { severity: 'blocking', owner: 'B5/B6 — base-wall falls (per-file)' },
   'legacy-var-css': { severity: 'blocking', owner: 'B1 — legacy token vocabulary burn (CSS side, incl. M8 scrollbar)' },
   'accent-law': { severity: 'blocking', owner: 'B4 — F1 accent-law fix + M9 accent-color re-point' },
-  'raw-color-css': { severity: 'polish', owner: 'WVR-013 — composites .c-kpi-hover shadow literal (expiry-tracked)' },
+  'raw-color-css': { severity: 'polish', owner: 'CSS tier-boundary — raw component-tier colors must move to semantic tokens' },
   'half-step': { severity: 'polish', owner: 'DD-9 — half-step spacing retirement' },
 };
 
