@@ -8,14 +8,14 @@
 
 **Tech Stack:** Python 3 standard library, pytest, Vitest health-check integration tests, BOT ERRORS runtime-manifest guard.
 
-**Status:** active — implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. The approval boundary now applies to publishing/merging the compose branch, not to reimplementing this plan.
+**Status:** landed via PR #830 (`97e60757`). This plan is retained as the D20 policy/design record; do not reimplement it from the historical compose branch notes.
 
 ---
 
 ## Current Evidence
 
-- Current local compose branch: `integration/provider-hardening-compose-refresh-20260613T194657Z`.
-- Current local compose head when this plan was written: `0ed8deac9a073ef533393722c750644ac9b92136`.
+- Landed branch: `integration/provider-hardening-compose-refresh-20260613T194657Z` via PR #830.
+- Historical compose head when this plan was written: `0ed8deac9a073ef533393722c750644ac9b92136`.
 - Current `origin/main` when this plan was written: `f65c3990f8c203978bd4b51affe7ee5f97e79024`.
 - `deploy/scripts/bot-errors-health-check.py:3118` defines `provider_keychain_unlock_status(...)`.
 - `deploy/scripts/bot-errors-health-check.py:3456` unconditionally appends `keychain_unlock_status=<...>` by calling `security unlock-keychain -p "" ~/Library/Keychains/login.keychain-db` for `claude-cli` credential diagnostics.
