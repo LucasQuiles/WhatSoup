@@ -71,6 +71,7 @@ import {
   handleHealEscalate,
   getActiveReportForClass,
   dequeueNextReport,
+  reconcileStaleHealReports,
   checkGlobalValve,
   parseHealContext,
 } from '../../src/core/heal.ts';
@@ -358,6 +359,84 @@ describe('getActiveReportForClass', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 9b. stale active report reconciliation
+// ---------------------------------------------------------------------------
+
+describe('reconcileStaleHealReports', () => {
+  it('expires old escalated reports so a restarted bot can emit the same error class again', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    db.raw.prepare(`
+      INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, created_at)
+      VALUES ('stale-report', 'crash__boom', 'crash', 'escalated', 1, '2026-06-13T00:00:00.000Z')
+    `).run();
+
+    const result = reconcileStaleHealReports(db, {
+      now: new Date('2026-06-13T01:00:00.000Z'),
+      staleMs: 30 * 60 * 1000,
+    });
+
+    expect(result.expiredReportIds).toEqual(['stale-report']);
+    expect(getActiveReportForClass(db, 'crash__boom')).toBeNull();
+
+    const next = emitHealReport(db, messenger, null, {
+      type: 'crash',
+      crashClass: 'boom',
+    });
+
+    expect(next).not.toBeNull();
+    const rows = db.raw.prepare(`
+      SELECT report_id, state FROM heal_reports WHERE error_class = 'crash__boom'
+    `).all() as Array<{ report_id: string; state: string }>;
+    expect(rows).toEqual(expect.arrayContaining([
+      { report_id: 'stale-report', state: 'stale_expired' },
+      { report_id: next, state: 'attempt_1' },
+    ]));
+  });
+
+  it('leaves fresh queued and escalated reports active', () => {
+    const db = makeDb();
+
+    db.raw.prepare(`
+      INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, created_at)
+      VALUES
+        ('fresh-queued', 'crash__queued', 'crash', 'queued', 1, '2026-06-13T00:45:00.000Z'),
+        ('fresh-escalated', 'crash__escalated', 'crash', 'escalated', 1, '2026-06-13T00:45:00.000Z')
+    `).run();
+
+    const result = reconcileStaleHealReports(db, {
+      now: new Date('2026-06-13T01:00:00.000Z'),
+      staleMs: 30 * 60 * 1000,
+    });
+
+    expect(result.expiredReportIds).toEqual([]);
+    expect(getActiveReportForClass(db, 'crash__queued')?.state).toBe('queued');
+    expect(getActiveReportForClass(db, 'crash__escalated')?.state).toBe('escalated');
+  });
+
+  it('automatically reconciles stale same-class reports before suppressing an emit', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    db.raw.prepare(`
+      INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, created_at)
+      VALUES ('stale-suppressor', 'crash__auto', 'crash', 'escalated', 1, '2000-01-01T00:00:00.000Z')
+    `).run();
+
+    const reportId = emitHealReport(db, messenger, null, {
+      type: 'crash',
+      crashClass: 'auto',
+    });
+
+    expect(reportId).not.toBeNull();
+    const stale = db.raw.prepare('SELECT state FROM heal_reports WHERE report_id = ?').get('stale-suppressor') as { state: string };
+    expect(stale.state).toBe('stale_expired');
+    expect(getActiveReportForClass(db, 'crash__auto')?.report_id).toBe(reportId);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 10 & 11. dequeueNextReport
 // ---------------------------------------------------------------------------
 
@@ -395,6 +474,21 @@ describe('dequeueNextReport', () => {
 
     const result = dequeueNextReport(db);
     expect(result).toStrictEqual(null);
+  });
+
+  it('expires stale queued reports before dequeueing', () => {
+    const db = makeDb();
+
+    db.raw.prepare(`
+      INSERT INTO heal_reports (report_id, error_class, error_type, state, attempt_count, created_at)
+      VALUES ('stale-queued', 'crash__queued_old', 'crash', 'queued', 1, '2000-01-01T00:00:00.000Z')
+    `).run();
+
+    const result = dequeueNextReport(db);
+
+    expect(result).toBeNull();
+    const row = db.raw.prepare('SELECT state FROM heal_reports WHERE report_id = ?').get('stale-queued') as { state: string };
+    expect(row.state).toBe('stale_expired');
   });
 });
 

@@ -55,6 +55,12 @@ describe('classifyAgentFailure', () => {
       expected: 'provider_usage_limit' as const,
     },
     {
+      label: 'provider credit balance exhausted',
+      source: 'provider_result' as const,
+      message: 'Provider error: insufficient credits. Please add credits to continue.',
+      expected: 'provider_usage_limit' as const,
+    },
+    {
       label: 'context overflow',
       source: 'provider_result' as const,
       message: 'Prompt is too long for the current context window.',

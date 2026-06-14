@@ -544,6 +544,17 @@ type PerChatCleanupRuntimeState = {
     createdAt: number;
     softExpiryTimer?: ReturnType<typeof setTimeout>;
     hardExpiryTimer?: ReturnType<typeof setTimeout>;
+    resolution?: 'first-vote-wins' | 'admin-only' | 'admin-wins' | 'majority-after-timeout';
+    timeoutMs?: number;
+    votesByQuestion?: Map<number, Map<string, {
+      voterJid: string;
+      selectedOptions: string[];
+      isAdmin: boolean;
+      timestamp: number;
+    }>>;
+    adminJids?: Set<string> | null;
+    source?: 'askuser' | 'send_poll';
+    sentPollMessageIds?: string[];
   }>;
   resumeFailedHandling: Set<string>;
   autoCompactCooldownUntil: Map<string, number>;
@@ -2149,6 +2160,63 @@ describe('AgentRuntime', () => {
       expect(mockSession.sendTurn).toHaveBeenCalledWith(expect.stringContaining('A: Go'));
     });
     expect(state.pendingPollQuestions.has(canonicalJid)).toBe(false);
+  });
+
+  it('normalizes legacy pending poll timeout during LID remap before re-arming timers', async () => {
+    const canonicalJid = '15550004444@s.whatsapp.net';
+    const lidKey = '15550004444@lid';
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const state = runtime as unknown as PerChatCleanupRuntimeState & {
+      chatSessions: Map<string, typeof mockSession>;
+      chatQueues: Map<string, IOutboundQueue>;
+    };
+
+    await runtime.start();
+    state.chatSessions.set(lidKey, mockSession);
+    state.chatQueues.set(lidKey, mockQueue);
+    state.pendingPollQuestions.set(lidKey, {
+      questions: [{
+        question: 'Pick a runtime',
+        header: 'Runtime',
+        options: [
+          { label: 'Node', description: 'JavaScript runtime' },
+          { label: 'Go', description: 'Compiled runtime' },
+        ],
+        multiSelect: false,
+      }],
+      toolId: 'tool-legacy-timeout',
+      chatJid: lidKey,
+      chatJidAliases: new Set([lidKey]),
+      mode: 'poll',
+      pollMessageIdToQuestionIndex: new Map([['POLL_LEGACY_TIMEOUT', 0]]),
+      currentQuestionIndex: 0,
+      answersCollected: {},
+      createdAt: Date.now(),
+      resolution: 'first-vote-wins',
+      votesByQuestion: new Map(),
+      adminJids: null,
+      source: 'askuser',
+      sentPollMessageIds: ['POLL_LEGACY_TIMEOUT'],
+    });
+
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    setTimeoutSpy.mockClear();
+
+    try {
+      runtime.handleJidAliasChanged('15550004444', canonicalJid);
+
+      const migratedPoll = state.pendingPollQuestions.get(canonicalJid);
+      expect(migratedPoll?.timeoutMs).toBe(3_600_000);
+      for (const [, delay] of setTimeoutSpy.mock.calls) {
+        expect(delay).toEqual(expect.any(Number));
+        expect(Number.isFinite(delay as number)).toBe(true);
+        expect(delay as number).toBeGreaterThan(0);
+      }
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
   });
 
   it('per_chat active-session events keep delivering results after LID remap', async () => {
@@ -4781,6 +4849,91 @@ describe('AgentRuntime', () => {
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       provider: 'opencode-cli',
       model: 'minimax/minimax-m2',
+    });
+  });
+
+  it('sandboxPerChat does not pass primary custom endpoint config to fallback opencode workspaces', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentProviderConfig?: Record<string, unknown>;
+      agentFallbackProvider?: string;
+      agentFallbackModel?: string;
+    };
+    agentConfig.agentProvider = 'claude-cli';
+    agentConfig.agentProviderConfig = {
+      baseUrl: 'https://primary.example.invalid/v1',
+      apiKeyService: 'openai',
+    };
+    agentConfig.agentFallbackProvider = 'opencode-cli';
+    agentConfig.agentFallbackModel = 'minimax/minimax-m2';
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+    });
+    await runtime.start();
+
+    (runtime as unknown as { fallbackActiveUntil: number | null }).fallbackActiveUntil = Date.now() + 60_000;
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello fallback' }));
+
+    const provisionCalls = mockProvisionWorkspace.mock.calls as unknown as Array<[{
+      provider?: string;
+      providerConfig?: unknown;
+    }]>;
+    const fallbackProvision = provisionCalls.find(([opts]) => opts.provider === 'opencode-cli')?.[0];
+    expect(fallbackProvision?.providerConfig).toBeUndefined();
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      provider: 'opencode-cli',
+      model: 'minimax/minimax-m2',
+      providerConfig: {},
+    });
+  });
+
+  it('sandboxPerChat passes custom endpoint config for primary opencode workspaces', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const agentConfig = mockConfig as typeof mockConfig & {
+      agentProvider?: string;
+      agentProviderConfig?: Record<string, unknown>;
+    };
+    agentConfig.agentProvider = 'opencode-cli';
+    agentConfig.agentProviderConfig = {
+      baseUrl: 'https://api.example.invalid/v1',
+      apiKeyService: 'openai',
+    };
+
+    const sandbox = { allowedPaths: ['/fake'], allowedTools: [], bash: { enabled: false } };
+    const runtime = new AgentRuntime(db, messenger, 'test', {
+      sessionScope: 'per_chat',
+      sandboxPerChat: true,
+      sandbox,
+      cwd: tmpdir(),
+      model: 'model-a',
+    });
+    await runtime.start();
+
+    await sendAndDrain(runtime, makeMsg({ chatJid: '15550100001@s.whatsapp.net', content: 'hello primary' }));
+
+    expect(mockProvisionWorkspace).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'opencode-cli',
+      providerConfig: {
+        baseUrl: 'https://api.example.invalid/v1',
+        model: 'model-a',
+        apiKeyService: 'openai',
+      },
+    }));
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({
+      provider: 'opencode-cli',
+      model: 'model-a',
+      providerConfig: {
+        baseUrl: 'https://api.example.invalid/v1',
+        apiKeyService: 'openai',
+      },
     });
   });
 
@@ -7983,6 +8136,79 @@ describe('AgentRuntime', () => {
 
       const snapAfter = runtime.getHealthSnapshot();
       expect((snapAfter.details as { pollPersistenceErrors: number }).pollPersistenceErrors).toBe(2);
+
+      db.close();
+    });
+
+    it('normalizes legacy pending poll timeout before persistence', () => {
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const createdAt = 1_700_000_000_000;
+      const pending = {
+        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
+        toolId: 'tool-legacy-timeout',
+        chatJid: 'chatLegacy@g.us',
+        chatJidAliases: new Set(['chatLegacy@g.us']),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([['POLL_LEGACY', 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt,
+        resolution: 'first-vote-wins',
+        votesByQuestion: new Map(),
+        adminJids: null,
+        source: 'askuser',
+        sentPollMessageIds: ['POLL_LEGACY'],
+      } as PendingPollQuestion;
+
+      (runtime as unknown as { persistPendingPoll(k: string, p: PendingPollQuestion): void })
+        .persistPendingPoll('legacy-timeout', pending);
+
+      const row = db.raw
+        .prepare('SELECT payload, closes_at, hard_closes_at FROM pending_polls WHERE map_key = ?')
+        .get('legacy-timeout') as { payload: string; closes_at: number; hard_closes_at: number };
+      const payload = JSON.parse(row.payload) as { timeoutMs?: number };
+      expect(payload.timeoutMs).toBe(3_600_000);
+      expect(row.closes_at).toBe(createdAt + 3_600_000);
+      expect(row.hard_closes_at).toBe(createdAt + 7_200_000);
+
+      db.close();
+    });
+
+    it('clamps out-of-range legacy pending poll timeout before persistence', () => {
+      const db = makeRealDb();
+      const { messenger } = makeMessenger();
+      const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+      const createdAt = 1_700_000_000_000;
+      const pending = {
+        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A', description: '' }, { label: 'B', description: '' }], multiSelect: false }],
+        toolId: 'tool-huge-timeout',
+        chatJid: 'chatHuge@g.us',
+        chatJidAliases: new Set(['chatHuge@g.us']),
+        mode: 'poll',
+        pollMessageIdToQuestionIndex: new Map([['POLL_HUGE', 0]]),
+        currentQuestionIndex: 0,
+        answersCollected: {},
+        createdAt,
+        resolution: 'first-vote-wins',
+        timeoutMs: Number.MAX_SAFE_INTEGER,
+        votesByQuestion: new Map(),
+        adminJids: null,
+        source: 'askuser',
+        sentPollMessageIds: ['POLL_HUGE'],
+      } as PendingPollQuestion;
+
+      (runtime as unknown as { persistPendingPoll(k: string, p: PendingPollQuestion): void })
+        .persistPendingPoll('huge-timeout', pending);
+
+      const row = db.raw
+        .prepare('SELECT payload, closes_at, hard_closes_at FROM pending_polls WHERE map_key = ?')
+        .get('huge-timeout') as { payload: string; closes_at: number; hard_closes_at: number };
+      const payload = JSON.parse(row.payload) as { timeoutMs?: number };
+      expect(payload.timeoutMs).toBe(86_400_000);
+      expect(row.closes_at).toBe(createdAt + 86_400_000);
+      expect(row.hard_closes_at).toBe(createdAt + 172_800_000);
 
       db.close();
     });

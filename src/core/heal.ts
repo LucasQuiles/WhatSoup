@@ -19,11 +19,12 @@ const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 const RESOLUTION_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
 const GLOBAL_VALVE_LIMIT = 5;
 const GLOBAL_VALVE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const ACTIVE_REPORT_STATES = ['attempt_1', 'cooldown', 'attempt_2', 'escalated', 'queued'] as const;
+export const HEAL_ACTIVE_STALE_MS = RESOLUTION_WINDOW_MS;
 
 // Suppress unused variable warnings — these constants document the design intent
 // and will be used when cooldown/resolution logic is wired in.
 void COOLDOWN_MS;
-void RESOLUTION_WINDOW_MS;
 
 export interface HealReportData {
   type: 'crash' | 'degraded' | 'service_crash';
@@ -47,6 +48,17 @@ interface HealReportRow {
   created_at: string;
 }
 
+export interface ReconcileStaleHealReportsOptions {
+  now?: Date;
+  staleMs?: number;
+}
+
+export interface ReconcileStaleHealReportsResult {
+  expiredReportIds: string[];
+  cutoff: string;
+  staleMs: number;
+}
+
 /**
  * Emit a heal report for a given error condition.
  *
@@ -67,6 +79,7 @@ export function emitHealReport(
   activeControlReportId?: string | null,
 ): string | null {
   const errorClass = normalizeErrorClass(data.type, data.crashClass ?? data.stderr ?? data.recentLogs ?? 'unknown');
+  reconcileStaleHealReports(db);
 
   // Check for active report with same error class (single-flight)
   const active = getActiveReportForClass(db, errorClass);
@@ -208,9 +221,53 @@ export function handleHealEscalate(db: Database, payload: HealCompletePayload): 
 export function getActiveReportForClass(db: Database, errorClass: string): HealReportRow | null {
   return (db.raw.prepare(`
     SELECT * FROM heal_reports
-    WHERE error_class = ? AND state IN ('attempt_1', 'cooldown', 'attempt_2', 'escalated', 'queued')
+    WHERE error_class = ? AND state IN (${activeStateSql()})
     ORDER BY created_at DESC LIMIT 1
   `).get(errorClass) ?? null) as HealReportRow | null;
+}
+
+/**
+ * Expire old active rows left behind by a restart or lost control session.
+ *
+ * Without this reconciliation, an old 'queued' or 'escalated' row suppresses
+ * the same error class forever even though runtime.activeControlReportId is
+ * process-local and was cleared by the restart.
+ */
+export function reconcileStaleHealReports(
+  db: Database,
+  options: ReconcileStaleHealReportsOptions = {},
+): ReconcileStaleHealReportsResult {
+  const now = options.now ?? new Date();
+  const staleMs = options.staleMs ?? HEAL_ACTIVE_STALE_MS;
+  const cutoff = new Date(now.getTime() - staleMs).toISOString();
+
+  const rows = db.raw.prepare(`
+    SELECT report_id, error_class, state FROM heal_reports
+    WHERE state IN (${activeStateSql()}) AND datetime(created_at) <= datetime(?)
+    ORDER BY created_at ASC
+  `).all(cutoff) as Array<Pick<HealReportRow, 'report_id' | 'error_class' | 'state'>>;
+
+  if (rows.length === 0) {
+    return { expiredReportIds: [], cutoff, staleMs };
+  }
+
+  const update = db.raw.prepare(`
+    UPDATE heal_reports
+    SET state = 'stale_expired', resolved_at = ?
+    WHERE report_id = ?
+  `);
+  const resolvedAt = now.toISOString();
+  for (const row of rows) update.run(resolvedAt, row.report_id);
+
+  log.warn({
+    count: rows.length,
+    reportIds: rows.map(row => row.report_id),
+    states: rows.map(row => row.state),
+    staleMs,
+    cutoff,
+  }, 'expired stale active heal reports');
+
+  return { expiredReportIds: rows.map(row => row.report_id), cutoff, staleMs };
 }
 
 /**
@@ -218,6 +275,8 @@ export function getActiveReportForClass(db: Database, errorClass: string): HealR
  * Returns the dequeued row (pre-transition state), or null if nothing queued.
  */
 export function dequeueNextReport(db: Database): HealReportRow | null {
+  reconcileStaleHealReports(db);
+
   const row = (db.raw.prepare(`
     SELECT * FROM heal_reports WHERE state = 'queued' ORDER BY created_at ASC LIMIT 1
   `).get() ?? null) as HealReportRow | null;
@@ -227,6 +286,10 @@ export function dequeueNextReport(db: Database): HealReportRow | null {
     log.info({ reportId: row.report_id, errorClass: row.error_class }, 'heal report dequeued');
   }
   return row;
+}
+
+function activeStateSql(): string {
+  return ACTIVE_REPORT_STATES.map(state => `'${state}'`).join(', ');
 }
 
 /**

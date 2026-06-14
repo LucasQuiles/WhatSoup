@@ -3,7 +3,7 @@
 //
 // TWO DISTINCT ALGORITHMS — do not merge them:
 //   assertPrivateDirectorySync / ensurePrivateDirectorySync (workspace pattern):
-//     assert-first, mkdir on ENOENT, then re-assert. Refuses symlinks at all stages.
+//     assert-first, mkdir on ENOENT, then chmod to 0700. Refuses symlinks before chmod.
 //   forceEnsurePrivateDirectorySync (auth-bond / bot-errors pattern):
 //     mkdir-then-force-chmod. Refuses symlinks after mkdir.
 
@@ -40,6 +40,7 @@ export function assertPrivateDirectorySync(dirPath: string): void {
 export function ensurePrivateDirectorySync(dirPath: string): void {
   try {
     assertPrivateDirectorySync(dirPath);
+    chmodSync(dirPath, 0o700);
     return;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -47,6 +48,7 @@ export function ensurePrivateDirectorySync(dirPath: string): void {
 
   mkdirSync(dirPath, { recursive: true, mode: 0o700 });
   assertPrivateDirectorySync(dirPath);
+  chmodSync(dirPath, 0o700);
 }
 
 export function writePrivateFileSync(filePath: string, data: string): void {

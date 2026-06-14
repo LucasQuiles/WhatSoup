@@ -26,6 +26,7 @@ import { readSseDataLines } from './sse.ts';
 import { stripLoneSurrogates, sanitizeMessageHistory, isSurrogateError } from '../../../core/sanitize-surrogates.ts';
 import { createChildLogger } from '../../../logger.ts';
 import { boundedRetryAfterMs, waitForRateLimitRetry } from './rate-limit-retry.ts';
+import { providerPreview } from '../provider-preview-sanitizer.ts';
 
 const log = createChildLogger('anthropic-api-provider');
 
@@ -335,7 +336,7 @@ export class AnthropicApiProvider implements ProviderSession {
       // tried recovery yet, sanitize the entire history and retry once.
       if (response.status === 400 && isSurrogateError(errText) && !selfHealAttempt) {
         log.warn(
-          { model, errPreview: errText.slice(0, 200), messageCount: this.messages.length },
+          { model, errPreview: providerPreview(errText, 200), messageCount: this.messages.length },
           'surrogate corruption detected — self-healing conversation history',
         );
         // Deep-sanitize the stored messages (mutates in place for future turns too)
@@ -350,7 +351,7 @@ export class AnthropicApiProvider implements ProviderSession {
       let friendlyMsg: string;
       if (response.status === 400) {
         friendlyMsg = '_There was an issue with my conversation data. Please try again or send /new to start fresh._';
-        log.error({ status: 400, errPreview: errText.slice(0, 500), model, selfHealAttempt }, 'API 400 error (post self-heal)');
+        log.error({ status: 400, errPreview: providerPreview(errText, 500), model, selfHealAttempt }, 'API 400 error (post self-heal)');
       } else if (response.status === 429) {
         const retryAfterMs = boundedRetryAfterMs(response.headers);
         if (!rateLimitRetryAttempt && retryAfterMs !== null) {
@@ -368,7 +369,7 @@ export class AnthropicApiProvider implements ProviderSession {
         log.error({ status: response.status, model }, 'API server error');
       } else {
         friendlyMsg = `_Service error (${response.status}) - please try again._`;
-        log.error({ status: response.status, errPreview: errText.slice(0, 300), model }, 'API error');
+        log.error({ status: response.status, errPreview: providerPreview(errText, 300), model }, 'API error');
       }
 
       return { text: '', terminalResultText: friendlyMsg };
@@ -396,7 +397,7 @@ export class AnthropicApiProvider implements ProviderSession {
         event = JSON.parse(data) as Record<string, unknown>;
       } catch (err) {
         // Malformed SSE chunk - skip, but preserve observability.
-        log.warn({ err, dataPreview: data.slice(0, 200), model }, 'malformed SSE chunk from Anthropic API');
+        log.warn({ err, dataPreview: providerPreview(data, 200), model }, 'malformed SSE chunk from Anthropic API');
         continue;
       }
 

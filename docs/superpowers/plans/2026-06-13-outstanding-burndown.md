@@ -1,15 +1,129 @@
 # Outstanding Burndown Implementation Plan
 
-**Status:** completed/superseded — original implementation branch landed through #810, with follow-on closures in #814, #808, #813, #804, #816, #817, #818, #820, and #821. Do not restart `chore/outstanding-specs-and-burndown`.
+**Status:** completed/superseded — original implementation branch landed through #810, with follow-on closures in #814, #808, #813, #804, #816, #817, #818, #820, #821, #822, #823, and #825. Do not restart `chore/outstanding-specs-and-burndown`.
 
-> **CURRENT STATE REFOCUS (2026-06-13):** `origin/main` is `0c17e3c1dac3826db5cb006c740062873e360cb7`. The original hardening branch is closed:
+> **CURRENT STATE REFOCUS (2026-06-13 16:08 ET):** `origin/main` is `f65c3990f8c203978bd4b51affe7ee5f97e79024`. The original hardening branch is closed:
 > - #810 closed R1-R5, H1 collector/runner, P1, and the safeguard-diagnostics fail-closed fix.
 > - #814 closed the remaining no-decision residuals and several decisions after approval: `bot-errors-emit.py` parent preflight, `bot-errors-q-loop.py` exception alignment for private-dir setup, `checkBearerAuth` deletion, `guard-core.readText`, `asRecordOrEmpty`, and import-boundary fail-closed coverage.
 > - #808 superseded the duplicate-helper lanes with `src/lib/private-fs.ts`, `src/core/provider-mcp-config.ts`, `src/runtimes/chat/enrichment/raw-output.ts`, and `src/lib/short-hash.ts`.
 > - #815 closed the alert-pipeline review follow-ups and is now part of current `origin/main`; post-merge main CI on `13068ac9` finished 5/5 green.
-> - #804, #813, #816, #817, #818, #820, and #821 have since landed on main. #816 post-merge main CI on `218dfacd` finished 5/5 green; #817 post-merge main CI on `558730b0` finished 5/5 green; #818 post-merge main CI on `e1f07ffe` finished 5/5 green; #820 post-merge main CI on `99c7a0f2` finished 5/5 green; #821 PR CI was 6/6 green before merge and post-merge main CI on `0c17e3c1` finished 5/5 green.
+> - #804, #813, #816, #817, #818, #820, #821, #822, #823, and #825 have since landed on main. #816 post-merge main CI on `218dfacd` finished 5/5 green; #817 post-merge main CI on `558730b0` finished 5/5 green; #818 post-merge main CI on `e1f07ffe` finished 5/5 green; #820 post-merge main CI on `99c7a0f2` finished 5/5 green; #821 PR CI was 6/6 green before merge and post-merge main CI on `0c17e3c1` finished 5/5 green; #822 landed as `a865276e`; #823 landed as `a9d2e53b`; #825 landed as `289c5f7b`.
 >
-> **Do next:** finish the approval-gated #819 handoff update and #822 primary-model probe fix-up, then continue the provider-outage hardening follow-up PRs for health turn capability, outbound dedupe, and release drift detection. Preserve/triage dirty parallel worktrees before cleanup. **Do not** treat the historical task checklist below as active work without first rechecking current main.
+> **Current local compose:** `integration/provider-hardening-compose-refresh-20260613T194657Z` composes the validated local hardening branches that are still not on `main`: private-fs chmod, provider errPreview redaction, heal stale reconciliation, detailed API retry shape, D18 health-poller policy, Python deploy redaction SSOT, guardrail residuals, verification reliability, process-lock ownership, pending-poll timeout normalization/clamping, provider credit taxonomy, release drift CLI, sandbox opencode provider config, and D20 keychain observe-only/opt-in diagnostics. The latest code-bearing commit before handoff-only/docs commits was `6dcae2ea`; D20 implementation landed at `56086d44`; the mutable docs-only landing-candidate `HEAD` must be read from git or project memory to avoid self-invalidating this tracked file on every handoff edit. Pre-cleanup cherry proof caught two branch-tip commits that were not yet represented in the compose (`184d264a` credit-exhaustion false-positive tightening and `66e5cae3` fallback-opencode sandbox-config coverage); both are now included and `git cherry -v` shows them as represented. Compose-only fixes recorded in this branch: require BOT ERRORS helper manifest paths, classify the verification residuals plan in `docs/publication-audit.md`, preserve Python redaction contracts for `Authorization: Bearer ...` and `whatsoup@<phone>` service units, import the canonical `isRecord` helper in the runtime-manifest guard, sanitize private host/domain/tailnet examples in public test fixtures by constructing the values dynamically, and make provider keychain unlock mutation opt-in.
+>
+> **Current proof:** `npm ci` completed in the fresh worktree with the expected Node 26 engine warning; targeted TS suite passed 612/612 before the final cherry-proof pass, then the two rescued branch tips passed their direct targeted suite (239/239); deploy Python pytest passed 302/302 under `python3.12`; changed-test Test Integrity scan had no findings; `guard:test-integrity` was clean with the existing 4-item baseline; `typecheck:all`, source-runtime/doc/work-index/public-surface/publication/runtime-manifest guards passed; `NODE_OPTIONS=--trace-warnings` runtime suite passed 216/216 with no `TimeoutNaNWarning`/`NaN` hits; full Vitest passed 590 files / 2 skipped, 9591 tests / 11 skipped at code head `6dcae2ea`; sanitized-fixture targeted tests passed 151/151 with Test Integrity clean; D20 red-first provider probe tests failed 4 assertions before implementation and now pass 13/13; deploy Python pytest now passes 305/305; `tests/scripts/bot-errors-health-check.test.ts` passes 110/110; D20 changed-test Test Integrity is clean; exact-head `verify:push:branch` at `56086d44` exited 0; full Vitest at `56086d44` passed 590 files / 2 skipped and 9591 tests / 11 skipped; exact-head `verify:push:branch` was rerun and exited 0 after the reconciliation-doc update. An earlier full-suite run failed four compose-only tests, and the fixes above are the recorded remediation.
+>
+> **Current coordination snapshot (2026-06-13 21:23 ET):** `origin/main` is still `f65c3990f8c203978bd4b51affe7ee5f97e79024`, this compose branch is clean and ahead of `origin/main`, and the only open GitHub PRs are draft #828 (`fix/timestamp-unit-normalization-20260613`) and draft #829 (`fix/opencode-primary-model-run-probe-20260613`). PR #826 is no longer open; it merged as `d8ee9f3b` and should not be treated as a live blocker. Additional peer surfaces observed in the current worktree inventory include a dirty `feat/systemd-unit-reconciliation` worktree, a dirty console agent scratch worktree (`agent-a361a4a53a4323750`), a local-only #828/#829 integration branch that is now behind current main, and many coverage/test worktrees. These are review inputs only; do not clean, rebase, fold, or delete them without explicit owner handoff.
+>
+> **Pre-publish collision check (2026-06-13 21:37 ET):** main still has not moved, the compose branch is clean, and `guard:bot-errors-runtime-manifest` passes (10 files). Draft #828 overlaps only `deploy/source-runtime-manifest.json` and still has one patch-positive commit (`fix(db): normalize message timestamp units`). Draft #829 overlaps `deploy/source-runtime-manifest.json`, `src/runtimes/agent/runtime.ts`, and `tests/scripts/bot-errors-health-check.test.ts`, and still has two patch-positive commits (`fix(agent): probe opencode primary model by running it`, `test: isolate release-gate temp state`). These drafts are not patch-equivalent to the compose branch; landing compose first is allowed only as an owner-approved queue decision that expects #828/#829 to rebase or be rebuilt afterward.
+>
+> **Do next:** seek named approval before any push/PR/merge. Keep draft PRs #828 and #829 read-only/peer-owned; their topics overlap current main but `git cherry -v` still shows non-equivalent commits, so do not delete or mark superseded without `range-diff`/owner confirmation. Preserve/triage dirty parallel worktrees before cleanup. **Do not** treat the historical task checklist below as active work without first rechecking current main.
+
+## Distilled Goal Evidence Matrix
+
+| Goal | Current evidence | Status | Remaining gate |
+|---|---|---|---|
+| Land current burndown branch safely | Local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z` is clean, 0 behind current `origin/main`, and exact-head `verify:push:branch` passes; open drafts #828/#829 are still patch-positive and peer-owned | Locally ready; not landed | Named approval to push/open PR; CI green; squash merge with clean body/no trailer; post-merge main CI; then branch/worktree cleanup only after `git cherry -v`/`range-diff` proof |
+| Close ready residual fixes | `bot-errors-emit.py` `atomic_write_json()` calls `ensure_private_dir(path.parent)`; `scripts/import-boundary-check.ts` is in the push-battery boundary guard; `scripts/source-runtime-drift-check.ts` documents its narrower helper contracts | Implemented locally and covered by compose gates | Main remains unchanged until compose lands |
+| Python deploy-script architecture decision package | `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` chooses manifest-tracked `deploy/scripts/lib/` and documents fallback N-copy equivalence guard if real-host shared imports fail | Implemented locally; decision documented | Owner approval implicit in compose landing; real-host deployment validation after merge |
+| D5/R8 secret-redaction SSOT | Shared `deploy/scripts/lib/bot_errors_redaction.py`; seven BOT ERRORS consumers migrated; redaction parity/SSOT tests pass; TypeScript hygiene scanner explicitly remains separate | Implemented locally | Main/CI/post-merge validation, then watch for real-host import issues |
+| Decision-gated cleanup D1-D4/H2 | Main already has D1/D3/D4/H2 through #814; compose adds D2 chmod defense in `src/lib/private-fs.ts` | D1/D3/D4/H2 closed on main; D2 local | D2 lands only with compose |
+| Collector cooldown flake | Compose adds deterministic fake-clock coverage in `deploy/scripts/tests/test_bot_errors_collector_backoff.py`; no retry/skip/quarantine | Implemented locally | CI and post-merge proof after compose PR |
+| Older high-risk runtime decisions | Compose includes heal stale reconciliation, process-lock ownership/TOCTOU hardening, detailed API retry-shape work, D18 health-poller policy, D20 keychain observe-only/opt-in behavior, and provider errPreview sanitization | Implemented locally | CI/post-merge proof; D20 remains local until compose lands |
+| Verification infrastructure hardening | Compose adds `guard:bot-errors-runtime-manifest`, branch-diff repo hygiene, file-size identity budget, coverage headroom diagnostic, and deploy Python fixture hygiene coverage | Implemented locally | CI/post-merge proof; coverage target itself remains open in RR-013 |
+| Low-urgency DRY/SSOT items | GuardIssue duplication, safe_filename suffix drift, collector process-lifetime cache note, and local hash helper cleanup remain tracked rather than batched | Tracked only | Trigger-gated future cleanup; do not batch into compose |
+| Parallel worktree/branch triage | Current handoff classifies credential-write, alert-truth, SOUP design/implementation, #828/#829, full-compose scratch, systemd-unit reconciliation, and console scratch | Preserved/read-only | Owner decisions to keep/land/discard; no unilateral cleanup |
+
+## Approval-To-Merge Runbook
+
+Run these commands only from the isolated compose worktree unless a command explicitly names another path:
+
+```bash
+cd /private/tmp/whatsoup-provider-hardening-compose-refresh-20260613T194657Z
+git fetch origin --prune --quiet
+git status --short
+git rev-list --left-right --count origin/main...HEAD
+git remote -v
+npm run guard:bot-errors-runtime-manifest
+npm run verify:push:branch
+```
+
+Expected before push: clean status, SSH GitHub remote for `LucasQuiles/WhatSoup`, divergence `0 57` or the same branch still `0` behind current `origin/main`, manifest guard exit 0, and `verify:push:branch` exit 0. If `origin/main` advances or the divergence left side is not `0`, stop and rebase/reverify before asking to publish.
+
+After named approval to publish this exact branch head:
+
+```bash
+cd /private/tmp/whatsoup-provider-hardening-compose-refresh-20260613T194657Z
+HEAD_SHA="$(git rev-parse HEAD)"
+git push -u origin integration/provider-hardening-compose-refresh-20260613T194657Z
+REMOTE_SHA="$(git ls-remote origin integration/provider-hardening-compose-refresh-20260613T194657Z | awk '{print $1}')"
+test "$REMOTE_SHA" = "$HEAD_SHA"
+cat > /tmp/whatsoup-provider-hardening-compose-pr.md <<'PR_BODY'
+## Summary
+- land the provider-hardening compose branch: private-fs chmod, provider errPreview sanitization, heal stale reconciliation, process-lock ownership, D18 policy, D20 keychain observe-only behavior, Python deploy redaction SSOT, cooldown determinism, verification guardrails, and related docs
+- preserve peer-owned draft PRs #828/#829 as non-equivalent follow-ups that must rebase or rebuild after this branch if it lands first
+- keep TypeScript source-diff secret hygiene separate from Python runtime redaction
+
+## Verification
+- python3.12 -m pytest deploy/scripts/tests/test_bot_errors_redaction_regex.py deploy/scripts/tests/test_bot_errors_redaction_ssot.py -q
+- npm test -- --pool=forks tests/scripts/check-bot-errors-runtime-manifest.test.ts tests/scripts/bot-errors-health-check.test.ts
+- npm run guard:bot-errors-runtime-manifest
+- npm run verify:push:branch
+
+## Coordination
+- draft #828 remains patch-positive and overlaps only deploy/source-runtime-manifest.json
+- draft #829 remains patch-positive and overlaps deploy/source-runtime-manifest.json, src/runtimes/agent/runtime.ts, and tests/scripts/bot-errors-health-check.test.ts
+- do not delete peer worktrees/branches as part of this PR
+PR_BODY
+PR_URL="$(gh pr create --base main --head integration/provider-hardening-compose-refresh-20260613T194657Z --title 'chore: land provider hardening compose' --body-file /tmp/whatsoup-provider-hardening-compose-pr.md)"
+printf '%s\n' "$PR_URL"
+```
+
+After PR creation: verify the PR head matches the pushed SHA and wait for required checks before merge:
+
+```bash
+PR_NUMBER="$(basename "$PR_URL")"
+gh pr view "$PR_NUMBER" --json number,state,isDraft,baseRefName,headRefName,headRefOid,mergeStateStatus,statusCheckRollup,url
+test "$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)" = "$HEAD_SHA"
+gh pr checks "$PR_NUMBER"
+```
+
+Do not merge while checks are pending, red, missing, or while #828/#829 ownership has not accepted that compose may land first.
+
+After named approval to merge a green PR:
+
+```bash
+cat > /tmp/whatsoup-provider-hardening-compose-squash.md <<'SQUASH_BODY'
+Land the local provider-hardening compose branch.
+
+Includes private-fs chmod hardening, provider preview redaction, heal stale reconciliation, process-lock ownership, D18 health-poller policy, D20 keychain observe-only/opt-in diagnostics, Python deploy redaction SSOT, collector cooldown determinism, and verification guardrails.
+
+Peer-owned draft PRs #828 and #829 remain separate follow-ups.
+SQUASH_BODY
+gh pr merge "$PR_NUMBER" --squash --match-head-commit "$HEAD_SHA" --subject "chore: land provider hardening compose" --body-file /tmp/whatsoup-provider-hardening-compose-squash.md
+MERGE_SHA="$(gh pr view "$PR_NUMBER" --json mergeCommit -q .mergeCommit.oid)"
+gh pr view "$PR_NUMBER" --json state,mergeCommit
+for i in $(seq 1 40); do
+  gh api "repos/LucasQuiles/WhatSoup/commits/$MERGE_SHA/check-runs" -q '{total:.total_count, conclusions:[.check_runs[].conclusion]}'
+  sleep 30
+done
+```
+
+Stop after the first post-merge check poll that proves all expected main check runs are present and `success`. If any run is `failure`, `cancelled`, or missing after the watch window, keep the branch/worktree and investigate.
+
+Cleanup is allowed only after the PR is merged, main CI is green, and squash-equivalence is proven:
+
+```bash
+cd "$HOME/LAB/WhatSoup"
+git fetch origin main --prune --quiet
+git cherry -v origin/main integration/provider-hardening-compose-refresh-20260613T194657Z | tee /tmp/whatsoup-compose-cherry-after-merge.txt
+! grep -q '^+' /tmp/whatsoup-compose-cherry-after-merge.txt
+git worktree remove /private/tmp/whatsoup-provider-hardening-compose-refresh-20260613T194657Z
+git branch -D integration/provider-hardening-compose-refresh-20260613T194657Z
+git push origin --delete integration/provider-hardening-compose-refresh-20260613T194657Z
+```
+
+Do not run cleanup if `git cherry -v` shows any `+` line. Do not clean, delete, rebase, or stash peer-owned surfaces (`feat/credential-write-api`, `fix/alert-truth-corrections`, SOUP branches, #828/#829 worktrees, full-compose scratch, systemd-unit reconciliation, or console agent scratch) from this landing lane.
 
 ## Refocused Remaining Queue
 
@@ -22,13 +136,49 @@
 | PR #818: mini1 health profile personal runtime | Landed in current main as `e1f07ffe`; post-merge main CI 5/5 green | Closed; local isolated validation passed Test Integrity, `tests/scripts/bot-errors-health-check.test.ts` (110 tests), `guard:doc-drift`, and `verify:push:branch`. |
 | PR #820: Claude provider lifecycle coverage | Landed in current main as `99c7a0f2`; post-merge main CI 5/5 green | Closed; local review covered Test Integrity, targeted lifecycle tests, corrected adjacent provider tests, and `verify:push:branch`. |
 | PR #821: config/model consistency | Landed in current main as `0c17e3c1`; PR CI 6/6 green before merge; post-merge main CI 5/5 green | Closed; local review covered Test Integrity, 194 focused validator tests, typecheck, lint fitness, `verify:push:branch`, and `verify:release` on rerun with Python 3.12 after host Python 3.14 caused an inconclusive node-gyp/pyexpat failure. |
-| PR #822: primary-model usability probe contract | Open remote head `909e868a`; PR CI 6/6 green, but local review found a real sync-throw gap | Local fix `fc1669c9` adds red/green sync-adapter-throw coverage and passed Test Integrity, targeted tests, typecheck, and `verify:push:branch`; push that fix and rerun CI before any merge. The slice is still a contract module with no production caller. |
+| PR #822: primary-model usability probe contract | Landed in current main as `a865276e` | Closed as a contract-only slice. Follow-up before runtime/health wiring: represent OpenCode custom endpoint mode and decide explicit semantics for codex/gemini providers. |
+| PR #823: release snapshot dry-run contract | Landed in current main as `a9d2e53b` | Closed as a manual dry-run contract slice. Follow-up: decide whether to wire it into an npm script or release gate. |
+| PR #824: outbound terminal text dedupe | Open remote head `88c22d97`; local rebased remediation head `e1ce00ac` is not pushed | Local review found the remote branch only exercised manual `markLastTerminal()` calls; durability-mode production paths called `clearLastOpId()` and never populated the dedupe window. Local remediation wires per-chat/shared durability result completion through `markLastTerminal({ skipDurabilityMark: true })` and enables text dedupe only for suppressed terminal provider errors. Publishing requires explicit force-with-lease approval because the branch was rebased onto current `main`. |
+| PR #825: publication audit summary | Landed in current main as `289c5f7b` | Closed; current tracked docs/publication summary is now the baseline. |
+| PR #826: primary-model usability runtime | Merged as `d8ee9f3b` | Closed; keep only as baseline context. Do not confuse the older local `da9b41e6` integration commit with an open PR head. |
 | PR #815: alert-pipeline review follow-ups | Landed in current main as `13068ac9`; post-merge main CI 5/5 green | Closed; keep only as baseline context for #804/#813 validation. |
-| D5/R8 Python secret-redaction SSOT | Still open as architecture/security work; current main has cross-consumer redaction tests but no canonical pattern source | Use `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` as the execution package after approval. |
-| Python standalone deploy architecture | Still open | Recommended direction is a manifest-tracked `deploy/scripts/lib/` module; fallback is an explicit N-copy equivalence guard if host deployment proves standalone imports cannot ship safely. |
-| Collector cooldown flake | Still needs current CI-history verification | Confirm whether the flake remains merge-blocking; if yes, fix with deterministic fake timers, not retry/skip. |
-| Older runtime decisions | Need current-main revalidation | Recheck heal restart suppression, lock TOCTOU, detailed APIs wire-or-excise, HTTP-error degraded-forever, keychain unlock behavior, and errPreview sanitization against landed #807/#813/#815/#816/#818/#820. |
-| Parallel worktrees/branches | Active preservation concern | Classify by owner/status; use `git cherry -v` or `git range-diff` before deleting anything claimed superseded. |
+| D5/R8 Python secret-redaction SSOT | Implemented in local compose; not on `main` until the compose branch lands | Compose uses manifest-tracked `deploy/scripts/lib/bot_errors_redaction.py`, migrates seven BOT ERRORS deploy consumers, adds parity/SSOT tests, and keeps TS source-diff hygiene vocabulary separate for now. |
+| Python standalone deploy architecture | Decision package executed in local compose; not on `main` until the compose branch lands | Recommended direction adopted locally: a manifest-tracked `deploy/scripts/lib/` module with runtime-manifest coverage. Fallback remains N-copy equivalence guard if real-host deployment rejects shared imports. |
+| Collector cooldown flake | Implemented in local compose; not on `main` until the compose branch lands | Compose adds deterministic fake-clock coverage in `deploy/scripts/tests/test_bot_errors_collector_backoff.py`; do not retry/skip/quarantine this class. |
+| Older runtime decisions | Implemented in local compose; not on `main` until the compose branch lands | Compose includes heal stale reconciliation, process-lock ownership/TOCTOU hardening, detailed API retry-shape work, D18 health-poller policy, provider errPreview sanitization, and D20 keychain observe-only/opt-in unlock policy. D20 is captured in `docs/superpowers/plans/2026-06-13-d20-provider-keychain-unlock-policy.md`; do not claim it closed on `main` until the compose branch is published, CI-verified, merged, and post-merge validated. Reverify each runtime decision against branch `HEAD` before publishing. |
+| Parallel worktrees/branches | Active preservation concern; current inventory recorded below | Preserve all named branches until owner approval; use `git cherry -v` or `git range-diff` before deleting anything claimed superseded. |
+
+## Parallel Worktree Inventory
+
+Fresh read on 2026-06-13/14 against `origin/main` `f65c3990f8c203978bd4b51affe7ee5f97e79024`; all entries below were inspected read-only.
+
+| Surface | State | Evidence | Classification | Next action |
+|---|---|---|---|---|
+| `credential-write` worktree (`feat/credential-write-api`) | Clean; old upstream `origin/feat/provider-management-console` gone | `rev-list` vs main: `12/183`; `git cherry -v` shows 11 patch-positive commits and 1 already represented commit | Owner-gated feature/API branch | Keep; decide keep/land/discard with owner. Do not delete as stale merely because the old upstream is gone. |
+| `alert-truth` worktree (`fix/alert-truth-corrections`) | Clean; remote branch gone | `rev-list` vs main: `6/165`; `git cherry -v` shows 6 patch-positive commits | Bot-errors reliability workstream | Keep; owner triage required before landing or pruning. |
+| `soup-design` worktree (`design/soup-rebrand`) | Clean; tracks `origin/main`; diverged | `status`: ahead 69 / behind 131; `git cherry -v` shows design-program commits not on main | Long-running SOUP design branch | Preserve; rebase/land/discard only by SOUP owner decision. |
+| `soup-impl` worktree (`feat/soup-v3-foundation`) | Clean; tracks `origin/main`; ahead-only at this snapshot | `status`: ahead 272; `git cherry -v` shows implementation + design commits not on main | Long-running SOUP implementation branch | Preserve; this is substantial live work, not cleanup debris. |
+| `integration/provider-hardening-827-829-20260613` worktree | Clean local branch; no remote branch; 8 ahead / 1 behind current main | Contains PR #828 + #829 heads plus older provider-usability integration commits; changed files overlap runtime, db time parsing, and provider usability | Peer/draft integration surface | Read-only unless owner hands over. Rebase/rebuild only by owner decision while #828/#829 remain open drafts. |
+| `integration/provider-hardening-full-compose-20260614T0050Z` worktree | Clean branch head `304b7c12`; 0 behind / 50 ahead main | `git range-diff origin/main..compose-refresh origin/main..full-compose` shows refresh has 32 patch-unique commits and full-compose has 29 patch-unique commits; full-compose still has unconditional keychain unlock, deletes the D20 plan, and would drop the manifest-tracked Python redaction SSOT/runtime-manifest guard if used as the landing branch | Parallel scratch integration, not a superseding landing candidate | Preserve read-only until owner decides whether to cherry-pick selected full-compose topics into refresh or discard/rebuild it. Do not push/merge/delete it as if superseded without a fresh `range-diff` and owner approval. |
+| `feat/turn-capability-health-20260614` worktree | Clean and exactly at current `origin/main` | `rev-list origin/main...feat/turn-capability-health-20260614` is `0/0` | Stale but owner-approval cleanup only | Safe to delete only after owner confirms it is not a handoff marker or pending scratch surface. |
+| `feat/systemd-unit-reconciliation` worktree | Dirty; tracks `origin/main`; behind current main with staged and unstaged deploy/systemd edits | Modified/added deploy units, maintenance scripts, package scripts, tests, and `docs/public-surface.md` | Other active workstream | Preserve untouched. Do not stash, rebase, stage, commit, or clean from this lane. |
+| `agent-a361a4a53a4323750` console scratch worktree | Dirty with console component edits and untracked console tests | Modified `MessageBubble`, `Nav`, `Inbox`; untracked console tests | Agent-owned scratch | Preserve untouched unless the agent owner hands it over. |
+
+## Guardrail Audit Addendum
+
+| Priority | Gap | Current evidence | Next action |
+|---|---|---|---|
+| P0 | `guard:repo:staged` is not a PR/base diff gate in CI or post-commit pre-push contexts | `.github/workflows/quality.yml` ran the staged guard, but the guard reads `git diff --cached`; a clean CI index made added-line hygiene rules a smoke/no-op rather than PR-diff enforcement | Local branch `chore/guardrail-residuals-20260613` adds `guard:repo:branch-diff`, merge-base scanning, branch-history secret/artifact scanning for add-then-remove leaks, CI wiring, branch push wiring, public-surface docs, and chain self-tests. |
+| P0 | `arch.file-size` is documented as blocking, but current enforcement is warning-count-only | `guard:lint:src` exits 0 on warnings, while `tests/scripts/fitness-file-size-warning-budget.test.ts` asserts only a max warning count, not exact file identities or line-count deltas | Decide whether file-size stays growth-fence-only or becomes blocking; then align docs, registry wording, and the budget test. |
+| P1 | Release tag gate remains weaker than `verify:release` | `.github/workflows/tag-release-gate.yml` intentionally runs a guard-only subset, omitting full Vitest, coverage, test-integrity, drills, tokenomics, tools guard, and console build | Keep documented as tag-smoke unless owner approves heavier tag gating; do not cite tag CI as release verification. |
+| P1 | Release snapshot dry-run contract is still manual after #823 | #823 added the script and tests, but no `package.json` or CI invocation exists yet | Decide whether to add an npm script and release-gate wiring or keep it as a manual operator tool. |
+| P1 | BOT ERRORS runtime manifest integrity was covered by a large health-check test, not a fast explicit guard | `tests/scripts/bot-errors-health-check.test.ts` validates committed manifest hashes, but branch/release chains did not have a dedicated runtime-manifest guard step | Local branch `chore/guardrail-residuals-20260613` adds `guard:bot-errors-runtime-manifest`, required path inventory enforcement, CI wiring, branch/release wiring, public-surface docs, and chain self-tests. |
+| P1 | WhatSoup guard watchdog treats drift-without-delivery-attempts as non-broken | `tools/whatsoup_guard` labels the state but exits 0 when no alerts are emitted | Make this state inconclusive/degraded or document why no-attempt drift is acceptable. |
+| P1 | Public-surface route extraction can silently degrade to existence-only | `public-surface-drift-check.ts` skips multiline/unparseable route entries by design | Convert unsupported route shapes to fail-closed findings or add explicit tracked exceptions. |
+| P1 | `test-integrity: source-string-ok` suppresses at file scope | The plugin suppresses every source-string finding when the marker appears anywhere in a file | Prefer line/block-scoped suppressions or split policy-source-string tests away from general tests. |
+| P2 | Test-integrity baseline still carries parser-error blind spots | Baseline check is clean, but three parser-error exemptions plus one weak-assertion exemption remain owner-annotated | Remediate or rebaseline only after rescanning the affected files; do not call this zero-risk. |
+| P2 | Import-boundary ratchet collapses duplicate file/specifier edges | A second forbidden import of the same specifier in one file is intentionally ignored once the edge is baselined | Decide whether debt-count prevention matters; if yes, track duplicate edge counts separately. |
+| P2 | Fail-closed gate detector is shell-regex-narrow | It scans selected shell files and same-line sentinel patterns; TS/JS gates and multiline shell shapes are outside scope | Document scope or expand detection before relying on it as full fail-open coverage. |
 
 > **SPLIT RECONCILIATION (2026-06-13):** During pre-push review the consolidation lane was found to collide with the concurrent, more comprehensive PR #808 (`refactor/private-fs-and-mcp-writer-consolidation`), which independently lands `src/lib/private-fs.ts` (superset of F2's `privateWriteError`), `src/runtimes/chat/enrichment/raw-output.ts` (identical to F1's `truncateRaw`/fence-strip), and `src/lib/short-hash.ts`. To avoid duplicate modules and conflicting edits, this PR was split: **F1 and F2 are dropped and ceded to PR #808**; the **cosmetic F3 folds** (anonymize-private-literals.ts, work-index.ts onto guard-core git/text helpers) are also dropped (collision-free with #808 but pure DRY — re-landable later). **Kept:** R1–R5, H1, P1, the R3 staged-blob-distinct-error machinery in guard-core, and the safeguard-diagnostics fail-open→fail-closed reliability fix (a reliability fix, not consolidation; collision-free). Net shipped scope = hardening + correctness only.
 

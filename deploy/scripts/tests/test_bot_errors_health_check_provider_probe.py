@@ -70,8 +70,9 @@ def test_headless_provider_auth_failure_stays_actionable_when_local_auth_state_i
     )
 
 
-def test_provider_credential_probe_unlocks_and_pins_login_keychain(monkeypatch):
+def test_provider_credential_probe_skips_keychain_unlock_by_default(monkeypatch):
     monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.delenv("BOT_ERRORS_PROVIDER_KEYCHAIN_UNLOCK", raising=False)
     monkeypatch.setattr(_mod, "provider_settings_fragments", lambda: [])
     monkeypatch.setattr(_mod, "provider_claude_state_fragments", lambda: [])
     monkeypatch.setattr(_mod, "provider_macos_session_fragments", lambda _account, _timeout: [])
@@ -90,12 +91,92 @@ def test_provider_credential_probe_unlocks_and_pins_login_keychain(monkeypatch):
     keychain_path = str(Path.home() / "Library" / "Keychains" / "login.keychain-db")
     account = _mod.os.environ.get("USER") or Path.home().name
     service = "Claude" + " Code-credentials"
+    assert "keychain_unlock_policy=observe_only" in fragments
+    assert "keychain_unlock_status=skipped" in fragments
+    assert "credential_item_status=ok" in fragments
+    assert "credential_secret_status=ok" in fragments
+    assert ["security", "unlock-keychain", "-p", "", keychain_path] not in commands
+    assert ["security", "find-generic-password", "-s", service, "-a", account, keychain_path] in commands
+    assert ["security", "find-generic-password", "-s", service, "-a", account, "-w", keychain_path] in commands
+
+
+def test_provider_credential_probe_unlocks_when_env_opted_in(monkeypatch):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setenv("BOT_ERRORS_PROVIDER_KEYCHAIN_UNLOCK", "1")
+    monkeypatch.setattr(_mod, "provider_settings_fragments", lambda: [])
+    monkeypatch.setattr(_mod, "provider_claude_state_fragments", lambda: [])
+    monkeypatch.setattr(_mod, "provider_macos_session_fragments", lambda _account, _timeout: [])
+    commands: list[list[str]] = []
+
+    def fake_provider_command_output(command, *_args):
+        commands.append(command)
+        if command[:2] == ["security", "find-generic-password"] and "-w" in command:
+            return "secret-value", "", 0, False
+        return "", "", 0, False
+
+    monkeypatch.setattr(_mod, "provider_command_output", fake_provider_command_output)
+
+    fragments = _mod.provider_credential_fragments({}, {}, "claude-cli", 15)
+
+    keychain_path = str(Path.home() / "Library" / "Keychains" / "login.keychain-db")
+    account = _mod.os.environ.get("USER") or Path.home().name
+    service = "Claude" + " Code-credentials"
+    assert "keychain_unlock_policy=enabled" in fragments
     assert "keychain_unlock_status=ok" in fragments
     assert "credential_item_status=ok" in fragments
     assert "credential_secret_status=ok" in fragments
     assert ["security", "unlock-keychain", "-p", "", keychain_path] in commands
     assert ["security", "find-generic-password", "-s", service, "-a", account, keychain_path] in commands
     assert ["security", "find-generic-password", "-s", service, "-a", account, "-w", keychain_path] in commands
+
+
+def test_provider_credential_probe_unlocks_when_profile_opted_in(monkeypatch):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.delenv("BOT_ERRORS_PROVIDER_KEYCHAIN_UNLOCK", raising=False)
+    monkeypatch.setattr(_mod, "provider_settings_fragments", lambda: [])
+    monkeypatch.setattr(_mod, "provider_claude_state_fragments", lambda: [])
+    monkeypatch.setattr(_mod, "provider_macos_session_fragments", lambda _account, _timeout: [])
+    commands: list[list[str]] = []
+
+    def fake_provider_command_output(command, *_args):
+        commands.append(command)
+        return "", "", 0, False
+
+    monkeypatch.setattr(_mod, "provider_command_output", fake_provider_command_output)
+
+    fragments = _mod.provider_credential_fragments({"providerCredentialUnlockKeychain": True}, {}, "claude-cli", 15)
+
+    keychain_path = str(Path.home() / "Library" / "Keychains" / "login.keychain-db")
+    assert "keychain_unlock_policy=enabled" in fragments
+    assert "keychain_unlock_status=ok" in fragments
+    assert ["security", "unlock-keychain", "-p", "", keychain_path] in commands
+
+
+def test_provider_credential_probe_item_false_overrides_profile_and_env_unlock(monkeypatch):
+    monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
+    monkeypatch.setenv("BOT_ERRORS_PROVIDER_KEYCHAIN_UNLOCK", "1")
+    monkeypatch.setattr(_mod, "provider_settings_fragments", lambda: [])
+    monkeypatch.setattr(_mod, "provider_claude_state_fragments", lambda: [])
+    monkeypatch.setattr(_mod, "provider_macos_session_fragments", lambda _account, _timeout: [])
+    commands: list[list[str]] = []
+
+    def fake_provider_command_output(command, *_args):
+        commands.append(command)
+        return "", "", 0, False
+
+    monkeypatch.setattr(_mod, "provider_command_output", fake_provider_command_output)
+
+    fragments = _mod.provider_credential_fragments(
+        {"providerCredentialUnlockKeychain": True},
+        {"providerCredentialUnlockKeychain": False},
+        "claude-cli",
+        15,
+    )
+
+    keychain_path = str(Path.home() / "Library" / "Keychains" / "login.keychain-db")
+    assert "keychain_unlock_policy=observe_only" in fragments
+    assert "keychain_unlock_status=skipped" in fragments
+    assert ["security", "unlock-keychain", "-p", "", keychain_path] not in commands
 
 
 def test_fleet_api_default_url_uses_configured_bind_address(monkeypatch):
