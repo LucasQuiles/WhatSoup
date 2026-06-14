@@ -10,7 +10,7 @@ import {
   Suspense,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus } from "lucide-react";
+import { Plus, RotateCw } from "lucide-react";
 const AddLineWizard = lazy(() => import("../components/AddLineWizard"));
 import { motion } from "framer-motion";
 import { useLines, useFeed, useLogs } from "../hooks/use-fleet";
@@ -328,11 +328,13 @@ const SoupKitchen: FC = () => {
     data: lineData,
     isError: linesError,
     error: linesQueryError,
+    refetch: refetchLines,
   } = useLines();
   const {
     data: feedData,
     isError: feedError,
     error: feedQueryError,
+    refetch: refetchFeed,
   } = useFeed();
   const navigate = useNavigate();
 
@@ -877,6 +879,19 @@ const SoupKitchen: FC = () => {
                     <TableError
                       colSpan={COL_COUNT}
                       message={`Unable to load fleet data: ${fleetLoadErrorMessage}`}
+                      retry={
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon={<RotateCw size={12} strokeWidth={1.75} />}
+                          onClick={() => {
+                            if (linesError) void refetchLines();
+                            if (feedError) void refetchFeed();
+                          }}
+                        >
+                          Retry
+                        </Button>
+                      }
                     />
                   ) : filtered.length === 0 ? (
                     <TableEmpty

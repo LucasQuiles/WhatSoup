@@ -136,6 +136,8 @@ interface RenderOptions {
   feed?: FeedEvent[];
   linesError?: Error | null;
   feedError?: Error | null;
+  linesRefetch?: ReturnType<typeof vi.fn>;
+  feedRefetch?: ReturnType<typeof vi.fn>;
   fleetMetrics?: Partial<FleetMetrics> | null;
   logs?: LogEntry[];
 }
@@ -148,11 +150,13 @@ function renderPage(opts: RenderOptions = {}) {
     data: lines,
     isError: Boolean(opts.linesError),
     error: opts.linesError ?? null,
+    refetch: opts.linesRefetch ?? vi.fn(),
   });
   useFeedMock.mockReturnValue({
     data: feed,
     isError: Boolean(opts.feedError),
     error: opts.feedError ?? null,
+    refetch: opts.feedRefetch ?? vi.fn(),
   });
   useFleetMetricsMock.mockReturnValue({
     data: opts.fleetMetrics ?? undefined,
@@ -589,21 +593,39 @@ describe('SoupKitchen error state handling', () => {
     expect(fineRow.className).not.toContain('warn');
   });
 
-  it('renders a fleet-load-error row instead of the empty-filtered placeholder when the lines query fails', () => {
+  it('renders a retryable fleet-load-error row instead of the empty-filtered placeholder when the lines query fails', () => {
+    const linesRefetch = vi.fn();
+    const feedRefetch = vi.fn();
     renderPage({
       lines: [],
       linesError: new Error('upstream 502'),
+      linesRefetch,
+      feedRefetch,
     });
     expect(screen.getByText(/Unable to load fleet data: upstream 502/)).toBeDefined();
     expect(screen.queryByText('No instances match the current filters')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(linesRefetch).toHaveBeenCalledTimes(1);
+    expect(feedRefetch).not.toHaveBeenCalled();
   });
 
-  it('renders a fleet-load-error row when the feed query fails even if lines succeeded', () => {
+  it('renders a retryable fleet-load-error row when the feed query fails even if lines succeeded', () => {
+    const linesRefetch = vi.fn();
+    const feedRefetch = vi.fn();
     renderPage({
       lines: [makeLine({ name: 'visible-line' })],
       feedError: new Error('feed offline'),
+      linesRefetch,
+      feedRefetch,
     });
     expect(screen.getByText(/Unable to load fleet data: feed offline/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(feedRefetch).toHaveBeenCalledTimes(1);
+    expect(linesRefetch).not.toHaveBeenCalled();
   });
 });
 
