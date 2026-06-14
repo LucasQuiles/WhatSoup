@@ -118,6 +118,8 @@ const designRegressionCheckCountPattern =
   /\bdesign-regression\b[^\n]*?\b(\d+)\s+checks?\b/i;
 const designRegressionBlockingSetPattern =
   /\bdesign-regression\b[^\n]*?\bblocking set\s+`([^`]+)`/i;
+const designRegressionExitOnFailPattern =
+  /\bEXIT_ON_FAIL=\(([^)]*)\)/i;
 const designBurndownSummaryPattern =
   /\bburndown\b[^\n]*?\b(\d+)\s+total\s*\/\s*(\d+)\s+blocking\b/i;
 const designGuardTestInventoryPattern =
@@ -722,9 +724,12 @@ function checkDesignEnforcementClaims(
     }
 
     const designRegressionBlockingSetMatch = lineText.match(designRegressionBlockingSetPattern);
-    if (designRegressionBlockingSetMatch?.[1]) {
+    const designRegressionExitOnFailMatch = lineText.match(designRegressionExitOnFailPattern);
+    const designRegressionBlockingSetText =
+      designRegressionBlockingSetMatch?.[1] ?? designRegressionExitOnFailMatch?.[1];
+    if (designRegressionBlockingSetText) {
       const claimed = integerSetFromText(
-        designRegressionBlockingSetMatch[1],
+        designRegressionBlockingSetText,
         `${filePath}:${line} design-regression blocking set`,
       );
       const claimedSet = new Set(claimed);

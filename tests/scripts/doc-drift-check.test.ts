@@ -307,6 +307,29 @@ describe('doc drift check', () => {
     ]);
   });
 
+  it('flags stale documented EXIT_ON_FAIL design-regression blocking sets', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'lint-plan.md');
+    const missingCheck = currentDesignRegressionBlockingChecks[0] ?? 1;
+    const staleBlockingSet = currentDesignRegressionBlockingChecks
+      .filter((check) => check !== missingCheck)
+      .join(' ');
+    const text = `Blocking set live in \`design-regression.sh\`: \`EXIT_ON_FAIL=(${staleBlockingSet})\`.`;
+    writeFileSync(staleDoc, `${text}\n`, 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: missingCheck,
+        claimed: 0,
+        filePath: staleDoc,
+        kind: 'design-regression-blocking-check',
+        line: 1,
+        text,
+        expected: 'design-regression blocking check from console/scripts/design-regression.sh EXIT_ON_FAIL',
+      },
+    ]);
+  });
+
   it('flags stale current theme-parity token counts', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
     const staleDoc = path.join(dir, 'current-design.md');
