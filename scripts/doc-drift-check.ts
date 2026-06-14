@@ -113,7 +113,7 @@ const currentDesignEnforcementContextPattern =
 const shadowBaselineTotalPattern =
   /\blint-shadow-baseline\.json\b[^\n]*?(?:—|=|:|\bis\b|\btotal\b|\bceiling\b)\s*(\d+)\b/i;
 const themeParityTokenCountPattern =
-  /\btheme parity\b[^\n]*?\b(\d+)\b/i;
+  /\b(?:theme parity|check-theme-parity\.mjs)\b[^\n]*?\b(\d+)\s*(?:tokens?\b)?/i;
 const designRegressionCheckCountPattern =
   /\bdesign-regression\b[^\n]*?\b(\d+)\s+checks?\b/i;
 const designRegressionBlockingSetPattern =

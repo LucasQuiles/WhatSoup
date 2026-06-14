@@ -327,6 +327,26 @@ describe('doc drift check', () => {
     ]);
   });
 
+  it('flags stale check-theme-parity.mjs token-count claims in current conformance docs', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'conformance-manifest.md');
+    const staleThemeParityCount = currentThemeParityTokenCount - 1;
+    const text = `Dark theme evidence: \`console/scripts/check-theme-parity.mjs\` (${staleThemeParityCount} tokens both scopes).`;
+    writeFileSync(staleDoc, `${text}\n`, 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: currentThemeParityTokenCount,
+        claimed: staleThemeParityCount,
+        filePath: staleDoc,
+        kind: 'theme-parity-token-count',
+        line: 1,
+        text,
+        expected: 'theme parity token count from console/src/styles/tokens.semantic.css',
+      },
+    ]);
+  });
+
   it('flags stale current design burndown summary counts', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
     const staleDoc = path.join(dir, 'current-design.md');
