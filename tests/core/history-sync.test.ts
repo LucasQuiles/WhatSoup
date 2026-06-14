@@ -131,6 +131,17 @@ describe('processHistoryBatch', () => {
     expect(row.sender_jid).toBe('bob@s.whatsapp.net');
   });
 
+  it('normalizes envelope-only millisecond timestamps before writing placeholders', () => {
+    processHistoryBatch(db, [
+      envelopeOnlyMsg({ id: 'MSG4_MS', chat: 'group@g.us', participant: 'bob@s.whatsapp.net', ts: 1_777_824_570_676 }),
+    ]);
+
+    const row = db.raw
+      .prepare('SELECT timestamp FROM messages WHERE message_id=?')
+      .get('MSG4_MS') as { timestamp: number };
+    expect(row.timestamp).toBe(1_777_824_570);
+  });
+
   it('placeholder falls back to chat_jid when no participant (DM case)', () => {
     processHistoryBatch(db, [envelopeOnlyMsg({ id: 'MSG5', chat: 'alice@s.whatsapp.net' })]);
     const row = db.raw.prepare('SELECT sender_jid FROM messages WHERE message_id=?').get('MSG5') as { sender_jid: string };

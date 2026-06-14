@@ -726,6 +726,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [26, runMigration26],
   [27, runMigration27],
   [28, runMigration28],
+  [29, runMigration29],
 ]);
 
 function runMigration25(db: DatabaseSync): void {
@@ -742,6 +743,19 @@ function runMigration26(db: DatabaseSync): void {
 
 function runMigration28(db: DatabaseSync): void {
   db.exec(MIGRATION_28_PENDING_POLLS);
+}
+
+function runMigration29(db: DatabaseSync): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
+    .get() as { name: string } | undefined;
+  if (!table) return;
+
+  db.exec(`
+    UPDATE messages
+    SET timestamp = CAST(timestamp / 1000 AS INTEGER)
+    WHERE timestamp >= 100000000000
+  `);
 }
 
 function runMigration27(db: DatabaseSync): void {
@@ -1254,4 +1268,3 @@ export function resolveDecryptionFailure(db: Database, messageId: string): void 
     WHERE message_id = ? AND resolved = 0
   `).run(messageId);
 }
-

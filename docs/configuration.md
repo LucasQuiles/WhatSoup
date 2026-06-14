@@ -961,6 +961,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 26 | Rebuilds pre-existing `outbound_sends` tables so the caller CHECK constraint allows Reply Guarantee Protocol fallback audit rows (`rgp`) |
 | 27 | Message query performance indexes on timestamp/from-me, timestamp/content-type, and token counters when token columns exist (`runMigration27`) |
 | 28 | `pending_polls` table — persists `AskUserQuestion`/`send_poll` state across runtime restarts. Columns: `map_key` (PK), `chat_jid`, `tool_id`, `source`, `resolution`, `payload` (JSON), `created_at`, `closes_at`, `hard_closes_at`. Indexes on `chat_jid` and `closes_at`. Rehydration runs at `AgentRuntime.start()`; rows with `hard_closes_at <= now` are dropped after a one-line "decision expired during downtime" notice. (`runMigration28`) |
+| 29 | Normalizes any existing millisecond-scale `messages.timestamp` rows down to Unix epoch seconds so message ordering, retention, enrichment windows, and fleet displays use one timestamp unit (`runMigration29`) |
 
 ---
 

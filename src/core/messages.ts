@@ -1,7 +1,7 @@
 import type { Database } from './database.ts';
 import { resolveDecryptionFailure } from './database.ts';
 import type { ContentType } from './types.ts';
-import { nowUnixSec } from '../fleet/time-utils.ts';
+import { normalizeUnixTimestampSeconds, nowUnixSec } from '../fleet/time-utils.ts';
 
 // ---------------------------------------------------------------------------
 // MCP row shape — used by tool files that query the messages table directly
@@ -114,7 +114,7 @@ function toInsertParams(msg: StoreMessageInput): Record<string, null | number | 
     content: msg.content ?? null,
     content_type: msg.contentType ?? 'text',
     is_from_me: msg.isFromMe ? 1 : 0,
-    timestamp: msg.timestamp,
+    timestamp: normalizeUnixTimestampSeconds(msg.timestamp),
     quoted_message_id: msg.quotedMessageId ?? null,
     raw_message: msg.rawMessage ?? null,
     content_text: msg.contentText ?? null,
