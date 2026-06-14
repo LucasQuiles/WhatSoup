@@ -13,6 +13,7 @@ import {
   findRawFormControlInventory,
   findShadowBaselineInventory,
   findSoupKitchenLabelCount,
+  findTestFileTestCount,
   findThemeParityTokenCount,
   findToolRegistrations,
   run,
@@ -28,6 +29,7 @@ const currentThemeParityTokenCount = findThemeParityTokenCount(repoRoot);
 const currentDesignBurndownSummary = findDesignBurndownSummary(repoRoot);
 const currentDesignRegressionBlockingChecks = findDesignRegressionBlockingChecks(repoRoot);
 const currentSoupKitchenLabelCount = findSoupKitchenLabelCount(repoRoot);
+const currentUseThemeTestCount = findTestFileTestCount(repoRoot, 'tests/console/use-theme.test.tsx');
 
 describe('doc drift check', () => {
   afterEach(() => {
@@ -294,6 +296,26 @@ describe('doc drift check', () => {
         line: 1,
         text,
         expected: 'Soup Kitchen label count from console/src and docs/console-guide.md',
+      },
+    ]);
+  });
+
+  it('flags stale backticked test-file count claims in current docs', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'conformance-manifest.md');
+    const staleCount = currentUseThemeTestCount + 1;
+    const text = `Dark theme evidence: \`tests/console/use-theme.test.tsx\` (${staleCount} tests).`;
+    writeFileSync(staleDoc, `${text}\n`, 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: currentUseThemeTestCount,
+        claimed: staleCount,
+        filePath: staleDoc,
+        kind: 'test-file-test-count',
+        line: 1,
+        text,
+        expected: 'Vitest collected test count for tests/console/use-theme.test.tsx',
       },
     ]);
   });

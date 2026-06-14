@@ -11,6 +11,7 @@ export type DocDriftKind =
   | 'raw-form-control-inventory'
   | 'brand-regression-lint-count'
   | 'soup-kitchen-label-count'
+  | 'test-file-test-count'
   | 'theme-parity-token-count'
   | 'shadow-baseline-total'
   | 'design-regression-check-count'
@@ -117,6 +118,8 @@ const brandRegressionLintCountPattern =
   /\bbrand-regression lint\s*\(\s*(\d+)\s+hits?\b/i;
 const soupKitchenLabelCountPattern =
   /["“]?Soup Kitchen["”]?\s*[×x]\s*(\d+)\s+counter\b/i;
+const nonBrowserTestFileCountPattern =
+  /`(tests\/(?!browser\/)[^`]+?\.(?:test|spec)\.[cm]?[tj]sx?)`\s*\(\s*(\d+)\s+tests?\b/gi;
 const shadowBaselineTotalPattern =
   /\blint-shadow-baseline\.json\b[^\n]*?(?:—|=|:|\bis\b|\btotal\b|\bceiling\b)\s*(\d+)\b/i;
 const themeParityTokenCountPattern =
@@ -456,11 +459,10 @@ function vitestListEntryFile(entry: unknown): string {
   return (entry as { file: string }).file;
 }
 
-export function findDesignGuardTestInventory(cwd: string = process.cwd()): DesignGuardTestInventory {
-  const { testFiles, vitestArgs } = findDesignGuardVitestArgs(cwd);
+function listVitestTests(cwd: string, vitestArgs: string[]): unknown[] {
   const vitestPath = path.resolve(cwd, 'node_modules/.bin/vitest');
   if (!existsSync(vitestPath)) {
-    throw new Error('ERROR(schema:test:design-guards): missing local Vitest binary');
+    throw new Error('ERROR(schema:vitest-list): missing local Vitest binary');
   }
 
   const result = spawnSync(vitestPath, ['list', ...vitestArgs, '--json'], {
@@ -469,14 +471,40 @@ export function findDesignGuardTestInventory(cwd: string = process.cwd()): Desig
     env: { ...cleanGitEnv(), CI: 'true' },
   });
   if (result.error) {
-    throw new Error(`ERROR(schema:test:design-guards): vitest list failed: ${result.error.message}`);
+    throw new Error(`ERROR(schema:vitest-list): vitest list failed: ${result.error.message}`);
   }
   if (result.status !== 0) {
     const output = `${result.stderr || ''}${result.stdout || ''}`.trim();
-    throw new Error(`ERROR(schema:test:design-guards): vitest list exited ${result.status}: ${output}`);
+    throw new Error(`ERROR(schema:vitest-list): vitest list exited ${result.status}: ${output}`);
   }
 
-  const entries = parseVitestListJson(result.stdout);
+  return parseVitestListJson(result.stdout);
+}
+
+export function findTestFileTestCount(cwd: string = process.cwd(), testFile: string): number {
+  if (!designGuardTestFilePattern.test(testFile) || testFile.startsWith('tests/browser/')) {
+    throw new Error(`ERROR(schema:test-file-count): unsupported test file ${testFile}`);
+  }
+  if (!existsSync(path.resolve(cwd, testFile))) {
+    throw new Error(`ERROR(schema:test-file-count): missing test file ${testFile}`);
+  }
+
+  const entries = listVitestTests(cwd, [testFile, '--pool=forks']);
+  const expectedFile = normalizeRepoPath(testFile);
+  const count = entries.reduce<number>((total, entry) => {
+    const entryFile = vitestListEntryFile(entry);
+    const absoluteFile = path.isAbsolute(entryFile) ? entryFile : path.resolve(cwd, entryFile);
+    return normalizeRepoPath(path.relative(cwd, absoluteFile)) === expectedFile ? total + 1 : total;
+  }, 0);
+  if (count === 0) {
+    throw new Error(`ERROR(schema:test-file-count): Vitest collected no tests for ${testFile}`);
+  }
+  return count;
+}
+
+export function findDesignGuardTestInventory(cwd: string = process.cwd()): DesignGuardTestInventory {
+  const { testFiles, vitestArgs } = findDesignGuardVitestArgs(cwd);
+  const entries = listVitestTests(cwd, vitestArgs);
   const collectedFiles = new Set<string>();
   for (const entry of entries) {
     const entryFile = vitestListEntryFile(entry);
@@ -707,6 +735,37 @@ function checkRawFormControlInventoryClaims(
   return issues;
 }
 
+function checkTestFileCountClaims(
+  cwd: string,
+  filePath: string,
+  lines: string[],
+  testFileCountCache: Map<string, number>,
+): DocDriftIssue[] {
+  const issues: DocDriftIssue[] = [];
+
+  lines.forEach((lineText, index) => {
+    for (const match of lineText.matchAll(nonBrowserTestFileCountPattern)) {
+      const testFile = match[1];
+      if (!testFile) continue;
+      const claimed = Number(match[2]);
+      const actual = testFileCountCache.get(testFile) ?? findTestFileTestCount(cwd, testFile);
+      testFileCountCache.set(testFile, actual);
+      addTypedCountIssue(
+        issues,
+        'test-file-test-count',
+        filePath,
+        index + 1,
+        claimed,
+        actual,
+        lineText,
+        `Vitest collected test count for ${testFile}`,
+      );
+    }
+  });
+
+  return issues;
+}
+
 function isCurrentDesignEnforcementClaim(filePath: string, lineText: string): boolean {
   return currentDesignEnforcementDocPattern.test(filePath)
     || currentDesignEnforcementContextPattern.test(lineText);
@@ -903,6 +962,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const designRegressionBlockingChecks = findDesignRegressionBlockingChecks(cwd);
   const designBurndownSummary = findDesignBurndownSummary(cwd);
   const designGuardTestInventory = findDesignGuardTestInventory(cwd);
+  const testFileCountCache = new Map<string, number>();
   const toolCountsByModule = new Map<string, number>();
   for (const registration of registrations) {
     const moduleName = path.basename(registration.filePath);
@@ -920,6 +980,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
 
     issues.push(...checkMigrationHistoryTable(filePath, lines, migrationVersions));
     issues.push(...checkRawFormControlInventoryClaims(filePath, lines, rawFormControlInventory));
+    issues.push(...checkTestFileCountClaims(cwd, filePath, lines, testFileCountCache));
     issues.push(...checkDesignEnforcementClaims(
       filePath,
       lines,
