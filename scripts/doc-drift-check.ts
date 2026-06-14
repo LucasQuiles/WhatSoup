@@ -1,7 +1,8 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { normalizeRepoPath } from './lib/guard-core.ts';
+import { cleanGitEnv, normalizeRepoPath } from './lib/guard-core.ts';
 
 export type DocDriftKind =
   | 'tool-count'
@@ -9,7 +10,9 @@ export type DocDriftKind =
   | 'migration-history'
   | 'raw-form-control-inventory'
   | 'shadow-baseline-total'
-  | 'design-regression-check-count';
+  | 'design-regression-check-count'
+  | 'design-guard-test-file-count'
+  | 'design-guard-test-count';
 
 export interface DocDriftIssue {
   filePath: string;
@@ -49,6 +52,15 @@ export interface RawFormControlInventory {
 
 export interface ShadowBaselineInventory {
   total: number;
+}
+
+export interface DesignGuardTestInventory {
+  fileCount: number;
+  testCount: number;
+}
+
+interface PackageJsonWithScripts {
+  scripts?: Record<string, unknown>;
 }
 
 const defaultDocPaths = [
@@ -93,6 +105,9 @@ const shadowBaselineTotalPattern =
   /\blint-shadow-baseline\.json\b[^\n]*?(?:—|=|:|\bis\b|\btotal\b|\bceiling\b)\s*(\d+)\b/i;
 const designRegressionCheckCountPattern =
   /\bdesign-regression\b[^\n]*?\b(\d+)\s+checks?\b/i;
+const designGuardTestInventoryPattern =
+  /\btest:design-guards\b[^\n]*?\b(\d+)\s+files?\s*\/\s*(\d+)\s+tests?\b/i;
+const designGuardTestFilePattern = /^tests\/.+\.(?:test|spec)\.[cm]?[tj]sx?$/;
 
 function lineForOffset(text: string, offset: number): number {
   let line = 1;
@@ -253,6 +268,100 @@ export function findDesignRegressionCheckCount(cwd: string = process.cwd()): num
     throw new Error('ERROR(schema:design-regression.sh): check headers are not contiguous');
   }
   return uniqueChecks.size;
+}
+
+function findDesignGuardVitestArgs(cwd: string): { testFiles: string[]; vitestArgs: string[] } {
+  const packagePath = path.resolve(cwd, 'package.json');
+  const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as PackageJsonWithScripts;
+  const script = packageJson.scripts?.['test:design-guards'];
+  if (typeof script !== 'string' || script.trim() === '') {
+    throw new Error('ERROR(schema:package.json): missing scripts.test:design-guards');
+  }
+
+  const tokens = script.split(/\s+/).filter(Boolean);
+  const separatorIndex = tokens.indexOf('--');
+  const vitestArgs = separatorIndex >= 0
+    ? tokens.slice(separatorIndex + 1)
+    : tokens.filter((token) => designGuardTestFilePattern.test(token) || token.startsWith('--'));
+  const testFiles = vitestArgs.filter((token) => designGuardTestFilePattern.test(token));
+  if (testFiles.length === 0) {
+    throw new Error('ERROR(schema:test:design-guards): no test files found in package.json script');
+  }
+  if (new Set(testFiles).size !== testFiles.length) {
+    throw new Error('ERROR(schema:test:design-guards): duplicate test files in package.json script');
+  }
+  for (const testFile of testFiles) {
+    if (!existsSync(path.resolve(cwd, testFile))) {
+      throw new Error(`ERROR(schema:test:design-guards): missing test file ${testFile}`);
+    }
+  }
+
+  return { testFiles, vitestArgs };
+}
+
+function parseVitestListJson(stdout: string): unknown[] {
+  const jsonStart = stdout.indexOf('[');
+  const jsonEnd = stdout.lastIndexOf(']');
+  if (jsonStart < 0 || jsonEnd < jsonStart) {
+    throw new Error('ERROR(schema:test:design-guards): vitest list did not emit JSON');
+  }
+
+  const parsed = JSON.parse(stdout.slice(jsonStart, jsonEnd + 1)) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error('ERROR(schema:test:design-guards): vitest list JSON is not an array');
+  }
+  return parsed;
+}
+
+function vitestListEntryFile(entry: unknown): string {
+  if (
+    typeof entry !== 'object'
+    || entry === null
+    || typeof (entry as { file?: unknown }).file !== 'string'
+    || typeof (entry as { name?: unknown }).name !== 'string'
+  ) {
+    throw new Error('ERROR(schema:test:design-guards): vitest list entry is malformed');
+  }
+  return (entry as { file: string }).file;
+}
+
+export function findDesignGuardTestInventory(cwd: string = process.cwd()): DesignGuardTestInventory {
+  const { testFiles, vitestArgs } = findDesignGuardVitestArgs(cwd);
+  const vitestPath = path.resolve(cwd, 'node_modules/.bin/vitest');
+  if (!existsSync(vitestPath)) {
+    throw new Error('ERROR(schema:test:design-guards): missing local Vitest binary');
+  }
+
+  const result = spawnSync(vitestPath, ['list', ...vitestArgs, '--json'], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...cleanGitEnv(), CI: 'true' },
+  });
+  if (result.error) {
+    throw new Error(`ERROR(schema:test:design-guards): vitest list failed: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const output = `${result.stderr || ''}${result.stdout || ''}`.trim();
+    throw new Error(`ERROR(schema:test:design-guards): vitest list exited ${result.status}: ${output}`);
+  }
+
+  const entries = parseVitestListJson(result.stdout);
+  const collectedFiles = new Set<string>();
+  for (const entry of entries) {
+    const entryFile = vitestListEntryFile(entry);
+    const absoluteFile = path.isAbsolute(entryFile) ? entryFile : path.resolve(cwd, entryFile);
+    collectedFiles.add(normalizeRepoPath(path.relative(cwd, absoluteFile)));
+  }
+
+  const expectedFiles = new Set(testFiles.map((testFile) => normalizeRepoPath(testFile)));
+  if (collectedFiles.size !== expectedFiles.size || [...expectedFiles].some((testFile) => !collectedFiles.has(testFile))) {
+    throw new Error('ERROR(schema:test:design-guards): vitest list collected a different file set than package.json');
+  }
+
+  return {
+    fileCount: testFiles.length,
+    testCount: entries.length,
+  };
 }
 
 function checkMigrationHistoryTable(
@@ -477,6 +586,7 @@ function checkDesignEnforcementClaims(
   lines: string[],
   shadowBaseline: ShadowBaselineInventory,
   designRegressionCheckCount: number,
+  designGuardTestInventory: DesignGuardTestInventory,
 ): DocDriftIssue[] {
   const issues: DocDriftIssue[] = [];
 
@@ -511,6 +621,30 @@ function checkDesignEnforcementClaims(
         'design-regression check count from console/scripts/design-regression.sh',
       );
     }
+
+    const designGuardTestMatch = lineText.match(designGuardTestInventoryPattern);
+    if (designGuardTestMatch) {
+      addTypedCountIssue(
+        issues,
+        'design-guard-test-file-count',
+        filePath,
+        line,
+        Number(designGuardTestMatch[1]),
+        designGuardTestInventory.fileCount,
+        lineText,
+        'test:design-guards file count from package.json',
+      );
+      addTypedCountIssue(
+        issues,
+        'design-guard-test-count',
+        filePath,
+        line,
+        Number(designGuardTestMatch[2]),
+        designGuardTestInventory.testCount,
+        lineText,
+        'test:design-guards test count from Vitest list',
+      );
+    }
   });
 
   return issues;
@@ -526,6 +660,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const rawFormControlInventory = findRawFormControlInventory(cwd);
   const shadowBaselineInventory = findShadowBaselineInventory(cwd);
   const designRegressionCheckCount = findDesignRegressionCheckCount(cwd);
+  const designGuardTestInventory = findDesignGuardTestInventory(cwd);
   const toolCountsByModule = new Map<string, number>();
   for (const registration of registrations) {
     const moduleName = path.basename(registration.filePath);
@@ -548,6 +683,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
       lines,
       shadowBaselineInventory,
       designRegressionCheckCount,
+      designGuardTestInventory,
     ));
 
     lines.forEach((lineText, index) => {

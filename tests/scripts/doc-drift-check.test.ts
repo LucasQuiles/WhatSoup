@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   findDocDrift,
+  findDesignGuardTestInventory,
   findDesignRegressionCheckCount,
   findRawFormControlInventory,
   findShadowBaselineInventory,
@@ -18,6 +19,7 @@ const currentToolCount = findToolRegistrations(repoRoot).length;
 const currentRawFormControlInventory = findRawFormControlInventory(repoRoot);
 const currentShadowBaselineInventory = findShadowBaselineInventory(repoRoot);
 const currentDesignRegressionCheckCount = findDesignRegressionCheckCount(repoRoot);
+const currentDesignGuardTestInventory = findDesignGuardTestInventory(repoRoot);
 
 describe('doc drift check', () => {
   afterEach(() => {
@@ -262,6 +264,36 @@ describe('doc drift check', () => {
         line: 1,
         text: 'The current design-enforcement run has design-regression 16 checks.',
         expected: 'design-regression check count from console/scripts/design-regression.sh',
+      },
+    ]);
+  });
+
+  it('flags stale current design guard test inventory counts', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'current-design.md');
+    const staleFileCount = currentDesignGuardTestInventory.fileCount - 1;
+    const staleTestCount = currentDesignGuardTestInventory.testCount - 1;
+    const text = `The current design-enforcement run has test:design-guards ${staleFileCount} files / ${staleTestCount} tests.`;
+    writeFileSync(staleDoc, `${text}\n`, 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: currentDesignGuardTestInventory.fileCount,
+        claimed: staleFileCount,
+        filePath: staleDoc,
+        kind: 'design-guard-test-file-count',
+        line: 1,
+        text,
+        expected: 'test:design-guards file count from package.json',
+      },
+      {
+        actual: currentDesignGuardTestInventory.testCount,
+        claimed: staleTestCount,
+        filePath: staleDoc,
+        kind: 'design-guard-test-count',
+        line: 1,
+        text,
+        expected: 'test:design-guards test count from Vitest list',
       },
     ]);
   });
