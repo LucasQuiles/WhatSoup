@@ -45,6 +45,15 @@
 - Tests added: `deploy/scripts/tests/test_bot_errors_redaction_regex.py` covers all consumers and `.config/secrets/` paths; `deploy/scripts/tests/test_bot_errors_redaction_ssot.py` rejects local regex-clone reintroduction.
 - Boundary preserved: TypeScript `scripts/repo-hygiene-guard.ts` remains a source-diff hygiene scanner with a distinct threat model.
 
+## Implementation Reconciliation
+
+The task snippets below were the red-first implementation plan. The local compose branch has now implemented the slice with a slightly narrower public helper API than the initial draft:
+
+- Authoritative helper API: `deploy/scripts/lib/bot_errors_redaction.py` exports `redact_bot_errors_text(value, *, credential_path_marker, ...)` and `redact_json_value(value, redact_text)`.
+- Script wrappers remain the compatibility boundary: collector, dispatcher, emit, health-check, heartbeat-watchdog, q-loop, and runner expose their existing wrapper names and pass each script's historical credential-path marker to the shared helper.
+- Do not paste the older Task 2/Task 3 snippets over the current branch. In particular, the draft helper name `redact_text` was superseded by `redact_bot_errors_text`, and JSON redaction now accepts the caller's wrapper function to preserve per-script marker semantics.
+- Current proof on the local compose branch: `python3.12 -m pytest deploy/scripts/tests/test_bot_errors_redaction_regex.py deploy/scripts/tests/test_bot_errors_redaction_ssot.py -q` passes 86 tests, and `npm test -- --pool=forks tests/scripts/check-bot-errors-runtime-manifest.test.ts tests/scripts/bot-errors-health-check.test.ts` passes 117 tests.
+
 ## File Structure
 
 - Create: `deploy/scripts/lib/__init__.py`
