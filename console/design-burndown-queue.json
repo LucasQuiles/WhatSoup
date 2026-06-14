@@ -682,10 +682,10 @@
           "path": "src/components/line-detail/ProvidersKeysCard.tsx",
           "count": 5,
           "lines": [
-            66,
-            83,
-            106,
-            168
+            67,
+            84,
+            107,
+            174
           ]
         },
         {
@@ -771,7 +771,7 @@
           "path": "src/pages/Inbox.tsx",
           "count": 1,
           "lines": [
-            420
+            421
           ]
         },
         {
