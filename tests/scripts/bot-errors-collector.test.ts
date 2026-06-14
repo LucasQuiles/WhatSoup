@@ -373,6 +373,10 @@ describe('bot-errors-collector', () => {
           BOT_ERRORS_STATE_DIR: tmpRoot,
           BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
           BOT_ERRORS_TAILSCALE_STATUS_COMMAND: fakeTailscale,
+          // Full-suite load can starve the shell fake long enough to exceed
+          // the production 2s lookup default, which makes this test count the
+          // skipped writefail probe as a second isolated failure.
+          BOT_ERRORS_TAILSCALE_STATUS_TIMEOUT_SECONDS: '30',
         },
         encoding: 'utf8',
       },
