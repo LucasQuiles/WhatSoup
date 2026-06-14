@@ -16,6 +16,7 @@ afterEach(() => {
 });
 
 interface FixtureOptions {
+  extraPublicFiles?: Record<string, string>;
   favicon?: string;
   index?: string;
   manifest?: string | null;
@@ -43,6 +44,11 @@ function makeFixture(options: FixtureOptions = {}) {
       options.manifest ?? JSON.stringify({ icons: [{ src: '/favicon.svg', sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }] }, null, 2),
     );
   }
+  for (const [path, content] of Object.entries(options.extraPublicFiles ?? {})) {
+    const target = join(root, 'console/public', path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, content);
+  }
   return { favicon, index, manifest, root };
 }
 
@@ -67,6 +73,7 @@ function parsedOutput(result: ReturnType<typeof runScript>) {
   return JSON.parse(result.stdout) as {
     by_rule: Record<string, number>;
     failure_count: number;
+    failures: Array<{ code: string; message: string; target: string }>;
     finding_count: number;
     mode: 'report-only' | 'fail-on-findings';
     verdict: 'PASS' | 'FAIL';
@@ -127,5 +134,39 @@ describe('check-brand-assets.mjs', () => {
     expect(result.status).toBe(0);
     expect(output.verdict).toBe('PASS');
     expect(output.by_rule['soup/brand-pwa-maskable-assets-missing']).toBe(2);
+  });
+
+  it('fails on legacy product or channel copy in peripheral artifacts', () => {
+    const fixture = makeFixture({
+      index: '<!doctype html><html><head><link rel="icon" href="/favicon.svg" /><link rel="manifest" href="/manifest.webmanifest" /></head><body>Soup Kitchen from WhatsApp</body></html>\n',
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.failures.filter((failure) => failure.code === 'PERIPHERAL_BRAND_COPY')).toHaveLength(2);
+    expect(output.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'PERIPHERAL_BRAND_COPY', target: fixture.index }),
+    ]));
+  });
+
+  it('fails when a public SVG asset is not referenced by the shell, manifest, or console source', () => {
+    const fixture = makeFixture({
+      extraPublicFiles: {
+        'unused.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" />\n',
+      },
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'ORPHAN_PUBLIC_SVG',
+        target: join(fixture.root, 'console/public/unused.svg'),
+      }),
+    ]));
   });
 });

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Report SOUP brand asset readiness: favicon source, document links, and PWA/maskable coverage.
 
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -12,6 +12,12 @@ const DEFAULT_FAVICON = resolve(consoleRoot, 'public/favicon.svg');
 const DEFAULT_INDEX = resolve(consoleRoot, 'index.html');
 const DEFAULT_MANIFEST = resolve(consoleRoot, 'public/manifest.webmanifest');
 const LEGACY_BOLT_COLORS = ['#863bff', '#7e14ff', '#47bfff', '#aa3bff'];
+const PERIPHERAL_TEXT_EXT = /\.(?:json|webmanifest|html)$/i;
+const REFERENCE_TEXT_EXT = /\.(?:css|html|json|ts|tsx|webmanifest)$/i;
+const FORBIDDEN_PERIPHERAL_COPY = [
+  { label: 'legacy product name "Soup Kitchen"', pattern: /Soup Kitchen/i },
+  { label: 'channel-bound copy "from/on/via WhatsApp"', pattern: /\b(?:from|on|via)\s+WhatsApp\b/i },
+];
 
 function usage() {
   return `Usage: node console/scripts/check-brand-assets.mjs [options]
@@ -57,6 +63,58 @@ function addFinding(findings, rule, target, evidence, message) {
 
 function addFailure(failures, code, target, message) {
   failures.push({ code, message, target });
+}
+
+function pushExisting(files, path) {
+  if (existsSync(path) && !files.includes(path)) files.push(path);
+}
+
+function pathConsoleRoot(paths) {
+  return dirname(paths.index);
+}
+
+function displayPath(path, paths) {
+  const root = pathConsoleRoot(paths);
+  return path.startsWith(`${root}/`) ? `console/${path.slice(root.length + 1)}` : path;
+}
+
+function peripheralTextArtifacts(paths) {
+  const files = [];
+  const publicDir = dirname(paths.manifest);
+
+  pushExisting(files, paths.index);
+  if (existsSync(publicDir)) {
+    for (const entry of readdirSync(publicDir, { withFileTypes: true })) {
+      if (entry.isFile() && PERIPHERAL_TEXT_EXT.test(entry.name)) {
+        pushExisting(files, resolve(publicDir, entry.name));
+      }
+    }
+  }
+  pushExisting(files, paths.manifest);
+
+  return files;
+}
+
+function textFilesUnder(dir) {
+  if (!existsSync(dir)) return [];
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...textFilesUnder(path));
+    } else if (entry.isFile() && REFERENCE_TEXT_EXT.test(entry.name)) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
+function publicSvgAssets(paths) {
+  const publicDir = dirname(paths.manifest);
+  if (!existsSync(publicDir)) return [];
+  return readdirSync(publicDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.svg'))
+    .map((entry) => resolve(publicDir, entry.name));
 }
 
 function numericAttr(svg, attr) {
@@ -200,6 +258,43 @@ function analyzeManifest(path) {
   return findings;
 }
 
+function scanPeripheralBrandFailures(paths) {
+  const failures = [];
+  const textArtifacts = peripheralTextArtifacts(paths);
+
+  for (const file of textArtifacts) {
+    const text = readFileSync(file, 'utf8');
+    for (const { label, pattern } of FORBIDDEN_PERIPHERAL_COPY) {
+      if (pattern.test(text)) {
+        addFailure(
+          failures,
+          'PERIPHERAL_BRAND_COPY',
+          file,
+          `Forbidden peripheral copy (${label}) in ${displayPath(file, paths)}.`,
+        );
+      }
+    }
+  }
+
+  const referenceText = [
+    ...textArtifacts,
+    ...textFilesUnder(resolve(pathConsoleRoot(paths), 'src')),
+  ].map((file) => readFileSync(file, 'utf8')).join('\n');
+
+  for (const file of publicSvgAssets(paths)) {
+    if (!referenceText.includes(basename(file))) {
+      addFailure(
+        failures,
+        'ORPHAN_PUBLIC_SVG',
+        file,
+        `Public SVG ${basename(file)} is not referenced by index.html, public text artifacts, or console/src.`,
+      );
+    }
+  }
+
+  return failures;
+}
+
 function buildReport(opts) {
   const paths = { favicon: opts.favicon, index: opts.index, manifest: opts.manifest };
   const failures = [];
@@ -214,10 +309,12 @@ function buildReport(opts) {
       ...analyzeIndex(readFileSync(opts.index, 'utf8'), paths),
       ...analyzeManifest(opts.manifest),
     ].sort((a, b) => a.rule.localeCompare(b.rule) || a.target.localeCompare(b.target));
+    failures.push(...scanPeripheralBrandFailures(paths));
   }
 
   const byRule = {};
   for (const finding of findings) byRule[finding.rule] = (byRule[finding.rule] ?? 0) + 1;
+  failures.sort((a, b) => a.code.localeCompare(b.code) || a.target.localeCompare(b.target));
 
   return {
     by_rule: Object.fromEntries(Object.entries(byRule).sort(([a], [b]) => a.localeCompare(b))),
