@@ -7,7 +7,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-design-resilience.mjs');
 const PROMOTED_RULES = [
   'soup/layer-owner-required',
+  'soup/no-hover-only-content',
+  'soup/no-layout-shift-interaction',
   'soup/no-unsafe-truncation',
+  'soup/no-vw-font-size',
   'soup/scroll-owner-required',
 ];
 
@@ -58,13 +61,16 @@ function parsedOutput(result: ReturnType<typeof runScript>) {
 }
 
 describe('check-design-resilience.mjs', () => {
-  it('promotes zeroed layer-owner, truncation, and scroll-owner lanes through the package script', () => {
+  it('promotes every zeroed resilience lane through the package script', () => {
     const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'console/package.json'), 'utf8')) as {
       scripts?: Record<string, string>;
     };
 
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/layer-owner-required');
+    expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-hover-only-content');
+    expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-layout-shift-interaction');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-unsafe-truncation');
+    expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-vw-font-size');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/scroll-owner-required');
   });
 
@@ -155,21 +161,35 @@ export function Fixture() {
     expect(output.by_rule).toEqual({ 'soup/scroll-owner-required': 1 });
   });
 
-  it('keeps unrelated resilience findings report-only when promoted rules are clean', () => {
+  it('fails when promoted interaction and viewport-type rules have findings', () => {
     const root = makeFixture(`
 export function Fixture() {
-  return <span className="opacity-0 group-hover:opacity-100">Hidden action</span>
+  return (
+    <section>
+      <button className="px-[var(--sp-2)] hover:px-[var(--sp-4)]">Action</button>
+      <span className="opacity-0 group-hover:opacity-100">Hidden action</span>
+      <h1 className="text-[4vw]">Fleet</h1>
+    </section>
+  )
 }
 `);
     const result = runScript(root, promotedRuleArgs());
     const output = parsedOutput(result);
 
-    expect(result.status).toBe(0);
-    expect(output.verdict).toBe('PASS');
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
     expect(output.mode).toBe('fail-on-rule');
     expect(output.enforced_rules).toEqual(PROMOTED_RULES);
-    expect(output.failed_rules).toEqual([]);
-    expect(output.by_rule).toEqual({ 'soup/no-hover-only-content': 1 });
+    expect(output.failed_rules).toEqual([
+      'soup/no-hover-only-content',
+      'soup/no-layout-shift-interaction',
+      'soup/no-vw-font-size',
+    ]);
+    expect(output.by_rule).toEqual({
+      'soup/no-hover-only-content': 1,
+      'soup/no-layout-shift-interaction': 1,
+      'soup/no-vw-font-size': 1,
+    });
   });
 
   it('stays silent for documented full-value, scroll-owner, stable-state, focus-parity, type-scale, and layer-token patterns', () => {

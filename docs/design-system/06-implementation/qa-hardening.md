@@ -570,10 +570,11 @@ The audit scans `console/src` for promoted and report-only findings:
   (`min-h-0` / `min-w-0`) or a declared scroll-owner exception (promoted: fails the package
   script);
 - `soup/no-layout-shift-interaction` candidates: hover/focus/active state classes or CSS that change
-  width, height, margin, padding, gap, basis, grid tracks, border width, or min/max dimensions;
+  width, height, margin, padding, gap, basis, grid tracks, border width, or min/max dimensions
+  (promoted: fails the package script);
 - `soup/no-hover-only-content` candidates: hover/group-hover reveal without focus parity or an
-  explicit exception;
-- `soup/no-vw-font-size` candidates: viewport-width typography;
+  explicit exception (promoted: fails the package script);
+- `soup/no-vw-font-size` candidates: viewport-width typography (promoted: fails the package script);
 - `soup/layer-owner-required` candidates: raw z-index utilities that do not consume `--z-*` tokens.
 
 Reviewers apply these rule-of-thumb checks before accepting any migrated surface:
@@ -591,18 +592,16 @@ Reviewers apply these rule-of-thumb checks before accepting any migrated surface
 | Empty/loading/error states | Empty, loading, error, and degraded states preserve the same space ownership and focus model as loaded states. | State changes remove landmarks, focus targets, or scroll owners. |
 | Motion and reveal | Motion clarifies state changes but does not carry required information; reduced motion has an equivalent static state. | Information appears only during animation or reveal timing. |
 
-The package script currently promotes `soup/layer-owner-required`, `soup/no-unsafe-truncation`, and
-`soup/scroll-owner-required` with explicit `--fail-on-rule` flags; raw `z-*` / `z-[N]` layering,
-missing full-value paths for clipped text, and missing scroll-owner min-size proof are blocking once
-their inventories are zero. The remaining resilience lanes stay report-only: findings are emitted as
-structured JSON with per-rule counts and sample file/line evidence. `--fail-on-findings` exists only
-for future promotion packets after the remaining inventory is burned down or documented with
-sanctioned exceptions.
+A finding in any current `check-design-resilience.mjs` lane fails the package script through explicit
+`--fail-on-rule` flags: raw `z-*` / `z-[N]` layering, missing full-value paths for clipped text,
+missing scroll-owner min-size proof, geometry-changing interaction states, hover-only content, and
+viewport-width typography are all blocking. The checker still emits structured JSON with per-rule
+counts and sample file/line evidence; `--fail-on-findings` remains available for future lanes before
+they receive named `--fail-on-rule` promotion flags.
 
-A PASS with report-only lanes still present means the audit ran and no promoted rule failed. It does
-not prove the UI is resilient, does not replace long-string screenshots, reduced-height screenshots,
-keyboard/touch tests, focus-ring checks, or reviewer inspection, and must never be cited as "zero
-findings" unless `finding_count` is actually `0`.
+A PASS means the current source scan has zero resilience findings. It does not replace long-string
+screenshots, reduced-height screenshots, keyboard/touch tests, focus-ring checks, or reviewer
+inspection.
 
 ### 17.6 Font Asset Integrity Guard
 

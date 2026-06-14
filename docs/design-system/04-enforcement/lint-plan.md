@@ -87,9 +87,9 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/tabular-nums-required | proposed | scoped-error (Table/metric) | P4 | zero current usage — needs spec landing first |
 | soup/no-unsafe-truncation | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | truncation needs full-value access or documented exception |
 | soup/scroll-owner-required | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | scrollable regions need axis min-size proof and one declared owner |
-| soup/no-layout-shift-interaction | report-only script | scoped-error / blocking script | P4/G7 | hover/focus/active states must not change layout dimensions |
-| soup/no-hover-only-content | report-only script | scoped-error / blocking script | P4/G7 | hover-revealed content needs keyboard/focus parity |
-| soup/no-vw-font-size | report-only script | global-error | P4/G7 | typography must use tokenized type scale, not viewport width |
+| soup/no-layout-shift-interaction | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | hover/focus/active states must not change layout dimensions |
+| soup/no-hover-only-content | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | hover-revealed content needs keyboard/focus parity |
+| soup/no-vw-font-size | package-script fail-on-rule | global-error | P4/G7 | typography must use tokenized type scale, not viewport width |
 | soup/layer-owner-required | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | z-index uses `--z-*` layer tokens or a documented owner |
 | soup/no-duplicate-shell | shadow (advisory) | warn-on-changed-files | P2 | heuristic; routes to duplication-register, never error |
 | soup/theme-parity (script) | CI-blocking script | CI-blocking script | P1 | not an ESLint rule; section 5 |
@@ -585,22 +585,23 @@ cannot express the check).
 
 - **Purpose:** hover, focus, active, selected, and pressed states must not change component geometry.
   Stable controls are required for dense operational scanning and keyboard use.
-- **Mechanism:** report-only resilience script. Flag hover/focus/active classes or CSS selectors that
-  change width, height, min/max dimensions, margin, padding, gap, basis, grid tracks, or border
-  width.
+- **Mechanism:** package-script fail-on-rule resilience script. Flag hover/focus/active classes or
+  CSS selectors that change width, height, min/max dimensions, margin, padding, gap, basis, grid
+  tracks, or border width.
 - **Scope:** buttons, cards, rows, tabs, chips, toolbar controls, table rows, and list items. Motion
   transforms are evaluated separately by reduced-motion rules.
 - **Violation / valid:** `hover:px-[var(--sp-4)]` → reserve the expanded width up front or reveal
   affordances with opacity/transform inside stable bounds.
 - **FP strategy:** fixtures must include stable opacity/transform reveal, invalid padding growth, and
   a tokenized exception for deliberate drag/resize handles.
-- **Autofix:** no. **Phase:** P4/G7. **Entry:** report-only script.
+- **Autofix:** no. **Phase:** P4/G7. **Entry:** package-script fail-on-rule; promoted
+  2026-06-14 after the inventory reached zero.
 
 ### soup/no-hover-only-content
 
 - **Purpose:** content revealed on hover must also be reachable by keyboard, touch, and assistive
   technology. Hover-only commands are hidden commands.
-- **Mechanism:** report-only resilience script. Flag `hover:` / `group-hover:` reveal patterns
+- **Mechanism:** package-script fail-on-rule resilience script. Flag `hover:` / `group-hover:` reveal patterns
   without `focus:`, `focus-visible:`, `group-focus-within:`, always-visible small-screen handling,
   or `data-hover-only-exception`.
 - **Scope:** row actions, card actions, toolbars, copy buttons, menus, popovers, and inline metadata.
@@ -608,13 +609,14 @@ cannot express the check).
   `group-focus-within:opacity-100` and a real focusable trigger.
 - **FP strategy:** fixtures must include hover+focus parity, hover-only invalid reveal, and a
   documented decorative-only exception.
-- **Autofix:** partial suggestion only. **Phase:** P4/G7. **Entry:** report-only script.
+- **Autofix:** partial suggestion only. **Phase:** P4/G7. **Entry:** package-script fail-on-rule;
+  promoted 2026-06-14 after the inventory reached zero.
 
 ### soup/no-vw-font-size
 
 - **Purpose:** type follows the tokenized type scale. Viewport-width font sizing breaks dense panels,
   long labels, reduced-height views, and user zoom.
-- **Mechanism:** report-only resilience script now; later hard rule. Flag `text-[...vw]`,
+- **Mechanism:** package-script fail-on-rule resilience script. Flag `text-[...vw]`,
   `font-size: ...vw`, `clamp(...vw...)`, and equivalent viewport-relative type declarations.
 - **Scope:** `console/src/**` and checked-in brand assets. Exempt generated bitmap proofs; SVG/HTML
   identity assets still need tokenized min/max sizing if they are product UI.
@@ -622,7 +624,8 @@ cannot express the check).
   line-height tokens.
 - **FP strategy:** fixtures must include invalid viewport type, valid tokenized clamp without vw, and
   a non-UI generated artifact exception.
-- **Autofix:** no. **Phase:** P4/G7. **Entry:** report-only script.
+- **Autofix:** no. **Phase:** P4/G7. **Entry:** package-script fail-on-rule; promoted
+  2026-06-14 after the inventory reached zero.
 
 ### soup/layer-owner-required
 
