@@ -21,8 +21,9 @@
 //                           outside the token-definition tiers (allowlist:
 //                           tokens.primitive.css + tokens.semantic.css, the only files
 //                           permitted to own raw color values per tokens-v3 §1/§3).
-//         raw-font-size-css — raw font-size declarations in non-token CSS; component
-//                           and composite CSS must consume the type scale instead.
+//         raw-font-size-css — raw font-size/font shorthand declarations in non-token
+//                           CSS; component and composite CSS must consume the type
+//                           scale instead.
 //         transition-all-css — CSS transition shorthands/longhands that target "all";
 //                           CSS must name explicit properties, same as the TSX rule.
 //         raw-dimension-css — direct raw length units in layout/spacing/radius CSS
@@ -347,6 +348,9 @@ const HALF_STEP_DEF_LINE = /^\s*--sp-[012]h\s*:/;
 // var()-reference only).
 const RAW_COLOR_ALLOWLIST = new Set(['tokens.primitive.css', 'tokens.semantic.css']);
 const RAW_FONT_SIZE_ALLOWLIST = new Set(['tokens.primitive.css']);
+// `primitives.css` still carries DD-26 `font: var(--type-*, fallback)` / primitive
+// shorthand fallbacks; component/composite CSS remains zero-ceiling for raw `font:`.
+const RAW_FONT_SHORTHAND_ALLOWLIST = new Set([...RAW_FONT_SIZE_ALLOWLIST, 'primitives.css']);
 const RAW_DIMENSION_ALLOWLIST = new Set(['tokens.primitive.css', 'tokens.semantic.css', 'tokens.component.css']);
 
 function stripCssVarFunctions(value) {
@@ -417,8 +421,9 @@ for (const name of styleEntries) {
 
     // raw-font-size-css: type sizes in component/composite CSS must route through
     // the tokenized type scale (`var(--text-*)` / `var(--type-*)`), not literal px/rem.
-    if (decl.property === 'font-size'
-      && !RAW_FONT_SIZE_ALLOWLIST.has(name)
+    const scansRawFontSize = decl.property === 'font-size' && !RAW_FONT_SIZE_ALLOWLIST.has(name);
+    const scansRawFontShorthand = decl.property === 'font' && !RAW_FONT_SHORTHAND_ALLOWLIST.has(name);
+    if ((scansRawFontSize || scansRawFontShorthand)
       && RAW_FONT_SIZE_VALUE.test(decl.value)) {
       addHit('raw-font-size-css', filePath, decl.line);
     }

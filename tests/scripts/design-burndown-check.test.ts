@@ -95,6 +95,8 @@ input[type="checkbox"] { accent-color: var(--color-s-ok); }
 .c-pad { padding: var(--sp-1h); }
 `;
 
+const DEFAULT_PRIMITIVES_CSS = '';
+
 const DEFAULT_TSX = `export function Widget() {
   return <div style={{ paddingLeft: 'var(--sp-0h)' }}>x</div>;
 }
@@ -110,6 +112,7 @@ function makeFixture(opts: {
   shadowBaseline?: object | string;
   semanticCss?: string;
   primitiveCss?: string;
+  primitivesCss?: string | null;
   compositesCss?: string;
   tsx?: string | null;
 } = {}): Fixture {
@@ -131,6 +134,9 @@ function makeFixture(opts: {
   writeFileSync(join(stylesDir, 'tokens.semantic.css'), opts.semanticCss ?? DEFAULT_SEMANTIC_CSS);
   writeFileSync(join(stylesDir, 'tokens.primitive.css'), opts.primitiveCss ?? DEFAULT_PRIMITIVE_CSS);
   writeFileSync(join(stylesDir, 'composites.css'), opts.compositesCss ?? DEFAULT_COMPOSITES_CSS);
+  if (opts.primitivesCss !== null) {
+    writeFileSync(join(stylesDir, 'primitives.css'), opts.primitivesCss ?? DEFAULT_PRIMITIVES_CSS);
+  }
 
   const tsx = opts.tsx === undefined ? DEFAULT_TSX : opts.tsx;
   if (tsx !== null) {
@@ -239,9 +245,15 @@ describe('check-design-burndown.mjs', () => {
       ]);
     });
 
-    it('raw-font-size-css fires on raw font-size declarations but ignores tokenized type-scale values', () => {
+    it('raw-font-size-css fires on raw font-size declarations and shorthands but ignores tokenized type-scale values', () => {
       const fixture = makeFixture({
-        compositesCss: `.c-body { font-size: 14px; }\n.c-token { font-size: var(--text-body); }\n`,
+        compositesCss: [
+          '.c-body { font-size: 14px; }',
+          '.c-short { font: 500 14px/20px var(--font-sans); }',
+          '.c-token { font-size: var(--text-body); }',
+          '',
+        ].join('\n'),
+        primitivesCss: '.soup-pill { font: 500 10px/14px var(--font-sans); }\n',
         tsx: null,
       });
       const result = runScript(fixture, ['--update']);
@@ -249,9 +261,9 @@ describe('check-design-burndown.mjs', () => {
 
       const item = itemOf(readQueue(fixture), 'raw-font-size-css');
       expect(item.severity).toBe('polish');
-      expect(item.count).toBe(1);
+      expect(item.count).toBe(2);
       expect(item.files).toEqual([
-        { path: 'src/styles/composites.css', count: 1, lines: [1] },
+        { path: 'src/styles/composites.css', count: 2, lines: [1, 2] },
       ]);
     });
 

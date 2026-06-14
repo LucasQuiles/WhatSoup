@@ -322,8 +322,9 @@ cannot express the check).
   `console/src/components/StatusDot.tsx:34`; `console/src/components/Skeleton.tsx:18`). Plus the
   recharts non-`style` prop hole: `wrapperStyle`/`contentStyle` (4 Legend copies, DUP-09).
 - **CSS-side coverage:** `check-design-burndown.mjs` owns CSS-only gaps that ESLint cannot see,
-  including `raw-font-size-css` (zero ceiling) for non-token `font-size:` literals outside the
-  primitive type scale and `transition-all-css` (zero ceiling) for CSS shorthand/longhand
+  including `raw-font-size-css` (zero ceiling) for non-token `font-size:` literals and `font:`
+  shorthands outside the primitive type scale and `transition-all-css` (zero ceiling) for CSS
+  shorthand/longhand
   transition declarations that target `all`. It also tracks `raw-dimension-css` for direct raw
   CSS layout/spacing/radius lengths outside token files, ignoring `var()` fallbacks so resilient
   token fallbacks do not dominate the debt signal.
