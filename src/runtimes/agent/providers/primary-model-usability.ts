@@ -45,7 +45,7 @@ export interface PrimaryModelProbeOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 5_000;
+const DEFAULT_TIMEOUT_MS = 15_000;
 const TIMEOUT = Symbol('primary-model-probe-timeout');
 const PROBE_THROW = Symbol('primary-model-probe-throw');
 

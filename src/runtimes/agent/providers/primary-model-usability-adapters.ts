@@ -39,6 +39,7 @@ interface ModelsListResponse {
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 const API_PROBE_TIMEOUT_MS = 5_000;
+const CLI_MODEL_PROBE_TIMEOUT_MS = 15_000;
 const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 
@@ -76,7 +77,7 @@ async function probeCliModel(
     binary,
     modelProbeCommand(provider, model, providerConfig),
     modelProbeEnv(provider, model, providerConfig, deps),
-    deps.cwd ? { cwd: deps.cwd } : undefined,
+    { ...(deps.cwd ? { cwd: deps.cwd } : {}), timeoutMs: CLI_MODEL_PROBE_TIMEOUT_MS },
   );
   return mapCliProbeResult(result);
 }

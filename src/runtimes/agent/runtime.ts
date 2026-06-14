@@ -170,8 +170,9 @@ const PROVIDER_FALLBACK_PRIMARY_RECHECK_MS = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 5 * 60 * 1000;
   return Math.min(Math.max(raw, 30 * 1000), 30 * 60 * 1000);
 })();
-// The 5 s primary-probe timeout lives with the probe implementation
-// (PROBE_TIMEOUT_MS in providers/binary-preflight.ts), shared by all probes.
+// The primary model usability probe has its own longer CLI deadline in
+// primary-model-usability-adapters.ts; shorter binary presence checks keep
+// their 5 s preflight timeout in providers/binary-preflight.ts.
 // Consecutive failed recovery probes (revert-timer extension path) before a
 // single fallback_recovery_stalled alert is emitted. The cap only surfaces the
 // stall — the window keeps extending so the instance is never stranded on a
