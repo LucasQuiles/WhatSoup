@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Vitest, existing provider API test harnesses, existing `src/runtimes/agent/provider-crash-diagnostics.ts` sanitizer logic.
 
-**Status:** implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. The approval boundary now applies to publishing/merging the compose branch, not to reimplementing this plan.
+**Status:** active — implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. The approval boundary now applies to publishing/merging the compose branch, not to reimplementing this plan.
 
 ---
 
