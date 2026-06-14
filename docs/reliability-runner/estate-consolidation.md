@@ -1,15 +1,15 @@
 # Reliability Estate Consolidation
 
-Status: active ledger. Updated: 2026-06-14T08:03:15Z.
+Status: active ledger. Updated: 2026-06-14T08:08:39Z.
 
 Purpose: keep merge, branch, worktree, sweep, and instruction-hierarchy cleanup evidence in one tracked place while the reliability runner stays active.
 
 ## Current Live Queue
 
-- GitHub PR queue: empty as of 2026-06-14T08:03Z.
+- GitHub PR queue: empty as of 2026-06-14T08:08Z.
 - Latest merged PR: #841, merge commit `0ad5ab47`, with CodeQL and Quality Node 24/25 checks successful.
 - Open GitHub issue: #640, `Prevent ignored canonical docs from disappearing from work-index coverage`; do not close or comment without explicit operator approval.
-- Active peer-owned branch: `test/session-classifier-pid-coverage-20260614`. Latest read at 2026-06-14T08:03Z showed six unique local patches relative to `origin/main`, local head `21a66510`, remote head `aafd6049`, and no open PR. Treat the exact count as volatile and re-run `git cherry -v origin/main test/session-classifier-pid-coverage-20260614` before any disposition.
+- Active peer-owned branch: `test/session-classifier-pid-coverage-20260614`. Latest read at 2026-06-14T08:08Z showed six unique patches relative to `origin/main` and no open PR. Treat the exact head/count as volatile and re-run `git status --porcelain=v2 --branch` plus `git cherry -v origin/main test/session-classifier-pid-coverage-20260614` before any disposition.
 
 ## Artifact And Feature Sweep
 
