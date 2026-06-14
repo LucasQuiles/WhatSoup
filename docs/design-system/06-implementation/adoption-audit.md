@@ -108,7 +108,7 @@ are the shadow-baseline falls for that file.
 | LogsTab.tsx | LogStream, Toolbar, ToolbarFilters, Pill | none | 4/4 = 100% | no |
 | SummaryTab.tsx | Button (×5) | LT×16: 40-212 (largest tab token debt); sp-half 181, 191 | 5/5 | yes (tokens) |
 | MetricsTab.tsx | ToolbarTimeRange, Button, Tabs/Tab | LT×13; chart ratio style remains inline for the token-usage split bar | controls 4/4 = 100% | yes (tokens) |
-| HistoryTab.tsx | none | composer: raw `<textarea>` 204 with `outline-none` 206 (THE one remaining focus-suppression carve-out, C-B4-6); raw `<button>`×2: 184, 225 (c-btn-primary send 227); raw cursor-pagination buttons; LT×9; legacy var 188; sp-half 206 | 0/3 = 0% | yes |
+| HistoryTab.tsx | TextArea, Button (×2), ActionButton | focus suppression closed: composer routes through `TextArea` with zero `outline-none`; load-older, jump-to-newest, and send controls route through button primitives; LT×9; legacy var 188; sp-half 206 | controls 4/4 = 100% | yes (tokens) |
 | AccessTab.tsx | none | raw `<button>`×4: 90, 97, 107, 117; LT×10: 42-160; sp-half 56, 78 | 0/4 = 0% | yes |
 | ModeTab.tsx | none | raw `<button>`×3: 27, 51, 58; LT×4; legacy vars 74, 103 | 0/3 = 0% | yes |
 | PipelineTab.tsx | none | raw `<button>` 35; LT×8: 43-172; legacy vars 24, 25; sp-half 22 (the DUP-08 ternary evasion site) | 0/1 = 0% | yes |
@@ -205,7 +205,7 @@ was not decomposed).
 | M3 | Loading/skeleton states: TableSkeleton hardcodes inline px widths; no skeleton component spec | Skeleton.tsx (~line 19, `${140 + i * 20}px`) | state-taxonomy covers loading as a state; no skeleton spec/primitive; shimmer waivered WVR-005 pending C5 motion disposition | Tokenize widths or rule skeleton geometry exempt; fold into C5 shimmer disposition |
 | M4 | Charts family unspecced: 4 chart wrappers + ChartPanel render recharts with legacy-token axis/series/tooltip styling | FleetMetricsChart/FleetSessionChart/FleetTokenChart/MetricsChart, chart-utils.ts:7-20 | no chart spec in 03-spec/components/; WVR-001 covers margins only, not the legacy color refs | C3 chart surface slice (already named as WVR-001's cleanup_trigger): chart token adapter + retoken axis/tooltip styles |
 | ~~M5~~ | **DONE** — UnlockScreen is sliced onto `TextInput` + `Button`, with semantic surface wrappers and no caller legacy-token overrides. | UnlockScreen.tsx; `tests/console/unlock-screen.test.tsx` | input.md/button.md specs adopted; focused test pins primitive-owned styling. | Closed 2026-06-14; shadow ratchet lowered `soup/no-legacy-tokens :: src/components/UnlockScreen.tsx` 3→0. |
-| M6 | Pagination: HistoryTab cursor pagination is raw buttons; no pagination pattern spec | HistoryTab.tsx (cursor state ~35-40, load-more controls) | no pagination spec/primitive (Table spec has no pagination section) | Rides the HistoryTab composer slice (C-B4-6); rule whether load-more is Button-enough or needs a pattern entry |
+| ~~M6~~ | **DONE / RE-NARROWED** — HistoryTab cursor controls now route through `Button` (`Load older messages`, `Jump to newest`); no raw pagination buttons remain. | HistoryTab.tsx (cursor state ~35-40, load-more controls) | No standalone pagination primitive is needed until a reusable cursor-pagination family exists. | Closed for the raw-control gap; future reusable pagination is a product-pattern trigger, not current debt. |
 | M7 | kbd hints: KeyboardShortcutsHelp renders `<kbd>` with legacy tier classes; no kbd treatment in typography spec | KeyboardShortcutsHelp.tsx:36-57 | no spec home for kbd chips | Token pass + one-line typography.md amendment at C3 |
 | M8 | Scrollbar theming uses legacy vars: global webkit scrollbar thumb `var(--b2)`/`var(--b3)` | composites.css:73-76 | tokens exist (`--border-*`); CSS-side, unguarded by ESLint (lint-plan §1) | Mechanical retoken with the composites.css burndown (B1) |
 | ~~M9~~ | **DONE** — native control theming now uses `accent-color: var(--accent)`, aligning checkbox/radio/range/progress accent with the locked electric-blue action channel instead of OK-GREEN. | composites.css:22; consumers: UpdateModal.tsx:422, ConfigStep.tsx:692, form-primitives.tsx:110, ModelAuthStep.tsx:262/272, ConfigEditDialog.tsx:162 | select.md/input.md exist; the global rule now carries the action-accent channel. | Closed; same law family as F1, with no remaining `accent-law` burndown findings. |
@@ -219,21 +219,18 @@ was not decomposed).
 
 | Rule | Falls | Files | Top files |
 |---|---|---|---|
-| soup/no-legacy-tokens | 354 | 61 | Inbox 25 · ConfigStep 21 · ActiveHoursHeatmap 19 · GroupDetailModal 17 · SummaryTab 16 · MessageContent 15 · Nav 15 · MetricsTab 13 · UpdateModal 12 · (52 more files, full list reproduced by `python3 -c` decomposition of the baseline) |
-| soup/no-raw-button | 70 | 29 | GroupDetailModal 9 · Inbox 8 · ConfigStep 5 · FeedCard 4 · AccessTab 4 · ScheduledMessageRow 4 · MetricsTab 3 · ModeTab 3 · Nav 3 · Ops 3 · (19 more) |
-| soup/no-raw-form-control | 36 | 15 | ConfigEditDialog 7 · ScheduleComposerModal 5 · form-primitives 5 (kit-exempt in spirit, counted by the rule) · GroupDetailModal 3 · ConfigStep 3 · ModelAuthStep 3 · (9 more) |
-| no-restricted-syntax (base wall) | 22 | 9 | Nav 6 · MessageContent 5 · mock-data 5 · HistoryTab/ModeTab/PipelineTab/ModelAuthStep/use-toast/Inbox 1 each |
+| soup/no-legacy-tokens | 331 | 57 | Inbox 25 · ConfigStep 21 · GroupDetailModal 17 · SummaryTab 16 · Nav 15 · MessageContent 15 · ActiveHoursHeatmap 15 · MetricsTab 13 · UpdateModal 12 · ProvidersKeysCard 9 · (47 more files, full list in `console/lint-shadow-baseline.json`) |
+| no-restricted-syntax (base wall) | 18 | 5 | Nav 6 · mock-data 5 · MessageContent 5 · PipelineTab 1 · ModeTab 1 |
 | soup/no-brand-regression | 2 | 2 | Nav (split wordmark) · UpdateModal ("Update WhatSoup") — both flip at the P4/C4 brand slice by design |
-| soup/no-focus-suppression | 1 | 1 | HistoryTab 206 (`outline-none` composer) — the sanctioned sole carve-out |
+| soup/no-raw-form-control | 2 | 1 | ConfigStep 2 |
+| ~~soup/no-focus-suppression~~ | 0 | 0 | closed: zero TSX `outline-none` sites; former Inbox and HistoryTab composer carve-outs retired |
 | soup/no-utility-smell | 1 | 1 | GroupCard |
 
-Reconciliation: my independent scan found 70 raw buttons and the same file set — exact match.
-Raw form controls: scan found 36 sites in the same 15 files — match. Focus suppression: scan
-confirms `outline-none` exists ONLY at HistoryTab.tsx:206 console-wide; the old Inbox.tsx:434
-site is now the textarea change handler, and the composer send action uses `ActionButton`.
-eslint.config.js verified: Group F excludes HistoryTab only (block 2, files list line 719);
-the lint-plan changelog's "stale Inbox comment at :704" is FIXED on the current tree — line 704
-now reads "excludes HistoryTab only — Inbox carve-out retired at B4 close".
+Reconciliation: the live shadow baseline is 354 (= 331 + 18 + 2 + 2 + 1) and the live
+burndown queue is 663/598 with `focus-suppression` absent. Focus suppression now reads
+zero in two independent checks: `design-regression` check 12 and whole-tree `outline-none`
+grep over `console/src`; both former chat composers route through `TextArea`, and the
+HistoryTab send/load/jump actions route through button primitives.
 
 ## 6. Legacy-token census
 
@@ -315,9 +312,9 @@ Blocking items (14 tracked; B12 now closed):
    flips, theme toggle (DD-5), Nav's 3 raw buttons + 15 token refs + 6 base-wall falls.
 6. **B6 — Inbox completion**: composer (textarea+send), header band → Toolbar, 8 raw buttons,
    25 token refs, DD-24 narrow-width action path, DD-8 meta-lane tiering.
-7. **B7 — HistoryTab composer (C-B4-6)**: retires the LAST focus-suppression carve-out
-   (eslint block 2 deleted, baseline soup/no-focus-suppression → 0), plus its 2 raw buttons +
-   pagination controls (M6).
+7. ~~**B7 — HistoryTab composer (C-B4-6)**~~ — **DONE / RE-NARROWED**: HistoryTab
+   composer uses `TextArea`; load-older, jump-to-newest, and send controls use
+   `Button`/`ActionButton`; no focus-suppression or raw-button remainder stays in this slice.
 8. **B8 — Dialog internals wave**: ConfigEditDialog, ScheduleComposerModal, GroupDetailModal,
    CreateGroupModal, SaveContactDialog, UpdateModal raw controls/buttons inside Modal shells
    (overlaps B2/B3; named because shells being green hides red interiors).
@@ -340,10 +337,11 @@ register · WizardStepper extraction · type-ramp definition (DD-26).
 ## 9. Strong-claim audit and limits of static analysis
 
 Claims re-verified before publication:
-- "486 = 354+70+36+22+2+1+1" — recomputed from the baseline JSON; sums match the declared total.
-- "outline-none only at HistoryTab:206" — independent whole-tree grep, plus eslint block-2 read,
-  plus the retired Inbox site read in context (now `ActionButton`). Three-way agreement.
-- "70 raw buttons / 31 raw form controls" — my scan matched the shadow baseline file-for-file.
+- "354 = 331+18+2+2+1" — recomputed from the live `console/lint-shadow-baseline.json`;
+  sums match the declared total.
+- "zero TSX outline-none sites" — independent whole-tree grep plus `design-regression`
+  check 12; the retired Inbox and HistoryTab sites now read as `TextArea`/button primitives.
+- "2 raw form controls" — live shadow baseline now lists only ConfigStep's two file inputs.
 - "former c-btn-primary ok-green sites" — closed before this snapshot; definition now reads
   `background: var(--accent); border-color: var(--accent); color: var(--accent-fg);` at
   composites.css:733, and the live burndown queue reports `accent-law: 0`.
@@ -390,8 +388,7 @@ Artifacts (all committed):
 Sources, by category:
 - **Consumed from `lint-shadow-baseline.json`** (never re-counted — the shadow ratchet
   owns TSX enforcement; `lines` are `null`, line detail lives in the ESLint shadow run):
-  `raw-button` (B2), `raw-form-control` (B3), `legacy-token-tsx` (B1),
-  `focus-suppression` (B7), `brand-regression` (B5), `base-wall` (B5/B6),
+  `raw-form-control` (B3), `legacy-token-tsx` (B1), `brand-regression` (B5), `base-wall` (B5/B6),
   `utility-smell` (polish).
 - **Frozen shadow line-shape inventory:** `check-shadow-frozen-inventory.mjs` reuses the
   same shadow ESLint JSON and pins exact file/line/message shape for `base-wall` and

@@ -142,6 +142,10 @@ function getRenderedBubble(container: HTMLElement, text: string) {
   return bubble as HTMLElement
 }
 
+function getLoadOlderButton() {
+  return screen.getByRole('button', { name: 'Load older messages' })
+}
+
 beforeEach(() => {
   getMessagesMock.mockReset()
   sendMessageMock.mockReset()
@@ -305,7 +309,7 @@ describe('HistoryTab — message rendering', () => {
   it('shows "Load older messages" button when messages list is non-empty', () => {
     render(withProviders(<HistoryTab {...defaultProps()} />))
 
-    expect(screen.getByText('Load older messages')).toBeDefined()
+    expect(getLoadOlderButton()).toBeDefined()
   })
 })
 
@@ -525,7 +529,7 @@ describe('HistoryTab — load older messages', () => {
 
     // MSG_1.pk=101, MSG_2.pk=102. Oldest positive pk = 101.
     await act(async () => {
-      fireEvent.click(screen.getByText('Load older messages'))
+      fireEvent.click(getLoadOlderButton())
     })
 
     expect(getMessagesMock).toHaveBeenCalledTimes(1)
@@ -539,7 +543,7 @@ describe('HistoryTab — load older messages', () => {
     render(withProviders(<HistoryTab {...defaultProps()} />))
 
     await act(async () => {
-      fireEvent.click(screen.getByText('Load older messages'))
+      fireEvent.click(getLoadOlderButton())
     })
 
     await waitFor(() => {
@@ -553,7 +557,7 @@ describe('HistoryTab — load older messages', () => {
     render(withProviders(<HistoryTab {...defaultProps()} />))
 
     await act(async () => {
-      fireEvent.click(screen.getByText('Load older messages'))
+      fireEvent.click(getLoadOlderButton())
     })
 
     await waitFor(() => {
@@ -568,7 +572,7 @@ describe('HistoryTab — load older messages', () => {
     render(withProviders(<HistoryTab {...defaultProps()} />))
 
     await act(async () => {
-      fireEvent.click(screen.getByText('Load older messages'))
+      fireEvent.click(getLoadOlderButton())
     })
 
     await waitFor(() => {
@@ -585,7 +589,7 @@ describe('HistoryTab — load older messages', () => {
     render(withProviders(<HistoryTab {...defaultProps()} />))
 
     await act(async () => {
-      fireEvent.click(screen.getByText('Load older messages'))
+      fireEvent.click(getLoadOlderButton())
     })
 
     await waitFor(() => {
@@ -601,7 +605,7 @@ describe('HistoryTab — load older messages', () => {
     const { rerender } = render(withProviders(<HistoryTab {...defaultProps()} />))
 
     await act(async () => {
-      fireEvent.click(screen.getByText('Load older messages'))
+      fireEvent.click(getLoadOlderButton())
     })
     await waitFor(() => expect(screen.getByText('No more messages')).toBeDefined())
 
@@ -616,7 +620,7 @@ describe('HistoryTab — load older messages', () => {
 
     // The load button should be back (reset from "no more messages")
     await waitFor(() => {
-      expect(screen.getByText('Load older messages')).toBeDefined()
+      expect(getLoadOlderButton()).toBeDefined()
       expect(screen.queryByText('No more messages')).toBeNull()
     })
   })

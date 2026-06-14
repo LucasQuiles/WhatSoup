@@ -5,7 +5,12 @@ Design-system audit of the WhatSoup console (`console/src`). Every claim carries
 matching, so `c-btn` does not double-count `c-btn-primary`). Line numbers verified against the
 tree at audit time.
 
-Canonical composite classes live in `console/src/index.css`. Verified anchor points:
+**Status note, 2026-06-14:** the class-count and line-anchor sections are historical
+pre-primitive-migration census data. Live TSX usage of `c-btn*` is now zero; use
+`lint-shadow-baseline.json`, `design-burndown-queue.json`, and the adoption audit for current
+burndown counts until this catalogue is fully regenerated.
+
+Canonical composite classes now live in `console/src/styles/composites.css`. Historical anchor points:
 
 | Class | Defined at |
 |---|---|

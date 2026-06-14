@@ -1,5 +1,5 @@
 import React from 'react'
-import { Send, MessageSquareOff, Loader2, ChevronsUp } from 'lucide-react'
+import { Send, MessageSquareOff, ChevronsUp } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
@@ -133,19 +133,18 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
         {/* Load older messages */}
         {reversed.length > 0 && (
           hasMore ? (
-            <div
-              className={`flex items-center justify-center c-hover text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)] ${loadingOlder ? '' : 'cursor-pointer hover:text-t2'}`}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full flex items-center justify-center c-hover text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)] hover:text-t2"
               onClick={loadOlder}
+              loading={loadingOlder}
+              icon={<ChevronsUp size={14} strokeWidth={1.75} />}
             >
-              {loadingOlder ? (
-                <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
-              ) : (
-                <ChevronsUp size={14} strokeWidth={1.75} />
-              )}
               <span className="text-sm">
                 {loadingOlder ? 'Loading...' : 'Load older messages'}
               </span>
-            </div>
+            </Button>
           ) : (
             <div
               className="flex items-center justify-center text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
