@@ -260,4 +260,14 @@ export function FleetTokenChart() {
     expect(output.finding_count).toBe(2);
     expect(output.scanned_file_count).toBe(2);
   });
+
+  it('fails closed on an empty scan (zero files = broken glob, never a silent PASS)', () => {
+    const root = makeFixture({});
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.scanned_file_count).toBe(0);
+    expect(output.verdict).toBe('FAIL');
+  });
 });

@@ -258,6 +258,10 @@ function buildReport(opts) {
   const root = resolve(opts.root);
   const scanDirs = opts.scanDirs.map((dir) => dir.replaceAll('\\', '/'));
   const files = scanDirs.flatMap((dir) => walk(resolve(root, dir)));
+  const scannedFileCount = files.filter((file) => statSync(file).isFile()).length;
+  // Fail-closed: a zero-file scan cannot distinguish "no violations" from
+  // "nothing scanned" (broken glob / renamed path); refuse to PASS on empty.
+  const emptyScan = scannedFileCount === 0;
   const findings = sortFindings(uniqueFindings(files.flatMap((file) => scanFile(root, file))));
   const shownFindings = findings.slice(0, opts.maxFindings);
   const failedRules = [...new Set(findings
@@ -280,10 +284,13 @@ function buildReport(opts) {
       scan_dirs: scanDirs,
     },
     sample_count: shownFindings.length,
-    scanned_file_count: files.filter((file) => statSync(file).isFile()).length,
+    scanned_file_count: scannedFileCount,
     schema_version: 1,
     truncated: shownFindings.length < findings.length,
-    verdict: failedRules.length > 0 ? 'FAIL' : 'PASS',
+    verdict: emptyScan || failedRules.length > 0 ? 'FAIL' : 'PASS',
+    ...(emptyScan
+      ? { empty_scan_error: `No scannable files under ${scanDirs.join(', ')} — refusing to PASS (fail-closed); check scan paths/globs.` }
+      : {}),
   };
 }
 
