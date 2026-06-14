@@ -56,12 +56,13 @@ unless a future spec row adds explicit data foreground tokens. The activity toke
 anchor: lower heatmap buckets derive by mixing it into the chart bed, not by borrowing mode/chat
 or status colors. Data tokens must not borrow provider, status, or mode channels.
 
-Audit hook: `npm --prefix console run design:color-semantics` inventories four report-only drift
-classes until the provider/data tokens land: provider identity borrowing status/mode tokens,
-chart data series borrowing provider/status/mode tokens, traffic quantities rendered with
-chromatic ink, and component-local palette maps. Report-only PASS means "inventory captured", not
-"colour semantics are compliant"; hard-error promotion waits for token implementation, contrast
-proof, both-theme screenshots, and false-positive fixtures.
+Audit hook: `npm --prefix console run design:color-semantics` hard-gates four drift classes:
+provider identity borrowing status/mode/data/literal colors, chart data series borrowing
+provider/status/mode/literal colors, traffic quantities rendered with chromatic ink, and
+component-local palette maps. Direct `check-color-semantics.mjs` invocations without fail flags are
+still report-only inventory runs; the package script runs the promoted fail-on-rule set and a PASS
+means the scanner found zero findings in those four categories. It does not replace contrast proof,
+screenshots, or semantic review for newly introduced color roles.
 
 ## 3. Per-theme derivation laws
 

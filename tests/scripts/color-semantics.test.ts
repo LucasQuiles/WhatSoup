@@ -1,10 +1,17 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-color-semantics.mjs');
+const PACKAGE_JSON = resolve(process.cwd(), 'console/package.json');
+const PROMOTED_RULES = [
+  'soup/data-series-token-only',
+  'soup/no-component-local-palette',
+  'soup/provider-palette-only',
+  'soup/traffic-neutrality',
+];
 
 const tmpDirs: string[] = [];
 
@@ -37,6 +44,10 @@ function runScript(root: string, extraArgs: string[] = []) {
   );
 }
 
+function promotedRuleArgs() {
+  return PROMOTED_RULES.flatMap((rule) => ['--fail-on-rule', rule]);
+}
+
 function parsedOutput(result: ReturnType<typeof runScript>) {
   return JSON.parse(result.stdout) as {
     by_rule: Record<string, number>;
@@ -51,6 +62,17 @@ function parsedOutput(result: ReturnType<typeof runScript>) {
 }
 
 describe('check-color-semantics.mjs', () => {
+  it('keeps the package script blocking every promoted color-semantics rule', () => {
+    const packageJson = JSON.parse(readFileSync(PACKAGE_JSON, 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    const script = packageJson.scripts['design:color-semantics'];
+
+    for (const rule of PROMOTED_RULES) {
+      expect(script).toContain(`--fail-on-rule ${rule}`);
+    }
+  });
+
   it('reports provider, data-series, traffic, and local-palette drift in report-only mode', () => {
     const root = makeFixture({
       'console/src/lib/providers.ts': `
@@ -93,6 +115,45 @@ const colorMap: Record<string, string> = {
       'soup/traffic-neutrality': 1,
     });
     expect(output.finding_count).toBe(4);
+  });
+
+  it('fails every promoted rule when a planted violation reaches the blocking config', () => {
+    const root = makeFixture({
+      'console/src/lib/providers.ts': `
+export const PROVIDER_COLORS = {
+  'codex-cli': { stroke: 'var(--color-s-ok)', fill: 'var(--color-s-ok)' },
+};
+`,
+      'console/src/components/FleetMetricsChart.tsx': `
+export function FleetMetricsChart() {
+  return <Area dataKey="inbound" stroke="var(--color-m-cht)" fill="var(--color-m-cht)" />;
+}
+`,
+      'console/src/pages/SoupKitchen.tsx': `
+export function SoupKitchen() {
+  return <KpiCard value="12" label="Messages Sent" color="text-m-cht" />;
+}
+`,
+      'console/src/components/KpiCard.tsx': `
+const colorMap: Record<string, string> = {
+  ok: 'var(--status-ok-solid)',
+};
+`,
+    });
+    const result = runScript(root, promotedRuleArgs());
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.enforced_rules).toEqual(PROMOTED_RULES);
+    expect(output.failed_rules).toEqual(PROMOTED_RULES);
+    expect(output.by_rule).toEqual({
+      'soup/data-series-token-only': 1,
+      'soup/no-component-local-palette': 1,
+      'soup/provider-palette-only': 1,
+      'soup/traffic-neutrality': 1,
+    });
   });
 
   it('stays silent for provider, data-series, and neutral traffic token paths', () => {

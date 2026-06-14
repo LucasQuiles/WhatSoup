@@ -648,10 +648,10 @@ inventoried by `console/scripts/check-color-semantics.mjs` and exposed as:
 npm --prefix console run design:color-semantics
 ```
 
-The audit scans `console/src` for color-system findings. `soup/no-component-local-palette` is
-blocking because the repository has a canonical transitional helper at
-`console/src/lib/color-semantics.ts`; the remaining provider/data/traffic lanes stay report-only
-until their named prerequisites are complete.
+The audit scans `console/src` for color-system findings. The package script fail-closes
+`soup/no-component-local-palette`, `soup/provider-palette-only`, `soup/data-series-token-only`, and
+`soup/traffic-neutrality` because provider tokens, data tokens, traffic neutralization, and the
+canonical transitional helper at `console/src/lib/color-semantics.ts` have landed.
 
 - `soup/provider-palette-only` candidates: provider identity colour maps or provider display
   contexts borrowing status/mode tokens or literal colours instead of `--provider-*`;
@@ -669,13 +669,11 @@ until their named prerequisites are complete.
 - `soup/no-component-local-palette` candidates: component-local colour maps that duplicate design
   truth outside documented provider/data/status token maps.
 
-The default CLI mode is deliberately report-only, but `npm --prefix console run
-design:color-semantics` runs with `--fail-on-rule soup/no-component-local-palette`. A `PASS` from
-that package script proves only that no component/page-local colour map re-entered and that the
-remaining color-system inventory was emitted. It does not prove the provider palette is
-implemented, does not prove all charts use lawful data colours, does not replace contrast checks or
-screenshots, and must never be cited as full colour-system compliance unless `finding_count` is
-actually `0` under the appropriate promotion mode.
+The underlying CLI remains report-only when invoked without fail flags, but `npm --prefix console run
+design:color-semantics` runs with one `--fail-on-rule` for each promoted lane. A `PASS` from that
+package script proves the scanner found zero provider, data-series, traffic-neutrality, and
+component-local palette findings. It does not replace contrast checks, screenshots, or semantic
+review for new color roles outside the scanner's current categories.
 
 ### 17.9 Raw Form-Control Inventory Gate
 

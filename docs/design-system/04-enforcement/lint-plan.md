@@ -80,9 +80,9 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/modal-must-restore-focus | proposed | scoped-error (Modal) | P2 | enforceable once Modal primitive exists |
 | soup/motion-needs-reduced-variant | shadow | global-error | P5 | 1 of ~6 animation families has a reduced variant today |
 | soup/no-literal-status-colors | shadow | global-error | P2 | 8 TS maps to collapse first (DUP-06/07) |
-| soup/provider-palette-only | report-only script | scoped-error / blocking script | P4/G5 | provider identity must consume `--provider-*`; no status/mode/data/literal colours |
-| soup/data-series-token-only | report-only script | scoped-error / blocking script | P4/G5 | non-provider chart dimensions must consume `--data-*`; FleetMetricsChart is message-volume data, not provider identity |
-| soup/traffic-neutrality | report-only script | scoped-error / blocking script | P4/G5 | sent/received/sessions/media quantities stay neutral ink unless reclassified as status |
+| soup/provider-palette-only | blocking script | scoped-error / blocking script | P4/G5 | provider identity must consume `--provider-*`; no status/mode/data/literal colours |
+| soup/data-series-token-only | blocking script | scoped-error / blocking script | P4/G5 | non-provider chart dimensions must consume `--data-*`; FleetMetricsChart is message-volume data, not provider identity |
+| soup/traffic-neutrality | blocking script | scoped-error / blocking script | P4/G5 | sent/received/sessions/media quantities stay neutral ink unless reclassified as status |
 | soup/no-component-local-palette | blocking script | keep blocking script / later scoped-error | P4/G5 | component-local colour maps collapse into documented provider/data/status token maps or explicit exceptions |
 | soup/tabular-nums-required | proposed | scoped-error (Table/metric) | P4 | zero current usage — needs spec landing first |
 | soup/no-unsafe-truncation | report-only script | warn-on-changed-files | P4/G7 | truncation needs full-value access or documented exception |
@@ -462,57 +462,58 @@ cannot express the check).
 
 - **Purpose:** keep provider identity out of status, mode, action, and chart data channels. Provider
   colours are the constrained exception in `color.md` §2.1 and must consume `--provider-*`.
-- **Mechanism:** first slice is the report-only source audit
-  `console/scripts/check-color-semantics.mjs`; later promotion may port the stable cases to custom
-  ESLint selectors after `--provider-*` tokens and helper APIs land.
+- **Mechanism:** blocking source audit through `console/scripts/check-color-semantics.mjs` via
+  `--fail-on-rule soup/provider-palette-only`. A later packet may port the stable cases to custom
+  ESLint selectors, but the package script is already fail-closed for this zeroed lane.
 - **Scope:** provider metadata, provider display contexts, provider legends, and provider-scoped
   chart series. Exempt token definition files; token values are governed by `tokens-v3.md` +
   contrast checks.
 - **Violation / valid:** `PROVIDER_COLORS.codex.fill = 'var(--color-s-ok)'` →
   `PROVIDER_COLORS.codex.fill = 'var(--provider-codex)'`.
-- **FP strategy:** true-positive fixtures for provider maps and provider chips; false-positive
-  fixtures for status displays that only mention a provider in copy, token definitions, and neutral
-  provider fallback text.
-- **Autofix:** no. **Phase:** P4/G5. **Entry:** report-only script.
+- **FP strategy:** true-positive and false-positive fixtures live in
+  `tests/scripts/color-semantics.test.ts`; the package-script config is pinned to include this rule.
+- **Autofix:** no. **Phase:** P4/G5. **Entry:** blocking script.
 
 ### soup/data-series-token-only
 
 - **Purpose:** separate data dimensions from provider identity and status/mode semantics.
   FleetMetricsChart is fleet-aggregate message-volume data; it must not consume provider tokens.
-- **Mechanism:** report-only source audit first; later custom rule or blocking script once
-  `--data-*` tokens are implemented and chart categories are classified.
+- **Mechanism:** blocking source audit through `console/scripts/check-color-semantics.mjs` via
+  `--fail-on-rule soup/data-series-token-only`. A later custom rule can replace the script after the
+  chart category classifier stabilizes further.
 - **Scope:** chart and heatmap components. Provider-scoped series may use `--provider-*`; message
   volume, token input/output, active-hour intensity, and other non-provider dimensions use
   `--data-*`.
 - **Violation / valid:** `stroke="var(--color-m-cht)"` for inbound messages →
   `stroke="var(--data-inbound)"`.
-- **FP strategy:** fixtures must distinguish provider legends from non-provider chart dimensions and
-  keep semantic status charts out of the data palette rule.
-- **Autofix:** no. **Phase:** P4/G5. **Entry:** report-only script.
+- **FP strategy:** fixtures distinguish non-provider chart dimensions from lawful `--data-*` paths;
+  later provider-legend/status-chart fixtures must accompany any classifier expansion.
+- **Autofix:** no. **Phase:** P4/G5. **Entry:** blocking script.
 
 ### soup/traffic-neutrality
 
 - **Purpose:** traffic quantities are neutral operational ink. Chromatic treatment is reserved for
   status/severity or explicitly classified data visualization, not raw volume numbers.
-- **Mechanism:** report-only source audit first; later blocking rule once the metric classification
-  table is encoded and sent/received/sessions/media surfaces are neutralized.
+- **Mechanism:** blocking source audit through `console/scripts/check-color-semantics.mjs` via
+  `--fail-on-rule soup/traffic-neutrality`; sent/received/sessions/media surfaces are now
+  neutralized and covered by the scanner's metric classification.
 - **Scope:** KPI strip, fleet table traffic columns, line summary traffic rows, and adjacent
   traffic counters. Lines connected, need attention, unread, failed, warning, and health metrics
   stay outside this rule because they carry status/severity.
 - **Violation / valid:** `Messages Sent` with `color="text-m-cht"` → `color="neutral"` on
   `KpiCard`, direct semantic `--text-2` styling for raw values, or the approved neutral metric
   primitive.
-- **FP strategy:** fixtures must prove status KPIs remain chromatic while non-status traffic KPIs
-  fail when chromatic.
-- **Autofix:** no. **Phase:** P4/G5. **Entry:** report-only script.
+- **FP strategy:** fixtures prove chromatic traffic KPIs fail while neutral traffic paths stay
+  silent; status/severity KPI expansion needs its own paired fixture before scanner broadening.
+- **Autofix:** no. **Phase:** P4/G5. **Entry:** blocking script.
 
 ### soup/no-component-local-palette
 
 - **Purpose:** prevent duplicated colour truth in components after provider/data/status helpers
   exist.
 - **Mechanism:** blocking slice of `console/scripts/check-color-semantics.mjs` via
-  `--fail-on-rule soup/no-component-local-palette`. The same script still reports provider/data/
-  traffic findings; only this zeroed rule is fail-closed until those other prerequisites are true.
+  `--fail-on-rule soup/no-component-local-palette`. The package script also fail-closes the zeroed
+  provider, data-series, and traffic lanes.
 - **Scope:** `console/src/components/**` and `console/src/pages/**`. Exempt canonical token/helper
   modules and documented one-off visual test fixtures.
 - **Violation / valid:** component `const colorMap = { 'text-s-ok': 'var(--color-s-ok)' }` →
