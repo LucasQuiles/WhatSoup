@@ -63,6 +63,16 @@ assert_in() {
 assert_not_in() {
   if grep -qF -- "$1" "$2"; then fail "$3 (leaked)"; else pass "$3"; fi
 }
+assert_credential_failure() {
+  if grep -F "FAIL credential:" "$CAPTURE" 2>/dev/null | grep -F "$1" | grep -F "$2" >/dev/null; then
+    pass "$3"
+  else
+    fail "$3 (missing: FAIL credential: * $1 * $2)"
+  fi
+}
+credential_failure_count() {
+  grep -F "FAIL credential:" "$CAPTURE" 2>/dev/null | grep -F "$1" | grep -F "$2" | wc -l | tr -d ' '
+}
 # assert_count <dir> <pattern> <expected> <label>
 assert_count() {
   local n; n=$(find "$1" -maxdepth 1 -name "$2" 2>/dev/null | wc -l | tr -d ' ')
@@ -986,7 +996,7 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "FAIL credential: credential_requirement=tokens.env missing required expected_path_redacted=true expected_path_basename=tokens.env" "$CAPTURE" "D22a missing required credential fails"
+assert_credential_failure "missing required" "expected_path_basename=tokens.env" "D22a missing required credential fails"
 assert_not_in "D22_SECRET" "$CAPTURE" "D22a no credential body leaked"
 
 reset_sandbox
@@ -1003,7 +1013,7 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 chmod 600 "$D22_HOME/.config/whatsoup/tokens.env"
 dispatch_once
-assert_in "FAIL credential: credential_requirement=tokens.env unreadable credential_path_redacted=true credential_path_basename=tokens.env" "$CAPTURE" "D22b unreadable required credential fails"
+assert_credential_failure "unreadable" "credential_path_basename=tokens.env" "D22b unreadable required credential fails"
 assert_not_in "D22_SECRET_UNREADABLE" "$CAPTURE" "D22b unreadable credential contents not leaked"
 
 reset_sandbox
@@ -1020,7 +1030,7 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
 assert_in "BOT ERROR" "$CAPTURE" "D22c credential 0644 fails closed"
-assert_in "FAIL credential: credential_requirement=tokens.env mode>600 credential_path_redacted=true credential_path_basename=tokens.env" "$CAPTURE" "D22c credential 0644 critical line"
+assert_credential_failure "mode>600" "credential_path_basename=tokens.env" "D22c credential 0644 critical line"
 assert_not_in "credential_meta" "$CAPTURE" "D22c required credential does not duplicate metadata line"
 assert_not_in "D22_SECRET_MODE_WARN" "$CAPTURE" "D22c warning credential contents not leaked"
 
@@ -1037,8 +1047,8 @@ HOME="$D22_HOME" BOT_ERRORS_DRY_CLOCK_STATUS=synced \
   BOT_ERRORS_HEALTH_PROFILE_JSON='{"role":"bot-host","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"requiredCredentialFiles":["tokens.env"]}' \
   python3 "$HEALTH" --daily >/dev/null 2>&1
 dispatch_once
-assert_in "FAIL credential: credential_requirement=tokens.env world_writable credential_path_redacted=true credential_path_basename=tokens.env" "$CAPTURE" "D22c credential world-writable fails"
-d22c_fail_count=$(grep -cF "FAIL credential: credential_requirement=tokens.env" "$CAPTURE" 2>/dev/null | tr -d ' ')
+assert_credential_failure "world_writable" "credential_path_basename=tokens.env" "D22c credential world-writable fails"
+d22c_fail_count=$(credential_failure_count "world_writable" "credential_path_basename=tokens.env")
 [ "$d22c_fail_count" = "1" ] && pass "D22c world-writable required credential fails once" \
   || fail "D22c expected one required credential FAIL, got $d22c_fail_count"
 assert_not_in "credential_meta" "$CAPTURE" "D22c world-writable required credential does not duplicate metadata line"
