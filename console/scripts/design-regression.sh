@@ -37,7 +37,7 @@ CONSOLE_DIR="$REPO_ROOT/console"
 #   - Check 13: live PASS (exactly 5 infinite occurrences, all sanctioned/waivered); FAIL on new.
 #   - Check 14: live PASS (no expired waivers); deterministic date check, zero FP surface.
 #   - Check 15: live PASS after use-exit-presence dead suppression cleanup; FAIL on any
-#               lint suppression lacking a waiver:<id> tag.
+#               lint suppression lacking a waiver:<id> tag or WVR registry/source drift.
 #   - Check 16: live PASS (zero legacy lane vars); FAIL on reintroduction.
 #   - Check 17: live PASS (zero component-tier CSS raw colors after --shadow-hover);
 #               FAIL on raw hex/rgb/hsl/oklch reintroduction outside token tiers.
@@ -385,24 +385,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Check 15: Lint-suppression directives without waiver: tag
+# Check 15: Lint-suppression waiver registry sync
 # ---------------------------------------------------------------------------
-check_start "15" "Suppression directives without waiver: tag"
-# Look for lint-suppression directives in TS/TSX files, filtering those that have waiver:
-DISABLE_PATTERN='eslint-''disable'  # split to avoid self-matching the hygiene guard
-ALL_DISABLES=$(rg -n "$DISABLE_PATTERN" "$CONSOLE_SRC" -g '*.ts' -g '*.tsx' 2>/dev/null || true)
-UNTAGGED=$(echo "$ALL_DISABLES" | grep -v 'waiver:' || true)
-C15_COUNT=$(printf '%s' "$UNTAGGED" | grep -c "$DISABLE_PATTERN" || true)
-C15_COUNT=${C15_COUNT:-0}
-echo "    Untagged disable directives: $C15_COUNT"
-if [ -n "$UNTAGGED" ] && [ "$C15_COUNT" -gt 0 ]; then
-  echo "$UNTAGGED" | head -5 | sed 's/^/    /'
-fi
-echo "    Expectation: zero (all suppressions must carry waiver:<id>)"
-if [ "$C15_COUNT" -eq 0 ]; then
-  check_result "15" "0" "all suppressions carry waiver: tag" "OK"
+check_start "15" "Lint-suppression waiver registry sync"
+WAIVER_SYNC_OUTPUT=$(node "$CONSOLE_DIR/scripts/check-waiver-sync.mjs" 2>&1)
+WAIVER_SYNC_STATUS=$?
+C15_COUNT=$(printf '%s' "$WAIVER_SYNC_OUTPUT" | node -e 'const fs=require("fs"); try { const o=JSON.parse(fs.readFileSync(0,"utf8")); console.log(o.issue_count ?? 1); } catch { console.log(1); }' 2>/dev/null || echo 1)
+C15_COUNT=${C15_COUNT:-1}
+WAIVER_SYNC_SUMMARY=$(printf '%s' "$WAIVER_SYNC_OUTPUT" | node -e '
+const fs = require("fs");
+try {
+  const o = JSON.parse(fs.readFileSync(0, "utf8"));
+  console.log(`    Registered waivers: ${o.registered_count}`);
+  console.log(`    Source waiver tags: ${o.source_tag_count}`);
+  console.log(`    Untagged disable directives: ${o.untagged_count}`);
+  console.log(`    Unknown source waiver ids: ${o.unknown_source_ids.length}`);
+  console.log(`    Stale registry TS/TSX scopes: ${o.stale_registry_scope_count}`);
+  for (const item of o.untagged_suppressions.slice(0, 3)) {
+    console.log(`    untagged ${item.file}:${item.line}: ${item.evidence}`);
+  }
+  for (const id of o.unknown_source_ids.slice(0, 5)) {
+    console.log(`    unknown source id: ${id}`);
+  }
+  for (const item of o.stale_registry_scopes.slice(0, 5)) {
+    console.log(`    stale registry scope: ${item.id} ${item.scope_file}`);
+  }
+} catch {
+  process.exit(1);
+}
+' 2>/dev/null || true)
+if [ -n "$WAIVER_SYNC_SUMMARY" ]; then
+  echo "$WAIVER_SYNC_SUMMARY"
 else
-  check_result "15" "$C15_COUNT" "untagged suppressions -- add waiver:<id> (shadow: non-blocking)" "WARN"
+  echo "$WAIVER_SYNC_OUTPUT" | head -8 | sed 's/^/    /'
+fi
+echo "    Expectation: zero (source lint suppression waiver tags match eslint-waivers.yaml)"
+if [ "$WAIVER_SYNC_STATUS" -eq 0 ] && [ "$C15_COUNT" -eq 0 ]; then
+  check_result "15" "0" "waiver registry and source suppression tags in sync" "OK"
+else
+  check_result "15" "$C15_COUNT" "waiver registry/source mismatch" "FAIL"
 fi
 
 # ---------------------------------------------------------------------------

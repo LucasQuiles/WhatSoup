@@ -1,12 +1,55 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/design-regression.sh');
+const WAIVER_SYNC_SCRIPT = resolve(process.cwd(), 'console/scripts/check-waiver-sync.mjs');
+const tmpDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tmpDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  tmpDirs.length = 0;
+});
 
 function runScript() {
   return spawnSync('bash', [SCRIPT], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 8 * 1024 * 1024,
+  });
+}
+
+function makeWaiverFixture(opts: {
+  source?: string;
+  waivers?: string;
+} = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'waiver-sync-'));
+  tmpDirs.push(root);
+
+  const consoleDir = join(root, 'console');
+  const srcDir = join(consoleDir, 'src');
+  mkdirSync(srcDir, { recursive: true });
+
+  writeFileSync(
+    join(srcDir, 'Fixture.tsx'),
+    opts.source ??
+      `/* eslint-disable react-hooks/set-state-in-effect -- waiver:WVR-001 test fixture; expires 2099-12-31 */\nexport const Fixture = 1;\n`,
+  );
+  writeFileSync(
+    join(consoleDir, 'eslint-waivers.yaml'),
+    opts.waivers ??
+      `waivers:\n  - id: WVR-001\n    scope: console/src/Fixture.tsx\n    expiry: 2099-12-31\n`,
+  );
+
+  return consoleDir;
+}
+
+function runWaiverSync(consoleRoot: string) {
+  return spawnSync('node', [WAIVER_SYNC_SCRIPT, '--console-root', consoleRoot], {
     cwd: process.cwd(),
     encoding: 'utf8',
     maxBuffer: 8 * 1024 * 1024,
@@ -38,5 +81,71 @@ describe('design-regression.sh guard contracts', () => {
     const check12 = checkBlock(output, 12);
     expect(check12).toContain('outline-none without focus-visible: count: 0');
     expect(check12).toContain('PASS  count=0  (zero focus suppression sites)');
+  });
+
+  it('reports waiver registry/source sync as a clean blocking PASS', () => {
+    const result = runScript();
+    const output = `${result.stdout}\n${result.stderr}`;
+
+    expect(result.status).toBe(0);
+
+    const check15 = checkBlock(output, 15);
+    expect(check15).toContain('Registered waivers: 10');
+    expect(check15).toContain('Untagged disable directives: 0');
+    expect(check15).toContain('Unknown source waiver ids: 0');
+    expect(check15).toContain('Stale registry TS/TSX scopes: 0');
+    expect(check15).toContain('PASS  count=0  (waiver registry and source suppression tags in sync)');
+  });
+
+  it('waiver sync passes when source tags and registry scopes agree', () => {
+    const consoleRoot = makeWaiverFixture();
+    const result = runWaiverSync(consoleRoot);
+
+    expect(result.status).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      verdict: string;
+      issue_count: number;
+      source_tag_count: number;
+      registered_count: number;
+    };
+    expect(output.verdict).toBe('PASS');
+    expect(output.issue_count).toBe(0);
+    expect(output.source_tag_count).toBe(1);
+    expect(output.registered_count).toBe(1);
+  });
+
+  it('waiver sync fails when a source tag is absent from eslint-waivers.yaml', () => {
+    const consoleRoot = makeWaiverFixture({
+      source:
+        `/* eslint-disable react-hooks/set-state-in-effect -- waiver:WVR-999 test fixture; expires 2099-12-31 */\nexport const Fixture = 1;\n`,
+    });
+    const result = runWaiverSync(consoleRoot);
+
+    expect(result.status).toBe(1);
+    const output = JSON.parse(result.stdout) as {
+      verdict: string;
+      unknown_source_ids: string[];
+    };
+    expect(output.verdict).toBe('FAIL');
+    expect(output.unknown_source_ids).toContain('WVR-999');
+  });
+
+  it('waiver sync fails when a TS/TSX registry scope has no matching source tag in that file', () => {
+    const consoleRoot = makeWaiverFixture({
+      waivers:
+        `waivers:\n  - id: WVR-001\n    scope: console/src/Other.tsx\n    expiry: 2099-12-31\n`,
+    });
+    const result = runWaiverSync(consoleRoot);
+
+    expect(result.status).toBe(1);
+    const output = JSON.parse(result.stdout) as {
+      verdict: string;
+      stale_registry_scopes: Array<{ id: string; scope_file: string }>;
+    };
+    expect(output.verdict).toBe('FAIL');
+    expect(output.stale_registry_scopes).toContainEqual({
+      id: 'WVR-001',
+      scope_file: 'console/src/Other.tsx',
+    });
   });
 });

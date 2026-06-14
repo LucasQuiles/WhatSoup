@@ -815,7 +815,7 @@ repo root):
 | 12 | Focus suppression | `rg -n "outline-none" console/src` minus lines also matching `focus-visible:` | zero after P2 |
 | 13 | Infinite animation allowlist | `rg -n "infinite" console/src/index.css` (and successor token/component CSS) | only the sanctioned ok-breathing + waivered shimmer/typing until P5 disposition |
 | 14 | Expired waivers | script compares `expiry:` dates in `console/eslint-waivers.yaml` to today | none expired |
-| 15 | Suppression-without-waiver | `rg -n "no-restricted-syntax|soup/" console/src -g '*.ts*'` filtered to lint-suppression directives lacking `waiver:` | zero |
+| 15 | Lint-suppression waiver registry sync | `node console/scripts/check-waiver-sync.mjs` checks TS/TSX lint-suppression directives for registered `waiver:WVR-*` tags and verifies registry scopes point at the tagged source file | zero untagged suppressions, unknown source WVR ids, or stale TS/TSX registry scopes |
 
 Each rule must also carry either a negative fixture or a documented negative example before it moves
 to `scoped-error`. The required trap list is maintained in
