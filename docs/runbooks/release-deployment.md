@@ -85,6 +85,29 @@ They do not by themselves authorize deleting the release or replacing it. Decide
 whether to port the lesson back to source, re-cut from merged source, or roll
 back to the prior release path.
 
+## Scheduled Drift Alerting
+
+Production hosts can wrap the same read-only drift check with
+`scripts/live-release-drift-alert.ts`. The wrapper runs
+`release-snapshot-plan.ts --check-release` against a release directory and queues
+a BOT ERRORS event only when drift or checker failure is observed. Clean checks
+do not emit by default; use `--clear-on-ok` only for a deliberate recovery proof.
+
+Example one-shot command:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/live-release-drift-alert.ts \
+  --release "$HOME/LAB/WhatSoup-release-<commit>" \
+  --instance release-bot \
+  --source release-drift \
+  --json
+```
+
+Installing a launchd/cron schedule for this command is a live alerting change and
+needs separate named approval. The scheduled job must use the pinned Node runtime
+and the running release path, and it must remain read-only: no apply, re-cut,
+plist mutation, restart, cleanup, WhatsApp turn, or credential change.
+
 ## Live Acceptance
 
 After a separately approved re-cut:
