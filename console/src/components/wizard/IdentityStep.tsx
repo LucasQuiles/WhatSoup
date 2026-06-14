@@ -46,6 +46,9 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
   const [nameStatus, setNameStatus] = useState<NameStatus>('idle')
   const [showConfirmed, setShowConfirmed] = useState(false)
   const nameInputId = useId()
+  const nameLockedHelperId = useId()
+  const nameTakenErrorId = useId()
+  const nameErrorId = useId()
   const descriptionInputId = useId()
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -60,6 +63,12 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
   const description = (data.description as string) ?? ''
   const type = (data.type as string) ?? 'chat'
   const adminPhones = (data.adminPhones as string[]) ?? []
+  const hasNameTakenError = !nameLocked && nameStatus === 'taken'
+  const nameDescribedBy = [
+    nameLocked ? nameLockedHelperId : undefined,
+    hasNameTakenError ? nameTakenErrorId : undefined,
+    errors.name ? nameErrorId : undefined,
+  ].filter(Boolean).join(' ') || undefined
 
   /* Debounced uniqueness check */
   useEffect(() => {
@@ -124,7 +133,9 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
             placeholder="my-line"
             className={nameLocked ? 'opacity-[var(--opacity-muted)] cursor-not-allowed' : ''}
             disabled={nameLocked}
-            error={Boolean(errors.name) || (!nameLocked && nameStatus === 'taken')}
+            aria-invalid={errors.name || hasNameTakenError ? true : undefined}
+            aria-describedby={nameDescribedBy}
+            error={Boolean(errors.name) || hasNameTakenError}
             confirmed={nameStatus === 'available' || nameLocked}
           />
           {!nameLocked && nameStatus === 'checking' && (
@@ -138,13 +149,13 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
           )}
         </div>
         {nameLocked && (
-          <div className="c-helper">Name is locked — instance already provisioned</div>
+          <div id={nameLockedHelperId} className="c-helper">Name is locked — instance already provisioned</div>
         )}
-        {!nameLocked && nameStatus === 'taken' && (
-          <div className="c-error">Name already exists</div>
+        {hasNameTakenError && (
+          <div id={nameTakenErrorId} className="c-error">Name already exists</div>
         )}
         {errors.name && (
-          <div className="c-error">{errors.name}</div>
+          <div id={nameErrorId} className="c-error">{errors.name}</div>
         )}
       </div>
 

@@ -512,6 +512,17 @@ describe('error display', () => {
     expect(screen.getByText('Name is required')).toBeDefined()
   })
 
+  it('marks the name input invalid and describes it with the name error', () => {
+    renderStep({ errors: { name: 'Name is required' } })
+
+    const input = screen.getByLabelText('Name') as HTMLInputElement
+    const error = screen.getByText('Name is required')
+
+    expect(error.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(input.getAttribute('aria-describedby')).toBe(error.id)
+  })
+
   it('shows type error from errors.type prop', () => {
     renderStep({ errors: { type: 'Type must be selected' } })
     expect(screen.getByText('Type must be selected')).toBeDefined()
@@ -538,6 +549,25 @@ describe('error display', () => {
     })
     expect(screen.getByText('Invalid name format')).toBeDefined()
     expect(screen.getByText('Name already exists')).toBeDefined()
+  })
+
+  it('describes the name input with both format and uniqueness errors when both render', async () => {
+    mockCheckExists.mockResolvedValue({ exists: true })
+    renderStep({ data: { name: 'taken' }, errors: { name: 'Invalid name format' } })
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+      await Promise.resolve()
+    })
+
+    const input = screen.getByLabelText('Name') as HTMLInputElement
+    const formatError = screen.getByText('Invalid name format')
+    const uniquenessError = screen.getByText('Name already exists')
+    const describedBy = input.getAttribute('aria-describedby')?.split(' ') ?? []
+
+    expect(formatError.id).toBeTruthy()
+    expect(uniquenessError.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(describedBy).toEqual(expect.arrayContaining([uniquenessError.id, formatError.id]))
   })
 })
 
