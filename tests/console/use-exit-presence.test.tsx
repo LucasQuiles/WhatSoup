@@ -382,14 +382,11 @@ describe('useExitPresence — fallback timer path', () => {
     expect(result.current.mounted).toBe(false)
   })
 
-  it('effect cleanup (open→true): cancelled=true prevents timer from firing', async () => {
+  it('reopen during closing dwell cancels stale closing phase and terminal callbacks', async () => {
     // When open transitions false→true during a dwell, the effect cleanup
     // (lines 158–168) sets cancelled=true, clearing the timer and listener.
     // The rAF's `if (cancelled) return` guard makes the rAF a no-op.
-    // Observable: mounted stays true after re-opening (component is still mounted);
-    // closingActive stays true (cleanup does not reset it) so phase='closing'.
-    // This is correct: the component is mounted and visible, just still flagged
-    // as 'closing' until the next proper close cycle.
+    // DD-30 regression: the reopened shell must not remain data-state="closing".
     const { el, shellRef } = makeShellEl('300ms')
     const { result, rerender } = renderHook(
       ({ open }: { open: boolean }) => useExitPresence(open, shellRef, ANIM_NAME),
@@ -402,15 +399,25 @@ describe('useExitPresence — fallback timer path', () => {
 
     // Re-open: cleanup fires (cancelled=true), then open=true effect runs.
     rerender({ open: true })
-    await act(async () => {})
 
     // Component stays mounted (open=true always → mounted=true).
     expect(result.current.mounted).toBe(true)
+    expect(result.current.phase).toBe('open')
 
-    // After timers: the rAF is a no-op (cancelled=true) so no timer is armed.
-    // mounted stays true.
+    await act(async () => {})
+    expect(result.current.mounted).toBe(true)
+    expect(result.current.phase).toBe('open')
+
+    // Canceled listener and fallback paths must not unmount the reopened shell.
+    await act(async () => {
+      fireEvent.animationEnd(el, { animationName: ANIM_NAME })
+    })
+    expect(result.current.mounted).toBe(true)
+    expect(result.current.phase).toBe('open')
+
     await act(async () => { vi.runAllTimers() })
     expect(result.current.mounted).toBe(true)
+    expect(result.current.phase).toBe('open')
   })
 })
 

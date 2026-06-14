@@ -12,18 +12,18 @@
  *        (b) fallback timer: computed duration + FALLBACK_BUFFER_MS.
  *
  *   On open false→true (re-open during closing):
- *     Cancels any in-flight closing dwell. The cancel ref is checked in the
- *     open=false effect's cleanup — no extra state update on open=true renders.
+ *     The open=false effect cleanup cancels any in-flight timer/listener.
+ *     open=true renders force phase='open' immediately, then the open effect
+ *     clears the stale closing dwell bit before the next close cycle.
  *
  *   Instant path (C-B5-1):
  *     jsdom: no stylesheet → empty animationDuration → instant synchronous unmount.
  *     All existing consumer suites remain byte-stable.
  *     reduced-motion: animation:none → 0s → instant.
  *
- *   No extra render cycle for open=true:
- *     The 'mounted' state uses a separate boolean that is only set to false on close.
- *     On open=true, mounted is derived from (open=true) without needing a state update,
- *     preserving the useDismissable focus effect on the same render as Modal mounts.
+ *   No stale closing phase on re-open:
+ *     mounted and phase both key off open=true first. The reopened shell cannot
+ *     render data-state="closing" while the cleanup-state reset is committing.
  *
  *   StrictMode safe: effects have symmetric cleanup. No module-level state.
  *
@@ -75,7 +75,8 @@ export function useExitPresence(
 ): UseExitPresenceResult {
   // closingActive tracks the deferred-unmount dwell.
   // ONLY set to true on close; reset to false when the dwell ends or open resumes.
-  // On open=true renders this is always false → no state update needed.
+  // open=true renders derive phase from open first, then the open effect clears
+  // any stale dwell bit after the open=false cleanup has cancelled callbacks.
   const [closingActive, setClosingActive] = useState(false);
 
   const animNameRef = useRef(animName);
@@ -87,6 +88,9 @@ export function useExitPresence(
     if (open) {
       // Re-open (or initial mount): the previous open=false effect cleanup has
       // already cancelled any in-flight timer/listener before this effect runs.
+      // Clear the stale dwell bit so a later zero-duration close can unmount.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- waiver:WVR-015 reopen must clear stale close dwell after callbacks are cancelled; expires 2026-12-31
+      setClosingActive(false);
       return;
     }
 
@@ -106,7 +110,6 @@ export function useExitPresence(
     }
 
     // Closing dwell: enter the closing phase.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- waiver:WVR-015 close dwell must arm before the shell can unmount; expires 2026-12-31
     setClosingActive(true);
 
     let cancelled = false;
@@ -144,9 +147,9 @@ export function useExitPresence(
       if (timerId !== null) clearTimeout(timerId);
       shell.removeEventListener('animationend', handleAnimationEnd);
       // Note: we do NOT call setClosingActive(false) in cleanup here.
-      // The cleanup runs on unmount (component tree removal), at which point
-      // the component is gone anyway. StrictMode cleanup/re-setup: the second
-      // setup resets cancellation state.
+      // On re-open, the open=true effect clears it after this cleanup has
+      // cancelled callbacks. On unmount, the component is gone anyway.
+      // StrictMode cleanup/re-setup: the second setup resets cancellation state.
     };
   }, [open, shellRef]);
 
@@ -155,7 +158,7 @@ export function useExitPresence(
   // open=false + closingActive=true → mounted (dwell).
   // open=false + closingActive=false → not mounted.
   const mounted = open || closingActive;
-  const phase: ExitPhase = closingActive ? 'closing' : 'open';
+  const phase: ExitPhase = open ? 'open' : closingActive ? 'closing' : 'open';
 
   return { mounted, phase };
 }
