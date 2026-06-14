@@ -83,6 +83,15 @@ describe('ChatListItem', () => {
     expect(row.getAttribute('style')).toContain('border-left')
   })
 
+  it('carries the c-chat-item class that owns the row focus-visible ring', () => {
+    render(<ChatListItem chat={chat()} isSelected={false} onClick={() => {}} tabIndex={0} />)
+    const row = screen.getByRole('option')
+
+    expect(row.classList.contains('c-chat-item')).toBe(true)
+    expect(row.getAttribute('tabIndex')).toBe('0')
+    expect(row.getAttribute('role')).toBe('option')
+  })
+
   it('omits the active class and inline style when not selected', () => {
     render(<ChatListItem chat={chat()} isSelected={false} onClick={() => {}} />)
     const row = screen.getByRole('option')

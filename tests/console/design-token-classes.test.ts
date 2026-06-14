@@ -101,4 +101,15 @@ describe('design token component classes', () => {
 
     expect(css).not.toContain('Focus ring: --m-cht')
   })
+
+  it('keeps ChatListItem rows on the tokenized focus-visible ring recipe', () => {
+    const css = readCompositeCss()
+    const block = blockFor(css, '.c-chat-item:focus-visible')
+
+    expect(block).toContain('outline: none;')
+    expect(block).toContain('background: var(--surface-overlay);')
+    expect(block).toContain('box-shadow:')
+    expect(block).toContain('var(--focus-ring)')
+    expect(block).toContain('transition: none;')
+  })
 })
