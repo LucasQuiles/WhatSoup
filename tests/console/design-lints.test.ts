@@ -46,6 +46,8 @@ const FIXTURE_PATH = resolve(REPO_ROOT, 'console/src/pages/__fixture__.tsx')
 const PRIMITIVES_FIXTURE_PATH = resolve(REPO_ROOT, 'console/src/components/primitives/__fixture__.tsx')
 // ConfigStep path: exempt from soup/no-brand-regression by EXEMPT_FILE_SUFFIXES.
 const CONFIGSTEP_PATH = resolve(REPO_ROOT, 'console/src/components/wizard/ConfigStep.tsx')
+const USE_DISMISSABLE_PATH = resolve(REPO_ROOT, 'console/src/hooks/use-dismissable.ts')
+const KEYBOARD_SHORTCUTS_PATH = resolve(REPO_ROOT, 'console/src/hooks/use-keyboard-shortcuts.ts')
 
 let eslint: ESLintType
 let eslintPrimitives: ESLintType
@@ -146,6 +148,105 @@ const x = <X />`
 const x = <FeedIcon kind="message" />`
     )
     expect(hasWarning(messages, 'icon-family')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P2 custom plugin rule - soup/no-inline-dismiss-handler
+// Flags hand-rolled Escape dismissal inside useEffect callbacks. Exempts the
+// canonical useDismissable hook and the global keyboard-shortcuts hook.
+// ---------------------------------------------------------------------------
+
+describe('soup/no-inline-dismiss-handler', () => {
+  it('fires on a hand-rolled document Escape listener inside useEffect', async () => {
+    const messages = await lintWarnings(
+      `import { useEffect } from 'react'
+export function Dialog({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    function handleKeydown(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleKeydown)
+    return () => document.removeEventListener('keydown', handleKeydown)
+  }, [onClose])
+  return null
+}`
+    )
+    expect(hasWarning(messages, 'no-inline-dismiss-handler')).toBe(true)
+  })
+
+  it('fires on a reverse Escape comparison inside a useEffect callback', async () => {
+    const messages = await lintWarnings(
+      `import { useEffect } from 'react'
+export function Dialog({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const handleKeydown = (event: KeyboardEvent) => {
+      if ('Escape' !== event.key) return
+      onClose()
+    }
+    document.addEventListener('keydown', handleKeydown)
+    return () => document.removeEventListener('keydown', handleKeydown)
+  }, [onClose])
+  return null
+}`
+    )
+    expect(hasWarning(messages, 'no-inline-dismiss-handler')).toBe(true)
+  })
+
+  it('is silent when dismissal is delegated to useDismissable', async () => {
+    const messages = await lintWarnings(
+      `import { useRef } from 'react'
+import { useDismissable } from '../hooks/use-dismissable'
+export function Dialog({ onClose, open }: { onClose: () => void; open: boolean }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useDismissable(ref, { onClose, open })
+  return <div ref={ref} />
+}`
+    )
+    expect(hasWarning(messages, 'no-inline-dismiss-handler')).toBe(false)
+  })
+
+  it('is silent for non-dismiss inline keyboard handling', async () => {
+    const messages = await lintWarnings(
+      `const x = <textarea onKeyDown={e => {
+  if (e.key === 'Enter' && !e.shiftKey) e.preventDefault()
+}} />`
+    )
+    expect(hasWarning(messages, 'no-inline-dismiss-handler')).toBe(false)
+  })
+
+  it('is silent inside the canonical useDismissable hook', async () => {
+    const messages = await lintWarnings(
+      `import { useEffect } from 'react'
+export function useDismissable() {
+  useEffect(() => {
+    function handleKeydown(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return
+    }
+    document.addEventListener('keydown', handleKeydown)
+    return () => document.removeEventListener('keydown', handleKeydown)
+  }, [])
+}`,
+      USE_DISMISSABLE_PATH
+    )
+    expect(hasWarning(messages, 'no-inline-dismiss-handler')).toBe(false)
+  })
+
+  it('is silent inside the global keyboard-shortcuts hook', async () => {
+    const messages = await lintWarnings(
+      `import { useEffect } from 'react'
+export function useKeyboardShortcuts() {
+  useEffect(() => {
+    function handleKeydown(e: KeyboardEvent) {
+      if (e.key === 'Escape') return
+    }
+    document.addEventListener('keydown', handleKeydown)
+    return () => document.removeEventListener('keydown', handleKeydown)
+  }, [])
+}`,
+      KEYBOARD_SHORTCUTS_PATH
+    )
+    expect(hasWarning(messages, 'no-inline-dismiss-handler')).toBe(false)
   })
 })
 
@@ -677,6 +778,24 @@ const x = FaBeer`,
         FIXTURE_PATH
       )
       expect(hasError(messages, 'icon-family')).toBe(true)
+    })
+
+    it('no-inline-dismiss-handler fires as an error at a pages path', async () => {
+      const messages = await lintErrors(
+        `import { useEffect } from 'react'
+export function Dialog({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    function handleKeydown(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleKeydown)
+    return () => document.removeEventListener('keydown', handleKeydown)
+  }, [onClose])
+  return null
+}`,
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-inline-dismiss-handler')).toBe(true)
     })
   })
 

@@ -694,6 +694,7 @@ export default defineConfig([
     rules: {
       'soup/protected-identifiers': 'error',
       'soup/icon-family': 'error',
+      'soup/no-inline-dismiss-handler': 'error',
 
       // ═══════════════════════════════════════════════════════════════
       // DESIGN SYSTEM ENFORCEMENT

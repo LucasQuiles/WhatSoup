@@ -96,7 +96,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/icon-family | scoped-error | global-error | P1 | zero current violations (lucide-react only) |
 | soup/no-utility-smell | scoped-error (primitives tier) | warn-on-changed-files | P2 | G2 mandatory item 3 tripwire |
 | soup/no-format-bypass | shadow | warn-on-changed-files | P3 | DUP-13/14 helpers must exist first |
-| soup/no-inline-dismiss-handler | shadow | global-error | P2 | lands with useDismissable |
+| soup/no-inline-dismiss-handler | global-error | global-error | P2 | document-level Escape dismissal must go through `useDismissable` |
 | soup/no-raw-table | global-error (outside primitives) | keep | C2.3/D6 | added post-T7 (C2.3 tripwire → D6 flip); Group S, design-selectors.mjs |
 | soup/no-raw-sortable-header | global-error (outside primitives) | keep | C2.3/D6 | added post-T7 (C2.3 tripwire → D6 flip); Group S, design-selectors.mjs |
 | soup/no-legacy-log-lanes | global-error (outside primitives) | keep | C2.3/D6 | added post-T7 (C2.3 tripwire → D6 flip); Group S, design-selectors.mjs |
@@ -707,17 +707,16 @@ cannot express the check).
 - **Purpose:** Escape/outside-click dismissal exists only inside `useDismissable` (DUP-03/04:
   9 copy-pasted Escape `useEffect` blocks enumerated at duplication-register DUP-04; 2 outside-
   click copies; 2 surfaces with none).
-- **Mechanism:** selector
-  `Literal[value="Escape"]` inside `useEffect` callbacks outside the hook module — concretely a
-  custom rule: flag `BinaryExpression[left.property.name="key"]` comparing to `'Escape'` in any
-  file except `console/src/hooks/use-dismissable.ts` (new home) and the keyboard-shortcuts hook
-  (`console/src/hooks/use-keyboard-shortcuts.ts`, which owns global shortcuts).
+- **Mechanism:** custom rule: flag `event.key`/`e.key` comparisons to `'Escape'` inside `useEffect`
+  callbacks in any file except `console/src/hooks/use-dismissable.ts` and the keyboard-shortcuts
+  hook (`console/src/hooks/use-keyboard-shortcuts.ts`, which owns global shortcuts). Inline
+  component keyboard handlers are not part of this rule; they remain covered by behavior tests.
 - **Scope:** `console/src/**` with the two exemptions above.
 - **Violation / valid:** local `if (e.key === 'Escape') close()` effect → `useDismissable(ref,
   onClose)`.
 - **FP strategy:** the two named exemptions cover every legitimate global handler; per-component
   key handling for non-dismiss purposes (e.g. list navigation) compares other keys and never fires.
-- **Autofix:** no. **Phase:** P2 (lands with the hook). **Entry:** shadow.
+- **Autofix:** no. **Phase:** P2 (lands with the hook). **Entry:** global-error.
 
 Catalog count: 22 rules (20 ESLint-side: 18 soup/* AST/selector rules + 2 presence-check custom
 rules; 2 script-side: theme-parity, motion-reduced CSS pass).

@@ -9,6 +9,9 @@
  *                               + the split-span wordmark detector
  *   soup/protected-identifiers — flags near-miss renames of protected protocol contracts
  *   soup/icon-family           — permits lucide-react icons and denies other icon packages
+ *   soup/no-inline-dismiss-handler
+ *                             — flags hand-rolled Escape dismissal effects outside
+ *                               the single useDismissable hook
  *
  * Rules stubbed (proposed / needs primitives / CSS-side):
  *   soup/no-duplicate-shell          — heuristic, warn-ceiling
@@ -17,7 +20,6 @@
  *   soup/modal-must-restore-focus    — proposed; Modal primitive must exist first
  *   soup/motion-needs-reduced-variant — shadow; CSS-script-primary (section 5)
  *   soup/no-format-bypass            — shadow; enabled after lib gains epoch overloads (P3)
- *   soup/no-inline-dismiss-handler   — shadow; lands with useDismissable (P2)
  */
 
 // ---------------------------------------------------------------------------
@@ -58,6 +60,11 @@ const DENIED_ICON_IMPORTS = [
   /^bootstrap-icons(\/|$)/,
 ]
 
+const INLINE_DISMISS_EXEMPT_FILE_SUFFIXES = [
+  'hooks/use-dismissable.ts',
+  'hooks/use-keyboard-shortcuts.ts',
+]
+
 /**
  * Returns true if the string contains a protected contract identifier.
  * Used to build the allowlist so those occurrences are not flagged by
@@ -79,6 +86,11 @@ const EXEMPT_FILE_SUFFIXES = [
 function isExemptFile(filename) {
   if (!filename) return false
   return EXEMPT_FILE_SUFFIXES.some((s) => filename.endsWith(s))
+}
+
+function isInlineDismissExemptFile(filename) {
+  if (!filename) return false
+  return INLINE_DISMISS_EXEMPT_FILE_SUFFIXES.some((s) => filename.endsWith(s))
 }
 
 function checkTextLiterals(context, checkStringValue) {
@@ -302,6 +314,77 @@ const iconFamily = {
 }
 
 // ---------------------------------------------------------------------------
+// soup/no-inline-dismiss-handler
+// Lint-plan section 3: global-error entry state, P2 target.
+// ---------------------------------------------------------------------------
+function isUseEffectCall(node) {
+  if (!node || node.type !== 'CallExpression') return false
+  const callee = node.callee
+  if (callee?.type === 'Identifier') return callee.name === 'useEffect'
+  return callee?.type === 'MemberExpression' && callee.property?.name === 'useEffect'
+}
+
+function hasUseEffectCallbackAncestor(node) {
+  let current = node
+  while (current?.parent) {
+    const parent = current.parent
+    if (
+      (current.type === 'ArrowFunctionExpression' || current.type === 'FunctionExpression') &&
+      isUseEffectCall(parent) &&
+      parent.arguments?.[0] === current
+    ) {
+      return true
+    }
+    current = parent
+  }
+  return false
+}
+
+function isEscapeLiteral(node) {
+  return node?.type === 'Literal' && node.value === 'Escape'
+}
+
+function isEventKeyMember(node) {
+  if (node?.type !== 'MemberExpression') return false
+  if (node.computed) return node.property?.type === 'Literal' && node.property.value === 'key'
+  return node.property?.type === 'Identifier' && node.property.name === 'key'
+}
+
+const noInlineDismissHandler = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        'Prevent hand-rolled Escape dismissal useEffect handlers outside useDismissable. ' +
+        'The single dismissal hook owns overlay Escape/outside-click behavior.',
+    },
+    messages: {
+      inlineEscape:
+        '[soup/no-inline-dismiss-handler] Hand-rolled Escape dismissal inside useEffect must use useDismissable. ' +
+        'Move overlay dismissal to console/src/hooks/use-dismissable.ts instead of comparing event.key to "Escape" locally.',
+    },
+    schema: [],
+  },
+
+  create(context) {
+    const filename = context.getFilename ? context.getFilename() : (context.filename ?? '')
+    if (isInlineDismissExemptFile(filename)) return {}
+
+    return {
+      BinaryExpression(node) {
+        if (!['===', '==', '!==', '!='].includes(node.operator)) return
+        const comparesEscape =
+          (isEventKeyMember(node.left) && isEscapeLiteral(node.right)) ||
+          (isEscapeLiteral(node.left) && isEventKeyMember(node.right))
+        if (!comparesEscape) return
+        if (!hasUseEffectCallbackAncestor(node)) return
+        context.report({ node, messageId: 'inlineEscape' })
+      },
+    }
+  },
+}
+
+// ---------------------------------------------------------------------------
 // Stubs for rules that are proposed or need primitives / CSS-side work first.
 // Each stub is a valid rule that fires zero violations (returns {}).
 // Documented so the lifecycle table remains consistent.
@@ -352,11 +435,6 @@ const motionNeedsReducedVariant = makeStub(
 const noFormatBypass = makeStub(
   '[stub] soup/no-format-bypass — SHADOW. Enabled after format-time.ts gains epoch overloads ' +
     '(P3). Will flag toLocaleString/toLocaleDateString outside lib/.'
-)
-
-const noInlineDismissHandler = makeStub(
-  '[stub] soup/no-inline-dismiss-handler — SHADOW. Enabled with useDismissable hook (P2). ' +
-    "Will flag e.key === 'Escape' comparisons outside the hook and keyboard-shortcuts hook."
 )
 
 // ---------------------------------------------------------------------------
