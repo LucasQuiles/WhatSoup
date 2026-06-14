@@ -2,19 +2,18 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 655,
-    "blocking": 590,
+    "total": 652,
+    "blocking": 587,
     "byCategory": {
       "accent-law": 0,
-      "base-wall": 22,
+      "base-wall": 21,
       "brand-regression": 2,
-      "focus-suppression": 1,
       "half-step": 64,
       "legacy-token-tsx": 334,
       "legacy-var-css": 220,
       "raw-color-css": 0,
       "raw-font-size-css": 0,
-      "raw-form-control": 11,
+      "raw-form-control": 10,
       "utility-smell": 1
     }
   },
@@ -32,13 +31,8 @@
       "id": "burndown:base-wall",
       "category": "base-wall",
       "severity": "blocking",
-      "count": 22,
+      "count": 21,
       "files": [
-        {
-          "path": "src/components/line-detail/HistoryTab.tsx",
-          "count": 1,
-          "lines": null
-        },
         {
           "path": "src/components/line-detail/ModeTab.tsx",
           "count": 1,
@@ -101,21 +95,6 @@
         }
       ],
       "owner": "B5 — Nav/brand slice (P4/C4 flips)",
-      "source": "lint-shadow-baseline.json (line detail lives in the ESLint shadow run)"
-    },
-    {
-      "id": "burndown:focus-suppression",
-      "category": "focus-suppression",
-      "severity": "blocking",
-      "count": 1,
-      "files": [
-        {
-          "path": "src/components/line-detail/HistoryTab.tsx",
-          "count": 1,
-          "lines": null
-        }
-      ],
-      "owner": "B7 — HistoryTab composer (C-B4-6)",
       "source": "lint-shadow-baseline.json (line detail lives in the ESLint shadow run)"
     },
     {
@@ -604,16 +583,11 @@
       "id": "burndown:raw-form-control",
       "category": "raw-form-control",
       "severity": "blocking",
-      "count": 11,
+      "count": 10,
       "files": [
         {
           "path": "src/components/line-detail/ConfigEditDialog.tsx",
           "count": 7,
-          "lines": null
-        },
-        {
-          "path": "src/components/line-detail/HistoryTab.tsx",
-          "count": 1,
           "lines": null
         },
         {
@@ -684,7 +658,7 @@
           "path": "src/components/line-detail/HistoryTab.tsx",
           "count": 1,
           "lines": [
-            209
+            210
           ]
         },
         {

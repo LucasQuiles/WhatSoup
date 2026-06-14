@@ -245,6 +245,18 @@ describe('HistoryTab — no-selection empty state', () => {
     expect(screen.queryByText('No messages yet')).toBeNull()
     expect(screen.getByPlaceholderText('Type a reply...')).toBeDefined()
   })
+
+  it('routes the reply composer through TextArea without suppressing focus outlines', () => {
+    render(withProviders(<HistoryTab {...defaultProps()} />))
+
+    const textarea = screen.getByPlaceholderText('Type a reply...') as HTMLTextAreaElement
+
+    expect(textarea.classList.contains('c-input')).toBe(true)
+    expect(textarea.classList.contains('font-sans')).toBe(true)
+    expect(textarea.classList.contains('outline-none')).toBe(false)
+    expect(textarea.getAttribute('style')).toContain('resize: none')
+    expect(textarea.getAttribute('style')).toContain('max-height: var(--feed-preview-max)')
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -44,11 +44,10 @@ export const structuralSelectors = [
   },
 ]
 
-// ── Group F — focus suppression, console-wide with carve-out ────────────────
-// Scope: all console/src TS/TSX EXCEPT pages/Inbox.tsx and
-//        components/line-detail/HistoryTab.tsx (the two chat composers;
-//        absorbed by their migration waves — see d6-investigation.md §4 Group F)
-// Current violations outside carve-out: 0 (check 12: exactly 2 hits, both carved out)
+// ── Group F — focus suppression, console-wide ───────────────────────────────
+// Scope: all console/src TS/TSX. The Inbox and HistoryTab composer carve-outs
+// were removed by their migration waves.
+// Current violations: 0.
 export const focusSuppressionSelectors = [
   {
     selector: 'Literal[value=/\\boutline-none\\b/][value!=/focus-visible:/]',

@@ -715,29 +715,8 @@ export default defineConfig([
         ...designSystemRestrictions,
         // Group S: structural (console-wide, excludes primitives/**):
         ...structuralSelectors,
-        // Group F: focus suppression (console-wide, excludes HistoryTab only — Inbox carve-out retired at B4 close):
+        // Group F: focus suppression (console-wide):
         ...focusSuppressionSelectors,
-      ],
-    },
-  },
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Block 2 — Composer carve-out for Group F (focus suppression).
-  // HistoryTab.tsx carries the one remaining outline-none violation (the
-  // HistoryTab composer); it is carved out of the focus rule until its
-  // migration wave lands (C-B4-6). It still gets the full base wall and
-  // Group S structural selectors.
-  // ─────────────────────────────────────────────────────────────────────────
-  {
-    files: [
-      'src/components/line-detail/HistoryTab.tsx',
-    ],
-    rules: {
-      'no-restricted-syntax': [
-        'error',
-        ...designSystemRestrictions,
-        // Group S carried (no focus — carve-out):
-        ...structuralSelectors,
       ],
     },
   },

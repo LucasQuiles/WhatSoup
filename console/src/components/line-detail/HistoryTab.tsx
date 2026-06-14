@@ -9,6 +9,7 @@ import { useStickyScroll } from '../../hooks/use-sticky-scroll'
 import EmptyState from '../EmptyState'
 import ChatListItem from '../ChatListItem'
 import MessageBubble from '../MessageBubble'
+import { TextArea } from '../primitives'
 import { Button } from '../primitives/Button'
 import { ActionButton } from '../primitives/ActionButton'
 import type { Mode, ChatItem, Message } from './types'
@@ -204,15 +205,15 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       <div
         className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-t bg-d2"
       >
-        <textarea
+        <TextArea
           ref={textareaRef}
-          className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-body"
+          className="flex-1 text-t2 placeholder-t5 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
           rows={1}
-          style={{
-            maxHeight: 'var(--feed-preview-max)',
-            resize: 'none',
-            overflow: 'hidden',
-          }}
+          minHeight={0}
+          maxHeight="var(--feed-preview-max)"
+          resize="none"
+          overflow="hidden"
+          textFace="sans"
           placeholder="Type a reply..."
           aria-label="Type a reply"
           value={msgText}

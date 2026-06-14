@@ -266,6 +266,29 @@ describe('TextArea', () => {
     rerender(<TextArea aria-label="Body" value="" onChange={() => {}} confirmed />)
     expectBorderColor(textarea, 'var(--wizard-accent)')
   })
+
+  it('supports bounded non-resizable sans textareas without a style escape hatch', () => {
+    render(
+      <TextArea
+        aria-label="Reply"
+        value=""
+        onChange={() => {}}
+        textFace="sans"
+        minHeight={0}
+        maxHeight="var(--feed-preview-max)"
+        overflow="hidden"
+        resize="none"
+      />,
+    )
+
+    const textarea = screen.getByLabelText('Reply') as HTMLTextAreaElement
+    expect(textarea.classList.contains('font-sans')).toBe(true)
+    expect(textarea.classList.contains('font-mono')).toBe(false)
+    expect(textarea.getAttribute('style')).toContain('min-height: 0')
+    expect(textarea.getAttribute('style')).toContain('max-height: var(--feed-preview-max)')
+    expect(textarea.getAttribute('style')).toContain('overflow: hidden')
+    expect(textarea.getAttribute('style')).toContain('resize: none')
+  })
 })
 
 // RadioField

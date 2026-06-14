@@ -68,14 +68,14 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-channel-specific-copy | proposed | global-error | P4/G7 | flags generic visible "WhatsApp" copy after the multi-channel positioning lock; protocol/runtime prompts stay allowlisted |
 | soup/protected-identifiers | scoped-error | global-error | P1 | cheap, zero current violations — start strict |
 | soup/no-raw-button | scoped-error (M list) | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
-| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate compares live shadow ESLint output to generated `console/design-raw-form-control-inventory.json`; current generated manifest is 11 total = 11 consumer-migration + 0 primitive self-hits |
+| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate compares live shadow ESLint output to generated `console/design-raw-form-control-inventory.json`; current generated manifest is 10 total = 10 consumer-migration + 0 primitive self-hits |
 | soup/no-adhoc-modal | scoped-error (M list) | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
 | soup/no-legacy-tokens | scoped-error (primitives tier) | global-error | P2+ complete | enabled only after alias layer + primitives land |
 | soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap |
 | soup/no-untokenized-values | scoped-error (already live) | global-error | P1 | exists `console/eslint.config.js:157-191,227-229`; close 3 evasion shapes (DUP-08) |
 | soup/no-transition-all | global-error (already live) | keep | P5 | `console/eslint.config.js:126-128` |
 | soup/no-infinite-animation | shadow | global-error | P5 | 4 current infinite animations to disposition |
-| soup/no-focus-suppression | scoped-error (console-wide, HistoryTab carve-out) | global-error | P2 | 2 TSX + 3 CSS occurrences today |
+| soup/no-focus-suppression | scoped-error (console-wide) | global-error | P2 | 0 TSX `outline-none` occurrences today; composer carve-outs retired |
 | soup/focus-visible-required | shadow | scoped-error (primitives) | P2 | primitives-first; screens inherit |
 | soup/modal-must-restore-focus | proposed | scoped-error (Modal) | P2 | enforceable once Modal primitive exists |
 | soup/motion-needs-reduced-variant | shadow | global-error | P5 | 1 of ~6 animation families has a reduced variant today |
@@ -230,7 +230,7 @@ cannot express the check).
 - **Violation / valid:** bare `<select className="c-input …">`
   (`console/src/components/line-detail/ConfigEditDialog.tsx:199-205`) → `<SelectInput …>`.
 - **FP strategy:** directory scoping plus the deterministic inventory gate. Current generated
-  manifest is exactly 11 consumer hits. D4.2 intentionally cleared the former 5 form-kit self-hits
+  manifest is exactly 10 consumer hits. D4.2 intentionally cleared the former 5 form-kit self-hits
   by moving the canonical primitive under `components/primitives/**`; D4.3a cleared the shared
   `SearchInput` producer, D4.3b cleared `UnlockScreen`, and D4.3c cleared `TagInput` by routing
   each through `TextInput`; D4.3j cleared `ModelAuthStep` by routing API-key input through
@@ -238,7 +238,7 @@ cannot express the check).
   routing subject/description/ephemeral controls through `TextInput`, `TextArea`, and `SelectInput`;
   D4.3l cleared the ConfigStep enabled-plugin checkbox through `CheckboxField`; D4.3m cleared
   ScheduleComposerModal by routing its text, media, datetime, and cron fields through `TextInput`
-  and `TextArea`.
+  and `TextArea`; D4.3n cleared `HistoryTab` by routing its reply composer through `TextArea`.
   Remaining count movement must be classified as exemption-movement vs consumer-migration before
   any inventory or baseline ratchet.
 - **Autofix:** no (prop surfaces differ). **Phase:** P2. **Entry:** shadow.
@@ -370,11 +370,8 @@ cannot express the check).
 ### soup/no-focus-suppression
 
 - **Purpose:** never remove focus affordance without a focus-visible replacement. Current state:
-  the global reset removes outlines (`console/src/index.css:230-236`) and a global `:focus-visible`
-  ring restores them for `button/input/select/textarea/a` (`console/src/index.css:1173-1183`) —
-  that pairing is the sanctioned pattern. TSX-level `outline-none` without a visible replacement is
-  the violation: `console/src/pages/Inbox.tsx:434` and
-  `console/src/components/line-detail/HistoryTab.tsx:206` (the two duplicated chat composers).
+  TSX-level `outline-none` has been zeroed; the former Inbox and HistoryTab chat-composer carve-outs
+  were retired by routing those composers through primitives without outline suppression.
 - **Mechanism:** selector `Literal[value=/\boutline-none\b/]` (+ template-literal variant) flagging
   unless the same className string contains `focus-visible:`; CSS-side `rg` for `outline: none`
   outside the two sanctioned blocks.
@@ -866,10 +863,9 @@ landed `ba4ed643`):
   added post-T7 as C2.3 shadow tripwires; rows added to the table above): global-error
   outside `components/primitives/**` (the canonical-renderer exemption), re-carried through
   every later-match config block.
-- **Group F** (soup/no-focus-suppression): scoped-error console-wide with a single remaining
-  carve-out — `components/line-detail/HistoryTab.tsx` (C-B4-6). The original second carve-out
-  (pages/Inbox.tsx) was retired at B4 close (`9bfde5c3`); a stale "Inbox + HistoryTab" comment
-  survives at eslint.config.js:704 (code truth is the HistoryTab-only block 2).
+- **Group F** (soup/no-focus-suppression): scoped-error console-wide with no carve-outs. The Inbox
+  composer carve-out was retired at B4 close (`9bfde5c3`), and the HistoryTab carve-out was retired
+  when its reply composer moved to `TextArea` without `outline-none`.
 - **Group M** (soup/no-raw-button, soup/no-adhoc-modal): scoped-error across the current
   10-file M list — AddLineWizard.tsx (joined at B3 wave 4 `061986ee`), pages/LineDetail.tsx,
   pages/SoupKitchen.tsx, TagInput.tsx, CardSelector.tsx, ConfirmDialog.tsx, RelinkModal.tsx,
@@ -884,14 +880,16 @@ landed `ba4ed643`):
   color semantics, resilience, font assets, brand assets, and design-lint fixture coverage.
 - **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
-  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 13 14 15 16 17)` — ten
-  checks fail the run; check 15 promoted after the dead `useExitPresence` suppression was removed,
-  and check 17 promoted after `.c-kpi-hover` moved to `--shadow-hover` and
-  `raw-color-css` ratcheted to zero. The burndown scanner also carries a zeroed
+  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17)` —
+  eleven checks fail the run; check 12 promoted after the final focus-suppression carve-out was
+  removed, check 15 promoted after the dead `useExitPresence` suppression was removed, and check 17
+  promoted after `.c-kpi-hover` moved to `--shadow-hover` and `raw-color-css` ratcheted to zero. The
+  burndown scanner also carries a zeroed
   `raw-font-size-css` category for CSS type-scale re-entry. Checks 18–20 remain report-only per the
   §2 lifecycle, and the remaining immature checks each sit behind a named landing gate in the
   script's justification block. Workflow drift for the shared design chain is pinned by
-  `guard:safeguard-diagnostics`.
+  `guard:safeguard-diagnostics`. `tests/scripts/design-regression-guards.test.ts` pins the promoted
+  list and the zero-hit focus-suppression output shape.
 All other rule rows are unchanged: states verified still accurate against the live configs
 (brand-regression, raw-form-control, infinite-animation, literal-status-colors,
 inline-dismiss-handler, format-bypass, duplicate-shell remain in the shadow config;

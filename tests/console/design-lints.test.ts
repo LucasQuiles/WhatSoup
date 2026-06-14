@@ -1002,14 +1002,14 @@ export function Dialog({ onClose }: { onClose: () => void }) {
       expect(hasError(messages, 'no-focus-suppression')).toBe(true)
     })
 
-    it('no-focus-suppression is still silent at HistoryTab.tsx (carve-out retained, C-B4-6)', async () => {
-      // HistoryTab.tsx remains in Block 2 — its composer outline-none is the
-      // remaining hit, owned by the form-kit composer-flavor slice (C-B4-6).
+    it('no-focus-suppression fires at HistoryTab.tsx (composer carve-out retired)', async () => {
+      // The HistoryTab composer now uses TextArea without outline-none, so the
+      // file joins the fully enforced focus-suppression set.
       const messages = await lintErrors(
         'const x = <button className="outline-none px-4 py-2">Click</button>',
         resolve(REPO_ROOT, 'console/src/components/line-detail/HistoryTab.tsx')
       )
-      expect(hasError(messages, 'no-focus-suppression')).toBe(false)
+      expect(hasError(messages, 'no-focus-suppression')).toBe(true)
     })
 
     it('no-focus-suppression is silent when focus-visible: is paired', async () => {

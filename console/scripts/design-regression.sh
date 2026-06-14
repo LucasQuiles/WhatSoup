@@ -32,6 +32,8 @@ CONSOLE_DIR="$REPO_ROOT/console"
 #   - Check 6: live PASS (split wordmark ">What<...>Soup<" absent); fail path real.
 #   - Check 8: fixed to assert exact title content (was vacuous); FAIL on title drift.
 #   - Check 10: live PASS (all three protected contracts present); FAIL on deletion.
+#   - Check 12: live PASS (zero TSX outline-none after Inbox + HistoryTab composer
+#               migrations); FAIL on focus suppression reintroduction.
 #   - Check 13: live PASS (exactly 5 infinite occurrences, all sanctioned/waivered); FAIL on new.
 #   - Check 14: live PASS (no expired waivers); deterministic date check, zero FP surface.
 #   - Check 15: live PASS after use-exit-presence dead suppression cleanup; FAIL on any
@@ -44,8 +46,7 @@ CONSOLE_DIR="$REPO_ROOT/console"
 #   - Checks 5,7: post-P4 gate (copy flip not landed).
 #   - Check 9: theme-parity promoted via design:theme-parity path.
 #   - Check 11: utility-smell; warn-on-changed-files ceiling only.
-#   - Check 12: focus-suppression carve-out (B4 wave composers).
-EXIT_ON_FAIL=(1 2 6 8 10 13 14 15 16 17)
+EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17)
 
 FAILED_CHECKS=()
 PASS=0
@@ -317,14 +318,19 @@ check_result "11" "$C11_COUNT" "only waivered" "WARN"
 # ---------------------------------------------------------------------------
 check_start "12" "Focus suppression: outline-none without focus-visible:"
 C12_ALL=$(rg -n 'outline-none' "$CONSOLE_SRC" 2>/dev/null || true)
-C12_COUNT=$(echo "$C12_ALL" | grep -v 'focus-visible:' | grep -c 'outline-none' || echo 0)
+C12_COUNT=$(printf '%s\n' "$C12_ALL" | grep -v 'focus-visible:' | grep -c 'outline-none' || true)
+C12_COUNT=${C12_COUNT:-0}
 echo "    outline-none without focus-visible: count: $C12_COUNT"
 if [ "$C12_COUNT" -gt 0 ]; then
-  echo "$C12_ALL" | grep -v 'focus-visible:' | head -5 | sed 's/^/    /'
+  printf '%s\n' "$C12_ALL" | grep -v 'focus-visible:' | head -5 | sed 's/^/    /'
 fi
 echo "    Expectation: zero after P2"
-echo "    Current: HistoryTab.tsx:206 (composer; C-B4-6 — form-kit slice)"
-check_result "12" "$C12_COUNT" "zero after P2 (shadow baseline)" "WARN"
+echo "    Current: zero TSX outline-none sites; Inbox and HistoryTab composer carve-outs retired"
+if [ "$C12_COUNT" -eq 0 ]; then
+  check_result "12" "$C12_COUNT" "zero focus suppression sites" "OK"
+else
+  check_result "12" "$C12_COUNT" "zero focus suppression sites" "WARN"
+fi
 
 # ---------------------------------------------------------------------------
 # Check 13: Infinite animation allowlist

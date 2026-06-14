@@ -1,6 +1,7 @@
 import { Check } from 'lucide-react';
 import {
   type FC,
+  type CSSProperties,
   type InputHTMLAttributes,
   type ReactNode,
   type RefObject,
@@ -93,16 +94,33 @@ export interface TextAreaProps extends Omit<TextareaHTMLAttributes<HTMLTextAreaE
   error?: boolean;
   confirmed?: boolean;
   minHeight?: number;
+  maxHeight?: CSSProperties['maxHeight'];
+  overflow?: CSSProperties['overflow'];
+  resize?: CSSProperties['resize'];
+  textFace?: 'mono' | 'sans';
 }
 
-export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, className, ref, ...props }) => (
+export const TextArea: FC<TextAreaProps> = ({
+  error,
+  confirmed,
+  minHeight,
+  maxHeight,
+  overflow,
+  resize,
+  textFace = 'mono',
+  className,
+  ref,
+  ...props
+}) => (
   <textarea
     ref={ref}
     {...props}
-    className={`c-input font-mono ${className ?? ''}`}
+    className={`c-input ${textFace === 'sans' ? 'font-sans' : 'font-mono'} ${className ?? ''}`}
     style={{
       minHeight: minHeight ?? 80,
-      resize: 'vertical',
+      maxHeight,
+      overflow,
+      resize: resize ?? 'vertical',
       borderColor: borderColor(error, confirmed),
     }}
   />
