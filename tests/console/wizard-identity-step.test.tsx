@@ -130,10 +130,10 @@ describe('initial render', () => {
         adminPhones: ['15551234567'],
       },
     })
-    const nameInput = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    const nameInput = screen.getByLabelText('Name') as HTMLInputElement
     expect(nameInput.value).toBe('my-line')
 
-    const descInput = screen.getByPlaceholderText('What this line is for') as HTMLInputElement
+    const descInput = screen.getByLabelText(/Description/) as HTMLInputElement
     expect(descInput.value).toBe('A test line')
 
     expect(screen.getByText('15551234567')).toBeDefined()
@@ -141,9 +141,9 @@ describe('initial render', () => {
 
   it('defaults name and description to empty strings when data is empty', () => {
     renderStep({ data: {} })
-    const nameInput = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    const nameInput = screen.getByLabelText('Name') as HTMLInputElement
     expect(nameInput.value).toBe('')
-    const descInput = screen.getByPlaceholderText('What this line is for') as HTMLInputElement
+    const descInput = screen.getByLabelText(/Description/) as HTMLInputElement
     expect(descInput.value).toBe('')
   })
 })
@@ -465,7 +465,7 @@ describe('admin phones field', () => {
 describe('nameLocked prop', () => {
   it('disables the name input when nameLocked is true', () => {
     renderStep({ data: { name: 'locked-line' }, nameLocked: true })
-    const input = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    const input = screen.getByLabelText('Name') as HTMLInputElement
     expect(input.disabled).toBe(true)
   })
 
@@ -497,7 +497,7 @@ describe('nameLocked prop', () => {
 
   it('name input is enabled when nameLocked is false', () => {
     renderStep({ data: { name: 'my-line' }, nameLocked: false })
-    const input = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    const input = screen.getByLabelText('Name') as HTMLInputElement
     expect(input.disabled).toBe(false)
   })
 })

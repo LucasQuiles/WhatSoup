@@ -118,10 +118,6 @@ const WizardWrapper: FC<{
 
 /**
  * Fill out step 0 identity fields (type + name + adminPhones).
- *
- * IdentityStep uses raw <label> elements without htmlFor, so accessible-name
- * role queries won't work. Locate inputs by placeholder text instead — this is
- * the same approach used by wizard-identity-step.test.tsx.
  */
 async function fillIdentityStep(): Promise<void> {
   // Select line type — passive card.
@@ -130,8 +126,7 @@ async function fillIdentityStep(): Promise<void> {
   const passiveCard = screen.getByRole('radio', { name: /passive/i })
   await act(async () => { fireEvent.click(passiveCard) })
 
-  // Enter a line name — located by placeholder, not by label association.
-  const nameInput = screen.getByPlaceholderText('my-line')
+  const nameInput = screen.getByLabelText('Name')
   await act(async () => {
     fireEvent.change(nameInput, { target: { value: 'test-line' } })
   })

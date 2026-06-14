@@ -1,10 +1,11 @@
-import { type FC, useEffect, useRef, useState } from 'react'
+import { type FC, useEffect, useId, useRef, useState } from 'react'
 import { Bot, Check, Eye, Loader2, MessageSquare, X } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
 import { api } from '../../lib/api'
 import { slugAgentWorkspaceName } from '../../lib/agent-cwd.ts'
 import { validatePhone } from '../../lib/validation'
+import { TextInput } from '../primitives'
 import WizardStep from './WizardStep'
 
 interface IdentityStepProps {
@@ -44,6 +45,8 @@ type NameStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error'
 const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocked }) => {
   const [nameStatus, setNameStatus] = useState<NameStatus>('idle')
   const [showConfirmed, setShowConfirmed] = useState(false)
+  const nameInputId = useId()
+  const descriptionInputId = useId()
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -109,20 +112,20 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
 
       {/* Name */}
       <div>
-        <label className="c-heading c-field-label">
+        <label htmlFor={nameInputId} className="c-heading c-field-label">
           Name
         </label>
         <div className="flex items-center gap-[var(--sp-2)]">
-          <input
+          <TextInput
+            id={nameInputId}
             type="text"
             value={name}
             onChange={(e) => onChange({ name: slugAgentWorkspaceName(e.target.value) })}
             placeholder="my-line"
-            className={`c-input font-mono${nameLocked ? ' opacity-[var(--opacity-muted)] cursor-not-allowed' : ''}`}
+            className={nameLocked ? 'opacity-[var(--opacity-muted)] cursor-not-allowed' : ''}
             disabled={nameLocked}
-            style={{
-              borderColor: errors.name ? 'var(--color-s-crit)' : nameStatus === 'taken' ? 'var(--color-s-crit)' : nameStatus === 'available' || nameLocked ? 'var(--wizard-accent)' : 'var(--b2)',
-            }}
+            error={Boolean(errors.name) || (!nameLocked && nameStatus === 'taken')}
+            confirmed={nameStatus === 'available' || nameLocked}
           />
           {!nameLocked && nameStatus === 'checking' && (
             <Loader2 size={16} className="animate-spin text-t4 flex-none" />
@@ -147,19 +150,17 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
 
       {/* Description */}
       <div>
-        <label className="c-heading c-field-label">
+        <label htmlFor={descriptionInputId} className="c-heading c-field-label">
           Description <span className="text-t5">(optional)</span>
         </label>
         <div className="flex items-center gap-[var(--sp-2)]">
-        <input
+        <TextInput
+          id={descriptionInputId}
           type="text"
           value={description}
           onChange={(e) => onChange({ description: e.target.value })}
           placeholder="What this line is for"
-          className="c-input"
-          style={{
-            borderColor: showConfirmed && description.trim() ? 'var(--wizard-accent)' : 'var(--b2)',
-          }}
+          confirmed={showConfirmed && Boolean(description.trim())}
         />
         {showConfirmed && description.trim() && (
           <Check size={16} className="wizard-check" />
