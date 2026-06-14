@@ -4,6 +4,7 @@ import { RotateCw, SlidersHorizontal, GitBranch, Power } from 'lucide-react'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
 import { formatRelative } from '../../lib/format-time'
+import { formatCount } from '../../lib/text-utils'
 import { getProvider, getProviderColor, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { statusTextClass } from '../../lib/status-severity'
 import ConfirmDialog from '../ConfirmDialog'
@@ -83,7 +84,7 @@ export function SummaryTab({
       ? [{ label: 'ISOLATION', value: 'per-chat', color: 'text-m-agt' }]
       : []),
     ...(line.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0)
-      ? [{ label: 'TOKENS', value: `${(line.tokenUsage.input + line.tokenUsage.output).toLocaleString()}`, color: 'text-t2' }]
+      ? [{ label: 'TOKENS', value: formatCount(line.tokenUsage.input + line.tokenUsage.output), color: 'text-t2' }]
       : []),
   ]
 

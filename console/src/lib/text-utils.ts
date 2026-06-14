@@ -64,6 +64,12 @@ export function formatCompact(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`
 }
 
+/** Format exact counts with locale grouping for labels and tooltips. */
+export function formatCount(value: number | null | undefined): string {
+  const n = typeof value === 'number' && Number.isFinite(value) ? value : 0
+  return n.toLocaleString('en-US')
+}
+
 /** Format a phone-like JID for display. */
 export function formatPhone(raw: string | number | null | undefined): string {
   const text = textValue(raw).trim()

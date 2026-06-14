@@ -95,7 +95,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/theme-parity (script) | CI-blocking script | CI-blocking script | P1 | not an ESLint rule; section 5 |
 | soup/icon-family | scoped-error | global-error | P1 | zero current violations (lucide-react only) |
 | soup/no-utility-smell | scoped-error (primitives tier) | warn-on-changed-files | P2 | G2 mandatory item 3 tripwire |
-| soup/no-format-bypass | shadow | warn-on-changed-files | P3 | DUP-13/14 helpers must exist first |
+| soup/no-format-bypass | global-error | global-error | P3 | date/time/count formatting must go through `console/src/lib` helpers |
 | soup/no-inline-dismiss-handler | global-error | global-error | P2 | document-level Escape dismissal must go through `useDismissable` |
 | soup/no-raw-table | global-error (outside primitives) | keep | C2.3/D6 | added post-T7 (C2.3 tripwire → D6 flip); Group S, design-selectors.mjs |
 | soup/no-raw-sortable-header | global-error (outside primitives) | keep | C2.3/D6 | added post-T7 (C2.3 tripwire → D6 flip); Group S, design-selectors.mjs |
@@ -691,16 +691,17 @@ cannot express the check).
 ### soup/no-format-bypass
 
 - **Purpose:** timestamps/counts format through `console/src/lib/format-time.ts` and
-  `console/src/lib/text-utils.ts` only (DUP-13: 6 raw `toLocale*` bypass sites because the lib
-  lacks epoch overloads; DUP-14: `formatCompact` vs `toLocaleString` mixed ad hoc).
+  `console/src/lib/text-utils.ts` only (DUP-13: raw epoch/date `toLocale*` bypass sites; DUP-14:
+  `formatCompact` vs exact count formatting mixed ad hoc).
 - **Mechanism:** selector `CallExpression[callee.property.name=/^toLocale(Date|Time)?String$/]`
-  outside `console/src/lib/**`.
-- **Scope:** `console/src/**` minus `lib/`. Enabled only after the helper gains epoch-second
-  overloads + `DATE_SHORT` constant (P3 polish work), otherwise it would mandate the impossible.
+  outside `console/src/lib/**`; implemented as a custom rule so computed member access is covered
+  too.
+- **Scope:** `console/src/**` minus `lib/`. The helper surface owns ISO/SQLite timestamps, epoch
+  seconds, short/long date labels, compact numbers, and exact count grouping.
 - **Violation / valid:** `new Date(epoch * 1000).toLocaleString()`
   (`console/src/components/line-detail/ScheduledMessageRow.tsx:107`) → `formatFullTime(epoch)`.
 - **FP strategy:** lib-directory exemption is the entire policy; no heuristics.
-- **Autofix:** partial. **Phase:** P3. **Entry:** shadow.
+- **Autofix:** partial. **Phase:** P3. **Entry:** global-error.
 
 ### soup/no-inline-dismiss-handler
 

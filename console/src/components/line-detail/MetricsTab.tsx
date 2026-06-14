@@ -6,6 +6,7 @@ import { FleetSessionChart } from '../FleetSessionChart'
 import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
+import { formatCount } from '../../lib/text-utils'
 import { ToolbarTimeRange } from '../primitives'
 import { Button } from '../primitives/Button'
 import type { MetricsRange, LineMetrics, LineInstance } from './types'
@@ -143,21 +144,21 @@ export function MetricsTab({
                   <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--data-token-input-solid)] opacity-50" />
                   <span className="text-data text-t3">Input</span>
                   <span className="font-medium text-t1 text-data">
-                    {line.tokenUsage.input.toLocaleString()}
+                    {formatCount(line.tokenUsage.input)}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
                   <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--data-token-output-solid)]" />
                   <span className="text-data text-t3">Output</span>
                   <span className="font-medium text-t1 text-data">
-                    {line.tokenUsage.output.toLocaleString()}
+                    {formatCount(line.tokenUsage.output)}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
                   <Cpu size={13} strokeWidth={1.5} className="text-t4" />
                   <span className="text-data text-t4">Total</span>
                   <span className="text-t2 text-data">
-                    {(line.tokenUsage.input + line.tokenUsage.output).toLocaleString()}
+                    {formatCount(line.tokenUsage.input + line.tokenUsage.output)}
                   </span>
                 </div>
               </div>

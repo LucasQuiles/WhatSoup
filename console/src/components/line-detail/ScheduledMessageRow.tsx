@@ -18,6 +18,7 @@ import {
   ChevronUp,
 } from 'lucide-react'
 import type { ScheduledMessage } from '../../types.js'
+import { formatFullTime } from '../../lib/format-time'
 import { Button } from '../primitives/Button'
 import { statusColor, statusLabel, contentTypeLabel, cronToHuman } from './scheduled-utils.js'
 
@@ -105,7 +106,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           <div className="flex items-center gap-2 flex-wrap c-label mt-[var(--sp-0h)]">
             <span>{message.chatName ?? message.chatJid}</span>
             <span style={metaDividerStyle}>·</span>
-            <span>{new Date(message.scheduledAt * 1000).toLocaleString()}</span>
+            <span>{formatFullTime(message.scheduledAt)}</span>
 
             {/* Recurrence indicator */}
             {isRecurring && (
@@ -192,16 +193,16 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           className="c-label flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 [border-top:var(--bw)_solid_var(--b1)] gap-[var(--sp-3)]"
         >
           {message.nextRunAt && (
-            <span>Next run: {new Date(message.nextRunAt * 1000).toLocaleString()}</span>
+            <span>Next run: {formatFullTime(message.nextRunAt)}</span>
           )}
           {message.sentAt && (
-            <span>Last sent: {new Date(message.sentAt * 1000).toLocaleString()}</span>
+            <span>Last sent: {formatFullTime(message.sentAt)}</span>
           )}
           {message.retryCount > 0 && (
             <span>Retries: {message.retryCount}</span>
           )}
           <span>ID: {message.id}</span>
-          <span>Created: {new Date(message.createdAt * 1000).toLocaleString()}</span>
+          <span>Created: {formatFullTime(message.createdAt)}</span>
         </div>
       )}
     </div>

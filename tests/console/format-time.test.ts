@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { formatChatTime, formatRelative, formatTime, formatTimeWithSeconds } from '../../console/src/lib/format-time';
+import {
+  formatChatTime,
+  formatFullTime,
+  formatLongDate,
+  formatRelative,
+  formatShortDate,
+  formatTime,
+  formatTimeWithSeconds,
+} from '../../console/src/lib/format-time';
 
 describe('timestamp format helpers', () => {
   it('renders missing timestamps as an empty marker', () => {
@@ -20,5 +28,16 @@ describe('timestamp format helpers', () => {
     expect(formatTimeWithSeconds('2026-04-05 19:30:45')).toBe(
       formatTimeWithSeconds('2026-04-05T19:30:45Z'),
     );
+  });
+
+  it('formats epoch-second timestamps through the shared helpers', () => {
+    const epochSeconds = Date.parse('2026-04-05T19:30:45Z') / 1000;
+    expect(formatFullTime(epochSeconds)).toBe(formatFullTime('2026-04-05T19:30:45Z'));
+    expect(formatTime(epochSeconds)).toBe(formatTime('2026-04-05T19:30:45Z'));
+  });
+
+  it('formats short and long date labels', () => {
+    expect(formatShortDate('2026-04-05T00:00:00')).toBe('Apr 5');
+    expect(formatLongDate('2026-04-05T00:00:00')).toBe('April 5, 2026');
   });
 });

@@ -4,6 +4,7 @@ import ModeBadge from '../ModeBadge'
 import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_LABELS } from '../../lib/access-modes'
+import { formatCount } from '../../lib/text-utils'
 import { Button } from '../primitives/Button'
 
 interface ReviewStepProps {
@@ -173,7 +174,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
           <KV label="System prompt" value={truncate(systemPrompt, 60)} />
         )}
         <KV label="Rate limit" value={`${rateLimitPerHour}/hr`} />
-        <KV label="Token budget" value={tokenBudget.toLocaleString()} />
+        <KV label="Token budget" value={formatCount(tokenBudget)} />
         {type === 'agent' && (
           <>
             <KV label="CWD" value={agentCwd} />

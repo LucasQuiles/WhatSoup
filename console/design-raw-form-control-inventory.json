@@ -80,9 +80,9 @@
       "consumer_group": "line_detail_and_modals",
       "file": "console/src/components/line-detail/GroupDetailModal.tsx",
       "lines": [
-        165,
-        183,
-        700
+        166,
+        184,
+        701
       ],
       "total": 3
     },
@@ -280,7 +280,7 @@
       "consumer_group": "line_detail_and_modals",
       "element": "input",
       "file": "console/src/components/line-detail/GroupDetailModal.tsx",
-      "line": 165,
+      "line": 166,
       "rule": "soup/no-raw-form-control",
       "snippet": "<input"
     },
@@ -290,7 +290,7 @@
       "consumer_group": "line_detail_and_modals",
       "element": "textarea",
       "file": "console/src/components/line-detail/GroupDetailModal.tsx",
-      "line": 183,
+      "line": 184,
       "rule": "soup/no-raw-form-control",
       "snippet": "<textarea"
     },
@@ -300,7 +300,7 @@
       "consumer_group": "line_detail_and_modals",
       "element": "select",
       "file": "console/src/components/line-detail/GroupDetailModal.tsx",
-      "line": 700,
+      "line": 701,
       "rule": "soup/no-raw-form-control",
       "snippet": "<select"
     },

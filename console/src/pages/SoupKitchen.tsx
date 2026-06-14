@@ -36,6 +36,7 @@ import {
   formatPhone,
   displayInstanceName,
   formatCompact,
+  formatCount,
 } from "../lib/text-utils";
 import { getProvider, getProviderColor } from "../lib/providers";
 import {
@@ -579,7 +580,7 @@ const SoupKitchen: FC = () => {
           active={activeKpi === "attention"}
         />
         <KpiCard
-          value={kpis.totalSent.toLocaleString()}
+          value={formatCount(kpis.totalSent)}
           label="Messages Sent"
           color="neutral"
           onClick={() => toggleKpi("sent", "messages")}
@@ -587,7 +588,7 @@ const SoupKitchen: FC = () => {
           sparkData={messageSparklines?.outbound}
         />
         <KpiCard
-          value={kpis.totalReceived.toLocaleString()}
+          value={formatCount(kpis.totalReceived)}
           label="Messages Received"
           color="neutral"
           onClick={() => toggleKpi("received", "messages")}
@@ -610,7 +611,7 @@ const SoupKitchen: FC = () => {
           active={activeKpi === "unread"}
         />
         <KpiCard
-          value={kpis.totalMedia.toLocaleString()}
+          value={formatCount(kpis.totalMedia)}
           label="Media Processed"
           color="neutral"
           onClick={() => toggleKpi("media", "messages")}
@@ -958,7 +959,7 @@ const SoupKitchen: FC = () => {
                             {(line.tokenUsage?.input ?? 0) > 0 ? (
                               <span
                                 className="c-data text-t2"
-                                title={`${(line.tokenUsage?.input ?? 0).toLocaleString()} in / ${(line.tokenUsage?.output ?? 0).toLocaleString()} out`}
+                                title={`${formatCount(line.tokenUsage?.input)} in / ${formatCount(line.tokenUsage?.output)} out`}
                               >
                                 {formatCompact(
                                   (line.tokenUsage?.input ?? 0) +

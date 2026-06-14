@@ -33,6 +33,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { X, Copy, Link, LogOut, UserMinus, ShieldCheck, ShieldOff, UserPlus } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api.js'
+import { formatLongDate } from '../../lib/format-time'
 import { useToast } from '../../hooks/toast-context.js'
 import ConfirmDialog from '../ConfirmDialog.js'
 import EmptyState from '../EmptyState.js'
@@ -148,7 +149,7 @@ function InfoTab({
   }
 
   const createdDate = detail.creation
-    ? new Date(detail.creation * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+    ? formatLongDate(detail.creation)
     : null
 
   const owner = detail.participants.find(p => p.admin === 'superadmin')

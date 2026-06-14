@@ -731,7 +731,7 @@
           "path": "src/components/line-detail/PipelineTab.tsx",
           "count": 1,
           "lines": [
-            23
+            24
           ]
         },
         {
@@ -748,16 +748,16 @@
           "path": "src/components/line-detail/ScheduledMessageRow.tsx",
           "count": 2,
           "lines": [
-            105,
-            133
+            106,
+            134
           ]
         },
         {
           "path": "src/components/line-detail/SummaryTab.tsx",
           "count": 2,
           "lines": [
-            191,
-            201
+            192,
+            202
           ]
         },
         {

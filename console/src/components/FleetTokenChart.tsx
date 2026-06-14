@@ -10,7 +10,7 @@ import {
 } from 'recharts';
 import type { TokenUsageBucket, MetricsRange } from '../types';
 import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
-import { formatCompact } from '../lib/text-utils';
+import { formatCompact, formatCount } from '../lib/text-utils';
 import { getProvider, getProviderColor } from '../lib/providers';
 
 interface FleetTokenChartProps {
@@ -59,7 +59,7 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
             contentStyle={TOOLTIP_STYLE}
             labelFormatter={(v) => formatTooltipLabel(String(v), range)}
             formatter={(value, name) => [
-              (Number(value) || 0).toLocaleString(),
+              formatCount(Number(value) || 0),
               String(name),
             ]}
           />
@@ -122,7 +122,7 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(v) => formatTooltipLabel(String(v), range)}
           formatter={(value, name) => [
-            (Number(value) || 0).toLocaleString(),
+            formatCount(Number(value) || 0),
             String(name),
           ]}
         />

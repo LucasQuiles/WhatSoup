@@ -9,6 +9,7 @@
  *                               + the split-span wordmark detector
  *   soup/protected-identifiers — flags near-miss renames of protected protocol contracts
  *   soup/icon-family           — permits lucide-react icons and denies other icon packages
+ *   soup/no-format-bypass      — flags raw toLocale* formatting outside console/src/lib
  *   soup/no-inline-dismiss-handler
  *                             — flags hand-rolled Escape dismissal effects outside
  *                               the single useDismissable hook
@@ -19,7 +20,6 @@
  *   soup/focus-visible-required      — shadow; primitives-first (P2)
  *   soup/modal-must-restore-focus    — proposed; Modal primitive must exist first
  *   soup/motion-needs-reduced-variant — shadow; CSS-script-primary (section 5)
- *   soup/no-format-bypass            — shadow; enabled after lib gains epoch overloads (P3)
  */
 
 // ---------------------------------------------------------------------------
@@ -65,6 +65,12 @@ const INLINE_DISMISS_EXEMPT_FILE_SUFFIXES = [
   'hooks/use-keyboard-shortcuts.ts',
 ]
 
+const FORMAT_BYPASS_METHODS = new Set([
+  'toLocaleString',
+  'toLocaleDateString',
+  'toLocaleTimeString',
+])
+
 /**
  * Returns true if the string contains a protected contract identifier.
  * Used to build the allowlist so those occurrences are not flagged by
@@ -91,6 +97,16 @@ function isExemptFile(filename) {
 function isInlineDismissExemptFile(filename) {
   if (!filename) return false
   return INLINE_DISMISS_EXEMPT_FILE_SUFFIXES.some((s) => filename.endsWith(s))
+}
+
+function normalizePath(filename) {
+  return filename ? filename.replace(/\\/g, '/') : ''
+}
+
+function isFormatBypassExemptFile(filename) {
+  const normalized = normalizePath(filename)
+  if (!normalized.includes('/console/src/')) return true
+  return normalized.includes('/console/src/lib/')
 }
 
 function checkTextLiterals(context, checkStringValue) {
@@ -314,6 +330,48 @@ const iconFamily = {
 }
 
 // ---------------------------------------------------------------------------
+// soup/no-format-bypass
+// Lint-plan section 3: global-error entry state, P3 target.
+// ---------------------------------------------------------------------------
+function memberPropertyName(member) {
+  if (member?.property?.type === 'Identifier' && !member.computed) return member.property.name
+  if (member?.property?.type === 'Literal' && typeof member.property.value === 'string') {
+    return member.property.value
+  }
+  return null
+}
+
+const noFormatBypass = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        'Require user-facing date/time/count formatting to go through console/src/lib helpers.',
+    },
+    messages: {
+      bypass:
+        '[soup/no-format-bypass] Raw {{method}} formatting outside console/src/lib bypasses shared display helpers. ' +
+        'Use format-time.ts or text-utils.ts instead.',
+    },
+    schema: [],
+  },
+
+  create(context) {
+    const filename = context.getFilename ? context.getFilename() : (context.filename ?? '')
+    if (isFormatBypassExemptFile(filename)) return {}
+
+    return {
+      CallExpression(node) {
+        if (node.callee?.type !== 'MemberExpression') return
+        const method = memberPropertyName(node.callee)
+        if (!FORMAT_BYPASS_METHODS.has(method)) return
+        context.report({ node, messageId: 'bypass', data: { method } })
+      },
+    }
+  },
+}
+
+// ---------------------------------------------------------------------------
 // soup/no-inline-dismiss-handler
 // Lint-plan section 3: global-error entry state, P2 target.
 // ---------------------------------------------------------------------------
@@ -430,11 +488,6 @@ const motionNeedsReducedVariant = makeStub(
   '[stub] soup/motion-needs-reduced-variant — SHADOW. Primary check is CSS-script-side ' +
     '(section 5). TSX side: motion.* usage without useReducedMotion import. ' +
     'Full implementation at P5.'
-)
-
-const noFormatBypass = makeStub(
-  '[stub] soup/no-format-bypass — SHADOW. Enabled after format-time.ts gains epoch overloads ' +
-    '(P3). Will flag toLocaleString/toLocaleDateString outside lib/.'
 )
 
 // ---------------------------------------------------------------------------

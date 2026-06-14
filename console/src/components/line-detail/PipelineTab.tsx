@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Button } from '../primitives/Button'
+import { formatCount } from '../../lib/text-utils'
 import type { Mode, LineInstance } from './types'
 
 /* Pipeline Node — compact inline pill */
@@ -103,8 +104,8 @@ function getNodeDetails(
     case 'API':
       if (line.models?.conversation) details.push({ label: 'Model', value: line.models.conversation })
       if (line.tokenUsage) {
-        details.push({ label: 'Input tokens', value: line.tokenUsage.input.toLocaleString() })
-        details.push({ label: 'Output tokens', value: line.tokenUsage.output.toLocaleString() })
+        details.push({ label: 'Input tokens', value: formatCount(line.tokenUsage.input) })
+        details.push({ label: 'Output tokens', value: formatCount(line.tokenUsage.output) })
       }
       break
     case 'SDK Loop':

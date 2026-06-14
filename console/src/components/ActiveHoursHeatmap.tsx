@@ -1,5 +1,6 @@
 import React from 'react';
 import type { MetricsRange } from './line-detail/types';
+import { formatShortDate } from '../lib/format-time';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -18,11 +19,6 @@ function formatHour(h: number): string {
   if (h < 12) return `${h}a`;
   if (h === 12) return '12p';
   return `${h - 12}p`;
-}
-
-function formatDate(dateStr: string): string {
-  const d = new Date(dateStr + 'T00:00:00');
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 function HeatmapLegend({ max }: { max: number }) {
@@ -109,7 +105,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
     const allValues = byDate.flatMap(d => d.hours);
     const max = Math.max(...allValues, 1);
     const labelEvery = byDate.length > 20 ? 5 : byDate.length > 10 ? 3 : 1;
-    const dateLabels = byDate.map(d => formatDate(d.date));
+    const dateLabels = byDate.map(d => formatShortDate(`${d.date}T00:00:00`));
 
     return (
       <section className="c-card font-mono p-[var(--sp-4)] bg-d2">

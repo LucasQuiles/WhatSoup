@@ -46,6 +46,8 @@ const FIXTURE_PATH = resolve(REPO_ROOT, 'console/src/pages/__fixture__.tsx')
 const PRIMITIVES_FIXTURE_PATH = resolve(REPO_ROOT, 'console/src/components/primitives/__fixture__.tsx')
 // ConfigStep path: exempt from soup/no-brand-regression by EXEMPT_FILE_SUFFIXES.
 const CONFIGSTEP_PATH = resolve(REPO_ROOT, 'console/src/components/wizard/ConfigStep.tsx')
+const FORMAT_TIME_PATH = resolve(REPO_ROOT, 'console/src/lib/format-time.ts')
+const TEXT_UTILS_PATH = resolve(REPO_ROOT, 'console/src/lib/text-utils.ts')
 const USE_DISMISSABLE_PATH = resolve(REPO_ROOT, 'console/src/hooks/use-dismissable.ts')
 const KEYBOARD_SHORTCUTS_PATH = resolve(REPO_ROOT, 'console/src/hooks/use-keyboard-shortcuts.ts')
 
@@ -148,6 +150,63 @@ const x = <X />`
 const x = <FeedIcon kind="message" />`
     )
     expect(hasWarning(messages, 'icon-family')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P3 custom plugin rule - soup/no-format-bypass
+// Flags raw toLocale* formatting outside console/src/lib. The lib helpers own
+// date/time/count display, including epoch-second timestamps.
+// ---------------------------------------------------------------------------
+
+describe('soup/no-format-bypass', () => {
+  it('fires on raw epoch date formatting outside lib', async () => {
+    const messages = await lintWarnings(
+      `export function Row({ epoch }: { epoch: number }) {
+  return <span>{new Date(epoch * 1000).toLocaleString()}</span>
+}`
+    )
+    expect(hasWarning(messages, 'no-format-bypass')).toBe(true)
+  })
+
+  it('fires on raw count formatting outside lib', async () => {
+    const messages = await lintWarnings(
+      `export function Count({ total }: { total: number }) {
+  return <span>{total.toLocaleString()}</span>
+}`
+    )
+    expect(hasWarning(messages, 'no-format-bypass')).toBe(true)
+  })
+
+  it('is silent when formatting is delegated to shared helpers', async () => {
+    const messages = await lintWarnings(
+      `import { formatFullTime } from '../lib/format-time'
+import { formatCount } from '../lib/text-utils'
+export function Row({ epoch, total }: { epoch: number; total: number }) {
+  return <span>{formatFullTime(epoch)} {formatCount(total)}</span>
+}`
+    )
+    expect(hasWarning(messages, 'no-format-bypass')).toBe(false)
+  })
+
+  it('is silent inside format-time helpers', async () => {
+    const messages = await lintWarnings(
+      `export function formatFullTime(d: Date) {
+  return d.toLocaleString('en-US')
+}`,
+      FORMAT_TIME_PATH
+    )
+    expect(hasWarning(messages, 'no-format-bypass')).toBe(false)
+  })
+
+  it('is silent inside text-utils helpers', async () => {
+    const messages = await lintWarnings(
+      `export function formatCount(n: number) {
+  return n.toLocaleString('en-US')
+}`,
+      TEXT_UTILS_PATH
+    )
+    expect(hasWarning(messages, 'no-format-bypass')).toBe(false)
   })
 })
 
@@ -778,6 +837,16 @@ const x = FaBeer`,
         FIXTURE_PATH
       )
       expect(hasError(messages, 'icon-family')).toBe(true)
+    })
+
+    it('no-format-bypass fires as an error at a pages path', async () => {
+      const messages = await lintErrors(
+        `export function Count({ total }: { total: number }) {
+  return <span>{total.toLocaleString()}</span>
+}`,
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-format-bypass')).toBe(true)
     })
 
     it('no-inline-dismiss-handler fires as an error at a pages path', async () => {

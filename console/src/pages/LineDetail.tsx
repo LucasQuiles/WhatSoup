@@ -6,6 +6,7 @@ import { useLine, useChats, useMessages, useAccess, useLogs, useTyping } from '.
 import { useMetrics } from '../hooks/use-metrics'
 import type { MetricsRange } from '../types'
 import { getPreference, setPreference } from '../lib/preferences'
+import { formatCount } from '../lib/text-utils'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
 import ModeBadge from '../components/ModeBadge'
@@ -166,7 +167,7 @@ export default function LineDetail() {
         <div className="hidden lg:flex gap-4 font-mono text-t4 text-sm">
           <span>uptime: {line.uptime ?? '—'}</span>
           <span>port: {line.healthPort}</span>
-          <span>msgs: {(line.messagesTotal ?? 0).toLocaleString()}</span>
+          <span>msgs: {formatCount(line.messagesTotal)}</span>
         </div>
 
         {/* Heartbeat + Actions */}
