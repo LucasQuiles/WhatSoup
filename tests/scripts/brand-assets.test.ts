@@ -151,6 +151,26 @@ describe('check-brand-assets.mjs', () => {
     ]));
   });
 
+  it('fails on legacy product or channel copy in nested public peripheral artifacts', () => {
+    const fixture = makeFixture({
+      extraPublicFiles: {
+        'pwa/install.html': '<!doctype html><html><body>Soup Kitchen via WhatsApp</body></html>\n',
+      },
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.failures.filter((failure) => failure.code === 'PERIPHERAL_BRAND_COPY')).toHaveLength(2);
+    expect(output.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'PERIPHERAL_BRAND_COPY',
+        target: join(fixture.root, 'console/public/pwa/install.html'),
+      }),
+    ]));
+  });
+
   it('fails when a public SVG asset is not referenced by the shell, manifest, or console source', () => {
     const fixture = makeFixture({
       extraPublicFiles: {
@@ -166,6 +186,25 @@ describe('check-brand-assets.mjs', () => {
       expect.objectContaining({
         code: 'ORPHAN_PUBLIC_SVG',
         target: join(fixture.root, 'console/public/unused.svg'),
+      }),
+    ]));
+  });
+
+  it('fails when a nested public SVG asset is not referenced by the shell, manifest, or console source', () => {
+    const fixture = makeFixture({
+      extraPublicFiles: {
+        'icons/unused.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" />\n',
+      },
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'ORPHAN_PUBLIC_SVG',
+        target: join(fixture.root, 'console/public/icons/unused.svg'),
       }),
     ]));
   });

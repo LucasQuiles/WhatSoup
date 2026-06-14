@@ -78,17 +78,27 @@ function displayPath(path, paths) {
   return path.startsWith(`${root}/`) ? `console/${path.slice(root.length + 1)}` : path;
 }
 
+function filesUnder(dir, matchesFile) {
+  if (!existsSync(dir)) return [];
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...filesUnder(path, matchesFile));
+    } else if (entry.isFile() && matchesFile(entry.name)) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
 function peripheralTextArtifacts(paths) {
   const files = [];
   const publicDir = dirname(paths.manifest);
 
   pushExisting(files, paths.index);
-  if (existsSync(publicDir)) {
-    for (const entry of readdirSync(publicDir, { withFileTypes: true })) {
-      if (entry.isFile() && PERIPHERAL_TEXT_EXT.test(entry.name)) {
-        pushExisting(files, resolve(publicDir, entry.name));
-      }
-    }
+  for (const file of filesUnder(publicDir, (name) => PERIPHERAL_TEXT_EXT.test(name))) {
+    pushExisting(files, file);
   }
   pushExisting(files, paths.manifest);
 
@@ -96,25 +106,12 @@ function peripheralTextArtifacts(paths) {
 }
 
 function textFilesUnder(dir) {
-  if (!existsSync(dir)) return [];
-  const files = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = resolve(dir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...textFilesUnder(path));
-    } else if (entry.isFile() && REFERENCE_TEXT_EXT.test(entry.name)) {
-      files.push(path);
-    }
-  }
-  return files;
+  return filesUnder(dir, (name) => REFERENCE_TEXT_EXT.test(name));
 }
 
 function publicSvgAssets(paths) {
   const publicDir = dirname(paths.manifest);
-  if (!existsSync(publicDir)) return [];
-  return readdirSync(publicDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.svg'))
-    .map((entry) => resolve(publicDir, entry.name));
+  return filesUnder(publicDir, (name) => name.endsWith('.svg'));
 }
 
 function numericAttr(svg, attr) {
