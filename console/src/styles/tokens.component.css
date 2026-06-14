@@ -59,6 +59,7 @@
   /* ═══ Z-index scale ═══ */
   --z-float: 10;             /* floating buttons, scroll indicators */
   --z-overlay: 100;          /* modal overlays, dialogs */
+  --z-toast: 110;            /* toasts / notifications — above overlays */
   /* --- Button heights (button.md variants x sizes) --- */
   --btn-h:    32px;           /* md default button height */
   --btn-h-sm: 28px;           /* sm button height */

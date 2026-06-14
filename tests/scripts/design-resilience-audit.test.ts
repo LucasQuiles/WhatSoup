@@ -153,4 +153,32 @@ export function Fixture() {
     expect(output.scanned_file_count).toBe(0);
     expect(output.verdict).toBe('FAIL');
   });
+
+  it('flags arbitrary z-[N] layer values (regression: trailing \\b previously missed the bracket form)', () => {
+    // z-[110] ends in `]` (a non-word char), so the old trailing-\b anchor never
+    // matched it — only the bare `z-50` form was caught. This pins the bracket form.
+    const root = makeFixture(`
+export function Fixture() {
+  return <div className="fixed z-[110]">toast</div>
+}
+`);
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule['soup/layer-owner-required']).toBe(1);
+    expect(output.findings.some((f) => f.rule === 'soup/layer-owner-required')).toBe(true);
+  });
+
+  it('stays silent for tokenized z-[var(--z-*)] layer values', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return <div className="fixed z-[var(--z-toast)]">toast</div>
+}
+`);
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule['soup/layer-owner-required']).toBeUndefined();
+    expect(output.finding_count).toBe(0);
+  });
 });

@@ -43,7 +43,7 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
   // (P3, D5 follow-up or C3 polish pass).
   const toastStack = (
     <div
-      className="fixed z-[110] flex flex-col gap-2 pointer-events-none"
+      className="fixed z-[var(--z-toast)] flex flex-col gap-2 pointer-events-none"
       style={{ bottom: 'var(--sp-5)', right: 'var(--sp-5)' }}
     >
       <AnimatePresence>

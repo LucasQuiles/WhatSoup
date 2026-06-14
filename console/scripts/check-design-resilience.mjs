@@ -182,7 +182,10 @@ function scanLine(findings, file, lines, index) {
     );
   }
 
-  if (/\bz-(?:\[[^\]]+\]|\d+)\b/.test(line)
+  // Trailing boundary is a negative lookahead, NOT \b: `]` is a non-word char, so a
+  // trailing \b never matches the `z-[N]` arbitrary form (z-[110] etc.) — only the
+  // bare `z-50` form. (?![\w-]) closes that hole so both forms are caught.
+  if (/\bz-(?:\[[^\]]+\]|\d+)(?![\w-])/.test(line)
     && !/\bz-\[var\(--z-[^)]+\)\]/.test(line)
     && !/soup-layer-ok|data-layer-owner\s*=/.test(context)) {
     addFinding(
