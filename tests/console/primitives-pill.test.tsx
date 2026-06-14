@@ -113,6 +113,24 @@ describe('Pill — interactive variant', () => {
     expect(screen.getByRole('button').getAttribute('aria-pressed')).toBe('true');
   });
 
+  it('keeps pressed/type contracts when pass-through button props conflict', () => {
+    render(
+      <Pill
+        variant="interactive"
+        pressed={true}
+        type="submit"
+        aria-pressed={false}
+        onClick={() => {}}
+      >
+        filter
+      </Pill>,
+    );
+
+    const btn = screen.getByRole('button', { name: 'filter' });
+    expect(btn.getAttribute('aria-pressed')).toBe('true');
+    expect(btn.getAttribute('type')).toBe('button');
+  });
+
   it('applies soup-pill--pressed class when pressed=true', () => {
     render(<Pill variant="interactive" pressed={true} onClick={() => {}}>filter</Pill>);
     expect(screen.getByRole('button').classList.contains('soup-pill--pressed')).toBe(true);

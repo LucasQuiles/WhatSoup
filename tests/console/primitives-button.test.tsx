@@ -146,6 +146,13 @@ describe('ActionButton', () => {
     expect(btn.getAttribute('aria-label')).toBe('Restart line');
   });
 
+  it('keeps label as the accessible name when pass-through aria-label conflicts', () => {
+    render(<ActionButton label="Restart line" aria-label="Wrong label" />);
+
+    expect(screen.getByRole('button', { name: 'Restart line' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Wrong label' })).toBeNull();
+  });
+
   it('renders label text in reveal span (visible on hover/focus)', () => {
     render(<ActionButton label="Delete line" />);
     const labelEl = document.querySelector('.soup-actbtn__label');

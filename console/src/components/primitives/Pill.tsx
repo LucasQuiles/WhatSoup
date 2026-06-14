@@ -141,10 +141,10 @@ export const Pill: FC<PillProps> = (props) => {
     ], className);
     return (
       <button
+        {...buttonProps}
         type="button"
         aria-pressed={pressed}
         className={cls}
-        {...buttonProps}
         aria-describedby={count !== undefined ? countId : undefined}
       >
         <span className="soup-pill__label">{children}</span>

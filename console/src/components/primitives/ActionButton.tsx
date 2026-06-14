@@ -41,10 +41,10 @@ export const ActionButton: FC<ActionButtonProps> = ({
 
   return (
     <button
+      {...rest}
       type={type}
       className={composedClass}
       aria-label={label}
-      {...rest}
     >
       {icon && <span aria-hidden="true">{icon}</span>}
       <span className="soup-actbtn__label" aria-hidden="true">
