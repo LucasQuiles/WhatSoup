@@ -24,7 +24,7 @@
     "design:color-semantics": "node scripts/check-color-semantics.mjs --fail-on-rule soup/no-component-local-palette --fail-on-rule soup/provider-palette-only --fail-on-rule soup/data-series-token-only --fail-on-rule soup/traffic-neutrality",
     "design:raw-form-control-inventory": "node scripts/check-raw-form-control-inventory.mjs",
     "design:font-assets": "node scripts/check-font-assets.mjs",
-    "design:resilience": "node scripts/check-design-resilience.mjs",
+    "design:resilience": "node scripts/check-design-resilience.mjs --fail-on-rule soup/layer-owner-required",
     "design:lint-fixtures": "node scripts/check-design-lint-fixtures.mjs",
     "design:token-drift": "node scripts/check-token-spec-drift.mjs",
     "lint:shadow:baseline": "node scripts/check-shadow-baseline.mjs",

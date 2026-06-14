@@ -90,7 +90,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-layout-shift-interaction | report-only script | scoped-error / blocking script | P4/G7 | hover/focus/active states must not change layout dimensions |
 | soup/no-hover-only-content | report-only script | scoped-error / blocking script | P4/G7 | hover-revealed content needs keyboard/focus parity |
 | soup/no-vw-font-size | report-only script | global-error | P4/G7 | typography must use tokenized type scale, not viewport width |
-| soup/layer-owner-required | report-only script | scoped-error / blocking script | P4/G7 | z-index uses `--z-*` layer tokens or a documented owner |
+| soup/layer-owner-required | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | z-index uses `--z-*` layer tokens or a documented owner |
 | soup/no-duplicate-shell | shadow (advisory) | warn-on-changed-files | P2 | heuristic; routes to duplication-register, never error |
 | soup/theme-parity (script) | CI-blocking script | CI-blocking script | P1 | not an ESLint rule; section 5 |
 | soup/icon-family | scoped-error | global-error | P1 | zero current violations (lucide-react only) |
@@ -610,9 +610,11 @@ cannot express the check).
 
 - **Purpose:** layering must use the `--z-*` contract so modals, popovers, toasts, drawers, and
   sticky bars do not fight through raw z-index literals.
-- **Mechanism:** report-only resilience script. Flag `z-[...]`, `z-50`-style utilities, and raw
+- **Mechanism:** resilience script promoted in the package script with
+  `--fail-on-rule soup/layer-owner-required`. Flag `z-[...]`, `z-50`-style utilities, and raw
   `z-index` declarations unless they use a `--z-*` token or carry `data-layer-owner` /
-  `soup-layer-ok` evidence.
+  `soup-layer-ok` evidence. Other resilience lanes remain report-only until their inventories are
+  burned down or sanctioned.
 - **Scope:** overlay, sticky, floating, and portal surfaces in `console/src/**`.
 - **Violation / valid:** `className="z-[999]"` → `className="z-[var(--z-modal)]"` or a primitive
   prop that owns the layer.

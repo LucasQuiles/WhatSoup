@@ -45,6 +45,8 @@ describe('design token component classes', () => {
     const messageBubble = read('console/src/components/MessageBubble.tsx')
 
     expect(messageBubble).toContain('c-card c-card--detail')
+    expect(messageBubble).toContain('z-[var(--z-float)]')
+    expect(messageBubble).not.toContain('z-50')
   })
 
   it('keeps c-dialog visual-only and documents the canonical panel border token', () => {

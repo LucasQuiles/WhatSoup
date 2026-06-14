@@ -1,10 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-design-resilience.mjs');
+const PROMOTED_RULES = ['soup/layer-owner-required'];
 
 const tmpDirs: string[] = [];
 
@@ -35,18 +36,32 @@ function runScript(root: string, extraArgs: string[] = []) {
   );
 }
 
+function promotedRuleArgs() {
+  return PROMOTED_RULES.flatMap((rule) => ['--fail-on-rule', rule]);
+}
+
 function parsedOutput(result: ReturnType<typeof runScript>) {
   return JSON.parse(result.stdout) as {
     by_rule: Record<string, number>;
+    enforced_rules: string[];
+    failed_rules: string[];
     finding_count: number;
     findings: Array<{ rule: string; file: string; line: number }>;
-    mode: 'report-only' | 'fail-on-findings';
+    mode: 'report-only' | 'fail-on-findings' | 'fail-on-rule';
     scanned_file_count: number;
     verdict: 'PASS' | 'FAIL';
   };
 }
 
 describe('check-design-resilience.mjs', () => {
+  it('promotes the zeroed layer-owner lane through the package script', () => {
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'console/package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+
+    expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/layer-owner-required');
+  });
+
   it('reports text, scroll, geometry, hover, viewport-font, and layer risks in report-only mode', () => {
     const root = makeFixture(`
 export function Fixture() {
@@ -77,6 +92,48 @@ export function Fixture() {
       'soup/scroll-owner-required': 1,
     });
     expect(output.finding_count).toBe(6);
+  });
+
+  it('fails when the promoted layer-owner rule has findings', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return (
+    <section>
+      <div className="truncate text-t1">long id</div>
+      <div className="fixed z-50">Overlay</div>
+    </section>
+  )
+}
+`);
+    const result = runScript(root, promotedRuleArgs());
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.enforced_rules).toEqual(PROMOTED_RULES);
+    expect(output.failed_rules).toEqual(PROMOTED_RULES);
+    expect(output.by_rule).toMatchObject({
+      'soup/layer-owner-required': 1,
+      'soup/no-unsafe-truncation': 1,
+    });
+  });
+
+  it('keeps unrelated resilience findings report-only when layer-owner is clean', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return <div className="truncate text-t1">long id</div>
+}
+`);
+    const result = runScript(root, promotedRuleArgs());
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(0);
+    expect(output.verdict).toBe('PASS');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.enforced_rules).toEqual(PROMOTED_RULES);
+    expect(output.failed_rules).toEqual([]);
+    expect(output.by_rule).toEqual({ 'soup/no-unsafe-truncation': 1 });
   });
 
   it('stays silent for documented full-value, scroll-owner, stable-state, focus-parity, type-scale, and layer-token patterns', () => {

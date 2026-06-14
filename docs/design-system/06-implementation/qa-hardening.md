@@ -581,15 +581,17 @@ Reviewers apply these rule-of-thumb checks before accepting any migrated surface
 | Empty/loading/error states | Empty, loading, error, and degraded states preserve the same space ownership and focus model as loaded states. | State changes remove landmarks, focus targets, or scroll owners. |
 | Motion and reveal | Motion clarifies state changes but does not carry required information; reduced motion has an equivalent static state. | Information appears only during animation or reveal timing. |
 
-Default mode is deliberately report-only: findings are emitted as structured JSON with `verdict:
-PASS`, `mode: report-only`, per-rule counts, and sample file/line evidence. `--fail-on-findings`
-exists only for future promotion packets after the current inventory is burned down or documented
-with sanctioned exceptions.
+The package script currently promotes `soup/layer-owner-required` with
+`--fail-on-rule soup/layer-owner-required`; raw `z-*`/`z-[N]` layering is blocking once the inventory
+is zero. The remaining resilience lanes stay report-only: findings are emitted as structured JSON
+with per-rule counts and sample file/line evidence. `--fail-on-findings` exists only for future
+promotion packets after the remaining inventory is burned down or documented with sanctioned
+exceptions.
 
-A PASS in report-only mode means the audit ran and produced an inventory. It does not prove the UI is
-resilient, does not replace long-string screenshots, reduced-height screenshots, keyboard/touch
-tests, focus-ring checks, or reviewer inspection, and must never be cited as "zero findings" unless
-`finding_count` is actually `0`.
+A PASS with report-only lanes still present means the audit ran and no promoted rule failed. It does
+not prove the UI is resilient, does not replace long-string screenshots, reduced-height screenshots,
+keyboard/touch tests, focus-ring checks, or reviewer inspection, and must never be cited as "zero
+findings" unless `finding_count` is actually `0`.
 
 ### 17.6 Font Asset Integrity Guard
 

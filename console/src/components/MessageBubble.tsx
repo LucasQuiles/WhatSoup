@@ -38,7 +38,7 @@ const DetailCard: FC<{ msg: Message; placement: CardPlacement; rightAnchored: bo
   return (
     <div
       data-placement={placement}
-      className="absolute z-50 pointer-events-none c-card c-card--detail mb-[var(--sp-2)]"
+      className="absolute z-[var(--z-float)] pointer-events-none c-card c-card--detail mb-[var(--sp-2)]"
       style={style}
     >
       <div className="flex flex-col gap-[var(--sp-2)]">
