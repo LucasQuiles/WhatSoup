@@ -227,7 +227,7 @@ export default function LineDetail() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-            className="flex-1 min-h-0 flex flex-col overflow-auto px-[var(--sp-5)] pt-[var(--sp-4)] pb-[var(--sp-8)]"
+            className="flex-1 min-h-0 min-w-0 flex flex-col overflow-auto px-[var(--sp-5)] pt-[var(--sp-4)] pb-[var(--sp-8)]"
           >
             {activeTab === 'summary' && (
               <SummaryTab

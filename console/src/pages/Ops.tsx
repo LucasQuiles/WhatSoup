@@ -131,7 +131,7 @@ export default function Ops() {
         </div>
 
         {/* Instance cards */}
-        <div className="flex-1 overflow-auto scrollbar-hide p-[var(--sp-3)]">
+        <div className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide p-[var(--sp-3)]">
           <div className="flex flex-col gap-[var(--sp-2)]">
             {linesLoading ? (
               <div className="text-t5 text-center py-8 font-mono text-data">

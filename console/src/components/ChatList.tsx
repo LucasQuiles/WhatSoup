@@ -90,7 +90,7 @@ const ChatList: FC<ChatListProps> = ({ chats, selectedChat, onSelect, typingKeys
         role="listbox"
         aria-label="Chat conversations"
         aria-multiselectable="false"
-        className="flex-1 overflow-auto scrollbar-hide"
+        className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide"
       >
         <div className="text-center py-[var(--sp-8)] px-[var(--sp-4)]">
           <span className="c-body">No chats found</span>
@@ -105,7 +105,7 @@ const ChatList: FC<ChatListProps> = ({ chats, selectedChat, onSelect, typingKeys
       role="listbox"
       aria-label="Chat conversations"
       aria-multiselectable="false"
-      className="flex-1 overflow-auto scrollbar-hide"
+      className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide"
       onKeyDown={handleKeyDown}
     >
       {chats.map(chat => (

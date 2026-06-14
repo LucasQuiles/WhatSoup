@@ -33,7 +33,7 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
       </span>
 
       {/* Alert chips */}
-      <div className="flex items-center gap-2 overflow-x-auto">
+      <div className="flex min-w-0 items-center gap-2 overflow-x-auto">
         {alerts.map((alert) => (
           <Button
             key={alert.line}

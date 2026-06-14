@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const SCRIPT = resolve(process.cwd(), 'console/scripts/check-design-resilience.mjs');
-const PROMOTED_RULES = ['soup/layer-owner-required'];
+const PROMOTED_RULES = ['soup/layer-owner-required', 'soup/scroll-owner-required'];
 
 const tmpDirs: string[] = [];
 
@@ -54,12 +54,13 @@ function parsedOutput(result: ReturnType<typeof runScript>) {
 }
 
 describe('check-design-resilience.mjs', () => {
-  it('promotes the zeroed layer-owner lane through the package script', () => {
+  it('promotes zeroed layer-owner and scroll-owner lanes through the package script', () => {
     const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'console/package.json'), 'utf8')) as {
       scripts?: Record<string, string>;
     };
 
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/layer-owner-required');
+    expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/scroll-owner-required');
   });
 
   it('reports text, scroll, geometry, hover, viewport-font, and layer risks in report-only mode', () => {
@@ -94,7 +95,7 @@ export function Fixture() {
     expect(output.finding_count).toBe(6);
   });
 
-  it('fails when the promoted layer-owner rule has findings', () => {
+  it('fails when a promoted layer-owner rule has findings', () => {
     const root = makeFixture(`
 export function Fixture() {
   return (
@@ -112,11 +113,28 @@ export function Fixture() {
     expect(output.verdict).toBe('FAIL');
     expect(output.mode).toBe('fail-on-rule');
     expect(output.enforced_rules).toEqual(PROMOTED_RULES);
-    expect(output.failed_rules).toEqual(PROMOTED_RULES);
+    expect(output.failed_rules).toEqual(['soup/layer-owner-required']);
     expect(output.by_rule).toMatchObject({
       'soup/layer-owner-required': 1,
       'soup/no-unsafe-truncation': 1,
     });
+  });
+
+  it('fails when a promoted scroll-owner rule has findings', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return <div className="flex-1 overflow-y-auto p-[var(--sp-3)]">log</div>
+}
+`);
+    const result = runScript(root, promotedRuleArgs());
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.enforced_rules).toEqual(PROMOTED_RULES);
+    expect(output.failed_rules).toEqual(['soup/scroll-owner-required']);
+    expect(output.by_rule).toEqual({ 'soup/scroll-owner-required': 1 });
   });
 
   it('keeps unrelated resilience findings report-only when layer-owner is clean', () => {
@@ -144,6 +162,7 @@ export function Fixture({ name }: { name: string }) {
       <div title={name} className="truncate text-t1">{name}</div>
       <div data-full-value={name} className="truncate text-t1">{name}</div>
       <div className="flex-1 min-h-0 overflow-y-auto p-[var(--sp-3)]">log</div>
+      <div className="flex-1 min-h-0 min-w-0 overflow-auto p-[var(--sp-3)]">both axes</div>
       <button className="px-[var(--sp-2)] hover:bg-[var(--surface-inset)] focus-visible:outline-none">Action</button>
       <span className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">Hidden action</span>
       <h1 className="text-t1">Fleet</h1>
@@ -159,6 +178,18 @@ export function Fixture({ name }: { name: string }) {
     expect(output.verdict).toBe('PASS');
     expect(output.finding_count).toBe(0);
     expect(output.scanned_file_count).toBe(1);
+  });
+
+  it('requires both min axes for overflow-auto scroll owners', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return <div className="flex-1 min-h-0 overflow-auto p-[var(--sp-3)]">both axes</div>
+}
+`);
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule).toEqual({ 'soup/scroll-owner-required': 1 });
   });
 
   it('can fail when findings are promoted from report-only to blocking mode', () => {

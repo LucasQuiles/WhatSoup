@@ -783,7 +783,7 @@ const SoupKitchen: FC = () => {
             drawer={drawerEl}
           >
             {/* Table region — governed x-scroll; never page-level overflow */}
-            <div className="overflow-y-auto overflow-x-auto scrollbar-hide h-full">
+            <div className="min-h-0 min-w-0 overflow-y-auto overflow-x-auto scrollbar-hide h-full">
               <Table density="compressed">
                 <TableHeader>
 

@@ -86,7 +86,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-component-local-palette | blocking script | keep blocking script / later scoped-error | P4/G5 | component-local colour maps collapse into documented provider/data/status token maps or explicit exceptions |
 | soup/tabular-nums-required | proposed | scoped-error (Table/metric) | P4 | zero current usage — needs spec landing first |
 | soup/no-unsafe-truncation | report-only script | warn-on-changed-files | P4/G7 | truncation needs full-value access or documented exception |
-| soup/scroll-owner-required | report-only script | scoped-error / blocking script | P4/G7 | scrollable regions need axis min-size proof and one declared owner |
+| soup/scroll-owner-required | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | scrollable regions need axis min-size proof and one declared owner |
 | soup/no-layout-shift-interaction | report-only script | scoped-error / blocking script | P4/G7 | hover/focus/active states must not change layout dimensions |
 | soup/no-hover-only-content | report-only script | scoped-error / blocking script | P4/G7 | hover-revealed content needs keyboard/focus parity |
 | soup/no-vw-font-size | report-only script | global-error | P4/G7 | typography must use tokenized type scale, not viewport width |
@@ -569,7 +569,7 @@ cannot express the check).
 
 - **Purpose:** every scrollable space must have exactly one visible owner and axis min-size proof so
   panels do not create hidden nested scroll traps.
-- **Mechanism:** report-only resilience script. Flag `overflow-auto`, `overflow-scroll`,
+- **Mechanism:** package-script fail-on-rule resilience script. Flag `overflow-auto`, `overflow-scroll`,
   `overflow-x-*`, and `overflow-y-*` without `min-h-0` / `min-w-0` proof or a
   `data-scroll-owner` / `soup-scroll-owner-ok` exception.
 - **Scope:** scroll containers in route shells, modals, drawers, lists, tables, logs, and wizard
@@ -579,7 +579,7 @@ cannot express the check).
 - **FP strategy:** fixtures must distinguish axis-specific x/y scroll, nested scroll with one named
   owner, and invalid unnamed nested scroll.
 - **Autofix:** partial (`min-h-0`/`min-w-0` suggestions only). **Phase:** P4/G7. **Entry:**
-  report-only script.
+  package-script fail-on-rule; promoted 2026-06-14 after the inventory reached zero.
 
 ### soup/no-layout-shift-interaction
 

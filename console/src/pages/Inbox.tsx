@@ -304,7 +304,7 @@ export default function Inbox() {
             {isSearchMode ? (
               <div
                 ref={searchScrollRef}
-                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 py-[var(--sp-4)] px-[var(--sp-5)]"
+                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 min-w-0 py-[var(--sp-4)] px-[var(--sp-5)]"
               >
                 {searchError ? (
                   <div className="flex-1 flex items-center justify-center">
@@ -348,7 +348,7 @@ export default function Inbox() {
               <div
                 ref={scrollRef}
                 onScroll={handleScroll}
-                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative py-[var(--sp-4)] px-[var(--sp-5)]"
+                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 min-w-0 relative py-[var(--sp-4)] px-[var(--sp-5)]"
               >
                 {messages && messages.length > 0 && hasMore && (
                   <Button
@@ -481,7 +481,7 @@ export default function Inbox() {
             </div>
 
             {/* Details body */}
-            <div className="flex-1 overflow-auto scrollbar-hide p-[var(--sp-4)]">
+            <div className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide p-[var(--sp-4)]">
               {/* Info card */}
               <div className="mb-[var(--sp-4)]">
                 <div className="c-col-header mb-[var(--sp-2)]">Details</div>

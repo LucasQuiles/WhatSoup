@@ -45,7 +45,7 @@ export function MetricsTab({
           : detailTab
 
   return (
-    <div className="flex-1 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
+    <div className="flex-1 min-h-0 min-w-0 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
       {/* Range selector */}
       <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-4)]">
         <ToolbarTimeRange

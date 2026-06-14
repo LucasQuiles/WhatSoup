@@ -128,7 +128,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       <div
         ref={stickyScrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto scrollbar-hide py-[var(--sp-4)] px-[var(--sp-5)]"
+        className="flex-1 min-h-0 overflow-y-auto scrollbar-hide py-[var(--sp-4)] px-[var(--sp-5)]"
       >
         {/* Load older messages */}
         {reversed.length > 0 && (
@@ -257,7 +257,7 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
           <span className="c-label">{chats.length} chats</span>
         </div>
 
-        <div className="flex-1 overflow-auto scrollbar-hide">
+        <div className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide">
           {chats.map(chat => (
             <ChatListItem
               key={chat.conversationKey}
