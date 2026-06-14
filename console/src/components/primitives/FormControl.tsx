@@ -131,6 +131,22 @@ export const SelectInput: FC<SelectInputProps> = ({ error, confirmed, children, 
   </select>
 );
 
+export interface FileInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'style' | 'type' | 'value'> {
+  ref?: RefObject<HTMLInputElement | null>;
+  error?: boolean;
+  confirmed?: boolean;
+}
+
+export const FileInput: FC<FileInputProps> = ({ error, confirmed, className, ref, ...props }) => (
+  <input
+    ref={ref}
+    type="file"
+    {...props}
+    className={`c-input c-file-input text-data ${className ?? ''}`}
+    style={{ borderColor: borderColor(error, confirmed) }}
+  />
+);
+
 export interface TextAreaProps extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'style'> {
   ref?: RefObject<HTMLTextAreaElement | null>;
   error?: boolean;

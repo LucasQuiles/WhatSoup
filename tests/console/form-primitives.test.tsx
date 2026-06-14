@@ -12,6 +12,7 @@ import {
   TextInput,
   NumberInput,
   SelectInput,
+  FileInput,
   TextArea,
   RadioField,
   CheckboxField,
@@ -255,6 +256,33 @@ describe('SelectInput', () => {
       </SelectInput>,
     )
     expectBorderColor(select, 'var(--wizard-accent)')
+  })
+})
+
+// FileInput
+
+describe('FileInput', () => {
+  it('renders file attributes without accepting controlled value props', () => {
+    const onChange = vi.fn()
+
+    render(
+      <FileInput
+        aria-label="Upload instructions"
+        accept=".md,.txt"
+        className="file-extra"
+        onChange={onChange}
+        confirmed
+      />,
+    )
+
+    const input = screen.getByLabelText('Upload instructions') as HTMLInputElement
+    expect(input.type).toBe('file')
+    expect(input.accept).toBe('.md,.txt')
+    expect(input.classList.contains('c-input')).toBe(true)
+    expect(input.classList.contains('c-file-input')).toBe(true)
+    expect(input.classList.contains('text-data')).toBe(true)
+    expect(input.classList.contains('file-extra')).toBe(true)
+    expectBorderColor(input, 'var(--wizard-accent)')
   })
 })
 

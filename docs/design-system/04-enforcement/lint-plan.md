@@ -68,7 +68,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-channel-specific-copy | proposed | global-error | P4/G7 | flags generic visible "WhatsApp" copy after the multi-channel positioning lock; protocol/runtime prompts stay allowlisted |
 | soup/protected-identifiers | scoped-error | global-error | P1 | cheap, zero current violations — start strict |
 | soup/no-raw-button | scoped-error (M list) | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
-| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate compares live shadow ESLint output to generated `console/design-raw-form-control-inventory.json`; current generated manifest is 2 total = 2 consumer-migration + 0 primitive self-hits |
+| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate compares live shadow ESLint output to generated `console/design-raw-form-control-inventory.json`; current generated manifest is 0 total |
 | soup/no-adhoc-modal | scoped-error (M list) | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
 | soup/no-legacy-tokens | scoped-error (primitives tier) | global-error | P2+ complete | enabled only after alias layer + primitives land |
 | soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap |
@@ -213,8 +213,8 @@ cannot express the check).
 
 - **Purpose:** `input`, `select`, `textarea` render through the promoted FormControl primitive
   (`console/src/components/primitives/FormControl.tsx`; transitional wizard shim:
-  `console/src/components/wizard/form-primitives.tsx`) and the P2 `Select` policy. The remaining
-  counted consumers are the two `type="file"` inputs in `ConfigStep`.
+  `console/src/components/wizard/form-primitives.tsx`) and the P2 `Select` policy. File upload
+  controls route through `FileInput`.
 - **Mechanism:** selector `JSXOpeningElement[name.name=/^(input|select|textarea)$/]`, per-directory
   scope like soup/no-raw-button. The census is mechanical through
   `npm --prefix console run design:raw-form-control-inventory`, which derives findings from
@@ -223,14 +223,13 @@ cannot express the check).
   `console/design-raw-form-control-inventory.json`; packets update that generated inventory with
   `npm --prefix console run design:raw-form-control-inventory -- --update`, never with copied
   package-script counts.
-- **Scope/exemptions:** `components/primitives/**` and the form-kit module exempt; `type="file"`
-  sites (`console/src/components/wizard/ConfigStep.tsx:436,752`) get a named waiver until
-  a FileInput primitive is specced (none planned for v3.0).
-- **Violation / valid:** bare `<input className="c-input …">` → `<TextInput …>`; bare
-  `<select className="c-input …">` → `<SelectInput …>`; bare `<textarea className="c-input …">`
-  → `<TextArea …>`. `type="file"` stays waivered until a FileInput primitive is specced.
+- **Scope/exemptions:** `components/primitives/**` and the form-kit module exempt; consumer
+  inventory is currently zero.
+- **Violation / valid:** bare `<input className="c-input …">` → `<TextInput …>` or
+  `<FileInput …>` for uploads; bare `<select className="c-input …">` → `<SelectInput …>`;
+  bare `<textarea className="c-input …">` → `<TextArea …>`.
 - **FP strategy:** directory scoping plus the deterministic inventory gate. Current generated
-  manifest is exactly 2 consumer hits, both held `ConfigStep` file inputs. D4.2 intentionally
+  manifest is empty. D4.2 intentionally
   cleared the former 5 form-kit self-hits by moving the canonical primitive under
   `components/primitives/**`; D4.3a cleared the shared
   `SearchInput` producer, D4.3b cleared `UnlockScreen`, and D4.3c cleared `TagInput` by routing

@@ -2,7 +2,7 @@ import { type FC, type ChangeEvent, type ReactNode, useCallback, useEffect, useI
 import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
-import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } from '../primitives'
+import { Field, TextInput, NumberInput, SelectInput, FileInput, TextArea, CheckboxField } from '../primitives'
 // form-styles static exports replaced by CSS classes (c-field-label, c-helper)
 import { validatePhone } from '../../lib/validation'
 import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
@@ -437,11 +437,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               </span>
             </label>
             <div className="flex items-center justify-center cursor-pointer rounded-sm p-[var(--sp-4)] bg-d3 mb-[var(--sp-2)] c-border-dashed">
-              <input
-                type="file"
+              <FileInput
                 accept=".md,.txt"
                 onChange={handleFileUpload}
-                className="w-full cursor-pointer text-t3 text-data"
+                className="w-full cursor-pointer text-t3"
               />
             </div>
             <TextArea
@@ -753,8 +752,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             {(data.settingsJsonMode as string) === 'custom' && (
               <>
                 <div className="mt-[var(--sp-2)]">
-                  <input
-                    type="file"
+                  <FileInput
                     accept=".json"
                     onChange={(e) => {
                       const file = e.target.files?.[0]
@@ -770,7 +768,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                       }
                       reader.readAsText(file)
                     }}
-                    className="w-full cursor-pointer text-t3 mb-[var(--sp-2)] text-data"
+                    className="w-full cursor-pointer text-t3 mb-[var(--sp-2)]"
                   />
                 </div>
                 <TextArea

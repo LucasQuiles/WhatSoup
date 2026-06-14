@@ -14,7 +14,8 @@ mechanically generated in `console/design-raw-form-control-inventory.json` and c
 `SearchInput`, `UnlockScreen`, and `TagInput` render through `TextInput`; do not use the
 2026-06-12 raw-form counts below as the live source of truth. As of the 2026-06-14
 UnlockScreen restyle slice, `UnlockScreen` also has zero `soup/no-legacy-tokens` findings:
-the caller no longer overrides `TextInput`/`Button` with legacy utility classes.
+the caller no longer overrides `TextInput`/`Button` with legacy utility classes. As of the
+2026-06-14 FileInput slice, raw form-control inventory is zero.
 
 ## 1. Methodology
 
@@ -51,7 +52,7 @@ called out qualitatively and in the burndown; they are not double-counted in the
 - **Fully-conformant surfaces: 8 / 67 = 12%** (zero legacy patterns in-file):
   AddLineWizard, RelinkModal, LogsTab, ChatList, ErrorBoundary, StatusDot, ModeBadge,
   QrDisplay (waivered WVR-002). **Pages fully clean: 0 / 4.**
-- **Legacy token vocabulary still live:** 354 TSX-side shadow falls across 61 files
+- **Legacy token vocabulary still live:** 331 TSX-side shadow falls across 57 files
   (soup/no-legacy-tokens), plus ~153 legacy `var()` occurrences in `src/styles/composites.css`
   (97 lines — invisible to ESLint by design, lint-plan §1), plus 28 half-step spacing
   consumption lines (DD-9). TSX consumers reference the new semantic vocabulary directly only
@@ -123,7 +124,7 @@ are the shadow-baseline falls for that file.
 
 | Surface | Primitives used | Legacy remnants | Adopt % | Blocks |
 |---|---|---|---|---|
-| wizard/ConfigStep.tsx | form kit (TextInput/SelectInput/NumberInput/TextArea/CheckboxField/Field), Tabs/Tab | raw `<button>`×5: 644, 652, 663, 884, 937; raw `<input>`×3: 435 (file 436), 691 (checkbox 692), 751 (file 752) — file inputs waivered (no FileInput primitive planned, lint-plan §3); LT×21 (largest wizard debt); legacy vars 891, 893; sp-half 698 | 47/55 = 85% | yes |
+| wizard/ConfigStep.tsx | form kit (TextInput/SelectInput/NumberInput/TextArea/CheckboxField/FileInput/Field), Tabs/Tab | raw `<button>`×5 remains; raw form controls closed (enabled-plugin checkbox routes through `CheckboxField`; file uploads route through `FileInput`); LT×21 (largest wizard debt); legacy vars; sp-half | controls partial (buttons remain) | yes (buttons/tokens) |
 | wizard/ModelAuthStep.tsx | SelectInput, Tabs/Tab | raw `<button>` 171; raw `<input>`×3: 161, 261 (radio 262), 271 (radio 272); LT×6; legacy var 168 | 6/10 = 60% | yes |
 | wizard/IdentityStep.tsx | none (form kit NOT used) | raw `<input>`×2: 116, 154; LT×4; legacy vars 124, 161 | 0/2 = 0% | yes |
 | wizard/LinkStep.tsx | none | raw `<button>`×2: 134, 160 — legacy recipe sites were accent-safe by the F1 close; LT×5; hex 95 | 0/2 = 0% | yes |
@@ -215,22 +216,23 @@ was not decomposed).
 | M13 | Hand-rolled mode radio-cards in ModeSwitchDialog duplicate the CardSelector pattern with inline legacy mode-color styles | ModeSwitchDialog.tsx:70-92 | CardSelector (DD-14 radiogroup) exists and is unused here | Migrate to CardSelector in the C3 LineDetail pass |
 | M14 | Local SearchInput recipe parallel to ToolbarSearch | shared/SearchInput.tsx | toolbar.md owns search-in-toolbar; standalone search input has no primitive | Promote into the form kit (or absorb into ToolbarSearch) during B-residue work |
 
-## 5. Shadow-baseline rollup (ground truth: console/lint-shadow-baseline.json, total 486)
+## 5. Shadow-baseline rollup (ground truth: console/lint-shadow-baseline.json, total 352)
 
 | Rule | Falls | Files | Top files |
 |---|---|---|---|
 | soup/no-legacy-tokens | 331 | 57 | Inbox 25 · ConfigStep 21 · GroupDetailModal 17 · SummaryTab 16 · Nav 15 · MessageContent 15 · ActiveHoursHeatmap 15 · MetricsTab 13 · UpdateModal 12 · ProvidersKeysCard 9 · (47 more files, full list in `console/lint-shadow-baseline.json`) |
 | no-restricted-syntax (base wall) | 18 | 5 | Nav 6 · mock-data 5 · MessageContent 5 · PipelineTab 1 · ModeTab 1 |
 | soup/no-brand-regression | 2 | 2 | Nav (split wordmark) · UpdateModal ("Update WhatSoup") — both flip at the P4/C4 brand slice by design |
-| soup/no-raw-form-control | 2 | 1 | ConfigStep 2 |
+| ~~soup/no-raw-form-control~~ | 0 | 0 | closed: `ConfigStep` file uploads route through `FileInput`; generated raw-form inventory is empty |
 | ~~soup/no-focus-suppression~~ | 0 | 0 | closed: zero TSX `outline-none` sites; former Inbox and HistoryTab composer carve-outs retired |
 | soup/no-utility-smell | 1 | 1 | GroupCard |
 
-Reconciliation: the live shadow baseline is 354 (= 331 + 18 + 2 + 2 + 1) and the live
-burndown queue is 663/598 with `focus-suppression` absent. Focus suppression now reads
-zero in two independent checks: `design-regression` check 12 and whole-tree `outline-none`
-grep over `console/src`; both former chat composers route through `TextArea`, and the
-HistoryTab send/load/jump actions route through button primitives.
+Reconciliation: the live shadow baseline is 352 (= 331 + 18 + 2 + 1) and the live
+burndown queue is 661/596 with `focus-suppression` and `raw-form-control` absent. Focus
+suppression now reads zero in two independent checks: `design-regression` check 12 and
+whole-tree `outline-none` grep over `console/src`; both former chat composers route
+through `TextArea`, the HistoryTab send/load/jump actions route through button primitives,
+and the last file uploads route through `FileInput`.
 
 ## 6. Legacy-token census
 
@@ -244,7 +246,7 @@ Consumption outside the token tier (current tree):
 
 | Vocabulary | TSX/TS occurrences | CSS occurrences | Notes |
 |---|---|---|---|
-| Strict legacy utilities `bg-d*`/`text-t*`/`border-t*` | 313 | composites.css class definitions generate them | shadow rule counts 354 nodes total for its scope (utilities+vars, per-node) |
+| Strict legacy utilities `bg-d*`/`text-t*`/`border-t*` | 313 | composites.css class definitions generate them | shadow rule counts 331 nodes total for its scope (utilities+vars, per-node) |
 | Strict legacy vars `var(--color-[dt]N)`, `var(--b1..4)` | 75 | 97 lines in composites.css | composites.css is ESLint-invisible (lint-plan §1 — rg-script territory) |
 | Mode/status shorthand utilities `text-s-*`, `text-m-*`, etc. | 130 | throughout composites.css | semantically fine, names ride the alias map |
 | Extended legacy vars (washes/softs/shadows/ease) + above, total legacy var() in composites.css | — | 153 occurrences | includes `--card-shadow`, `--m-*-wash`, `--s-*-soft` etc. |
@@ -277,16 +279,16 @@ Per pattern family (primitive-rendered / total sites):
 | Tabs / panel switchers | 5/5 = 100% | LineDetail, GroupDetailModal, ConfigStep, ModelAuthStep, and MetricsTab Tokens/Sessions on Tabs |
 | Toolbars | 6 primitive bands; ad-hoc bands remain on Inbox header, HistoryTab composer row, tab-header action rows (GroupsTab/ScheduledTab/AccessTab) | qualitative |
 | Buttons | 30/100 = 30% | 30 Button/ActionButton JSX vs 70 raw `<button>` |
-| Form controls | 43/74 = 58% | 43 form-kit JSX vs 31 raw controls outside the kit |
+| Form controls | generated inventory 0 raw consumers | all consumer `input`/`select`/`textarea` sites route through promoted primitives; original 2026-06-12 site ratio is historical |
 | Status/badge rendering | high but not total | status-map driver + 18 StatusCell/ModeBadge uses; residual inline mode/status styling in ModeSwitchDialog, AlertBanner, KpiCard, FeedCard/FeedIcon, providers.ts |
-| Token vocabulary | far behind | §6: 354 TSX shadow falls + 153 composites.css refs; 3 direct semantic refs |
+| Token vocabulary | far behind | §6: 331 TSX shadow falls + 153 composites.css refs; 3 direct semantic refs |
 
 Per page (in-file sites): SoupKitchen 100% (27/27) · LineDetail 100% (8/8) · Ops 63% (5/8) ·
 Inbox 0% (0/9). Per family dir: wizard 54/64 = 84% sites but 0/7 files token-clean ·
 line-detail 41/64 = 64% · top-level components 36/26-legacy ≈ 58% · shared 3/3 files partial.
 
 **OVERALL: interactive/structural primitive adoption 64.6% (184/285 sites). Fully-conformant
-surfaces 8/67 = 12%. Token-vocabulary migration is the long pole: 354 TSX + ~153 CSS legacy
+surfaces 8/67 = 12%. Token-vocabulary migration is the long pole: 331 TSX + ~153 CSS legacy
 references must reach zero before the C4 alias removal can land. By the operator's 100%-adoption
 bar, the program is roughly two-thirds done on controls and at the beginning of the
 final token/brand burn.**
@@ -295,16 +297,15 @@ final token/brand burn.**
 
 Blocking items (14 tracked; B12 now closed):
 
-1. **B1 — Legacy token vocabulary burn** (354 TSX falls ×61 files; 153 composites.css refs;
+1. **B1 — Legacy token vocabulary burn** (331 TSX falls ×57 files; 153 composites.css refs;
    scrollbar M8; `--overlay-badge` literal). Largest debts first: Inbox 25, ConfigStep 21,
    ActiveHoursHeatmap 19, GroupDetailModal 17, SummaryTab 16, MessageContent 15, Nav 15.
    Mechanical alias rewrite is the sanctioned codemod (lint-plan soup/no-legacy-tokens).
 2. **B2 — Raw `<button>` elimination** (70 ×29 files → Button/ActionButton). Top: GroupDetailModal 9,
    Inbox 8, ConfigStep 5, FeedCard 4, AccessTab 4, ScheduledMessageRow 4.
-3. **B3 — Form-control kit completion**: promote form-primitives out of wizard/ (DUP-12),
-   then migrate the 31 raw controls (ConfigEditDialog 7, ScheduleComposerModal 5,
-   GroupDetailModal 3, ModelAuthStep 3, IdentityStep 2, +9 singles incl. TagInput, SearchInput,
-   SaveContactDialog, CreateGroupModal, UpdateModal, UnlockScreen, Inbox, HistoryTab).
+3. ~~**B3 — Form-control kit completion**~~ — **DONE**: all consumer raw form controls route
+   through promoted primitives; generated raw-form-control inventory is empty after `FileInput`
+   absorbed the last `ConfigStep` file uploads.
 4. ~~**B4 — F1 accent-law fix**~~ — **DONE / RE-NARROWED**: `c-btn-primary`, native
    `accent-color`, Nav active underlines, and unread badges now use `--accent`; the
    remaining green wordmark is C4 brand/nameplate work.
@@ -337,11 +338,12 @@ register · WizardStepper extraction · type-ramp definition (DD-26).
 ## 9. Strong-claim audit and limits of static analysis
 
 Claims re-verified before publication:
-- "354 = 331+18+2+2+1" — recomputed from the live `console/lint-shadow-baseline.json`;
+- "352 = 331+18+2+1" — recomputed from the live `console/lint-shadow-baseline.json`;
   sums match the declared total.
 - "zero TSX outline-none sites" — independent whole-tree grep plus `design-regression`
   check 12; the retired Inbox and HistoryTab sites now read as `TextArea`/button primitives.
-- "2 raw form controls" — live shadow baseline now lists only ConfigStep's two file inputs.
+- "zero raw form controls" — live shadow baseline and generated raw-form inventory now list no
+  consumer raw `input`/`select`/`textarea` sites.
 - "former c-btn-primary ok-green sites" — closed before this snapshot; definition now reads
   `background: var(--accent); border-color: var(--accent); color: var(--accent-fg);` at
   composites.css:733, and the live burndown queue reports `accent-law: 0`.
@@ -388,7 +390,7 @@ Artifacts (all committed):
 Sources, by category:
 - **Consumed from `lint-shadow-baseline.json`** (never re-counted — the shadow ratchet
   owns TSX enforcement; `lines` are `null`, line detail lives in the ESLint shadow run):
-  `raw-form-control` (B3), `legacy-token-tsx` (B1), `brand-regression` (B5), `base-wall` (B5/B6),
+  `legacy-token-tsx` (B1), `brand-regression` (B5), `base-wall` (B5/B6),
   `utility-smell` (polish).
 - **Frozen shadow line-shape inventory:** `check-shadow-frozen-inventory.mjs` reuses the
   same shadow ESLint JSON and pins exact file/line/message shape for `base-wall` and
@@ -426,8 +428,8 @@ Wired unconditionally (fail-open forbidden) into: `.husky/pre-push`, root
 fixtures proving every scan fires, ratchet rise/fall/drift, fail-closed raises):
 `tests/scripts/design-burndown-check.test.ts`.
 
-Counting-rule notes vs this audit's census (initial queue, 2026-06-12): the ESLint-side
-categories reconcile exactly with §5 (486 = 354+70+36+22+2+1+1). `legacy-var-css` counts
+Counting-rule notes vs this audit's original census (initial queue, 2026-06-12): the ESLint-side
+categories reconciled with the original §5 snapshot (486 = 354+70+36+22+2+1+1). `legacy-var-css` counts
 260 occurrences over 183 lines of composites.css — the §6 strict-vars subset agrees
 exactly (97 lines), and the surplus over the "~153" extended figure is per-occurrence
 counting (multiple `var()` per line) plus the motion aliases `--ease` (64) and

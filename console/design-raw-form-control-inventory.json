@@ -20,55 +20,16 @@
     "exemption_movement": "Raw form-control finding in the transitional form-kit self module; only clears by moving the canonical primitive under components/primitives/**."
   },
   "totals": {
-    "by_classification": {
-      "consumer_migration": 2
-    },
-    "by_consumer_group": {
-      "wizard_consumers": 2
-    },
+    "by_classification": {},
+    "by_consumer_group": {},
     "by_element": {
-      "input": 2,
+      "input": 0,
       "select": 0,
       "textarea": 0
     },
-    "files": 1,
-    "total": 2
+    "files": 0,
+    "total": 0
   },
-  "by_file": [
-    {
-      "by_element": {
-        "input": 2
-      },
-      "classification": "consumer_migration",
-      "consumer_group": "wizard_consumers",
-      "file": "console/src/components/wizard/ConfigStep.tsx",
-      "lines": [
-        440,
-        756
-      ],
-      "total": 2
-    }
-  ],
-  "hits": [
-    {
-      "classification": "consumer_migration",
-      "column": 15,
-      "consumer_group": "wizard_consumers",
-      "element": "input",
-      "file": "console/src/components/wizard/ConfigStep.tsx",
-      "line": 440,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<input"
-    },
-    {
-      "classification": "consumer_migration",
-      "column": 19,
-      "consumer_group": "wizard_consumers",
-      "element": "input",
-      "file": "console/src/components/wizard/ConfigStep.tsx",
-      "line": 756,
-      "rule": "soup/no-raw-form-control",
-      "snippet": "<input"
-    }
-  ]
+  "by_file": [],
+  "hits": []
 }
