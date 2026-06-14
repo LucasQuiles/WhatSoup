@@ -13,8 +13,7 @@
  */
 import { type FC, useRef, useState } from 'react'
 import { UserPlus } from 'lucide-react'
-import { Modal, ModalHeader, ModalBody, ModalFooter } from './primitives'
-import { Button } from './primitives/Button'
+import { Button, Modal, ModalHeader, ModalBody, ModalFooter, TextInput } from './primitives'
 
 export interface SaveContactDialogProps {
   /** Controls visibility. */
@@ -66,11 +65,11 @@ export const SaveContactDialog: FC<SaveContactDialogProps> = ({
           <label htmlFor="save-contact-name-input" className="c-field-label block mb-[var(--sp-2)]">
             Contact name
           </label>
-          <input
+          <TextInput
             ref={inputRef}
             id="save-contact-name-input"
             type="text"
-            className="c-input font-mono w-full"
+            className="w-full"
             placeholder="First Last"
             value={name}
             onChange={e => setName(e.target.value)}
