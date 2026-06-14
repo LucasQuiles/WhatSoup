@@ -12,7 +12,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import { levelColor, levelBg, levelLineBg } from '../../console/src/lib/log-theme';
-import { staggerChildVariants } from '../../console/src/lib/motion';
+import {
+  motionDurations,
+  motionEasings,
+  staggerChildVariants,
+  toastMotion,
+} from '../../console/src/lib/motion';
 
 describe('log-theme', () => {
   it('levelColor maps each known log level to a CSS class', () => {
@@ -65,5 +70,46 @@ describe('motion staggerChildVariants', () => {
   it('visible transition uses the project standard 500ms duration + cubic-bezier ease', () => {
     expect(staggerChildVariants.visible.transition.duration).toBe(0.5);
     expect(staggerChildVariants.visible.transition.ease).toEqual([0.22, 1, 0.36, 1]);
+  });
+});
+
+describe('motion tokens', () => {
+  it('mirrors the closed CSS duration token set as seconds for framer-motion', () => {
+    expect(motionDurations).toEqual({
+      fast: 0.12,
+      base: 0.18,
+      slow: 0.28,
+    });
+  });
+
+  it('mirrors the semantic easing tokens for framer-motion', () => {
+    expect(motionEasings).toEqual({
+      enter: [0.2, 0, 0, 1],
+      exit: [0.4, 0, 1, 1],
+    });
+  });
+});
+
+describe('toastMotion', () => {
+  it('enters with the toast base-duration/ease-enter token band', () => {
+    expect(toastMotion.initial).toEqual({ opacity: 0, y: 8 });
+    expect(toastMotion.animate).toEqual({
+      opacity: 1,
+      y: 0,
+      transition: {
+        duration: motionDurations.base,
+        ease: motionEasings.enter,
+      },
+    });
+  });
+
+  it('exits with the faster toast exit token band', () => {
+    expect(toastMotion.exit).toEqual({
+      opacity: 0,
+      transition: {
+        duration: motionDurations.fast,
+        ease: motionEasings.exit,
+      },
+    });
   });
 });
