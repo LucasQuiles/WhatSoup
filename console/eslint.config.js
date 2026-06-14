@@ -7,6 +7,7 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 import soupPlugin from './eslint-rules/index.mjs'
 import {
   structuralSelectors,
+  rawFormControlSelectors,
   focusSuppressionSelectors,
   migratedSurfaceSelectors,
   legacyTokenSelectors,
@@ -715,6 +716,8 @@ export default defineConfig([
         ...designSystemRestrictions,
         // Group S: structural (console-wide, excludes primitives/**):
         ...structuralSelectors,
+        // Raw form controls are also console-wide except primitives/**:
+        ...rawFormControlSelectors,
         // Group F: focus suppression (console-wide):
         ...focusSuppressionSelectors,
       ],
@@ -746,8 +749,9 @@ export default defineConfig([
         'error',
         ...designSystemRestrictions,
         ...scheduledGroupsDesignSystemRestrictions,
-        // Re-carry Group S and Group F so they aren't silently dropped for these files:
+        // Re-carry Group S, raw form controls, and Group F so they aren't silently dropped for these files:
         ...structuralSelectors,
+        ...rawFormControlSelectors,
         ...focusSuppressionSelectors,
       ],
     },
@@ -775,8 +779,9 @@ export default defineConfig([
       'no-restricted-syntax': [
         'error',
         ...designSystemRestrictions,
-        // Group S, F, and M:
+        // Group S, raw form controls, F, and M:
         ...structuralSelectors,
+        ...rawFormControlSelectors,
         ...focusSuppressionSelectors,
         ...migratedSurfaceSelectors,
       ],
@@ -799,8 +804,9 @@ export default defineConfig([
         'error',
         ...designSystemRestrictions,
         ...scheduledGroupsDesignSystemRestrictions,
-        // Full union — Group S, F, M:
+        // Full union — Group S, raw form controls, F, M:
         ...structuralSelectors,
+        ...rawFormControlSelectors,
         ...focusSuppressionSelectors,
         ...migratedSurfaceSelectors,
       ],

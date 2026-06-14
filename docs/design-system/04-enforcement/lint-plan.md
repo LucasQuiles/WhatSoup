@@ -68,7 +68,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-channel-specific-copy | proposed | global-error | P4/G7 | flags generic visible "WhatsApp" copy after the multi-channel positioning lock; protocol/runtime prompts stay allowlisted |
 | soup/protected-identifiers | scoped-error | global-error | P1 | cheap, zero current violations — start strict |
 | soup/no-raw-button | scoped-error (M list) | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
-| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate compares live shadow ESLint output to generated `console/design-raw-form-control-inventory.json`; current generated manifest is 0 total |
+| soup/no-raw-form-control | scoped-error (non-primitives) | scoped-error per dir | P2 | zero outside `components/primitives/**`; generated raw-form inventory remains the mechanical count authority |
 | soup/no-adhoc-modal | scoped-error (M list) | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
 | soup/no-legacy-tokens | scoped-error (primitives tier) | global-error | P2+ complete | enabled only after alias layer + primitives land |
 | soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap |
@@ -212,19 +212,22 @@ cannot express the check).
 ### soup/no-raw-form-control
 
 - **Purpose:** `input`, `select`, `textarea` render through the promoted FormControl primitive
-  (`console/src/components/primitives/FormControl.tsx`; transitional wizard shim:
-  `console/src/components/wizard/form-primitives.tsx`) and the P2 `Select` policy. File upload
-  controls route through `FileInput`.
-- **Mechanism:** selector `JSXOpeningElement[name.name=/^(input|select|textarea)$/]`, per-directory
-  scope like soup/no-raw-button. The census is mechanical through
+  (`console/src/components/primitives/FormControl.tsx`) and the P2 `Select` policy. File upload
+  controls route through `FileInput`; primitive-owned renderers such as `ToolbarSearch` stay inside
+  `components/primitives/**`.
+- **Mechanism:** promoted selector `JSXOpeningElement[name.name=/^(input|select|textarea)$/]`,
+  carried by `rawFormControlSelectors` in `console/eslint-rules/design-selectors.mjs` and re-carried
+  by each non-primitives flat-config block in `console/eslint.config.js`. The census is mechanical through
   `npm --prefix console run design:raw-form-control-inventory`, which derives findings from
-  `console/eslint.config.shadow.mjs` JSON output and classifies each hit as either
-  consumer-migration or exemption-movement. The package script compares the live scan to
+  `console/eslint.config.shadow.mjs` JSON output; after promotion the shadow run receives the
+  selector through `baseSyntaxSelectors` and keeps baseline continuity without a duplicate
+  shadow-only copy. The inventory classifies each hit as either consumer-migration or
+  exemption-movement. The package script compares the live scan to
   `console/design-raw-form-control-inventory.json`; packets update that generated inventory with
   `npm --prefix console run design:raw-form-control-inventory -- --update`, never with copied
   package-script counts.
-- **Scope/exemptions:** `components/primitives/**` and the form-kit module exempt; consumer
-  inventory is currently zero.
+- **Scope/exemptions:** `components/primitives/**` exempt because the primitive tier owns the raw
+  renderers; consumer inventory is currently zero.
 - **Violation / valid:** bare `<input className="c-input …">` → `<TextInput …>` or
   `<FileInput …>` for uploads; bare `<select className="c-input …">` → `<SelectInput …>`;
   bare `<textarea className="c-input …">` → `<TextArea …>`.
@@ -912,7 +915,7 @@ landed `ba4ed643`):
   list and the zero-hit focus-suppression / dangling-var output shapes, including fixture probes for
   Check 19 failure and fallback silence.
 All other rule rows are unchanged: states verified still accurate against the live configs
-(brand-regression, raw-form-control, infinite-animation, literal-status-colors,
+(brand-regression, infinite-animation, literal-status-colors,
 inline-dismiss-handler, format-bypass, duplicate-shell remain in the shadow config;
 raw-color/untokenized-values/transition-all verified still live in the base config).
 Rows NOT re-verified by this pass and left untouched: protected-identifiers and icon-family
@@ -936,3 +939,10 @@ forms while preserving the frozen `whatsoup*` protocol/storage identifiers, and 
 icon components allowed. `console/eslint.config.js` registers both at error severity; the shadow
 config overrides them to warnings for fixture/baseline visibility. `tests/console/design-lints.test.ts`
 now carries firing/silent fixtures and default-config error probes for both rules.
+
+Changelog: 2026-06-14 — `soup/no-raw-form-control` is now a scoped-error selector outside
+`components/primitives/**` after the generated raw-form inventory reached zero. The selector lives in
+`rawFormControlSelectors`, every non-primitives flat-config block re-carries it, the primitives block
+omits it intentionally, and `eslint.config.shadow.mjs` no longer carries a duplicate shadow-only copy.
+Default-config probes pin raw `input`/`select`/`textarea` failures plus the FormControl and
+ToolbarSearch primitive exemptions.

@@ -16,7 +16,6 @@
  *   soup/no-brand-regression   — custom rule (implemented in eslint-rules/index.mjs)
  *   soup/protected-identifiers — custom rule; scoped-error in default config, warn here
  *   soup/icon-family           — custom rule; scoped-error in default config, warn here
- *   soup/no-raw-form-control   — raw <input>/<select>/<textarea> outside primitives dir
  *   soup/no-infinite-animation — TSX-side inline animation: ... infinite
  *   soup/no-raw-color          — hex/rgb/hsl literals (selector extension; already error
  *                                in default config, kept here for shadow baseline parity)
@@ -29,6 +28,8 @@
  * PROMOTED (no longer in shadowSyntaxRules — now flow via baseSyntaxSelectors):
  *   Group S: soup/no-raw-table, soup/no-raw-sortable-header, soup/no-legacy-log-lanes
  *            — promoted to global-error in Block 1 of eslint.config.js
+ *   soup/no-raw-form-control
+ *            — promoted to scoped-error outside components/primitives/**
  *   Group F: soup/no-focus-suppression
  *            — promoted to scoped-error (console-wide minus composer carve-out)
  *   Group M: soup/no-raw-button, soup/no-adhoc-modal (both prongs)
@@ -55,19 +56,6 @@ import baseConfig from './eslint.config.js'
 
 const shadowSyntaxRules = [
 
-  // ── soup/no-raw-form-control (shadow) ────────────────────────────────────
-  // Flag raw <input>/<select>/<textarea>. Baseline: 31 consumer findings after the
-  // FormControl primitive moved under components/primitives/** (22 inputs, 2 selects,
-  // 7 textareas). type="file" sites get a named waiver at P6.
-  // NOT promoted: remaining consumers still need one-file-at-a-time migration.
-  {
-    selector: 'JSXOpeningElement[name.name=/^(input|select|textarea)$/]',
-    message:
-      '[soup/no-raw-form-control SHADOW] Raw form control element. ' +
-      'P2 goal: render through promoted form kit or Select primitive. ' +
-      'This is a baseline counter — shadow stage, non-blocking.',
-  },
-
   // ── soup/no-infinite-animation (shadow, TSX side) ────────────────────────
   // Flag inline animation property containing "infinite".
   // CSS-side covered by design-regression.sh check 13.
@@ -89,6 +77,7 @@ const shadowSyntaxRules = [
   // Removed (Group S): JSXOpeningElement[name.name="table"],
   //                    JSXOpeningElement[name.name="th"]:has(onClick),
   //                    Literal[value=/var\(--log-col-/]
+  // Removed (raw form): JSXOpeningElement[name.name=/^(input|select|textarea)$/]
   // Removed (Group F): Literal[value=/\boutline-none\b/][value!=/focus-visible:/]
   // Removed (Group M): JSXOpeningElement[name.name="button"],
   //                    Literal[value=/c-dialog-backdrop/],

@@ -837,10 +837,10 @@ describe('soup/no-brand-regression', () => {
 // path (not yet error-severity for that rule).
 //
 // Fixture paths:
-//   FIXTURE_PATH (pages/__fixture__.tsx)      — base scope, gets S + F + (not M, not P)
-//   LINEDETAIL_PATH (pages/LineDetail.tsx)    — M list: gets S + F + M
+//   FIXTURE_PATH (pages/__fixture__.tsx)      — base scope, gets S + raw-form + F + (not M, not P)
+//   LINEDETAIL_PATH (pages/LineDetail.tsx)    — M list: gets S + raw-form + F + M
 //   PRIMITIVES_FIXTURE_PATH (primitives/__fixture__.tsx) — P scope: gets F + P, NOT S/M
-//   INBOX_PATH (pages/Inbox.tsx)              — B4 retired carve-out: now gets S + F (full enforcement)
+//   INBOX_PATH (pages/Inbox.tsx)              — B4 retired carve-out: now gets S + raw-form + F
 //   LINEPICKER_PATH (components/LinePicker.tsx) — NOT in M list: no M rules at error
 //
 // All assertions filter severity === 2 (error) to isolate promoted rules.
@@ -978,6 +978,50 @@ export function Dialog({ onClose }: { onClose: () => void }) {
         FIXTURE_PATH
       )
       expect(hasError(messages, 'no-legacy-log-lanes')).toBe(true)
+    })
+  })
+
+  // ─── Raw form controls: non-primitives only ──────────────────────────────
+
+  describe('soup/no-raw-form-control — promoted outside primitives', () => {
+    it('raw input fires as error at a components path', async () => {
+      const messages = await lintErrors(
+        '<input type="text" aria-label="Name" />',
+        resolve(REPO_ROOT, 'console/src/components/Example.tsx')
+      )
+      expect(hasError(messages, 'no-raw-form-control')).toBe(true)
+    })
+
+    it('raw select fires as error at a pages path', async () => {
+      const messages = await lintErrors(
+        '<select aria-label="Status"><option value="ok">OK</option></select>',
+        resolve(REPO_ROOT, 'console/src/pages/Example.tsx')
+      )
+      expect(hasError(messages, 'no-raw-form-control')).toBe(true)
+    })
+
+    it('raw textarea fires as error at a line-detail path', async () => {
+      const messages = await lintErrors(
+        '<textarea aria-label="Message" />',
+        resolve(REPO_ROOT, 'console/src/components/line-detail/Example.tsx')
+      )
+      expect(hasError(messages, 'no-raw-form-control')).toBe(true)
+    })
+
+    it('raw input is allowed in the FormControl primitive renderer', async () => {
+      const messages = await lintErrors(
+        '<input type="text" className="soup-input" aria-label="Name" />',
+        resolve(REPO_ROOT, 'console/src/components/primitives/FormControl.tsx')
+      )
+      expect(hasError(messages, 'no-raw-form-control')).toBe(false)
+    })
+
+    it('ToolbarSearch remains allowed as a primitive-owned raw search input', async () => {
+      const messages = await lintErrors(
+        '<input type="search" className="soup-toolbar-search" aria-label="Search" />',
+        resolve(REPO_ROOT, 'console/src/components/primitives/Toolbar.tsx')
+      )
+      expect(hasError(messages, 'no-raw-form-control')).toBe(false)
     })
   })
 

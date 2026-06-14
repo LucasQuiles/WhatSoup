@@ -7,7 +7,7 @@
  * eslint.config.shadow.mjs (so promoted selectors are removed from shadowSyntaxRules
  * without loss — they flow back in via baseSyntaxSelectors from the base config blocks).
  *
- * SSOT for all four D6 flip groups (S, F, M, P).
+ * SSOT for promoted selector groups.
  * Message-tag prefix [soup/<rule>] is load-bearing for ratchet keying —
  * never change the tag, only the text after it.
  *
@@ -41,6 +41,20 @@ export const structuralSelectors = [
       'Log surfaces render through the LogStream primitive; use its component tokens ' +
       '--log-time-w / --log-level-w / --log-source-w instead. ' +
       'FIX: replace var(--log-col-*) with the LogStream component token.',
+  },
+]
+
+// -- Raw form controls, non-primitives -------------------------------------
+// Scope: all console/src TS/TSX except components/primitives/**
+// (FormControl, ToolbarSearch, and other primitive-owned renderers may render raw controls)
+// Current violations in scope: 0 (generated raw-form-control inventory is empty)
+export const rawFormControlSelectors = [
+  {
+    selector: 'JSXOpeningElement[name.name=/^(input|select|textarea)$/]',
+    message:
+      '[soup/no-raw-form-control] Raw form control element outside primitives. ' +
+      'FIX: render through FormControl primitives: TextInput, NumberInput, SelectInput, ' +
+      'TextArea, CheckboxField, RadioField, or FileInput from components/primitives/FormControl.tsx.',
   },
 ]
 
