@@ -723,13 +723,15 @@ counts; it compares the live mechanical scan to that generated manifest. When a 
 changes the inventory, the update command is:
 
 ```bash
+npm --prefix console run design:shadow-frozen-inventory -- --update
 npm --prefix console run design:raw-form-control-inventory -- --update
 ```
 
-The generated inventory update belongs in the same packet as the source/rule change that caused the
-movement, with the same exemption-vs-migration classification used for the shadow and burndown
-ratchets. `verify:console-design` includes the compare-mode inventory gate after
-`lint:shadow:baseline`.
+Generated inventory updates belong in the same packet as the source/rule change that caused the
+movement. `design:shadow-frozen-inventory` pins exact file:line/message shape for the frozen
+`base-wall` and `brand-regression` categories; `design:raw-form-control-inventory` carries the
+same exemption-vs-migration classification used for the shadow and burndown ratchets.
+`verify:console-design` includes both compare-mode inventory gates after `lint:shadow:baseline`.
 
 Root `guard:doc-drift` also checks the current inventory claims in this section and
 `lint-plan.md` against the generated manifest, so prose counts move with the same packet as the

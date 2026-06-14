@@ -386,6 +386,7 @@ Artifacts (all committed):
 | `console/scripts/check-design-burndown.mjs` | scanner + ratchet (deterministic, fail-closed: parse errors and missing inputs RAISE — never silently empty) |
 | `console/design-burndown-queue.json` | the live queue — items `{id, category, severity, count, files[{path,count,lines}], owner}` + summary `{total, blocking, byCategory}` |
 | `console/design-burndown-baseline.json` | per-category ceiling `{category: count}` (fall-only ratchet) |
+| `console/design-shadow-frozen-inventory.json` | exact file:line/message inventory for frozen shadow categories whose same-count movement should not pass silently |
 
 Sources, by category:
 - **Consumed from `lint-shadow-baseline.json`** (never re-counted — the shadow ratchet
@@ -393,6 +394,10 @@ Sources, by category:
   `raw-button` (B2), `raw-form-control` (B3), `legacy-token-tsx` (B1),
   `focus-suppression` (B7), `brand-regression` (B5), `base-wall` (B5/B6),
   `utility-smell` (polish).
+- **Frozen shadow line-shape inventory:** `check-shadow-frozen-inventory.mjs` reuses the
+  same shadow ESLint JSON and pins exact file/line/message shape for `base-wall` and
+  `brand-regression` (current total 22 = 20 + 2), closing the same-count drift gap left by
+  rule×file ceilings.
 - **CSS-side scans** (what ESLint cannot see, §6 census mechanized, with file:line):
   `legacy-var-css` (B1 — legacy-name list DERIVED from the tokens.semantic.css
   "Legacy aliases" block, same derivation as §6), `accent-law` (B4 — F1 action-control

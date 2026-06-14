@@ -882,8 +882,9 @@ landed `ba4ed643`):
   `components/primitives/**` (born-clean tier); both remain shadow outside primitives.
 - **Shared design verification chain**: CI-blocking — `npm run verify:console-design` runs in
   `verify:push:branch`, `verify:release`, quality.yml CI, and tag-release CI. It owns theme parity,
-  token drift, contrast, shadow baseline, raw-form inventory, design regression/metrics/burndown,
-  color semantics, resilience, font assets, brand assets, and design-lint fixture coverage.
+  token drift, contrast, shadow baseline, frozen shadow inventory, raw-form inventory, design
+  regression/metrics/burndown, color semantics, resilience, font assets, brand assets, and
+  design-lint fixture coverage.
 - **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
   Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17)` —

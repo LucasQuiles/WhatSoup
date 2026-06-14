@@ -35,6 +35,7 @@ const requiredPackageScripts = {
     'npm --prefix console run design:token-drift',
     'npm --prefix console run design:contrast',
     'npm --prefix console run lint:shadow:baseline',
+    'npm --prefix console run design:shadow-frozen-inventory',
     'npm --prefix console run design:raw-form-control-inventory',
     'npm --prefix console run design:regression',
     'npm --prefix console run design:metrics',
@@ -293,6 +294,20 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
       .toContain('missing npm --prefix console run design:raw-form-control-inventory');
+  });
+
+  it('fails when the shared console design verification chain omits frozen shadow inventory coverage', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:console-design': requiredPackageScripts['verify:console-design']
+          .replace(' && npm --prefix console run design:shadow-frozen-inventory', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+      .toContain('missing npm --prefix console run design:shadow-frozen-inventory');
   });
 
   it('fails when the pre-commit hook omits design-system documentation hygiene', () => {
