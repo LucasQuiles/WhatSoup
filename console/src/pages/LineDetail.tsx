@@ -15,6 +15,7 @@ import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import ConfirmDialog from '../components/ConfirmDialog'
 import Skeleton, { TableSkeleton } from '../components/Skeleton'
+import EmptyState from '../components/EmptyState'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield,
@@ -65,8 +66,18 @@ export default function LineDetail() {
   const setMetricsRange = (r: MetricsRange) => { setMetricsRangeRaw(r); setPreference('metricsRange', r); }
   const { data: line } = useLine(name || '')
   const { data: chats } = useChats(name || '')
-  const { data: access } = useAccess(name || '')
-  const { data: logs } = useLogs(name || '')
+  const {
+    data: access,
+    isLoading: accessLoading,
+    error: accessError,
+    refetch: refetchAccess,
+  } = useAccess(name || '')
+  const {
+    data: logs,
+    isLoading: logsLoading,
+    error: logsError,
+    refetch: refetchLogs,
+  } = useLogs(name || '')
   const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics } = useMetrics(name || '', metricsRange)
   const { data: typingData } = useTyping()
   const typingJids = React.useMemo(() =>
@@ -245,7 +256,20 @@ export default function LineDetail() {
               />
             )}
             {activeTab === 'pipeline' && <PipelineTab mode={line.mode} line={line} modeColor={modeColor} />}
-            {activeTab === 'access' && <AccessTab access={access || []} lineName={name || ''} />}
+            {activeTab === 'access' && (
+              accessLoading ? (
+                <EmptyState title="Loading access list..." description="Fetching access decisions for this line." />
+              ) : accessError ? (
+                <EmptyState
+                  variant="error"
+                  title="Failed to load access list"
+                  description={accessError.message}
+                  onRetry={() => { void refetchAccess() }}
+                />
+              ) : (
+                <AccessTab access={access ?? []} lineName={name || ''} />
+              )
+            )}
             {activeTab === 'history' && (
               <HistoryTab
                 chats={chats || []}
@@ -257,7 +281,20 @@ export default function LineDetail() {
                 typingJids={typingJids}
               />
             )}
-            {activeTab === 'logs' && <LogsTab logs={logs || []} filter={logFilter} onFilterChange={setLogFilter} />}
+            {activeTab === 'logs' && (
+              logsLoading ? (
+                <EmptyState title="Loading logs..." description="Fetching recent log entries for this line." />
+              ) : logsError ? (
+                <EmptyState
+                  variant="error"
+                  title="Failed to load logs"
+                  description={logsError.message}
+                  onRetry={() => { void refetchLogs() }}
+                />
+              ) : (
+                <LogsTab logs={logs ?? []} filter={logFilter} onFilterChange={setLogFilter} />
+              )
+            )}
             {activeTab === 'metrics' && (
               <MetricsTab
                 metrics={metrics}

@@ -15,6 +15,7 @@ import {
   screen,
   within,
   act,
+  waitFor,
 } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -32,8 +33,18 @@ const useLineMock = vi.hoisted(() => vi.fn());
 const useTypingMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useChatsMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
 const useMessagesMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
-const useAccessMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
-const useLogsMock = vi.hoisted(() => vi.fn(() => ({ data: [] })));
+const useAccessMock = vi.hoisted(() => vi.fn((): {
+  data?: unknown[];
+  isLoading?: boolean;
+  error?: Error | null;
+  refetch?: () => unknown;
+} => ({ data: [] })));
+const useLogsMock = vi.hoisted(() => vi.fn((): {
+  data?: unknown[];
+  isLoading?: boolean;
+  error?: Error | null;
+  refetch?: () => unknown;
+} => ({ data: [] })));
 
 const useMetricsMock = vi.hoisted(() => vi.fn(() => ({
   data: undefined,
@@ -253,5 +264,57 @@ describe('LineDetail header — primitive buttons + overflow contract', () => {
     });
     const h1 = screen.getByRole('heading', { level: 1 });
     expect(h1.className).toContain('truncate');
+  });
+});
+
+describe('LineDetail tab query error states', () => {
+  it('surfaces access query errors with retry instead of rendering an empty access list', async () => {
+    const refetch = vi.fn();
+    useAccessMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      error: new Error('access socket down'),
+      refetch,
+    });
+
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat' }) });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /Access/ }));
+    });
+
+    await waitFor(() => expect(screen.getByText('Failed to load access list')).toBeDefined());
+    expect(screen.getByText('access socket down')).toBeDefined();
+    expect(screen.queryByText('Allowed (0)')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces log query errors with retry instead of rendering an empty log stream', async () => {
+    const refetch = vi.fn();
+    useLogsMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      error: new Error('log tail unavailable'),
+      refetch,
+    });
+
+    await act(async () => {
+      renderLineDetail({ line: makeLine({ name: 'test-line', mode: 'chat' }) });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /Logs/ }));
+    });
+
+    await waitFor(() => expect(screen.getByText('Failed to load logs')).toBeDefined());
+    expect(screen.getByText('log tail unavailable')).toBeDefined();
+    expect(screen.queryByText('No log entries.')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(refetch).toHaveBeenCalledTimes(1);
   });
 });
