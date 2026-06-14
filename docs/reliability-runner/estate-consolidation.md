@@ -1,37 +1,40 @@
 # Reliability Estate Consolidation
 
-Status: active ledger. Updated: 2026-06-14T19:17Z.
+Status: active ledger. Updated: 2026-06-14T19:41Z.
 
 Purpose: keep merge, branch, worktree, sweep, and instruction-hierarchy cleanup evidence in one tracked place while the reliability runner stays active.
 
 ## Current Live Queue
 
-- GitHub PR queue is volatile; re-run `gh pr list --state open` before merge or cleanup. Latest read at 2026-06-14T19:17Z showed no open PRs.
-- Latest merged PR: #846, merge commit `96d4181a`, head `81166160d93e9dc0dc6e4d1cb9883799484c9b7b`, with exact-head local `verify:release` under pinned Node 24 plus CodeQL and Quality Node 24/25 checks successful.
+- GitHub PR queue is volatile; re-run `gh pr list --state open` before merge or cleanup. Latest read at 2026-06-14T19:35Z showed no open PRs.
+- Latest merged PR: #847, merge commit `9f386bfa`, head `fdcab72314ae70e3ad0711f84c93f08cd6520f20`, with branch gate and GitHub CodeQL/Quality Node 24/25 checks successful.
 - Open GitHub issue: #640, `Prevent ignored canonical docs from disappearing from work-index coverage`; do not close or comment without explicit operator approval.
 - `test/session-classifier-pid-coverage-20260614` was merged through PR #843 and then pruned locally and remotely after `git cherry -v origin/main test/session-classifier-pid-coverage-20260614` returned empty.
 - `test/fleet-silence-route-coverage-20260614` was merged through PR #844 and then pruned locally and remotely after `git merge-base --is-ancestor test/fleet-silence-route-coverage-20260614 origin/main` succeeded and `git cherry -v origin/main test/fleet-silence-route-coverage-20260614` returned empty.
 - `test/main-bootstrap-coverage-20260614` was merged through PR #846 and then pruned locally and remotely after `git merge-base --is-ancestor test/main-bootstrap-coverage-20260614 origin/main` succeeded and `git cherry -v origin/main test/main-bootstrap-coverage-20260614` returned empty.
+- `docs/estate-ledger-refresh-20260614-main-bootstrap` was merged through PR #847 and then pruned locally and remotely after `git merge-base --is-ancestor docs/estate-ledger-refresh-20260614-main-bootstrap origin/main` succeeded and `git cherry -v origin/main docs/estate-ledger-refresh-20260614-main-bootstrap` returned empty.
 
 ## Artifact And Feature Sweep
 
 - `npm run guard:work-index`: clean.
 - `docs/work-index.md`: 188 entries, 13 unknown-status rows, 38 pending rows, 0 inconsistencies.
 - Artifact sweep dry-run `20260614T074934Z`: 1939 matched artifacts, 1346 report-only residuals, 1297 low-confidence artifacts, 0 swept.
+- Artifact sweep dry-run `20260614T193531Z`: 1954 matched artifacts, 1341 report-only residuals, 1324 low-confidence artifacts, 0 swept.
 - Broad artifact-sweep apply mode is deferred: the dry-run marks canonical tracked docs under `docs/specs` and `docs/superpowers` as `would-sweep`, so cleanup needs a narrow allowlist rather than a whole-manifest archive/delete pass.
-- No new sweep run was created for the 18:29Z refresh. Existing ignored `.sweep/` run directories are local evidence cache only; tracked runner docs remain the canonical source.
+- Ignored `.sweep/` cache was pruned reversibly: 109 older run directories were moved to the sweep-backup namespace `whatsoup-457b0e0360/ignored-cache-prune-20260614T193531Z`, leaving only `.sweep/20260614T074934Z`, `.sweep/20260614T193531Z`, and `.sweep/superseded-local` in the repo.
 
 ## Instruction Hierarchy
 
-Instruction audit summary at 2026-06-14T18:31Z: all configured root-router references resolved for the checked machine/global and project surfaces. No instruction files were edited in this pass.
+Instruction audit summary at 2026-06-14T19:35Z: all configured root-router references resolved for the checked machine/global and project surfaces. Registry says every tracked surface is current through 2026-07-14. No instruction files were edited in this pass.
 
 ## Branch And Worktree Hygiene
 
 - Remote-tracking refs were refreshed with `git fetch --prune origin`.
 - Do not delete branches with nonzero `git cherry -v origin/main <branch>` output.
 - Do not remove worktrees with dirty or staged files, even when branch history is already reachable from `origin/main`.
-- Current classifier at 2026-06-14T19:17Z: the primary checkout is detached at `origin/main` because local `main` is owned by a peer worktree; many other worktrees are clean and `git cherry -v origin/main <branch>` returns empty, but their histories are not direct ancestors because the work appears patch-equivalent or superseded through other merges.
-- Broad worktree/branch deletion is deferred while peer-agent Claude shells are present in this checkout. Do not prune shared worktrees solely from cherry-empty evidence unless the owning process is clear or the operator explicitly approves the batch.
+- Current classifier at 2026-06-14T19:40Z: primary checkout is on `chore/estate-hygiene-sweep-20260614` at `origin/main` head `9f386bfa`; local `main` is owned by a peer worktree. Merged-local refs outside the current branch are attached to active worktrees; clean worktree branches still show nonzero `git cherry -v origin/main <branch>` unique-patch counts.
+- `git worktree prune --dry-run --verbose` and `git remote prune origin --dry-run` produced no output after fetch/prune and cache relocation.
+- Broad worktree/branch deletion is deferred while peer-agent worktrees and nonzero cherry evidence remain. Do not prune shared worktrees solely from clean status or stale branch names unless the owning process is clear or the operator explicitly approves the batch.
 
 ## Closure Gates
 
