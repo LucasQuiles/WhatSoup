@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 pytest, TypeScript, Vitest 4, existing `scripts/eslint-fitness-check.ts`, existing repo hygiene guard, existing coverage output at `coverage/coverage-summary.json`.
 
-**Status:** active — implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. Collector cooldown stabilization, file-size warning identity pinning, coverage-headroom guard availability, branch-diff hygiene, and deploy Python fixture coverage are present locally; coverage-headroom remains intentionally advisory until measured coverage has enough headroom.
+**Status:** landed via PR #830 (`97e60757`). Collector cooldown stabilization, file-size warning identity pinning, coverage-headroom guard availability, branch-diff hygiene, and deploy Python fixture coverage are on `main`; coverage-headroom remains intentionally advisory until measured coverage has enough headroom.
 
 ---
 

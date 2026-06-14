@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 standard library, pytest, existing BOT ERRORS runtime manifest validation, existing TypeScript health-check manifest tests.
 
-**Status:** active — implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. The approval boundary now applies to publishing/merging the compose branch, not to reimplementing this plan.
+**Status:** landed via PR #830 (`97e60757`). This plan is retained as the Python deploy redaction SSOT design/proof record.
 
 ---
 
@@ -34,7 +34,7 @@
 - `deploy/scripts/tests/test_bot_errors_redaction_regex.py` does not load `bot-errors-health-check.py`, so the health-check gap is not enforced by the current Python parity test.
 - `deploy/scripts/tests/test_bot_errors_redaction_regex.py` also omits `bot-errors-dispatcher.py`, so dispatcher can drift from the deploy-script redaction contract without this Python parity test catching it.
 - The deploy scripts are manifest-managed by `deploy/bot-errors-runtime-manifest.json`; `tests/scripts/bot-errors-health-check.test.ts` validates the committed manifest hashes and `mustContain` markers.
-- The local compose branch adds `deploy/scripts/lib/bot_errors_redaction.py` plus manifest coverage. Current `origin/main` `f65c3990f8c2` still lacks this shared Python module until the compose branch lands.
+- `origin/main` includes `deploy/scripts/lib/bot_errors_redaction.py` plus manifest coverage as of `97e60757`.
 - Recent hardening already closed the emit atomic-write parent preflight, private-dir `bot-errors-q-loop.py` exception alignment, `guard-core.readText`, and console `asRecordOrEmpty`; this plan is only for D5/R8 redaction SSOT and the Python deploy import/manifest strategy.
 
 ## Local Compose Outcome
@@ -47,12 +47,12 @@
 
 ## Implementation Reconciliation
 
-The task snippets below were the red-first implementation plan. The local compose branch has now implemented the slice with a slightly narrower public helper API than the initial draft:
+The task snippets below were the red-first implementation plan. PR #830 implemented the slice with a slightly narrower public helper API than the initial draft:
 
 - Authoritative helper API: `deploy/scripts/lib/bot_errors_redaction.py` exports `redact_bot_errors_text(value, *, credential_path_marker, ...)` and `redact_json_value(value, redact_text)`.
 - Script wrappers remain the compatibility boundary: collector, dispatcher, emit, health-check, heartbeat-watchdog, q-loop, and runner expose their existing wrapper names and pass each script's historical credential-path marker to the shared helper.
 - Do not paste the older Task 2/Task 3 snippets over the current branch. In particular, the draft helper name `redact_text` was superseded by `redact_bot_errors_text`, and JSON redaction now accepts the caller's wrapper function to preserve per-script marker semantics.
-- Current proof on the local compose branch: `python3.12 -m pytest deploy/scripts/tests/test_bot_errors_redaction_regex.py deploy/scripts/tests/test_bot_errors_redaction_ssot.py -q` passes 86 tests, and `npm test -- --pool=forks tests/scripts/check-bot-errors-runtime-manifest.test.ts tests/scripts/bot-errors-health-check.test.ts` passes 117 tests.
+- Current proof from the landed compose: `python3.12 -m pytest deploy/scripts/tests/test_bot_errors_redaction_regex.py deploy/scripts/tests/test_bot_errors_redaction_ssot.py -q` passed 86 tests, and `npm test -- --pool=forks tests/scripts/check-bot-errors-runtime-manifest.test.ts tests/scripts/bot-errors-health-check.test.ts` passed 117 tests.
 
 ## File Structure
 

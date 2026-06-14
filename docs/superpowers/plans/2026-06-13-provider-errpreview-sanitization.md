@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Vitest, existing provider API test harnesses, existing `src/runtimes/agent/provider-crash-diagnostics.ts` sanitizer logic.
 
-**Status:** active — implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. The approval boundary now applies to publishing/merging the compose branch, not to reimplementing this plan.
+**Status:** landed via PR #830 (`97e60757`). This plan is retained as the provider-preview sanitization design/proof record.
 
 ---
 
@@ -17,9 +17,9 @@
 - Current verified base: `origin/main` `f65c3990f8c2` (`feat(agent): surface turn capability in health`).
 - `src/runtimes/agent/provider-crash-diagnostics.ts` already redacts provider CLI crash stderr for bearer strings, keyed secrets, common token prefixes, and email addresses.
 - `src/runtimes/agent/providers/claude.ts` and `src/runtimes/agent/session.ts` already consume that crash-preview sanitizer for stderr paths.
-- Current `origin/main` still lacks this fix until the compose branch lands.
-- The local compose branch routes `anthropic-api.ts` and `openai-api.ts` HTTP error previews and malformed SSE previews through `providerPreview(...)`.
-- The local compose branch adds `src/runtimes/agent/provider-preview-sanitizer.ts` and focused provider preview redaction tests.
+- `origin/main` includes this fix as of `97e60757`.
+- `anthropic-api.ts` and `openai-api.ts` HTTP error previews and malformed SSE previews route through `providerPreview(...)`.
+- `src/runtimes/agent/provider-preview-sanitizer.ts` and focused provider preview redaction tests are on `main`.
 
 ## Risk Statement
 
