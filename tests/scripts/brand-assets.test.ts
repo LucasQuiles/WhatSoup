@@ -16,6 +16,7 @@ afterEach(() => {
 });
 
 interface FixtureOptions {
+  extraConsoleFiles?: Record<string, string>;
   extraPublicFiles?: Record<string, string>;
   favicon?: string;
   index?: string;
@@ -43,6 +44,11 @@ function makeFixture(options: FixtureOptions = {}) {
       manifest,
       options.manifest ?? JSON.stringify({ icons: [{ src: '/favicon.svg', sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }] }, null, 2),
     );
+  }
+  for (const [path, content] of Object.entries(options.extraConsoleFiles ?? {})) {
+    const target = join(root, 'console', path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, content);
   }
   for (const [path, content] of Object.entries(options.extraPublicFiles ?? {})) {
     const target = join(root, 'console/public', path);
@@ -245,5 +251,42 @@ describe('check-brand-assets.mjs', () => {
         target: join(fixture.root, 'console/public/icons/unused.svg'),
       }),
     ]));
+  });
+
+  it('does not treat prose basename mentions as public SVG references', () => {
+    const fixture = makeFixture({
+      extraPublicFiles: {
+        'icons/unused.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" />\n',
+      },
+      index: '<!doctype html><html><head><link rel="icon" type="image/svg+xml" href="/favicon.svg" /><link rel="manifest" href="/manifest.webmanifest" /><!-- icons/unused.svg was retired --></head><body></body></html>\n',
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'ORPHAN_PUBLIC_SVG',
+        target: join(fixture.root, 'console/public/icons/unused.svg'),
+      }),
+    ]));
+  });
+
+  it('accepts public SVG assets referenced by a console source path', () => {
+    const fixture = makeFixture({
+      extraConsoleFiles: {
+        'src/IconPreview.tsx': 'export const iconPath = "/icons/used.svg";\n',
+      },
+      extraPublicFiles: {
+        'icons/used.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" />\n',
+      },
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(0);
+    expect(output.verdict).toBe('PASS');
+    expect(output.failure_count).toBe(0);
   });
 });

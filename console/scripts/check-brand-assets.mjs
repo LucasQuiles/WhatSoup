@@ -2,7 +2,7 @@
 // Report SOUP brand asset readiness: favicon source, document links, and PWA/maskable coverage.
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -115,6 +115,39 @@ function textFilesUnder(dir) {
 function publicSvgAssets(paths) {
   const publicDir = dirname(paths.manifest);
   return filesUnder(publicDir, (name) => name.endsWith('.svg'));
+}
+
+function normalizeSvgReference(value) {
+  const trimmed = value.trim().replace(/\\/g, '/').replace(/[?#].*$/, '');
+  const publicIndex = trimmed.lastIndexOf('/public/');
+  let path = publicIndex >= 0 ? trimmed.slice(publicIndex + '/public/'.length) : trimmed;
+  path = path.replace(/^public\//, '').replace(/^\/+/, '');
+  while (path.startsWith('./')) path = path.slice(2);
+  if (!path || path.startsWith('../') || !path.toLowerCase().endsWith('.svg')) return null;
+  return path;
+}
+
+function collectSvgReferences(text) {
+  const cleaned = text
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1');
+  const references = new Set();
+  const patterns = [
+    /\b(?:href|src|xlink:href)\s*=\s*["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,
+    /["']src["']\s*:\s*["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,
+    /url\(\s*["']?([^"')\s]+\.svg(?:[?#][^"')\s]*)?)["']?\s*\)/gi,
+    /(?:import\s+[^'"]+\s+from\s+|from\s+|import\(\s*)["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,
+    /["']((?:\/|\.{1,2}\/|public\/|[^"']+\/)[^"']+\.svg(?:[?#][^"']*)?)["']/gi,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of cleaned.matchAll(pattern)) {
+      const reference = normalizeSvgReference(match[1]);
+      if (reference) references.add(reference);
+    }
+  }
+  return references;
 }
 
 function numericAttr(svg, attr) {
@@ -276,13 +309,19 @@ function scanPeripheralBrandFailures(paths) {
     }
   }
 
-  const referenceText = [
+  const referencedSvgAssets = new Set();
+  for (const file of [
     ...textArtifacts,
     ...textFilesUnder(resolve(pathConsoleRoot(paths), 'src')),
-  ].map((file) => readFileSync(file, 'utf8')).join('\n');
+  ]) {
+    for (const reference of collectSvgReferences(readFileSync(file, 'utf8'))) {
+      referencedSvgAssets.add(reference);
+    }
+  }
 
   for (const file of publicSvgAssets(paths)) {
-    if (!referenceText.includes(basename(file))) {
+    const publicPath = relative(dirname(paths.manifest), file).replace(/\\/g, '/');
+    if (!referencedSvgAssets.has(publicPath)) {
       addFailure(
         failures,
         'ORPHAN_PUBLIC_SVG',

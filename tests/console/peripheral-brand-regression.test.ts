@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { basename, resolve } from 'node:path'
+import { relative, resolve } from 'node:path'
 
 // The TSX brand-regression guard scans `console/src` only, so brand/channel copy
 // in peripheral artifacts (the document shell, PWA manifest) escapes it entirely.
@@ -12,37 +12,66 @@ import { basename, resolve } from 'node:path'
 
 const consoleRoot = resolve(import.meta.dirname, '..', '..', 'console')
 
-function peripheralTextArtifacts(): string[] {
-  const files = [resolve(consoleRoot, 'index.html')]
-  const publicDir = resolve(consoleRoot, 'public')
-  if (existsSync(publicDir)) {
-    for (const entry of readdirSync(publicDir)) {
-      if (/\.(?:json|webmanifest|html)$/.test(entry)) files.push(resolve(publicDir, entry))
-    }
-  }
-  return files.filter(existsSync)
-}
-
-function textFilesUnder(dir: string): string[] {
+function filesUnder(dir: string, matchesFile: (name: string) => boolean): string[] {
   if (!existsSync(dir)) return []
   const files: string[] = []
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = resolve(dir, entry.name)
     if (entry.isDirectory()) {
-      files.push(...textFilesUnder(path))
-    } else if (/\.(?:css|html|json|ts|tsx|webmanifest)$/.test(entry.name)) {
+      files.push(...filesUnder(path, matchesFile))
+    } else if (matchesFile(entry.name)) {
       files.push(path)
     }
   }
   return files
 }
 
-function publicSvgAssets(): string[] {
+function peripheralTextArtifacts(): string[] {
+  const files = [resolve(consoleRoot, 'index.html')]
   const publicDir = resolve(consoleRoot, 'public')
-  if (!existsSync(publicDir)) return []
-  return readdirSync(publicDir)
-    .filter((entry) => entry.endsWith('.svg'))
-    .map((entry) => resolve(publicDir, entry))
+  files.push(...filesUnder(publicDir, (name) => /\.(?:json|webmanifest|html)$/.test(name)))
+  return files.filter(existsSync)
+}
+
+function textFilesUnder(dir: string): string[] {
+  return filesUnder(dir, (name) => /\.(?:css|html|json|ts|tsx|webmanifest)$/.test(name))
+}
+
+function publicSvgAssets(): string[] {
+  return filesUnder(resolve(consoleRoot, 'public'), (name) => name.endsWith('.svg'))
+}
+
+function normalizeSvgReference(value: string): string | null {
+  const trimmed = value.trim().replace(/\\/g, '/').replace(/[?#].*$/, '')
+  const publicIndex = trimmed.lastIndexOf('/public/')
+  let path = publicIndex >= 0 ? trimmed.slice(publicIndex + '/public/'.length) : trimmed
+  path = path.replace(/^public\//, '').replace(/^\/+/, '')
+  while (path.startsWith('./')) path = path.slice(2)
+  if (!path || path.startsWith('../') || !path.toLowerCase().endsWith('.svg')) return null
+  return path
+}
+
+function collectSvgReferences(text: string): Set<string> {
+  const cleaned = text
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^\S\r\n])\/\/.*$/gm, '$1')
+  const references = new Set<string>()
+  const patterns = [
+    /\b(?:href|src|xlink:href)\s*=\s*["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,
+    /["']src["']\s*:\s*["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,
+    /url\(\s*["']?([^"')\s]+\.svg(?:[?#][^"')\s]*)?)["']?\s*\)/gi,
+    /(?:import\s+[^'"]+\s+from\s+|from\s+|import\(\s*)["']([^"']+\.svg(?:[?#][^"']*)?)["']/gi,
+    /["']((?:\/|\.{1,2}\/|public\/|[^"']+\/)[^"']+\.svg(?:[?#][^"']*)?)["']/gi,
+  ]
+
+  for (const pattern of patterns) {
+    for (const match of cleaned.matchAll(pattern)) {
+      const reference = normalizeSvgReference(match[1])
+      if (reference) references.add(reference)
+    }
+  }
+  return references
 }
 
 // Legacy product name retired in favour of "Fleet" / "SOUP"; channel-bound copy
@@ -75,12 +104,19 @@ describe('peripheral brand regression (artifacts outside console/src)', () => {
   })
 
   it('does not ship unreferenced public SVG assets', () => {
-    const referenceText = [
+    const referenced = new Set<string>()
+    for (const file of [
       ...peripheralTextArtifacts(),
       ...textFilesUnder(resolve(consoleRoot, 'src')),
-    ].map((file) => readFileSync(file, 'utf8')).join('\n')
+    ]) {
+      for (const reference of collectSvgReferences(readFileSync(file, 'utf8'))) {
+        referenced.add(reference)
+      }
+    }
+
+    const publicDir = resolve(consoleRoot, 'public')
     const orphaned = publicSvgAssets()
-      .filter((file) => !referenceText.includes(basename(file)))
+      .filter((file) => !referenced.has(relative(publicDir, file).replace(/\\/g, '/')))
       .map((file) => file.replace(`${consoleRoot}/`, 'console/'))
 
     expect(orphaned).toEqual([])
