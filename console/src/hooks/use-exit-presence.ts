@@ -83,19 +83,10 @@ export function useExitPresence(
     animNameRef.current = animName;
   });
 
-  // A ref storing the cancel function for any in-flight closing dwell.
-  // Checked on open=false→true without needing an effect for the open=true path.
-  const cancelClosingRef = useRef<(() => void) | null>(null);
-
   useEffect(() => {
     if (open) {
-      // Re-open (or initial mount): cancel any in-flight closing dwell.
-      // This does NOT require a separate setClosingActive(false) call here —
-      // the cancel function already calls setClosingActive(false).
-      if (cancelClosingRef.current) {
-        cancelClosingRef.current();
-        cancelClosingRef.current = null;
-      }
+      // Re-open (or initial mount): the previous open=false effect cleanup has
+      // already cancelled any in-flight timer/listener before this effect runs.
       return;
     }
 
@@ -115,6 +106,7 @@ export function useExitPresence(
     }
 
     // Closing dwell: enter the closing phase.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- waiver:WVR-015 close dwell must arm before the shell can unmount; expires 2026-12-31
     setClosingActive(true);
 
     let cancelled = false;
@@ -123,19 +115,10 @@ export function useExitPresence(
     function unmount() {
       if (cancelled) return;
       cancelled = true;
-      cancelClosingRef.current = null;
       if (timerId !== null) clearTimeout(timerId);
       shell!.removeEventListener('animationend', handleAnimationEnd);
       setClosingActive(false);
     }
-
-    cancelClosingRef.current = () => {
-      cancelled = true;
-      cancelClosingRef.current = null;
-      if (timerId !== null) clearTimeout(timerId);
-      shell!.removeEventListener('animationend', handleAnimationEnd);
-      setClosingActive(false);
-    };
 
     function handleAnimationEnd(e: AnimationEvent) {
       if (e.target !== shell) return;
@@ -157,7 +140,6 @@ export function useExitPresence(
 
     return () => {
       cancelled = true;
-      cancelClosingRef.current = null;
       cancelAnimationFrame(rafId);
       if (timerId !== null) clearTimeout(timerId);
       shell.removeEventListener('animationend', handleAnimationEnd);
@@ -166,8 +148,7 @@ export function useExitPresence(
       // the component is gone anyway. StrictMode cleanup/re-setup: the second
       // setup resets cancellation state.
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional open-only dependency: the exit machinery must re-arm exactly on open transitions, not when ref-stable callbacks re-render; expires 2026-12-31
-  }, [open]);
+  }, [open, shellRef]);
 
   // Derive mounted from open (primary) and closingActive (dwell).
   // open=true → always mounted regardless of closingActive.

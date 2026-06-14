@@ -877,8 +877,9 @@ landed `ba4ed643`):
   `verify:release`, and quality.yml CI (wired `44897b16`, parity completed `f09f5dc3`).
 - **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
-  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 13 14 16 17)` — nine
-  checks fail the run; check 17 promoted after `.c-kpi-hover` moved to `--shadow-hover` and
+  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 13 14 15 16 17)` — ten
+  checks fail the run; check 15 promoted after the dead `useExitPresence` suppression was removed,
+  and check 17 promoted after `.c-kpi-hover` moved to `--shadow-hover` and
   `raw-color-css` ratcheted to zero. The burndown scanner also carries a zeroed
   `raw-font-size-css` category for CSS type-scale re-entry. Checks 18–20 remain report-only per the
   §2 lifecycle, and the remaining immature checks each sit behind a named landing gate in the

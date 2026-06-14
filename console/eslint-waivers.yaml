@@ -29,7 +29,9 @@
 # B3W4 changes (2026-06-12):
 #   WVR-014 RETIRED — static data-line-type accent definitions replace runtime injection (grep-verified; B3 wave 4).
 #   WVR-013 RETIRED — .c-kpi-hover shadow migrated to --shadow-hover (raw-color-css 1→0).
-# Remaining: 9 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011..WVR-012).
+# Suppression hygiene (2026-06-14):
+#   WVR-015 ADDED — useExitPresence must arm the close dwell synchronously inside the close effect.
+# Remaining: 10 entries (WVR-001, WVR-002, WVR-005..WVR-009, WVR-011..WVR-012, WVR-015).
 
 waivers:
   - id: WVR-001
@@ -187,3 +189,23 @@ waivers:
       Retire if react-refresh capability changes or helper extraction happens.
     safer_alternative_considered: separate popover-keyboard.ts module — rejected as spec-orphan fragmentation.
     status: temporary
+  - id: WVR-015
+    rule: react-hooks/set-state-in-effect
+    owner: console-maintainer
+    reason: >
+      useExitPresence must synchronously arm closingActive when open flips false;
+      otherwise the hook returns mounted=false for the close render and the shell can
+      unmount before CSS exit animation listeners/timers are attached.
+    scope: console/src/hooks/use-exit-presence.ts:109
+    expiry: 2026-12-31
+    replacement_plan: >
+      Revisit during the modal/drawer presence-machine cleanup; retire if the exit
+      animation contract moves to a reducer/primitive that can represent closing
+      during render without an effect-state arm.
+    safer_alternative_considered: >
+      requestAnimationFrame/setTimeout deferral — rejected because it moves the dwell
+      arm after the close render, which can remove the shell before the exit path exists.
+    status: temporary
+    expiration_phase: D-series-close
+    cleanup_trigger: modal/drawer presence primitive rewrite or React hook guidance change
+    user_approval_required: no

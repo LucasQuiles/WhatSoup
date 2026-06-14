@@ -34,6 +34,8 @@ CONSOLE_DIR="$REPO_ROOT/console"
 #   - Check 10: live PASS (all three protected contracts present); FAIL on deletion.
 #   - Check 13: live PASS (exactly 5 infinite occurrences, all sanctioned/waivered); FAIL on new.
 #   - Check 14: live PASS (no expired waivers); deterministic date check, zero FP surface.
+#   - Check 15: live PASS after use-exit-presence dead suppression cleanup; FAIL on any
+#               lint suppression lacking a waiver:<id> tag.
 #   - Check 16: live PASS (zero legacy lane vars); FAIL on reintroduction.
 #   - Check 17: live PASS (zero component-tier CSS raw colors after --shadow-hover);
 #               FAIL on raw hex/rgb/hsl/oklch reintroduction outside token tiers.
@@ -43,8 +45,7 @@ CONSOLE_DIR="$REPO_ROOT/console"
 #   - Check 9: theme-parity promoted via design:theme-parity path.
 #   - Check 11: utility-smell; warn-on-changed-files ceiling only.
 #   - Check 12: focus-suppression carve-out (B4 wave composers).
-#   - Check 15: waiver-tag hygiene; WARN non-blocking.
-EXIT_ON_FAIL=(1 2 6 8 10 13 14 16 17)
+EXIT_ON_FAIL=(1 2 6 8 10 13 14 15 16 17)
 
 FAILED_CHECKS=()
 PASS=0

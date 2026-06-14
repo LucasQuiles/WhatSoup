@@ -21,20 +21,9 @@
  * effect fires (React unmounts the element synchronously on the first render where
  * mounted=false, before effects run), making lines 110–168 unreachable from a Fixture.
  *
- * ── Accepted unreachable lines ──────────────────────────────────────────────────
- * Lines 96–98 (cancelClosingRef body in the open=true branch):
- *   React runs effect cleanups before new effects on the same dependency change.
- *   When open transitions false→true, the open=false effect cleanup fires first
- *   (setting cancelClosingRef.current = null) before the open=true effect runs.
- *   The open=true effect finds cancelClosingRef.current === null → the if-block
- *   is never entered. In real Modal/Drawer usage, the dwell is never entered in
- *   jsdom (shell=null path above), making open=false cleanup a no-op for the ref.
- *   Result: lines 96–98 are dead code in the current implementation.
- *   Finding: the actual cancellation happens via `cancelled=true` in the cleanup
- *   (lines 159–163), which prevents the timer/animationend callbacks from firing;
- *   the cancelClosingRef approach in the open=true effect is redundant.
- *   Browser-lane proof owns the animated-exit round-trip (C-B5-7).
- * ────────────────────────────────────────────────────────────────────────────────
+ * Cleanup-before-next-effect is the cancellation contract: when open flips back to
+ * true, React runs the open=false cleanup before the open=true effect, cancelling
+ * the rAF/timer/listener via the local `cancelled` guard.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, renderHook, render, act, fireEvent } from '@testing-library/react'

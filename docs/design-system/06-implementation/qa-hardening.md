@@ -226,6 +226,7 @@ Each enforcement rule should include a negative fixture or documented negative e
 | generic UI-facing WhatsApp copy where channel-agnostic positioning is required | fails channel-specific-copy rule |
 | protected internal WhatSoup identifier renamed | fails protected-identifier rule |
 | protected channel/runtime identifier renamed (`@s.whatsapp.net`, Baileys, JID, `conversation_key`, generated prompts) | fails protected-identifier or channel-specific-copy false-positive fixture |
+| lint suppression without `waiver:<id>` tag | fails design-regression check 15 |
 | modal without focus restoration | fails modal-restore rule/test |
 | missing focus-visible treatment | fails focus-visible rule/test |
 | status chip without text label | fails status law rule/test |
