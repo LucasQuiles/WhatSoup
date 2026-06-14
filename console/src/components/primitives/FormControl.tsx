@@ -3,6 +3,7 @@ import {
   type FC,
   type InputHTMLAttributes,
   type ReactNode,
+  type RefObject,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
   useId,
@@ -40,12 +41,14 @@ export const Field: FC<FieldProps> = ({ label, error, helper, confirmed, childre
 };
 
 export interface TextInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'style'> {
+  ref?: RefObject<HTMLInputElement | null>;
   error?: boolean;
   confirmed?: boolean;
 }
 
-export const TextInput: FC<TextInputProps> = ({ error, confirmed, className, ...props }) => (
+export const TextInput: FC<TextInputProps> = ({ error, confirmed, className, ref, ...props }) => (
   <input
+    ref={ref}
     {...props}
     className={`c-input font-mono ${className ?? ''}`}
     style={{ borderColor: borderColor(error, confirmed) }}
@@ -53,12 +56,14 @@ export const TextInput: FC<TextInputProps> = ({ error, confirmed, className, ...
 );
 
 export interface NumberInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'style' | 'type'> {
+  ref?: RefObject<HTMLInputElement | null>;
   error?: boolean;
   confirmed?: boolean;
 }
 
-export const NumberInput: FC<NumberInputProps> = ({ error, confirmed, className, ...props }) => (
+export const NumberInput: FC<NumberInputProps> = ({ error, confirmed, className, ref, ...props }) => (
   <input
+    ref={ref}
     type="number"
     {...props}
     className={`c-input c-input-number font-mono ${className ?? ''}`}
@@ -67,12 +72,14 @@ export const NumberInput: FC<NumberInputProps> = ({ error, confirmed, className,
 );
 
 export interface SelectInputProps extends Omit<SelectHTMLAttributes<HTMLSelectElement>, 'style'> {
+  ref?: RefObject<HTMLSelectElement | null>;
   error?: boolean;
   confirmed?: boolean;
 }
 
-export const SelectInput: FC<SelectInputProps> = ({ error, confirmed, children, className, ...props }) => (
+export const SelectInput: FC<SelectInputProps> = ({ error, confirmed, children, className, ref, ...props }) => (
   <select
+    ref={ref}
     {...props}
     className={`c-input c-select ${className ?? ''}`}
     style={{ borderColor: borderColor(error, confirmed) }}
@@ -82,13 +89,15 @@ export const SelectInput: FC<SelectInputProps> = ({ error, confirmed, children, 
 );
 
 export interface TextAreaProps extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'style'> {
+  ref?: RefObject<HTMLTextAreaElement | null>;
   error?: boolean;
   confirmed?: boolean;
   minHeight?: number;
 }
 
-export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, className, ...props }) => (
+export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, className, ref, ...props }) => (
   <textarea
+    ref={ref}
     {...props}
     className={`c-input font-mono ${className ?? ''}`}
     style={{

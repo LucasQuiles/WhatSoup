@@ -10,6 +10,7 @@
  *   - Width: --panel-composer 540px → size="md" 560px (tokens-v3 §6.12).
  *   - initialFocus on subject input (C-B3W1-1).
  *   - Footer raw c-btn buttons → Button primitives.
+ *   - Subject input → TextInput primitive.
  *   - Gains: stacking-aware Escape, focus trap, focus restoration.
  *   - Public prop interface, reset-on-open, submit pipeline, toasts unchanged.
  */
@@ -19,8 +20,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../lib/api.js'
 import { useToast } from '../../hooks/toast-context.js'
 import { ContactSearchPicker } from '../shared/ContactSearchPicker.js'
-import { Modal, ModalHeader, ModalBody, ModalFooter } from '../primitives'
-import { Button } from '../primitives/Button'
+import { Button, Modal, ModalHeader, ModalBody, ModalFooter, TextInput } from '../primitives'
 import type { ContactResult } from '../../types.js'
 
 interface CreateGroupModalProps {
@@ -86,14 +86,14 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
           >
             Group subject <span className="text-s-crit">*</span>
           </label>
-          <input
+          <TextInput
             ref={subjectInputRef}
             id="create-group-subject"
             type="text"
             value={subject}
             onChange={e => setSubject(e.target.value)}
             placeholder="Enter group name..."
-            className="c-input font-mono text-t2"
+            className="text-t2"
           />
         </div>
 
