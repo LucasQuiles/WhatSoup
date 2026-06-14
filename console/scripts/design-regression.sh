@@ -2,11 +2,11 @@
 # console/scripts/design-regression.sh
 #
 # Design-regression check suite (lint-plan section 5).
-# Implements all 16 labeled checks from the lint-plan's rg-based regression table.
+# Implements all 20 labeled checks from the lint-plan's rg-based regression table.
 #
-# Shadow stage policy:
-#   - All checks are REPORT-ONLY at shadow stage.
-#   - This script always exits 0 (counts reported, never blocking).
+# Enforcement policy:
+#   - Checks listed in EXIT_ON_FAIL are blocking and make this script exit 1 on WARN/FAIL.
+#   - Remaining checks stay report-only until their baseline is zero or fully waivered.
 #   - When a check is promoted to CI-blocking, update the EXIT_ON_FAIL array below.
 #
 # Usage:
@@ -24,7 +24,7 @@ CONSOLE_SRC="$REPO_ROOT/console/src"
 CONSOLE_DIR="$REPO_ROOT/console"
 
 # Checks marked EXIT_ON_FAIL will cause a non-zero exit if they find unexpected results.
-# At shadow stage: empty array (all report-only).
+# Mature zero-baseline checks are blocking; immature or non-zero baseline checks remain report-only.
 # Promoted checks (D6 packet §10 rollback table, commit 3):
 #   - Check 1: tightened hex pattern correct (no false-positive decimal IDs); zero real hex
 #               colors verified live; promotes FAIL on any real color leak.
@@ -41,12 +41,15 @@ CONSOLE_DIR="$REPO_ROOT/console"
 #   - Check 16: live PASS (zero legacy lane vars); FAIL on reintroduction.
 #   - Check 17: live PASS (zero component-tier CSS raw colors after --shadow-hover);
 #               FAIL on raw hex/rgb/hsl/oklch reintroduction outside token tiers.
+#   - Check 19: live PASS (zero dangling no-fallback var() refs in component-tier CSS);
+#               FAIL on undefined CSS custom-property refs that would resolve empty.
 # Immature checks remaining report-only (d6-investigation.md §5):
 #   - Checks 3,4: post-P2 gate (alias-layer not complete).
 #   - Checks 5,7: post-P4 gate (copy flip not landed).
 #   - Check 9: theme-parity promoted via design:theme-parity path.
 #   - Check 11: utility-smell; warn-on-changed-files ceiling only.
-EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17)
+#   - Checks 18,20: post-C2 alias consolidation gate.
+EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17 19)
 
 FAILED_CHECKS=()
 PASS=0
@@ -197,7 +200,8 @@ FILTERED=$(echo "$RAW_MATCHES" | awk -F: 'NF>=3 {
 }' | grep -v 'WhatSoupError\|mcp__whatsoup__\|whatsoup:\|/run/whatsoup/\|whatsoup/instances\|whatsoup@\|config/whatsoup' | grep -v 'wizard/ConfigStep.tsx' || true)
 # ConfigStep.tsx exemption: system-prompt template is bot-identity/protocol copy (EXEMPT-PROTECTED
 # in branding-touchpoints.md) -- kept in lockstep with the soup/no-brand-regression ESLint exemption.
-C5_COUNT=$(echo "$FILTERED" | grep -c 'WhatSoup' || echo 0)
+C5_COUNT=$(printf '%s\n' "$FILTERED" | grep -c 'WhatSoup' || true)
+C5_COUNT=${C5_COUNT:-0}
 echo "    Non-contract matches: $C5_COUNT"
 if [ -n "$FILTERED" ] && [ "$C5_COUNT" -gt 0 ]; then
   echo "$FILTERED" | head -10 | sed 's/^/    /'
@@ -340,7 +344,8 @@ fi
 check_start "13" "Infinite animation allowlist"
 CSS_FILES=$(find "$CONSOLE_SRC/styles" "$CONSOLE_SRC" -maxdepth 1 -name "*.css" 2>/dev/null)
 C13_ALL=$(rg -n 'infinite' $CSS_FILES 2>/dev/null || true)
-C13_COUNT=$(echo "$C13_ALL" | grep -c 'infinite' || echo 0)
+C13_COUNT=$(printf '%s\n' "$C13_ALL" | grep -c 'infinite' || true)
+C13_COUNT=${C13_COUNT:-0}
 echo "    'infinite' occurrences in CSS: $C13_COUNT"
 if [ -n "$C13_ALL" ]; then
   echo "$C13_ALL" | sed 's|'"$CONSOLE_SRC/"'||' | sed 's/^/    /'
@@ -452,8 +457,8 @@ fi
 #   Semantic owns per-theme role assignments; component tier must not own reused values.
 #   Component tier values are scoped to the owning component only.
 #
-# ALL four checks are REPORT-ONLY (not in EXIT_ON_FAIL) per lint-plan §2 lifecycle.
-# Promote only after baseline count is zero or fully waivered.
+# Checks 17 and 19 are blocking because their live baselines are zero.
+# Checks 18 and 20 remain report-only until the duplicate alias tier is consolidated.
 #
 # CSS-tier file groups used by checks 17-20:
 CSS_TIER_COMPONENT_FILES="$CONSOLE_SRC/styles/tokens.component.css $CONSOLE_SRC/styles/primitives.css $CONSOLE_SRC/styles/composites.css"
@@ -581,17 +586,11 @@ check_result "18" "$C18_COUNT" "zero legacy aliases in primitive tier (report-on
 #   printf '.c { color: var(--z-nonexistent, red); }\n' > /tmp/f19c.css
 #   Fallback form excluded from no-fallback ref set; not reported.
 #
-# Live-tree dangling no-fallback refs (5):
-#   --r-1, --r-2        not yet defined in any CSS file (§2.3 radii tokens missing
-#                       from tokens.primitive.css — P0 CSS split incomplete)
-#   --type-label        not yet defined (§2.6 type ramp tokens not added to CSS yet)
-#   --type-body-st      not yet defined (§2.6 type ramp tokens not added to CSS yet)
-#   --wizard-accent     runtime inline custom property set from AddLineWizard.tsx:265
-#                       via style={{ '--wizard-accent': ... }} — never a CSS definition.
-#                       WVR-014 (filed): runtime-injected; TSX sets it before CSS consumes it.
-# Burndown: add --r-1 (4px), --r-2 (6px) to tokens.primitive.css §2.3 radii block;
-#           add --type-label, --type-body-st to tokens.primitive.css §2.6 type ramp block.
-#           --wizard-accent documented as WVR-014 in eslint-waivers.yaml (filed 2026-06-12).
+# Live-tree dangling no-fallback refs: 0. Radius/type references use explicit
+# fallbacks until those token definitions land, and --wizard-accent is now
+# statically defined in composites.css with fallback-safe consumers.
+# Any future no-fallback undefined var() is a blocking failure: define the token
+# in the owning tier, or add an explicit fallback only for intentional runtime values.
 # ---------------------------------------------------------------------------
 check_start "19" "CSS tier-boundary: dangling var() refs without fallback in component-tier CSS"
 
@@ -603,7 +602,7 @@ check_start "19" "CSS tier-boundary: dangling var() refs without fallback in com
 C19_DEFINED=$(rg --no-filename '^\s*--[a-zA-Z0-9_-]+\s*:' \
   "$CSS_TIER_PRIMITIVE_FILE" "$CSS_TIER_SEMANTIC_FILE" \
   $CSS_TIER_COMPONENT_FILES 2>/dev/null \
-  | sed 's/:.*//' | sed 's/^[[:space:]]*//' | sort -u || true)
+  | sed 's/:.*//' | sed 's/^[[:space:]]*//' | sed '/^$/d' | sort -u || true)
 
 # Step 2: Extract var(--name) refs WITHOUT fallback from component-tier files.
 # Pattern: var( then --name then ) — the closing ) immediately follows the name
@@ -612,11 +611,11 @@ C19_NO_FALLBACK_REFS=""
 # shellcheck disable=SC2086
 C19_NO_FALLBACK_REFS=$(rg -o 'var\(--[a-zA-Z0-9_-]+\)' \
   $CSS_TIER_COMPONENT_FILES 2>/dev/null \
-  | grep -oE -- '--[a-zA-Z0-9_-]+' | sort -u || true)
+  | grep -oE -- '--[a-zA-Z0-9_-]+' | sed '/^$/d' | sort -u || true)
 
 # Step 3: Set difference — no-fallback refs not present in the definition set
 C19_DANGLING=""
-if [ -n "$C19_NO_FALLBACK_REFS" ] && [ -n "$C19_DEFINED" ]; then
+if [ -n "$C19_NO_FALLBACK_REFS" ]; then
   C19_DANGLING=$(comm -23 \
     <(printf '%s\n' "$C19_NO_FALLBACK_REFS") \
     <(printf '%s\n' "$C19_DEFINED") 2>/dev/null || true)
@@ -631,18 +630,15 @@ if [ -n "$C19_DANGLING" ] && [ "$C19_COUNT" -gt 0 ]; then
   printf '%s\n' "$C19_DANGLING" | sed 's/^/    /'
   echo ""
   echo "    BURNDOWN:"
-  echo "      --r-1: add to tokens.primitive.css §2.3 (--r-1: 4px)"
-  echo "      --r-2: add to tokens.primitive.css §2.3 (--r-2: 6px)"
-  echo "      --type-label: add to tokens.primitive.css §2.6 (500 12px/16px var(--font-sans))"
-  echo "      --type-body-st: add to tokens.primitive.css §2.6 (500 14px/20px var(--font-sans))"
-  echo "      --wizard-accent: WAIVER-RUNTIME-VAR (AddLineWizard.tsx:265 inline style prop)"
+  echo "      Define the custom property in the owning token tier, or add an explicit"
+  echo "      fallback only when the value is intentionally runtime-provided."
 fi
 echo "    Spec: tokens-v3 §1 (highest-value: undefined tokens = silent visual breakage)"
-echo "    Lifecycle: REPORT-ONLY (shadow); promote after P0 type+radius token definitions land"
+echo "    Lifecycle: BLOCKING — live count is zero; undefined no-fallback refs break silently"
 if [ "$C19_COUNT" -eq 0 ]; then
   check_result "19" "0" "no dangling var() refs without fallback" "OK"
 else
-  check_result "19" "$C19_COUNT" "dangling var() refs found -- see burndown above" "WARN"
+  check_result "19" "$C19_COUNT" "dangling var() refs found -- define token or add explicit fallback" "FAIL"
 fi
 
 # ---------------------------------------------------------------------------

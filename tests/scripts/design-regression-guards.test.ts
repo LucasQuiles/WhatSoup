@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -56,6 +56,56 @@ function runWaiverSync(consoleRoot: string) {
   });
 }
 
+function makeDesignRegressionFixture(componentCss: string) {
+  const root = mkdtempSync(join(tmpdir(), 'design-regression-'));
+  tmpDirs.push(root);
+
+  const consoleDir = join(root, 'console');
+  const scriptsDir = join(consoleDir, 'scripts');
+  const srcDir = join(consoleDir, 'src');
+  const stylesDir = join(srcDir, 'styles');
+  const libDir = join(srcDir, 'lib');
+  mkdirSync(scriptsDir, { recursive: true });
+  mkdirSync(stylesDir, { recursive: true });
+  mkdirSync(libDir, { recursive: true });
+  mkdirSync(join(srcDir, 'components'), { recursive: true });
+  mkdirSync(join(srcDir, 'pages'), { recursive: true });
+
+  copyFileSync(SCRIPT, join(scriptsDir, 'design-regression.sh'));
+  writeFileSync(join(consoleDir, 'index.html'), '<title>WhatSoup Console</title>\n');
+  writeFileSync(join(libDir, 'preferences.ts'), "export const key = 'whatsoup:preferences';\n");
+  writeFileSync(join(srcDir, 'mock-data.ts'), "export const socket = '/run/whatsoup/agent.sock';\n");
+  writeFileSync(join(libDir, 'agent-cwd.ts'), "export const path = 'whatsoup/instances/demo';\n");
+  writeFileSync(
+    join(scriptsDir, 'check-waiver-sync.mjs'),
+    `console.log(JSON.stringify({
+  issue_count: 0,
+  registered_count: 0,
+  source_tag_count: 0,
+  untagged_count: 0,
+  unknown_source_ids: [],
+  stale_registry_scope_count: 0,
+  untagged_suppressions: [],
+  stale_registry_scopes: []
+}));\n`,
+  );
+  writeFileSync(join(stylesDir, 'tokens.primitive.css'), ':root {\n  --font-sans: system-ui;\n}\n');
+  writeFileSync(join(stylesDir, 'tokens.semantic.css'), ':root {\n  --color-token: var(--font-sans);\n}\n');
+  writeFileSync(join(stylesDir, 'tokens.component.css'), ':root {\n  --shadow-token: var(--color-token);\n}\n');
+  writeFileSync(join(stylesDir, 'primitives.css'), componentCss);
+  writeFileSync(join(stylesDir, 'composites.css'), '.fixture { color: var(--color-token); }\n');
+
+  return join(scriptsDir, 'design-regression.sh');
+}
+
+function runDesignRegressionFixture(componentCss: string) {
+  return spawnSync('bash', [makeDesignRegressionFixture(componentCss)], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    maxBuffer: 8 * 1024 * 1024,
+  });
+}
+
 function checkBlock(output: string, checkNumber: number): string {
   const start = output.indexOf(`--- Check ${checkNumber}:`);
   const next = output.indexOf(`--- Check ${checkNumber + 1}:`, start + 1);
@@ -67,7 +117,7 @@ describe('design-regression.sh guard contracts', () => {
   it('keeps the promoted blocking check list explicit', () => {
     const source = readFileSync(SCRIPT, 'utf8');
 
-    expect(source).toContain('EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17)');
+    expect(source).toContain('EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17 19)');
   });
 
   it('reports zero focus-suppression hits as a clean blocking PASS', () => {
@@ -76,11 +126,51 @@ describe('design-regression.sh guard contracts', () => {
 
     expect(result.status).toBe(0);
     expect(output).not.toContain('integer expected');
-    expect(output).toContain('Blocking checks: 1 2 6 8 10 12 13 14 15 16 17 (all PASS)');
+    expect(output).toContain('Blocking checks: 1 2 6 8 10 12 13 14 15 16 17 19 (all PASS)');
 
     const check12 = checkBlock(output, 12);
     expect(check12).toContain('outline-none without focus-visible: count: 0');
     expect(check12).toContain('PASS  count=0  (zero focus suppression sites)');
+  });
+
+  it('reports dangling no-fallback CSS var refs as a clean blocking PASS when absent', () => {
+    const result = runScript();
+    const output = `${result.stdout}\n${result.stderr}`;
+
+    expect(result.status).toBe(0);
+
+    const check19 = checkBlock(output, 19);
+    expect(check19).toContain('Dangling var() refs (no fallback, no CSS definition): 0');
+    expect(check19).toContain('Lifecycle: BLOCKING');
+    expect(check19).toContain('PASS  count=0  (no dangling var() refs without fallback)');
+  });
+
+  it('fails a fixture repo when component CSS references an undefined var without fallback', () => {
+    const result = runDesignRegressionFixture(
+      '.fixture { color: var(--color-token); border-color: var(--missing-token); }\n',
+    );
+    const output = `${result.stdout}\n${result.stderr}`;
+
+    expect(result.status).toBe(1);
+
+    const check19 = checkBlock(output, 19);
+    expect(check19).toContain('Dangling var() refs (no fallback, no CSS definition): 1');
+    expect(check19).toContain('--missing-token');
+    expect(check19).toContain('FAIL  count=1');
+    expect(output).toContain('BLOCKING checks failed: 19');
+  });
+
+  it('allows fixture CSS refs that provide an explicit fallback', () => {
+    const result = runDesignRegressionFixture(
+      '.fixture { color: var(--color-token); border-color: var(--runtime-token, var(--color-token)); }\n',
+    );
+    const output = `${result.stdout}\n${result.stderr}`;
+
+    expect(result.status).toBe(0);
+
+    const check19 = checkBlock(output, 19);
+    expect(check19).toContain('Dangling var() refs (no fallback, no CSS definition): 0');
+    expect(check19).toContain('PASS  count=0  (no dangling var() refs without fallback)');
   });
 
   it('reports waiver registry/source sync as a clean blocking PASS', () => {

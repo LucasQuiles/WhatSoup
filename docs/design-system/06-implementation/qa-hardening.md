@@ -220,6 +220,7 @@ Each enforcement rule should include a negative fixture or documented negative e
 |---|---|
 | sample component with raw color | fails raw-color rule |
 | component-tier CSS `box-shadow` with raw `rgba()` | fails design-regression check 17 and the `raw-color-css` burndown zero ceiling |
+| component-tier CSS `var(--missing-token)` without an explicit fallback or definition | fails design-regression check 19 |
 | component/composite CSS with raw `font-size: 14px` or `font: 500 14px/20px ...` | fails the `raw-font-size-css` burndown zero ceiling |
 | component/composite CSS with `transition: all` or `transition-property: all` | fails the `transition-all-css` burndown zero ceiling |
 | non-token CSS layout declaration with direct raw lengths (`width: 40px`, `padding: calc(var(--sp-2) + 1px)`) | fails the `raw-dimension-css` burndown ceiling |

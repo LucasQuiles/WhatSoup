@@ -897,17 +897,20 @@ landed `ba4ed643`):
   design-lint fixture coverage.
 - **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
-  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17)` —
-  eleven checks fail the run; check 12 promoted after the final focus-suppression carve-out was
+  Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 12 13 14 15 16 17 19)` —
+  twelve checks fail the run; check 12 promoted after the final focus-suppression carve-out was
   removed, check 15 promoted after the dead `useExitPresence` suppression was removed, and check 17
-  promoted after `.c-kpi-hover` moved to `--shadow-hover` and `raw-color-css` ratcheted to zero. The
+  promoted after `.c-kpi-hover` moved to `--shadow-hover` and `raw-color-css` ratcheted to zero.
+  Check 19 promoted after dangling no-fallback CSS `var()` refs reached zero; undefined
+  component-tier custom-property references now fail before they can resolve empty at runtime. The
   burndown scanner also carries zeroed `raw-font-size-css` and `transition-all-css` categories for
   CSS type-scale and motion-law re-entry, plus a ratcheted `raw-dimension-css` category for raw
-  layout-length re-entry. Checks 18–20 remain report-only per the
+  layout-length re-entry. Checks 18 and 20 remain report-only per the
   §2 lifecycle, and the remaining immature checks each sit behind a named landing gate in the
   script's justification block. Workflow drift for the shared design chain is pinned by
   `guard:safeguard-diagnostics`. `tests/scripts/design-regression-guards.test.ts` pins the promoted
-  list and the zero-hit focus-suppression output shape.
+  list and the zero-hit focus-suppression / dangling-var output shapes, including fixture probes for
+  Check 19 failure and fallback silence.
 All other rule rows are unchanged: states verified still accurate against the live configs
 (brand-regression, raw-form-control, infinite-animation, literal-status-colors,
 inline-dismiss-handler, format-bypass, duplicate-shell remain in the shadow config;
