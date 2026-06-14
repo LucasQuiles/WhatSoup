@@ -28,7 +28,7 @@ import { useToast } from '../../hooks/toast-context.js'
 import { ChatPicker } from '../shared/ChatPicker.js'
 import { cronToHuman } from './scheduled-utils.js'
 import type { ChatItem, ScheduledMessage } from '../../types.js'
-import { Modal, ModalHeader, ModalBody, ModalFooter } from '../primitives'
+import { Modal, ModalHeader, ModalBody, ModalFooter, TextArea, TextInput } from '../primitives'
 import { Button } from '../primitives/Button'
 import { ToolbarTimeRange } from '../primitives/Toolbar'
 
@@ -245,13 +245,14 @@ export function ScheduleComposerModal({
             >
               Message text
             </label>
-            <textarea
+            <TextArea
               id="composer-text"
               value={text}
               onChange={e => setText(e.target.value)}
               placeholder="Type your message..."
               rows={4}
-              className="c-input font-mono text-t2 resize-vertical min-h-[var(--sp-16,calc(var(--sp-12)*2))] h-auto"
+              minHeight={96}
+              className="text-t2 h-auto"
             />
           </div>
         ) : (
@@ -263,13 +264,13 @@ export function ScheduleComposerModal({
               >
                 File path
               </label>
-              <input
+              <TextInput
                 id="composer-path"
                 type="text"
                 value={mediaPath}
                 onChange={e => setMediaPath(e.target.value)}
                 placeholder="/path/to/file.jpg"
-                className="c-input font-mono text-t2"
+                className="text-t2"
               />
             </div>
             <div>
@@ -279,13 +280,13 @@ export function ScheduleComposerModal({
               >
                 Caption (optional)
               </label>
-              <textarea
+              <TextArea
                 id="composer-caption"
                 value={caption}
                 onChange={e => setCaption(e.target.value)}
                 placeholder="Optional caption..."
                 rows={2}
-                className="c-input font-mono text-t2 resize-vertical h-auto"
+                className="text-t2 h-auto"
               />
             </div>
           </div>
@@ -299,12 +300,12 @@ export function ScheduleComposerModal({
           >
             Scheduled time (local)
           </label>
-          <input
+          <TextInput
             id="composer-datetime"
             type="datetime-local"
             value={datetimeLocal}
             onChange={e => setDatetimeLocal(e.target.value)}
-            className="c-input font-mono text-t2"
+            className="text-t2"
           />
         </div>
 
@@ -336,12 +337,12 @@ export function ScheduleComposerModal({
                 ))}
               </div>
               {/* Custom cron input */}
-              <input
+              <TextInput
                 type="text"
                 value={cronExpr}
                 onChange={e => setCronExpr(e.target.value)}
                 placeholder="Cron expression (min hr dom mon dow)"
-                className="c-input font-mono text-t2"
+                className="text-t2"
               />
               {/* Preview */}
               {cronPreview && (

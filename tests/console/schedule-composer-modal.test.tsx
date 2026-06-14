@@ -415,6 +415,33 @@ describe('ScheduleComposerModal — field editing', () => {
     expect(textarea.value).toBe('new message text')
   })
 
+  it('routes composer fields through form-control primitives', () => {
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    const text = screen.getByRole('textbox', { name: /Message text/i })
+    const scheduledTime = screen.getByLabelText(/Scheduled time/i)
+
+    expect(text.className).toContain('c-input')
+    expect(text.className).toContain('font-mono')
+    expect(scheduledTime.className).toContain('c-input')
+    expect(scheduledTime.className).toContain('font-mono')
+
+    fireEvent.click(screen.getByRole('button', { name: /Media/i }))
+    const path = screen.getByLabelText(/File path/i)
+    const caption = screen.getByLabelText(/Caption/i)
+
+    expect(path.className).toContain('c-input')
+    expect(path.className).toContain('font-mono')
+    expect(caption.className).toContain('c-input')
+    expect(caption.className).toContain('font-mono')
+
+    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
+    const cron = screen.getByPlaceholderText(/Cron expression/i)
+
+    expect(cron.className).toContain('c-input')
+    expect(cron.className).toContain('font-mono')
+  })
+
   it('switches to media content type when "Media" button is clicked', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 

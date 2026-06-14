@@ -68,7 +68,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-channel-specific-copy | proposed | global-error | P4/G7 | flags generic visible "WhatsApp" copy after the multi-channel positioning lock; protocol/runtime prompts stay allowlisted |
 | soup/protected-identifiers | scoped-error | global-error | P1 | cheap, zero current violations — start strict |
 | soup/no-raw-button | scoped-error (M list) | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
-| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate compares live shadow ESLint output to generated `console/design-raw-form-control-inventory.json`; current generated manifest is 16 total = 16 consumer-migration + 0 primitive self-hits |
+| soup/no-raw-form-control | shadow | scoped-error per dir | P2 | deterministic inventory gate compares live shadow ESLint output to generated `console/design-raw-form-control-inventory.json`; current generated manifest is 11 total = 11 consumer-migration + 0 primitive self-hits |
 | soup/no-adhoc-modal | scoped-error (M list) | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
 | soup/no-legacy-tokens | scoped-error (primitives tier) | global-error | P2+ complete | enabled only after alias layer + primitives land |
 | soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap |
@@ -230,13 +230,15 @@ cannot express the check).
 - **Violation / valid:** bare `<select className="c-input …">`
   (`console/src/components/line-detail/ConfigEditDialog.tsx:199-205`) → `<SelectInput …>`.
 - **FP strategy:** directory scoping plus the deterministic inventory gate. Current generated
-  manifest is exactly 16 consumer hits. D4.2 intentionally cleared the former 5 form-kit self-hits
+  manifest is exactly 11 consumer hits. D4.2 intentionally cleared the former 5 form-kit self-hits
   by moving the canonical primitive under `components/primitives/**`; D4.3a cleared the shared
   `SearchInput` producer, D4.3b cleared `UnlockScreen`, and D4.3c cleared `TagInput` by routing
   each through `TextInput`; D4.3j cleared `ModelAuthStep` by routing API-key input through
   `TextInput` and auth-method radios through `RadioField`; D4.3k cleared `GroupDetailModal` by
   routing subject/description/ephemeral controls through `TextInput`, `TextArea`, and `SelectInput`;
-  D4.3l cleared the ConfigStep enabled-plugin checkbox through `CheckboxField`.
+  D4.3l cleared the ConfigStep enabled-plugin checkbox through `CheckboxField`; D4.3m cleared
+  ScheduleComposerModal by routing its text, media, datetime, and cron fields through `TextInput`
+  and `TextArea`.
   Remaining count movement must be classified as exemption-movement vs consumer-migration before
   any inventory or baseline ratchet.
 - **Autofix:** no (prop surfaces differ). **Phase:** P2. **Entry:** shadow.
