@@ -2290,16 +2290,16 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     chmodSync(join(binDir, 'sntp'), 0o755);
 
     const env = { ...process.env };
-    delete env.BOT_ERRORS_DRY_CLOCK_STATUS;
-    delete env.BOT_ERRORS_DRY_CLOCK_OFFSET_MS;
-    delete env.BOT_ERRORS_CLOCK_WARNING_OFFSET_MS;
-    delete env.BOT_ERRORS_CLOCK_CRITICAL_OFFSET_MS;
+    for (const key of Object.keys(env)) {
+      if (key.startsWith('BOT_ERRORS_')) delete env[key];
+    }
 
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
       cwd: process.cwd(),
       env: {
         ...env,
         HOME: tmpRoot,
+        TMPDIR: tmpRoot,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_DRY_PLATFORM: 'darwin',

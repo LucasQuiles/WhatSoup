@@ -41,21 +41,24 @@ describe('probePrimaryModelUsability', () => {
     ).resolves.toMatchObject({ status: 'credential-unavailable' });
   });
 
-  it('maps opencode catalog hits and misses without duplicating catalog parsing', async () => {
+  it('maps OpenCode model-addressed binary probe results without using catalog-only checks', async () => {
     const foundAdapters: PrimaryModelProbeAdapters = {
-      probeModelCatalog: vi.fn(async () => ({ status: 'found' as const, suggestion: null })),
+      probeBinaryModel: vi.fn(async () => ({ status: 'ok' as const })),
     };
     await expect(
       probePrimaryModelUsability({ provider: 'opencode-cli', model: 'vendor/model-a' }, foundAdapters),
     ).resolves.toMatchObject({ status: 'usable' });
-    expect(foundAdapters.probeModelCatalog).toHaveBeenCalledWith('opencode', 'vendor/model-a');
+    expect(foundAdapters.probeBinaryModel).toHaveBeenCalledWith({
+      provider: 'opencode-cli',
+      model: 'vendor/model-a',
+    });
 
     const missingAdapters: PrimaryModelProbeAdapters = {
-      probeModelCatalog: vi.fn(async () => ({ status: 'not_found' as const, suggestion: 'vendor/model-b' })),
+      probeBinaryModel: vi.fn(async () => ({ status: 'model_unavailable' as const })),
     };
     await expect(
       probePrimaryModelUsability({ provider: 'opencode-cli', model: 'vendor/model-a' }, missingAdapters),
-    ).resolves.toMatchObject({ status: 'model-unavailable', suggestion: 'vendor/model-b' });
+    ).resolves.toMatchObject({ status: 'model-unavailable' });
   });
 
   it('maps API model access statuses to the shared usability contract', async () => {
@@ -127,7 +130,6 @@ describe('probePrimaryModelUsability', () => {
     const adapters: PrimaryModelProbeAdapters = {
       probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => ({ status: 'ok' })),
       probeApiModelAccess: vi.fn(async (): Promise<ApiModelAccessProbeResult> => ({ status: 'found' })),
-      probeModelCatalog: vi.fn(async () => ({ status: 'found' as const, suggestion: null })),
     };
 
     await expect(
@@ -138,6 +140,5 @@ describe('probePrimaryModelUsability', () => {
     ).resolves.toMatchObject({ status: 'unknown', reason: 'model-not-configured' });
     expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
     expect(adapters.probeApiModelAccess).not.toHaveBeenCalled();
-    expect(adapters.probeModelCatalog).not.toHaveBeenCalled();
   });
 });

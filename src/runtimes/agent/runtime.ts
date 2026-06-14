@@ -2537,7 +2537,6 @@ export class AgentRuntime implements Runtime {
     ensureAgentSchema(this.db);
     this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
-    this.schedulePrimaryModelUsabilityProbe('startup');
 
     // Write sandbox policy and hook settings when sandbox config is present
     if (this.sandbox) {
@@ -3059,6 +3058,7 @@ export class AgentRuntime implements Runtime {
       });
     }
 
+    this.schedulePrimaryModelUsabilityProbe('startup');
     this.startHealthStatsTimer();
     this.startWorkspaceSweepTimer();
     this.startQueueSweepTimer();
@@ -6637,7 +6637,9 @@ export class AgentRuntime implements Runtime {
       probeInFlight: true,
     };
 
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig);
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, {
+      cwd: this.cwd ?? homedir(),
+    });
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
       .then((result) => this.recordPrimaryModelUsability(result, trigger))

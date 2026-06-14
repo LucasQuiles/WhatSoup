@@ -276,7 +276,7 @@ export function getProviderBinary(provider: string): string | null {
  * catalog instead — so sessions with a baseUrl must omit `-m` and let
  * opencode resolve the model from the config file.
  */
-function opencodeUsesConfigModel(providerConfig: Record<string, unknown> | undefined): boolean {
+export function opencodeUsesConfigModel(providerConfig: Record<string, unknown> | undefined): boolean {
   const baseUrl = providerConfig?.['baseUrl'];
   return typeof baseUrl === 'string' && baseUrl.trim() !== '';
 }
