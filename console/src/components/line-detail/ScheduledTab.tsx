@@ -16,7 +16,7 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
   const [composerOpen, setComposerOpen] = useState(false)
   const [editMessage, setEditMessage] = useState<ScheduledMessage | undefined>(undefined)
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['scheduled', lineName],
     queryFn: () => api.getScheduled(lineName),
     enabled: !!lineName,
@@ -94,6 +94,7 @@ export function ScheduledTab({ lineName }: { lineName: string }) {
         variant="error"
         title="Failed to load scheduled messages"
         description={error instanceof Error ? error.message : 'MCP socket may not be available.'}
+        onRetry={() => { void refetch() }}
       />
     )
   }

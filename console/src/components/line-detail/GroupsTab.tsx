@@ -14,7 +14,7 @@ export function GroupsTab({ lineName, myJid }: { lineName: string; myJid?: strin
   const [selectedGroup, setSelectedGroup] = useState<GroupInfo | null>(null)
   const [showCreate, setShowCreate] = useState(false)
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['groups', lineName],
     queryFn: () => api.getGroups(lineName),
     enabled: !!lineName,
@@ -33,6 +33,7 @@ export function GroupsTab({ lineName, myJid }: { lineName: string; myJid?: strin
         variant="error"
         title="Failed to load groups"
         description={error instanceof Error ? error.message : 'MCP socket may not be available.'}
+        onRetry={() => { void refetch() }}
       />
     )
   }

@@ -154,7 +154,7 @@ describe('ScheduledTab — loading / error / empty states', () => {
     expect(screen.queryByRole('button', { name: /New Scheduled Message/i })).toBeNull()
   })
 
-  it('renders the error EmptyState with the thrown message when the query rejects', async () => {
+  it('renders a retryable error EmptyState with the thrown message when the query rejects', async () => {
     getScheduledMock.mockRejectedValue(new Error('socket down'))
 
     await renderSettled()
@@ -162,6 +162,10 @@ describe('ScheduledTab — loading / error / empty states', () => {
     expect(screen.getByText('Failed to load scheduled messages')).toBeDefined()
     expect(screen.getByText('socket down')).toBeDefined()
     expect(screen.queryByText(pendingEarly.payload.text as string)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => expect(getScheduledMock).toHaveBeenCalledTimes(2))
   })
 
   it('falls back to the MCP-socket hint when the rejection is not an Error', async () => {
