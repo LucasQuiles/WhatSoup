@@ -248,7 +248,11 @@ describe('messages', () => {
     // so the chunking path (CHUNK_SIZE=500) must be exercised.
     const COUNT = 1500;
     for (let i = 0; i < COUNT; i++) {
-      storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + i, isFromMe: false }));
+      storeMessageIfNew(db, makeMsg({
+        messageId: `bulk-param-limit-${i}`,
+        timestamp: BASE_TS + i,
+        isFromMe: false,
+      }));
     }
     const all = getUnprocessedMessages(db, COUNT + 10);
     expect(all.length).toBe(COUNT);
