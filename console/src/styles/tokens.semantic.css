@@ -83,6 +83,7 @@
   --provider-anthropic-wash: color-mix(in srgb, var(--provider-anthropic-fg) var(--wash), transparent);
   --provider-opencode-fg:   #9FB3A6;
   --provider-opencode-wash: color-mix(in srgb, var(--provider-opencode-fg) var(--wash), transparent);
+  --provider-unknown:       var(--text-3);
 
   --data-inbound-solid:  #6B8299;
   --data-outbound-solid: #9AB2C4;
@@ -181,6 +182,7 @@
   --provider-anthropic-wash: color-mix(in srgb, var(--provider-anthropic-fg) var(--wash), transparent);
   --provider-opencode-fg:   #536F5C;
   --provider-opencode-wash: color-mix(in srgb, var(--provider-opencode-fg) var(--wash), transparent);
+  --provider-unknown:       var(--text-3);
 
   --data-inbound-solid:  #456073;
   --data-outbound-solid: #5E7E94;

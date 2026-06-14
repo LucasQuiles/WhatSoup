@@ -42,10 +42,10 @@ series, and provider identity chips.
 
 Constraints: provider colours ride a dedicated **muted data-viz palette** (`--provider-*`), defined
 in `tokens-v3.md` §3.6a as `--provider-{claude,codex,gemini,openai,anthropic,opencode}-fg` plus
-matching `-wash` tokens. Provider foreground tokens must be AA-checked wherever used as text and
-must stay visually subordinate to status and the action accent. They may **never** carry success,
-warning, failure, selected, focused, unread, or primary-action meaning, and may never reuse a
-`--color-s-*` / `--color-m-*` token.
+matching `-wash` tokens and the neutral `--provider-unknown` fallback. Provider foreground tokens
+must be AA-checked wherever used as text and must stay visually subordinate to status and the action
+accent. They may **never** carry success, warning, failure, selected, focused, unread, or
+primary-action meaning, and may never reuse a `--color-s-*` / `--color-m-*` token.
 
 Message-volume and other non-provider chart series take the separate `--data-*` palette in
 `tokens-v3.md` §3.6a. Lawful data-series tokens are:

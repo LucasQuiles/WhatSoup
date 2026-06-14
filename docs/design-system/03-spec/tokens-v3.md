@@ -220,6 +220,7 @@ non-provider data dimensions only.
 | `--provider-anthropic-wash` | `color-mix(in srgb, var(--provider-anthropic-fg) var(--wash), transparent)` | `color-mix(in srgb, var(--provider-anthropic-fg) var(--wash), transparent)` | Anthropic provider chip wash |
 | `--provider-opencode-fg` | `#9FB3A6` | `#536F5C` | OpenCode provider identity text/legend/series |
 | `--provider-opencode-wash` | `color-mix(in srgb, var(--provider-opencode-fg) var(--wash), transparent)` | `color-mix(in srgb, var(--provider-opencode-fg) var(--wash), transparent)` | OpenCode provider chip wash |
+| `--provider-unknown` | `var(--text-3)` | `var(--text-3)` | neutral fallback for unrecognized provider IDs |
 | `--data-inbound-solid` | `#6B8299` | `#456073` | inbound/message received chart series |
 | `--data-outbound-solid` | `#9AB2C4` | `#5E7E94` | outbound/message sent chart series |
 | `--data-media-solid` | `#B39B72` | `#7A6238` | media/message attachment chart series |

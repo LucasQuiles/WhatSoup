@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PROVIDERS, getProvider, getProviderColor, getProviderConfigFields, type ProviderDef } from '../../console/src/lib/providers.ts';
+import { PROVIDERS, PROVIDER_COLORS, getProvider, getProviderColor, getProviderConfigFields } from '../../console/src/lib/providers.ts';
 
 describe('PROVIDERS', () => {
   it('has 6 providers', () => {
@@ -30,8 +30,12 @@ describe('getProvider', () => {
 });
 
 describe('getProviderColor', () => {
+  it('has an explicit color entry for every canonical provider', () => {
+    expect(Object.keys(PROVIDER_COLORS).sort()).toEqual(PROVIDERS.map((provider) => provider.id).sort());
+  });
+
   it('uses dedicated provider tokens instead of status or mode channels', () => {
-    const borrowedChannel = /var\(--(?:color-[ms]-|status-|mode-|data-)/;
+    const borrowedChannel = /var\(--(?:color-[mst]-|status-|mode-|data-)/;
 
     for (const provider of PROVIDERS) {
       const color = getProviderColor(provider.id);
@@ -43,8 +47,8 @@ describe('getProviderColor', () => {
 
   it('keeps unknown providers neutral', () => {
     expect(getProviderColor('unknown-provider')).toEqual({
-      stroke: 'var(--color-t3)',
-      fill: 'var(--color-t3)',
+      stroke: 'var(--provider-unknown)',
+      fill: 'var(--text-3)',
     });
   });
 });

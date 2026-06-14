@@ -15,10 +15,13 @@
 //  tests/console/provider-catalog-drift.test.ts pins the ID lists together.
 // ---------------------------------------------------------------------------
 
-import PROVIDER_IDS from '../../../src/runtimes/agent/providers/provider-ids.json';
+import providerIdsJson from '../../../src/runtimes/agent/providers/provider-ids.json';
+import type { ProviderId } from '../../../src/runtimes/agent/providers/index.ts';
+
+const PROVIDER_IDS = providerIdsJson as readonly ProviderId[];
 
 export interface ProviderDef {
-  id: string;
+  id: ProviderId;
   displayName: string;
   shortName: string;
   type: 'cli' | 'api';
@@ -31,7 +34,7 @@ export interface ConfigFieldDef {
   inputType: 'text' | 'number';
 }
 
-export const DEFAULT_PROVIDER_ID = 'claude-cli';
+export const DEFAULT_PROVIDER_ID: ProviderId = 'claude-cli';
 
 /** Console-local display metadata; membership and order come from the JSON. */
 const PROVIDER_META: ProviderDef[] = [
@@ -95,7 +98,14 @@ export function getProviderConfigFields(providerId: string): ConfigFieldDef[] {
   return fields;
 }
 
-export const PROVIDER_COLORS: Record<string, { stroke: string; fill: string }> = {
+export type ProviderColor = Readonly<{ stroke: string; fill: string }>;
+
+const UNKNOWN_PROVIDER_COLOR: ProviderColor = {
+  stroke: 'var(--provider-unknown)',
+  fill: 'var(--text-3)',
+};
+
+export const PROVIDER_COLORS: Readonly<Record<ProviderId, ProviderColor>> = {
   'claude-cli':    { stroke: 'var(--provider-claude-fg)',    fill: 'var(--provider-claude-fg)' },
   'codex-cli':     { stroke: 'var(--provider-codex-fg)',     fill: 'var(--provider-codex-fg)' },
   'gemini-cli':    { stroke: 'var(--provider-gemini-fg)',    fill: 'var(--provider-gemini-fg)' },
@@ -104,8 +114,12 @@ export const PROVIDER_COLORS: Record<string, { stroke: string; fill: string }> =
   'opencode-cli':  { stroke: 'var(--provider-opencode-fg)',  fill: 'var(--provider-opencode-fg)' },
 };
 
-export function getProviderColor(id: string): { stroke: string; fill: string } {
-  return PROVIDER_COLORS[id] ?? { stroke: 'var(--color-t3)', fill: 'var(--color-t3)' };
+function isKnownProviderId(id: string): id is ProviderId {
+  return (PROVIDER_IDS as readonly string[]).includes(id);
+}
+
+export function getProviderColor(id: string): ProviderColor {
+  return isKnownProviderId(id) ? PROVIDER_COLORS[id] : UNKNOWN_PROVIDER_COLOR;
 }
 
 function modelPlaceholder(providerId: string): string {
