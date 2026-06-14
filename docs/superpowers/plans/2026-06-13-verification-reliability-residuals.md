@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 pytest, TypeScript, Vitest 4, existing `scripts/eslint-fitness-check.ts`, existing repo hygiene guard, existing coverage output at `coverage/coverage-summary.json`.
 
-**Status:** pending; execution should start only after the guardrail residual branch is either landed or deliberately split out of Task 4.
+**Status:** implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. Collector cooldown stabilization, file-size warning identity pinning, coverage-headroom guard availability, branch-diff hygiene, and deploy Python fixture coverage are present locally; coverage-headroom remains intentionally advisory until measured coverage has enough headroom.
 
 ---
 
@@ -18,6 +18,14 @@
 - Do not stack this work on `chore/guardrail-residuals-20260613` unless that branch has already landed. If it has not landed, keep this as a separate branch and rebase after it lands.
 - Before push or PR: run Test Integrity on any changed `tests/**/*.test.*` files, then `npm run verify:push:branch`.
 - Do not weaken, skip, retry-loop, or quarantine flaky tests. The collector cooldown flake must be stabilized by deterministic time control.
+
+## Local Compose Outcome
+
+- Collector cooldown tests use deterministic fake-clock coverage in `deploy/scripts/tests/test_bot_errors_collector_backoff.py`.
+- File-size warning budget now pins file identities, not just count.
+- `guard:coverage-headroom` exists, but it is not part of the normal push/release gate because current coverage does not yet provide the configured two-point headroom on every enforced metric.
+- Branch/base diff hygiene exists as `guard:repo:branch-diff` and is wired into local/CI guard chains.
+- Deploy Python fixture hygiene coverage is pinned in `tests/scripts/repo-hygiene-guard.test.ts`; the fixture values are constructed dynamically so public tests do not carry literal private host/domain/tailnet examples.
 
 ## File Structure
 

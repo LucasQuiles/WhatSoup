@@ -25,7 +25,7 @@ scoped markdown files currently on disk.
 | Dimension | Breakdown |
 |---|---|
 | Kind | bead=113, doc=15, handoff=4, plan=20, review=2, spec=13, state=20 |
-| Status | active=2, closed=9, completed=118, deferred=8, pending=41, unknown=9 |
+| Status | active=2, closed=9, completed=118, deferred=8, pending=38, unknown=12 |
 | Status source | bead-manifest=3, body-marker=108, directory=7, fallback=4, phase-log=7, state-md-status=58 |
 
 ## Inconsistencies
@@ -41,7 +41,7 @@ scoped markdown files currently on disk.
 | `docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md` | doc | bot-errors-reliability | state-md-status |
 | `docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md` | state | bot-errors-reliability | state-md-status |
 
-### Unknown-status — triage needed (9)
+### Unknown-status — triage needed (12)
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
@@ -50,6 +50,9 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | phase4-realtime-performance | 2026-05-12 |
 | `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | phase5-analytics-observability | 2026-04-24 |
 | `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | scheduled-groups-tabs | 2026-04-06 |
+| `docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md` | plan | provider-errpreview-sanitization | 2026-06-13 |
+| `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | python-deploy-redaction-ssot | 2026-06-13 |
+| `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | plan | verification-reliability-residuals | 2026-06-13 |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | review | bot-errors-tool-call-audit | 2026-06-12 |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | spec | colony-orchestration-design | 2026-04-04 |
 | `docs/superpowers/specs/2026-04-06-scheduled-groups-tabs-design.md` | spec | scheduled-groups-tabs-design | 2026-04-06 |
@@ -346,9 +349,9 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | completed | body-marker | twilio-sms-transport | 2026-06-11 |  |
 | `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | completed | body-marker | twilio-voice-webhook | 2026-06-11 |  |
 | `docs/superpowers/plans/2026-06-13-outstanding-burndown.md` | plan | completed | body-marker | outstanding-burndown | 2026-06-13 |  |
-| `docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md` | plan | pending | body-marker | provider-errpreview-sanitization | 2026-06-13 |  |
-| `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | pending | body-marker | python-deploy-redaction-ssot | 2026-06-13 |  |
-| `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | plan | pending | body-marker | verification-reliability-residuals | 2026-06-13 |  |
+| `docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md` | plan | unknown | body-marker | provider-errpreview-sanitization | 2026-06-13 |  |
+| `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | unknown | body-marker | python-deploy-redaction-ssot | 2026-06-13 |  |
+| `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | plan | unknown | body-marker | verification-reliability-residuals | 2026-06-13 |  |
 
 ### docs/superpowers/reviews  _(2 entries)_
 
@@ -378,4 +381,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-14T00:16:41Z from commit `f05cb5662f11a9804afd5112d90fa356b173b038`
+- Generated at 2026-06-14T00:36:42Z from commit `f0313475da9d1b4b74c98be0f8835da14fcddc00`

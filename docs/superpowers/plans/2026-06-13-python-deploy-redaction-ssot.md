@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3 standard library, pytest, existing BOT ERRORS runtime manifest validation, existing TypeScript health-check manifest tests.
 
-**Status:** pending; approval required before implementation because this changes deploy-script import shape.
+**Status:** implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. The approval boundary now applies to publishing/merging the compose branch, not to reimplementing this plan.
 
 ---
 
@@ -34,8 +34,16 @@
 - `deploy/scripts/tests/test_bot_errors_redaction_regex.py` does not load `bot-errors-health-check.py`, so the health-check gap is not enforced by the current Python parity test.
 - `deploy/scripts/tests/test_bot_errors_redaction_regex.py` also omits `bot-errors-dispatcher.py`, so dispatcher can drift from the deploy-script redaction contract without this Python parity test catching it.
 - The deploy scripts are manifest-managed by `deploy/bot-errors-runtime-manifest.json`; `tests/scripts/bot-errors-health-check.test.ts` validates the committed manifest hashes and `mustContain` markers.
-- There is no in-repo `deploy/secret-patterns.json` or shared Python redaction module on current `origin/main` `f65c3990f8c2`.
-- Recent hardening already closed the emit atomic-write parent preflight, `bot-errors-q-loop.py` exception alignment, `guard-core.readText`, and console `asRecordOrEmpty`; this plan is only for D5/R8 redaction SSOT and the Python deploy import/manifest strategy.
+- The local compose branch adds `deploy/scripts/lib/bot_errors_redaction.py` plus manifest coverage. Current `origin/main` `f65c3990f8c2` still lacks this shared Python module until the compose branch lands.
+- Recent hardening already closed the emit atomic-write parent preflight, private-dir `bot-errors-q-loop.py` exception alignment, `guard-core.readText`, and console `asRecordOrEmpty`; this plan is only for D5/R8 redaction SSOT and the Python deploy import/manifest strategy.
+
+## Local Compose Outcome
+
+- Shared module: `deploy/scripts/lib/bot_errors_redaction.py`.
+- Manifest coverage: `deploy/bot-errors-runtime-manifest.json` and `scripts/check-bot-errors-runtime-manifest.ts` include the shared helper files.
+- Consumers migrated: collector, dispatcher, emit, health-check, heartbeat-watchdog, q-loop, and runner.
+- Tests added: `deploy/scripts/tests/test_bot_errors_redaction_regex.py` covers all consumers and `.config/secrets/` paths; `deploy/scripts/tests/test_bot_errors_redaction_ssot.py` rejects local regex-clone reintroduction.
+- Boundary preserved: TypeScript `scripts/repo-hygiene-guard.ts` remains a source-diff hygiene scanner with a distinct threat model.
 
 ## File Structure
 

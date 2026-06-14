@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, Vitest, existing provider API test harnesses, existing `src/runtimes/agent/provider-crash-diagnostics.ts` sanitizer logic.
 
-**Status:** pending; approval required before implementation because this changes runtime security logging behavior across HTTP providers.
+**Status:** implemented in local compose branch `integration/provider-hardening-compose-refresh-20260613T194657Z`, not yet pushed or landed on `main`. The approval boundary now applies to publishing/merging the compose branch, not to reimplementing this plan.
 
 ---
 
@@ -17,15 +17,20 @@
 - Current verified base: `origin/main` `f65c3990f8c2` (`feat(agent): surface turn capability in health`).
 - `src/runtimes/agent/provider-crash-diagnostics.ts` already redacts provider CLI crash stderr for bearer strings, keyed secrets, common token prefixes, and email addresses.
 - `src/runtimes/agent/providers/claude.ts` and `src/runtimes/agent/session.ts` already consume that crash-preview sanitizer for stderr paths.
-- `src/runtimes/agent/providers/anthropic-api.ts` still logs raw `errText.slice(...)` into `errPreview` for HTTP error bodies.
-- `src/runtimes/agent/providers/anthropic-api.ts` still logs raw malformed SSE `data.slice(...)` into `dataPreview`.
-- `src/runtimes/agent/providers/openai-api.ts` still logs raw `errText.slice(...)` into `errPreview` for HTTP error bodies.
-- `src/runtimes/agent/providers/openai-api.ts` still logs raw malformed SSE `data.slice(...)` into `dataPreview`.
-- Existing tests prove crash stderr redaction but do not prove API response body preview redaction.
+- Current `origin/main` still lacks this fix until the compose branch lands.
+- The local compose branch routes `anthropic-api.ts` and `openai-api.ts` HTTP error previews and malformed SSE previews through `providerPreview(...)`.
+- The local compose branch adds `src/runtimes/agent/provider-preview-sanitizer.ts` and focused provider preview redaction tests.
 
 ## Risk Statement
 
 Provider API errors and malformed SSE chunks can echo request fragments, authorization headers, account identifiers, or upstream diagnostic JSON. Current logs truncate those strings but do not redact them first, so truncation only limits blast radius; it does not prevent leaking secrets inside the retained prefix.
+
+## Local Compose Outcome
+
+- Shared helper: `src/runtimes/agent/provider-preview-sanitizer.ts`.
+- Provider call sites: `src/runtimes/agent/providers/anthropic-api.ts` and `src/runtimes/agent/providers/openai-api.ts`.
+- Tests: `tests/runtimes/agent/providers/api-preview-redaction.test.ts` covers HTTP error `errPreview`, malformed SSE `dataPreview`, and sanitize-before-truncate behavior with runtime-built secret fixtures.
+- Compatibility: user-facing provider failure messages and existing crash-diagnostics metadata names are preserved.
 
 ## Decision Record
 
