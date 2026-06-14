@@ -110,7 +110,7 @@ rows must carry `aria-label`s describing their action.
 `single-toolbar-pattern` (import restriction), `confirm-on-destructive` (review checklist +
 `useConfirm` helper adoption), dead-affordance review lane in the QA matrix.
 
-`design:resilience` is the report-only source audit for hover-only reveal risks, interaction geometry
-shifts, and raw layer ownership. It does not replace browser keyboard/focus tests; it only produces
-the current inventory that must be burned down or explicitly exempted before a hard lint rule is
-promoted.
+`design:resilience` is the blocking source audit for hover-only reveal risks, interaction geometry
+shifts, viewport-width typography, unsafe truncation, scroll-owner proof, and raw layer ownership.
+It does not replace browser keyboard/focus tests; it proves the current source inventory is zero and
+prevents new findings through named `--fail-on-rule` checks.

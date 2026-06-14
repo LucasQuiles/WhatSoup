@@ -121,8 +121,8 @@ These rules are binding design law before they become hard lint:
 overrides on table/list internals), and the 320px reflow check in the visual QA matrix (both
 themes, per cutover plan).
 
-Report-only resilience inventory begins with `design:resilience` and covers unsafe truncation,
-scroll-owner proof, layout-shifting interaction states, viewport-width typography, and raw layer
-values. Hard-error promotion is forbidden until current findings are inventoried, false positives are
+The blocking `design:resilience` source audit covers unsafe truncation, scroll-owner proof,
+layout-shifting interaction states, viewport-width typography, hover-only content, and raw layer
+values. Promotion is allowed only after current findings are inventoried, false positives are
 classified, visual/behavior proof exists for the affected surfaces, and sanctioned exceptions are
-documented.
+documented; the current lanes have reached that state and now fail the package script on any finding.

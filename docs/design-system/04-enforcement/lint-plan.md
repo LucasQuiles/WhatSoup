@@ -634,8 +634,8 @@ cannot express the check).
 - **Mechanism:** resilience script promoted in the package script with
   `--fail-on-rule soup/layer-owner-required`. Flag `z-[...]`, `z-50`-style utilities, and raw
   `z-index` declarations unless they use a `--z-*` token or carry `data-layer-owner` /
-  `soup-layer-ok` evidence. Other resilience lanes remain report-only until their inventories are
-  burned down or sanctioned.
+  `soup-layer-ok` evidence. All current `check-design-resilience.mjs` lanes are now promoted with
+  explicit `--fail-on-rule` flags after their inventories reached zero.
 - **Scope:** overlay, sticky, floating, and portal surfaces in `console/src/**`.
 - **Violation / valid:** `className="z-[999]"` → `className="z-[var(--z-modal)]"` or a primitive
   prop that owns the layer.
