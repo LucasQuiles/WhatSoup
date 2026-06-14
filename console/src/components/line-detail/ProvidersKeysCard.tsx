@@ -1,6 +1,7 @@
 import { type FC, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { KeyRound, ShieldOff, ShieldCheck, Zap } from 'lucide-react'
+import EmptyState from '../EmptyState'
 import { useProviders, useProviderStatus } from '../../hooks/use-fleet'
 import { formatRelative } from '../../lib/format-time'
 import { getProvider, getProviderColor } from '../../lib/providers'
@@ -112,7 +113,7 @@ const ChainEntry: FC<{
 }
 
 export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
-  const { data: status, isLoading, error } = useProviderStatus(lineName)
+  const { data: status, isLoading, error, refetch } = useProviderStatus(lineName)
   const { data: catalog } = useProviders()
   const [now, setNow] = useState(() => Date.now())
 
@@ -156,7 +157,12 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
       </div>
       <div className="py-[var(--sp-3)] px-[var(--sp-4)]">
         {error ? (
-          <div className="text-s-crit text-sm">Failed to load provider status.</div>
+          <EmptyState
+            variant="error"
+            title="Failed to load provider status"
+            description={error.message}
+            onRetry={() => { void refetch() }}
+          />
         ) : isLoading || !status ? (
           <div className="text-t4 text-sm">Loading provider status…</div>
         ) : (
