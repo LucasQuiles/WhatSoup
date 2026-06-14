@@ -1,21 +1,21 @@
 # Reliability Estate Consolidation
 
-Status: active ledger. Updated: 2026-06-14T07:35:00Z.
+Status: active ledger. Updated: 2026-06-14T08:03:15Z.
 
 Purpose: keep merge, branch, worktree, sweep, and instruction-hierarchy cleanup evidence in one tracked place while the reliability runner stays active.
 
 ## Current Live Queue
 
-- GitHub PR queue: empty as of 2026-06-14T07:30Z.
+- GitHub PR queue: empty as of 2026-06-14T08:03Z.
 - Latest merged PR: #841, merge commit `0ad5ab47`, with CodeQL and Quality Node 24/25 checks successful.
 - Open GitHub issue: #640, `Prevent ignored canonical docs from disappearing from work-index coverage`; do not close or comment without explicit operator approval.
-- Active unmerged local branch: `test/session-classifier-pid-coverage-20260614`; `git cherry -v origin/main` shows two unique commits: `96b9c6f0` and `5c721f1d`.
+- Active peer-owned branch: `test/session-classifier-pid-coverage-20260614`. Latest read at 2026-06-14T08:03Z showed six unique local patches relative to `origin/main`, local head `21a66510`, remote head `aafd6049`, and no open PR. Treat the exact count as volatile and re-run `git cherry -v origin/main test/session-classifier-pid-coverage-20260614` before any disposition.
 
 ## Artifact And Feature Sweep
 
 - `npm run guard:work-index`: clean.
 - `docs/work-index.md`: 188 entries, 13 unknown-status rows, 38 pending rows, 0 inconsistencies.
-- Artifact sweep dry-run `20260614T073043Z-codex-dry-run`: 1939 matched artifacts, 1342 report-only residuals, 1290 low-confidence artifacts, 0 swept.
+- Artifact sweep dry-run `20260614T074934Z`: 1939 matched artifacts, 1346 report-only residuals, 1297 low-confidence artifacts, 0 swept.
 - Broad artifact-sweep apply mode is deferred: the dry-run marks canonical tracked docs under `docs/specs` and `docs/superpowers` as `would-sweep`, so cleanup needs a narrow allowlist rather than a whole-manifest archive/delete pass.
 
 ## Instruction Hierarchy
