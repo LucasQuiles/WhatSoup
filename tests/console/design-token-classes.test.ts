@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 
 const repoRoot = resolve(import.meta.dirname, '../..')
 const read = (path: string) => readFileSync(resolve(repoRoot, path), 'utf8')
+const readCompositeCss = () => read('console/src/styles/composites.css')
 // C0 token split: index.css is now a slim importer; design-token assertions read the full tier set.
 const readTokenCss = () => [
   'console/src/index.css',
@@ -12,6 +13,18 @@ const readTokenCss = () => [
   'console/src/styles/tokens.component.css',
   'console/src/styles/composites.css',
 ].map(read).join('\n')
+
+const blockFor = (css: string, selectorFragment: string) => {
+  const selectorStart = css.indexOf(selectorFragment)
+  expect(selectorStart).toBeGreaterThanOrEqual(0)
+
+  const blockStart = css.indexOf('{', selectorStart)
+  const blockEnd = css.indexOf('}', blockStart)
+  expect(blockStart).toBeGreaterThan(selectorStart)
+  expect(blockEnd).toBeGreaterThan(blockStart)
+
+  return css.slice(blockStart + 1, blockEnd)
+}
 
 describe('design token component classes', () => {
   it('defines reusable input and card classes in index.css', () => {
@@ -57,5 +70,35 @@ describe('design token component classes', () => {
     expect(css).toContain('/* Canonical panel container border: use --b1 for c-card and c-section so all primary panels share the same boundary token. */')
     expect(css).toContain('.c-card {\n  background: var(--color-d2);\n  border: var(--bw) solid var(--b1);')
     expect(css).toContain('.c-section {\n  background: var(--color-d2);\n  border: var(--bw) solid var(--b1);')
+  })
+
+  it('keeps shared control focus rings on the dedicated focus token', () => {
+    const css = readCompositeCss()
+    const modeOrStatusFocusColor = /--(?:color-[ms]-|[ms]-[a-z]+-(?:wash|soft|border|ring)|mode-|status-)/
+
+    for (const selector of ['.c-input:focus-visible', '.c-select:focus-visible']) {
+      const block = blockFor(css, selector)
+
+      expect(block).toContain('border-color: var(--focus-ring);')
+      expect(block).toContain('outline: 2px solid var(--focus-ring);')
+      expect(block).toContain('outline-offset: var(--bw-focus);')
+      expect(block).toContain('transition: none;')
+      expect(block).not.toMatch(modeOrStatusFocusColor)
+    }
+
+    const globalActionFocus = blockFor(css, '\nbutton:focus-visible')
+    expect(globalActionFocus).toContain('outline: 2px solid var(--focus-ring);')
+    expect(globalActionFocus).toContain('outline-offset: var(--bw-accent);')
+    expect(globalActionFocus).toContain('transition: none;')
+    expect(globalActionFocus).not.toMatch(modeOrStatusFocusColor)
+
+    const globalFormFocus = blockFor(css, '\ninput:focus-visible')
+    expect(globalFormFocus).toContain('border-color: var(--focus-ring);')
+    expect(globalFormFocus).toContain('outline: 2px solid var(--focus-ring);')
+    expect(globalFormFocus).toContain('outline-offset: var(--bw-focus);')
+    expect(globalFormFocus).toContain('transition: none;')
+    expect(globalFormFocus).not.toMatch(modeOrStatusFocusColor)
+
+    expect(css).not.toContain('Focus ring: --m-cht')
   })
 })

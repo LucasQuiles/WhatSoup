@@ -630,10 +630,10 @@ body::before {
 .c-input::placeholder { color: var(--color-t5); }
 .c-input:hover { border-color: var(--b3); }
 .c-input:focus-visible {
-  border-color: var(--color-m-cht);
-  box-shadow:
-    0 0 0 var(--bw-focus) var(--color-d1),
-    0 0 0 calc(var(--bw-focus) + var(--bw-focus-outer)) var(--m-cht-wash);
+  border-color: var(--focus-ring);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-focus);
+  transition: none;
 }
 .c-input-search {
   padding-left: var(--sp-7);
@@ -664,10 +664,10 @@ body::before {
 .c-select::placeholder { color: var(--color-t5); }
 .c-select:hover { border-color: var(--b3); }
 .c-select:focus-visible {
-  border-color: var(--color-m-cht);
-  box-shadow:
-    0 0 0 var(--bw-focus) var(--color-d1),
-    0 0 0 calc(var(--bw-focus) + var(--bw-focus-outer)) var(--m-cht-wash);
+  border-color: var(--focus-ring);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-focus);
+  transition: none;
 }
 
 .c-input-number {
@@ -931,17 +931,22 @@ body::before {
 
 /* ═══ Interaction states — from design spec §1.9 ═══ */
 
-/* Focus ring: --m-cht with 2px box-shadow at wash opacity.
+/* Focus ring: dedicated --focus-ring semantic token.
    Focus feedback is INSTANT per motion spec (interaction-patterns/motion: focus and
    validation feedback never animate) — no transition on the ring. */
 button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+  transition: none;
+}
+
 input:focus-visible,
 select:focus-visible,
-textarea:focus-visible,
-a:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 var(--bw-focus) var(--m-cht-wash), 0 0 0 var(--bw-focus-outer) var(--m-cht-soft);
-  border-color: var(--color-m-cht);
+textarea:focus-visible {
+  border-color: var(--focus-ring);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-focus);
   transition: none;
 }
 
