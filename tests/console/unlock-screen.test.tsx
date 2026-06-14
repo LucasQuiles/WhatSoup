@@ -26,6 +26,23 @@ vi.mock('../../console/src/lib/api', () => ({
 
 import UnlockScreen from '../../console/src/components/UnlockScreen'
 
+const legacyInputOverrideClasses = [
+  'bg-b1',
+  'border-b3',
+  'p-2',
+  'rounded',
+  'text-sm',
+  'text-t1',
+]
+
+const legacyButtonOverrideClasses = [
+  'bg-accent',
+  'disabled:opacity-50',
+  'p-2',
+  'rounded',
+  'text-b1',
+]
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -79,6 +96,24 @@ describe('UnlockScreen — render', () => {
     render(<UnlockScreen onUnlocked={() => {}} />)
 
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('lets the input and button primitives own styling without legacy caller overrides', () => {
+    render(<UnlockScreen onUnlocked={() => {}} />)
+
+    const input = document.querySelector('input[type="password"]') as HTMLInputElement
+    const btn = screen.getByRole('button', { name: 'Unlock' }) as HTMLButtonElement
+
+    expect(input.classList.contains('c-input')).toBe(true)
+    for (const className of legacyInputOverrideClasses) {
+      expect(input.classList.contains(className)).toBe(false)
+    }
+
+    expect(btn.classList.contains('soup-btn')).toBe(true)
+    expect(btn.classList.contains('soup-btn--primary')).toBe(true)
+    for (const className of legacyButtonOverrideClasses) {
+      expect(btn.classList.contains(className)).toBe(false)
+    }
   })
 })
 

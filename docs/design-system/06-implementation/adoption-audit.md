@@ -12,7 +12,9 @@ Post-audit current-state note: this file is a dated snapshot. Current raw form-c
 mechanically generated in `console/design-raw-form-control-inventory.json` and checked by
 `npm --prefix console run design:raw-form-control-inventory`. As of D4.3a/D4.3b/D4.3c,
 `SearchInput`, `UnlockScreen`, and `TagInput` render through `TextInput`; do not use the
-2026-06-12 raw-form counts below as the live source of truth.
+2026-06-12 raw-form counts below as the live source of truth. As of the 2026-06-14
+UnlockScreen restyle slice, `UnlockScreen` also has zero `soup/no-legacy-tokens` findings:
+the caller no longer overrides `TextInput`/`Button` with legacy utility classes.
 
 ## 1. Methodology
 
@@ -79,7 +81,7 @@ are the shadow-baseline falls for that file.
 | Surface | Spec source | Primitives used | Legacy remnants | Adopt % | Blocks |
 |---|---|---|---|---|---|
 | components/Nav.tsx (top bar) | brand.md §1 (nameplate+tick), tokens-v3 chrome glass | none | split "What"+"Soup" wordmark (brand-regression fall); raw `<button>`×3: 139 (theme toggle, DD-5), 174, 193; LT×15: 39-196; sp-half×6; no-restricted-syntax×6 | 0/3 = 0% | yes (C3/C4 nameplate slice) |
-| components/UnlockScreen.tsx | input.md, button.md (neither adopted) | none | raw password `<input>` 38; raw submit `<button>` 48; LT×3: 33, 34, 45 | 0/2 = 0% | yes — see missed-surface M5 |
+| components/UnlockScreen.tsx | input.md, button.md | TextInput, Button | closed 2026-06-14: no raw controls; no LT findings; caller uses semantic surface classes and primitive-owned input/button styling | 2/2 = 100% | no |
 | App.tsx | tokens-v3 | MotionConfig reducedMotion (DD-20 closure) | LT×2: 25, 60 | — | yes (token refs) |
 | components/ErrorBoundary.tsx | state-taxonomy | composes EmptyState; tokenized | none | — | no |
 
@@ -202,7 +204,7 @@ was not decomposed).
 | ~~M2~~ | **DONE** — ChatListItem rows (`div role="option" tabIndex`) now receive `.c-chat-item:focus-visible`, with an inset tokenized ring and a real-browser trusted-Tab proof that the focused option has non-`none` `box-shadow`. | ChatListItem.tsx; composites.css `.c-chat-item:focus-visible`; `tests/browser/a11y-contracts.test.tsx` | focus-visible-required rule remains shadow/primitives-first; this closes the known keyboard-visible consumer gap for the chat list row family. | Closed; DD-17 is no longer half-stale on the focus-visibility leg. |
 | M3 | Loading/skeleton states: TableSkeleton hardcodes inline px widths; no skeleton component spec | Skeleton.tsx (~line 19, `${140 + i * 20}px`) | state-taxonomy covers loading as a state; no skeleton spec/primitive; shimmer waivered WVR-005 pending C5 motion disposition | Tokenize widths or rule skeleton geometry exempt; fold into C5 shimmer disposition |
 | M4 | Charts family unspecced: 4 chart wrappers + ChartPanel render recharts with legacy-token axis/series/tooltip styling | FleetMetricsChart/FleetSessionChart/FleetTokenChart/MetricsChart, chart-utils.ts:7-20 | no chart spec in 03-spec/components/; WVR-001 covers margins only, not the legacy color refs | C3 chart surface slice (already named as WVR-001's cleanup_trigger): chart token adapter + retoken axis/tooltip styles |
-| M5 | UnlockScreen never sliced: raw password input, raw submit button, legacy tokens; appears in NO migration packet, M list, or burndown register — only in test-coverage docs | UnlockScreen.tsx:33-48 | input.md/button.md specs exist; nothing adopted | Add to C3 as a (small) screen slice; it is a first-run/locked-state surface the operator sees |
+| ~~M5~~ | **DONE** — UnlockScreen is sliced onto `TextInput` + `Button`, with semantic surface wrappers and no caller legacy-token overrides. | UnlockScreen.tsx; `tests/console/unlock-screen.test.tsx` | input.md/button.md specs adopted; focused test pins primitive-owned styling. | Closed 2026-06-14; shadow ratchet lowered `soup/no-legacy-tokens :: src/components/UnlockScreen.tsx` 3→0. |
 | M6 | Pagination: HistoryTab cursor pagination is raw buttons; no pagination pattern spec | HistoryTab.tsx (cursor state ~35-40, load-more controls) | no pagination spec/primitive (Table spec has no pagination section) | Rides the HistoryTab composer slice (C-B4-6); rule whether load-more is Button-enough or needs a pattern entry |
 | M7 | kbd hints: KeyboardShortcutsHelp renders `<kbd>` with legacy tier classes; no kbd treatment in typography spec | KeyboardShortcutsHelp.tsx:36-57 | no spec home for kbd chips | Token pass + one-line typography.md amendment at C3 |
 | M8 | Scrollbar theming uses legacy vars: global webkit scrollbar thumb `var(--b2)`/`var(--b3)` | composites.css:73-76 | tokens exist (`--border-*`); CSS-side, unguarded by ESLint (lint-plan §1) | Mechanical retoken with the composites.css burndown (B1) |
@@ -324,7 +326,7 @@ Blocking items (14 tracked; B12 now closed):
    (overlaps B2/B3; named because shells being green hides red interiors).
 9. **B9 — Wizard residue**: IdentityStep/LinkStep/ReviewStep onto the kit + Button;
    ConfigStep's 5 raw buttons; ModelAuthStep radios.
-10. **B10 — UnlockScreen slice (M5)** — currently sliced nowhere.
+10. ~~**B10 — UnlockScreen slice (M5)**~~ — **DONE** 2026-06-14: `TextInput` + `Button`, semantic wrappers, no legacy-token shadow findings, focused primitive-ownership test.
 11. **B11 — MetricsTab Tokens/Sessions → Tabs (DD-15)** + its 3 raw buttons.
 12. ~~**B12 — M2 focus ring on ChatListItem rows**~~ — **DONE** with `.c-chat-item:focus-visible` and trusted browser proof.
 13. **B13 — DD-10 sort-button 24px floor fix** (register: blocks final acceptance).

@@ -1,6 +1,6 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 359,
+  "total": 356,
   "rules": {
     "no-restricted-syntax :: src/components/line-detail/ModeTab.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/PipelineTab.tsx": 1,
@@ -53,7 +53,6 @@
     "soup/no-legacy-tokens :: src/components/shared/ContactSearchPicker.tsx": 1,
     "soup/no-legacy-tokens :: src/components/shared/SearchInput.tsx": 1,
     "soup/no-legacy-tokens :: src/components/Toast.tsx": 2,
-    "soup/no-legacy-tokens :: src/components/UnlockScreen.tsx": 3,
     "soup/no-legacy-tokens :: src/components/UpdateModal.tsx": 12,
     "soup/no-legacy-tokens :: src/components/wizard/ConfigStep.tsx": 21,
     "soup/no-legacy-tokens :: src/components/wizard/IdentityStep.tsx": 2,
