@@ -9,8 +9,11 @@ export type DocDriftKind =
   | 'module-count'
   | 'migration-history'
   | 'raw-form-control-inventory'
+  | 'theme-parity-token-count'
   | 'shadow-baseline-total'
   | 'design-regression-check-count'
+  | 'design-burndown-total'
+  | 'design-burndown-blocking-count'
   | 'design-guard-test-file-count'
   | 'design-guard-test-count';
 
@@ -59,6 +62,11 @@ export interface DesignGuardTestInventory {
   testCount: number;
 }
 
+export interface DesignBurndownSummary {
+  total: number;
+  blocking: number;
+}
+
 interface PackageJsonWithScripts {
   scripts?: Record<string, unknown>;
 }
@@ -103,8 +111,12 @@ const currentDesignEnforcementContextPattern =
   /\b(?:current|live)\b.*\b(?:design[- ]enforcement|shadow baseline|shadow ratchet|design-regression)\b/i;
 const shadowBaselineTotalPattern =
   /\blint-shadow-baseline\.json\b[^\n]*?(?:—|=|:|\bis\b|\btotal\b|\bceiling\b)\s*(\d+)\b/i;
+const themeParityTokenCountPattern =
+  /\btheme parity\b[^\n]*?\b(\d+)\b/i;
 const designRegressionCheckCountPattern =
   /\bdesign-regression\b[^\n]*?\b(\d+)\s+checks?\b/i;
+const designBurndownSummaryPattern =
+  /\bburndown\b[^\n]*?\b(\d+)\s+total\s*\/\s*(\d+)\s+blocking\b/i;
 const designGuardTestInventoryPattern =
   /\btest:design-guards\b[^\n]*?\b(\d+)\s+files?\s*\/\s*(\d+)\s+tests?\b/i;
 const designGuardTestFilePattern = /^tests\/.+\.(?:test|spec)\.[cm]?[tj]sx?$/;
@@ -268,6 +280,53 @@ export function findDesignRegressionCheckCount(cwd: string = process.cwd()): num
     throw new Error('ERROR(schema:design-regression.sh): check headers are not contiguous');
   }
   return uniqueChecks.size;
+}
+
+function scopeTokens(css: string, scopeMatcher: (selector: string) => boolean): Set<string> {
+  const tokens = new Set<string>();
+  const blockPattern = /([^{}]+)\{([^{}]*)\}/g;
+  for (const match of css.matchAll(blockPattern)) {
+    const selector = match[1]?.trim() ?? '';
+    const body = match[2] ?? '';
+    if (!scopeMatcher(selector)) continue;
+    for (const tokenMatch of body.matchAll(/--([a-z0-9-]+)\s*:/g)) {
+      const token = tokenMatch[1];
+      if (token) tokens.add(token);
+    }
+  }
+  return tokens;
+}
+
+export function findThemeParityTokenCount(cwd: string = process.cwd()): number {
+  const tokensPath = path.resolve(cwd, 'console/src/styles/tokens.semantic.css');
+  const css = readFileSync(tokensPath, 'utf8');
+  const dark = scopeTokens(css, (selector) => selector.includes('[data-theme="dark"]'));
+  const light = scopeTokens(css, (selector) => selector.includes('[data-theme="light"]'));
+  const missingInLight = [...dark].filter((token) => !light.has(token));
+  const missingInDark = [...light].filter((token) => !dark.has(token));
+  if (missingInLight.length > 0 || missingInDark.length > 0) {
+    throw new Error('ERROR(schema:tokens.semantic.css): theme parity token sets differ');
+  }
+  return dark.size;
+}
+
+export function findDesignBurndownSummary(cwd: string = process.cwd()): DesignBurndownSummary {
+  const queuePath = path.resolve(cwd, 'console/design-burndown-queue.json');
+  const queue = JSON.parse(readFileSync(queuePath, 'utf8')) as {
+    summary?: {
+      total?: unknown;
+      blocking?: unknown;
+    };
+  };
+  const total = queue.summary?.total;
+  const blocking = queue.summary?.blocking;
+  if (typeof total !== 'number' || !Number.isFinite(total)) {
+    throw new Error('ERROR(schema:design-burndown-queue.json): missing numeric summary.total');
+  }
+  if (typeof blocking !== 'number' || !Number.isFinite(blocking)) {
+    throw new Error('ERROR(schema:design-burndown-queue.json): missing numeric summary.blocking');
+  }
+  return { total, blocking };
 }
 
 function findDesignGuardVitestArgs(cwd: string): { testFiles: string[]; vitestArgs: string[] } {
@@ -584,8 +643,10 @@ function isCurrentDesignEnforcementClaim(filePath: string, lineText: string): bo
 function checkDesignEnforcementClaims(
   filePath: string,
   lines: string[],
+  themeParityTokenCount: number,
   shadowBaseline: ShadowBaselineInventory,
   designRegressionCheckCount: number,
+  designBurndownSummary: DesignBurndownSummary,
   designGuardTestInventory: DesignGuardTestInventory,
 ): DocDriftIssue[] {
   const issues: DocDriftIssue[] = [];
@@ -594,6 +655,20 @@ function checkDesignEnforcementClaims(
     if (!isCurrentDesignEnforcementClaim(filePath, lineText)) return;
 
     const line = index + 1;
+    const themeParityMatch = lineText.match(themeParityTokenCountPattern);
+    if (themeParityMatch) {
+      addTypedCountIssue(
+        issues,
+        'theme-parity-token-count',
+        filePath,
+        line,
+        Number(themeParityMatch[1]),
+        themeParityTokenCount,
+        lineText,
+        'theme parity token count from console/src/styles/tokens.semantic.css',
+      );
+    }
+
     const shadowBaselineMatch = lineText.match(shadowBaselineTotalPattern);
     if (shadowBaselineMatch) {
       addTypedCountIssue(
@@ -619,6 +694,30 @@ function checkDesignEnforcementClaims(
         designRegressionCheckCount,
         lineText,
         'design-regression check count from console/scripts/design-regression.sh',
+      );
+    }
+
+    const designBurndownMatch = lineText.match(designBurndownSummaryPattern);
+    if (designBurndownMatch) {
+      addTypedCountIssue(
+        issues,
+        'design-burndown-total',
+        filePath,
+        line,
+        Number(designBurndownMatch[1]),
+        designBurndownSummary.total,
+        lineText,
+        'design burndown total from console/design-burndown-queue.json',
+      );
+      addTypedCountIssue(
+        issues,
+        'design-burndown-blocking-count',
+        filePath,
+        line,
+        Number(designBurndownMatch[2]),
+        designBurndownSummary.blocking,
+        lineText,
+        'design burndown blocking count from console/design-burndown-queue.json',
       );
     }
 
@@ -658,8 +757,10 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const moduleCount = findRegisterModuleImports(cwd).length;
   const migrationVersions = findMigrationRegistryVersions(cwd);
   const rawFormControlInventory = findRawFormControlInventory(cwd);
+  const themeParityTokenCount = findThemeParityTokenCount(cwd);
   const shadowBaselineInventory = findShadowBaselineInventory(cwd);
   const designRegressionCheckCount = findDesignRegressionCheckCount(cwd);
+  const designBurndownSummary = findDesignBurndownSummary(cwd);
   const designGuardTestInventory = findDesignGuardTestInventory(cwd);
   const toolCountsByModule = new Map<string, number>();
   for (const registration of registrations) {
@@ -681,8 +782,10 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
     issues.push(...checkDesignEnforcementClaims(
       filePath,
       lines,
+      themeParityTokenCount,
       shadowBaselineInventory,
       designRegressionCheckCount,
+      designBurndownSummary,
       designGuardTestInventory,
     ));
 

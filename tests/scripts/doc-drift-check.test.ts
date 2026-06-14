@@ -6,10 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   findDocDrift,
+  findDesignBurndownSummary,
   findDesignGuardTestInventory,
   findDesignRegressionCheckCount,
   findRawFormControlInventory,
   findShadowBaselineInventory,
+  findThemeParityTokenCount,
   findToolRegistrations,
   run,
 } from '../../scripts/doc-drift-check.ts';
@@ -20,6 +22,8 @@ const currentRawFormControlInventory = findRawFormControlInventory(repoRoot);
 const currentShadowBaselineInventory = findShadowBaselineInventory(repoRoot);
 const currentDesignRegressionCheckCount = findDesignRegressionCheckCount(repoRoot);
 const currentDesignGuardTestInventory = findDesignGuardTestInventory(repoRoot);
+const currentThemeParityTokenCount = findThemeParityTokenCount(repoRoot);
+const currentDesignBurndownSummary = findDesignBurndownSummary(repoRoot);
 
 describe('doc drift check', () => {
   afterEach(() => {
@@ -264,6 +268,56 @@ describe('doc drift check', () => {
         line: 1,
         text: 'The current design-enforcement run has design-regression 16 checks.',
         expected: 'design-regression check count from console/scripts/design-regression.sh',
+      },
+    ]);
+  });
+
+  it('flags stale current theme-parity token counts', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'current-design.md');
+    const staleThemeParityCount = currentThemeParityTokenCount - 1;
+    const text = `The current design-enforcement run has theme parity ${staleThemeParityCount}.`;
+    writeFileSync(staleDoc, `${text}\n`, 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: currentThemeParityTokenCount,
+        claimed: staleThemeParityCount,
+        filePath: staleDoc,
+        kind: 'theme-parity-token-count',
+        line: 1,
+        text,
+        expected: 'theme parity token count from console/src/styles/tokens.semantic.css',
+      },
+    ]);
+  });
+
+  it('flags stale current design burndown summary counts', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'current-design.md');
+    const staleTotal = currentDesignBurndownSummary.total - 1;
+    const staleBlocking = currentDesignBurndownSummary.blocking - 1;
+    const text = `The current design-enforcement run has burndown ${staleTotal} total / ${staleBlocking} blocking.`;
+    writeFileSync(staleDoc, `${text}\n`, 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: currentDesignBurndownSummary.total,
+        claimed: staleTotal,
+        filePath: staleDoc,
+        kind: 'design-burndown-total',
+        line: 1,
+        text,
+        expected: 'design burndown total from console/design-burndown-queue.json',
+      },
+      {
+        actual: currentDesignBurndownSummary.blocking,
+        claimed: staleBlocking,
+        filePath: staleDoc,
+        kind: 'design-burndown-blocking-count',
+        line: 1,
+        text,
+        expected: 'design burndown blocking count from console/design-burndown-queue.json',
       },
     ]);
   });
