@@ -227,8 +227,7 @@ before the program may declare the cutover complete.
 | DD-21r | wizard/modal tablist keyboard contracts (ConfigStep, ModelAuthStep, GroupDetailModal) | B3 wave 4 / C3 |
 
 **Riding as documented debt (register "no"):** DD-5 (theme-toggle treatment,
-rides the C3 nav slice), DD-9 (half-step spacing aliases), DD-15 (remaining
-binary toggle pairs), DD-19 (modal exit motion + inert background), DD-22 (log
+rides the C3 nav slice), DD-9 (half-step spacing aliases), DD-19 (modal exit motion + inert background), DD-22 (log
 virtualization awaits a streaming source), DD-23 (popover collision flip),
 DD-24 (collapse-orphaned contact actions), DD-25 (toast motion literals),
 DD-26 (type ramp has consumers with fallbacks but no CSS definitions — C3).

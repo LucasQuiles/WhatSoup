@@ -7,7 +7,7 @@ import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
 import { formatCount } from '../../lib/text-utils'
-import { ToolbarTimeRange } from '../primitives'
+import { ToolbarTimeRange, Tabs, Tab } from '../primitives'
 import { Button } from '../primitives/Button'
 import type { MetricsRange, LineMetrics, LineInstance } from './types'
 
@@ -35,6 +35,14 @@ export function MetricsTab({
   const [detailTab, setDetailTab] = useState<DetailTab>('tokens')
   const hasAnyData = metrics?.hasMessageData || metrics?.hasTokenData || metrics?.hasSessionData
   const hasDetailData = metrics?.hasTokenData || metrics?.hasSessionData
+  const activeDetailTab: DetailTab =
+    detailTab === 'sessions' && metrics?.hasSessionData
+      ? 'sessions'
+      : metrics?.hasTokenData
+        ? 'tokens'
+        : metrics?.hasSessionData
+          ? 'sessions'
+          : detailTab
 
   return (
     <div className="flex-1 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
@@ -94,42 +102,39 @@ export function MetricsTab({
           {/* Detail metrics — tabbed */}
           {hasDetailData && (
             <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
-              <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-3)]">
+              <Tabs
+                label="Metric detail series"
+                value={activeDetailTab}
+                onChange={(id) => setDetailTab(id as DetailTab)}
+                className="mb-[var(--sp-3)]"
+              >
                 {metrics?.hasTokenData && (
-                  <Button
-                    size="sm"
-                    variant={detailTab === 'tokens' ? 'primary' : 'ghost'}
-                    onClick={() => setDetailTab('tokens')}
-                  >
-                    Tokens
-                  </Button>
+                  <Tab id="tokens">Tokens</Tab>
                 )}
                 {metrics?.hasSessionData && (
-                  <Button
-                    size="sm"
-                    variant={detailTab === 'sessions' ? 'primary' : 'ghost'}
-                    onClick={() => setDetailTab('sessions')}
-                  >
-                    Sessions
-                  </Button>
+                  <Tab id="sessions">Sessions</Tab>
                 )}
-              </div>
+              </Tabs>
               <div className="h-[var(--chart-min-h)]">
-                {detailTab === 'tokens' && metrics?.hasTokenData && (
-                  <FleetTokenChart
-                    data={metrics.tokenUsage}
-                    byProvider={metrics.tokenUsageByProvider}
-                    providers={metrics.providers}
-                    range={metricsRange}
-                  />
+                {activeDetailTab === 'tokens' && metrics?.hasTokenData && (
+                  <div role="tabpanel" id="tabpanel-tokens" aria-labelledby="tab-tokens" className="h-full">
+                    <FleetTokenChart
+                      data={metrics.tokenUsage}
+                      byProvider={metrics.tokenUsageByProvider}
+                      providers={metrics.providers}
+                      range={metricsRange}
+                    />
+                  </div>
                 )}
-                {detailTab === 'sessions' && metrics?.hasSessionData && (
-                  <FleetSessionChart
-                    data={metrics.sessionActivity}
-                    byProvider={metrics.sessionActivityByProvider}
-                    providers={metrics.providers}
-                    range={metricsRange}
-                  />
+                {activeDetailTab === 'sessions' && metrics?.hasSessionData && (
+                  <div role="tabpanel" id="tabpanel-sessions" aria-labelledby="tab-sessions" className="h-full">
+                    <FleetSessionChart
+                      data={metrics.sessionActivity}
+                      byProvider={metrics.sessionActivityByProvider}
+                      providers={metrics.providers}
+                      range={metricsRange}
+                    />
+                  </div>
                 )}
               </div>
             </section>

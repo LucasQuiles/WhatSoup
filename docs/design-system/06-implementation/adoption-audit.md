@@ -107,7 +107,7 @@ are the shadow-baseline falls for that file.
 |---|---|---|---|---|
 | LogsTab.tsx | LogStream, Toolbar, ToolbarFilters, Pill | none | 4/4 = 100% | no |
 | SummaryTab.tsx | Button (×5) | LT×16: 40-212 (largest tab token debt); sp-half 181, 191 | 5/5 | yes (tokens) |
-| MetricsTab.tsx | ToolbarTimeRange | raw `<button>`×3: 52, 98, 107 — 98/107 are the Tokens/Sessions pair ruled Tabs semantics (DD-15, C3); c-btn-primary active state; LT×13 | 1/4 = 25% | yes |
+| MetricsTab.tsx | ToolbarTimeRange, Button, Tabs/Tab | LT×13; chart ratio style remains inline for the token-usage split bar | controls 4/4 = 100% | yes (tokens) |
 | HistoryTab.tsx | none | composer: raw `<textarea>` 204 with `outline-none` 206 (THE one remaining focus-suppression carve-out, C-B4-6); raw `<button>`×2: 184, 225 (c-btn-primary send 227); raw cursor-pagination buttons; LT×9; legacy var 188; sp-half 206 | 0/3 = 0% | yes |
 | AccessTab.tsx | none | raw `<button>`×4: 90, 97, 107, 117; LT×10: 42-160; sp-half 56, 78 | 0/4 = 0% | yes |
 | ModeTab.tsx | none | raw `<button>`×3: 27, 51, 58; LT×4; legacy vars 74, 103 | 0/3 = 0% | yes |
@@ -261,9 +261,9 @@ the aliases). `c-btn-primary` (composites.css:729) hard-binds primary buttons to
 `var(--color-s-ok)` — see F1.
 
 **F1 — accent-law violation in the legacy button recipe (new finding, blocking):**
-`.c-btn-primary { background: var(--color-s-ok) … }` renders OK-GREEN primary actions at 10 live
+`.c-btn-primary { background: var(--color-s-ok) … }` renders OK-GREEN primary actions at 8 live
 sites while the locked law (color.md §2; conformance row 6) is electric-blue as the single
-action accent: LinkStep.tsx:134, 160 · GroupsTab.tsx:50 · MetricsTab.tsx:100, 109 ·
+action accent: LinkStep.tsx:134, 160 · GroupsTab.tsx:50 ·
 ScheduledTab.tsx:111 · Inbox.tsx:434 · HistoryTab.tsx:227 · EmptyState.tsx:66 ·
 ReviewStep.tsx:213. The conformance manifest's PASS on the accent row is true for the Button
 primitive but the legacy recipe path contradicts the law on every unmigrated send/confirm
@@ -280,7 +280,7 @@ Per pattern family (primitive-rendered / total sites):
 | Log streams | 3/3 = 100% | LogsTab, Ops, SoupKitchen drawer |
 | Drawers | 1/1 = 100% | SoupKitchen |
 | Popover pickers | 3/3 = 100% | LinePicker, ChatPicker, ContactSearchPicker (LinePicker trigger buttons still raw) |
-| Tabs / panel switchers | 4/5 = 80% | LineDetail, GroupDetailModal, ConfigStep, ModelAuthStep on Tabs; MetricsTab Tokens/Sessions pair residual (DD-15) |
+| Tabs / panel switchers | 5/5 = 100% | LineDetail, GroupDetailModal, ConfigStep, ModelAuthStep, and MetricsTab Tokens/Sessions on Tabs |
 | Toolbars | 6 primitive bands; ad-hoc bands remain on Inbox header, HistoryTab composer row, tab-header action rows (GroupsTab/ScheduledTab/AccessTab) | qualitative |
 | Buttons | 30/100 = 30% | 30 Button/ActionButton JSX vs 70 raw `<button>` |
 | Form controls | 43/74 = 58% | 43 form-kit JSX vs 31 raw controls outside the kit |
@@ -327,7 +327,7 @@ Blocking items (14 tracked; B12 now closed):
 9. **B9 — Wizard residue**: IdentityStep/LinkStep/ReviewStep onto the kit + Button;
    ConfigStep's 5 raw buttons; ModelAuthStep radios.
 10. ~~**B10 — UnlockScreen slice (M5)**~~ — **DONE** 2026-06-14: `TextInput` + `Button`, semantic wrappers, no legacy-token shadow findings, focused primitive-ownership test.
-11. **B11 — MetricsTab Tokens/Sessions → Tabs (DD-15)** + its 3 raw buttons.
+11. ~~**B11 — MetricsTab Tokens/Sessions → Tabs (DD-15)**~~ — **DONE**: panel switcher moved to Tabs; keyboard manual activation and Sessions-only default pinned.
 12. ~~**B12 — M2 focus ring on ChatListItem rows**~~ — **DONE** with `.c-chat-item:focus-visible` and trusted browser proof.
 13. **B13 — DD-10 sort-button 24px floor fix** (register: blocks final acceptance).
 14. **B14 — DD-18r remaining responsive legs** (Inbox viewport rows, drawer-flip case, legacy

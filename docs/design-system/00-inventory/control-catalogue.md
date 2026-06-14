@@ -250,10 +250,9 @@ hand-rolls tab buttons with a mode-colored absolute underline `<div>` (`:246-251
 `:231-234`) but a parallel visual system (underline inset `left-2 right-2` + `rounded-t` vs c-tab's
 full-width `--bw-accent` border).
 
-Other segmented controls not using tabs: MetricsTab range selector uses `c-btn c-btn-sm` +
-primary/ghost swap (`console/src/components/line-detail/MetricsTab.tsx:41-50`); SoupKitchen chart
-range uses `FilterPill` (`console/src/pages/SoupKitchen.tsx:285-292`) — three different mechanisms
-for "pick one of N ranges/views".
+Other range selectors are toolbar controls by semantics, not tabs: MetricsTab and SoupKitchen
+use `ToolbarTimeRange`. The MetricsTab Tokens/Sessions content switcher uses the Tabs primitive
+(DD-15 closed), so it is no longer a segmented-control residual.
 
 ## 7. Cards
 
