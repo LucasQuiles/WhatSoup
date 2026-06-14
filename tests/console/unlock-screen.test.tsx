@@ -209,6 +209,22 @@ describe('UnlockScreen — error render', () => {
     })
   })
 
+  it('marks the token input invalid and describes it with the unlock error alert', async () => {
+    mockUnlockConsole.mockRejectedValue(new Error('invalid token'))
+    render(<UnlockScreen onUnlocked={vi.fn()} />)
+
+    const input = document.querySelector('input[type="password"]') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'bad-token' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock' }))
+
+    await waitFor(() => {
+      const alert = screen.getByRole('alert')
+      expect(alert.id).toBeTruthy()
+      expect(input.getAttribute('aria-invalid')).toBe('true')
+      expect(input.getAttribute('aria-describedby')).toBe(alert.id)
+    })
+  })
+
   it('shows "unlock failed" fallback text when the rejection is not an Error instance', async () => {
     mockUnlockConsole.mockRejectedValue('plain string rejection')
     render(<UnlockScreen onUnlocked={vi.fn()} />)

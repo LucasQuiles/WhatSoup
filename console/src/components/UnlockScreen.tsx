@@ -1,4 +1,4 @@
-import { useState, useCallback, type FormEvent } from 'react'
+import { useState, useCallback, useId, type FormEvent } from 'react'
 import { unlockConsole } from '../lib/api'
 import { Button, TextInput } from './primitives'
 
@@ -11,6 +11,7 @@ export default function UnlockScreen({ onUnlocked }: { onUnlocked: () => void })
   const [token, setToken] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const errorId = useId()
 
   const submit = useCallback(async (e: FormEvent) => {
     e.preventDefault()
@@ -46,8 +47,11 @@ export default function UnlockScreen({ onUnlocked }: { onUnlocked: () => void })
           onChange={(e) => setToken(e.target.value)}
           placeholder="fleet token"
           aria-label="fleet token"
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
+          error={Boolean(error)}
         />
-        {error && <div role="alert" className="c-error">{error}</div>}
+        {error && <div id={errorId} role="alert" className="c-error">{error}</div>}
         <Button
           type="submit"
           variant="primary"
