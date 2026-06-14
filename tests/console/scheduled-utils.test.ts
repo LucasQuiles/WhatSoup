@@ -8,18 +8,18 @@ import {
 
 describe('scheduled-utils statusColor', () => {
   it('maps every known ScheduledMessage status to its design-system color token', () => {
-    expect(statusColor('pending')).toBe('var(--color-s-warn)');
-    expect(statusColor('processing')).toBe('var(--color-m-cht)');
-    expect(statusColor('sent')).toBe('var(--color-s-ok)');
-    expect(statusColor('failed')).toBe('var(--color-s-crit)');
-    expect(statusColor('cancelled')).toBe('var(--color-t4)');
+    expect(statusColor('pending')).toBe('var(--status-warn-solid)');
+    expect(statusColor('processing')).toBe('var(--mode-chat-solid)');
+    expect(statusColor('sent')).toBe('var(--status-ok-solid)');
+    expect(statusColor('failed')).toBe('var(--status-crit-solid)');
+    expect(statusColor('cancelled')).toBe('var(--text-2)');
   });
 
-  it('falls back to neutral t4 for unknown / empty / case-mismatched statuses', () => {
-    expect(statusColor('unknown')).toBe('var(--color-t4)');
-    expect(statusColor('')).toBe('var(--color-t4)');
-    expect(statusColor('Pending')).toBe('var(--color-t4)');
-    expect(statusColor('SENT')).toBe('var(--color-t4)');
+  it('falls back to neutral text-2 for unknown / empty / case-mismatched statuses', () => {
+    expect(statusColor('unknown')).toBe('var(--text-2)');
+    expect(statusColor('')).toBe('var(--text-2)');
+    expect(statusColor('Pending')).toBe('var(--text-2)');
+    expect(statusColor('SENT')).toBe('var(--text-2)');
   });
 });
 

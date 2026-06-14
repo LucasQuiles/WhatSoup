@@ -1,16 +1,20 @@
 // ---------------------------------------------------------------------------
 //  Scheduled message utility functions (client-side)
 // ---------------------------------------------------------------------------
+import type { ScheduledMessage } from '../../types.js';
+import { statusColorToken } from '../../lib/status-severity.js';
 import { capitalize } from '../../lib/text-utils.js';
 
+type ScheduledStatus = ScheduledMessage['status'];
+
 export function statusColor(status: string): string {
-  switch (status) {
-    case 'pending':    return 'var(--color-s-warn)';
-    case 'processing': return 'var(--color-m-cht)';
-    case 'sent':       return 'var(--color-s-ok)';
-    case 'failed':     return 'var(--color-s-crit)';
-    case 'cancelled':  return 'var(--color-t4)';
-    default:           return 'var(--color-t4)';
+  switch (status as ScheduledStatus) {
+    case 'pending':    return statusColorToken('warn');
+    case 'processing': return 'var(--mode-chat-solid)';
+    case 'sent':       return statusColorToken('ok');
+    case 'failed':     return statusColorToken('crit');
+    case 'cancelled':  return 'var(--text-2)';
+    default:           return 'var(--text-2)';
   }
 }
 

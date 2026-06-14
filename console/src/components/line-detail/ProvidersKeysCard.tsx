@@ -4,6 +4,7 @@ import { KeyRound, ShieldOff, ShieldCheck, Zap } from 'lucide-react'
 import { useProviders, useProviderStatus } from '../../hooks/use-fleet'
 import { formatRelative } from '../../lib/format-time'
 import { getProvider, getProviderColor } from '../../lib/providers'
+import { statusBadgeStyle } from '../../lib/status-severity'
 import type { ProviderCatalogEntry, ProviderSlotStatus, ProviderStatus } from '../../types'
 
 /**
@@ -54,9 +55,9 @@ function displayName(
 const KeyBadge: FC<{ keyPresent: boolean | null }> = ({ keyPresent }) => {
   const spec =
     keyPresent === true
-      ? { label: 'key set', icon: KeyRound, color: 'var(--color-s-ok)', bg: 'var(--s-ok-wash)' }
+      ? { label: 'key set', icon: KeyRound, ...statusBadgeStyle('ok') }
       : keyPresent === false
-      ? { label: 'no key', icon: ShieldOff, color: 'var(--color-s-crit)', bg: 'var(--s-crit-wash)' }
+      ? { label: 'no key', icon: ShieldOff, ...statusBadgeStyle('crit') }
       : { label: 'n/a — native auth', icon: ShieldCheck, color: 'var(--text-2)', bg: 'var(--surface-inset)' }
   const Icon = spec.icon
   return (

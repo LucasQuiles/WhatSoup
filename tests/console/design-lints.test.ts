@@ -48,6 +48,7 @@ const PRIMITIVES_FIXTURE_PATH = resolve(REPO_ROOT, 'console/src/components/primi
 const CONFIGSTEP_PATH = resolve(REPO_ROOT, 'console/src/components/wizard/ConfigStep.tsx')
 const FORMAT_TIME_PATH = resolve(REPO_ROOT, 'console/src/lib/format-time.ts')
 const TEXT_UTILS_PATH = resolve(REPO_ROOT, 'console/src/lib/text-utils.ts')
+const STATUS_SEVERITY_PATH = resolve(REPO_ROOT, 'console/src/lib/status-severity.ts')
 const USE_DISMISSABLE_PATH = resolve(REPO_ROOT, 'console/src/hooks/use-dismissable.ts')
 const KEYBOARD_SHORTCUTS_PATH = resolve(REPO_ROOT, 'console/src/hooks/use-keyboard-shortcuts.ts')
 
@@ -207,6 +208,71 @@ export function Row({ epoch, total }: { epoch: number; total: number }) {
       TEXT_UTILS_PATH
     )
     expect(hasWarning(messages, 'no-format-bypass')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P2 custom plugin rule - soup/no-literal-status-colors
+// Flags duplicated status-keyed color maps outside the shared status helpers.
+// Standalone status UI can still use semantic classes; map/switch color
+// decisions must delegate to status-severity.ts.
+// ---------------------------------------------------------------------------
+
+describe('soup/no-literal-status-colors', () => {
+  it('fires on a status-keyed object map with literal status colors', async () => {
+    const messages = await lintWarnings(
+      `const statusBadge = {
+  allowed: { bg: 'var(--s-ok-wash)', color: 'var(--color-s-ok)' },
+  blocked: { bg: 'var(--s-crit-wash)', color: 'var(--color-s-crit)' },
+  pending: { bg: 'var(--s-warn-wash)', color: 'var(--color-s-warn)' },
+}`
+    )
+    expect(hasWarning(messages, 'no-literal-status-colors')).toBe(true)
+  })
+
+  it('fires on a status switch that returns literal status colors', async () => {
+    const messages = await lintWarnings(
+      `function statusColor(status: string): string {
+  switch (status) {
+    case 'pending': return 'var(--color-s-warn)'
+    case 'sent': return 'var(--color-s-ok)'
+    case 'failed': return 'var(--color-s-crit)'
+    default: return 'var(--text-2)'
+  }
+}`
+    )
+    expect(hasWarning(messages, 'no-literal-status-colors')).toBe(true)
+  })
+
+  it('is silent when status maps delegate to shared helpers', async () => {
+    const messages = await lintWarnings(
+      `import { statusBadgeStyle, statusColorToken } from '../lib/status-severity'
+const statusSeverity = {
+  allowed: 'ok',
+  blocked: 'crit',
+  pending: 'warn',
+  seen: 'warn',
+} as const
+function badge(status: keyof typeof statusSeverity) {
+  return statusBadgeStyle(statusSeverity[status])
+}
+function color(status: keyof typeof statusSeverity) {
+  return statusColorToken(statusSeverity[status])
+}`
+    )
+    expect(hasWarning(messages, 'no-literal-status-colors')).toBe(false)
+  })
+
+  it('is silent inside the shared status helper module', async () => {
+    const messages = await lintWarnings(
+      `const STATUS_COLOR_TOKEN = {
+  ok: 'var(--status-ok-solid)',
+  warn: 'var(--status-warn-solid)',
+  crit: 'var(--status-crit-solid)',
+} as const`,
+      STATUS_SEVERITY_PATH
+    )
+    expect(hasWarning(messages, 'no-literal-status-colors')).toBe(false)
   })
 })
 
@@ -847,6 +913,18 @@ const x = FaBeer`,
         FIXTURE_PATH
       )
       expect(hasError(messages, 'no-format-bypass')).toBe(true)
+    })
+
+    it('no-literal-status-colors fires as an error at a pages path', async () => {
+      const messages = await lintErrors(
+        `const statusBadge = {
+  allowed: { bg: 'var(--s-ok-wash)', color: 'var(--color-s-ok)' },
+  blocked: { bg: 'var(--s-crit-wash)', color: 'var(--color-s-crit)' },
+  pending: { bg: 'var(--s-warn-wash)', color: 'var(--color-s-warn)' },
+}`,
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-literal-status-colors')).toBe(true)
     })
 
     it('no-inline-dismiss-handler fires as an error at a pages path', async () => {

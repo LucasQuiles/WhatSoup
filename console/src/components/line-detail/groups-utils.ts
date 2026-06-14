@@ -1,3 +1,5 @@
+import { statusBadgeStyle } from '../../lib/status-severity.js';
+
 export function roleLabel(admin?: 'admin' | 'superadmin'): string {
   if (admin === 'superadmin') return 'Owner';
   if (admin === 'admin') return 'Admin';
@@ -5,8 +7,8 @@ export function roleLabel(admin?: 'admin' | 'superadmin'): string {
 }
 
 export function roleBadgeStyle(admin?: 'admin' | 'superadmin'): { bg: string; color: string } | null {
-  if (admin === 'superadmin') return { bg: 'var(--s-warn-wash)', color: 'var(--color-s-warn)' };
-  if (admin === 'admin') return { bg: 'var(--s-ok-wash)', color: 'var(--color-s-ok)' };
+  if (admin === 'superadmin') return statusBadgeStyle('warn');
+  if (admin === 'admin') return statusBadgeStyle('ok');
   return null;
 }
 

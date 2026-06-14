@@ -296,6 +296,6 @@ const noRawTable = makeStub('[stub] soup/no-raw-table — stale duplicate stub.'
     expect(result.status).toBe(0);
     expect(output.verdict).toBe('PASS');
     expect(output.implemented_rules.length).toBeGreaterThanOrEqual(10);
-    expect(output.stub_rules.length).toBeGreaterThanOrEqual(5);
+    expect(output.stub_rules.length).toBeGreaterThanOrEqual(4);
   });
 });

@@ -79,7 +79,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/focus-visible-required | shadow | scoped-error (primitives) | P2 | primitives-first; screens inherit |
 | soup/modal-must-restore-focus | proposed | scoped-error (Modal) | P2 | enforceable once Modal primitive exists |
 | soup/motion-needs-reduced-variant | shadow | global-error | P5 | 1 of ~6 animation families has a reduced variant today |
-| soup/no-literal-status-colors | shadow | global-error | P2 | 8 TS maps to collapse first (DUP-06/07) |
+| soup/no-literal-status-colors | global-error | global-error | P2 | Implemented 2026-06-14; flags duplicated status-keyed color maps/switches outside shared helpers |
 | soup/provider-palette-only | blocking script | scoped-error / blocking script | P4/G5 | provider identity must consume `--provider-*`; no status/mode/data/literal colours |
 | soup/data-series-token-only | blocking script | scoped-error / blocking script | P4/G5 | non-provider chart dimensions must consume `--data-*`; FleetMetricsChart is message-volume data, not provider identity |
 | soup/traffic-neutrality | blocking script | scoped-error / blocking script | P4/G5 | sent/received/sessions/media quantities stay neutral ink unless reclassified as status |
@@ -436,27 +436,21 @@ cannot express the check).
 
 ### soup/no-literal-status-colors
 
-- **Purpose:** status is rendered only via semantic status tokens + the canonical helper; no
-  per-domain color tables. Today the mode/status→color logic exists as 8 TS copies (DUP-07
-  enumerates all: canonical `console/src/components/line-detail/types.ts:8-10`, re-rolls in
-  `console/src/pages/LineDetail.tsx:117`,
-  `console/src/components/line-detail/ModeSwitchDialog.tsx:48`,
-  `console/src/components/line-detail/PipelineTab.tsx:20,:147`,
-  `console/src/components/ModeBadge.tsx:9-29`, `console/src/components/CardSelector.tsx:18-28`,
-  `console/src/components/KpiCard.tsx:13-21`) and 7 visual dot/badge implementations (DUP-06).
-  P2-12 adds the semantic-collision requirement: separate `--focus-ring`, `--action-primary`,
-  `--status-ok`, `--mode-passive` roles even where dark values coincide.
-- **Mechanism:** selectors: `Literal[value=/var\(--color-s-(ok|warn|crit)\)/]` and
-  `Literal[value=/\b(text|bg|border)-s-(ok|warn|crit)\b/]` outside the helper module and the
-  StatusDot/Pill primitives; custom rule flags object literals whose keys are exactly the status
-  union (`ok|warn|crit` / `pas|cht|agt` / `online|degraded|unreachable`) mapping to color-bearing
-  strings, outside `console/src/lib/status.ts` (new home).
-- **Scope:** `console/src/**` minus `lib/status.ts`, `lib/mode.ts`, primitives.
+- **Purpose:** status is rendered only via semantic status tokens + canonical helpers; no
+  per-domain status color tables. `status-severity.ts` owns reusable severity → color/wash/class
+  helpers (`statusColorToken`, `statusWashToken`, `statusBadgeStyle`,
+  `statusTextClassForSeverity`), while `status-map.ts` owns the shape-law renderer map.
+- **Mechanism:** custom rule flags duplicated status-keyed object maps and status-like switch
+  returns that contain status color literals (`var(--color-s-*)`, `var(--status-*)`,
+  `var(--s-*-wash/ring/soft)`, or `text/bg/border-s-*`) outside the shared status helpers and
+  primitives.
+- **Scope:** `console/src/**` minus `lib/status-map.ts`, `lib/status-severity.ts`, and
+  `components/primitives/**`.
 - **Violation / valid:** `const colorMap = { online: 'var(--color-s-ok)', … }` → import
-  `statusTone()` from `lib/status.ts`.
+  `statusColorToken()`/`statusBadgeStyle()` from `lib/status-severity.ts`.
 - **FP strategy:** the key-shape heuristic requires ALL keys to be from a status union and ALL
   values color-like — partial matches ignored.
-- **Autofix:** no. **Phase:** P2 (lands with the helper consolidation). **Entry:** shadow.
+- **Autofix:** no. **Phase:** P2. **Entry:** global-error.
 
 ### soup/provider-palette-only
 

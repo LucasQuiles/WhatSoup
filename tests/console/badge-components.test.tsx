@@ -35,7 +35,14 @@ import { StatusCell, ModeBadge as ModeBadgePrimitive } from '../../console/src/c
 import ModeBadge from '../../console/src/components/ModeBadge.tsx';
 import StatusDot from '../../console/src/components/StatusDot.tsx';
 import { STATUS_MAP, MODE_MAP, resolveStatus, resolveMode, CONNECTION_MAP, resolveConnection } from '../../console/src/lib/status-map.ts';
-import { statusAlertMessage, statusSeverity } from '../../console/src/lib/status-severity.ts';
+import {
+  statusAlertMessage,
+  statusBadgeStyle,
+  statusColorToken,
+  statusSeverity,
+  statusTextClassForSeverity,
+  statusWashToken,
+} from '../../console/src/lib/status-severity.ts';
 
 
 afterEach(() => {
@@ -92,6 +99,33 @@ describe('STATUS_MAP', () => {
     expect(STATUS_MAP.unlinked.token).toBeNull();
     expect(STATUS_MAP.unlinked.label).toBe('unlinked');
     expect(STATUS_MAP.unlinked.shapeClass).toBe('soup-shape soup-shape--off');
+  });
+});
+
+describe('status severity helpers', () => {
+  it('maps severities to semantic status color tokens', () => {
+    expect(statusColorToken('ok')).toBe('var(--status-ok-solid)');
+    expect(statusColorToken('warn')).toBe('var(--status-warn-solid)');
+    expect(statusColorToken('crit')).toBe('var(--status-crit-solid)');
+  });
+
+  it('maps severities to semantic status wash tokens', () => {
+    expect(statusWashToken('ok')).toBe('var(--status-ok-wash)');
+    expect(statusWashToken('warn')).toBe('var(--status-warn-wash)');
+    expect(statusWashToken('crit')).toBe('var(--status-crit-wash)');
+  });
+
+  it('returns paired badge styles from the shared helper', () => {
+    expect(statusBadgeStyle('warn')).toEqual({
+      bg: 'var(--status-warn-wash)',
+      color: 'var(--status-warn-solid)',
+    });
+  });
+
+  it('maps severity utility classes from one table', () => {
+    expect(statusTextClassForSeverity('ok')).toBe('text-s-ok');
+    expect(statusTextClassForSeverity('warn')).toBe('text-s-warn');
+    expect(statusTextClassForSeverity('crit')).toBe('text-s-crit');
   });
 });
 

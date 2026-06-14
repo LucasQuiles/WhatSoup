@@ -10,13 +10,15 @@
  *   soup/protected-identifiers — flags near-miss renames of protected protocol contracts
  *   soup/icon-family           — permits lucide-react icons and denies other icon packages
  *   soup/no-format-bypass      — flags raw toLocale* formatting outside console/src/lib
+ *   soup/no-literal-status-colors
+ *                             — flags duplicated status-keyed color maps outside
+ *                               the shared status helpers/primitives
  *   soup/no-inline-dismiss-handler
  *                             — flags hand-rolled Escape dismissal effects outside
  *                               the single useDismissable hook
  *
  * Rules stubbed (proposed / needs primitives / CSS-side):
  *   soup/no-duplicate-shell          — heuristic, warn-ceiling
- *   soup/no-literal-status-colors    — shadow; P2
  *   soup/focus-visible-required      — shadow; primitives-first (P2)
  *   soup/modal-must-restore-focus    — proposed; Modal primitive must exist first
  *   soup/motion-needs-reduced-variant — shadow; CSS-script-primary (section 5)
@@ -71,6 +73,39 @@ const FORMAT_BYPASS_METHODS = new Set([
   'toLocaleTimeString',
 ])
 
+const STATUS_COLOR_EXEMPT_FILE_SUFFIXES = [
+  'src/lib/status-map.ts',
+  'src/lib/status-severity.ts',
+  'src/components/primitives/',
+]
+
+const STATUS_LIKE_KEYS = new Set([
+  'ok',
+  'warn',
+  'crit',
+  'online',
+  'degraded',
+  'unreachable',
+  'logged_out',
+  'config_error',
+  'unknown',
+  'unlinked',
+  'allowed',
+  'blocked',
+  'pending',
+  'seen',
+  'processing',
+  'sent',
+  'failed',
+  'cancelled',
+  'connected',
+  'connecting',
+  'disconnected',
+])
+
+const STATUS_COLOR_LITERAL_PATTERN =
+  /var\(--(?:color-s-(?:ok|warn|crit)|status-(?:ok|warn|crit)(?:-[a-z]+)?|s-(?:ok|warn|crit)-(?:wash|ring|soft))\)|\b(?:text|bg|border)-s-(?:ok|warn|crit)\b/
+
 /**
  * Returns true if the string contains a protected contract identifier.
  * Used to build the allowlist so those occurrences are not flagged by
@@ -107,6 +142,12 @@ function isFormatBypassExemptFile(filename) {
   const normalized = normalizePath(filename)
   if (!normalized.includes('/console/src/')) return true
   return normalized.includes('/console/src/lib/')
+}
+
+function isStatusColorExemptFile(filename) {
+  const normalized = normalizePath(filename)
+  if (!normalized.includes('/console/src/')) return true
+  return STATUS_COLOR_EXEMPT_FILE_SUFFIXES.some((suffix) => normalized.includes(suffix))
 }
 
 function checkTextLiterals(context, checkStringValue) {
@@ -372,6 +413,117 @@ const noFormatBypass = {
 }
 
 // ---------------------------------------------------------------------------
+// soup/no-literal-status-colors
+// Lint-plan section 3: global-error entry state, P2 target.
+// ---------------------------------------------------------------------------
+function stringValue(node) {
+  if (node?.type === 'Literal' && typeof node.value === 'string') return node.value
+  if (node?.type === 'TemplateLiteral' && node.expressions.length === 0) {
+    return node.quasis.map((q) => q.value.raw).join('')
+  }
+  return null
+}
+
+function propertyKeyName(prop) {
+  if (!prop || prop.computed) return null
+  if (prop.key?.type === 'Identifier') return prop.key.name
+  if (prop.key?.type === 'Literal' && typeof prop.key.value === 'string') return prop.key.value
+  return null
+}
+
+function nodeContainsStatusColorLiteral(node) {
+  if (!node) return false
+  const value = stringValue(node)
+  if (value && STATUS_COLOR_LITERAL_PATTERN.test(value)) return true
+
+  switch (node.type) {
+    case 'ObjectExpression':
+      return node.properties.some((prop) => {
+        if (prop.type === 'SpreadElement') return nodeContainsStatusColorLiteral(prop.argument)
+        return nodeContainsStatusColorLiteral(prop.value)
+      })
+    case 'ArrayExpression':
+      return node.elements.some((element) => nodeContainsStatusColorLiteral(element))
+    case 'ConditionalExpression':
+      return (
+        nodeContainsStatusColorLiteral(node.consequent) ||
+        nodeContainsStatusColorLiteral(node.alternate)
+      )
+    case 'TemplateLiteral':
+      return node.quasis.some((quasi) => STATUS_COLOR_LITERAL_PATTERN.test(quasi.value.raw))
+    default:
+      return false
+  }
+}
+
+function isStatusLikeKey(key) {
+  return STATUS_LIKE_KEYS.has(key)
+}
+
+function isStatusColorMap(node) {
+  if (node?.type !== 'ObjectExpression') return false
+  const props = node.properties.filter((prop) => prop.type === 'Property')
+  if (props.length < 2) return false
+  const keys = props.map(propertyKeyName)
+  if (keys.some((key) => !key || !isStatusLikeKey(key))) return false
+  return props.some((prop) => nodeContainsStatusColorLiteral(prop.value))
+}
+
+function discriminantName(node) {
+  if (!node) return ''
+  if (node.type === 'Identifier') return node.name
+  if (node.type === 'MemberExpression') return memberPropertyName(node) ?? ''
+  return ''
+}
+
+function isStatusLikeSwitch(node) {
+  const caseKeys = node.cases
+    .map((switchCase) => stringValue(switchCase.test))
+    .filter(Boolean)
+  if (caseKeys.length >= 2 && caseKeys.every(isStatusLikeKey)) return true
+  return /(status|state|severity|tone)$/i.test(discriminantName(node.discriminant))
+}
+
+const noLiteralStatusColors = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        'Prevent duplicated status-keyed color maps outside the shared status helpers.',
+    },
+    messages: {
+      literalStatusColor:
+        '[soup/no-literal-status-colors] Status color maps must use shared status helpers. ' +
+        'Move status color/tone decisions to console/src/lib/status-severity.ts or consume statusBadgeStyle/statusColorToken.',
+    },
+    schema: [],
+  },
+
+  create(context) {
+    const filename = context.getFilename ? context.getFilename() : (context.filename ?? '')
+    if (isStatusColorExemptFile(filename)) return {}
+
+    return {
+      ObjectExpression(node) {
+        if (!isStatusColorMap(node)) return
+        context.report({ node, messageId: 'literalStatusColor' })
+      },
+
+      SwitchStatement(node) {
+        if (!isStatusLikeSwitch(node)) return
+        for (const switchCase of node.cases) {
+          for (const consequent of switchCase.consequent) {
+            if (consequent.type !== 'ReturnStatement') continue
+            if (!nodeContainsStatusColorLiteral(consequent.argument)) continue
+            context.report({ node: consequent.argument, messageId: 'literalStatusColor' })
+          }
+        }
+      },
+    }
+  },
+}
+
+// ---------------------------------------------------------------------------
 // soup/no-inline-dismiss-handler
 // Lint-plan section 3: global-error entry state, P2 target.
 // ---------------------------------------------------------------------------
@@ -466,12 +618,6 @@ const noDuplicateShell = makeStub(
   '[stub] soup/no-duplicate-shell — SHADOW advisory. Full implementation is a warn-ceiling ' +
     'heuristic flagging surface+border+radius class combinations outside primitives. ' +
     'Currently a stub pending P2 primitive landing.'
-)
-
-const noLiteralStatusColors = makeStub(
-  '[stub] soup/no-literal-status-colors — SHADOW. Will flag var(--color-s-*) and ' +
-    'bg/text-s-* utilities outside lib/status.ts + status primitives. ' +
-    'Enabled with P2 helper consolidation.'
 )
 
 const focusVisibleRequired = makeStub(

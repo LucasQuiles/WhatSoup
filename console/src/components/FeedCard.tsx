@@ -4,7 +4,7 @@ import type { FeedEvent, Mode } from "../types";
 import FeedIcon from "./FeedIcon";
 import { formatWhatsAppText } from "../lib/format-wa-text";
 import { getProvider } from "../lib/providers";
-import { statusAlertMessage, statusSeverity } from "../lib/status-severity";
+import { statusAlertMessage, statusColorToken, statusSeverity } from "../lib/status-severity";
 import { Button } from "./primitives/Button";
 
 // ---------------------------------------------------------------------------
@@ -65,10 +65,7 @@ function healthTone(d: HealthDetail): BadgeTone {
 }
 
 function healthEdgeColor(d: HealthDetail): string {
-  const tone = healthTone(d);
-  if (tone === "ok") return "var(--color-s-ok)";
-  if (tone === "crit") return "var(--color-s-crit)";
-  return "var(--color-s-warn)";
+  return statusColorToken(statusSeverity(d.status));
 }
 
 function healthHeadline(d: HealthDetail): string {
@@ -80,15 +77,15 @@ function edgeColor(event: FeedEvent): string {
   const d = event.detail;
   if (!d) return "var(--b1)";
   if (d.type === "health") return healthEdgeColor(d);
-  if (event.isError) return "var(--color-s-crit)";
+  if (event.isError) return statusColorToken("crit");
   switch (d.type) {
     case "connection":
-      if (d.state === "connected") return "var(--color-s-ok)";
-      if (d.state === "connecting" || d.reconnecting) return "var(--color-s-warn)";
-      if (d.state === "disconnected" || d.statusCode) return "var(--color-s-crit)";
+      if (d.state === "connected") return statusColorToken("ok");
+      if (d.state === "connecting" || d.reconnecting) return statusColorToken("warn");
+      if (d.state === "disconnected" || d.statusCode) return statusColorToken("crit");
       return "var(--b2)";
     case "message": return d.direction === "inbound" ? "var(--color-m-cht)" : "var(--color-m-agt)";
-    case "tool_error": return "var(--color-s-crit)";
+    case "tool_error": return statusColorToken("crit");
     case "session": return "var(--color-m-agt)";
     default: return "var(--b1)";
   }

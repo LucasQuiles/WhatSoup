@@ -21,6 +21,8 @@
  *   soup/no-raw-color          — hex/rgb/hsl literals (selector extension; already error
  *                                in default config, kept here for shadow baseline parity)
  *   soup/no-format-bypass      — custom rule; global-error in default config, warn here
+ *   soup/no-literal-status-colors
+ *                              — custom rule; global-error in default config, warn here
  *   soup/no-duplicate-shell    — advisory stub (warn-ceiling, never error)
  *   Other stub rules           — zero-fire stubs from eslint-rules/index.mjs
  *
@@ -138,7 +140,7 @@ const shadowConfig = [
       'soup/protected-identifiers': 'warn',
       'soup/icon-family': 'warn',
 
-      // Lifecycle rules that remain report-only in the shadow run.
+      // Lifecycle rules plus global-error custom rules mirrored at warn for baseline tracking.
       'soup/no-duplicate-shell': 'warn',
       'soup/no-literal-status-colors': 'warn',
       'soup/focus-visible-required': 'warn',

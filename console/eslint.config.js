@@ -695,6 +695,7 @@ export default defineConfig([
       'soup/protected-identifiers': 'error',
       'soup/icon-family': 'error',
       'soup/no-format-bypass': 'error',
+      'soup/no-literal-status-colors': 'error',
       'soup/no-inline-dismiss-handler': 'error',
 
       // ═══════════════════════════════════════════════════════════════

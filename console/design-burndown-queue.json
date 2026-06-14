@@ -2,15 +2,15 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 681,
-    "blocking": 615,
+    "total": 679,
+    "blocking": 613,
     "byCategory": {
       "accent-law": 0,
       "base-wall": 22,
       "brand-regression": 2,
       "focus-suppression": 1,
       "half-step": 64,
-      "legacy-token-tsx": 341,
+      "legacy-token-tsx": 339,
       "legacy-var-css": 221,
       "raw-color-css": 1,
       "raw-form-control": 28,
@@ -121,7 +121,7 @@
       "id": "burndown:legacy-token-tsx",
       "category": "legacy-token-tsx",
       "severity": "blocking",
-      "count": 341,
+      "count": 339,
       "files": [
         {
           "path": "src/App.tsx",
@@ -266,11 +266,6 @@
         {
           "path": "src/components/line-detail/ScheduleComposerModal.tsx",
           "count": 5,
-          "lines": null
-        },
-        {
-          "path": "src/components/line-detail/scheduled-utils.ts",
-          "count": 2,
           "lines": null
         },
         {
@@ -716,8 +711,8 @@
           "path": "src/components/line-detail/AccessTab.tsx",
           "count": 2,
           "lines": [
-            57,
-            79
+            74,
+            96
           ]
         },
         {
@@ -738,10 +733,10 @@
           "path": "src/components/line-detail/ProvidersKeysCard.tsx",
           "count": 5,
           "lines": [
-            64,
-            81,
-            104,
-            166
+            65,
+            82,
+            105,
+            167
           ]
         },
         {
@@ -764,8 +759,8 @@
           "path": "src/components/LineTags.tsx",
           "count": 3,
           "lines": [
-            57,
-            91
+            58,
+            92
           ]
         },
         {
