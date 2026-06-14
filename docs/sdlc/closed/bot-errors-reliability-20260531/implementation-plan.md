@@ -1,18 +1,25 @@
-# BOT ERRORS Fleet Reliability Implementation Plan
+# BOT ERRORS Fleet Reliability Historical Plan
+
+Status: closed — superseded by the 2026-06-13 bot-errors consolidation close-out.
+
+This file is retained as historical planning evidence. It is not the active
+implementation queue. The active tracked trunk is
+`docs/reliability-runner/README.md`, with current status rows in
+`docs/reliability-runner/feature-matrix.md`.
 
 ## Bead Manifest
 
 | Bead | Status | Scope | Verification |
 |---|---|---|---|
 | BE-01 Durable bus | complete | Outbox, dispatcher, collector, q-loop, deadman, daily health, heartbeat watchdog | Existing service tests and live service status checks |
-| BE-02 Process failure runner | complete | `deploy/scripts/bot-errors-runner.py` plus health launchd/systemd wiring | Runner tests; fleet queue checks on MACLAB, MWLAB, mini1-11, nucles |
-| BE-03 Runtime tool failure alerts | review | `src/runtimes/agent/runtime.ts`, `src/core/workspace.ts`, `deploy/hooks/post-tool-use-log.mjs` | Runtime, hook, workspace, poll-lint, emit-alert focused tests |
-| BE-04 Mention-safe dispatch rendering | review | `deploy/scripts/bot-errors-dispatcher.py` | Dispatcher dry-send regression |
-| BE-05 B5 redaction gate | review | TypeScript outbox, Claude hook, Python emit/runner, dispatcher | Secret-shape tests for AWS keys, GitHub tokens, JWTs, PEM private keys, URL userinfo |
-| BE-06 Hung tool watchdog | pending | OperationTracker/SSE/MCP timeout surfaces | Add tests for stalled tools that never emit `tool_result` |
-| BE-07 Stale numeric instance identity | pending | Fleet health discovery/profile canonicalization | Regression for phone/account identity mapping to canonical service name |
-| BE-08 Operator command wrapping | pending | Coordinator/operator shell commands | Document wrapper requirement and add runner-backed helpers |
-| BE-09 Fleet deploy and drills | pending | MACLAB, MWLAB, mini1-11 | One-by-one controlled failure drills with BOT ERRORS receipt and Q action |
+| BE-02 Process failure runner | complete | `deploy/scripts/bot-errors-runner.py` plus health launchd/systemd wiring | Runner tests; fleet queue checks on managed development, relay, and mini hosts |
+| BE-03 Runtime tool failure alerts | superseded | `src/runtimes/agent/runtime.ts`, `src/core/workspace.ts`, `deploy/hooks/post-tool-use-log.mjs` | Runtime/provider residuals moved to current provider-failure lanes. |
+| BE-04 Mention-safe dispatch rendering | superseded | `deploy/scripts/bot-errors-dispatcher.py` | Dispatcher alert-pipeline hardening landed in the PR train. |
+| BE-05 B5 redaction gate | superseded | TypeScript outbox, Claude hook, Python emit/runner, dispatcher | Redaction/logging follow-up moved to the current logging PR train. |
+| BE-06 Hung tool watchdog | superseded | OperationTracker/SSE/MCP timeout surfaces | Not owned by this closed packet; carry only through a current owner lane. |
+| BE-07 Stale numeric instance identity | superseded | Fleet health discovery/profile canonicalization | Not owned by this closed packet; carry only through C2/C3 host-currency work if still applicable. |
+| BE-08 Operator command wrapping | superseded | Coordinator/operator shell commands | Not owned by this closed packet; carry only through C10/operator ceremony lanes if still applicable. |
+| BE-09 Fleet deploy and drills | superseded | Managed development, relay, and mini hosts | Reframed as C2/C3/C4 consolidation: script parity, host currency, and activation proof. |
 
 ## Implemented Slice: BE-03
 
@@ -57,22 +64,11 @@ npx vitest run --pool=forks tests/runtimes/agent/runtime.test.ts tests/hooks/rgp
 8 files passed, 238 tests passed
 ```
 
-## Required Next Tests
+## Closed Packet Boundary
 
-1. Runtime alert dry-run with a controlled tool error and local outbox capture.
-2. Dispatcher dry-send rendering check for service names and JIDs.
-3. Hung tool simulation with no `tool_result` event.
-4. Stale numeric instance profile test for Q account identity versus canonical `q` instance.
-5. Runner-wrapped operator command failure drill.
-6. Per-machine health check drill: MACLAB, MWLAB, mini1 through mini11.
+Do not reopen this historical packet for new implementation. Use the current
+close-out lanes instead:
 
-## Deploy Gate
-
-Do not mark complete until:
-
-- Q has reviewed the diff and evidence in BOT ERRORS.
-- Focused tests pass on nucles after final patch.
-- Staged guard passes on the exact files to commit.
-- Fleet rollout is performed one machine at a time.
-- Each machine produces expected alert evidence for at least one controlled failure mode.
-- Q confirms it can interpret and act on the alert end to end.
+1. C2/C3/C4 for fleet propagation, deployed-vs-intended host tables, and inert-feature activation.
+2. C7 for real alert corpus validation after propagation.
+3. C8/C9/C10 for estate, documentation, rollback-anchor, and ceremony close-out.
