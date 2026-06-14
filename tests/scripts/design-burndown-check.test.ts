@@ -255,6 +255,48 @@ describe('check-design-burndown.mjs', () => {
       ]);
     });
 
+    it('raw-dimension-css fires on direct CSS layout lengths but ignores var() fallbacks', () => {
+      const fixture = makeFixture({
+        compositesCss: [
+          '.c-size { width: 40px; }',
+          '.c-fallback { height: var(--panel-h, 20px); }',
+          '.c-calc { padding: calc(var(--sp-2) + 1px) var(--sp-3); }',
+          '.c-radius { border-radius: 8px; }',
+          '.c-token { width: var(--panel-w); padding: var(--sp-2); }',
+          '.c-type { font-size: 12px; }',
+          '',
+        ].join('\n'),
+        tsx: null,
+      });
+      const result = runScript(fixture, ['--update']);
+      expect(result.status).toBe(0);
+
+      const item = itemOf(readQueue(fixture), 'raw-dimension-css');
+      expect(item.severity).toBe('blocking');
+      expect(item.count).toBe(3);
+      expect(item.files).toEqual([
+        { path: 'src/styles/composites.css', count: 3, lines: [1, 3, 4] },
+      ]);
+    });
+
+    it('raw-dimension-css stays silent for tokenized CSS dimensions and token-tier raw lengths', () => {
+      const fixture = makeFixture({
+        primitiveCss: `${DEFAULT_PRIMITIVE_CSS}:root { --shape-size: 12px; }\n`,
+        compositesCss: [
+          '.c-token { width: var(--panel-w); padding: var(--sp-2); }',
+          '.c-fallback { height: var(--panel-h, 20px); }',
+          '',
+        ].join('\n'),
+        tsx: null,
+      });
+      const result = runScript(fixture, ['--update']);
+      expect(result.status).toBe(0);
+
+      const item = itemOf(readQueue(fixture), 'raw-dimension-css');
+      expect(item.count).toBe(0);
+      expect(item.files).toEqual([]);
+    });
+
     it('transition-all-css fires on CSS transition-all shorthand and longhand declarations', () => {
       const fixture = makeFixture({
         compositesCss: [

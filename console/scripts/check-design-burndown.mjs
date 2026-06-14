@@ -25,6 +25,9 @@
 //                           and composite CSS must consume the type scale instead.
 //         transition-all-css — CSS transition shorthands/longhands that target "all";
 //                           CSS must name explicit properties, same as the TSX rule.
+//         raw-dimension-css — direct raw length units in layout/spacing/radius CSS
+//                           declarations outside token files; var() fallbacks are ignored
+//                           so resilient token fallbacks do not dominate the signal.
 //         half-step       — var(--sp-0h/--sp-1h/--sp-2h) usage outside their
 //                           definitions, across CSS *and* TSX/TS (DD-9 feed; the
 //                           half-steps have no ESLint rule, so both sides live here).
@@ -132,6 +135,7 @@ const CATEGORY_META = {
   'raw-color-css': { severity: 'polish', owner: 'CSS tier-boundary — raw component-tier colors must move to semantic tokens' },
   'raw-font-size-css': { severity: 'polish', owner: 'CSS type scale — raw font-size declarations must move to type tokens' },
   'transition-all-css': { severity: 'blocking', owner: 'P5 motion law — CSS transition-all parity with soup/no-transition-all' },
+  'raw-dimension-css': { severity: 'blocking', owner: 'CSS layout tokens — raw spacing/sizing/radius lengths must move to tokens' },
   'half-step': { severity: 'polish', owner: 'DD-9 — half-step spacing retirement' },
 };
 
@@ -311,6 +315,7 @@ const scanCategories = {
   'raw-color-css': {},
   'raw-font-size-css': {},
   'transition-all-css': {},
+  'raw-dimension-css': {},
   'half-step': {},
 };
 
@@ -332,6 +337,8 @@ const COLOR_BINDING_PROPERTY = /^(background|background-color|border|border-colo
 const RAW_COLOR = /#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3,4}\b|\brgba?\(|\bhsla?\(|\boklch\(/g;
 const RAW_FONT_SIZE_VALUE = /(?:^|[\s,(])\d*\.?\d+(?:px|rem|em|vw|vh|vmin|vmax|ch)\b/;
 const TRANSITION_ALL_VALUE = /(?:^|,)\s*all(?:\s|,|$)/i;
+const RAW_DIMENSION_PROPERTY = /^(?:width|height|min-width|min-height|max-width|max-height|inline-size|block-size|min-inline-size|min-block-size|max-inline-size|max-block-size|margin|margin-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|padding|padding-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|gap|row-gap|column-gap|inset|inset-(?:block|block-start|block-end|inline|inline-start|inline-end)|top|right|bottom|left|border-radius|border-(?:top-left|top-right|bottom-left|bottom-right)-radius|border-width|border-(?:top|right|bottom|left)-width|outline-width|scroll-margin|scroll-margin-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|scroll-padding|scroll-padding-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|border-spacing)$/;
+const RAW_DIMENSION_VALUE = /(?:^|[\s,(+-])-?\d*\.?\d+(?:px|rem|em|vw|vh|vmin|vmax|ch)\b/g;
 const HALF_STEP_REF = /--sp-[012]h\b/g;
 const HALF_STEP_DEF_LINE = /^\s*--sp-[012]h\s*:/;
 
@@ -340,6 +347,28 @@ const HALF_STEP_DEF_LINE = /^\s*--sp-[012]h\s*:/;
 // var()-reference only).
 const RAW_COLOR_ALLOWLIST = new Set(['tokens.primitive.css', 'tokens.semantic.css']);
 const RAW_FONT_SIZE_ALLOWLIST = new Set(['tokens.primitive.css']);
+const RAW_DIMENSION_ALLOWLIST = new Set(['tokens.primitive.css', 'tokens.semantic.css', 'tokens.component.css']);
+
+function stripCssVarFunctions(value) {
+  let out = '';
+  let varDepth = 0;
+  for (let i = 0; i < value.length; i++) {
+    if (varDepth === 0 && value.startsWith('var(', i)) {
+      varDepth = 1;
+      out += '    ';
+      i += 3;
+      continue;
+    }
+    if (varDepth > 0) {
+      if (value[i] === '(') varDepth += 1;
+      else if (value[i] === ')') varDepth -= 1;
+      out += value[i] === '\n' ? '\n' : ' ';
+      continue;
+    }
+    out += value[i];
+  }
+  return out;
+}
 
 for (const name of styleEntries) {
   const filePath = join(stylesDir, name);
@@ -397,6 +426,12 @@ for (const name of styleEntries) {
     if ((decl.property === 'transition' || decl.property === 'transition-property')
       && TRANSITION_ALL_VALUE.test(decl.value)) {
       addHit('transition-all-css', filePath, decl.line);
+    }
+
+    if (RAW_DIMENSION_PROPERTY.test(decl.property)
+      && !RAW_DIMENSION_ALLOWLIST.has(name)) {
+      const dimensionHits = [...stripCssVarFunctions(decl.value).matchAll(RAW_DIMENSION_VALUE)];
+      if (dimensionHits.length > 0) addHit('raw-dimension-css', filePath, decl.line, dimensionHits.length);
     }
   }
 }

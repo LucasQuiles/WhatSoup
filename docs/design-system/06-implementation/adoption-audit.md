@@ -408,6 +408,8 @@ Sources, by category:
   `raw-font-size-css` (raw non-token `font-size:` literals outside the primitive type scale;
   zero ceiling), `transition-all-css` (CSS `transition` / `transition-property` declarations
   targeting `all`; zero ceiling),
+  `raw-dimension-css` (direct raw length units in layout/spacing/radius CSS declarations outside
+  token files, with `var()` fallbacks ignored; current total 34 = 8 composites + 26 primitives),
   `half-step` (DD-9 — CSS *and* TSX/TS, since no ESLint rule covers the half-steps).
   Note: accent-law hits using alias names also count under legacy-var-css —
   intentional overlap, two remediation lenses (B4 law fix vs B1 vocabulary burn).

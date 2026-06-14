@@ -222,6 +222,7 @@ Each enforcement rule should include a negative fixture or documented negative e
 | component-tier CSS `box-shadow` with raw `rgba()` | fails design-regression check 17 and the `raw-color-css` burndown zero ceiling |
 | component/composite CSS with raw `font-size: 14px` | fails the `raw-font-size-css` burndown zero ceiling |
 | component/composite CSS with `transition: all` or `transition-property: all` | fails the `transition-all-css` burndown zero ceiling |
+| non-token CSS layout declaration with direct raw lengths (`width: 40px`, `padding: calc(var(--sp-2) + 1px)`) | fails the `raw-dimension-css` burndown ceiling |
 | raw button outside primitive | fails after scoped rule is enabled |
 | UI-facing WhatSoup copy where SOUP is required | fails brand-regression rule |
 | generic UI-facing WhatsApp copy where channel-agnostic positioning is required | fails channel-specific-copy rule |

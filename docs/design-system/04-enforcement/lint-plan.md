@@ -324,7 +324,9 @@ cannot express the check).
 - **CSS-side coverage:** `check-design-burndown.mjs` owns CSS-only gaps that ESLint cannot see,
   including `raw-font-size-css` (zero ceiling) for non-token `font-size:` literals outside the
   primitive type scale and `transition-all-css` (zero ceiling) for CSS shorthand/longhand
-  transition declarations that target `all`.
+  transition declarations that target `all`. It also tracks `raw-dimension-css` for direct raw
+  CSS layout/spacing/radius lengths outside token files, ignoring `var()` fallbacks so resilient
+  token fallbacks do not dominate the debt signal.
 - **Mechanism:** keep the selector wall; add a custom rule for the closures: (a) visit
   `ConditionalExpression` string branches under style-value positions; (b) track numeric-literal
   constants flowing into style props within the same file (one-hop identifier resolution — no
@@ -891,9 +893,9 @@ landed `ba4ed643`):
   eleven checks fail the run; check 12 promoted after the final focus-suppression carve-out was
   removed, check 15 promoted after the dead `useExitPresence` suppression was removed, and check 17
   promoted after `.c-kpi-hover` moved to `--shadow-hover` and `raw-color-css` ratcheted to zero. The
-  burndown scanner also carries zeroed
-  `raw-font-size-css` and `transition-all-css` categories for CSS type-scale and motion-law
-  re-entry. Checks 18–20 remain report-only per the
+  burndown scanner also carries zeroed `raw-font-size-css` and `transition-all-css` categories for
+  CSS type-scale and motion-law re-entry, plus a ratcheted `raw-dimension-css` category for raw
+  layout-length re-entry. Checks 18–20 remain report-only per the
   §2 lifecycle, and the remaining immature checks each sit behind a named landing gate in the
   script's justification block. Workflow drift for the shared design chain is pinned by
   `guard:safeguard-diagnostics`. `tests/scripts/design-regression-guards.test.ts` pins the promoted
