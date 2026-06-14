@@ -228,9 +228,10 @@ Each enforcement rule should include a negative fixture or documented negative e
 | missing focus-visible treatment | fails focus-visible rule/test |
 | status chip without text label | fails status law rule/test |
 | color-only status rendering | fails status law rule/test |
-| semantic token missing light value | fails theme-parity check |
+| semantic token missing light value | fails theme-parity check — negative fixtures live in `tests/scripts/theme-parity.test.ts` via the `check-theme-parity.mjs --file` seam (default no-flag run is byte-for-byte unchanged) |
 | deprecated token usage in migrated directory | fails legacy-token rule |
 | utility/spec-smell class | fails or warns per lifecycle |
+| new shadow-lint warning over the ratchet ceiling | fails shadow-baseline check — negative fixtures live in `tests/scripts/shadow-baseline.test.ts` via the `check-shadow-baseline.mjs --results-json`/`--baseline` seam (default no-flag run is byte-for-byte unchanged; fixtures can never write a baseline) |
 
 If a negative fixture is impractical at a lifecycle stage, document a negative example in the rule entry
 and add the fixture when the rule reaches scoped-error.

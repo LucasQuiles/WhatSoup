@@ -12,19 +12,45 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const consoleRoot = resolve(here, '..');
-const baselinePath = resolve(consoleRoot, 'lint-shadow-baseline.json');
+
+// Test seams. `--baseline <path>` overrides the prod ratchet file;
+// `--results-json <path>` feeds a captured eslint JSON array instead of shelling
+// eslint. With NEITHER flag, both inputs are byte-identical to the prod default,
+// so a no-flag run is unchanged. Injected results feed the SAME parse/count/
+// compare path below — no comparison semantics are bypassed.
+function argValue(flag) {
+  const i = process.argv.indexOf(flag);
+  const next = i !== -1 ? process.argv[i + 1] : undefined;
+  return next && !next.startsWith('--') ? next : null;
+}
+
+const baselineArg = argValue('--baseline');
+const baselinePath = baselineArg ? resolve(baselineArg) : resolve(consoleRoot, 'lint-shadow-baseline.json');
+const resultsJsonArg = argValue('--results-json');
+
+// Safety: a fixture results file must never be able to rewrite a baseline. When
+// results are injected, --update is refused outright so the prod baseline (or any
+// baseline) is untouchable from fixture data.
+if (resultsJsonArg && process.argv.includes('--update')) {
+  console.error('FAIL: --results-json cannot be combined with --update (a fixture run must never write a baseline)');
+  process.exit(2);
+}
 
 let raw;
-try {
-  raw = execFileSync('npx', ['eslint', '.', '-c', 'eslint.config.shadow.mjs', '--format', 'json'], {
-    cwd: consoleRoot,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-} catch (err) {
-  // eslint exits non-zero when errors (not warnings) exist; its stdout still carries the JSON
-  if (err.stdout) raw = err.stdout;
-  else throw err;
+if (resultsJsonArg) {
+  raw = readFileSync(resolve(resultsJsonArg), 'utf8');
+} else {
+  try {
+    raw = execFileSync('npx', ['eslint', '.', '-c', 'eslint.config.shadow.mjs', '--format', 'json'], {
+      cwd: consoleRoot,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (err) {
+    // eslint exits non-zero when errors (not warnings) exist; its stdout still carries the JSON
+    if (err.stdout) raw = err.stdout;
+    else throw err;
+  }
 }
 
 const results = JSON.parse(raw);

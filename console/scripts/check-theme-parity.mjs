@@ -8,7 +8,14 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const css = readFileSync(resolve(here, '../src/styles/tokens.semantic.css'), 'utf8');
+// Default target is the semantic token file. `--file <path>` points the SAME
+// parser at a fixture so the parity logic is testable without touching prod
+// tokens; with no flag, cssPath is byte-identical to the original default.
+const fileArgIndex = process.argv.indexOf('--file');
+const cssPath = fileArgIndex !== -1 && process.argv[fileArgIndex + 1]
+  ? resolve(process.argv[fileArgIndex + 1])
+  : resolve(here, '../src/styles/tokens.semantic.css');
+const css = readFileSync(cssPath, 'utf8');
 
 // Capture the body of each theme scope block. Dark is declared as `:root,\n[data-theme="dark"]`
 // (possibly multiple blocks); light as `[data-theme="light"]`.
