@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -72,15 +72,23 @@ function runScript(fixture: ReturnType<typeof makeFixture>, extraArgs: string[] 
 function parsedOutput(result: ReturnType<typeof runScript>) {
   return JSON.parse(result.stdout) as {
     by_rule: Record<string, number>;
+    enforced_rules: string[];
     failure_count: number;
     failures: Array<{ code: string; message: string; target: string }>;
+    failed_rules: string[];
     finding_count: number;
-    mode: 'report-only' | 'fail-on-findings';
+    mode: 'report-only' | 'fail-on-findings' | 'fail-on-rule';
     verdict: 'PASS' | 'FAIL';
   };
 }
 
 describe('check-brand-assets.mjs', () => {
+  it('promotes the canonical favicon link rule in the console package script', () => {
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'console/package.json'), 'utf8')) as { scripts?: Record<string, string> };
+
+    expect(pkg.scripts?.['design:brand-assets']).toContain('--fail-on-rule soup/brand-favicon-link-required');
+  });
+
   it('passes a square local monogram favicon with manifest and maskable icon coverage', () => {
     const fixture = makeFixture();
     const result = runScript(fixture);
@@ -134,6 +142,36 @@ describe('check-brand-assets.mjs', () => {
     expect(result.status).toBe(0);
     expect(output.verdict).toBe('PASS');
     expect(output.by_rule['soup/brand-pwa-maskable-assets-missing']).toBe(2);
+  });
+
+  it('fails on a missing canonical favicon link when that zeroed rule is promoted', () => {
+    const fixture = makeFixture({
+      index: '<!doctype html><html><head><link rel="manifest" href="/manifest.webmanifest" /></head><body></body></html>\n',
+    });
+    const result = runScript(fixture, ['--fail-on-rule', 'soup/brand-favicon-link-required']);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.enforced_rules).toEqual(['soup/brand-favicon-link-required']);
+    expect(output.failed_rules).toEqual(['soup/brand-favicon-link-required']);
+    expect(output.by_rule['soup/brand-favicon-link-required']).toBe(1);
+  });
+
+  it('keeps unresolved PWA coverage report-only when only the favicon link rule is promoted', () => {
+    const fixture = makeFixture({
+      index: '<!doctype html><html><head><link rel="icon" href="/favicon.svg" /></head><body></body></html>\n',
+      manifest: null,
+    });
+    const result = runScript(fixture, ['--fail-on-rule', 'soup/brand-favicon-link-required']);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(0);
+    expect(output.verdict).toBe('PASS');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.by_rule['soup/brand-pwa-maskable-assets-missing']).toBe(2);
+    expect(output.failed_rules).toEqual([]);
   });
 
   it('fails on legacy product or channel copy in peripheral artifacts', () => {

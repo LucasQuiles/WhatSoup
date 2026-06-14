@@ -26,6 +26,7 @@ Options:
   --favicon <path>      Favicon SVG. Default: console/public/favicon.svg
   --index <path>        HTML entrypoint. Default: console/index.html
   --manifest <path>     PWA manifest path. Default: console/public/manifest.webmanifest
+  --fail-on-rule <rule> Exit 1 when findings for this rule are present. Repeatable.
   --fail-on-findings    Exit 1 when report-only findings are present.
   --help                Print this message.
 `;
@@ -40,6 +41,7 @@ function requireValue(argv, index, flag) {
 function parseArgs(argv) {
   const opts = {
     failOnFindings: false,
+    failOnRules: new Set(),
     favicon: DEFAULT_FAVICON,
     help: false,
     index: DEFAULT_INDEX,
@@ -51,6 +53,7 @@ function parseArgs(argv) {
     else if (arg === '--favicon') opts.favicon = resolve(requireValue(argv, ++i, arg));
     else if (arg === '--index') opts.index = resolve(requireValue(argv, ++i, arg));
     else if (arg === '--manifest') opts.manifest = resolve(requireValue(argv, ++i, arg));
+    else if (arg === '--fail-on-rule') opts.failOnRules.add(requireValue(argv, ++i, arg));
     else if (arg === '--fail-on-findings') opts.failOnFindings = true;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -312,18 +315,26 @@ function buildReport(opts) {
   const byRule = {};
   for (const finding of findings) byRule[finding.rule] = (byRule[finding.rule] ?? 0) + 1;
   failures.sort((a, b) => a.code.localeCompare(b.code) || a.target.localeCompare(b.target));
+  const failedFindings = findings
+    .filter((finding) => opts.failOnFindings || opts.failOnRules.has(finding.rule))
+    .map((finding) => finding.rule);
+  const failedRules = [...new Set(failedFindings)].sort();
+  const enforcedRules = [...opts.failOnRules].sort();
+  const reportOnly = !opts.failOnFindings && enforcedRules.length === 0;
 
   return {
     by_rule: Object.fromEntries(Object.entries(byRule).sort(([a], [b]) => a.localeCompare(b))),
+    enforced_rules: enforcedRules,
     failure_count: failures.length,
     failures,
+    failed_rules: failedRules,
     finding_count: findings.length,
     findings,
     generated_at_utc: new Date().toISOString(),
-    mode: opts.failOnFindings ? 'fail-on-findings' : 'report-only',
+    mode: reportOnly ? 'report-only' : opts.failOnFindings ? 'fail-on-findings' : 'fail-on-rule',
     paths,
     schema_version: 1,
-    verdict: failures.length > 0 || (opts.failOnFindings && findings.length > 0) ? 'FAIL' : 'PASS',
+    verdict: failures.length > 0 || failedRules.length > 0 ? 'FAIL' : 'PASS',
   };
 }
 

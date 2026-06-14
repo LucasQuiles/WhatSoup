@@ -16,7 +16,7 @@
     "design:regression": "bash scripts/design-regression.sh",
     "preview": "vite preview",
     "prepare": "husky",
-    "design:brand-assets": "node scripts/check-brand-assets.mjs",
+    "design:brand-assets": "node scripts/check-brand-assets.mjs --fail-on-rule soup/brand-favicon-link-required",
     "design:theme-parity": "node scripts/check-theme-parity.mjs",
     "design:capture": "node scripts/capture-visual-matrix.mjs",
     "design:capture:validate": "node scripts/validate-visual-manifest.mjs",

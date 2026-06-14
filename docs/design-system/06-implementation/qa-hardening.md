@@ -646,10 +646,12 @@ The audit is report-only until the approved asset set lands. It checks:
 - canonical `/favicon.svg` link in `console/index.html`;
 - `/manifest.webmanifest` link plus checked-in manifest coverage for at least one maskable icon.
 
-Default mode emits `verdict: PASS`, `mode: report-only`, and finding counts even when the current
-asset is known bad. `--fail-on-findings` exists for the later promotion packet after favicon,
-badge, PWA, and maskable assets are replaced and visually proven. A report-only PASS must never be
-cited as visual approval or 16px legibility proof.
+The package script currently promotes only the already-zero canonical favicon-link rule with
+`--fail-on-rule soup/brand-favicon-link-required`. Peripheral legacy copy and orphan public SVGs
+hard-fail independently. The favicon artwork, badge, PWA, and maskable asset findings remain
+report-only until the approved asset set lands and is visually proven. `--fail-on-findings` exists
+for that later promotion packet. A PASS with report-only findings must never be cited as visual
+approval or 16px legibility proof.
 
 ### 17.8 Color Semantics Audit
 

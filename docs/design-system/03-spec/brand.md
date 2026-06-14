@@ -151,11 +151,13 @@ PROTECTED list), `no-channel-specific-copy` / channel vocabulary guard (generic 
 outside the §4 protected channel contexts), forbidden-treatment review in the QA matrix (no
 gradient/illustration assets in the console bundle).
 
-`design:brand-assets` is the report-only identity asset audit. It inventories whether the favicon is
-still the legacy purple/blue bolt, whether gradients/glow/masks remain in production brand assets,
-whether the favicon canvas is square, and whether the HTML/PWA manifest path can carry the future
-maskable SOUP mark. Report-only PASS means the inventory ran; it does not approve the visual asset
-or replace 16px screenshot proof.
+`design:brand-assets` is the identity asset audit. The package script fail-closes the already-zero
+canonical `/favicon.svg` shell link (`soup/brand-favicon-link-required`) and hard-fails peripheral
+legacy copy / orphan public SVGs. The unresolved visual asset lanes remain report-only: whether the
+favicon is still the legacy purple/blue bolt, whether gradients/glow/masks remain in production
+brand assets, whether the favicon canvas is square, and whether the HTML/PWA manifest path can carry
+the future maskable SOUP mark. A PASS with report-only findings means the inventory ran; it does not
+approve the visual asset or replace 16px screenshot proof.
 
 `console/index.html` owns document-shell brand/chrome hooks: the favicon link, PWA manifest link
 when present, and browser `theme-color`. `theme-color` initializes to the dark `--surface-base`
