@@ -504,15 +504,16 @@ SSOT maintenance:
 - new root or console `design:*` / `guard:design-system-hygiene` package scripts require this QA
   hardening document.
 
-This guard is wired into the root pre-commit hook because it depends on staged paths. It is not
-useful as a post-commit `verify:*` step unless a future mode compares changed files against a commit
-range. A PASS means only that the staged packet included the required tracked documentation owner;
-it does not prove the documentation is substantively correct. Reviewers still inspect the diff and
-the packet evidence.
+This guard is wired into the root pre-commit hook in staged mode and into quality.yml CI with
+`--changed-since <ref>` so PR/web-merge paths check the committed diff against the base branch. A
+PASS means only that the changed packet included the required tracked documentation owner; it does
+not prove the documentation is substantively correct. Reviewers still inspect the diff and the
+packet evidence.
 
-The hook wiring itself is protected by `scripts/safeguard-diagnostics.ts`: the safeguard diagnostics
+The hook and CI wiring are protected by `scripts/safeguard-diagnostics.ts`: the safeguard diagnostics
 must fail if `.husky/pre-commit` drops repo hygiene, publication, design-system documentation
-hygiene, node-pin, settings, or console lint coverage.
+hygiene, node-pin, settings, or console lint coverage, or if quality.yml drops the changed-range
+design-system hygiene step.
 
 ### 17.4 Shared Console Design Verification Chain
 

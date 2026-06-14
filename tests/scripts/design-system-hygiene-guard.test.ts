@@ -17,10 +17,16 @@ function git(repo: string, args: string[]): void {
   execFileSync('git', args, { cwd: repo, stdio: 'ignore', env: cleanGitEnv() });
 }
 
+function gitOutput(repo: string, args: string[]): string {
+  return execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: cleanGitEnv() }).trim();
+}
+
 function makeRepo(): string {
   const repo = mkdtempSync(join(tmpdir(), 'design-system-hygiene-'));
   repos.push(repo);
   git(repo, ['init']);
+  git(repo, ['config', 'user.name', 'WhatSoup Test']);
+  git(repo, ['config', 'user.email', 'whatsoup-test@users.noreply.github.com']);
   return repo;
 }
 
@@ -29,6 +35,10 @@ function stageFile(repo: string, filePath: string, content: string): void {
   mkdirSync(dirname(absolute), { recursive: true });
   writeFileSync(absolute, content);
   git(repo, ['add', filePath]);
+}
+
+function commit(repo: string, message: string): void {
+  git(repo, ['commit', '-m', message]);
 }
 
 afterEach(() => {
@@ -181,6 +191,47 @@ describe('design-system hygiene guard', () => {
     ]);
   });
 
+  it('fails changed-range token implementation changes without the token spec SSOT', () => {
+    const repo = makeRepo();
+    stageFile(repo, 'README.md', '# Fixture\n');
+    commit(repo, 'base');
+    const base = gitOutput(repo, ['rev-parse', 'HEAD']);
+
+    stageFile(repo, 'console/src/styles/tokens.semantic.css', ':root { --accent: #35f; }\n');
+    commit(repo, 'token change');
+
+    expect(findDesignSystemHygieneIssues(repo, { changedSince: base }).map((issue) => issue.code)).toEqual([
+      'token-implementation-missing-spec',
+    ]);
+  });
+
+  it('passes changed-range token implementation changes when tokens-v3.md changed too', () => {
+    const repo = makeRepo();
+    stageFile(repo, 'README.md', '# Fixture\n');
+    commit(repo, 'base');
+    const base = gitOutput(repo, ['rev-parse', 'HEAD']);
+
+    stageFile(repo, 'console/src/styles/tokens.semantic.css', ':root { --accent: #35f; }\n');
+    stageFile(repo, 'docs/design-system/03-spec/tokens-v3.md', '# Tokens\n\n- Accent updated.\n');
+    commit(repo, 'token change with docs');
+
+    expect(findDesignSystemHygieneIssues(repo, { changedSince: base })).toEqual([]);
+  });
+
+  it('prints changed-range json mode', () => {
+    const repo = makeRepo();
+    stageFile(repo, 'README.md', '# Fixture\n');
+    commit(repo, 'base');
+    const base = gitOutput(repo, ['rev-parse', 'HEAD']);
+    stageFile(repo, 'console/eslint-rules/index.mjs', 'export default { rules: {} };\n');
+    commit(repo, 'lint change');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    expect(runDesignSystemHygieneGuard(['--changed-since', base, '--json'], repo)).toBe(1);
+    expect(log.mock.calls.join('\n')).toContain('"mode": "changed-since"');
+    expect(log.mock.calls.join('\n')).toContain('lint-implementation-missing-plan');
+  });
+
   it('prints json and returns a failing status when issues exist', () => {
     const repo = makeRepo();
     stageFile(repo, 'console/src/styles/tokens.component.css', ':root { --card-gap: 12px; }\n');
@@ -192,8 +243,10 @@ describe('design-system hygiene guard', () => {
   });
 
   it('parses supported args', () => {
-    expect(parseArgs(['--staged', '--json'])).toEqual({ help: false, json: true, staged: true });
-    expect(parseArgs(['--help'])).toEqual({ help: true, json: false, staged: true });
+    expect(parseArgs(['--staged', '--json'])).toEqual({ changedSince: null, help: false, json: true, staged: true });
+    expect(parseArgs(['--changed-since', 'origin/main'])).toEqual({ changedSince: 'origin/main', help: false, json: false, staged: false });
+    expect(parseArgs(['--help'])).toEqual({ changedSince: null, help: true, json: false, staged: true });
+    expect(() => parseArgs(['--changed-since'])).toThrow('--changed-since requires a git ref');
     expect(() => parseArgs(['--unknown'])).toThrow('unknown argument: --unknown');
   });
 });

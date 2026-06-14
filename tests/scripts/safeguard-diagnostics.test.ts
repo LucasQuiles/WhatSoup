@@ -156,6 +156,8 @@ const requiredFiles: Record<string, string> = {
   ].join('\n'),
   '.github/workflows/quality.yml': [
     'name: Install console dependencies',
+    'name: Design-system hygiene changed files',
+    'npm run guard:design-system-hygiene -- --changed-since',
     'name: Console build',
     'name: Console design verification',
     'run: npm run verify:console-design',
@@ -304,6 +306,20 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
+  });
+
+  it('fails when CI omits design-system hygiene changed-range coverage', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': requiredFiles['.github/workflows/quality.yml']
+          .replace('npm run guard:design-system-hygiene -- --changed-since', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['npm run guard:design-system-hygiene -- --changed-since']) });
   });
 
   it('fails when tag release CI omits the shared console design verification chain', () => {

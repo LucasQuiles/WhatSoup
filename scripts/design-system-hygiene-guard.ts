@@ -1,4 +1,4 @@
-import { listStagedFiles, normalizeRepoPath, readStagedAddedLines } from './lib/guard-core.ts';
+import { git, gitList, listStagedFiles, normalizeRepoPath, readStagedAddedLines } from './lib/guard-core.ts';
 
 export interface DesignSystemHygieneIssue {
   code: string;
@@ -11,10 +11,11 @@ interface GuardRule {
   code: string;
   description: string;
   required: string[];
-  matches(filePath: string, staged: Set<string>, cwd: string): boolean;
+  matches(filePath: string, staged: Set<string>, cwd: string, readAddedLines: (filePath: string) => string): boolean;
 }
 
 interface ParsedArgs {
+  changedSince: string | null;
   help: boolean;
   json: boolean;
   staged: boolean;
@@ -71,9 +72,9 @@ function pathMatches(filePath: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(filePath));
 }
 
-function packageDesignScriptChanged(filePath: string, cwd: string): boolean {
+function packageDesignScriptChanged(filePath: string, readAddedLines: (filePath: string) => string): boolean {
   if (filePath !== 'package.json' && filePath !== 'console/package.json') return false;
-  const diff = readStagedAddedLines(cwd, filePath);
+  const diff = readAddedLines(filePath);
   return /^\+.*"(?:guard:design-system-hygiene|design:[^"]+)"/m.test(diff);
 }
 
@@ -124,7 +125,7 @@ const rules: GuardRule[] = [
     code: 'design-script-missing-docs',
     description: 'staged design/guard package scripts must update their tracked QA/enforcement docs',
     required: [qaHardening],
-    matches: (filePath, _staged, cwd) => packageDesignScriptChanged(filePath, cwd),
+    matches: (filePath, _staged, _cwd, readAddedLines) => packageDesignScriptChanged(filePath, readAddedLines),
   },
 ];
 
@@ -132,14 +133,30 @@ function hasRequiredDoc(staged: Set<string>, required: string[]): boolean {
   return required.some((filePath) => staged.has(filePath));
 }
 
-export function findDesignSystemHygieneIssues(cwd = process.cwd()): DesignSystemHygieneIssue[] {
-  const stagedFiles = listStagedFiles(cwd, 'ACMR').map(normalizeRepoPath);
-  const staged = new Set(stagedFiles);
+function readChangedAddedLines(cwd: string, changedSince: string, filePath: string): string {
+  try {
+    return git(['diff', '--unified=0', `${changedSince}...HEAD`, '--', filePath], cwd);
+  } catch {
+    return '';
+  }
+}
+
+export function findDesignSystemHygieneIssues(
+  cwd = process.cwd(),
+  options: { changedSince?: string } = {},
+): DesignSystemHygieneIssue[] {
+  const files = options.changedSince
+    ? gitList(['diff', '--name-only', '--diff-filter=ACMR', `${options.changedSince}...HEAD`], cwd)
+    : listStagedFiles(cwd, 'ACMR');
+  const staged = new Set(files.map(normalizeRepoPath));
+  const readAddedLines = (filePath: string) => options.changedSince
+    ? readChangedAddedLines(cwd, options.changedSince, filePath)
+    : readStagedAddedLines(cwd, filePath);
   const issues: DesignSystemHygieneIssue[] = [];
 
-  for (const filePath of stagedFiles) {
+  for (const filePath of staged) {
     for (const rule of rules) {
-      if (!rule.matches(filePath, staged, cwd)) continue;
+      if (!rule.matches(filePath, staged, cwd, readAddedLines)) continue;
       if (hasRequiredDoc(staged, rule.required)) continue;
       issues.push({
         code: rule.code,
@@ -154,21 +171,31 @@ export function findDesignSystemHygieneIssues(cwd = process.cwd()): DesignSystem
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
-  const args: ParsedArgs = { help: false, json: false, staged: true };
-  for (const arg of argv) {
+  const args: ParsedArgs = { changedSince: null, help: false, json: false, staged: true };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
     if (arg === '--help' || arg === '-h') args.help = true;
     else if (arg === '--json') args.json = true;
-    else if (arg === '--staged') args.staged = true;
+    else if (arg === '--staged') {
+      args.changedSince = null;
+      args.staged = true;
+    } else if (arg === '--changed-since') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) throw new Error('--changed-since requires a git ref');
+      args.changedSince = value;
+      args.staged = false;
+      index += 1;
+    }
     else throw new Error(`unknown argument: ${arg}`);
   }
   return args;
 }
 
 function usage(): string {
-  return `Usage: npm run guard:design-system-hygiene -- [--staged] [--json]
+  return `Usage: npm run guard:design-system-hygiene -- [--staged|--changed-since <ref>] [--json]
 
 Checks staged design-system implementation files for their tracked SSOT documentation companions.
-This is a local/report-only promotion gate; it is not wired into verify:* yet.
+CI may use --changed-since to compare committed changes against a base ref.
 `;
 }
 
@@ -200,9 +227,16 @@ export function runDesignSystemHygieneGuard(argv = process.argv.slice(2), cwd = 
     return 0;
   }
 
-  const issues = findDesignSystemHygieneIssues(cwd);
+  const issues = findDesignSystemHygieneIssues(cwd, args.changedSince ? { changedSince: args.changedSince } : {});
   if (args.json) {
-    console.log(JSON.stringify({ issues, issue_count: issues.length, schema_version: 1, verdict: issues.length === 0 ? 'PASS' : 'FAIL' }, null, 2));
+    console.log(JSON.stringify({
+      issues,
+      issue_count: issues.length,
+      mode: args.changedSince ? 'changed-since' : 'staged',
+      changed_since: args.changedSince,
+      schema_version: 1,
+      verdict: issues.length === 0 ? 'PASS' : 'FAIL',
+    }, null, 2));
   } else {
     printText(issues);
   }

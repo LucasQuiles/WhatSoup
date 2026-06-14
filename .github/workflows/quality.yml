@@ -95,6 +95,14 @@ jobs:
       - name: Documentation drift guard
         run: npm run guard:doc-drift
 
+      - name: Design-system hygiene changed files
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            npm run guard:design-system-hygiene -- --changed-since "origin/${GITHUB_BASE_REF}"
+          else
+            npm run guard:design-system-hygiene -- --changed-since HEAD^
+          fi
+
       - name: Public surface drift guard
         run: npm run guard:public-surface-drift
 

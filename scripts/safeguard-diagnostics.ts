@@ -276,6 +276,8 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     file: '.github/workflows/quality.yml',
     anchors: [
       'name: Install console dependencies',
+      'name: Design-system hygiene changed files',
+      'npm run guard:design-system-hygiene -- --changed-since',
       'name: Console build',
       'name: Console design verification',
       'run: npm run verify:console-design',
