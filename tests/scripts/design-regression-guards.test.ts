@@ -133,6 +133,36 @@ describe('design-regression.sh guard contracts', () => {
     expect(check12).toContain('PASS  count=0  (zero focus suppression sites)');
   });
 
+  it('fails a fixture repo when CSS uses an unsanctioned infinite animation', () => {
+    const result = runDesignRegressionFixture(
+      '.fixture { animation: spin 1s linear infinite; color: var(--color-token); }\n',
+    );
+    const output = `${result.stdout}\n${result.stderr}`;
+
+    expect(result.status).toBe(1);
+
+    const check13 = checkBlock(output, 13);
+    expect(check13).toContain("'infinite' occurrences in CSS: 1");
+    expect(check13).toContain('UNSANCTIONED');
+    expect(check13).toContain('spin 1s linear infinite');
+    expect(check13).toContain('FAIL  count=1  (1 unsanctioned infinite animations)');
+    expect(output).toContain('BLOCKING checks failed: 13');
+  });
+
+  it('allows a fixture repo when CSS infinite animations use sanctioned names', () => {
+    const result = runDesignRegressionFixture(
+      '.fixture { animation: shimmer 1.5s infinite linear; color: var(--color-token); }\n',
+    );
+    const output = `${result.stdout}\n${result.stderr}`;
+
+    expect(result.status).toBe(0);
+
+    const check13 = checkBlock(output, 13);
+    expect(check13).toContain("'infinite' occurrences in CSS: 1");
+    expect(check13).not.toContain('UNSANCTIONED');
+    expect(check13).toContain('PASS  count=1  (all 1 occurrences are waivered/sanctioned)');
+  });
+
   it('reports dangling no-fallback CSS var refs as a clean blocking PASS when absent', () => {
     const result = runScript();
     const output = `${result.stdout}\n${result.stderr}`;

@@ -34,7 +34,8 @@ CONSOLE_DIR="$REPO_ROOT/console"
 #   - Check 10: live PASS (all three protected contracts present); FAIL on deletion.
 #   - Check 12: live PASS (zero TSX outline-none after Inbox + HistoryTab composer
 #               migrations); FAIL on focus suppression reintroduction.
-#   - Check 13: live PASS (exactly 5 infinite occurrences, all sanctioned/waivered); FAIL on new.
+#   - Check 13: live PASS (all infinite occurrences use sanctioned/waivered names);
+#               FAIL on any unsanctioned infinite animation, even if the total count is unchanged.
 #   - Check 14: live PASS (no expired waivers); deterministic date check, zero FP surface.
 #   - Check 15: live PASS after use-exit-presence dead suppression cleanup; FAIL on any
 #               lint suppression lacking a waiver:<id> tag or WVR registry/source drift.
@@ -346,20 +347,32 @@ CSS_FILES=$(find "$CONSOLE_SRC/styles" "$CONSOLE_SRC" -maxdepth 1 -name "*.css" 
 C13_ALL=$(rg -n 'infinite' $CSS_FILES 2>/dev/null || true)
 C13_COUNT=$(printf '%s\n' "$C13_ALL" | grep -c 'infinite' || true)
 C13_COUNT=${C13_COUNT:-0}
+C13_UNSANCTIONED_HITS=$(printf '%s\n' "$C13_ALL" | awk '
+  /infinite/ {
+    # Allowed names are exact animation identifiers. Counting totals is not enough:
+    # a sanctioned line can disappear while an unsanctioned line keeps the same total.
+    if ($0 ~ /animation[[:space:]]*:[^;]*(^|[^[:alnum:]_-])(breathe-ring|typing-bounce|breathe|shimmer)([^[:alnum:]_-]|$)/) next;
+    print;
+  }
+' || true)
+C13_UNSANCTIONED_COUNT=0
+if [ -n "$C13_UNSANCTIONED_HITS" ]; then
+  C13_UNSANCTIONED_COUNT=$(printf '%s\n' "$C13_UNSANCTIONED_HITS" | grep -c '.' || true)
+fi
 echo "    'infinite' occurrences in CSS: $C13_COUNT"
 if [ -n "$C13_ALL" ]; then
   echo "$C13_ALL" | sed 's|'"$CONSOLE_SRC/"'||' | sed 's/^/    /'
 fi
-echo "    Sanctioned: breathe-ring x2 (ok-disc halo in composites+primitives), breathe, typing-bounce"
+echo "    Sanctioned names: breathe-ring (ok-disc halo in composites+primitives), breathe, typing-bounce, shimmer"
 echo "    Waivered until P5: shimmer (WVR-005), typing-bounce (WVR-006)"
-echo "    Unsanctioned: any new 'infinite' not in the above list"
-# Unsanctioned count = total minus the 5 known occurrences
-# (+1 at C2: primitives.css uses breathe-ring for the ok-disc halo, same sanctioned animation)
-C13_UNSANCTIONED=$((C13_COUNT - 5))
-if [ "$C13_UNSANCTIONED" -le 0 ]; then
+echo "    Unsanctioned: any 'infinite' line whose animation name is not in the sanctioned set"
+if [ "$C13_UNSANCTIONED_COUNT" -gt 0 ]; then
+  printf '%s\n' "$C13_UNSANCTIONED_HITS" | sed 's|'"$CONSOLE_SRC/"'||' | sed 's/^/    UNSANCTIONED /'
+fi
+if [ "$C13_UNSANCTIONED_COUNT" -eq 0 ]; then
   check_result "13" "$C13_COUNT" "all $C13_COUNT occurrences are waivered/sanctioned" "OK"
 else
-  check_result "13" "$C13_COUNT" "$C13_UNSANCTIONED unsanctioned infinite animations" "FAIL"
+  check_result "13" "$C13_UNSANCTIONED_COUNT" "$C13_UNSANCTIONED_COUNT unsanctioned infinite animations" "FAIL"
 fi
 
 # ---------------------------------------------------------------------------
