@@ -17,7 +17,7 @@
  *     consumers gone; verified zero remaining references).
  *   - Title typography normalises to soup-modal-title; X import removed.
  */
-import React, { useState, useCallback, useEffect } from 'react'
+import React, { useState, useCallback, useEffect, useId } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Save } from 'lucide-react'
 import TagInput from '../TagInput'
@@ -51,6 +51,10 @@ import {
   isEqualValue,
 } from './config-helpers'
 
+function fieldIdSegment(key: string): string {
+  return key.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'field'
+}
+
 export function ConfigEditDialog({
   open,
   config,
@@ -69,6 +73,7 @@ export function ConfigEditDialog({
   const [patch, setPatch] = useState<Record<string, unknown>>({})
   const [saving, setSaving] = useState(false)
   const [customEnumFields, setCustomEnumFields] = useState<Record<string, true>>({})
+  const fieldIdPrefix = useId()
 
   // Reset patch and custom-enum state on each open (C-B3W2-1 — mirrors
   // CreateGroupModal precedent; provides fresh-state-per-open semantics that
@@ -161,17 +166,26 @@ export function ConfigEditDialog({
     }
   }
 
-  const renderField = (key: string, originalValue: unknown) => {
+  const renderField = (
+    key: string,
+    originalValue: unknown,
+    fieldId: string,
+    describedBy: string | undefined,
+    invalid: boolean,
+  ) => {
     const val = currentValue(key)
 
     // Boolean -> checkbox
     if (typeof originalValue === 'boolean') {
       return (
         <CheckboxField
+          id={fieldId}
           checked={val as boolean}
           onChange={checked => setField(key, checked)}
           className="cursor-pointer"
           inputClassName="accent-current w-[var(--feed-col-icon)] h-[var(--feed-col-icon)]"
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
           label={(
             <span className="font-mono text-m-agt text-data">
               {String(val)}
@@ -185,9 +199,13 @@ export function ConfigEditDialog({
     if (typeof originalValue === 'number') {
       return (
         <NumberInput
+          id={fieldId}
           value={val as number}
           onChange={e => setField(key, Number(e.target.value))}
           className="text-s-warn"
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          error={invalid}
         />
       )
     }
@@ -197,6 +215,7 @@ export function ConfigEditDialog({
       const values = (val as string[]) ?? []
       return (
         <TagInput
+          id={fieldId}
           values={values}
           onChange={(newValues) => setField(key, newValues)}
           placeholder={key === 'adminPhones' ? 'Add phone number' : 'Add item'}
@@ -204,6 +223,8 @@ export function ConfigEditDialog({
           normalizeValue={key === 'adminPhones' ? normalizePhoneInput : undefined}
           accentColor={values.length > 0 ? 'var(--color-m-agt)' : undefined}
           displayLabels={key === 'adminPhones' ? adminPhonesDisplay : undefined}
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
         />
       )
     }
@@ -212,12 +233,16 @@ export function ConfigEditDialog({
     if (typeof originalValue === 'object' && originalValue !== null) {
       return (
         <TextArea
+          id={fieldId}
           readOnly
           value={JSON.stringify(val, null, 2)}
           className="text-t3"
           minHeight="calc(var(--sp-10) + var(--sp-5))"
           resize="vertical"
           dimmed
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          error={invalid}
         />
       )
     }
@@ -241,6 +266,7 @@ export function ConfigEditDialog({
       return (
         <div className="flex flex-col gap-[var(--sp-2)]">
           <SelectInput
+            id={fieldId}
             value={customEnumActive ? CUSTOM_ENUM_OPTION : val as string}
             onChange={e => {
               const nextValue = e.target.value
@@ -253,6 +279,9 @@ export function ConfigEditDialog({
               setField(key, nextValue)
             }}
             className="font-mono cursor-pointer text-m-pas pr-[var(--sp-8)]"
+            aria-describedby={describedBy}
+            aria-invalid={invalid ? true : undefined}
+            error={invalid && !customEnumActive}
           >
             {enumOpts.map(opt => (
               <option key={opt} value={opt}>{opt || '(default)'}</option>
@@ -263,11 +292,15 @@ export function ConfigEditDialog({
           </SelectInput>
           {customEnumActive && (
             <TextInput
+              id={`${fieldId}-custom`}
               type="text"
               value={typeof val === 'string' && !enumOpts.includes(val) ? val : ''}
               onChange={e => setField(key, e.target.value)}
               placeholder="Enter custom model ID"
               className="text-m-pas"
+              aria-describedby={describedBy}
+              aria-invalid={invalid ? true : undefined}
+              error={invalid}
             />
           )}
         </div>
@@ -278,11 +311,15 @@ export function ConfigEditDialog({
     if (typeof originalValue === 'string' && (originalValue as string).length > 80) {
       return (
         <TextArea
+          id={fieldId}
           value={val as string}
           onChange={e => setField(key, e.target.value)}
           className="text-m-pas"
           minHeight="calc(var(--sp-10) * 2)"
           resize="vertical"
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          error={invalid}
         />
       )
     }
@@ -290,10 +327,14 @@ export function ConfigEditDialog({
     // String (short) -> text input
     return (
       <TextInput
+        id={fieldId}
         type="text"
         value={val as string}
         onChange={e => setField(key, e.target.value)}
         className="text-m-pas"
+        aria-describedby={describedBy}
+        aria-invalid={invalid ? true : undefined}
+        error={invalid}
       />
     )
   }
@@ -323,26 +364,33 @@ export function ConfigEditDialog({
       </div>
 
       <ModalBody>
-        {editableEntries.map(([key, originalValue]) => (
-          <div key={key}>
-            <label className="c-label block mb-[var(--sp-1)]">
-              {key}
-              {(key in patch || key in customEnumFields) && (
-                <span
-                  className="font-mono ml-[var(--sp-2)] text-s-warn text-xs"
-                >
-                  modified
+        {editableEntries.map(([key, originalValue]) => {
+          const isActive = key in patch || key in customEnumFields
+          const fieldError = isActive ? getFieldError(key) : null
+          const fieldId = `${fieldIdPrefix}-${fieldIdSegment(key)}`
+          const errorId = fieldError ? `${fieldId}-error` : undefined
+
+          return (
+            <div key={key}>
+              <label htmlFor={fieldId} className="c-label block mb-[var(--sp-1)]">
+                {key}
+                {isActive && (
+                  <span
+                    className="font-mono ml-[var(--sp-2)] text-s-warn text-xs"
+                  >
+                    modified
+                  </span>
+                )}
+              </label>
+              {renderField(key, originalValue, fieldId, errorId, Boolean(fieldError))}
+              {fieldError && (
+                <span id={errorId} className="font-mono block text-s-crit mt-[var(--sp-1)] text-xs">
+                  {fieldError}
                 </span>
               )}
-            </label>
-            {renderField(key, originalValue)}
-            {(key in patch || key in customEnumFields) && getFieldError(key) && (
-              <span className="font-mono block text-s-crit mt-[var(--sp-1)] text-xs">
-                {getFieldError(key)}
-              </span>
-            )}
-          </div>
-        ))}
+            </div>
+          )
+        })}
       </ModalBody>
 
       <ModalFooter>

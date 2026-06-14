@@ -212,33 +212,42 @@ export interface CheckboxFieldProps {
   label: ReactNode;
   checked: boolean;
   onChange: (checked: boolean) => void;
+  id?: string;
   helper?: string;
   disabled?: boolean;
   className?: string;
   inputClassName?: string;
   labelClassName?: string;
   suffix?: ReactNode;
+  'aria-describedby'?: string;
+  'aria-invalid'?: true;
 }
 
 export const CheckboxField: FC<CheckboxFieldProps> = ({
   label,
   checked,
   onChange,
+  id,
   helper,
   disabled,
   className,
   inputClassName,
   labelClassName,
   suffix,
+  'aria-describedby': ariaDescribedBy,
+  'aria-invalid': ariaInvalid,
 }) => (
   <div>
     <label className={`c-checkbox-row ${className ?? ''}`}>
       <input
+        id={id}
         type="checkbox"
         checked={checked}
         disabled={disabled}
         onChange={event => onChange(event.target.checked)}
         className={inputClassName}
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={ariaInvalid}
       />
       <span className={`text-data ${labelClassName ?? ''}`} style={{ color: 'var(--text-2)' }}>{label}</span>
       {suffix && <span aria-hidden="true">{suffix}</span>}

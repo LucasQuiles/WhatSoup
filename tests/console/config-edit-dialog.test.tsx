@@ -13,13 +13,31 @@ import { ToastContext, type ToastContextValue } from '../../console/src/hooks/to
 // Stub it so all array-of-strings fields (adminPhones, etc.) are testable without
 // keyboard-simulation complexity; the TagInput unit is covered by its own tests.
 vi.mock('../../console/src/components/TagInput', () => ({
-  default: ({ values, onChange, placeholder, displayLabels }: {
+  default: ({
+    values,
+    onChange,
+    id,
+    placeholder,
+    displayLabels,
+    'aria-describedby': ariaDescribedBy,
+    'aria-invalid': ariaInvalid,
+  }: {
     values: string[]
     onChange: (v: string[]) => void
+    id?: string
     placeholder?: string
     displayLabels?: Record<string, string>
+    'aria-describedby'?: string
+    'aria-invalid'?: true
   }) => (
     <div data-testid="tag-input" data-placeholder={placeholder}>
+      <input
+        id={id}
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={ariaInvalid}
+        data-testid="tag-input-control"
+        readOnly
+      />
       {values.map((v, i) => (
         <span key={i} data-testid={`tag-${i}`}>{displayLabels?.[v] ?? v}</span>
       ))}
@@ -213,6 +231,17 @@ describe('ConfigEditDialog — agentOptions nested expansion', () => {
 // ---------------------------------------------------------------------------
 
 describe('ConfigEditDialog — field type rendering', () => {
+  it('associates dynamic scalar field labels with their controls', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    expect((screen.getByLabelText('enabled') as HTMLInputElement).type).toBe('checkbox')
+    expect((screen.getByLabelText('maxTokens') as HTMLInputElement).type).toBe('number')
+    expect((screen.getByLabelText('accessMode') as HTMLSelectElement).tagName).toBe('SELECT')
+    expect((screen.getByLabelText('systemPrompt') as HTMLTextAreaElement).tagName).toBe('TEXTAREA')
+  })
+
   it('renders a checkbox for boolean fields', () => {
     render(withProviders(
       <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
@@ -442,7 +471,11 @@ describe('ConfigEditDialog — save button state', () => {
     const numberInput = screen.getAllByRole('spinbutton')[0]
     fireEvent.change(numberInput, { target: { value: '10' } })
 
-    expect(screen.getByText('Min 256')).toBeDefined()
+    const error = screen.getByText('Min 256')
+    expect(error).toBeDefined()
+    expect(error.id).toBeTruthy()
+    expect(numberInput.getAttribute('aria-invalid')).toBe('true')
+    expect(numberInput.getAttribute('aria-describedby')).toBe(error.id)
   })
 })
 
@@ -935,6 +968,14 @@ describe('ConfigEditDialog — agentOptions.sessionScope enum', () => {
 // ---------------------------------------------------------------------------
 
 describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
+  it('associates the adminPhones label with the TagInput control', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    expect(screen.getByLabelText('adminPhones')).toBeDefined()
+  })
+
   it('passes adminPhones values into TagInput stub', () => {
     render(withProviders(
       <ConfigEditDialog
