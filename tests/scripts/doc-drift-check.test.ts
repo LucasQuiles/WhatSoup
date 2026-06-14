@@ -12,6 +12,7 @@ import {
   findDesignRegressionCheckCount,
   findRawFormControlInventory,
   findShadowBaselineInventory,
+  findSoupKitchenLabelCount,
   findThemeParityTokenCount,
   findToolRegistrations,
   run,
@@ -26,6 +27,7 @@ const currentDesignGuardTestInventory = findDesignGuardTestInventory(repoRoot);
 const currentThemeParityTokenCount = findThemeParityTokenCount(repoRoot);
 const currentDesignBurndownSummary = findDesignBurndownSummary(repoRoot);
 const currentDesignRegressionBlockingChecks = findDesignRegressionBlockingChecks(repoRoot);
+const currentSoupKitchenLabelCount = findSoupKitchenLabelCount(repoRoot);
 
 describe('doc drift check', () => {
   afterEach(() => {
@@ -252,6 +254,46 @@ describe('doc drift check', () => {
         line: 1,
         text: '| Token enforcement | `console/lint-shadow-baseline.json` — 602, rule×file buckets | current design-enforcement row |',
         expected: 'shadow lint total from console/lint-shadow-baseline.json',
+      },
+    ]);
+  });
+
+  it('flags stale current brand-regression lint counts', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'conformance-manifest.md');
+    const staleCount = (currentShadowBaselineInventory.byRule['soup/no-brand-regression'] ?? 0) + 1;
+    const text = `Brand scope evidence: brand-regression lint (${staleCount} hits = split wordmark + UpdateModal ternary).`;
+    writeFileSync(staleDoc, `${text}\n`, 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: currentShadowBaselineInventory.byRule['soup/no-brand-regression'] ?? 0,
+        claimed: staleCount,
+        filePath: staleDoc,
+        kind: 'brand-regression-lint-count',
+        line: 1,
+        text,
+        expected: 'soup/no-brand-regression count from console/lint-shadow-baseline.json',
+      },
+    ]);
+  });
+
+  it('flags stale current Soup Kitchen label counters', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'conformance-manifest.md');
+    const staleCount = currentSoupKitchenLabelCount + 1;
+    const text = `Brand scope evidence: "Soup Kitchen" ×${staleCount} counter.`;
+    writeFileSync(staleDoc, `${text}\n`, 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: currentSoupKitchenLabelCount,
+        claimed: staleCount,
+        filePath: staleDoc,
+        kind: 'soup-kitchen-label-count',
+        line: 1,
+        text,
+        expected: 'Soup Kitchen label count from console/src and docs/console-guide.md',
       },
     ]);
   });

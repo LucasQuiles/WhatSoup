@@ -9,6 +9,8 @@ export type DocDriftKind =
   | 'module-count'
   | 'migration-history'
   | 'raw-form-control-inventory'
+  | 'brand-regression-lint-count'
+  | 'soup-kitchen-label-count'
   | 'theme-parity-token-count'
   | 'shadow-baseline-total'
   | 'design-regression-check-count'
@@ -56,6 +58,7 @@ export interface RawFormControlInventory {
 
 export interface ShadowBaselineInventory {
   total: number;
+  byRule: Record<string, number>;
 }
 
 export interface DesignGuardTestInventory {
@@ -110,6 +113,10 @@ const currentDesignEnforcementDocPattern =
   /(?:^|\/)docs\/design-system\/06-implementation\/conformance-manifest\.md$|(?:^|\/)conformance-manifest\.md$/;
 const currentDesignEnforcementContextPattern =
   /\b(?:current|live)\b.*\b(?:design[- ]enforcement|shadow baseline|shadow ratchet|design-regression)\b/i;
+const brandRegressionLintCountPattern =
+  /\bbrand-regression lint\s*\(\s*(\d+)\s+hits?\b/i;
+const soupKitchenLabelCountPattern =
+  /["“]?Soup Kitchen["”]?\s*[×x]\s*(\d+)\s+counter\b/i;
 const shadowBaselineTotalPattern =
   /\blint-shadow-baseline\.json\b[^\n]*?(?:—|=|:|\bis\b|\btotal\b|\bceiling\b)\s*(\d+)\b/i;
 const themeParityTokenCountPattern =
@@ -263,11 +270,51 @@ export function findRawFormControlInventory(cwd: string = process.cwd()): RawFor
 
 export function findShadowBaselineInventory(cwd: string = process.cwd()): ShadowBaselineInventory {
   const baselinePath = path.resolve(cwd, 'console/lint-shadow-baseline.json');
-  const baseline = JSON.parse(readFileSync(baselinePath, 'utf8')) as { total?: unknown };
+  const baseline = JSON.parse(readFileSync(baselinePath, 'utf8')) as { total?: unknown; rules?: unknown };
   if (typeof baseline.total !== 'number' || !Number.isFinite(baseline.total)) {
     throw new Error('ERROR(schema:lint-shadow-baseline.json): missing numeric total');
   }
-  return { total: baseline.total };
+  if (typeof baseline.rules !== 'object' || baseline.rules === null || Array.isArray(baseline.rules)) {
+    throw new Error('ERROR(schema:lint-shadow-baseline.json): missing rules object');
+  }
+
+  const byRule: Record<string, number> = {};
+  for (const [key, count] of Object.entries(baseline.rules)) {
+    if (typeof count !== 'number' || !Number.isFinite(count)) {
+      throw new Error(`ERROR(schema:lint-shadow-baseline.json): non-numeric count for key "${key}"`);
+    }
+    const separatorIndex = key.indexOf(' :: ');
+    if (separatorIndex === -1) {
+      throw new Error(`ERROR(schema:lint-shadow-baseline.json): key missing " :: " separator: "${key}"`);
+    }
+    const rule = key.slice(0, separatorIndex);
+    byRule[rule] = (byRule[rule] ?? 0) + count;
+  }
+
+  return { total: baseline.total, byRule };
+}
+
+function walkRepoFiles(dir: string, extensions: RegExp, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    const absolutePath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      walkRepoFiles(absolutePath, extensions, out);
+    } else if (entry.isFile() && extensions.test(entry.name)) {
+      out.push(absolutePath);
+    }
+  }
+  return out;
+}
+
+export function findSoupKitchenLabelCount(cwd: string = process.cwd()): number {
+  const files = walkRepoFiles(path.resolve(cwd, 'console/src'), /\.(?:ts|tsx|js|jsx)$/);
+  const consoleGuidePath = path.resolve(cwd, 'docs/console-guide.md');
+  if (existsSync(consoleGuidePath)) files.push(consoleGuidePath);
+
+  return files.reduce((total, filePath) => {
+    const text = readFileSync(filePath, 'utf8');
+    return total + [...text.matchAll(/Soup Kitchen/g)].length;
+  }, 0);
 }
 
 export function findDesignRegressionCheckCount(cwd: string = process.cwd()): number {
@@ -668,6 +715,7 @@ function isCurrentDesignEnforcementClaim(filePath: string, lineText: string): bo
 function checkDesignEnforcementClaims(
   filePath: string,
   lines: string[],
+  soupKitchenLabelCount: number,
   themeParityTokenCount: number,
   shadowBaseline: ShadowBaselineInventory,
   designRegressionCheckCount: number,
@@ -681,6 +729,34 @@ function checkDesignEnforcementClaims(
     if (!isCurrentDesignEnforcementClaim(filePath, lineText)) return;
 
     const line = index + 1;
+    const brandRegressionMatch = lineText.match(brandRegressionLintCountPattern);
+    if (brandRegressionMatch) {
+      addTypedCountIssue(
+        issues,
+        'brand-regression-lint-count',
+        filePath,
+        line,
+        Number(brandRegressionMatch[1]),
+        shadowBaseline.byRule['soup/no-brand-regression'] ?? 0,
+        lineText,
+        'soup/no-brand-regression count from console/lint-shadow-baseline.json',
+      );
+    }
+
+    const soupKitchenMatch = lineText.match(soupKitchenLabelCountPattern);
+    if (soupKitchenMatch) {
+      addTypedCountIssue(
+        issues,
+        'soup-kitchen-label-count',
+        filePath,
+        line,
+        Number(soupKitchenMatch[1]),
+        soupKitchenLabelCount,
+        lineText,
+        'Soup Kitchen label count from console/src and docs/console-guide.md',
+      );
+    }
+
     const themeParityMatch = lineText.match(themeParityTokenCountPattern);
     if (themeParityMatch) {
       addTypedCountIssue(
@@ -820,6 +896,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const moduleCount = findRegisterModuleImports(cwd).length;
   const migrationVersions = findMigrationRegistryVersions(cwd);
   const rawFormControlInventory = findRawFormControlInventory(cwd);
+  const soupKitchenLabelCount = findSoupKitchenLabelCount(cwd);
   const themeParityTokenCount = findThemeParityTokenCount(cwd);
   const shadowBaselineInventory = findShadowBaselineInventory(cwd);
   const designRegressionCheckCount = findDesignRegressionCheckCount(cwd);
@@ -846,6 +923,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
     issues.push(...checkDesignEnforcementClaims(
       filePath,
       lines,
+      soupKitchenLabelCount,
       themeParityTokenCount,
       shadowBaselineInventory,
       designRegressionCheckCount,
