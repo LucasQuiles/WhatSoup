@@ -102,6 +102,30 @@ describe('probePrimaryModelUsability', () => {
     ).resolves.toMatchObject({ status: 'timeout' });
   });
 
+  it('keeps the default CLI model probe deadline beyond the old 5s startup window', async () => {
+    vi.useFakeTimers();
+    try {
+      const adapters: PrimaryModelProbeAdapters = {
+        probeBinaryModel: vi.fn(async (): Promise<BinaryModelProbeResult> => new Promise(() => {})),
+      };
+
+      const probePromise = probePrimaryModelUsability(
+        { provider: 'claude-cli', model: 'primary-model-a' },
+        adapters,
+      );
+      let settled = false;
+      void probePromise.then(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(probePromise).resolves.toMatchObject({ status: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns unknown when an adapter throws instead of misclassifying it as a timeout', async () => {
     const adapters: PrimaryModelProbeAdapters = {
       probeApiModelAccess: vi.fn(async () => {
