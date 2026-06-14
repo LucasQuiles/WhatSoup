@@ -43,8 +43,8 @@
       "consumer_group": "wizard_consumers",
       "file": "console/src/components/wizard/ConfigStep.tsx",
       "lines": [
-        436,
-        752
+        440,
+        756
       ],
       "total": 2
     }
@@ -56,7 +56,7 @@
       "consumer_group": "wizard_consumers",
       "element": "input",
       "file": "console/src/components/wizard/ConfigStep.tsx",
-      "line": 436,
+      "line": 440,
       "rule": "soup/no-raw-form-control",
       "snippet": "<input"
     },
@@ -66,7 +66,7 @@
       "consumer_group": "wizard_consumers",
       "element": "input",
       "file": "console/src/components/wizard/ConfigStep.tsx",
-      "line": 752,
+      "line": 756,
       "rule": "soup/no-raw-form-control",
       "snippet": "<input"
     }

@@ -344,6 +344,33 @@ describe('ConfigStep — real React handler wiring', () => {
     })
   })
 
+  describe('TagInput accessibility wiring', () => {
+    it('labels the allowlist contacts input and describes it with helper text', () => {
+      renderConfigStep({
+        initialData: { type: 'agent', name: 'sage', accessMode: 'allowlist' },
+      })
+
+      const input = screen.getByLabelText('Pre-approved contacts') as HTMLInputElement
+      const helper = screen.getByText('These contacts will be automatically approved when they first message.')
+
+      expect(helper.id).toBeTruthy()
+      expect(input.getAttribute('aria-describedby')).toBe(helper.id)
+    })
+
+    it('labels the RAG allowed indexes input and describes it with its Field helper', () => {
+      renderConfigStep({
+        initialData: { type: 'agent', name: 'sage' },
+      })
+      fireEvent.click(screen.getByRole('tab', { name: /RAG/i }))
+
+      const input = screen.getByLabelText('Allowed indexes') as HTMLInputElement
+      const helper = screen.getByText('Restrict which Pinecone indexes this instance can query')
+
+      expect(helper.id).toBeTruthy()
+      expect(input.getAttribute('aria-describedby')).toBe(helper.id)
+    })
+  })
+
   // ──────────────────────────────────────────────────────────────────────
   // Contract 2: form validation error rendering
   // ──────────────────────────────────────────────────────────────────────
