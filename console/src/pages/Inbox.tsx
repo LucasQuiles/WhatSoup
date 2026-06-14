@@ -103,7 +103,7 @@ export default function Inbox() {
 
   // Search via React Query — cached, deduped, auto loading/error states
   const searchEnabled = !!selectedChat && !!debouncedSearch
-  const { data: searchData, isLoading: searchLoading, error: searchQueryError } = useQuery({
+  const { data: searchData, isLoading: searchLoading, error: searchQueryError, refetch: refetchSearch } = useQuery({
     queryKey: ['search', activeLine, selectedChat, debouncedSearch],
     queryFn: () => api.searchMessages(activeLine, debouncedSearch, selectedChat!),
     enabled: searchEnabled,
@@ -314,6 +314,7 @@ export default function Inbox() {
                       icon={<Search size={40} strokeWidth={1.25} />}
                       title="Search failed"
                       description={searchError}
+                      onRetry={() => { void refetchSearch() }}
                     />
                   </div>
                 ) : searchResults.length > 0 ? (

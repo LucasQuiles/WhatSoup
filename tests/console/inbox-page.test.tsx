@@ -16,7 +16,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type ReactNode } from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 // ---------------------------------------------------------------------------
@@ -118,6 +118,9 @@ vi.mock('../../console/src/hooks/toast-context', () => ({
 // Dynamic import (after vi.mock declarations)
 // ---------------------------------------------------------------------------
 import Inbox from '../../console/src/pages/Inbox'
+import { api } from '../../console/src/lib/api'
+
+const searchMessagesMock = api.searchMessages as unknown as ReturnType<typeof vi.fn>
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -160,6 +163,8 @@ beforeEach(() => {
   mockChats = []
   mockMessages = []
   mockTyping = []
+  searchMessagesMock.mockReset()
+  searchMessagesMock.mockResolvedValue({ results: [], total: 0 })
 })
 
 afterEach(() => cleanup())
@@ -311,6 +316,28 @@ describe('Inbox — search row uses shared SearchInput (B4 adoption)', () => {
     // With no chats selected the search row is not rendered — no c-input-search at all.
     const inputs = document.querySelectorAll('input.c-input-search')
     expect(inputs.length).toBe(0)
+  })
+
+  it('renders a retryable search error state when message search fails', async () => {
+    searchMessagesMock.mockRejectedValue(new Error('search offline'))
+    mockChats = [makeChat('conv-a', { name: 'Test Chat' })]
+
+    renderInbox()
+    fireEvent.click(screen.getByRole('option', { name: 'Open conversation with Test Chat' }))
+    fireEvent.change(screen.getByLabelText('Search messages in this conversation'), {
+      target: { value: 'needle' },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Search failed')).toBeDefined()
+    })
+    expect(screen.getByText('search offline')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => {
+      expect(searchMessagesMock).toHaveBeenCalledTimes(2)
+    })
   })
 })
 
