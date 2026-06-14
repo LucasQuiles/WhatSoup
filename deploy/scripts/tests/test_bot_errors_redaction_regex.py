@@ -84,6 +84,31 @@ def test_common_secret_fixtures_redact_across_consumers(script_name: str, func_n
 
 
 @pytest.mark.parametrize(("script_name", "func_name", "_marker"), _REDACTORS)
+@pytest.mark.parametrize(
+    ("raw", "expected_prefix"),
+    [
+        ("authorization=authzsecret" + "d" * 20, "authorization="),
+        ("authorization: authzsecret" + "e" * 20, "authorization: "),
+    ],
+)
+def test_authorization_assignment_values_redact_across_consumers(
+    script_name: str,
+    func_name: str,
+    _marker: str,
+    raw: str,
+    expected_prefix: str,
+):
+    mod = _load_module(script_name)
+    redact: Callable[[str], str] = getattr(mod, func_name)
+
+    redacted = redact(raw)
+
+    assert redacted.startswith(expected_prefix)
+    assert "[REDACTED]" in redacted
+    assert "authzsecret" not in redacted
+
+
+@pytest.mark.parametrize(("script_name", "func_name", "_marker"), _REDACTORS)
 def test_repeated_pathlike_nonmatches_do_not_backtrack(script_name: str, func_name: str, _marker: str):
     mod = _load_module(script_name)
     redact: Callable[[str], str] = getattr(mod, func_name)

@@ -5,7 +5,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
-AUTHORIZATION_BEARER_RE = re.compile(r"\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s\\\"',;}]+", re.IGNORECASE)
+AUTHORIZATION_BEARER_RE = re.compile(r"\b(authorization\s*[:=]\s*(?:Bearer|Basic)\s+)[^\s\\\"',;}]+", re.IGNORECASE)
+AUTHORIZATION_KEYED_RE = re.compile(
+    r"(^|[^A-Za-z0-9_]|\\n)"
+    r"([\"']?authorization[\"']?\s*[:=]\s*[\"']?)"
+    r"(?!(?:Bearer|Basic)\s)"
+    r"([^\s\\,\"';}]+)([\"']?)",
+    re.IGNORECASE,
+)
 BEARER_VALUE_RE = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
 KEYED_SECRET_RE = re.compile(
     r"(^|[^A-Za-z0-9_]|\\n)"
@@ -75,12 +82,12 @@ def redact_bot_errors_text(
     text = URL_USERINFO_RE.sub(r"\1[REDACTED]@", text)
     text = AWS_ACCESS_KEY_ID_RE.sub(aws_marker, text)
     text = GITHUB_TOKEN_RE.sub(github_marker, text)
-    text = JWT_VALUE_RE.sub(jwt_marker, text)
-    text = AUTHORIZATION_BEARER_RE.sub(r"\1[REDACTED]", text)
-
     def redact_keyed(match: re.Match[str]) -> str:
         return f"{match.group(1)}{match.group(2)}[REDACTED]{match.group(4)}"
 
+    text = JWT_VALUE_RE.sub(jwt_marker, text)
+    text = AUTHORIZATION_BEARER_RE.sub(r"\1[REDACTED]", text)
+    text = AUTHORIZATION_KEYED_RE.sub(redact_keyed, text)
     text = KEYED_SECRET_RE.sub(redact_keyed, text)
     text = BEARER_VALUE_RE.sub(r"\1[REDACTED]", text)
     text = KEYED_PHONE_LIKE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{phone_marker}", text)
