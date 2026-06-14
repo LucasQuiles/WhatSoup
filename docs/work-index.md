@@ -376,4 +376,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-14T04:26:59Z from commit `44e2e8d36025db4ed66171e3db054b7746e6d98a`
+- Generated at 2026-06-14T04:51:58Z from commit `ac94de2d23f61ac9feacb1aaf33b478a18ea8a27`
