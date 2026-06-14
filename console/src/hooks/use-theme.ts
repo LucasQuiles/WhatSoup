@@ -8,9 +8,14 @@ import { getPreference, setPreference } from '../lib/preferences';
 export type Theme = 'dark' | 'light';
 
 const THEME_KEY = 'theme';
+const THEME_COLOR_META_SELECTOR = 'meta[name="theme-color"]';
+const THEME_COLOR_TOKEN = '--surface-base';
 
 function applyTheme(theme: Theme): void {
   document.documentElement.setAttribute('data-theme', theme);
+  const meta = document.querySelector(THEME_COLOR_META_SELECTOR);
+  const themeColor = meta ? getComputedStyle(document.documentElement).getPropertyValue(THEME_COLOR_TOKEN).trim() : '';
+  if (themeColor) meta?.setAttribute('content', themeColor);
 }
 
 export function useTheme(): { theme: Theme; toggleTheme: () => void } {

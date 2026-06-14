@@ -156,3 +156,9 @@ still the legacy purple/blue bolt, whether gradients/glow/masks remain in produc
 whether the favicon canvas is square, and whether the HTML/PWA manifest path can carry the future
 maskable SOUP mark. Report-only PASS means the inventory ran; it does not approve the visual asset
 or replace 16px screenshot proof.
+
+`console/index.html` owns document-shell brand/chrome hooks: the favicon link, PWA manifest link
+when present, and browser `theme-color`. `theme-color` initializes to the dark `--surface-base`
+semantic surface and runtime theme changes must sync it from computed `--surface-base`; it must not
+define an independent browser-chrome color scale. The document `<title>` remains a C4/P4 visible-copy
+decision until that rename packet lands.

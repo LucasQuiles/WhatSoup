@@ -3,17 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0E1013" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>WhatSoup Console</title>
     <!-- Theme init: apply persisted theme before first paint to avoid flash.
          Reads whatsoup:theme from localStorage; defaults to dark (tokens-v3 §5). -->
     <script>
       (function() {
+        function applyTheme(t) {
+          var theme = t === 'light' ? 'light' : 'dark';
+          document.documentElement.setAttribute('data-theme', theme);
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute('content', theme === 'light' ? '#FAFAFA' : '#0E1013');
+        }
         try {
-          var t = localStorage.getItem('whatsoup:theme');
-          document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+          applyTheme(localStorage.getItem('whatsoup:theme'));
         } catch (e) {
-          document.documentElement.setAttribute('data-theme', 'dark');
+          applyTheme('dark');
         }
       })();
     </script>

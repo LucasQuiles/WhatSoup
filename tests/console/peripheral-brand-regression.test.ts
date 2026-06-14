@@ -5,9 +5,10 @@ import { resolve } from 'node:path'
 // The TSX brand-regression guard scans `console/src` only, so brand/channel copy
 // in peripheral artifacts (the document shell, PWA manifest) escapes it entirely.
 // This pins those surfaces against the same legacy strings the src guard forbids.
-// Scope note: the user-visible `<title>WhatSoup Console>` → `SOUP Console` flip and a
-// `theme-color` meta are tracked rebrand items (peripheral-audit P1/P2) and are NOT
-// asserted here, so this guard passes today and only catches *new* drift.
+// Scope note: the user-visible `<title>WhatSoup Console>` → `SOUP Console` flip is a
+// tracked rebrand item (peripheral-audit P1) and is NOT asserted here, so this guard
+// passes today and only catches *new* drift. The theme-color meta is pinned by
+// use-theme.test.tsx against the semantic surface-base tokens.
 
 const consoleRoot = resolve(import.meta.dirname, '..', '..', 'console')
 
