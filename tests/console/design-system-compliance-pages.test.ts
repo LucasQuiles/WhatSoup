@@ -16,14 +16,28 @@ function tsxFiles(dir: string): string[] {
   })
 }
 
-function cBtnClassNameOffenders(): string[] {
+// Re-entry guards: legacy patterns migrated to zero. Pin each so it cannot
+// silently creep back during parallel development.
+function classNameOffenders(pattern: RegExp): string[] {
   return sourceRoots
     .flatMap(tsxFiles)
     .flatMap(path => read(path)
       .split('\n')
       .flatMap((line, index) => (
         line.includes('className=')
-          && /\bc-btn(?:\b|-)/.test(line)
+          && pattern.test(line)
+          ? [`${relative(repoRoot, resolve(repoRoot, path))}:${index + 1}: ${line.trim()}`]
+          : []
+      )))
+}
+
+function jsxElementOffenders(pattern: RegExp): string[] {
+  return sourceRoots
+    .flatMap(tsxFiles)
+    .flatMap(path => read(path)
+      .split('\n')
+      .flatMap((line, index) => (
+        pattern.test(line)
           ? [`${relative(repoRoot, resolve(repoRoot, path))}:${index + 1}: ${line.trim()}`]
           : []
       )))
@@ -39,7 +53,18 @@ const readTokenCss = () => [
 
 describe('design system compliance — Shannon slice', () => {
   it('keeps legacy c-btn classes out of source consumers', () => {
-    expect(cBtnClassNameOffenders()).toEqual([])
+    expect(classNameOffenders(/\bc-btn(?:\b|-)/)).toEqual([])
+  })
+
+  it('keeps other migrated-away legacy utility classes out of source consumers', () => {
+    // c-pill / c-chip migrated to the Pill / Badge primitives — re-entry guards.
+    expect(classNameOffenders(/\bc-pill(?:\b|-)/)).toEqual([])
+    expect(classNameOffenders(/\bc-chip(?:\b|-)/)).toEqual([])
+  })
+
+  it('keeps raw motion.button out of source consumers', () => {
+    // Migrated to <Button> (+ motion.div where animation is needed) — re-entry guard.
+    expect(jsxElementOffenders(/<motion\.button\b/)).toEqual([])
   })
 
   it('uses design tokens for Nav hardcoded pixel values', () => {
