@@ -6,7 +6,7 @@ Purpose: keep merge, branch, worktree, sweep, and instruction-hierarchy cleanup 
 
 ## Current Live Queue
 
-- GitHub PR queue is volatile; re-run `gh pr list --state open` before merge or cleanup. Latest read at 2026-06-14T08:13Z showed #842 (this draft ledger PR) and #843 (`test/session-classifier-pid-coverage-20260614`) open.
+- GitHub PR queue is volatile; re-run `gh pr list --state open` before merge or cleanup. Latest read at 2026-06-14T08:13Z showed #842 (this ledger PR) and #843 (`test/session-classifier-pid-coverage-20260614`) open.
 - Latest merged PR: #841, merge commit `0ad5ab47`, with CodeQL and Quality Node 24/25 checks successful.
 - Open GitHub issue: #640, `Prevent ignored canonical docs from disappearing from work-index coverage`; do not close or comment without explicit operator approval.
 - Active peer-owned branch: `test/session-classifier-pid-coverage-20260614`. Latest read at 2026-06-14T08:13Z showed PR #843 open and mergeable but blocked on pending checks. Treat the exact head/count as volatile and re-run `git status --porcelain=v2 --branch` plus `git cherry -v origin/main test/session-classifier-pid-coverage-20260614` before any disposition.
