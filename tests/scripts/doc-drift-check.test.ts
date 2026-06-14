@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   findDocDrift,
+  findDesignRegressionCheckCount,
   findRawFormControlInventory,
+  findShadowBaselineInventory,
   findToolRegistrations,
   run,
 } from '../../scripts/doc-drift-check.ts';
@@ -14,6 +16,8 @@ import {
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const currentToolCount = findToolRegistrations(repoRoot).length;
 const currentRawFormControlInventory = findRawFormControlInventory(repoRoot);
+const currentShadowBaselineInventory = findShadowBaselineInventory(repoRoot);
+const currentDesignRegressionCheckCount = findDesignRegressionCheckCount(repoRoot);
 
 describe('doc drift check', () => {
   afterEach(() => {
@@ -218,6 +222,46 @@ describe('doc drift check', () => {
         kind: 'raw-form-control-inventory',
         line: 3,
         expected: 'raw form-control consumer migrations from console/design-raw-form-control-inventory.json',
+      },
+    ]);
+  });
+
+  it('flags stale current shadow-baseline totals in live design enforcement docs', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'conformance-manifest.md');
+    writeFileSync(
+      staleDoc,
+      '| Token enforcement | `console/lint-shadow-baseline.json` — 602, rule×file buckets | current design-enforcement row |\n',
+      'utf8',
+    );
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: currentShadowBaselineInventory.total,
+        claimed: 602,
+        filePath: staleDoc,
+        kind: 'shadow-baseline-total',
+        line: 1,
+        text: '| Token enforcement | `console/lint-shadow-baseline.json` — 602, rule×file buckets | current design-enforcement row |',
+        expected: 'shadow lint total from console/lint-shadow-baseline.json',
+      },
+    ]);
+  });
+
+  it('flags stale current design-regression check counts', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'current-design.md');
+    writeFileSync(staleDoc, 'The current design-enforcement run has design-regression 16 checks.\n', 'utf8');
+
+    expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+      {
+        actual: currentDesignRegressionCheckCount,
+        claimed: 16,
+        filePath: staleDoc,
+        kind: 'design-regression-check-count',
+        line: 1,
+        text: 'The current design-enforcement run has design-regression 16 checks.',
+        expected: 'design-regression check count from console/scripts/design-regression.sh',
       },
     ]);
   });

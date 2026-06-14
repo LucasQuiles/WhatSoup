@@ -7,7 +7,9 @@ export type DocDriftKind =
   | 'tool-count'
   | 'module-count'
   | 'migration-history'
-  | 'raw-form-control-inventory';
+  | 'raw-form-control-inventory'
+  | 'shadow-baseline-total'
+  | 'design-regression-check-count';
 
 export interface DocDriftIssue {
   filePath: string;
@@ -45,6 +47,10 @@ export interface RawFormControlInventory {
   textarea: number;
 }
 
+export interface ShadowBaselineInventory {
+  total: number;
+}
+
 const defaultDocPaths = [
   'CLAUDE.md',
   'README.md',
@@ -52,6 +58,7 @@ const defaultDocPaths = [
   'docs/configuration.md',
   'docs/design-system/04-enforcement/lint-plan.md',
   'docs/design-system/06-implementation/qa-hardening.md',
+  'docs/design-system/06-implementation/conformance-manifest.md',
 ];
 
 const claimContextPattern = /\b(?:MCP|Tool registry|tool API reference|MCP Tool Reference|docs\/tools\.md|register imports?)\b/i;
@@ -78,6 +85,14 @@ const rawFormConsumerHitsPattern =
   /\bmanifest\s+is\s+exactly\s+(\d+)\s+consumer\s+hits?\b/i;
 const rawFormElementSplitPattern =
   /\belement split of\s+(\d+)\s+inputs?,\s+(\d+)\s+selects?,\s+and\s+(\d+)\s+textareas?\b/i;
+const currentDesignEnforcementDocPattern =
+  /(?:^|\/)docs\/design-system\/06-implementation\/conformance-manifest\.md$|(?:^|\/)conformance-manifest\.md$/;
+const currentDesignEnforcementContextPattern =
+  /\b(?:current|live)\b.*\b(?:design[- ]enforcement|shadow baseline|shadow ratchet|design-regression)\b/i;
+const shadowBaselineTotalPattern =
+  /\blint-shadow-baseline\.json\b[^\n]*?(?:—|=|:|\bis\b|\btotal\b|\bceiling\b)\s*(\d+)\b/i;
+const designRegressionCheckCountPattern =
+  /\bdesign-regression\b[^\n]*?\b(\d+)\s+checks?\b/i;
 
 function lineForOffset(text: string, offset: number): number {
   let line = 1;
@@ -214,6 +229,32 @@ export function findRawFormControlInventory(cwd: string = process.cwd()): RawFor
   };
 }
 
+export function findShadowBaselineInventory(cwd: string = process.cwd()): ShadowBaselineInventory {
+  const baselinePath = path.resolve(cwd, 'console/lint-shadow-baseline.json');
+  const baseline = JSON.parse(readFileSync(baselinePath, 'utf8')) as { total?: unknown };
+  if (typeof baseline.total !== 'number' || !Number.isFinite(baseline.total)) {
+    throw new Error('ERROR(schema:lint-shadow-baseline.json): missing numeric total');
+  }
+  return { total: baseline.total };
+}
+
+export function findDesignRegressionCheckCount(cwd: string = process.cwd()): number {
+  const scriptPath = path.resolve(cwd, 'console/scripts/design-regression.sh');
+  const text = readFileSync(scriptPath, 'utf8');
+  const checks = [...text.matchAll(/^# Check\s+(\d+):/gm)]
+    .map((match) => Number(match[1]))
+    .filter(Number.isInteger);
+  if (checks.length === 0) {
+    throw new Error('ERROR(schema:design-regression.sh): no check headers found');
+  }
+  const uniqueChecks = new Set(checks);
+  const maxCheck = Math.max(...uniqueChecks);
+  if (uniqueChecks.size !== maxCheck) {
+    throw new Error('ERROR(schema:design-regression.sh): check headers are not contiguous');
+  }
+  return uniqueChecks.size;
+}
+
 function checkMigrationHistoryTable(
   filePath: string,
   lines: string[],
@@ -312,6 +353,29 @@ function addCountIssue(
   });
 }
 
+function addTypedCountIssue(
+  issues: DocDriftIssue[],
+  kind: DocDriftKind,
+  filePath: string,
+  line: number,
+  claimed: number,
+  actual: number,
+  text: string,
+  expected: string,
+): void {
+  if (claimed === actual) return;
+
+  issues.push({
+    filePath,
+    line,
+    kind,
+    claimed,
+    actual,
+    text,
+    expected,
+  });
+}
+
 function checkRawFormControlInventoryClaims(
   filePath: string,
   lines: string[],
@@ -403,6 +467,55 @@ function checkRawFormControlInventoryClaims(
   return issues;
 }
 
+function isCurrentDesignEnforcementClaim(filePath: string, lineText: string): boolean {
+  return currentDesignEnforcementDocPattern.test(filePath)
+    || currentDesignEnforcementContextPattern.test(lineText);
+}
+
+function checkDesignEnforcementClaims(
+  filePath: string,
+  lines: string[],
+  shadowBaseline: ShadowBaselineInventory,
+  designRegressionCheckCount: number,
+): DocDriftIssue[] {
+  const issues: DocDriftIssue[] = [];
+
+  lines.forEach((lineText, index) => {
+    if (!isCurrentDesignEnforcementClaim(filePath, lineText)) return;
+
+    const line = index + 1;
+    const shadowBaselineMatch = lineText.match(shadowBaselineTotalPattern);
+    if (shadowBaselineMatch) {
+      addTypedCountIssue(
+        issues,
+        'shadow-baseline-total',
+        filePath,
+        line,
+        Number(shadowBaselineMatch[1]),
+        shadowBaseline.total,
+        lineText,
+        'shadow lint total from console/lint-shadow-baseline.json',
+      );
+    }
+
+    const designRegressionMatch = lineText.match(designRegressionCheckCountPattern);
+    if (designRegressionMatch) {
+      addTypedCountIssue(
+        issues,
+        'design-regression-check-count',
+        filePath,
+        line,
+        Number(designRegressionMatch[1]),
+        designRegressionCheckCount,
+        lineText,
+        'design-regression check count from console/scripts/design-regression.sh',
+      );
+    }
+  });
+
+  return issues;
+}
+
 export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const cwd = options.cwd ?? process.cwd();
   const docPaths = options.docPaths ?? existingDefaultDocs(cwd);
@@ -411,6 +524,8 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const moduleCount = findRegisterModuleImports(cwd).length;
   const migrationVersions = findMigrationRegistryVersions(cwd);
   const rawFormControlInventory = findRawFormControlInventory(cwd);
+  const shadowBaselineInventory = findShadowBaselineInventory(cwd);
+  const designRegressionCheckCount = findDesignRegressionCheckCount(cwd);
   const toolCountsByModule = new Map<string, number>();
   for (const registration of registrations) {
     const moduleName = path.basename(registration.filePath);
@@ -428,6 +543,12 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
 
     issues.push(...checkMigrationHistoryTable(filePath, lines, migrationVersions));
     issues.push(...checkRawFormControlInventoryClaims(filePath, lines, rawFormControlInventory));
+    issues.push(...checkDesignEnforcementClaims(
+      filePath,
+      lines,
+      shadowBaselineInventory,
+      designRegressionCheckCount,
+    ));
 
     lines.forEach((lineText, index) => {
       if (claimContextPattern.test(lineText)) {
