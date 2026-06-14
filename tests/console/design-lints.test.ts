@@ -86,6 +86,70 @@ function hasWarning(messages: string[], keyword: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// P1 scoped plugin rule - soup/protected-identifiers
+// Flags near-miss protocol/storage contract strings while allowing the frozen
+// whatsoup-form contracts that brand rules must not rename.
+// ---------------------------------------------------------------------------
+
+describe('soup/protected-identifiers', () => {
+  it('fires when the localStorage namespace is renamed to soup:', async () => {
+    const messages = await lintWarnings(
+      `const PREFIX = 'soup:'`
+    )
+    expect(hasWarning(messages, 'protected-identifiers')).toBe(true)
+  })
+
+  it('fires when a socket path is renamed to /run/soup/', async () => {
+    const messages = await lintWarnings(
+      `const socketPath = '/run/soup/personal.sock'`
+    )
+    expect(hasWarning(messages, 'protected-identifiers')).toBe(true)
+  })
+
+  it('is silent for the protected whatsoup contract forms', async () => {
+    const messages = await lintWarnings(
+      `const prefix = 'whatsoup:'
+const socketPath = '/run/whatsoup/personal.sock'
+const cwd = '~/.local/share/whatsoup/instances/sales/workspace'
+const serviceTemplate = 'whatsoup@'`
+    )
+    expect(hasWarning(messages, 'protected-identifiers')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P1 scoped plugin rule - soup/icon-family
+// Denies alternate third-party icon packages while allowing lucide-react and
+// local components that happen to include "Icon" in their filename.
+// ---------------------------------------------------------------------------
+
+describe('soup/icon-family', () => {
+  it('fires on a non-Lucide third-party icon package import', async () => {
+    const messages = await lintWarnings(
+      `import { FaBeer } from 'react-icons/fa'
+const x = FaBeer`
+    )
+    expect(hasWarning(messages, 'icon-family')).toBe(true)
+  })
+
+  it('is silent for lucide-react imports', async () => {
+    const messages = await lintWarnings(
+      `import { X } from 'lucide-react'
+const x = <X />`
+    )
+    expect(hasWarning(messages, 'icon-family')).toBe(false)
+  })
+
+  it('is silent for local icon components', async () => {
+    const messages = await lintWarnings(
+      `import FeedIcon from '../components/FeedIcon'
+const x = <FeedIcon kind="message" />`
+    )
+    expect(hasWarning(messages, 'icon-family')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Rule 1 - soup/no-raw-button
 // Selector: JSXOpeningElement[name.name="button"]
 // Exemption: components/primitives/** (Button primitive must render real <button>)
@@ -596,6 +660,25 @@ describe('promoted-path probes (D6 flip groups)', () => {
   function hasError(messages: string[], keyword: string): boolean {
     return messages.some((m) => m.includes(keyword))
   }
+
+  describe('P1 custom rules — scoped-error in the default config', () => {
+    it('protected-identifiers fires as an error at a pages path', async () => {
+      const messages = await lintErrors(
+        `const PREFIX = 'soup:'`,
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'protected-identifiers')).toBe(true)
+    })
+
+    it('icon-family fires as an error at a pages path', async () => {
+      const messages = await lintErrors(
+        `import { FaBeer } from 'react-icons/fa'
+const x = FaBeer`,
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'icon-family')).toBe(true)
+    })
+  })
 
   // ─── Group S: structural, console-wide (pages/__fixture__.tsx) ────────────
 

@@ -2,11 +2,13 @@
  * console/eslint-rules/index.mjs
  *
  * Local ESLint plugin: soup/* custom rules.
- * Registered as { soup: soupPlugin } in eslint.config.shadow.mjs.
+ * Registered as { soup: soupPlugin } in eslint.config.js.
  *
- * Rules implemented here (shadow stage, entry per lint-plan section 3):
+ * Rules implemented here (entry per lint-plan section 3):
  *   soup/no-brand-regression  — flags "WhatSoup" in JSXText / JSX string attrs
  *                               + the split-span wordmark detector
+ *   soup/protected-identifiers — flags near-miss renames of protected protocol contracts
+ *   soup/icon-family           — permits lucide-react icons and denies other icon packages
  *
  * Rules stubbed (proposed / needs primitives / CSS-side):
  *   soup/no-duplicate-shell          — heuristic, warn-ceiling
@@ -33,6 +35,29 @@ const PROTECTED_CONTRACT_PATTERNS = [
   '~/.config/whatsoup/',
 ]
 
+const PROTECTED_CONTRACT_NEAR_MISSES = [
+  { pattern: /(?<!What)SoupError\b/, valid: 'WhatSoupError' },
+  { pattern: /\bmcp__soup__/, valid: 'mcp__whatsoup__' },
+  { pattern: /(?<!what)soup:/, valid: 'whatsoup:' },
+  { pattern: /\/run\/soup\//, valid: '/run/whatsoup/' },
+  { pattern: /~\/\.local\/share\/soup\//, valid: '~/.local/share/whatsoup/' },
+  { pattern: /(?<!what)soup@/, valid: 'whatsoup@' },
+  { pattern: /(?<!what)soup\/instances/, valid: 'whatsoup/instances' },
+  { pattern: /~\/\.config\/soup\//, valid: '~/.config/whatsoup/' },
+]
+
+const DENIED_ICON_IMPORTS = [
+  /^@heroicons\//,
+  /^@tabler\/icons/,
+  /^@phosphor-icons\//,
+  /^@radix-ui\/react-icons$/,
+  /^react-icons(\/|$)/,
+  /^phosphor-react$/,
+  /^@fortawesome\//,
+  /^fontawesome/,
+  /^bootstrap-icons(\/|$)/,
+]
+
 /**
  * Returns true if the string contains a protected contract identifier.
  * Used to build the allowlist so those occurrences are not flagged by
@@ -54,6 +79,20 @@ const EXEMPT_FILE_SUFFIXES = [
 function isExemptFile(filename) {
   if (!filename) return false
   return EXEMPT_FILE_SUFFIXES.some((s) => filename.endsWith(s))
+}
+
+function checkTextLiterals(context, checkStringValue) {
+  return {
+    Literal(node) {
+      checkStringValue(node, node.value)
+    },
+    TemplateElement(node) {
+      checkStringValue(node, node.value.raw)
+    },
+    JSXText(node) {
+      checkStringValue(node, node.value)
+    },
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +224,84 @@ const noBrandRegression = {
 }
 
 // ---------------------------------------------------------------------------
+// soup/protected-identifiers
+// Lint-plan section 3: scoped-error entry state, P1 target.
+// ---------------------------------------------------------------------------
+const protectedIdentifiers = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        'Prevent protocol/storage contract identifiers from being partially renamed during UI rebrands. ' +
+        'Flags near-miss SOUP forms such as soup:, /run/soup/, and SoupError. ' +
+        'See lint-plan section 3 soup/protected-identifiers.',
+    },
+    messages: {
+      nearMiss:
+        '[soup/protected-identifiers] Protected contract near-miss "{{match}}" detected. ' +
+        'Keep the protocol/storage identifier as "{{valid}}" unless a migration is explicitly approved.',
+    },
+    schema: [],
+  },
+
+  create(context) {
+    function checkStringValue(node, str) {
+      if (typeof str !== 'string') return
+      for (const { pattern, valid } of PROTECTED_CONTRACT_NEAR_MISSES) {
+        const match = pattern.exec(str)
+        if (!match) continue
+        context.report({
+          node,
+          messageId: 'nearMiss',
+          data: {
+            match: match[0],
+            valid,
+          },
+        })
+        return
+      }
+    }
+
+    return checkTextLiterals(context, checkStringValue)
+  },
+}
+
+// ---------------------------------------------------------------------------
+// soup/icon-family
+// Lint-plan section 3: scoped-error entry state, P1 target.
+// ---------------------------------------------------------------------------
+const iconFamily = {
+  meta: {
+    type: 'problem',
+    docs: {
+      description:
+        'Keep console UI icons on the approved Lucide family. ' +
+        'Flags known alternate icon packages while allowing local components such as FeedIcon.',
+    },
+    messages: {
+      deniedImport:
+        '[soup/icon-family] Icon package "{{source}}" is not allowed. Use lucide-react for UI icons.',
+    },
+    schema: [],
+  },
+
+  create(context) {
+    return {
+      ImportDeclaration(node) {
+        const source = node.source?.value
+        if (typeof source !== 'string' || source === 'lucide-react') return
+        if (!DENIED_ICON_IMPORTS.some((pattern) => pattern.test(source))) return
+        context.report({
+          node: node.source,
+          messageId: 'deniedImport',
+          data: { source },
+        })
+      },
+    }
+  },
+}
+
+// ---------------------------------------------------------------------------
 // Stubs for rules that are proposed or need primitives / CSS-side work first.
 // Each stub is a valid rule that fires zero violations (returns {}).
 // Documented so the lifecycle table remains consistent.
@@ -252,6 +369,8 @@ export default {
   },
   rules: {
     'no-brand-regression': noBrandRegression,
+    'protected-identifiers': protectedIdentifiers,
+    'icon-family': iconFamily,
     'no-duplicate-shell': noDuplicateShell,
     'no-literal-status-colors': noLiteralStatusColors,
     'focus-visible-required': focusVisibleRequired,

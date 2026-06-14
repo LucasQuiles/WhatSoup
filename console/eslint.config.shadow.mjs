@@ -14,6 +14,8 @@
  *
  * Shadow rule batch covers (lint-plan section 3, shadow entry state):
  *   soup/no-brand-regression   — custom rule (implemented in eslint-rules/index.mjs)
+ *   soup/protected-identifiers — custom rule; scoped-error in default config, warn here
+ *   soup/icon-family           — custom rule; scoped-error in default config, warn here
  *   soup/no-raw-form-control   — raw <input>/<select>/<textarea> outside primitives dir
  *   soup/no-infinite-animation — TSX-side inline animation: ... infinite
  *   soup/no-raw-color          — hex/rgb/hsl literals (selector extension; already error
@@ -37,13 +39,11 @@
  * shadowSyntaxRules would double-count violations for unflipped files (the error-message
  * text differs, so dedupeSelectors cannot collapse the pair and the ratchet would inflate).
  *
- * NOT included (already at error severity in default config):
+ * Kept at error severity from the default config:
  *   soup/no-transition-all, soup/no-raw-color selectors already in eslint.config.js
- *   soup/icon-family, soup/protected-identifiers (scoped-error already)
  */
 
 import baseConfig from './eslint.config.js'
-import soupPlugin from './eslint-rules/index.mjs'
 
 // ---------------------------------------------------------------------------
 // Shadow-stage no-restricted-syntax selectors (REMAINING — not yet promoted).
@@ -124,18 +124,18 @@ const shadowConfig = [
   // Spread the base config so all existing error-severity rules remain intact.
   ...baseConfig,
 
-  // Shadow-stage additions: soup plugin + warn-severity selectors + custom rules.
+  // Shadow-stage additions: warn-severity selectors + custom rules.
+  // The soup plugin is registered by the spread base config.
   // Permanent exemption: console/src/components/primitives/ — the primitive IS
   // the canonical <button> renderer and must not be counted as a violation.
   {
     files: ['**/*.{ts,tsx}'],
     ignores: ['**/components/primitives/**'],
-    plugins: {
-      soup: soupPlugin,
-    },
     rules: {
-      // Custom rule: soup/no-brand-regression
+      // Custom rules.
       'soup/no-brand-regression': 'warn',
+      'soup/protected-identifiers': 'warn',
+      'soup/icon-family': 'warn',
 
       // Stub rules (zero-fire, but registered so the namespace is visible)
       'soup/no-duplicate-shell': 'warn',

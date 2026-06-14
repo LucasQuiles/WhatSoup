@@ -1,9 +1,10 @@
 # Lint Plan — SOUP Design System v3 Enforcement (T7)
 
-Status: plan only — implements nothing. Authorized by G2 (Option A conditional lock of "SOUP — v2
-(Blend)", `docs/design-system/02-directions/decision-log.md`). Executable by a fresh implementation
-agent during driver phase P6 (enforcement), with early rules landing alongside P1/P2 as noted per
-rule. All file:line citations verified against the tree on 2026-06-11.
+Status: living enforcement registry, originally authorized by G2 (Option A conditional lock of
+"SOUP — v2 (Blend)", `docs/design-system/02-directions/decision-log.md`). Executable by a fresh
+implementation agent during driver phase P6 (enforcement), with early rules landing alongside P1/P2
+as noted per rule. Historical file:line citations were verified against the tree on 2026-06-11;
+later changelog entries record implementation deltas.
 
 ---
 
@@ -884,12 +885,10 @@ All other rule rows are unchanged: states verified still accurate against the li
 inline-dismiss-handler, format-bypass, duplicate-shell remain in the shadow config;
 raw-color/untokenized-values/transition-all verified still live in the base config).
 Rows NOT re-verified by this pass and left untouched: protected-identifiers and icon-family
-(the shadow config's header comment carries both as "scoped-error already", and icon-family's
-strokeWidth companion is live at eslint.config.js, but no dedicated denylist/contract selector
-was located in either config by this audit — their cells keep the T7-recorded state and the
-discrepancy is flagged here rather than papered over), plus modal-must-restore-focus,
-focus-visible-required, motion-needs-reduced-variant, tabular-nums-required (proposed/shadow,
-no flip on record). Evidence: `06-implementation/d6-evidence.md`.
+(closed by the 2026-06-14 changelog entry below after this audit found no dedicated
+denylist/contract selector), plus modal-must-restore-focus, focus-visible-required,
+motion-needs-reduced-variant, tabular-nums-required (proposed/shadow, no flip on record).
+Evidence: `06-implementation/d6-evidence.md`.
 
 Changelog: 2026-06-13 — D2.1 fixture coverage gate added. `design:lint-fixtures` now derives
 implemented rule ids from the selector/plugin/config sources and verifies each implemented rule has
@@ -897,3 +896,12 @@ both firing and silent fixtures in `tests/console/design-lints.test.ts`; promote
 need default-config error probes. The packet also added the missing `soup/no-infinite-animation`
 shadow fixture suite, a primitives-exemption proof for `soup/no-raw-form-control`, and a guard
 against leaving an implemented selector rule registered as a zero-fire plugin stub.
+
+Changelog: 2026-06-14 — protected-identifiers and icon-family are now live P1 scoped-error rules
+instead of documentation-only claims. `console/eslint-rules/index.mjs` implements
+`soup/protected-identifiers` as a near-miss contract guard for `soup:`/`/run/soup/`/`SoupError`
+forms while preserving the frozen `whatsoup*` protocol/storage identifiers, and implements
+`soup/icon-family` as a precise third-party icon-package denylist with `lucide-react` and local
+icon components allowed. `console/eslint.config.js` registers both at error severity; the shadow
+config overrides them to warnings for fixture/baseline visibility. `tests/console/design-lints.test.ts`
+now carries firing/silent fixtures and default-config error probes for both rules.

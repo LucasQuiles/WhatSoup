@@ -4,6 +4,7 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
+import soupPlugin from './eslint-rules/index.mjs'
 import {
   structuralSelectors,
   focusSuppressionSelectors,
@@ -665,6 +666,13 @@ const scheduledGroupsDesignSystemRestrictions = [
 export default defineConfig([
   globalIgnores(['dist']),
 
+  {
+    files: ['**/*.{ts,tsx}'],
+    plugins: {
+      soup: soupPlugin,
+    },
+  },
+
   // ─────────────────────────────────────────────────────────────────────────
   // Block 1 — Base rule set for all TS/TSX.
   // Includes: designSystemRestrictions (existing wall) + Group S (structural,
@@ -684,6 +692,9 @@ export default defineConfig([
       globals: globals.browser,
     },
     rules: {
+      'soup/protected-identifiers': 'error',
+      'soup/icon-family': 'error',
+
       // ═══════════════════════════════════════════════════════════════
       // DESIGN SYSTEM ENFORCEMENT
       //
