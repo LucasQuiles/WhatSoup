@@ -292,6 +292,32 @@ describe('CheckboxField', () => {
     expect(screen.queryByText('Only applies to new messages')).toBeNull()
   })
 
+  it('supports disabled state, input class, row class, label class, and suffix content', () => {
+    render(
+      <CheckboxField
+        label="Restart line"
+        checked={false}
+        disabled
+        onChange={() => {}}
+        className="row-extra"
+        inputClassName="accent-extra"
+        labelClassName="label-extra"
+        suffix={<span data-testid="suffix">offline</span>}
+      />,
+    )
+
+    const checkbox = screen.getByRole('checkbox', { name: 'Restart line' }) as HTMLInputElement
+    const row = checkbox.closest('label')
+    const labelText = screen.getByText('Restart line')
+
+    expect(checkbox.disabled).toBe(true)
+    expect(checkbox.classList.contains('accent-extra')).toBe(true)
+    expect(row?.classList.contains('c-checkbox-row')).toBe(true)
+    expect(row?.classList.contains('row-extra')).toBe(true)
+    expect(labelText.classList.contains('label-extra')).toBe(true)
+    expect(screen.getByTestId('suffix').textContent).toBe('offline')
+  })
+
   it('changes checked state through user interaction', async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()

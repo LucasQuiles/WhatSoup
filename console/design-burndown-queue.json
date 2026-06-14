@@ -2,8 +2,8 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 675,
-    "blocking": 610,
+    "total": 674,
+    "blocking": 609,
     "byCategory": {
       "accent-law": 0,
       "base-wall": 22,
@@ -14,7 +14,7 @@
       "legacy-var-css": 220,
       "raw-color-css": 0,
       "raw-font-size-css": 0,
-      "raw-form-control": 26,
+      "raw-form-control": 25,
       "utility-smell": 1
     }
   },
@@ -604,7 +604,7 @@
       "id": "burndown:raw-form-control",
       "category": "raw-form-control",
       "severity": "blocking",
-      "count": 26,
+      "count": 25,
       "files": [
         {
           "path": "src/components/line-detail/ConfigEditDialog.tsx",
@@ -624,11 +624,6 @@
         {
           "path": "src/components/line-detail/ScheduleComposerModal.tsx",
           "count": 5,
-          "lines": null
-        },
-        {
-          "path": "src/components/UpdateModal.tsx",
-          "count": 1,
           "lines": null
         },
         {
@@ -798,7 +793,7 @@
           "path": "src/components/UpdateModal.tsx",
           "count": 1,
           "lines": [
-            419
+            423
           ]
         },
         {

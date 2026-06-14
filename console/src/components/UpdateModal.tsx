@@ -30,7 +30,7 @@ import { type FC, useReducer, useEffect, useCallback, useRef } from 'react'
 import { Download, Check, Loader2, AlertCircle, RotateCcw } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, getApiTicket, isProductionConsole } from '../lib/api'
-import { Modal, ModalHeader, ModalBody, ModalFooter } from './primitives'
+import { CheckboxField, Modal, ModalHeader, ModalBody, ModalFooter } from './primitives'
 import { Button } from './primitives/Button'
 import type { LineInstance } from '../types'
 
@@ -414,32 +414,29 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
                 const isError = instanceStatus[line.name] === 'error'
                 const disabled = line.status !== 'online' || isRestarting || isDone
                 return (
-                  <label
+                  <CheckboxField
                     key={line.name}
-                    className={`flex items-center cursor-pointer gap-[var(--sp-2)] py-[var(--sp-1h)] px-[var(--sp-2)] rounded-sm${disabled && !isDone ? ' opacity-50' : ''}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={instanceToggles[line.name] ?? false}
-                      disabled={disabled}
-                      onChange={(e) => dispatch({ type: 'toggleInstance', name: line.name, on: e.target.checked })}
-                      className="accent-[var(--color-m-cht)]"
-                    />
-                    <span className="font-mono text-t2 flex-1 text-data">
-                      {line.name}
-                    </span>
-                    <span className="font-mono text-t5 text-xs">
-                      {isRestarting ? (
-                        <Loader2 size={12} strokeWidth={1.75} className="text-m-cht animate-spin" />
-                      ) : isDone ? (
-                        <Check size={12} strokeWidth={1.75} className="text-s-ok" />
-                      ) : isError ? (
-                        <AlertCircle size={12} strokeWidth={1.75} className="text-s-crit" />
-                      ) : (
-                        line.status
-                      )}
-                    </span>
-                  </label>
+                    label={line.name}
+                    checked={instanceToggles[line.name] ?? false}
+                    disabled={disabled}
+                    onChange={(on) => dispatch({ type: 'toggleInstance', name: line.name, on })}
+                    className={`cursor-pointer py-[var(--sp-1h)] px-[var(--sp-2)] rounded-sm${disabled && !isDone ? ' opacity-50' : ''}`}
+                    inputClassName="accent-[var(--color-m-cht)]"
+                    labelClassName="font-mono text-t2 flex-1"
+                    suffix={
+                      <span className="font-mono text-t5 text-xs">
+                        {isRestarting ? (
+                          <Loader2 size={12} strokeWidth={1.75} className="text-m-cht animate-spin" />
+                        ) : isDone ? (
+                          <Check size={12} strokeWidth={1.75} className="text-s-ok" />
+                        ) : isError ? (
+                          <AlertCircle size={12} strokeWidth={1.75} className="text-s-crit" />
+                        ) : (
+                          line.status
+                        )}
+                      </span>
+                    }
+                  />
                 )
               })}
             </div>

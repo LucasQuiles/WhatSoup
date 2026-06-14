@@ -482,8 +482,8 @@ describe('UpdateModal — restart-instances phase', () => {
 
   it('renders line names as labels for their checkboxes', async () => {
     await renderAndAdvanceToRestartInstances()
-    expect(screen.getByText('primary-line')).toBeDefined()
-    expect(screen.getByText('sandbox-agent')).toBeDefined()
+    expect(screen.getByRole('checkbox', { name: 'primary-line' })).toBeDefined()
+    expect(screen.getByRole('checkbox', { name: 'sandbox-agent' })).toBeDefined()
   })
 
   it('pre-checks online instances and unchecks offline instances', async () => {

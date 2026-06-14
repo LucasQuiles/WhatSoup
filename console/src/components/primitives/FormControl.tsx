@@ -109,21 +109,39 @@ export const TextArea: FC<TextAreaProps> = ({ error, confirmed, minHeight, class
 );
 
 export interface CheckboxFieldProps {
-  label: string;
+  label: ReactNode;
   checked: boolean;
   onChange: (checked: boolean) => void;
   helper?: string;
+  disabled?: boolean;
+  className?: string;
+  inputClassName?: string;
+  labelClassName?: string;
+  suffix?: ReactNode;
 }
 
-export const CheckboxField: FC<CheckboxFieldProps> = ({ label, checked, onChange, helper }) => (
+export const CheckboxField: FC<CheckboxFieldProps> = ({
+  label,
+  checked,
+  onChange,
+  helper,
+  disabled,
+  className,
+  inputClassName,
+  labelClassName,
+  suffix,
+}) => (
   <div>
-    <label className="c-checkbox-row">
+    <label className={`c-checkbox-row ${className ?? ''}`}>
       <input
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={event => onChange(event.target.checked)}
+        className={inputClassName}
       />
-      <span className="text-data" style={{ color: 'var(--text-2)' }}>{label}</span>
+      <span className={`text-data ${labelClassName ?? ''}`} style={{ color: 'var(--text-2)' }}>{label}</span>
+      {suffix && <span aria-hidden="true">{suffix}</span>}
     </label>
     {helper && <div className="c-helper ml-[var(--sp-5)]">{helper}</div>}
   </div>
