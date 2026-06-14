@@ -85,6 +85,47 @@ They do not by themselves authorize deleting the release or replacing it. Decide
 whether to port the lesson back to source, re-cut from merged source, or roll
 back to the prior release path.
 
+## Scheduled Drift Alerting
+
+Production hosts can wrap the same read-only drift check with
+`scripts/live-release-drift-alert.ts`. The wrapper runs
+`release-snapshot-plan.ts --check-release` against a release directory and queues
+a BOT ERRORS event only when drift or checker failure is observed. Clean checks
+do not emit by default; use `--clear-on-ok` only for a deliberate recovery proof.
+
+Example one-shot command:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/live-release-drift-alert.ts \
+  --launchd-plist "$HOME/Library/LaunchAgents/com.whatsoup.<instance>.plist" \
+  --instance release-bot \
+  --source release-drift \
+  --json
+```
+
+The checked-in macOS template is
+`deploy/com.whatsoup.release-drift-check.plist`. Render it to a staging path
+before any install/load step:
+
+```bash
+bash deploy/scripts/render-release-drift-launchd.sh \
+  --instance <instance> \
+  --repo-root "$PWD" \
+  --home "$HOME" \
+  --output /tmp/com.whatsoup.release-drift-check.plist
+```
+
+The renderer substitutes install-time placeholders only. It refuses direct
+writes into `~/Library/LaunchAgents`; copying the staged plist there and loading
+it is the live alerting change.
+
+Installing a launchd/cron schedule for this command is a live alerting change and
+needs separate named approval. The scheduled job must use the pinned Node runtime
+and either an explicit reviewed release path or the active bot plist's
+`WorkingDirectory` via `--launchd-plist`; the latter is preferred so the check
+tracks future re-cuts. It must remain read-only: no apply, re-cut, plist
+mutation, restart, cleanup, WhatsApp turn, or credential change.
+
 ## Live Acceptance
 
 After a separately approved re-cut:

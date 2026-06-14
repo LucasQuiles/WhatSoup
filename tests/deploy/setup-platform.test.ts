@@ -167,6 +167,7 @@ describe('deploy/setup.sh launchd timer packaging (macOS)', () => {
 describe('deploy launchd timer plists', () => {
   const harnessPlist = path.join(repoRoot, 'deploy', 'com.whatsoup.harness-maintenance.plist');
   const replyPlist = path.join(repoRoot, 'deploy', 'com.whatsoup.reply-guarantee.plist');
+  const releaseDriftPlist = path.join(repoRoot, 'deploy', 'com.whatsoup.release-drift-check.plist');
 
   it('harness-maintenance plist fires daily at the systemd timer\'s OnCalendar time', () => {
     const plist = fs.readFileSync(harnessPlist, 'utf8');
@@ -193,8 +194,19 @@ describe('deploy launchd timer plists', () => {
     expect(plist).toContain('deploy/scripts/reply-guarantee-drain.sh');
   });
 
-  it('pins RunAtLoad=false on both plists — no immediate fire on load', () => {
-    for (const file of [harnessPlist, replyPlist]) {
+  it('release-drift-check plist runs the manifest drift alert wrapper on an interval', () => {
+    const plist = fs.readFileSync(releaseDriftPlist, 'utf8');
+    expect(plist).toContain('<string>com.whatsoup.release-drift-check</string>');
+    expect(plist).toContain('scripts/run-with-pinned-node.sh');
+    expect(plist).toContain('scripts/live-release-drift-alert.ts');
+    expect(plist).toContain('--launchd-plist');
+    expect(plist).toContain('com.whatsoup.__INSTANCE__.plist');
+    expect(plist).toContain('<string>__INSTANCE__</string>');
+    expect(plist).toMatch(/<key>StartInterval<\/key>\s*<integer>300<\/integer>/);
+  });
+
+  it('pins RunAtLoad=false on all plists — no immediate fire on load', () => {
+    for (const file of [harnessPlist, replyPlist, releaseDriftPlist]) {
       const plist = fs.readFileSync(file, 'utf8');
       expect(plist, `${path.basename(file)} must pin RunAtLoad=false`).toMatch(
         /<key>RunAtLoad<\/key>\s*<false\/>/,
@@ -203,7 +215,7 @@ describe('deploy launchd timer plists', () => {
   });
 
   it('plists use install-time placeholders, never machine-specific absolute paths', () => {
-    for (const file of [harnessPlist, replyPlist]) {
+    for (const file of [harnessPlist, replyPlist, releaseDriftPlist]) {
       const plist = fs.readFileSync(file, 'utf8');
       // __TOKEN__ sentinels are the install-time placeholder convention the
       // service-unit validity guard recognizes; literal ${VAR} forms are
@@ -216,7 +228,7 @@ describe('deploy launchd timer plists', () => {
 
   // @skip-env plutil ships with macOS only; the ubuntu CI runner has no plist linter.
   it.skipIf(process.platform !== 'darwin')('both plists pass plutil -lint', () => {
-    for (const file of [harnessPlist, replyPlist]) {
+    for (const file of [harnessPlist, replyPlist, releaseDriftPlist]) {
       const out = execFileSync('plutil', ['-lint', file], { encoding: 'utf8' });
       expect(out, `${path.basename(file)} failed plutil -lint`).toContain(': OK');
     }
