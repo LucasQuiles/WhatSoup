@@ -6,13 +6,14 @@ Purpose: keep merge, branch, worktree, sweep, and instruction-hierarchy cleanup 
 
 ## Current Live Queue
 
-- GitHub PR queue is volatile; re-run `gh pr list --state open` before merge or cleanup. Latest read at 2026-06-14T19:35Z showed no open PRs.
-- Latest merged PR: #847, merge commit `9f386bfa`, head `fdcab72314ae70e3ad0711f84c93f08cd6520f20`, with branch gate and GitHub CodeQL/Quality Node 24/25 checks successful.
+- GitHub PR queue is volatile; re-run `gh pr list --state open` before merge or cleanup. Latest read at 2026-06-14T19:53Z showed no open PRs after PR #848 merged.
+- Audited docs/merge hygiene checkpoint: PR #848, merge commit `2954b695`, head `b34cbf44b010122d02609ca1e969b4af017c8b90`, with local branch gate, pre-push branch gate, and GitHub CodeQL/Quality Node 24/25 checks successful.
 - Open GitHub issue: #640, `Prevent ignored canonical docs from disappearing from work-index coverage`; do not close or comment without explicit operator approval.
 - `test/session-classifier-pid-coverage-20260614` was merged through PR #843 and then pruned locally and remotely after `git cherry -v origin/main test/session-classifier-pid-coverage-20260614` returned empty.
 - `test/fleet-silence-route-coverage-20260614` was merged through PR #844 and then pruned locally and remotely after `git merge-base --is-ancestor test/fleet-silence-route-coverage-20260614 origin/main` succeeded and `git cherry -v origin/main test/fleet-silence-route-coverage-20260614` returned empty.
 - `test/main-bootstrap-coverage-20260614` was merged through PR #846 and then pruned locally and remotely after `git merge-base --is-ancestor test/main-bootstrap-coverage-20260614 origin/main` succeeded and `git cherry -v origin/main test/main-bootstrap-coverage-20260614` returned empty.
 - `docs/estate-ledger-refresh-20260614-main-bootstrap` was merged through PR #847 and then pruned locally and remotely after `git merge-base --is-ancestor docs/estate-ledger-refresh-20260614-main-bootstrap origin/main` succeeded and `git cherry -v origin/main docs/estate-ledger-refresh-20260614-main-bootstrap` returned empty.
+- `chore/estate-hygiene-sweep-20260614` was merged through PR #848 and then pruned locally and remotely after `git merge-base --is-ancestor chore/estate-hygiene-sweep-20260614 origin/main` succeeded and `git cherry -v origin/main chore/estate-hygiene-sweep-20260614` returned empty.
 
 ## Artifact And Feature Sweep
 
