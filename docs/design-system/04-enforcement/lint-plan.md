@@ -302,7 +302,7 @@ cannot express the check).
 
 ### soup/no-untokenized-values
 
-- **Purpose:** no hardcoded spacing/sizing/radius/shadow/z-index/opacity/filter values. The 106
+- **Purpose:** no hardcoded spacing/sizing/radius/shadow/z-index/opacity/filter/type-size values. The 106
   existing selectors already cover the `Literal`/`style`-attribute shapes
   (`console/eslint.config.js:157-191` spacing/sizing, `:95-106` radius, `:459-466` shadow,
   `:481-488` z-index, `:544-551` opacity, `:227-229` arbitrary px utilities). Three proven evasion
@@ -312,6 +312,9 @@ cannot express the check).
   template literals (`console/src/components/HeartbeatStrip.tsx:34` `w-[3px]`;
   `console/src/components/StatusDot.tsx:34`; `console/src/components/Skeleton.tsx:18`). Plus the
   recharts non-`style` prop hole: `wrapperStyle`/`contentStyle` (4 Legend copies, DUP-09).
+- **CSS-side coverage:** `check-design-burndown.mjs` owns CSS-only gaps that ESLint cannot see,
+  including `raw-font-size-css` (zero ceiling) for non-token `font-size:` literals outside the
+  primitive type scale.
 - **Mechanism:** keep the selector wall; add a custom rule for the closures: (a) visit
   `ConditionalExpression` string branches under style-value positions; (b) track numeric-literal
   constants flowing into style props within the same file (one-hop identifier resolution — no
@@ -876,8 +879,10 @@ landed `ba4ed643`):
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
   Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 13 14 16 17)` — nine
   checks fail the run; check 17 promoted after `.c-kpi-hover` moved to `--shadow-hover` and
-  `raw-color-css` ratcheted to zero. Checks 18–20 remain report-only per the §2 lifecycle, and the
-  remaining immature checks each sit behind a named landing gate in the script's justification block.
+  `raw-color-css` ratcheted to zero. The burndown scanner also carries a zeroed
+  `raw-font-size-css` category for CSS type-scale re-entry. Checks 18–20 remain report-only per the
+  §2 lifecycle, and the remaining immature checks each sit behind a named landing gate in the
+  script's justification block.
 All other rule rows are unchanged: states verified still accurate against the live configs
 (brand-regression, raw-form-control, infinite-animation, literal-status-colors,
 inline-dismiss-handler, format-bypass, duplicate-shell remain in the shadow config;

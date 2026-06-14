@@ -239,6 +239,22 @@ describe('check-design-burndown.mjs', () => {
       ]);
     });
 
+    it('raw-font-size-css fires on raw font-size declarations but ignores tokenized type-scale values', () => {
+      const fixture = makeFixture({
+        compositesCss: `.c-body { font-size: 14px; }\n.c-token { font-size: var(--text-body); }\n`,
+        tsx: null,
+      });
+      const result = runScript(fixture, ['--update']);
+      expect(result.status).toBe(0);
+
+      const item = itemOf(readQueue(fixture), 'raw-font-size-css');
+      expect(item.severity).toBe('polish');
+      expect(item.count).toBe(1);
+      expect(item.files).toEqual([
+        { path: 'src/styles/composites.css', count: 1, lines: [1] },
+      ]);
+    });
+
     it('half-step fires on CSS and TSX usage but not on the definitions', () => {
       const fixture = makeFixture();
       const result = runScript(fixture, ['--update']);

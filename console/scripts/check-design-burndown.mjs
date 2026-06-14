@@ -21,6 +21,8 @@
 //                           outside the token-definition tiers (allowlist:
 //                           tokens.primitive.css + tokens.semantic.css, the only files
 //                           permitted to own raw color values per tokens-v3 §1/§3).
+//         raw-font-size-css — raw font-size declarations in non-token CSS; component
+//                           and composite CSS must consume the type scale instead.
 //         half-step       — var(--sp-0h/--sp-1h/--sp-2h) usage outside their
 //                           definitions, across CSS *and* TSX/TS (DD-9 feed; the
 //                           half-steps have no ESLint rule, so both sides live here).
@@ -126,6 +128,7 @@ const CATEGORY_META = {
   'legacy-var-css': { severity: 'blocking', owner: 'B1 — legacy token vocabulary burn (CSS side, incl. M8 scrollbar)' },
   'accent-law': { severity: 'blocking', owner: 'B4 — F1 accent-law fix + M9 accent-color re-point' },
   'raw-color-css': { severity: 'polish', owner: 'CSS tier-boundary — raw component-tier colors must move to semantic tokens' },
+  'raw-font-size-css': { severity: 'polish', owner: 'CSS type scale — raw font-size declarations must move to type tokens' },
   'half-step': { severity: 'polish', owner: 'DD-9 — half-step spacing retirement' },
 };
 
@@ -303,6 +306,7 @@ const scanCategories = {
   'legacy-var-css': {},
   'accent-law': {},
   'raw-color-css': {},
+  'raw-font-size-css': {},
   'half-step': {},
 };
 
@@ -322,6 +326,7 @@ const STATUS_CHANNEL_VAR = /var\(\s*--(?:color-s-(?:ok|warn|crit)|s-(?:ok|warn|c
 const ACTION_CONTROL_SELECTOR = /(^|[\s,>+~(])(\.c-btn(?![a-zA-Z0-9-]*(?:danger|success|warning))[a-zA-Z0-9-]*|button)(?![a-zA-Z0-9_-])/;
 const COLOR_BINDING_PROPERTY = /^(background|background-color|border|border-color|border-top-color|border-bottom-color|border-left-color|border-right-color|color|box-shadow|outline-color|fill|stroke)$/;
 const RAW_COLOR = /#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3,4}\b|\brgba?\(|\bhsla?\(|\boklch\(/g;
+const RAW_FONT_SIZE_VALUE = /(?:^|[\s,(])\d*\.?\d+(?:px|rem|em|vw|vh|vmin|vmax|ch)\b/;
 const HALF_STEP_REF = /--sp-[012]h\b/g;
 const HALF_STEP_DEF_LINE = /^\s*--sp-[012]h\s*:/;
 
@@ -329,6 +334,7 @@ const HALF_STEP_DEF_LINE = /^\s*--sp-[012]h\s*:/;
 // owns raw scales, semantic owns per-theme assignments; every other CSS file must
 // var()-reference only).
 const RAW_COLOR_ALLOWLIST = new Set(['tokens.primitive.css', 'tokens.semantic.css']);
+const RAW_FONT_SIZE_ALLOWLIST = new Set(['tokens.primitive.css']);
 
 for (const name of styleEntries) {
   const filePath = join(stylesDir, name);
@@ -365,13 +371,22 @@ for (const name of styleEntries) {
   // accent-law: declaration-level scan with selector context
   for (const decl of cssDeclarations(stripped, `src/styles/${name}`)) {
     const statusHits = [...decl.value.matchAll(STATUS_CHANNEL_VAR)];
-    if (statusHits.length === 0) continue;
-    if (decl.property === 'accent-color') {
-      addHit('accent-law', filePath, decl.line, statusHits.length);
-      continue;
+    if (statusHits.length > 0) {
+      if (decl.property === 'accent-color') {
+        addHit('accent-law', filePath, decl.line, statusHits.length);
+        continue;
+      }
+      if (COLOR_BINDING_PROPERTY.test(decl.property) && ACTION_CONTROL_SELECTOR.test(decl.selector)) {
+        addHit('accent-law', filePath, decl.line, statusHits.length);
+      }
     }
-    if (COLOR_BINDING_PROPERTY.test(decl.property) && ACTION_CONTROL_SELECTOR.test(decl.selector)) {
-      addHit('accent-law', filePath, decl.line, statusHits.length);
+
+    // raw-font-size-css: type sizes in component/composite CSS must route through
+    // the tokenized type scale (`var(--text-*)` / `var(--type-*)`), not literal px/rem.
+    if (decl.property === 'font-size'
+      && !RAW_FONT_SIZE_ALLOWLIST.has(name)
+      && RAW_FONT_SIZE_VALUE.test(decl.value)) {
+      addHit('raw-font-size-css', filePath, decl.line);
     }
   }
 }

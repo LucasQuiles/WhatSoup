@@ -13,6 +13,7 @@
       "legacy-token-tsx": 339,
       "legacy-var-css": 220,
       "raw-color-css": 0,
+      "raw-font-size-css": 0,
       "raw-form-control": 26,
       "utility-smell": 1
     }
@@ -866,6 +867,15 @@
       "count": 0,
       "files": [],
       "owner": "CSS tier-boundary — raw component-tier colors must move to semantic tokens",
+      "source": "css-scan (check-design-burndown.mjs)"
+    },
+    {
+      "id": "burndown:raw-font-size-css",
+      "category": "raw-font-size-css",
+      "severity": "polish",
+      "count": 0,
+      "files": [],
+      "owner": "CSS type scale — raw font-size declarations must move to type tokens",
       "source": "css-scan (check-design-burndown.mjs)"
     },
     {
