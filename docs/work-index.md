@@ -76,8 +76,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/closed/bot-errors-reliability-20260531/implementation-plan.md` | doc | closed | body-marker | bot-errors-reliability | 2026-06-13 |  |
-| `docs/sdlc/closed/bot-errors-reliability-20260531/state.md` | state | closed | state-md-status | bot-errors-reliability | 2026-06-13 |  |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/implementation-plan.md` | doc | closed | body-marker | bot-errors-reliability | 2026-06-14 |  |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/state.md` | state | closed | state-md-status | bot-errors-reliability | 2026-06-14 |  |
 
 ### docs/sdlc/closed/control-plane-20260401  _(1 entries)_
 
@@ -376,4 +376,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-06-14T03:33:04Z from commit `789a9dd03cbd8bc19dc6dbd4c21d3b1b0a1b97c6`
+- Generated at 2026-06-14T04:10:29Z from commit `2f39a81955a53b10a32c742b996cc6fb1e5ac395`
