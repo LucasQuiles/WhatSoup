@@ -234,6 +234,17 @@ describe('classifyActiveSessions', () => {
     expect(results[0].conversationKey).toBe('12345');
   });
 
+  it('falls back to the raw chat_jid when conversation-key parsing rejects legacy data', () => {
+    insertSession({ claudePid: 1000, sessionId: 'ses-1', chatJid: 'legacy-session-key' });
+    durability.upsertSessionCheckpoint('legacy-session-key', {
+      claudePid: 1000, sessionId: 'ses-1', sessionStatus: 'active',
+    });
+
+    const results = classifyActiveSessions(db, durability, allOwned);
+    expect(results[0].classification).toBe('authoritative_live');
+    expect(results[0].conversationKey).toBe('legacy-session-key');
+  });
+
   // ── Integration scenario ──
 
   it('reproduces the Q zombie scenario: 4 sessions, 1 authoritative, 3 stale', () => {
