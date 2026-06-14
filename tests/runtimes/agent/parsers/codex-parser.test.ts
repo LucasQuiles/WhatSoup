@@ -351,6 +351,62 @@ describe('parseCodexEvent', () => {
       });
     });
 
+    it('uses MCP error text and structured fallbacks when message is absent', () => {
+      expect(parseCodexEvent(line({
+        jsonrpc: '2.0',
+        method: 'item/completed',
+        params: {
+          item: {
+            type: 'mcpToolCall',
+            id: 'mcp-error-text',
+            status: 'failed',
+            error: { text: 'text failure' },
+          },
+        },
+      }))).toEqual({
+        type: 'tool_result',
+        isError: true,
+        toolId: 'mcp-error-text',
+        content: 'text failure',
+      });
+
+      expect(parseCodexEvent(line({
+        jsonrpc: '2.0',
+        method: 'item/completed',
+        params: {
+          item: {
+            type: 'mcpToolCall',
+            id: 'mcp-error-json',
+            status: 'failed',
+            error: { code: 'E_DENIED' },
+          },
+        },
+      }))).toEqual({
+        type: 'tool_result',
+        isError: true,
+        toolId: 'mcp-error-json',
+        content: '{"code":"E_DENIED"}',
+      });
+
+      expect(parseCodexEvent(line({
+        jsonrpc: '2.0',
+        method: 'item/completed',
+        params: {
+          item: {
+            type: 'mcpToolCall',
+            id: 'mcp-error-raw',
+            status: 'failed',
+            error: 'raw failure',
+          },
+        },
+      }))).toEqual({
+        type: 'tool_result',
+        isError: true,
+        toolId: 'mcp-error-raw',
+        content: '{"type":"mcpToolCall","id":"mcp-error-raw","status":"failed","error":"raw failure"}',
+      });
+    });
+
     it.each([
       'thread/status/changed',
       'thread/name/updated',
@@ -444,6 +500,32 @@ describe('parseCodexEvent', () => {
       });
     });
 
+    it('ignores app-server item events with missing type and non-failed turns', () => {
+      expect(parseCodexEvent(line({
+        jsonrpc: '2.0',
+        method: 'item/started',
+        params: { item: { id: 'missing-start', command: 'pwd' } },
+      }))).toEqual({ type: 'ignored' });
+
+      expect(parseCodexEvent(line({
+        jsonrpc: '2.0',
+        method: 'item/completed',
+        params: { item: { id: 'missing-complete', status: 'completed' } },
+      }))).toEqual({ type: 'ignored' });
+
+      expect(parseCodexEvent(line({
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {},
+      }))).toEqual({ type: 'result', text: null });
+
+      expect(parseCodexEvent(line({
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: { turn: {} },
+      }))).toEqual({ type: 'result', text: null });
+    });
+
     it('uses fallback messages for failed turns and JSON-RPC errors with sparse shapes', () => {
       expect(parseCodexEvent(line({
         jsonrpc: '2.0',
@@ -520,6 +602,22 @@ describe('parseCodexEvent', () => {
       });
     });
 
+    it('falls back to generic legacy MCP input when raw input is not an object', () => {
+      expect(parseCodexEvent(line({
+        type: 'item.started',
+        item: {
+          type: 'mcp_tool_call',
+          id: 'legacy-mcp-raw',
+          input: 'raw input',
+        },
+      }))).toEqual({
+        type: 'tool_use',
+        toolName: 'mcp_tool_call',
+        toolId: 'legacy-mcp-raw',
+        toolInput: { input: 'raw input' },
+      });
+    });
+
     it('returns unknown for malformed legacy item events', () => {
       const parsed = { type: 'item.completed', item: 'bad-shape' };
       expect(parseCodexEvent(line(parsed))).toEqual({ type: 'unknown', raw: parsed });
@@ -527,9 +625,31 @@ describe('parseCodexEvent', () => {
 
     it('ignores unsupported legacy item types', () => {
       expect(parseCodexEvent(line({
+        type: 'item.started',
+        item: { id: 'legacy-missing-type', command: 'pwd' },
+      }))).toEqual({ type: 'ignored' });
+
+      expect(parseCodexEvent(line({
+        type: 'item.completed',
+        item: { id: 'legacy-completed-missing-type', status: 'completed' },
+      }))).toEqual({ type: 'ignored' });
+
+      expect(parseCodexEvent(line({
         type: 'item.completed',
         item: { type: 'web_search', id: 'legacy-search', status: 'completed' },
       }))).toEqual({ type: 'ignored' });
+    });
+
+    it('emits an empty legacy agent message when text and content are absent', () => {
+      expect(parseCodexEvent(line({
+        type: 'item.completed',
+        item: { type: 'agent_message', id: 'legacy-empty-message' },
+      }))).toEqual({
+        type: 'assistant_text',
+        text: '',
+        itemId: 'legacy-empty-message',
+        complete: true,
+      });
     });
 
     it('surfaces legacy exit-code, status, and structured fallbacks for tool results', () => {
