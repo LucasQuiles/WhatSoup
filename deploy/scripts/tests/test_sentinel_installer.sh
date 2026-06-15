@@ -40,7 +40,9 @@ common_env=(
   BOT_ERRORS_PYTHON="/usr/bin/python3"
   BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN=1
   BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS=1800
+  BOT_ERRORS_FLEET_SENTINEL_RANDOMIZED_DELAY_SECONDS=120
   BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_INTERVAL_SECONDS=300
+  BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_RANDOMIZED_DELAY_SECONDS=60
   BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_MAX_AGE_SECONDS=2700
   BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS=2700
   BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES=2
@@ -113,11 +115,13 @@ grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY='
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd tier2 token ttl env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_Q_HOST=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd q host env"; cat "$service"; exit 1; }
 grep -q '^OnUnitActiveSec=1800s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd interval"; cat "$timer"; exit 1; }
+grep -q '^RandomizedDelaySec=120s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd randomized delay"; cat "$timer"; exit 1; }
 grep -q '^Persistent=true$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd persistent"; cat "$timer"; exit 1; }
 grep -q '^ExecStart=/usr/bin/python3 .*bot-errors-heartbeat-watchdog.py --once --max-fleet-sentinel-age ' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog exec"; cat "$watchdog_service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_WATCHDOG_CHECKS=fleet_sentinel"$' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog checks env"; cat "$watchdog_service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT=' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog heartbeat env"; cat "$watchdog_service"; exit 1; }
 grep -q '^OnUnitActiveSec=300s$' "$watchdog_timer" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog interval"; cat "$watchdog_timer"; exit 1; }
+grep -q '^RandomizedDelaySec=60s$' "$watchdog_timer" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog randomized delay"; cat "$watchdog_timer"; exit 1; }
 grep -q '^Persistent=true$' "$watchdog_timer" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog persistent"; cat "$watchdog_timer"; exit 1; }
 grep -q 'dry_run=1' "$tmp/systemd.out" || { echo "SENTINEL_INSTALLER_FAIL systemd dry-run output"; cat "$tmp/systemd.out"; exit 1; }
 [[ ! -s "$tmp/systemd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL systemd invoked activation"; cat "$tmp/systemd.err"; exit 1; }
@@ -158,6 +162,26 @@ if env "${common_env[@]}" BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS=299 BOT_ERR
   exit 1
 fi
 grep -q 'must be at least 300' "$tmp/interval.err" || { echo "SENTINEL_INSTALLER_FAIL interval reason"; cat "$tmp/interval.err"; exit 1; }
+
+if env "${common_env[@]}" BOT_ERRORS_FLEET_SENTINEL_RANDOMIZED_DELAY_SECONDS=1801 BOT_ERRORS_FLEET_SENTINEL_PLATFORM=systemd bash "$S" > "$tmp/jitter.out" 2> "$tmp/jitter.err"; then
+  echo "SENTINEL_INSTALLER_FAIL accepted randomized delay above interval"
+  exit 1
+fi
+grep -q 'RANDOMIZED_DELAY_SECONDS must not exceed' "$tmp/jitter.err" || {
+  echo "SENTINEL_INSTALLER_FAIL randomized delay reason"
+  cat "$tmp/jitter.err"
+  exit 1
+}
+
+if env "${common_env[@]}" BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_RANDOMIZED_DELAY_SECONDS=301 BOT_ERRORS_FLEET_SENTINEL_PLATFORM=systemd bash "$S" > "$tmp/watchdog-jitter.out" 2> "$tmp/watchdog-jitter.err"; then
+  echo "SENTINEL_INSTALLER_FAIL accepted watchdog randomized delay above interval"
+  exit 1
+fi
+grep -q 'WATCHDOG_RANDOMIZED_DELAY_SECONDS must not exceed' "$tmp/watchdog-jitter.err" || {
+  echo "SENTINEL_INSTALLER_FAIL watchdog randomized delay reason"
+  cat "$tmp/watchdog-jitter.err"
+  exit 1
+}
 
 if env "${common_env[@]}" BOT_ERRORS_PYTHON=python3 BOT_ERRORS_FLEET_SENTINEL_PLATFORM=systemd bash "$S" > "$tmp/relative-python.out" 2> "$tmp/relative-python.err"; then
   echo "SENTINEL_INSTALLER_FAIL accepted relative python path"

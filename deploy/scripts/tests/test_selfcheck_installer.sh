@@ -30,6 +30,7 @@ common_env=(
   BOT_ERRORS_PYTHON="/usr/bin/python3"
   BOT_ERRORS_SELFCHECK_INSTALL_DRY_RUN=1
   BOT_ERRORS_SELFCHECK_INTERVAL_SECONDS=1800
+  BOT_ERRORS_SELFCHECK_RANDOMIZED_DELAY_SECONDS=120
   BOT_ERRORS_SELFCHECK_UNITS="com.bot-errors.health=loaded"
   BOT_ERRORS_SELFCHECK_FRESHNESS_JSON='[{"name":"daily-health","path":"/tmp/last&run","maxAgeSeconds":3600}]'
   BOT_ERRORS_SELFCHECK_HEARTBEAT_URL="http://central.invalid/heartbeat?x=1&y=2"
@@ -71,6 +72,7 @@ grep -q '^Environment="BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT=.*central-down&al
 grep -q '^Environment="BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS=7200"' "$service" || { echo "SELFCHECK_INSTALLER_FAIL systemd central down threshold"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_SELFCHECK_HEAL_MIN_FREE_BYTES=67108864"' "$service" || { echo "SELFCHECK_INSTALLER_FAIL systemd heal disk reserve"; cat "$service"; exit 1; }
 grep -q '^OnUnitActiveSec=1800s$' "$timer" || { echo "SELFCHECK_INSTALLER_FAIL systemd interval"; cat "$timer"; exit 1; }
+grep -q '^RandomizedDelaySec=120s$' "$timer" || { echo "SELFCHECK_INSTALLER_FAIL systemd randomized delay"; cat "$timer"; exit 1; }
 grep -q '^Persistent=true$' "$timer" || { echo "SELFCHECK_INSTALLER_FAIL systemd persistent"; cat "$timer"; exit 1; }
 grep -q 'dry_run=1' "$tmp/systemd.out" || { echo "SELFCHECK_INSTALLER_FAIL systemd dry-run output"; cat "$tmp/systemd.out"; exit 1; }
 [[ ! -s "$tmp/systemd.err" ]] || { echo "SELFCHECK_INSTALLER_FAIL systemd invoked activation"; cat "$tmp/systemd.err"; exit 1; }
@@ -89,6 +91,16 @@ if env "${common_env[@]}" BOT_ERRORS_SELFCHECK_INTERVAL_SECONDS=299 BOT_ERRORS_S
   exit 1
 fi
 grep -q 'must be at least 300' "$tmp/interval.err" || { echo "SELFCHECK_INSTALLER_FAIL interval reason"; cat "$tmp/interval.err"; exit 1; }
+
+if env "${common_env[@]}" BOT_ERRORS_SELFCHECK_RANDOMIZED_DELAY_SECONDS=1801 BOT_ERRORS_SELFCHECK_PLATFORM=systemd bash "$S" > "$tmp/jitter.out" 2> "$tmp/jitter.err"; then
+  echo "SELFCHECK_INSTALLER_FAIL accepted randomized delay above interval"
+  exit 1
+fi
+grep -q 'RANDOMIZED_DELAY_SECONDS must not exceed' "$tmp/jitter.err" || {
+  echo "SELFCHECK_INSTALLER_FAIL randomized delay reason"
+  cat "$tmp/jitter.err"
+  exit 1
+}
 
 if env "${common_env[@]}" BOT_ERRORS_PYTHON=python3 BOT_ERRORS_SELFCHECK_PLATFORM=systemd bash "$S" > "$tmp/relative-python.out" 2> "$tmp/relative-python.err"; then
   echo "SELFCHECK_INSTALLER_FAIL accepted relative python path"
