@@ -304,8 +304,10 @@ describe('AddLineWizard close and persistence behavior', () => {
     const { onClose } = renderWizard()
     await createPassiveLine()
 
-    const beforeUnload = new Event('beforeunload', { cancelable: true })
-    expect(window.dispatchEvent(beforeUnload)).toBe(false)
+    await waitFor(() => {
+      const beforeUnload = new Event('beforeunload', { cancelable: true })
+      expect(window.dispatchEvent(beforeUnload)).toBe(false)
+    })
 
     fireEvent.click(screen.getByRole('button', { name: 'Close wizard' }))
     expect(screen.getByRole('dialog', { name: 'Abandon new line?' })).toBeDefined()

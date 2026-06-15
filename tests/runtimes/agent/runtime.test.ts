@@ -532,30 +532,7 @@ type PerChatCleanupRuntimeState = {
   perChatTurnText: Map<string, string>;
   perChatAssistantItemText: Map<string, Map<string, string>>;
   pendingTurnText: Map<string, string>;
-  pendingPollQuestions: Map<string, {
-    questions: Array<{ question: string; header: string; options: Array<{ label: string; description: string }>; multiSelect: boolean }>;
-    toolId: string;
-    chatJid: string;
-    chatJidAliases: Set<string>;
-    mode: 'poll' | 'textFallback';
-    pollMessageIdToQuestionIndex: Map<string, number>;
-    currentQuestionIndex: number;
-    answersCollected: Record<number, string>;
-    createdAt: number;
-    softExpiryTimer?: ReturnType<typeof setTimeout>;
-    hardExpiryTimer?: ReturnType<typeof setTimeout>;
-    resolution?: 'first-vote-wins' | 'admin-only' | 'admin-wins' | 'majority-after-timeout';
-    timeoutMs?: number;
-    votesByQuestion?: Map<number, Map<string, {
-      voterJid: string;
-      selectedOptions: string[];
-      isAdmin: boolean;
-      timestamp: number;
-    }>>;
-    adminJids?: Set<string> | null;
-    source?: 'askuser' | 'send_poll';
-    sentPollMessageIds?: string[];
-  }>;
+  pendingPollQuestions: Map<string, PendingPollQuestion>;
   resumeFailedHandling: Set<string>;
   autoCompactCooldownUntil: Map<string, number>;
   autoCompactLastSuccessAt: Map<string, number>;
@@ -584,6 +561,8 @@ describe('isUsageLimitMessage', () => {
   it('matches distinctive provider usage-cap notices', () => {
     expect(isUsageLimitMessage("You're out of extra usage. Claude will be available at 8pm.")).toBe(true);
     expect(isUsageLimitMessage('You have hit your usage limit.')).toBe(true);
+    expect(isUsageLimitMessage('Insufficient credits for Anthropic API request.')).toBe(true);
+    expect(isUsageLimitMessage('Insufficient credits for this request.')).toBe(false);
   });
 
   it('requires reset-time evidence for generic quota wording', () => {
@@ -2052,6 +2031,12 @@ describe('AgentRuntime', () => {
         createdAt: Date.now(),
         softExpiryTimer: pollSoftTimer,
         hardExpiryTimer: pollHardTimer,
+        resolution: 'first-vote-wins',
+        timeoutMs: 60_000,
+        votesByQuestion: new Map(),
+        adminJids: null,
+        source: 'askuser',
+        sentPollMessageIds: ['POLL_ALIAS'],
       });
 
       expect(() => runtime.handleJidAliasChanged('15550004444', canonicalJid)).not.toThrow();
@@ -2144,6 +2129,12 @@ describe('AgentRuntime', () => {
       currentQuestionIndex: 0,
       answersCollected: {},
       createdAt: Date.now(),
+      resolution: 'first-vote-wins',
+      timeoutMs: 60_000,
+      votesByQuestion: new Map(),
+      adminJids: null,
+      source: 'askuser',
+      sentPollMessageIds: ['POLL_ALIAS_VOTE'],
     });
 
     runtime.handleJidAliasChanged('15550004444', canonicalJid);
@@ -2199,7 +2190,7 @@ describe('AgentRuntime', () => {
       adminJids: null,
       source: 'askuser',
       sentPollMessageIds: ['POLL_LEGACY_TIMEOUT'],
-    });
+    } as PendingPollQuestion);
 
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
     setTimeoutSpy.mockClear();

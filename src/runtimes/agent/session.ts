@@ -1830,6 +1830,10 @@ export class SessionManager {
     };
   }
 
+  getProviderId(): string {
+    return this.provider;
+  }
+
   /**
    * Kill child process and mark session.
    * @param suspend - true (default) = suspended (bot shutdown, resumable);
