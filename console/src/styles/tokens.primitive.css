@@ -61,17 +61,20 @@
 }
 
 :root {
-  /* Avatar hue palette - 8 fixed hues for group/contact avatars.
+  /* Avatar hue palette — 8 fixed hues for group/contact avatars.
      CONSUMED DYNAMICALLY via template string at components/line-detail/groups-utils.ts:41
-     (invisible to static var() greps) - never remove in a dead-token sweep. */
-  --avatar-hue-0: hsl(0, 45%, 55%);
-  --avatar-hue-1: hsl(45, 45%, 55%);
-  --avatar-hue-2: hsl(90, 45%, 55%);
-  --avatar-hue-3: hsl(135, 45%, 55%);
-  --avatar-hue-4: hsl(180, 45%, 55%);
-  --avatar-hue-5: hsl(225, 45%, 55%);
-  --avatar-hue-6: hsl(270, 45%, 55%);
-  --avatar-hue-7: hsl(315, 45%, 55%);
+     (invisible to static var() greps) — never remove in a dead-token sweep.
+     DD-44: lightness is 34% (not 55%) and initials use the fixed --avatar-ink, which
+     together clear WCAG AA 4.5:1 for all 8 hues × both themes (L55+--t1 bottomed at 1.78:1). */
+  --avatar-hue-0: hsl(0, 45%, 34%);
+  --avatar-hue-1: hsl(45, 45%, 34%);
+  --avatar-hue-2: hsl(90, 45%, 34%);
+  --avatar-hue-3: hsl(135, 45%, 34%);
+  --avatar-hue-4: hsl(180, 45%, 34%);
+  --avatar-hue-5: hsl(225, 45%, 34%);
+  --avatar-hue-6: hsl(270, 45%, 34%);
+  --avatar-hue-7: hsl(315, 45%, 34%);
+  --avatar-ink: #fff; /* fixed, theme-independent initials ink — equal contrast both themes (DD-44) */
 
   /* Spacing — 4px grid (§2.2); half-steps retained for legacy consumers pending C2 migration */
   --sp-0h: 3px;
