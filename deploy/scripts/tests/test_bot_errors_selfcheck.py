@@ -272,6 +272,23 @@ def test_central_ack_fresh_records_central_acked(tmp_path: Path):
     assert calls == []
 
 
+def test_future_central_ack_mtime_is_not_trusted(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    ack.write_text("{}", encoding="utf-8")
+    os.utime(ack, (1120.0, 1120.0))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+
+    status = _mod.run_selfcheck(config, deps)
+
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "future_mtime"
+    assert status["centralAck"]["futureBySeconds"] == 120
+    assert status["centralAck"]["localOnlySeconds"] == 0
+    assert status["centralAck"]["centralDownSuspected"] is False
+    assert "centralDownAlert" not in status
+    assert calls == []
+
+
 def test_symlinked_central_ack_is_not_trusted(tmp_path: Path):
     target = tmp_path / "external-central-ack.json"
     target.write_text("{}", encoding="utf-8")

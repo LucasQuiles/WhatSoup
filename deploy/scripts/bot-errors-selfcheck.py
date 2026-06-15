@@ -558,7 +558,17 @@ def central_ack_inventory(path: Optional[Path], now: float) -> dict:
             "path": str(path),
             "maxAgeSeconds": max_age,
         }
-    age = max(0, int(now - stat.st_mtime))
+    raw_age = int(now - stat.st_mtime)
+    if raw_age < 0:
+        return {
+            "configured": True,
+            "mode": "local_only",
+            "status": "future_mtime",
+            "path": str(path),
+            "futureBySeconds": abs(raw_age),
+            "maxAgeSeconds": max_age,
+        }
+    age = raw_age
     status = "fresh" if age <= max_age else "stale"
     mode = "central_acked" if status == "fresh" else "local_only"
     return {"configured": True, "mode": mode, "status": status, "path": str(path), "ageSeconds": age, "maxAgeSeconds": max_age}
