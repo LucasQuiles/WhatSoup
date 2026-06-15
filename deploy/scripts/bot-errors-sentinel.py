@@ -1229,9 +1229,6 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
         heartbeat = heartbeat_inventory(spec, now, config.heartbeat_max_age_seconds, config.max_clock_skew_seconds)
         probe = normalize_probe(deps.pull_probe(spec))
         result = evaluate_host(spec, heartbeat, probe, record, now, config)
-        ack_path = write_ack(spec, result, now)
-        if ack_path is not None:
-            result["ackPath"] = ack_path
         results.append(result)
 
     fleet_action = "none"
@@ -1253,6 +1250,11 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
         tier1_action = apply_tier1_bounds(results, host_state, config)
         if tier1_action is not None:
             fleet_action = tier1_action
+
+    for spec, result in zip(hosts, results):
+        ack_path = write_ack(spec, result, now)
+        if ack_path is not None:
+            result["ackPath"] = ack_path
 
     state["lastFleetAction"] = fleet_action
     state["lastReachabilityOracle"] = oracle

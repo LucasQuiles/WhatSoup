@@ -399,12 +399,15 @@ def test_tier1_action_outbox_emits_local_heal_request_once_per_cooldown(tmp_path
 def test_correlated_safe_drift_freezes_fleet_autoheal(tmp_path: Path):
     hosts_payload = []
     probes = {}
+    acks = {}
     for name in ("host-a", "host-b", "host-c"):
         hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=False, klass="drift", mtime=995.0)
-        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        acks[name] = tmp_path / "acks" / f"{name}.json"
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb), "ackPath": str(acks[name])})
         probes[name] = {"reachable": True, "healthy": False, "class": "drift"}
     hb = _heartbeat(tmp_path / "host-d-hb.json", healthy=False, klass="manifest_missing", mtime=995.0)
-    hosts_payload.append({"host": "host-d", "heartbeatPath": str(hb)})
+    acks["host-d"] = tmp_path / "acks" / "host-d.json"
+    hosts_payload.append({"host": "host-d", "heartbeatPath": str(hb), "ackPath": str(acks["host-d"])})
     probes["host-d"] = {"reachable": True, "healthy": False, "class": "manifest_missing"}
     hosts = _hosts_file(tmp_path, hosts_payload)
     result = _mod.run_once(_config(tmp_path, hosts, hysteresis_cycles=1), _deps(1000.0, probes))
@@ -413,6 +416,9 @@ def test_correlated_safe_drift_freezes_fleet_autoheal(tmp_path: Path):
     assert {by_host[name]["action"] for name in ("host-a", "host-b", "host-c")} == {"freeze_correlated_drift"}
     assert by_host["host-d"]["action"] == "tier1_heal_candidate"
     assert {by_host[name]["correlatedDriftClass"] for name in ("host-a", "host-b", "host-c")} == {"drift"}
+    assert json.loads(acks["host-a"].read_text(encoding="utf-8"))["centralAction"] == "freeze_correlated_drift"
+    assert json.loads(acks["host-d"].read_text(encoding="utf-8"))["centralAction"] == "tier1_heal_candidate"
+    assert by_host["host-a"]["ackPath"] == str(acks["host-a"])
     state = json.loads(_mod.state_path(_config(tmp_path, hosts, hysteresis_cycles=1)).read_text(encoding="utf-8"))
     assert {state["hosts"][name]["lastAction"] for name in ("host-a", "host-b", "host-c")} == {"freeze_correlated_drift"}
     assert state["hosts"]["host-d"]["lastAction"] == "tier1_heal_candidate"
@@ -422,9 +428,11 @@ def test_tier1_candidate_count_is_capped_without_correlated_freeze(tmp_path: Pat
     classes = {"host-a": "drift", "host-b": "manifest_missing", "host-c": "drift"}
     hosts_payload = []
     probes = {}
+    acks = {}
     for name, klass in classes.items():
         hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=False, klass=klass, mtime=995.0)
-        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        acks[name] = tmp_path / "acks" / f"{name}.json"
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb), "ackPath": str(acks[name])})
         probes[name] = {"reachable": True, "healthy": False, "class": klass}
     hosts = _hosts_file(tmp_path, hosts_payload)
     result = _mod.run_once(
@@ -436,6 +444,8 @@ def test_tier1_candidate_count_is_capped_without_correlated_freeze(tmp_path: Pat
     assert by_host["host-a"]["action"] == "tier1_heal_candidate"
     assert by_host["host-b"]["action"] == "tier1_heal_candidate"
     assert by_host["host-c"]["action"] == "defer_tier1_concurrency_cap"
+    assert json.loads(acks["host-a"].read_text(encoding="utf-8"))["centralAction"] == "tier1_heal_candidate"
+    assert json.loads(acks["host-c"].read_text(encoding="utf-8"))["centralAction"] == "defer_tier1_concurrency_cap"
 
 
 def test_flapping_suppresses_auto_heal_candidate(tmp_path: Path):
@@ -454,9 +464,11 @@ def test_flapping_suppresses_auto_heal_candidate(tmp_path: Path):
 def test_central_connectivity_suspect_requires_failed_oracle_to_suppress(tmp_path: Path):
     hosts_payload = []
     probes = {}
+    acks = {}
     for name in ("host-a", "host-b", "host-c"):
         hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=True, mtime=100.0)
-        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        acks[name] = tmp_path / "acks" / f"{name}.json"
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb), "ackPath": str(acks[name])})
         probes[name] = {"reachable": False, "healthy": False, "class": "unreachable"}
     hosts = _hosts_file(tmp_path, hosts_payload)
     result = _mod.run_once(_config(tmp_path, hosts, hysteresis_cycles=1, connectivity_hysteresis_cycles=1), _deps(1000.0, probes))
@@ -477,6 +489,7 @@ def test_central_connectivity_suspect_requires_failed_oracle_to_suppress(tmp_pat
     assert fleet_event["criticalWhatsAppAllowed"] is True
     assert fleet_event["criticalWhatsAppDailyCap"] == 8
     assert fleet_event["problemHostCount"] == 3
+    assert json.loads(acks["host-a"].read_text(encoding="utf-8"))["centralAction"] == "suppress_central_connectivity_suspect"
 
     waiting = _mod.run_once(_config(tmp_path / "waiting", hosts, hysteresis_cycles=1, connectivity_hysteresis_cycles=2), _deps(1000.0, probes, oracle_down))
     assert waiting["fleetAction"] == "central_connectivity_suspect"
