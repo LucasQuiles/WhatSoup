@@ -1001,6 +1001,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       let runtimeBlock: Record<string, unknown> = {};
       if (runtimeSnapshot) {
         const snap = runtimeSnapshot;
+        if (snap.status === 'unhealthy') {
+          status = 'unhealthy';
+        } else if (snap.status === 'degraded' && status === 'healthy') {
+          status = 'degraded';
+        }
         if (deps.instanceType === 'passive') {
           runtimeBlock = { passive: snap.details };
         } else if (deps.instanceType === 'chat') {
