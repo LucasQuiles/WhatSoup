@@ -2,7 +2,7 @@
 
 Status flow: DISCOVERED -> TRIAGED -> RESOLVED | DEFERRED | WONT_FIX.
 
-Last updated: 2026-06-14.
+Last updated: 2026-06-15.
 
 | ID | Status | Feature / work item | Completion | Evidence | Completion gate |
 |---|---|---:|---:|---|---|
@@ -21,6 +21,7 @@ Last updated: 2026-06-14.
 | RR-013 | TRIAGED | Coverage ratchet to requested target | 14% | `vitest.config.ts`; latest `coverage:check` summary; PR #843 `22470235`; PR #844 `b5026859`; PR #846 `96d4181a` / head `81166160`; PR #852 `556919e4`; `tests/console/mock-data.test.ts`; `tests/console/group-detail-modal.test.tsx` | Coverage is at least 98% for statements, branches, functions, and lines, and thresholds enforce it. |
 | RR-014 | RESOLVED | Open PR/source landing | 100% | PR #830 `97e60757`; PR #828 `28ed0dba`; PR #829 `95bee767`; PR #832 `3448e1ff`; PR #833 `6a74a102`; PR #835 `0525926a`; PR #841 `0ad5ab47`; PR #843 `22470235`; PR #842 `727c580c`; PR #844 `b5026859`; PR #846 `96d4181a`; PR #847 `9f386bfa`; PR #848 `2954b695`; PR #849 `35b18970`; PR #850 `470e768b`; PR #851 `cb1bedad`; PR #852 `556919e4`; PR #853 `37ab6f7b`; PR #854 `1f6bcb91`; PR #855 `1c07f8ef`; PR #856 `2327667a`; PR #857 `c947d639`; GitHub PR queue empty at the 2026-06-14T22:58Z checkpoint | Source landing queue is clear at the recorded checkpoint. Issue #640 remains open and is tracked under artifact/objective hygiene; do not close or comment without explicit operator approval. |
 | RR-015 | RESOLVED | D18 fleet health-poller HTTP error policy | 100% | `tests/fleet/health-poller.test.ts` | A parseable non-OK `/health` body is reachability evidence: the poller preserves the body-derived `degraded` or `logged_out` state with `consecutiveFailures=0`; only unparseable/generic transport failures increment toward `unreachable`. |
+| RR-016 | DEFERRED | Live provider-fallback degrade/recover acceptance test | 50% | classifier-level behavior covered by `tests/runtimes/agent/failure-taxonomy.test.ts` and `tests/runtimes/agent/provider-fallback.test.ts`; the deployed classifier maps an inaccessible-model error to `model-unavailable` and arms fallback while leaving benign assistant text unclassified | Stand up an isolated sandbox agent instance, set the primary model to an inaccessible test value (`inaccessible-model-for-test`), and confirm `/health` reports `turn_capability.model_usable=false` with fallback armed and no raw provider text leaked, then restore the model and confirm recovery. Deferred to avoid mutating the production line; requires a separate sandbox instance and pairing. |
 
 ## Current Gate Snapshot
 
