@@ -82,6 +82,12 @@ def now_iso(ts: int | None = None) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts or now_epoch()))
 
 
+def finite_epoch(value: Any) -> int | None:
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return int(value)
+
+
 def parse_iso_epoch(value: Any) -> int | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -336,7 +342,9 @@ def json_updated_age(path: Path, key: str = "updated_at") -> tuple[int | None, s
     value = data.get(key)
     if not isinstance(value, (int, float)):
         return None, f"missing numeric {key} in {path}"
-    updated = int(value)
+    updated = finite_epoch(value)
+    if updated is None:
+        return None, f"non-finite {key} in {path}: value={value}"
     if updated > current:
         return None, f"future {key} in {path}: value={updated} now={current} future_by_seconds={updated - current}"
     return max(0, current - updated), f"{path} {key}={updated}"
@@ -958,7 +966,7 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
             phase = str(state.get("phase") or "")
             if phase.startswith("q_unavailable_"):
                 last_unavailable = state.get("last_q_unavailable_at")
-                unavailable_at = int(last_unavailable) if isinstance(last_unavailable, (int, float)) else None
+                unavailable_at = finite_epoch(last_unavailable)
                 unavailable_age = max(0, now_epoch() - unavailable_at) if unavailable_at is not None else "unknown"
                 reason = str(state.get("last_q_unavailable_reason") or phase.removeprefix("q_unavailable_") or "unknown")
                 problems["q_loop:supervisor"] = (
