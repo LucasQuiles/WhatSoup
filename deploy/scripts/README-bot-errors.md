@@ -62,6 +62,17 @@ edit in the baseline import, isolated here so every later corrections diff stays
 
 Fleet minis have **no GitHub access**. Deploys are content-pushed from an operator machine:
 stream each script over ssh to the host's running location, then hash-verify on the host.
+This section describes the mechanics only; fleet mutation still requires a separately named
+owner approval that scopes the target hosts, restart surface, stop condition, and no-secret-output
+handling.
+
+Authorization gate: before any fleet mutation, record the named owner, approval reference,
+operator, source SHA, explicit host list, whether deploy/proof/restart are each authorized,
+and the abort condition. A past close-out baseline is not authorization for a new C2/C3 run.
+Owner-accepted exceptions must be written into the approval before that row is touched;
+they can cover reachability, restart, hook, or verification residuals only when the owner
+approval text names the exact waived field. Backup failure, copy failure, manifest
+write/hash failure, raw secret output, or authorization ambiguity remains a hard abort.
 
 - macOS hosts (mini1/4/7/8/9/10/11, mwlab, maclab): running copies at
   `~/LAB/WhatSoup/deploy/scripts/` (health job + bots read from this tree).
@@ -69,29 +80,47 @@ stream each script over ssh to the host's running location, then hash-verify on 
   restart collector, dispatcher, and q-loop after deploying long-running code.
 
 Current close-out baseline: the 2026-06-13 C2/C3/C4 fleet pass streamed the
-manifest-tracked bot-errors runtime payload from
-`/private/tmp/whatsoup-c2c4-runtime-20260613T074101Z`, built from
-`289c5f7b77c86e64d2ee5ef820aabd7e21492a78`. At deploy time,
+manifest-tracked bot-errors runtime payload from an isolated operator staging directory,
+built from `289c5f7b77c86e64d2ee5ef820aabd7e21492a78`. At deploy time,
 `origin/main=2197bfdc`; the intervening diff did not touch bot-errors runtime,
 hook, profile, or manifest inputs.
 
 The deploy contract is:
 
-1. Take a per-host backup before mutation.
+1. Take a per-host backup before mutation; abort if the backup path or restore proof cannot
+   be recorded.
 2. Copy the manifest-tracked bot-errors scripts, `deploy/bot-errors-runtime-manifest.json`,
-   `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree.
+   `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree; abort
+   on any copy error or missing payload hash.
 3. Write a host-local runtime manifest at
    `~/.config/whatsoup/bot-errors-runtime-manifest.json` and point services at it with
-   `BOT_ERRORS_RUNTIME_MANIFEST`.
+   `BOT_ERRORS_RUNTIME_MANIFEST`; abort if the written manifest hash cannot be verified.
 4. On Git-backed hosts, stamp `expected_head_sha` with the host checkout's actual HEAD so
    daily health detects real runtime skew without false mismatches from dirty host trees.
-   Non-Git runtime trees may report `git_head_sha: not_a_git_repository`.
+   Stamp immediately after the payload copy. Abort on Git-backed hosts if `git rev-parse HEAD`
+   fails; non-Git runtime trees may report `git_head_sha: not_a_git_repository`.
 5. Activate the drift hook with `core.hooksPath=.husky` where the Git config and hooks
-   directory are writable.
+   directory are writable. If either path is not writable, abort unless the owner pre-accepted
+   that row as a hook exception; for an accepted hook exception, run the manual drift-hook
+   simulation below and record its expected successful shape instead of treating hook
+   activation as complete.
 6. Restart long-running hub services after copying code. Timer-invoked health, deadman,
-   and heartbeat jobs load the new code on their next fire.
+   and heartbeat jobs load the new code on their next fire. Confirm restarted services report
+   active state through the service manager plus `/health` or equivalent independent probe
+   before proceeding; abort on restart failure unless the owner pre-accepted the row as an
+   exception.
 7. Verify every active runtime path against the manifest, then check outbox/writefail
-   queues and service restart counters.
+   queues and service restart counters. Abort on any hash mismatch, write-fail increase,
+   runtime-skew critical result, linked-device/auth regression, or provider regression without
+   an owner-accepted exception.
+
+Per-row close-out evidence must record: backup path and restore proof, copied payload hash,
+host-local runtime manifest path and hash, expected/source SHA, service manager action and
+post-action state, `/health` or equivalent health evidence, provider/effective-provider
+state, linked-device/auth state, pre/post BOT ERRORS queue/outbox/writefail counts,
+archive/drain evidence, runtime-skew result, and any owner-accepted exception wording.
+Each field needs timestamped host-local output, hash, count, exit status, or artifact path;
+placeholder or summary-only entries do not satisfy close-out.
 
 Current stability evidence, refreshed read-only on 2026-06-13 14:03 ET:
 
