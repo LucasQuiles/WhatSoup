@@ -821,7 +821,7 @@ def expired_q_remediation(state: dict, now: float) -> Optional[dict]:
     return dict(record)
 
 
-def add_tier2_remediation(payload: dict, state: dict, config: SentinelConfig, now: float) -> None:
+def add_tier2_remediation(payload: dict, state: dict, config: SentinelConfig, now: float, q_host_result: Optional[dict] = None) -> None:
     if payload.get("tier") != "tier2":
         return
     host = str(payload.get("host") or "unknown")
@@ -830,6 +830,16 @@ def add_tier2_remediation(payload: dict, state: dict, config: SentinelConfig, no
             "qEligible": False,
             "reason": "q_host_self_failure",
             "qHost": config.q_host,
+            "handledBy": "central_direct",
+        }
+        return
+    if q_host_result is not None and q_host_result.get("healthy") is not True:
+        payload["remediation"] = {
+            "qEligible": False,
+            "reason": "q_host_degraded",
+            "qHost": config.q_host,
+            "qHostClass": q_host_result.get("class"),
+            "qHostAction": q_host_result.get("action"),
             "handledBy": "central_direct",
         }
         return
@@ -1111,6 +1121,7 @@ def emit_action_events(
 ) -> list[dict]:
     emitted = emit_q_unavailable_event(state, config, now, controller_host)
     host_state = state.setdefault("hosts", {})
+    q_host_result = next((result for result in results if str(result.get("host") or "") == config.q_host), None)
     for result in results:
         action = str(result.get("action") or "")
         if action not in ACTION_EVENT_ACTIONS:
@@ -1123,7 +1134,7 @@ def emit_action_events(
         request_id = request_id_for(now, "host", subject, action, str(result.get("class") or "unknown"))
         path = action_event_path(config, now, "host", subject, action, request_id)
         payload = build_host_action_event(result, now, controller_host, fleet_action, request_id)
-        add_tier2_remediation(payload, state, config, now)
+        add_tier2_remediation(payload, state, config, now, q_host_result)
         digest_ref = apply_critical_whatsapp_budget(payload, state, config, now, controller_host)
         atomic_write_json(path, payload)
         ref = {"scope": "host", "host": subject, "action": action, "requestId": request_id, "path": str(path)}

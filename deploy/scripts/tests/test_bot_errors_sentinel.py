@@ -519,6 +519,36 @@ def test_q_host_self_failure_is_not_routed_to_q(tmp_path: Path):
     assert state.get("qRemediation") in (None, {})
 
 
+def test_degraded_q_host_blocks_tier2_q_routing(tmp_path: Path, monkeypatch):
+    hosts_payload = []
+    probes = {}
+    for name in ("host-a", "q-agent-host"):
+        hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        probes[name] = {"reachable": True, "healthy": False, "class": "permission_denied"}
+    hosts = _hosts_file(tmp_path, hosts_payload)
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, q_host="q-agent-host")
+    monkeypatch.setattr(_mod.secrets, "token_urlsafe", lambda _length: "should-not-issue")
+    result = _mod.run_once(config, _deps(1000.0, probes))
+    host_events = {}
+    for ref in result["actionEvents"]:
+        if ref["scope"] == "host":
+            payload = json.loads(Path(ref["path"]).read_text(encoding="utf-8"))
+            host_events[payload["host"]] = payload
+    assert host_events["host-a"]["remediation"] == {
+        "qEligible": False,
+        "reason": "q_host_degraded",
+        "qHost": "q-agent-host",
+        "qHostClass": "runtime_invariant_failed",
+        "qHostAction": "escalate",
+        "handledBy": "central_direct",
+    }
+    assert host_events["q-agent-host"]["remediation"]["reason"] == "q_host_self_failure"
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert state.get("qRemediation") in (None, {})
+    assert "should-not-issue" not in json.dumps(host_events)
+
+
 def test_q_remediation_is_one_host_at_a_time(tmp_path: Path, monkeypatch):
     hosts_payload = []
     probes = {}
