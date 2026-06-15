@@ -8,15 +8,28 @@ const {
   configStub,
   routeQueryMock,
   searchRecordsMock,
+  namespaceQueryMock,
+  rerankMock,
+  listIndexesMock,
 } = vi.hoisted(() => {
   const pineconeCtor = vi.fn();
   const searchRecordsMock = vi.fn();
+  const namespaceQueryMock = vi.fn();
+  const rerankMock = vi.fn();
+  const listIndexesMock = vi.fn();
   const PineconeMock = vi.fn().mockImplementation(function (this: unknown, ...args: unknown[]) {
     pineconeCtor(...args);
     return {
       index: vi.fn(() => ({
         searchRecords: searchRecordsMock,
+        namespace: vi.fn((namespace: string) => ({
+          query: (params: unknown) => namespaceQueryMock(namespace, params),
+        })),
       })),
+      inference: {
+        rerank: rerankMock,
+      },
+      listIndexes: listIndexesMock,
     };
   });
   const configStub = {
@@ -59,6 +72,47 @@ const {
             rerankTopN: 6,
             description: 'Routed WhatsApp memory',
           },
+          'single-ns': {
+            namespace: 'only_ns',
+            namespaces: [],
+            searchMode: 'records',
+            rerank: false,
+            rerankModel: 'bge-reranker-v2-m3',
+            topK: 4,
+            rerankTopN: 4,
+            description: 'Single namespace records index',
+          },
+          'entity-index': {
+            namespace: 'entity_ns',
+            namespaces: ['entity_ns'],
+            searchMode: 'entity',
+            rerank: false,
+            rerankModel: 'bge-reranker-v2-m3',
+            topK: 5,
+            rerankTopN: 5,
+            description: 'Entity index',
+          },
+          'vector-index': {
+            namespace: 'vec_a',
+            namespaces: ['vec_a', 'vec_b'],
+            searchMode: 'vector',
+            embedUrl: 'http://embed.local/embed',
+            rerank: false,
+            rerankModel: 'bge-reranker-v2-m3',
+            topK: 5,
+            rerankTopN: 5,
+            description: 'Vector index',
+          },
+          'rerank-index': {
+            namespace: 'rerank_ns',
+            namespaces: ['rerank_ns'],
+            searchMode: 'records',
+            rerank: true,
+            rerankModel: 'bge-reranker-v2-m3',
+            topK: 5,
+            rerankTopN: 2,
+            description: 'Rerank index',
+          },
         },
       },
     },
@@ -69,8 +123,21 @@ const {
     configStub,
     routeQueryMock: vi.fn(),
     searchRecordsMock,
+    namespaceQueryMock,
+    rerankMock,
+    listIndexesMock,
   };
 });
+
+type MutablePineconeConfig = {
+  apiKeyEnv?: string;
+  projectId?: string;
+  expectedHostSuffix?: string;
+};
+
+function mutablePineconeConfig(): MutablePineconeConfig {
+  return configStub.memory.pinecone as unknown as MutablePineconeConfig;
+}
 
 vi.mock('@pinecone-database/pinecone', () => ({
   Pinecone: PineconeMock,
@@ -102,11 +169,25 @@ beforeEach(() => {
   routeQueryMock.mockReturnValue({ namespaces: ['ns_summaries'], intent: 'hybrid' });
   searchRecordsMock.mockReset();
   searchRecordsMock.mockResolvedValue({ result: { hits: [] } });
+  namespaceQueryMock.mockReset();
+  namespaceQueryMock.mockResolvedValue({ matches: [] });
+  rerankMock.mockReset();
+  rerankMock.mockResolvedValue({ data: [] });
+  listIndexesMock.mockReset();
+  listIndexesMock.mockResolvedValue({ indexes: [] });
+  mutablePineconeConfig().apiKeyEnv = 'TEST_PINECONE_API_KEY';
+  mutablePineconeConfig().projectId = undefined;
+  mutablePineconeConfig().expectedHostSuffix = undefined;
+  configStub.memory.pinecone.knowledgeProfiles['entity-index']!.namespaces = ['entity_ns'];
+  configStub.memory.pinecone.knowledgeProfiles['vector-index']!.embedUrl = 'http://embed.local/embed';
   process.env.TEST_PINECONE_API_KEY = 'pinecone-test-key';
+  vi.unstubAllGlobals();
 });
 
 afterEach(() => {
   delete process.env.TEST_PINECONE_API_KEY;
+  delete process.env.PINECONE_API_KEY;
+  vi.unstubAllGlobals();
 });
 
 function collector(): {
@@ -169,6 +250,20 @@ describe('registerKnowledgeTools - registration gating', () => {
     expect(c.registered).toHaveLength(0);
   });
 
+  it('registers nothing when the knowledgeProfiles map is absent', () => {
+    const originalProfiles = configStub.memory.pinecone.knowledgeProfiles;
+    (configStub.memory.pinecone as { knowledgeProfiles?: typeof originalProfiles }).knowledgeProfiles = undefined;
+    const c = collector();
+
+    try {
+      registerKnowledgeTools(['index-a'], c.register);
+
+      expect(c.registered).toHaveLength(0);
+    } finally {
+      configStub.memory.pinecone.knowledgeProfiles = originalProfiles;
+    }
+  });
+
   it('produces a single knowledge_search tool with chat scope and read_only replayPolicy', () => {
     const c = collector();
     registerKnowledgeTools(['index-a', 'index-b'], c.register);
@@ -195,6 +290,18 @@ describe('registerKnowledgeTools - registration gating', () => {
     registerKnowledgeTools(['index-a'], c.register);
     expect(PineconeMock).toHaveBeenCalledTimes(1);
     expect(pineconeCtor).toHaveBeenCalledWith({ apiKey: 'pinecone-test-key' });
+  });
+
+  it('falls back to PINECONE_API_KEY when no apiKeyEnv override is configured', () => {
+    (configStub.memory.pinecone as { apiKeyEnv?: string }).apiKeyEnv = undefined;
+    delete process.env.TEST_PINECONE_API_KEY;
+    process.env.PINECONE_API_KEY = 'default-pinecone-key';
+    const c = collector();
+
+    registerKnowledgeTools(['index-a'], c.register);
+
+    expect(c.registered).toHaveLength(1);
+    expect(pineconeCtor).toHaveBeenCalledWith({ apiKey: 'default-pinecone-key' });
   });
 });
 
@@ -388,6 +495,424 @@ describe('knowledge_search handler - Pinecone search behavior', () => {
     expect(searchRecordsMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ namespace: 'ns_summaries' }));
     expect(searchRecordsMock).toHaveBeenNthCalledWith(2, expect.objectContaining({ namespace: 'ns_facts' }));
     expect(searchRecordsMock).toHaveBeenNthCalledWith(3, expect.objectContaining({ namespace: 'ns_chunks' }));
+  });
+
+  it('falls back to the primary namespace when a profile has no namespace fan-out', async () => {
+    const registry = registryWithKnowledgeTool(['single-ns']);
+
+    await registry.call(
+      'knowledge_search',
+      { index: 'single-ns', query: 'compact profile' },
+      { tier: 'global' },
+    );
+
+    expect(searchRecordsMock).toHaveBeenCalledTimes(1);
+    expect(searchRecordsMock).toHaveBeenCalledWith({
+      namespace: 'only_ns',
+      query: {
+        topK: 4,
+        inputs: { text: 'compact profile' },
+      },
+      fields: ['*'],
+    });
+  });
+
+  it('skips failed namespaces and formats entity hits grouped by entity_type', async () => {
+    searchRecordsMock
+      .mockRejectedValueOnce(new Error('one namespace failed'))
+      .mockResolvedValueOnce({
+        result: {
+          hits: [
+            { _id: 'alice', _score: 0.8, fields: { text: 'Alice owns budget', entity_type: 'person' } },
+            { _id: 'teams', _score: 0.7, fields: { text: 'Ops team', entity_type: 'teams' } },
+            { _id: 'unknown', _score: 0.6, fields: null },
+          ],
+        },
+      });
+    configStub.memory.pinecone.knowledgeProfiles['entity-index']!.namespaces = ['broken_ns', 'entity_ns'];
+    const registry = registryWithKnowledgeTool(['entity-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'entity-index', query: 'who owns budget' },
+      { tier: 'global' },
+    );
+
+    expect(searchRecordsMock).toHaveBeenCalledTimes(2);
+    expect(parseRegistryText(result)).toEqual({
+      index: 'entity-index',
+      query: 'who owns budget',
+      results_count: 3,
+      formatted: 'Persons:\n• Alice owns budget\n\nTeams:\n• Ops team\n\nUnknowns:\n• ',
+    });
+  });
+
+  it('returns a configured project-guard error before querying an index', async () => {
+    mutablePineconeConfig().projectId = 'expected-project';
+    listIndexesMock.mockResolvedValueOnce({
+      indexes: [{ name: 'index-a', host: 'index-a-wrong-project.svc.pinecone.io' }],
+    });
+    const registry = registryWithKnowledgeTool(['index-a']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'index-a', query: 'project notes' },
+      { tier: 'global' },
+    );
+
+    expect(listIndexesMock).toHaveBeenCalledTimes(1);
+    expect(searchRecordsMock).not.toHaveBeenCalled();
+    expect(parseRegistryText(result)).toEqual({
+      error: 'Index "index-a" is in the wrong Pinecone project for this instance.',
+    });
+  });
+
+  it('returns a missing-index project-guard error before querying an index', async () => {
+    mutablePineconeConfig().projectId = 'expected-project';
+    listIndexesMock.mockResolvedValueOnce({ indexes: [] });
+    const registry = registryWithKnowledgeTool(['index-a']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'index-a', query: 'project notes' },
+      { tier: 'global' },
+    );
+
+    expect(searchRecordsMock).not.toHaveBeenCalled();
+    expect(parseRegistryText(result)).toEqual({
+      error: 'Index "index-a" was not found for the configured Pinecone key.',
+    });
+  });
+
+  it('formats text hits with the ID and text when filepath and summary are absent', async () => {
+    searchRecordsMock.mockResolvedValueOnce({
+      result: {
+        hits: [
+          { _id: 'raw-doc', _score: 0.7, fields: { text: 'Raw body only' } },
+        ],
+      },
+    });
+    const registry = registryWithKnowledgeTool(['single-ns']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'single-ns', query: 'raw body' },
+      { tier: 'global' },
+    );
+
+    expect(parseRegistryText(result)).toEqual({
+      index: 'single-ns',
+      query: 'raw body',
+      results_count: 1,
+      formatted: '[raw-doc]\nRaw body only',
+    });
+  });
+
+  it('searches vector indexes by embedding once and querying every namespace', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ vectors: [[0.1, 0.2, 0.3]] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    namespaceQueryMock
+      .mockResolvedValueOnce({
+        matches: [
+          { id: 'vec-a', score: 0.4, metadata: { filepath: 'a.md', summary: 'Alpha vector' } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        matches: [
+          { id: 'vec-b', score: 0.9, metadata: { filepath: 'b.md', text: 'Beta vector' } },
+          { id: 'vec-b', score: 0.8, metadata: { filepath: 'b-duplicate.md', text: 'Duplicate' } },
+        ],
+      });
+    const registry = registryWithKnowledgeTool(['vector-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'vector-index', query: 'vector query', top_k: 2 },
+      { tier: 'global' },
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith('http://embed.local/embed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts: ['vector query'], input_type: 'query' }),
+    });
+    expect(namespaceQueryMock).toHaveBeenNthCalledWith(1, 'vec_a', {
+      topK: 2,
+      vector: [0.1, 0.2, 0.3],
+      includeMetadata: true,
+    });
+    expect(namespaceQueryMock).toHaveBeenNthCalledWith(2, 'vec_b', {
+      topK: 2,
+      vector: [0.1, 0.2, 0.3],
+      includeMetadata: true,
+    });
+    expect(parseRegistryText(result)).toEqual({
+      index: 'vector-index',
+      query: 'vector query',
+      results_count: 2,
+      formatted: '[b.md]\nBeta vector\n\n[a.md]\nAlpha vector',
+    });
+  });
+
+  it('returns vector-specific errors for embed service failures', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const registry = registryWithKnowledgeTool(['vector-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'vector-index', query: 'vector query' },
+      { tier: 'global' },
+    );
+
+    expect(namespaceQueryMock).not.toHaveBeenCalled();
+    expect(parseRegistryText(result)).toEqual({
+      error: 'Embed service unavailable (HTTP 503). Try again in a moment.',
+    });
+  });
+
+  it('fails vector search when the profile has no embed URL', async () => {
+    (configStub.memory.pinecone.knowledgeProfiles['vector-index'] as { embedUrl?: string }).embedUrl = undefined;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const registry = registryWithKnowledgeTool(['vector-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'vector-index', query: 'vector query' },
+      { tier: 'global' },
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(parseRegistryText(result)).toEqual({
+      error: 'Vector index "vector-index" is missing memory.pinecone.knowledgeProfiles.vector-index.embedUrl.',
+    });
+  });
+
+  it('fails vector search when the embed service returns no vectors', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ vectors: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const registry = registryWithKnowledgeTool(['vector-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'vector-index', query: 'vector query' },
+      { tier: 'global' },
+    );
+
+    expect(namespaceQueryMock).not.toHaveBeenCalled();
+    expect(parseRegistryText(result)).toEqual({
+      error: 'Embed service returned no vectors.',
+    });
+  });
+
+  it('fails vector search when the embed service request throws', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('embed refused')));
+    const registry = registryWithKnowledgeTool(['vector-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'vector-index', query: 'vector query' },
+      { tier: 'global' },
+    );
+
+    expect(namespaceQueryMock).not.toHaveBeenCalled();
+    expect(parseRegistryText(result)).toEqual({
+      error: 'Knowledge base is temporarily unavailable (embed service). Try again in a moment.',
+    });
+  });
+
+  it('skips failed vector namespaces while returning hits from healthy namespaces', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ vectors: [[0.5, 0.6]] }),
+    }));
+    namespaceQueryMock
+      .mockRejectedValueOnce(new Error('namespace down'))
+      .mockResolvedValueOnce({
+        matches: [
+          { id: 'survivor', score: 0.7, metadata: { filepath: 'survivor.md', text: 'Healthy namespace' } },
+        ],
+      });
+    const registry = registryWithKnowledgeTool(['vector-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'vector-index', query: 'vector query' },
+      { tier: 'global' },
+    );
+
+    expect(namespaceQueryMock).toHaveBeenCalledTimes(2);
+    expect(parseRegistryText(result)).toEqual({
+      index: 'vector-index',
+      query: 'vector query',
+      results_count: 1,
+      formatted: '[survivor.md]\nHealthy namespace',
+    });
+  });
+
+  it('defaults vector hit metadata and score when Pinecone returns sparse matches', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ vectors: [[0.5, 0.6]] }),
+    }));
+    namespaceQueryMock
+      .mockResolvedValueOnce({
+        matches: [
+          { id: 'sparse', score: 'not-a-number', metadata: null },
+        ],
+      })
+      .mockResolvedValueOnce({ matches: [] });
+    const registry = registryWithKnowledgeTool(['vector-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'vector-index', query: 'vector query' },
+      { tier: 'global' },
+    );
+
+    expect(parseRegistryText(result)).toEqual({
+      index: 'vector-index',
+      query: 'vector query',
+      results_count: 1,
+      formatted: '[sparse]\n',
+    });
+  });
+
+  it('reranks result documents when the profile enables rerank', async () => {
+    searchRecordsMock.mockResolvedValueOnce({
+      result: {
+        hits: [
+          { _id: 'doc-a', _score: 0.2, fields: { filepath: 'a.md', text: 'Alpha body' } },
+          { _id: 'doc-b', _score: 0.9, fields: { filepath: 'b.md', text: 'Beta body' } },
+        ],
+      },
+    });
+    rerankMock.mockResolvedValueOnce({
+      data: [
+        { index: 1, score: 0.99 },
+        { index: 0, score: 0.42 },
+        { index: 99, score: 0.1 },
+      ],
+    });
+    const registry = registryWithKnowledgeTool(['rerank-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'rerank-index', query: 'rank these' },
+      { tier: 'global' },
+    );
+
+    expect(rerankMock).toHaveBeenCalledWith({
+      model: 'bge-reranker-v2-m3',
+      query: 'rank these',
+      documents: [
+        { id: 'doc-b', text: 'Beta body' },
+        { id: 'doc-a', text: 'Alpha body' },
+      ],
+      topN: 2,
+      rankFields: ['text'],
+      returnDocuments: false,
+    });
+    expect(parseRegistryText(result)).toEqual({
+      index: 'rerank-index',
+      query: 'rank these',
+      results_count: 2,
+      formatted: '[a.md]\nAlpha body\n\n[b.md]\nBeta body',
+    });
+  });
+
+  it('falls back to vector scores when rerank fails', async () => {
+    searchRecordsMock.mockResolvedValueOnce({
+      result: {
+        hits: [
+          { _id: 'doc-a', _score: 0.2, fields: { filepath: 'a.md', text: 'Alpha body' } },
+          { _id: 'doc-b', _score: 0.9, fields: { filepath: 'b.md', text: 'Beta body' } },
+        ],
+      },
+    });
+    rerankMock.mockRejectedValueOnce(new Error('rerank down'));
+    const registry = registryWithKnowledgeTool(['rerank-index']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'rerank-index', query: 'rank these' },
+      { tier: 'global' },
+    );
+
+    expect(parseRegistryText(result)).toEqual({
+      index: 'rerank-index',
+      query: 'rank these',
+      results_count: 2,
+      formatted: '[b.md]\nBeta body\n\n[a.md]\nAlpha body',
+    });
+  });
+
+  it('maps transport and auth failures to operator-friendly tool errors', async () => {
+    mutablePineconeConfig().projectId = 'expected-project';
+    listIndexesMock
+      .mockRejectedValueOnce(new Error('ETIMEDOUT while listing indexes'))
+      .mockRejectedValueOnce(new Error('401 unauthorized'));
+    const registry = registryWithKnowledgeTool(['single-ns']);
+
+    const transport = await registry.call(
+      'knowledge_search',
+      { index: 'single-ns', query: 'network down' },
+      { tier: 'global' },
+    );
+    const auth = await registry.call(
+      'knowledge_search',
+      { index: 'single-ns', query: 'auth down' },
+      { tier: 'global' },
+    );
+
+    expect(parseRegistryText(transport)).toEqual({
+      error: 'Knowledge base is temporarily unavailable. Try again in a moment.',
+    });
+    expect(parseRegistryText(auth)).toEqual({
+      error: 'Knowledge base authentication error. Contact admin.',
+    });
+  });
+
+  it('maps unexpected top-level failures to a generic search error', async () => {
+    mutablePineconeConfig().projectId = 'expected-project';
+    listIndexesMock.mockRejectedValueOnce(new Error('unexpected list failure'));
+    const registry = registryWithKnowledgeTool(['single-ns']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'single-ns', query: 'generic failure' },
+      { tier: 'global' },
+    );
+
+    expect(parseRegistryText(result)).toEqual({
+      error: 'Search failed: unexpected list failure',
+    });
+  });
+
+  it('maps non-Error top-level failures to a generic search error', async () => {
+    mutablePineconeConfig().projectId = 'expected-project';
+    listIndexesMock.mockRejectedValueOnce('plain failure');
+    const registry = registryWithKnowledgeTool(['single-ns']);
+
+    const result = await registry.call(
+      'knowledge_search',
+      { index: 'single-ns', query: 'generic failure' },
+      { tier: 'global' },
+    );
+
+    expect(parseRegistryText(result)).toEqual({
+      error: 'Search failed: plain failure',
+    });
   });
 
   it('rejects namespace overrides outside the selected profile allowlist', async () => {
