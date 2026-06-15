@@ -539,6 +539,14 @@ def central_ack_inventory(path: Optional[Path], now: float) -> dict:
         return {"configured": False, "mode": "local_only", "status": "not_configured"}
     max_age = central_ack_max_age_seconds()
     try:
+        if path.is_symlink():
+            return {
+                "configured": True,
+                "mode": "local_only",
+                "status": "symlink",
+                "path": str(path),
+                "maxAgeSeconds": max_age,
+            }
         stat = path.stat()
     except FileNotFoundError:
         return {"configured": True, "mode": "local_only", "status": "missing", "path": str(path), "maxAgeSeconds": max_age}

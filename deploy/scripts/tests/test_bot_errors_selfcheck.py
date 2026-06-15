@@ -272,6 +272,23 @@ def test_central_ack_fresh_records_central_acked(tmp_path: Path):
     assert calls == []
 
 
+def test_symlinked_central_ack_is_not_trusted(tmp_path: Path):
+    target = tmp_path / "external-central-ack.json"
+    target.write_text("{}", encoding="utf-8")
+    os.utime(target, (990.0, 990.0))
+    ack = tmp_path / "central-ack.json"
+    os.symlink(target, ack)
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+
+    status = _mod.run_selfcheck(config, deps)
+
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "symlink"
+    assert status["centralAck"]["centralDownSuspected"] is False
+    assert "centralDownAlert" not in status
+    assert calls == []
+
+
 def test_central_ack_missing_or_stale_records_local_only(tmp_path: Path, monkeypatch):
     missing = tmp_path / "missing-ack.json"
     config, deps, calls, _head = _fixture(tmp_path, central_ack_path=missing)
@@ -419,10 +436,10 @@ def test_central_ack_stat_error_and_invalid_max_age_fallback(tmp_path: Path, mon
     ack = tmp_path / "central-ack.json"
     original_stat = Path.stat
 
-    def stat(path: Path):
+    def stat(path: Path, *args, **kwargs):
         if path == ack:
             raise PermissionError("denied")
-        return original_stat(path)
+        return original_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "stat", stat)
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "bad")
