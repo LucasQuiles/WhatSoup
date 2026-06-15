@@ -261,6 +261,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-doc-drift` | `npm run guard:doc-drift` | `package.json` | stable | active | Verify cross-doc references resolve on disk |
 | `cli:npm.guard-public-surface-drift` | `npm run guard:public-surface-drift` | `package.json` | stable | active | Verify `docs/public-surface.md` and package.json scripts agree |
 | `cli:npm.guard-source-runtime-drift` | `npm run guard:source-runtime-drift` | `package.json` | stable | active | Verify deployed runtime scripts match their checked-in sources against `deploy/source-runtime-manifest.json` |
+| `cli:npm.guard-fleet-bot-hardening-parity` | `npm run guard:fleet-bot-hardening-parity` | `package.json` | internal | active | Verify the redacted fleet bot-hardening parity manifest and source anchors stay aligned with the A-D provider-resilience standard |
 | `cli:npm.guard-bot-errors-runtime-manifest` | `npm run guard:bot-errors-runtime-manifest` | `package.json` | stable | active | Verify BOT ERRORS runtime manifest hashes and capability markers match checked-in deploy scripts |
 | `cli:npm.guard-work-index` | `npm run guard:work-index` | `package.json` | stable | active | Verify `docs/work-index.md` is up to date |
 | `cli:npm.guard-repo` | `npm run guard:repo` | `package.json` | stable | active | Repo hygiene guard (default mode) |

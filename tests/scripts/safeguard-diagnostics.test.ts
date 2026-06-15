@@ -30,6 +30,7 @@ const requiredPackageScripts = {
   'guard:claude-settings': 'node scripts/claude-settings-guard.ts --check',
   'guard:agent-decision-polls': 'node scripts/agent-decision-polls-guard.ts',
   'guard:safeguard-diagnostics': 'node scripts/safeguard-diagnostics.ts',
+  'guard:fleet-bot-hardening-parity': 'node scripts/check-fleet-bot-hardening-parity.ts',
   'guard:bot-errors-runtime-manifest': 'node scripts/check-bot-errors-runtime-manifest.ts',
   'verify:push:branch': [
     'npm run guard:repo:staged',
@@ -41,6 +42,7 @@ const requiredPackageScripts = {
     'npm run guard:work-index',
     'npm run guard:node-pin-consistency',
     'npm run guard:source-runtime-drift',
+    'npm run guard:fleet-bot-hardening-parity',
     'npm run guard:bot-errors-runtime-manifest',
     'npm run guard:bot-errors-simulation-matrix',
     'npm run guard:claude-settings',
@@ -60,6 +62,7 @@ const requiredPackageScripts = {
     'npm run guard:work-index',
     'npm run guard:node-pin-consistency',
     'npm run guard:source-runtime-drift',
+    'npm run guard:fleet-bot-hardening-parity',
     'npm run guard:bot-errors-runtime-manifest',
     'npm run guard:bot-errors-simulation-matrix',
     'npm run guard:claude-settings',
@@ -133,6 +136,13 @@ const requiredFiles: Record<string, string> = {
     'keyPresent',
     'recoveryProbeRequired',
     'uses providerConfig.apiKeyService',
+  ].join('\n'),
+  'scripts/check-fleet-bot-hardening-parity.ts': [
+    'REQUIRED_FLEET_BOT_HARDENING_CAPABILITIES',
+    'missing-required-capability',
+    'hardened-row-not-proven',
+    'sourceAnchors',
+    'private-label',
   ].join('\n'),
   'scripts/agent-decision-polls-guard.ts': [
     'AskUserQuestion',
