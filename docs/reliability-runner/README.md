@@ -18,6 +18,7 @@ Progression: orient -> gather runtime evidence -> classify gaps -> fix narrowly 
 - Fleet evidence matrix: `docs/reliability-runner/feature-matrix.md` rows RR-002, RR-005, RR-008; private runtime notes remain local until promoted.
 - Linked-device/auth-bond lifecycle: `docs/reliability-runner/feature-matrix.md` row RR-003; `src/transport/auth-bond.ts`; `src/lib/auth-bond-policy.ts`.
 - Provider fallback/taxonomy: `docs/reliability-runner/feature-matrix.md` row RR-004; `src/runtimes/agent/failure-taxonomy.ts`; provider fallback tests under `tests/runtimes/agent/`.
+- Fleet bot-hardening standard: `docs/runbooks/fleet-bot-hardening-standard.md`; redacted parity manifest `docs/reliability-runner/fleet-bot-hardening-parity.json`; source guard `package.json` `guard:fleet-bot-hardening-parity`; ties RR-004 provider resilience and RR-016 sandbox degrade/recover acceptance to per-bot parity evidence.
 - Artifact and historical-work finalization: `docs/reliability-runner/feature-matrix.md` rows RR-010 through RR-012; `docs/reliability-runner/pending-bead-dispositions.md`.
 - Estate consolidation and pruning ledger: `docs/reliability-runner/estate-consolidation.md`.
 - Verification and release gates: `package.json` `verify:release`; `vitest.config.ts`; `scripts/bot-errors-simulation-matrix.ts`; release logs captured in the validating session.
