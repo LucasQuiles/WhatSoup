@@ -228,6 +228,23 @@ def test_dispatcher_heartbeat_stat_error_after_private_check_is_reported_not_cra
     )
 
 
+def test_parse_args_falls_back_for_bad_max_age_env(monkeypatch):
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_MAX_Q_LOOP_AGE", "bad")
+    monkeypatch.setenv("BOT_ERRORS_MAX_DISPATCHER_AGE", "0")
+    monkeypatch.setenv("BOT_ERRORS_MAX_COLLECTOR_AGE", "-1")
+    monkeypatch.setenv("BOT_ERRORS_MAX_FLEET_SENTINEL_AGE", "")
+    monkeypatch.setenv("BOT_ERRORS_MAX_DAILY_HEALTH_AGE", "bad")
+
+    args = mod.parse_args([])
+
+    assert args.max_q_loop_age == 600
+    assert args.max_dispatcher_age == 300
+    assert args.max_collector_age == 180
+    assert args.max_fleet_sentinel_age == 2700
+    assert args.max_daily_health_age == 25 * 60 * 60
+
+
 def test_local_instance_health_flags_terminal_auth_class_as_physical_intervention(
     tmp_path: Path,
     monkeypatch,

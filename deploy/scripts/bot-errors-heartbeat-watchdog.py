@@ -36,6 +36,14 @@ def positive_env_int(name: str, default: int) -> int:
     return value
 
 
+def positive_env_int_or_default(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def watchdog_renotify_seconds() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", 6 * 60 * 60)
 
@@ -1108,15 +1116,15 @@ def run_once(args: argparse.Namespace) -> int:
     return 0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="BOT ERRORS independent heartbeat watchdog")
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--max-q-loop-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_Q_LOOP_AGE", "600")))
-    parser.add_argument("--max-dispatcher-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_DISPATCHER_AGE", "300")))
-    parser.add_argument("--max-collector-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_COLLECTOR_AGE", "180")))
-    parser.add_argument("--max-fleet-sentinel-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_FLEET_SENTINEL_AGE", "2700")))
-    parser.add_argument("--max-daily-health-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_DAILY_HEALTH_AGE", str(25 * 60 * 60))))
-    return parser.parse_args()
+    parser.add_argument("--max-q-loop-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_Q_LOOP_AGE", 600))
+    parser.add_argument("--max-dispatcher-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_DISPATCHER_AGE", 300))
+    parser.add_argument("--max-collector-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_COLLECTOR_AGE", 180))
+    parser.add_argument("--max-fleet-sentinel-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_FLEET_SENTINEL_AGE", 2700))
+    parser.add_argument("--max-daily-health-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_DAILY_HEALTH_AGE", 25 * 60 * 60))
+    return parser.parse_args(argv)
 
 
 def main() -> int:
