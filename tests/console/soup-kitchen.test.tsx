@@ -621,11 +621,16 @@ describe('SoupKitchen error state handling', () => {
       feedRefetch,
     });
     expect(screen.getByText(/Unable to load fleet data: feed offline/)).toBeDefined();
+    expect(screen.getByText(/Activity feed unavailable: feed offline/)).toBeDefined();
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
     expect(feedRefetch).toHaveBeenCalledTimes(1);
     expect(linesRefetch).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry activity' }));
+
+    expect(feedRefetch).toHaveBeenCalledTimes(2);
   });
 });
 

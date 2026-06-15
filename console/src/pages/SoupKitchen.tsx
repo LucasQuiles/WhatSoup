@@ -341,6 +341,7 @@ const SoupKitchen: FC = () => {
   const lines = lineData ?? EMPTY_LINES;
   const feed = feedData ?? EMPTY_FEED;
   const fleetLoadError = linesError || feedError;
+  const feedLoadErrorMessage = feedQueryError?.message ?? "Unable to load activity feed";
   const fleetLoadErrorMessage =
     linesQueryError?.message ??
     feedQueryError?.message ??
@@ -1035,7 +1036,11 @@ const SoupKitchen: FC = () => {
 
         {/* Activity Feed */}
         <div className="c-card flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:flex-1 lg:min-w-[var(--feed-min-w)]">
-          <ActivityFeed events={feed} />
+          <ActivityFeed
+            events={feed}
+            error={feedError ? feedLoadErrorMessage : undefined}
+            onRetry={feedError ? () => { void refetchFeed() } : undefined}
+          />
         </div>
       </motion.div>
 

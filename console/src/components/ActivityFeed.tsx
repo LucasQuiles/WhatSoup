@@ -1,5 +1,5 @@
 import { type FC, useState, useMemo } from "react";
-import { Pause, Play, Circle, Square } from "lucide-react";
+import { Pause, Play, Circle, Square, AlertTriangle, RotateCw } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "../hooks/toast-context";
 import { api } from "../lib/api";
@@ -12,6 +12,8 @@ import { statusNeedsAttention, statusSeverity } from "../lib/status-severity";
 
 interface ActivityFeedProps {
   events: FeedEvent[];
+  error?: string;
+  onRetry?: () => void;
 }
 
 type FeedFilter = "all" | "msgs" | "conn" | "errors" | "health" | "sessions";
@@ -54,7 +56,7 @@ function eventKey(event: FeedEvent): string {
   return `${event.instance ?? ""}:${event.time}:${d?.type ?? "generic"}:${dir}:${chat}`;
 }
 
-const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
+const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -63,7 +65,10 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
   const [filter, setFilter] = useState<FeedFilter>("all");
   const [stopTarget, setStopTarget] = useState<string | null>(null);
 
-  const displayEvents = snapshot ?? events;
+  const displayEvents = useMemo(
+    () => error ? [] : snapshot ?? events,
+    [error, events, snapshot],
+  );
 
   const filtered = useMemo(
     () => displayEvents.filter((e) => matchesFilter(e, filter)),
@@ -190,7 +195,25 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events }) => {
 
       {/* ── Feed stream ── */}
       <div className="feed-stream">
-        {filtered.map((event) => {
+        {error ? (
+          <div className="feed-empty">
+            <span className="inline-flex items-center justify-center gap-[var(--sp-1)] text-s-crit">
+              <AlertTriangle size={13} strokeWidth={1.75} />
+              Activity feed unavailable: {error}
+            </span>
+            {onRetry && (
+              <Button
+                variant="neutral"
+                size="sm"
+                icon={<RotateCw size={12} strokeWidth={1.75} />}
+                onClick={onRetry}
+                className="mt-[var(--sp-2)]"
+              >
+                Retry activity
+              </Button>
+            )}
+          </div>
+        ) : filtered.map((event) => {
           const key = eventKey(event);
           const canAct = actionableKeys.has(key);
           return (

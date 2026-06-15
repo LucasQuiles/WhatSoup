@@ -12,7 +12,7 @@ import type { LogEntry } from '../types'
 import {
   Terminal, Power,
   AlertTriangle, CheckCircle2,
-  Trash2, Link2, Loader2,
+  Trash2, Link2, Loader2, RotateCw,
 } from 'lucide-react'
 
 import { api } from '../lib/api'
@@ -27,6 +27,10 @@ type LevelFilter = 'all' | 'error' | 'warn' | 'info' | 'debug'
 
 const LOG_LEVELS: LevelFilter[] = ['all', 'error', 'warn', 'info', 'debug']
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 function logLevelTone(level: LevelFilter) {
   if (level === 'error') return 'crit' as const
   if (level === 'warn') return 'warn' as const
@@ -39,13 +43,13 @@ export default function Ops() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [relinkTarget, setRelinkTarget] = useState<string | null>(null)
-  const { data: lines = [], isLoading: linesLoading } = useLines()
-  const { data: feed = [] } = useFeed()
+  const { data: lines = [], isLoading: linesLoading, error: linesError, refetch: refetchLines } = useLines()
+  const { data: feed = [], error: feedError, refetch: refetchFeed } = useFeed()
   const [logFilter, setLogFilter] = useState<LevelFilter>('all')
   const [selectedLine, setSelectedLine] = useState<string>('')
 
   const activeLine = selectedLine || (lines[0]?.name ?? '')
-  const { data: logs = [] } = useLogs(activeLine)
+  const { data: logs = [], error: logsError, refetch: refetchLogs } = useLogs(activeLine)
   const currentLine = lines.find(l => l.name === activeLine)
 
   // Pre-format timestamps so LogStream renders human-readable times.
@@ -102,7 +106,12 @@ export default function Ops() {
           className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
           <span className="c-heading">Fleet Status</span>
-          {alerts.length > 0 ? (
+          {feedError ? (
+            <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)] text-label">
+              <AlertTriangle size={12} strokeWidth={1.75} />
+              alerts unavailable
+            </span>
+          ) : alerts.length > 0 ? (
             <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)] text-label">
               <AlertTriangle size={12} strokeWidth={1.75} />
               {alerts.length} alert{alerts.length !== 1 ? 's' : ''}
@@ -127,7 +136,22 @@ export default function Ops() {
                 {alerts.length} unhealthy
               </span>
             )}
+            {feedError && (
+              <span className="font-mono text-s-crit text-label">
+                Activity feed unavailable: {errorMessage(feedError)}
+              </span>
+            )}
           </div>
+          {feedError && (
+            <Button
+              variant="neutral"
+              size="sm"
+              icon={<RotateCw size={12} strokeWidth={1.75} />}
+              onClick={() => { void refetchFeed() }}
+            >
+              Retry alerts
+            </Button>
+          )}
         </div>
 
         {/* Instance cards */}
@@ -136,6 +160,20 @@ export default function Ops() {
             {linesLoading ? (
               <div className="text-t5 text-center py-8 font-mono text-data">
                 Loading fleet status...
+              </div>
+            ) : linesError ? (
+              <div className="flex flex-col items-center justify-center gap-[var(--sp-3)] text-center py-8 px-[var(--sp-4)]">
+                <span className="font-mono text-s-crit text-data">
+                  Failed to load fleet status: {errorMessage(linesError)}
+                </span>
+                <Button
+                  variant="neutral"
+                  size="sm"
+                  icon={<RotateCw size={12} strokeWidth={1.75} />}
+                  onClick={() => { void refetchLines() }}
+                >
+                  Retry fleet status
+                </Button>
               </div>
             ) : lines.length === 0 ? (
               <div className="text-t5 text-center py-8 font-mono text-data">
@@ -277,6 +315,8 @@ export default function Ops() {
         {/* Log stream */}
         <LogStream
           entries={filteredLogs}
+          error={logsError ? `Failed to load logs: ${errorMessage(logsError)}` : undefined}
+          onRetry={logsError ? () => { void refetchLogs() } : undefined}
           isFiltered={logFilter !== 'all'}
           filteredEmptyMessage={
             activeLine

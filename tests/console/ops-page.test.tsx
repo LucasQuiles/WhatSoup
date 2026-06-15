@@ -141,14 +141,31 @@ interface RenderOpts {
   logs?: LogEntry[]
   feed?: FeedEvent[]
   linesLoading?: boolean
+  linesError?: unknown
+  logsError?: unknown
+  feedError?: unknown
+  linesRefetch?: ReturnType<typeof vi.fn>
+  logsRefetch?: ReturnType<typeof vi.fn>
+  feedRefetch?: ReturnType<typeof vi.fn>
 }
 
 function renderOps(opts: RenderOpts = {}) {
-  const { lines = [], logs = [], feed = [], linesLoading = false } = opts
+  const {
+    lines = [],
+    logs = [],
+    feed = [],
+    linesLoading = false,
+    linesError = null,
+    logsError = null,
+    feedError = null,
+    linesRefetch = vi.fn(),
+    logsRefetch = vi.fn(),
+    feedRefetch = vi.fn(),
+  } = opts
 
-  mockUseLines.mockReturnValue({ data: lines, isLoading: linesLoading })
-  mockUseLogs.mockReturnValue({ data: logs })
-  mockUseFeed.mockReturnValue({ data: feed })
+  mockUseLines.mockReturnValue({ data: lines, isLoading: linesLoading, error: linesError, refetch: linesRefetch })
+  mockUseLogs.mockReturnValue({ data: logs, error: logsError, refetch: logsRefetch })
+  mockUseFeed.mockReturnValue({ data: feed, error: feedError, refetch: feedRefetch })
 
   const qc = makeClient()
   return render(
@@ -421,6 +438,57 @@ describe('Ops page — empty and loading states', () => {
 
     expect(screen.getByText('2 instances')).toBeDefined()
     expect(screen.getByText('2 online')).toBeDefined()
+  })
+
+  it('renders a retryable fleet-status error when the lines query fails', () => {
+    const linesRefetch = vi.fn()
+
+    renderOps({
+      lines: [],
+      linesError: new Error('fleet API down'),
+      linesRefetch,
+    })
+
+    expect(screen.getByText('Failed to load fleet status: fleet API down')).toBeDefined()
+    expect(screen.queryByText('No instances discovered. Create one from the Soup Kitchen.')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry fleet status' }))
+
+    expect(linesRefetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders a retryable alerts error when the feed query fails', () => {
+    const feedRefetch = vi.fn()
+
+    renderOps({
+      feedError: new Error('feed API down'),
+      feedRefetch,
+    })
+
+    expect(screen.getByText('alerts unavailable')).toBeDefined()
+    expect(screen.getByText('Activity feed unavailable: feed API down')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry alerts' }))
+
+    expect(feedRefetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders a retryable log error instead of a no-logs empty state when logs query fails', () => {
+    const logsRefetch = vi.fn()
+    const line = makeLine({ name: 'alpha' })
+
+    renderOps({
+      lines: [line],
+      logsError: new Error('logs API down'),
+      logsRefetch,
+    })
+
+    expect(screen.getByText('Failed to load logs: logs API down')).toBeDefined()
+    expect(screen.queryByText('No logs for alpha.')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+
+    expect(logsRefetch).toHaveBeenCalledTimes(1)
   })
 })
 
