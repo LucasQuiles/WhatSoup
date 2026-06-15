@@ -103,13 +103,13 @@ Ranking:
 
 ### P2-8. Dead affordances visible in the chrome
 
-- **Description:** Cmd/Ctrl+K is intercepted, advertised in the shortcuts help, and does nothing (`console/src/App.tsx:40`, `console/src/hooks/use-keyboard-shortcuts.ts:39-43`, `console/src/components/KeyboardShortcutsHelp.tsx:7`); the nav alert count is a non-interactive span (`console/src/components/Nav.tsx:150-156`); SoupKitchen AlertBanner chips render as buttons with no handler passed (`console/src/components/AlertBanner.tsx:36-48`, `console/src/pages/SoupKitchen.tsx:368`); unknown `/lines/:name` shows a permanent skeleton (`console/src/pages/LineDetail.tsx:101-115`).
+- **Description:** The nav alert count is a non-interactive span (`console/src/components/Nav.tsx:150-156`); SoupKitchen AlertBanner chips render as buttons with no handler passed (`console/src/components/AlertBanner.tsx:36-48`, `console/src/pages/SoupKitchen.tsx:368`). Closed since the original audit: Cmd/Ctrl+K now focuses the mounted search target (`6a1319b8`), and unknown `/lines/:name` now renders an actionable not-found / failed-load state (`9102a937`).
 - **Evidence:** ia-workflow-review.md §5.2.
-- **Affected files:** 5. **v3 direction:** wire (command palette, alert click-through, not-found state) or remove; design-system rule: nothing that looks interactive may be inert.
+- **Affected files:** 3 remaining. **v3 direction:** wire alert click-through / chip behavior or remove the interactive styling; design-system rule: nothing that looks interactive may be inert.
 
 ### P2-9. Empty/loading/error states are ad hoc
 
-- **Description:** `EmptyState` and `Skeleton` exist, but 6 ad-hoc empty divs and 9 ad-hoc spinners bypass them; route-level Suspense falls back to bare "Loading..." text (`console/src/App.tsx:19-25`); SoupKitchen cold-load is indistinguishable from a filtered-empty table (`console/src/pages/SoupKitchen.tsx:515-520`); UpdateModal's error phase offers Close but no retry (`console/src/components/UpdateModal.tsx:372-382`).
+- **Description:** `EmptyState` and `Skeleton` exist, but 6 ad-hoc empty divs and 9 ad-hoc spinners bypass them; route-level Suspense falls back to bare "Loading..." text (`console/src/App.tsx:19-25`); SoupKitchen cold-load is indistinguishable from a filtered-empty table (`console/src/pages/SoupKitchen.tsx:515-520`). Closed since the original audit: UpdateModal's error phase now offers `Try again` (`fee98c17`).
 - **Evidence:** duplication-register.md DUP-11; ia-workflow-review.md §5.2, §5.3.
 - **Affected files:** 15+. **v3 direction:** canonical Empty/Loading/Error composites with copy guidelines; route skeletons.
 

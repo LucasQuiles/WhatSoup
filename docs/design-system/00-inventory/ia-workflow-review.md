@@ -18,7 +18,7 @@ Routing is a flat, four-page React Router tree defined in `console/src/App.tsx`.
 
 - **Lazy loading**: all four pages are route-level code-split via `lazy()` (`console/src/App.tsx:11-14`); `UpdateModal` is modal-level code-split (`console/src/App.tsx:17`). `AddLineWizard` is lazy inside SoupKitchen (`console/src/pages/SoupKitchen.tsx:4`); `RelinkModal` is lazy inside LineDetail (`console/src/pages/LineDetail.tsx:16`) and Ops (`console/src/pages/Ops.tsx:24`).
 - **Suspense fallback**: a full-page centered text `Loading...` (`console/src/App.tsx:19-25`) — text only, no skeleton, no spinner.
-- **404 handling**: there is no 404 page. Unknown paths silently redirect to `/` (`console/src/App.tsx:59`). A *valid route with an invalid param* (`/lines/does-not-exist`) is worse: LineDetail renders a skeleton forever because the `!line` branch has no not-found or timeout state (`console/src/pages/LineDetail.tsx:101-115`). This is a dead end (see 6.2).
+- **404 handling**: there is no app-wide 404 page. Unknown paths silently redirect to `/` (`console/src/App.tsx:59`). A valid route with an invalid param (`/lines/does-not-exist`) is no longer a dead skeleton: LineDetail renders a not-found / load-failed `EmptyState`, `Retry line` for retryable failures, and `Back to fleet` (`console/src/pages/LineDetail.tsx:119-132`; fixed in `9102a937`).
 - **Error isolation**: each route element is wrapped in its own `ErrorBoundary` (`console/src/App.tsx:55-58`), which renders an error EmptyState with a Retry button (`console/src/components/ErrorBoundary.tsx:37-49`).
 - **Deep links into the app**: the activity feed emits `/inbox?line=...&chat=...` navigations for message events (`console/src/components/FeedCard.tsx:348`); SoupKitchen table rows navigate to `/lines/${name}` (`console/src/pages/SoupKitchen.tsx:464`).
 
@@ -43,7 +43,7 @@ Routing is a flat, four-page React Router tree defined in `console/src/App.tsx`.
 
 - `1`/`2`/`3` navigate to SoupKitchen / Inbox / Ops when no input is focused (`console/src/hooks/use-keyboard-shortcuts.ts:55-66`).
 - `?` toggles the shortcuts help modal (`console/src/hooks/use-keyboard-shortcuts.ts:49-52`, wired at `console/src/App.tsx:40`).
-- **`Cmd/Ctrl+K` is dead.** The hook intercepts it and calls `handlers.onSearch?.()` (`console/src/hooks/use-keyboard-shortcuts.ts:39-43`), but the only call site passes only `onHelp` (`console/src/App.tsx:40`), so the keypress is swallowed and nothing happens. The help modal still advertises "⌘+K — Focus search" (`console/src/components/KeyboardShortcutsHelp.tsx:7`). Documented-but-nonfunctional shortcut.
+- `Cmd/Ctrl+K` focuses the mounted search target. App wires `onSearch` to `[data-search-shortcut-target="true"]` focus/select (`console/src/App.tsx:54-61`), with opt-in targets on SoupKitchen and Inbox search fields; regression tests pin App wiring and both search primitives (`6a1319b8`).
 - There are no per-list shortcuts (j/k navigation, Enter-to-open) anywhere; `ChatListItem` supports Enter/Space activation only via its own keydown (`console/src/components/ChatListItem.tsx:21`).
 
 **Hidden/conditional nav surface**: LineDetail has no nav item of its own — it is reachable only by SoupKitchen row click (`console/src/pages/SoupKitchen.tsx:464`); the back affordance is an arrow that always goes to `/` (`console/src/pages/LineDetail.tsx:140-146`). Ops instance cards select a line for the log pane but do not link to LineDetail at all (`console/src/pages/Ops.tsx:121-130`).
@@ -239,11 +239,14 @@ Pattern: restart is confirmed in exactly one of its four entry points; allow/blo
 
 - Nav alert count: announces "{n} alerts" but is a plain span — no click-through to Ops or the affected line (`console/src/components/Nav.tsx:150-156`).
 - SoupKitchen AlertBanner chips: rendered as `<button>`s wired to `onAlertClick?.()` (`console/src/components/AlertBanner.tsx:36-48`) but SoupKitchen passes no handler (`console/src/pages/SoupKitchen.tsx:368`) — clickable-looking chips that do nothing.
-- `/lines/:name` with an unknown name: permanent skeleton, no not-found message, no way out but the browser (`console/src/pages/LineDetail.tsx:101-115`).
-- Cmd/Ctrl+K: intercepted and discarded (`console/src/hooks/use-keyboard-shortcuts.ts:39-43`, `console/src/App.tsx:40`) while advertised in help (`console/src/components/KeyboardShortcutsHelp.tsx:7`).
 - Wizard Link step: no skip/back; abandon deletes the instance (`console/src/components/AddLineWizard.tsx:325,377-388`).
 - Inbox "No chats found": no action offered, and shown during load (`console/src/pages/Inbox.tsx:243-247`).
-- UpdateModal error phase: Close only, no retry (`console/src/components/UpdateModal.tsx:372-382`).
+
+Resolved since the original inventory:
+
+- `/lines/:name` with an unknown name now renders an actionable not-found / failed-load state (`console/src/pages/LineDetail.tsx:119-132`; `9102a937`).
+- Cmd/Ctrl+K now focuses the mounted search shortcut target (`console/src/App.tsx:54-61`; `6a1319b8`).
+- UpdateModal error phase now offers `Try again` next to Close (`console/src/components/UpdateModal.tsx:477-481`; `fee98c17`).
 
 ### 5.3 Flow interruptions
 
@@ -290,7 +293,7 @@ Score: 8 of 12 v2 gaps addressed, 2 partial (cross-instance inbox, budget tracki
 ## Appendix: Priority shortlist for v3
 
 1. **Per-action confirmation policy** — restart confirmed in 1 of 4 entry points, block-contact in 1 of 2, scheduled-message delete never (4h).
-2. **Wire or remove dead affordances** — Cmd+K, nav alert count, AlertBanner chips, unknown-line skeleton (5.2).
+2. **Wire or remove dead affordances** — nav alert count and AlertBanner chips remain; Cmd+K and unknown-line skeleton are closed (5.2).
 3. **One conversation view** — merge Inbox center pane and HistoryTab (5.4).
 4. **Fix Escape stacking** in modal-over-modal (GroupDetailModal + ConfirmDialog) (4j).
 5. **Persist or URL-encode fleet filters** so drill-down round trips do not destroy triage state (4a).
