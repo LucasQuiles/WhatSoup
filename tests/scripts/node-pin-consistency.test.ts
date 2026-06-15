@@ -22,7 +22,13 @@ function makeFixture(opts: {
   enginesNode?: string;
   dockerVersion?: string;
   wrapperVersion?: string | 'reads-nvmrc' | 'none';
-  wrappers?: ('deploy/whatsoup' | 'deploy/whatsoup-auth' | 'deploy/whatsoup-fleet' | 'scripts/run-with-pinned-node.sh')[];
+  wrappers?: (
+    | 'deploy/whatsoup'
+    | 'deploy/whatsoup-auth'
+    | 'deploy/whatsoup-fleet'
+    | 'scripts/run-with-pinned-node.sh'
+    | 'scripts/run-with-pinned-npm.sh'
+  )[];
 }): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-node-pin-'));
   const nvmrc = opts.nvmrc ?? '24.15.0';
@@ -35,6 +41,7 @@ function makeFixture(opts: {
     'deploy/whatsoup-auth',
     'deploy/whatsoup-fleet',
     'scripts/run-with-pinned-node.sh',
+    'scripts/run-with-pinned-npm.sh',
   ];
 
   writeFileSync(path.join(dir, '.nvmrc'), `${nvmrc}\n`, 'utf8');
@@ -99,10 +106,16 @@ describe('node-pin consistency check', () => {
     const dir = makeFixture({ wrapperVersion: '24.13.0' });
     const drift = findNodePinDrift({ cwd: dir });
     expect(drift.canonical).toBe('24.15.0');
-    expect(drift.mismatches).toHaveLength(3);
+    expect(drift.mismatches).toHaveLength(5);
     for (const m of drift.mismatches) {
       expect(m.version).toBe('24.13.0');
-      expect(m.source.startsWith('deploy/')).toBe(true);
+      expect([
+        'deploy/whatsoup',
+        'deploy/whatsoup-auth',
+        'deploy/whatsoup-fleet',
+        'scripts/run-with-pinned-node.sh',
+        'scripts/run-with-pinned-npm.sh',
+      ]).toContain(m.source);
     }
   });
 

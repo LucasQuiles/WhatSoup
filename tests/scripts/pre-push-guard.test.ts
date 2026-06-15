@@ -215,10 +215,11 @@ describe('verify chain composition (package.json)', () => {
   it('verify:release invokes the standalone whatsoup guard package checks', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
-    expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard ci\b/);
-    expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard run typecheck\b/);
-    expect(chain).toMatch(/\bnpm --prefix tools\/whatsoup_guard test\b/);
-    expect(chain).not.toMatch(/\bnpm --prefix tools\/whatsoup_guard run coverage:proof\b/);
+    expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix tools\/whatsoup_guard ci\b/);
+    expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix tools\/whatsoup_guard run typecheck\b/);
+    expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix tools\/whatsoup_guard test\b/);
+    expect(chain).not.toMatch(/\bnpm --prefix tools\/whatsoup_guard\b/);
+    expect(chain).not.toMatch(/\btools\/whatsoup_guard run coverage:proof\b/);
   });
 
   it('root coverage excludes the standalone whatsoup guard package', () => {
@@ -252,7 +253,10 @@ describe('verify chain composition (package.json)', () => {
   it('verify:release invokes console lint', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
-    expect(chain).toMatch(/\bnpm --prefix console run lint\b/);
+    expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix console ci\b/);
+    expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix console run lint\b/);
+    expect(chain).toMatch(/\bbash scripts\/run-with-pinned-npm\.sh --prefix console run build\b/);
+    expect(chain).not.toMatch(/\bnpm --prefix console\b/);
   });
 
   it('exposes coverage headroom as an explicit guard script', () => {
