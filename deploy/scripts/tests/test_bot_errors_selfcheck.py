@@ -427,6 +427,29 @@ def test_future_central_ack_local_only_since_is_clamped(tmp_path: Path, monkeypa
     assert calls == []
 
 
+def test_non_finite_central_ack_local_only_since_is_reset(tmp_path: Path, monkeypatch):
+    missing = tmp_path / "missing-ack.json"
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=missing)
+    _seed_memory(
+        config,
+        {
+            "lastClass": "healthy",
+            "consecutive": 1,
+            "healHistory": [],
+            "centralAckLocalOnlySince": float("nan"),
+        },
+    )
+
+    status = _mod.run_selfcheck(config, deps)
+
+    assert status["centralAck"]["localOnlySeconds"] == 0
+    assert status["centralAck"]["localOnlySince"] == "1970-01-01T00:16:40Z"
+    assert status["centralAck"]["centralDownSuspected"] is False
+    assert "centralDownAlert" not in status
+    assert calls == []
+
+
 def test_fresh_central_ack_clears_local_only_watch(tmp_path: Path):
     ack = tmp_path / "central-ack.json"
     ack.write_text("{}", encoding="utf-8")
@@ -544,6 +567,20 @@ def test_safe_drift_requires_two_consecutive_cycles_before_heal(tmp_path: Path):
 def test_malformed_consecutive_memory_restarts_hysteresis(tmp_path: Path):
     config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
     _seed_memory(config, {"lastClass": "drift", "consecutive": "bad", "healHistory": []})
+
+    status = _mod.run_selfcheck(config, deps)
+
+    assert status["class"] == "drift"
+    assert status["consecutive"] == 1
+    assert status["action"] == "hysteresis_wait"
+    assert calls == []
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory["consecutive"] == 1
+
+
+def test_non_finite_consecutive_memory_restarts_hysteresis(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": float("inf"), "healHistory": []})
 
     status = _mod.run_selfcheck(config, deps)
 
@@ -1110,6 +1147,12 @@ def test_lever_stat_error_is_engaged(tmp_path: Path, monkeypatch):
 
 def test_invalid_heal_history_blocks_mutation():
     allowed, reason = _mod.heal_allowed({"healHistory": ["not-a-number"]}, 1000.0)
+    assert allowed is False
+    assert reason == "invalid_heal_history"
+
+
+def test_non_finite_heal_history_blocks_mutation():
+    allowed, reason = _mod.heal_allowed({"healHistory": [float("inf")]}, 1000.0)
     assert allowed is False
     assert reason == "invalid_heal_history"
 

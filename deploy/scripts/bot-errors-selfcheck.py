@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -169,8 +170,16 @@ def load_memory(path: Path) -> dict:
 def int_or_zero(value: object) -> int:
     try:
         return max(0, int(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def finite_float(value: object) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
 
 
 def update_consecutive(memory: dict, observed_class: str) -> int:
@@ -187,9 +196,8 @@ def heal_allowed(memory: dict, now: float) -> tuple[bool, str]:
     floor = now - HEAL_WINDOW_SECONDS
     kept = []
     for item in memory.get("healHistory", []):
-        try:
-            stamp = float(item)
-        except (TypeError, ValueError):
+        stamp = finite_float(item)
+        if stamp is None or stamp > now:
             return False, "invalid_heal_history"
         if stamp >= floor:
             kept.append(stamp)
@@ -606,12 +614,8 @@ def update_central_ack_watch(memory: dict, central_ack: dict, now: float) -> Non
         central_ack["centralDownSuspected"] = False
         return
 
-    raw_since = memory.get("centralAckLocalOnlySince")
-    try:
-        since = float(raw_since)
-    except (TypeError, ValueError):
-        since = now
-    if since > now:
+    since = finite_float(memory.get("centralAckLocalOnlySince"))
+    if since is None or since > now:
         since = now
     memory["centralAckLocalOnlySince"] = since
     local_only_seconds = max(0, int(now - since))
