@@ -166,6 +166,39 @@ export const BOT_ERRORS_SIMULATION_MATRIX: BotErrorsSimulationRequirement[] = [
     ],
   },
   {
+    id: 'provisioning-env-and-service-parity',
+    domain: 'supervision-orchestration',
+    risk: 'critical',
+    signal: 'BOT ERRORS systemd/launchd provisioning, routing env parity, and installer fail-closed behavior',
+    expectedOutcome: 'Fresh provisioning installs the monitor services/timers, both platform paths carry the private routing env contract, setup backfill plus launchd installers parse host env without executing it as shell, and launchd installers fail before writing plists when required health-profile input is missing.',
+    evidence: [
+      {
+        file: 'tests/deploy/setup-platform.test.ts',
+        anchors: [
+          'Linux setup installs BOT ERRORS service and timer units, not just the env template',
+          'Linux setup replay copies BOT ERRORS units and writes private routing env',
+          'Linux setup replay mirrors BOT_ERRORS_SOCKET when BOT_ERRORS_SOCKET_PATH is absent',
+          'Linux setup replay backfills missing BOT ERRORS keys in an existing private env file',
+          'Linux setup replay stops before routing env creation when daemon-reload fails',
+          'setup provisions the full BOT ERRORS routing env contract',
+        ],
+      },
+      {
+        file: 'tests/scripts/bot-errors-service-templates.test.ts',
+        anchors: [
+          'load live routing from the private host env file',
+          'launchd installers hydrate routing env from the private host env file into rendered plists',
+          'renders launchd plists with routing env from file without executing env-file shell',
+          'prefers explicit launchd installer env over stale private env-file values',
+          'mirrors BOT_ERRORS_SOCKET into BOT_ERRORS_SOCKET_PATH when the path key is absent',
+          'fails closed when launchctl bootstrap rejects a rendered plist',
+          'fails closed before writing launchd plists when the health profile is missing',
+          'must not source the host env as executable shell',
+        ],
+      },
+    ],
+  },
+  {
     id: 'delivery-durability-and-writefail',
     domain: 'bot-errors-delivery',
     risk: 'critical',

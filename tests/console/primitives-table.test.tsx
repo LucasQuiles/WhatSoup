@@ -514,6 +514,27 @@ describe('Table — EM_DASH', () => {
     const el = document.querySelector('.soup-table-ghost')!;
     expect(el.textContent).toBe('—');
   });
+
+  it('is aria-hidden so AT does not announce the ghost glyph (not aria-label="none")', () => {
+    render(<EM_DASH />);
+    const el = document.querySelector('.soup-table-ghost')!;
+    // aria-label="none" announced the literal word "none"; the glyph is decorative.
+    expect(el.getAttribute('aria-hidden')).toBe('true');
+    expect(el.getAttribute('aria-label')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Header cell semantics — scope="col" for AT header/cell association (WAI table)
+// ---------------------------------------------------------------------------
+
+describe('Table — header cell scope', () => {
+  it('TableHeaderCell renders a th with scope="col"', () => {
+    render(makeSortTable('name', { key: 'name', dir: 'none' }, vi.fn()));
+    const th = document.querySelector('.soup-table-th');
+    expect(th?.tagName).toBe('TH');
+    expect(th?.getAttribute('scope')).toBe('col');
+  });
 });
 
 // ---------------------------------------------------------------------------

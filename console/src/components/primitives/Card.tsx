@@ -64,9 +64,9 @@ export interface CardProps extends HTMLAttributes<HTMLElement> {
 
 // status-edge channel → status-solid token (the same channel tokens the status law uses).
 const EDGE_TOKEN: Record<CardEdge, string> = {
-  ok: 'var(--color-s-ok)',
-  warn: 'var(--color-s-warn)',
-  crit: 'var(--color-s-crit)',
+  ok: 'var(--status-ok-solid)',
+  warn: 'var(--status-warn-solid)',
+  crit: 'var(--status-crit-solid)',
 };
 
 // ---------------------------------------------------------------------------

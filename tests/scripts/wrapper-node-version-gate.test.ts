@@ -88,6 +88,18 @@ function writeFakeNode(
   return nodePath;
 }
 
+function writeFakeNpm(binDir: string): string {
+  const npmPath = path.join(binDir, 'npm');
+  writeExecutable(npmPath, [
+    '#!/usr/bin/env bash',
+    'printf "npm-node=%s\\n" "$(node --version)"',
+    'printf "npm-args=%s\\n" "$*"',
+    'exit 0',
+    '',
+  ].join('\n'));
+  return npmPath;
+}
+
 /**
  * Build a minimal HOME fixture (no nvm installation) so the wrapper's
  * DEFAULT_NODE path does not exist and the fallback is tested.
@@ -157,6 +169,7 @@ function makeFixtureRepoWithNvmrc(
   fs.mkdirSync(path.join(fixtureRoot, 'deploy', 'lib'), { recursive: true });
   const wrapperContents = fs.readFileSync(path.join(repoRoot, wrapperRelPath), 'utf8');
   const fixtureWrapper = path.join(fixtureRoot, wrapperRelPath);
+  fs.mkdirSync(path.dirname(fixtureWrapper), { recursive: true });
   fs.writeFileSync(fixtureWrapper, wrapperContents, 'utf8');
   fs.chmodSync(fixtureWrapper, 0o755);
   // The wrapper sources its node-resolution gate from deploy/lib relative to
@@ -175,6 +188,29 @@ function makeFixtureRepoWithNvmrc(
 }
 
 describe('deploy/whatsoup — Node major-version gate', () => {
+  it('run-with-pinned-npm executes npm from the resolved pinned Node directory', () => {
+    const fixtureScript = makeFixtureRepoWithNvmrc('24.15.0', path.join('scripts', 'run-with-pinned-npm.sh'));
+    const home = makeBareHome();
+    const pinnedBin = path.join(home, '.nvm', 'versions', 'node', 'v24.15.0', 'bin');
+    fs.mkdirSync(pinnedBin, { recursive: true });
+    writeFakeNode(pinnedBin, '24');
+    writeFakeNpm(pinnedBin);
+
+    const result = spawnSync('bash', [fixtureScript, '--prefix', 'tools/whatsoup_guard', 'ci'], {
+      encoding: 'utf8',
+      env: {
+        PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        USER: process.env['USER'] ?? 'testuser',
+        HOME: home,
+      },
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('npm-node=v24.0.0');
+    expect(result.stdout).toContain('npm-args=--prefix tools/whatsoup_guard ci');
+    expect(result.stderr).not.toContain('FATAL');
+  });
+
   it('Test 1: old Node fails the gate with a clear diagnostic, not exit 9', () => {
     const binDir = makeTmpDir('whatsoup-gate-bin-');
     const home = makeBareHome();

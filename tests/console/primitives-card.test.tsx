@@ -41,10 +41,11 @@ describe('Card primitive (DD-38)', () => {
     expect(screen.getByRole('button', { name: 'opt' }).getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('status-edge keys the inset border to the status channel token', () => {
+  it('status-edge keys the inset border to the canonical status channel token', () => {
     const { container } = render(<Card variant="status-edge" edge="warn">warn</Card>);
     const el = container.querySelector('.c-card') as HTMLElement;
-    expect(el.style.borderLeftColor).toContain('--color-s-warn');
+    // Canonical status-solid token (the legacy --color-s-* alias was migrated off).
+    expect(el.style.borderLeftColor).toContain('--status-warn-solid');
     expect(el.style.borderLeftStyle).toBe('solid');
   });
 
