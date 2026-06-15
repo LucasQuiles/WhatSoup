@@ -174,11 +174,10 @@ describe('auth-ticket -- constant-time compare SSOT', () => {
   // reachable through the public API because computeHmac only ever emits
   // well-formed base64url, so a behavioral test cannot pin the SSOT.
   //
-  // safe-compare.ts is the hardened canonical (well-formed-UTF-16 gate,
-  // byteLength check, never throws, empty strings never verify) and its own
-  // header cites auth-ticket's compare as the precedent it superseded. The
-  // HMAC verification path must use it rather than keep a weaker local copy
-  // (same anti-duplication pattern as parser-utils/no-duplicates).
+  // src/fleet/safe-compare.ts is the compatibility import path for the
+  // hardened src/lib/safe-compare.ts SSOT. The HMAC verification path must use
+  // it rather than keep a weaker local copy (same anti-duplication pattern as
+  // parser-utils/no-duplicates).
   it('uses safeStringEqual from safe-compare.ts, not a local naive compare', () => {
     const src = readFileSync(
       new URL('../../src/fleet/auth-ticket.ts', import.meta.url),

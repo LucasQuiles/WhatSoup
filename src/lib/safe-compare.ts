@@ -1,3 +1,17 @@
+// Constant-time string-compare helper for credential verification.
+//
+// The naive `a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b))`
+// pattern throws `RangeError: Input buffers must have the same byte length`
+// when an attacker (or a misconfigured caller) supplies a string whose JS
+// `.length` matches the expected token but whose UTF-8 byteLength does not,
+// or a string containing lone surrogates.
+//
+// `safeStringEqual` normalizes both sides to Buffers up front, gates on
+// `byteLength` equality, and rejects unpaired surrogates before encoding so
+// malformed Unicode cannot be accepted after UTF-8 replacement-character
+// normalization. It also wraps the comparison in try/catch so any future
+// Node-level surprise becomes `false` instead of a 500.
+
 import * as crypto from 'node:crypto';
 
 function isWellFormedUtf16(value: string): boolean {
