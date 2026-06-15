@@ -128,6 +128,53 @@ def test_load_hosts_validates_schema_and_duplicates(tmp_path: Path):
         _mod.load_hosts(missing_host)
 
 
+def test_expected_fleet_roster_derives_heartbeat_and_ack_paths(tmp_path: Path):
+    roster = _write_json(
+        tmp_path / "expected-fleet.json",
+        {
+            "schemaVersion": 1,
+            "hosts": [
+                {
+                    "host": "host-a",
+                    "role": "bot-host",
+                    "profile": "host-a.json",
+                    "collectorRemote": True,
+                    "instances": [],
+                },
+                {
+                    "host": "host-b",
+                    "role": "central",
+                    "profile": "host-b.json",
+                    "heartbeatPath": str(tmp_path / "explicit-heartbeat.json"),
+                    "ackPath": str(tmp_path / "explicit-ack.json"),
+                    "instances": [],
+                },
+            ],
+        },
+    )
+    state = tmp_path / "fleet-sentinel"
+
+    hosts = _mod.load_hosts(roster, state)
+
+    assert [host.host for host in hosts] == ["host-a", "host-b"]
+    assert hosts[0].role == "bot-host"
+    assert hosts[0].heartbeat_path == state / "heartbeats" / "host-a.json"
+    assert hosts[0].ack_path == state / "acks" / "host-a.json"
+    assert hosts[0].probe_path is None
+    assert hosts[0].ssh_host is None
+    assert hosts[0].root is None
+    assert hosts[1].heartbeat_path == tmp_path / "explicit-heartbeat.json"
+    assert hosts[1].ack_path == tmp_path / "explicit-ack.json"
+
+
+def test_default_hosts_path_reuses_expected_fleet_manifest(monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", raising=False)
+
+    path = _mod.default_hosts_path()
+
+    assert path == _mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"
+
+
 def test_json_and_atomic_helpers_fail_closed(tmp_path: Path, monkeypatch):
     with pytest.raises(_mod.SentinelError, match="missing JSON file"):
         _mod.read_json_object(tmp_path / "missing.json")
@@ -966,6 +1013,11 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
 
 def test_parse_args_defaults_and_default_deps(monkeypatch):
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_STATE_DIR", "/tmp/fleet-state")
+    monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", raising=False)
+    default_args = _mod.parse_args([])
+    assert default_args.hosts == str(_mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json")
+    assert default_args.state_dir == "/tmp/fleet-state"
+
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", "/tmp/fleet-hosts.json")
     args = _mod.parse_args([])
     assert args.hosts == "/tmp/fleet-hosts.json"

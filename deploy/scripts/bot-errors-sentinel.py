@@ -24,6 +24,7 @@ import time
 from typing import Callable, Optional
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 45 * 60
 DEFAULT_HYSTERESIS_CYCLES = 2
 DEFAULT_CONNECTIVITY_HYSTERESIS_CYCLES = 3
@@ -169,7 +170,7 @@ def state_root() -> Path:
 
 
 def default_hosts_path() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_FLEET_SENTINEL_HOSTS", state_root() / "hosts.json"))
+    return Path(os.environ.get("BOT_ERRORS_FLEET_SENTINEL_HOSTS", REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"))
 
 
 def positive_int_env(name: str, default: int, minimum: int = 0) -> int:
@@ -296,13 +297,29 @@ def text_or_none(value: object) -> Optional[str]:
     return text or None
 
 
-def load_hosts(path: Path) -> list[HostSpec]:
+def default_heartbeat_path(state_dir: Optional[Path], host: str) -> Optional[Path]:
+    return state_dir / "heartbeats" / f"{host}.json" if state_dir is not None else None
+
+
+def default_ack_path(state_dir: Optional[Path], host: str) -> Optional[Path]:
+    return state_dir / "acks" / f"{host}.json" if state_dir is not None else None
+
+
+def is_expected_fleet_roster(data: dict) -> bool:
+    hosts = data.get("hosts")
+    if not isinstance(hosts, list):
+        return False
+    return any(isinstance(item, dict) and ("profile" in item or "instances" in item or "collectorRemote" in item) for item in hosts)
+
+
+def load_hosts(path: Path, state_dir: Optional[Path] = None) -> list[HostSpec]:
     data = read_json_object(path)
     if data.get("schemaVersion") != 1:
         raise SentinelError("hosts file schemaVersion must be 1")
     hosts = data.get("hosts")
     if not isinstance(hosts, list) or not hosts:
         raise SentinelError("hosts file requires a non-empty hosts list")
+    derive_default_paths = is_expected_fleet_roster(data)
     result = []
     seen = set()
     for index, item in enumerate(hosts):
@@ -318,9 +335,9 @@ def load_hosts(path: Path) -> list[HostSpec]:
             HostSpec(
                 host=host,
                 role=str(item.get("role") or "runtime"),
-                heartbeat_path=path_or_none(item.get("heartbeatPath")),
+                heartbeat_path=path_or_none(item.get("heartbeatPath")) or (default_heartbeat_path(state_dir, host) if derive_default_paths else None),
                 probe_path=path_or_none(item.get("probePath")),
-                ack_path=path_or_none(item.get("ackPath")),
+                ack_path=path_or_none(item.get("ackPath")) or (default_ack_path(state_dir, host) if derive_default_paths else None),
                 ssh_host=text_or_none(item.get("sshHost")),
                 root=path_or_none(item.get("root")),
                 python=str(item.get("python") or "python3").strip() or "python3",
@@ -1195,7 +1212,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     deps = deps or default_deps(config)
     now = deps.now_epoch()
     controller_host = deps.hostname()
-    hosts = load_hosts(config.hosts_path)
+    hosts = load_hosts(config.hosts_path, config.state_dir)
     state = load_state(config)
     state["schemaVersion"] = 1
     state["updatedAt"] = now_iso(now)

@@ -22,6 +22,9 @@ repo="$tmp/root"
 mkdir -p "$repo/deploy/scripts"
 touch "$repo/deploy/scripts/bot-errors-sentinel.py"
 touch "$repo/deploy/scripts/bot-errors-heartbeat-watchdog.py"
+cat > "$repo/deploy/bot-errors-expected-fleet.json" <<'JSON'
+{"schemaVersion":1,"hosts":[{"host":"host-a","profile":"host-a.json","instances":[]}]}
+JSON
 hosts="$tmp/hosts&fleet.json"
 cat > "$hosts" <<'JSON'
 {"schemaVersion":1,"hosts":[{"host":"host-a"}]}
@@ -118,6 +121,23 @@ grep -q '^OnUnitActiveSec=300s$' "$watchdog_timer" || { echo "SENTINEL_INSTALLER
 grep -q '^Persistent=true$' "$watchdog_timer" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog persistent"; cat "$watchdog_timer"; exit 1; }
 grep -q 'dry_run=1' "$tmp/systemd.out" || { echo "SENTINEL_INSTALLER_FAIL systemd dry-run output"; cat "$tmp/systemd.out"; exit 1; }
 [[ ! -s "$tmp/systemd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL systemd invoked activation"; cat "$tmp/systemd.err"; exit 1; }
+
+PATH="$fakebin:$PATH" env \
+  BOT_ERRORS_REPO_ROOT="$repo" \
+  BOT_ERRORS_STATE_DIR="$tmp/default-state" \
+  BOT_ERRORS_FLEET_SENTINEL_STATE_DIR="$tmp/default-state/fleet-sentinel" \
+  BOT_ERRORS_FLEET_SENTINEL_ORACLE="$tmp/default-oracle.json" \
+  BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_DIR="$tmp/default-actions" \
+  BOT_ERRORS_PYTHON="/usr/bin/python3" \
+  BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN=1 \
+  BOT_ERRORS_FLEET_SENTINEL_PLATFORM=systemd \
+  BOT_ERRORS_SYSTEMD_USER_DIR="$tmp/default-systemd" \
+  bash "$S" > "$tmp/default-hosts.out" 2> "$tmp/default-hosts.err"
+default_service="$tmp/default-systemd/bot-errors-sentinel.service"
+[[ -f "$default_service" ]] || { echo "SENTINEL_INSTALLER_FAIL missing default-hosts systemd service"; cat "$tmp/default-hosts.err"; exit 1; }
+grep -q 'bot-errors-expected-fleet.json' "$default_service" || { echo "SENTINEL_INSTALLER_FAIL expected-fleet default hosts path"; cat "$default_service"; exit 1; }
+grep -q 'dry_run=1' "$tmp/default-hosts.out" || { echo "SENTINEL_INSTALLER_FAIL default-hosts dry-run output"; cat "$tmp/default-hosts.out"; exit 1; }
+[[ ! -s "$tmp/default-hosts.err" ]] || { echo "SENTINEL_INSTALLER_FAIL default-hosts invoked activation"; cat "$tmp/default-hosts.err"; exit 1; }
 
 badroot="$tmp/bad-root"
 mkdir -p "$badroot/deploy/scripts"
