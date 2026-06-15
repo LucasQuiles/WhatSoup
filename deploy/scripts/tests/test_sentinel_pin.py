@@ -1,6 +1,6 @@
 """TDD tests for sentinel_pin.py — Fleet Runtime Sentinel Plan 1 (Pin Foundation)."""
 from __future__ import annotations
-import json, pathlib, sys
+import json, os, pathlib, sys
 import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
 import sentinel_pin as sp
@@ -39,6 +39,33 @@ def test_load_pin_malformed_json_raises_pinloaderror(tmp_path):
         sp.load_pin(p)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schemaVersion": 2, "files": []},
+        {"schemaVersion": 1, "files": "not-a-list"},
+        {"schemaVersion": 1, "files": ["not-an-object"]},
+        {"schemaVersion": 1, "files": [{"path": "", "sha256": "0"*64}]},
+        {"schemaVersion": 1, "files": [{"path": "../escape", "sha256": "0"*64}]},
+        {"schemaVersion": 1, "files": [{"path": "/absolute", "sha256": "0"*64}]},
+        {"schemaVersion": 1, "files": [{"path": "deploy//double", "sha256": "0"*64}]},
+        {"schemaVersion": 1, "files": [{"path": "deploy/scripts/x.py", "sha256": "not-a-sha"}]},
+        {"schemaVersion": 1, "expected_head_sha": "not-a-sha", "files": []},
+        {
+            "schemaVersion": 1,
+            "files": [
+                {"path": "deploy/scripts/x.py", "sha256": "0"*64},
+                {"path": "deploy/scripts/x.py", "sha256": "1"*64},
+            ],
+        },
+    ],
+)
+def test_load_pin_rejects_untrusted_manifest_shapes(tmp_path, payload):
+    p = tmp_path / "manifest.json"; p.write_text(json.dumps(payload))
+    with pytest.raises(sp.PinLoadError):
+        sp.load_pin(p)
+
+
 # ---------------------------------------------------------------------------
 # Increment 2 — trust anchor (commit-exists + F10 ledger floor)
 # ---------------------------------------------------------------------------
@@ -72,6 +99,39 @@ def test_load_approved_f10_reads_ledger(tmp_path):
     assert sp.load_approved_f10(led) == {"1448da21"+"0"*56}
 
 
+@pytest.mark.parametrize("payload", [{"approved_f10": "bad"}, {"approved_f10": ["not-a-sha"]}, []])
+def test_load_approved_f10_rejects_bad_ledger(tmp_path, payload):
+    led = tmp_path / "ledger.json"; led.write_text(json.dumps(payload))
+    with pytest.raises(sp.PinLoadError):
+        sp.load_approved_f10(led)
+
+
+def test_trust_rejects_invalid_head_shape_without_calling_git():
+    called = False
+
+    def commit_exists(_sha):
+        nonlocal called
+        called = True
+        return True
+
+    ok, reason = sp.verify_pin_trust(_pin(head="abc123"), approved_f10={"1448da21"+"0"*56}, commit_exists=commit_exists)
+    assert ok is False and "invalid expected_head_sha" in reason
+    assert called is False
+
+
+def test_trust_rejects_commit_probe_exception():
+    def commit_exists(_sha):
+        raise RuntimeError("git unavailable")
+
+    ok, reason = sp.verify_pin_trust(_pin(), approved_f10={"1448da21"+"0"*56}, commit_exists=commit_exists)
+    assert ok is False and "commit check failed" in reason
+
+
+def test_trust_rejects_invalid_f10_shape():
+    ok, reason = sp.verify_pin_trust(_pin(f10="abc123"), approved_f10={"abc123"}, commit_exists=lambda s: True)
+    assert ok is False and "invalid f10" in reason
+
+
 # ---------------------------------------------------------------------------
 # Increment 3 — bundle integrity
 # ---------------------------------------------------------------------------
@@ -97,6 +157,22 @@ def test_bundle_flags_missing_and_mismatch(tmp_path):
     pin = sp.Pin(head_sha="a"*40, files={"deploy/scripts/bot-errors-emit.py": "0"*64, sp.F10_PATH: "1"*64}, f10_sha="1"*64)
     ok, mismatches = sp.verify_bundle(b, pin)
     assert ok is False and {m[1] for m in mismatches} == {"missing", "sha"}
+
+
+def test_bundle_rejects_unsafe_path_without_touching_outside_bundle(tmp_path):
+    outside = tmp_path / "outside.txt"; outside.write_text("outside")
+    pin = sp.Pin(head_sha="a"*40, files={"../outside.txt": "0"*64}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(tmp_path / "bundle", pin)
+    assert ok is False and mismatches == [("../outside.txt", "unsafe_path")]
+
+
+def test_bundle_rejects_symlinked_file(tmp_path):
+    b = tmp_path / "bundle"; target = tmp_path / "target.py"; target.write_text("redact\n")
+    link = b / sp.F10_PATH; link.parent.mkdir(parents=True)
+    os.symlink(target, link)
+    pin = sp.Pin(head_sha="a"*40, files={sp.F10_PATH: hashlib.sha256(b"redact\n").hexdigest()}, f10_sha=None)
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False and mismatches == [(sp.F10_PATH, "symlink")]
 
 
 # ---------------------------------------------------------------------------

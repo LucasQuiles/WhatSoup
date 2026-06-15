@@ -31,10 +31,25 @@ FILES=(
 
 sha() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; else sha256sum "$1" 2>/dev/null | awk '{print $1}'; fi; }
 
+assert_no_symlink_path() {
+  local root="$1" rel="$2" cur i
+  cur="$root"
+  local parts=()
+  IFS='/' read -r -a parts <<< "$rel"
+  for ((i=0; i<${#parts[@]}; i++)); do
+    cur="$cur/${parts[$i]}"
+    if [[ -L "$cur" ]]; then echo "  SYMLINK  $rel via $cur"; return 1; fi
+    if (( i < ${#parts[@]} - 1 )) && [[ -e "$cur" && ! -d "$cur" ]]; then
+      echo "  NOTDIR   $rel via $cur"; return 1
+    fi
+  done
+}
+
 do_verify() {
   local fail=0 r="$1"
   for entry in "${FILES[@]}"; do
     local path="${entry%%:*}" want="${entry##*:}" f="$r/${entry%%:*}"
+    if ! assert_no_symlink_path "$r" "$path"; then fail=1; continue; fi
     if [[ ! -f "$f" ]]; then echo "  MISSING  $path"; fail=1; continue; fi
     local got; got="$(sha "$f")"
     if [[ "$got" == "$want" ]]; then echo "  MATCH    $path"; else echo "  DRIFT    $path got=${got:0:12}"; fail=1; fi
@@ -66,6 +81,11 @@ case "$MODE" in
     echo "ROOT=$ROOT"; echo "STAGING=$STAGING"; echo "BACKUP=$BKDIR"
     # 0) sanity: staging is complete + matches expected shas (don't deploy a bad packet)
     echo "== staging integrity =="; do_verify "$STAGING" || { echo "FATAL: staging incomplete/mismatched"; exit 3; }
+    echo "== target safety =="
+    for entry in "${FILES[@]}"; do
+      local_path="${entry%%:*}"
+      assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
+    done
     # 1) backup EVERY target path that exists (record absentees for rollback-delete)
     mkdir -p "$BKDIR"; : > "$BKDIR/.was-absent"
     for entry in "${FILES[@]}"; do
@@ -93,9 +113,14 @@ case "$MODE" in
   rollback)
     BKDIR="${3:?missing <backup-dir>}"
     echo "== rollback $ROOT from $BKDIR =="
+    echo "== rollback target safety =="
     for entry in "${FILES[@]}"; do
       local_path="${entry%%:*}"
-      if [[ -f "$BKDIR/$local_path" ]]; then cp -p "$BKDIR/$local_path" "$ROOT/$local_path"; fi
+      assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
+    done
+    for entry in "${FILES[@]}"; do
+      local_path="${entry%%:*}"
+      if [[ -f "$BKDIR/$local_path" ]]; then mkdir -p "$(dirname "$ROOT/$local_path")"; cp -p "$BKDIR/$local_path" "$ROOT/$local_path"; fi
     done
     # delete files that were absent before deploy
     if [[ -f "$BKDIR/.was-absent" ]]; then
@@ -106,13 +131,17 @@ case "$MODE" in
   pin)
     # pin <manifest.json> <ledger.json> <head_sha>: stamp expected_head_sha + append F10 to the approved ledger.
     MAN="${2:?manifest}"; LEDGER="${3:?ledger}"; HEAD="${4:?head_sha}"
+    [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: head_sha must be lowercase 40-char git sha"; exit 3; }
     f10=$(python3 - "$MAN" <<'PY'
 import json,sys
+F10_PATH = "deploy/scripts/lib/bot_errors_redaction.py"
 d=json.load(open(sys.argv[1]))
-print(next((f["sha256"] for f in d.get("files",[]) if f["path"].endswith("lib/bot_errors_redaction.py")), ""))
+files=d.get("files",[])
+print(next((f.get("sha256", "") for f in files if isinstance(f, dict) and f.get("path") == F10_PATH), ""))
 PY
 )
     [ -n "$f10" ] || { echo "FATAL: no F10 in manifest"; exit 3; }
+    [[ "$f10" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: F10 sha must be lowercase sha256"; exit 3; }
     python3 - "$MAN" "$LEDGER" "$HEAD" "$f10" <<'PY'
 import json,sys
 man_p,led_p,head,f10=sys.argv[1:5]
