@@ -282,6 +282,23 @@ def test_queue_backlog_threshold_env_falls_back_for_bad_values(tmp_path: Path, m
     assert mod.queue_backlog_problems() == {}
 
 
+def test_queue_backlog_threshold_env_falls_back_for_infinite_values(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    _private_state(monkeypatch, mod, tmp_path)
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_CRITICAL_COUNT", "inf")
+
+    assert mod.queue_backlog_problems() == {}
+
+
+def test_timeout_env_falls_back_for_infinite_values(monkeypatch):
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "inf")
+    monkeypatch.setenv("BOT_ERRORS_LOCAL_HEALTH_TIMEOUT_SECONDS", "inf")
+
+    assert mod.service_check_timeout() == 5
+    assert mod.local_health_timeout() == 3
+
+
 def test_queue_backlog_directory_scan_error_is_reported_not_crashed(tmp_path: Path, monkeypatch):
     mod = _load_module()
     _private_state(monkeypatch, mod, tmp_path)

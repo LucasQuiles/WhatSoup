@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -381,7 +382,7 @@ def env_int(name: str, default: int) -> int:
         return default
     try:
         return int(float(raw))
-    except ValueError:
+    except (OverflowError, ValueError):
         return default
 
 
@@ -592,9 +593,10 @@ def dry_service_states() -> dict[str, str]:
 def service_check_timeout() -> float:
     raw = os.environ.get("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "5")
     try:
-        return max(0.1, float(raw))
+        value = float(raw)
     except ValueError:
         return 5
+    return max(0.1, value) if math.isfinite(value) else 5
 
 
 def systemd_service_status(service: str) -> str:
@@ -663,9 +665,10 @@ def local_service_problems() -> dict[str, str]:
 def local_health_timeout() -> float:
     raw = os.environ.get("BOT_ERRORS_LOCAL_HEALTH_TIMEOUT_SECONDS", "3")
     try:
-        return max(0.1, float(raw))
+        value = float(raw)
     except ValueError:
         return 3
+    return max(0.1, value) if math.isfinite(value) else 3
 
 
 def dry_local_health_responses() -> dict[str, Any]:
