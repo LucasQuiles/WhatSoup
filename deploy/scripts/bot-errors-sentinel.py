@@ -642,7 +642,10 @@ def classify_signals(heartbeat: dict, probe: dict) -> tuple[str, bool, str]:
 def prune_transition_times(record: dict, now: float, window_seconds: int) -> list[float]:
     floor = now - window_seconds
     kept = []
-    for item in record.get("transitions", []):
+    transitions = record.get("transitions", [])
+    if not isinstance(transitions, list):
+        transitions = []
+    for item in transitions:
         try:
             stamp = float(item)
         except (TypeError, ValueError):
@@ -655,7 +658,7 @@ def prune_transition_times(record: dict, now: float, window_seconds: int) -> lis
 
 def update_record(record: dict, observed_class: str, now: float, config: SentinelConfig) -> tuple[int, int]:
     if record.get("lastClass") == observed_class:
-        consecutive = int(record.get("consecutive") or 0) + 1
+        consecutive = int_or_zero(record.get("consecutive")) + 1
     else:
         consecutive = 1
         transitions = prune_transition_times(record, now, config.flap_window_seconds)
