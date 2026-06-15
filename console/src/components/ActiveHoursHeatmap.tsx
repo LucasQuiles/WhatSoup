@@ -1,17 +1,17 @@
 import React from 'react';
 import type { MetricsRange } from './line-detail/types';
+import { formatShortDate } from '../lib/format-time';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 
 function intensityColor(value: number, max: number): string {
-  if (max === 0 || value === 0) return 'var(--color-d2)';
+  if (max === 0 || value === 0) return 'var(--surface-raised)';
   const ratio = value / max;
-  // 4-stop opacity ramp against the accent color
-  if (ratio < 0.25) return 'color-mix(in srgb, var(--color-m-cht) 15%, var(--color-d2))';
-  if (ratio < 0.5) return 'color-mix(in srgb, var(--color-m-cht) 35%, var(--color-d2))';
-  if (ratio < 0.75) return 'color-mix(in srgb, var(--color-m-cht) 60%, var(--color-d2))';
-  return 'var(--color-m-cht)';
+  if (ratio < 0.25) return 'color-mix(in srgb, var(--data-activity-solid) 15%, var(--surface-raised))';
+  if (ratio < 0.5) return 'color-mix(in srgb, var(--data-activity-solid) 35%, var(--surface-raised))';
+  if (ratio < 0.75) return 'color-mix(in srgb, var(--data-activity-solid) 60%, var(--surface-raised))';
+  return 'var(--data-activity-solid)';
 }
 
 function formatHour(h: number): string {
@@ -19,11 +19,6 @@ function formatHour(h: number): string {
   if (h < 12) return `${h}a`;
   if (h === 12) return '12p';
   return `${h - 12}p`;
-}
-
-function formatDate(dateStr: string): string {
-  const d = new Date(dateStr + 'T00:00:00');
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 function HeatmapLegend({ max }: { max: number }) {
@@ -110,7 +105,7 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
     const allValues = byDate.flatMap(d => d.hours);
     const max = Math.max(...allValues, 1);
     const labelEvery = byDate.length > 20 ? 5 : byDate.length > 10 ? 3 : 1;
-    const dateLabels = byDate.map(d => formatDate(d.date));
+    const dateLabels = byDate.map(d => formatShortDate(`${d.date}T00:00:00`));
 
     return (
       <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
@@ -124,7 +119,11 @@ export function ActiveHoursHeatmap({ data, byDate, range }: {
           {/* Date header row */}
           <div />
           {byDate.map(({ date }, i) => (
-            <div key={`d-${date}`} className="text-t5 font-mono leading-tight text-center text-xs truncate">
+            <div
+              key={`d-${date}`}
+              title={i % labelEvery === 0 ? dateLabels[i] : undefined}
+              className="text-t5 font-mono leading-tight text-center text-xs truncate"
+            >
               {i % labelEvery === 0 ? dateLabels[i] : ''}
             </div>
           ))}

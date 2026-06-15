@@ -13,6 +13,7 @@ describe('fail-closed-gate-guard — scanGateScript', () => {
     ].join('\n');
     const findings = scanGateScript('scripts/check_ready.sh', script);
     expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('fail-open-probe');
     expect(findings[0].variable).toBe('code');
     expect(findings[0].line).toBe(3);
   });
@@ -63,6 +64,7 @@ describe('fail-closed-gate-guard — scanGateScript', () => {
     ].join('\n');
     const findings = scanGateScript('scripts/check_health.sh', script);
     expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('fail-open-probe');
     expect(findings[0].variable).toBe('code');
   });
 
@@ -74,10 +76,33 @@ describe('fail-closed-gate-guard — scanGateScript', () => {
     ].join('\n');
     expect(scanGateScript('scripts/diag.sh', script)).toHaveLength(0);
   });
+
+  it('flags grep -c counters that append a second zero on no matches', () => {
+    const script = [
+      '#!/usr/bin/env bash',
+      'count=$(printf "%s\\n" "$lines" | grep -c "needle" || echo 0)',
+      'if [ "$count" -eq 0 ]; then echo clean; fi',
+    ].join('\n');
+    const findings = scanGateScript('console/scripts/check_design.sh', script);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].kind).toBe('duplicate-zero-count');
+    expect(findings[0].line).toBe(2);
+    expect(findings[0].detail).toContain('0\\n0');
+  });
+
+  it('does NOT flag grep -c counters that preserve the emitted zero', () => {
+    const script = [
+      '#!/usr/bin/env bash',
+      'count=$(printf "%s\\n" "$lines" | grep -c "needle" || true)',
+      'count=${count:-0}',
+    ].join('\n');
+    expect(scanGateScript('console/scripts/check_design.sh', script)).toHaveLength(0);
+  });
 });
 
 describe('fail-closed-gate-guard — repo scan (regression trap)', () => {
-  it('finds no fail-open gate shapes in the committed scripts/deploy tree', () => {
+  it('finds no fail-open gate or duplicate-zero counter shapes in committed shell gates', () => {
     // Clean HEAD must pass; this arms the trap for future regressions.
     const findings = scanRepoGates(process.cwd());
     expect(findings).toEqual([]);

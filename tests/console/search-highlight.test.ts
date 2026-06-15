@@ -24,6 +24,25 @@ function message(content: string): Message {
 }
 
 describe('splitSearchHighlights', () => {
+  it('returns the whole text as unmatched when query is blank or only boolean operators', () => {
+    expect(splitSearchHighlights('Alpha beta', '')).toEqual([
+      { text: 'Alpha beta', matched: false },
+    ]);
+    expect(splitSearchHighlights('Alpha beta', 'AND OR NOT')).toEqual([
+      { text: 'Alpha beta', matched: false },
+    ]);
+  });
+
+  it('highlights quoted phrases and escapes regex punctuation in terms', () => {
+    expect(splitSearchHighlights('Use a+b then alpha beta.', '"alpha beta" a+b')).toEqual([
+      { text: 'Use ', matched: false },
+      { text: 'a+b', matched: true },
+      { text: ' then ', matched: false },
+      { text: 'alpha beta', matched: true },
+      { text: '.', matched: false },
+    ]);
+  });
+
   it('highlights multiple query terms case-insensitively and ignores boolean operators', () => {
     expect(splitSearchHighlights('Alpha beta gamma beta', 'alpha OR beta')).toEqual([
       { text: 'Alpha', matched: true },

@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import KpiCard from '../../console/src/components/KpiCard'
+import { KPI_COLOR_TOKENS } from '../../console/src/lib/color-semantics'
 
 afterEach(() => cleanup())
 
@@ -49,7 +50,7 @@ describe('KpiCard root behavior', () => {
 
     expect(card.getAttribute('aria-pressed')).toBe('true')
     expect(card.style.background).toBe('var(--color-d3)')
-    expect(card.style.border).toBe('var(--bw) solid var(--color-s-ok)')
+    expect(card.style.border).toBe(`var(--bw) solid ${KPI_COLOR_TOKENS['text-s-ok']}`)
     expect(card.style.boxShadow).toBe('var(--shadow-inset)')
   })
 
@@ -162,15 +163,7 @@ describe('KpiCard sparkline DOM', () => {
 })
 
 describe('KpiCard color variants', () => {
-  const expectedMap: Array<[string, string]> = [
-    ['text-s-ok', 'var(--color-s-ok)'],
-    ['text-s-crit', 'var(--color-s-crit)'],
-    ['text-s-warn', 'var(--color-s-warn)'],
-    ['text-m-agt', 'var(--color-m-agt)'],
-    ['text-m-cht', 'var(--color-m-cht)'],
-    ['text-m-pas', 'var(--color-m-pas)'],
-    ['text-t2', 'var(--color-t2)'],
-  ]
+  const expectedMap = Object.entries(KPI_COLOR_TOKENS)
 
   for (const [token, cssVar] of expectedMap) {
     it(`renders ${token} as the active border and sparkline stroke`, () => {

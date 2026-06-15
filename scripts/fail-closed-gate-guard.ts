@@ -3,12 +3,19 @@
  * (declared with rings ['guard','hook'] but previously unenforced) into the
  * guard ring.
  *
- * It scans committed bash gate scripts for the fail-OPEN probe shape the
+ * It scans committed bash gate scripts for two shell fail-closed hazards:
+ *
+ * 1. The fail-OPEN probe shape the
  * `writing-fail-closed-gates` skill warns about: a probe that substitutes a
  * sentinel value on failure (`|| echo "000"`, `|| echo ""`, `|| true`) and then
  * gates only on the SUCCESS code (`== "200"` / `= "200"`) without an explicit
  * branch that fails the gate on the inconclusive/unexpected value. Such a gate
  * silently passes on 000/5xx/timeouts — unknown state treated as success.
+ *
+ * 2. The duplicate-zero counter shape `grep -c ... || echo 0`. `grep -c` already
+ * prints `0` when there are no matches and then exits 1, so `|| echo 0` emits a
+ * two-line `0\n0` value. In arithmetic gates that becomes an unexpected syntax
+ * error; in string comparisons it can silently skip the intended branch.
  *
  * This is the complement to test-integrity's `bash-curl-without-fail`: that rule
  * fires when a curl has no `--fail`/status assertion at all; THIS rule fires
@@ -39,6 +46,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export interface GateFinding {
+  kind: 'fail-open-probe' | 'duplicate-zero-count';
   file: string;
   line: number;
   variable: string;
@@ -51,6 +59,10 @@ const GATE_EXT_RE = /\.(sh|bash)$/;
 // `code=$(... || echo "000")`  /  `resp=$(... || true)` etc. Captures the var.
 const SENTINEL_CAPTURE_RE =
   /(?:^|\b)(?<var>[A-Za-z_][A-Za-z0-9_]*)=.*\|\|\s*(?:echo\s*["']?(?<sentinel>000|)["']?|true|:)\b/;
+
+// `grep -c` prints "0" on no matches before exiting 1; `|| echo 0` adds a second zero.
+const DUPLICATE_ZERO_COUNT_RE =
+  /\bgrep\b(?=[^#\n]*\s(?:-[A-Za-z]*c[A-Za-z]*|--count)\b)[^#\n]*\|\|\s*echo\s+["']?0["']?\b/;
 
 // A success-only gate: `[ "$code" = "200" ]` / `[ "$code" == "200" ]` / `if [ "$resp" = "PONG" ]`.
 function successGateFor(line: string): { variable: string; expected: string } | null {
@@ -75,6 +87,21 @@ const FAIL_CLOSED_SIGNAL_RE =
 export function scanGateScript(relPath: string, content: string): GateFinding[] {
   const lines = content.split(/\r?\n/);
   const findings: GateFinding[] = [];
+
+  // Pass 0: malformed count fallback. This does not need cross-line context.
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i].trim();
+    if (!stripped || stripped.startsWith('#')) continue;
+    if (!DUPLICATE_ZERO_COUNT_RE.test(stripped)) continue;
+    findings.push({
+      kind: 'duplicate-zero-count',
+      file: relPath,
+      line: i + 1,
+      variable: 'grep-count',
+      detail:
+        '`grep -c ... || echo 0` emits `0\\n0` when there are no matches. Use `grep -c ... || true` plus an explicit default if needed.',
+    });
+  }
 
   // Pass 1: collect sentinel-captured variables and their capture line.
   const captured = new Map<string, number>();
@@ -109,6 +136,7 @@ export function scanGateScript(relPath: string, content: string): GateFinding[] 
     if (!captured.has(gate.variable)) continue;
     if (handledVars.has(gate.variable)) continue; // inconclusive path handled for THIS var
     findings.push({
+      kind: 'fail-open-probe',
       file: relPath,
       line: i + 1,
       variable: gate.variable,
@@ -123,7 +151,7 @@ function isGateFile(relPath: string): boolean {
   const base = path.basename(relPath);
   if (GATE_NAME_RE.test(base)) return true;
   // deploy/ + scripts/ shell files are gate-surface too.
-  return relPath.startsWith('deploy/') || relPath.startsWith('scripts/');
+  return relPath.startsWith('deploy/') || relPath.startsWith('scripts/') || relPath.startsWith('console/scripts/');
 }
 
 function walkShellFiles(root: string, dir: string, acc: string[]): void {
@@ -152,7 +180,7 @@ function walkShellFiles(root: string, dir: string, acc: string[]): void {
 
 export function scanRepoGates(cwd: string): GateFinding[] {
   const candidates: string[] = [];
-  for (const sub of ['scripts', 'deploy', '.husky']) {
+  for (const sub of ['scripts', 'deploy', '.husky', 'console/scripts']) {
     walkShellFiles(cwd, path.join(cwd, sub), candidates);
   }
   const findings: GateFinding[] = [];
@@ -173,10 +201,10 @@ function main(): void {
   const cwd = process.cwd();
   const findings = scanRepoGates(cwd);
   if (findings.length === 0) {
-    console.log('fail-closed-gate-guard: no fail-open gate shapes found (invariant.fail-closed-gate)');
+    console.log('fail-closed-gate-guard: no fail-open gate or duplicate-zero counter shapes found (invariant.fail-closed-gate)');
     return;
   }
-  console.error('fail-closed-gate-guard: fail-open gate shape(s) detected (invariant.fail-closed-gate):');
+  console.error('fail-closed-gate-guard: fail-open gate or duplicate-zero counter shape(s) detected (invariant.fail-closed-gate):');
   for (const f of findings) {
     console.error(`  ${f.file}:${f.line} ${f.detail}`);
   }

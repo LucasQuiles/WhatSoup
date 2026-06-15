@@ -1,0 +1,274 @@
+{
+  "schema_version": 1,
+  "source_of_truth": {
+    "eslint_config": "console/eslint.config.shadow.mjs",
+    "eslint_command": [
+      "eslint",
+      ".",
+      "-c",
+      "eslint.config.shadow.mjs",
+      "--format",
+      "json"
+    ],
+    "shadow_baseline": "console/lint-shadow-baseline.json",
+    "tracked_rules": {
+      "no-restricted-syntax": "base-wall",
+      "soup/no-brand-regression": "brand-regression"
+    }
+  },
+  "tracked_categories": [
+    "base-wall",
+    "brand-regression"
+  ],
+  "totals": {
+    "by_category": {
+      "base-wall": 18,
+      "brand-regression": 2
+    },
+    "files": 6,
+    "total": 20
+  },
+  "by_file": [
+    {
+      "by_category": {
+        "base-wall": 1,
+        "brand-regression": 0
+      },
+      "file": "console/src/components/line-detail/ModeTab.tsx",
+      "lines": [
+        77
+      ],
+      "total": 1
+    },
+    {
+      "by_category": {
+        "base-wall": 1,
+        "brand-regression": 0
+      },
+      "file": "console/src/components/line-detail/PipelineTab.tsx",
+      "lines": [
+        163
+      ],
+      "total": 1
+    },
+    {
+      "by_category": {
+        "base-wall": 5,
+        "brand-regression": 0
+      },
+      "file": "console/src/components/MessageContent.tsx",
+      "lines": [
+        155,
+        164,
+        166,
+        225
+      ],
+      "total": 5
+    },
+    {
+      "by_category": {
+        "base-wall": 6,
+        "brand-regression": 1
+      },
+      "file": "console/src/components/Nav.tsx",
+      "lines": [
+        48,
+        68,
+        69,
+        101,
+        102,
+        129,
+        130
+      ],
+      "total": 7
+    },
+    {
+      "by_category": {
+        "base-wall": 0,
+        "brand-regression": 1
+      },
+      "file": "console/src/components/UpdateModal.tsx",
+      "lines": [
+        370
+      ],
+      "total": 1
+    },
+    {
+      "by_category": {
+        "base-wall": 5,
+        "brand-regression": 0
+      },
+      "file": "console/src/mock-data.ts",
+      "lines": [
+        723,
+        728,
+        852,
+        939,
+        940
+      ],
+      "total": 5
+    }
+  ],
+  "hits": [
+    {
+      "category": "base-wall",
+      "column": 13,
+      "file": "console/src/components/line-detail/ModeTab.tsx",
+      "line": 77,
+      "message": "⛔ Inline display in style. FIX: remove from style, add to className. flex→\"flex\" inline-flex→\"inline-flex\" block→\"block\" inline-block→\"inline-block\" grid→\"grid\" none→\"hidden\".",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 11,
+      "file": "console/src/components/line-detail/PipelineTab.tsx",
+      "line": 163,
+      "message": "⛔ Inline display in style. FIX: remove from style, add to className. flex→\"flex\" inline-flex→\"inline-flex\" block→\"block\" inline-block→\"inline-block\" grid→\"grid\" none→\"hidden\".",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 25,
+      "file": "console/src/components/MessageContent.tsx",
+      "line": 155,
+      "message": "⛔ Inline position in style. FIX: remove from style, add to className. relative→\"relative\" absolute→\"absolute\" fixed→\"fixed\" sticky→\"sticky\".",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 47,
+      "file": "console/src/components/MessageContent.tsx",
+      "line": 155,
+      "message": "⛔ Inline display in style. FIX: remove from style, add to className. flex→\"flex\" inline-flex→\"inline-flex\" block→\"block\" inline-block→\"inline-block\" grid→\"grid\" none→\"hidden\".",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 15,
+      "file": "console/src/components/MessageContent.tsx",
+      "line": 164,
+      "message": "⛔ Inline position in style. FIX: remove from style, add to className. relative→\"relative\" absolute→\"absolute\" fixed→\"fixed\" sticky→\"sticky\".",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 15,
+      "file": "console/src/components/MessageContent.tsx",
+      "line": 166,
+      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 7,
+      "file": "console/src/components/MessageContent.tsx",
+      "line": 225,
+      "message": "⛔ Inline overflow in style. FIX: remove from style, add to className. hidden→\"overflow-hidden\" auto→\"overflow-auto\" scroll→\"overflow-scroll\". For single axis: \"overflow-y-auto\" etc.",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 17,
+      "file": "console/src/components/Nav.tsx",
+      "line": 68,
+      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 17,
+      "file": "console/src/components/Nav.tsx",
+      "line": 69,
+      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 21,
+      "file": "console/src/components/Nav.tsx",
+      "line": 101,
+      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 21,
+      "file": "console/src/components/Nav.tsx",
+      "line": 102,
+      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 21,
+      "file": "console/src/components/Nav.tsx",
+      "line": 129,
+      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 21,
+      "file": "console/src/components/Nav.tsx",
+      "line": 130,
+      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 36,
+      "file": "console/src/mock-data.ts",
+      "line": 723,
+      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 36,
+      "file": "console/src/mock-data.ts",
+      "line": 728,
+      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 83,
+      "file": "console/src/mock-data.ts",
+      "line": 852,
+      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 66,
+      "file": "console/src/mock-data.ts",
+      "line": 939,
+      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "base-wall",
+      "column": 60,
+      "file": "console/src/mock-data.ts",
+      "line": 940,
+      "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
+      "rule": "no-restricted-syntax"
+    },
+    {
+      "category": "brand-regression",
+      "column": 11,
+      "file": "console/src/components/Nav.tsx",
+      "line": 48,
+      "message": "[soup/no-brand-regression] Split wordmark detected: adjacent JSX spans render \"What\"+\"Soup\". These two spans must flip together at P4 (Nav.tsx:39-40).",
+      "rule": "soup/no-brand-regression"
+    },
+    {
+      "category": "brand-regression",
+      "column": 88,
+      "file": "console/src/components/UpdateModal.tsx",
+      "line": 370,
+      "message": "[soup/no-brand-regression] \"WhatSoup\" in JSX text — replace with the locked brand name. See lint-plan section 3 for P4 copy dispositions.",
+      "rule": "soup/no-brand-regression"
+    }
+  ]
+}

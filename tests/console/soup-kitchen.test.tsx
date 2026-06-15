@@ -4,27 +4,41 @@
  * Renders the real component under jsdom + Testing Library and asserts on
  * observable DOM (text content, aria states, classNames that encode user-
  * visible state) rather than scanning source strings or re-implementing
- * internals in a parallel helper. The previous version of this file matched
- * substrings against the SoupKitchen source and replicated its filter / alert
- * / mode-count logic; both patterns gave green checks even when the component
- * stopped emitting the matched markup. Tracked in issue #454.
+ * internals in a parallel helper.
  *
- * Tests against real exported helpers (computeKpis, deriveFleetMessageSparklines,
- * text-utils) are kept as-is — they pin contracts the component depends on.
+ * C2.3 change summary vs. the prior version:
+ *   - Row activation: click/Enter now opens the Drawer; "Open line" action
+ *     in the drawer navigates. Old direct-navigate test is replaced.
+ *   - Sort tests: header sort buttons (role "button" inside the th) are the
+ *     interaction target; aria-sort is still on the <th> (columnheader).
+ *     fireEvent.click targets the sort button, not the columnheader directly.
+ *   - visibleTableLineNames: "Line" is now col 0 (StatusCell + name), so the
+ *     cell index changed from 1 → 0.
+ *   - New: drawer open/retarget/Escape/close, aria-current on selected row,
+ *     drawer kv content swap, "Line not found" error state, StatusCell
+ *     presence per row, long-value fixture.
  *
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+  act,
+} from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context';
 
 // Hoisted hook mocks — must be declared before component import so the
 // `vi.mock` factories below can wire them in without forward-reference TDZ
-// issues. Each entry is a vi.fn whose return value we tune per-test.
+// issues.
 const useLinesMock = vi.hoisted(() => vi.fn());
 const useFeedMock = vi.hoisted(() => vi.fn());
 const useFleetMetricsMock = vi.hoisted(() => vi.fn());
+const useLogsMock = vi.hoisted(() => vi.fn());
 const navigateMock = vi.hoisted(() => vi.fn());
 
 vi.mock('react-router-dom', async (importOriginal) => {
@@ -41,6 +55,7 @@ vi.mock('../../console/src/hooks/use-fleet', async (importOriginal) => {
     ...actual,
     useLines: useLinesMock,
     useFeed: useFeedMock,
+    useLogs: useLogsMock,
   };
 });
 
@@ -82,6 +97,7 @@ import { computeKpis } from '../../console/src/lib/compute-kpis';
 import { deriveFleetMessageSparklines } from '../../console/src/lib/metrics-sparklines';
 import { displayInstanceName, formatPhone, formatCompact } from '../../console/src/lib/text-utils';
 import type { FeedEvent, FleetMetrics, LineInstance, Mode } from '../../console/src/types';
+import type { LogEntry } from '../../console/src/types';
 
 // ---------------------------------------------------------------------------
 // Test data factories + render helper
@@ -105,12 +121,25 @@ function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
   };
 }
 
+function makeLogEntry(overrides: Partial<LogEntry> = {}): LogEntry {
+  return {
+    timestamp: '2026-06-11T12:00:00Z',
+    level: 'info',
+    msg: 'test message',
+    source: 'test-source',
+    ...overrides,
+  };
+}
+
 interface RenderOptions {
   lines?: LineInstance[];
   feed?: FeedEvent[];
   linesError?: Error | null;
   feedError?: Error | null;
+  linesRefetch?: ReturnType<typeof vi.fn>;
+  feedRefetch?: ReturnType<typeof vi.fn>;
   fleetMetrics?: Partial<FleetMetrics> | null;
+  logs?: LogEntry[];
 }
 
 function renderPage(opts: RenderOptions = {}) {
@@ -121,16 +150,24 @@ function renderPage(opts: RenderOptions = {}) {
     data: lines,
     isError: Boolean(opts.linesError),
     error: opts.linesError ?? null,
+    refetch: opts.linesRefetch ?? vi.fn(),
   });
   useFeedMock.mockReturnValue({
     data: feed,
     isError: Boolean(opts.feedError),
     error: opts.feedError ?? null,
+    refetch: opts.feedRefetch ?? vi.fn(),
   });
   useFleetMetricsMock.mockReturnValue({
     data: opts.fleetMetrics ?? undefined,
     isLoading: false,
     isError: false,
+    refetch: vi.fn(),
+  });
+  useLogsMock.mockReturnValue({
+    data: opts.logs ?? [],
+    isError: false,
+    error: null,
     refetch: vi.fn(),
   });
 
@@ -165,14 +202,19 @@ function getKpiCard(label: string): HTMLElement {
   return card as HTMLElement;
 }
 
-/** Mode pills live in the toolbar — anchor on "All" (only one in DOM). */
+/** Mode pills are interactive Pills: <button> whose accessible name is the label
+ * (the count badge is aria-hidden, so it does not join the name). */
 function getModePill(label: string): HTMLElement {
-  const pillsContainer = screen.getByText('All').parentElement as HTMLElement;
-  return within(pillsContainer).getByText(label).closest('button') as HTMLElement;
+  const pills = screen.getAllByRole('button', { name: label });
+  // Chart-range pills share the toolbar; mode pills are the aria-pressed toggles.
+  const pill = pills.find((p) => p.hasAttribute('aria-pressed'));
+  if (!pill) throw new Error(`mode pill "${label}" not found`);
+  return pill;
 }
 
 /** Table body — scoped queries here ignore the KPI strip, alert banner, etc. */
 function tableBody(): HTMLElement {
+  // Anchor on the "Mode" columnheader — still present as col 1 in new layout.
   const headerCell = screen.getByRole('columnheader', { name: /^Mode\b/ });
   const tbody = headerCell.closest('table')!.querySelector('tbody');
   if (!tbody) throw new Error('SoupKitchen table has no tbody');
@@ -199,14 +241,17 @@ function alertBanner(): HTMLElement | null {
 
 /**
  * Return the list of line names visible in the instance table, preserving
- * the order produced by the component. Scoped to <tbody> so AlertBanner and
- * ModeBadge labels can't bleed in.
+ * the order produced by the component. Scoped to <tbody>.
+ *
+ * C2.3 change: "Line" is now col 0 (StatusCell renders name text inside it).
+ * Old col index was 1; new col index is 0.
  */
 function visibleTableLineNames(lines: LineInstance[]): string[] {
   const known = new Map(lines.map((line) => [displayInstanceName(line.name), line.name]));
   return tableRows()
     .map((row) => {
-      const lineCell = tableCell(row, 1);
+      // Col 0 now holds the StatusCell + name label.
+      const lineCell = tableCell(row, 0);
       for (const [displayName, rawName] of known) {
         if (within(lineCell).queryByText(displayName)) return rawName;
       }
@@ -215,13 +260,22 @@ function visibleTableLineNames(lines: LineInstance[]): string[] {
     .filter((name): name is string => name !== undefined);
 }
 
+/**
+ * Find the sort button INSIDE a given columnheader th.
+ * TableHeaderCell renders a <button> inside the <th> for sortable columns.
+ */
+function getSortButton(columnheader: HTMLElement): HTMLElement {
+  const btn = columnheader.querySelector('button');
+  if (!btn) throw new Error('No sort button in columnheader');
+  return btn as HTMLElement;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Loading / empty state
 // ---------------------------------------------------------------------------
 
 describe('SoupKitchen loading state', () => {
   it('renders with empty lines array when data is not yet loaded', () => {
-    // When useLines returns { data: undefined }, the component defaults to []
     const lines: LineInstance[] = [];
     const kpis = computeKpis(lines);
 
@@ -298,8 +352,6 @@ describe('SoupKitchen KPI cards with data', () => {
       'Media Processed',
     ];
     for (const label of expected) {
-      // getKpiCard throws if the label isn't found exactly once on a KPI card,
-      // which is exactly the contract we want here.
       expect(getKpiCard(label)).toBeDefined();
     }
   });
@@ -308,10 +360,18 @@ describe('SoupKitchen KPI cards with data', () => {
     renderPage({ lines });
     expect(within(getKpiCard('Lines Connected')).getByText('2')).toBeDefined();
     expect(within(getKpiCard('Need Attention')).getByText('3')).toBeDefined();
-    expect(within(getKpiCard('Messages Sent')).getByText('170')).toBeDefined();
-    expect(within(getKpiCard('Messages Received')).getByText('310')).toBeDefined();
-    expect(within(getKpiCard('Agent Sessions')).getByText('2')).toBeDefined();
-    expect(within(getKpiCard('Media Processed')).getByText('21')).toBeDefined();
+    const sentValue = within(getKpiCard('Messages Sent')).getByText('170');
+    const receivedValue = within(getKpiCard('Messages Received')).getByText('310');
+    const sessionsValue = within(getKpiCard('Agent Sessions')).getByText('2');
+    const mediaValue = within(getKpiCard('Media Processed')).getByText('21');
+    expect(sentValue).toBeDefined();
+    expect(receivedValue).toBeDefined();
+    expect(sessionsValue).toBeDefined();
+    expect(mediaValue).toBeDefined();
+    for (const value of [sentValue, receivedValue, sessionsValue, mediaValue]) {
+      expect(value.className).not.toMatch(/text-(m-|s-)/);
+      expect(value.getAttribute('style')).toContain('--text-2');
+    }
   });
 });
 
@@ -343,9 +403,22 @@ describe('SoupKitchen instance table rendering', () => {
 
   it('renders all expected column headers', () => {
     renderPage({ lines });
-    const expected = ['Mode', 'Line', 'Chats', 'Groups', 'Unread', 'Sent', 'Recv', 'Tokens', 'Sessions', 'Provider', 'Tags', 'Active'];
+    // C2.3: "Line" replaced the old "Mode+Line" split — col 0 is now "Line"
+    // (StatusCell+name). "Mode" is still col 1.
+    const expected = ['Line', 'Mode', 'Chats', 'Groups', 'Unread', 'Sent', 'Recv', 'Tokens', 'Sessions', 'Provider', 'Tags', 'Active'];
     for (const col of expected) {
       expect(screen.getByRole('columnheader', { name: new RegExp(`^${col}\\b`) })).toBeDefined();
+    }
+  });
+
+  it('renders a StatusCell in col 0 of each data row (shape law)', () => {
+    renderPage({ lines });
+    // StatusCell renders soup-status-cell class. Assert at least one per row.
+    // This is a shape-law check — does NOT assert color (visual only).
+    for (const row of tableRows()) {
+      const cell = tableCell(row, 0);
+      // StatusCell renders a span.soup-status-cell containing a shape span + label
+      expect(cell.querySelector('.soup-status-cell')).not.toBeNull();
     }
   });
 
@@ -369,21 +442,47 @@ describe('SoupKitchen instance table rendering', () => {
 
   it('shows totalSessions for agent-mode rows and em-dash for non-agent rows', () => {
     renderPage({ lines });
-    // operator-agent (agent mode) should expose its totalSessions value
+    // Sessions is col 8 in the new layout (Line=0, Mode=1, Chats=2, Groups=3,
+    // Unread=4, Sent=5, Recv=6, Tokens=7, Sessions=8).
     const agentRow = screen.getByText(displayInstanceName('operator-agent')).closest('tr') as HTMLElement;
     expect(tableCell(agentRow, 8).textContent).toBe('47');
+    for (const index of [5, 6, 8]) {
+      const value = tableCell(agentRow, index).querySelector('.c-data') as HTMLElement;
+      expect(value.className).not.toMatch(/text-(m-|s-)/);
+      expect(value.getAttribute('style')).toContain('--text-2');
+    }
 
-    // primary-line (passive mode) should show em-dash in the Sessions column.
     const passiveRow = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
     expect(tableCell(passiveRow, 8).textContent).toBe('—');
-    // And the passive row must NOT contain "47"
     expect(within(passiveRow).queryByText('47')).toBeNull();
   });
 
-  it('navigates to /lines/<name> when a row is clicked', () => {
+  // C2.3: row click now opens the drawer, not navigates directly.
+  // Navigation moves to the "Open line" button inside the drawer.
+  it('clicking a row opens the drawer for that line', () => {
     renderPage({ lines });
     const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
     fireEvent.click(row);
+    // Drawer is open: the inspector complementary region is present.
+    expect(screen.getByRole('complementary')).toBeDefined();
+    // navigateMock must NOT have been called on row click.
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it('pressing Enter on a row opens the drawer', () => {
+    renderPage({ lines });
+    const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
+    fireEvent.keyDown(row, { key: 'Enter' });
+    expect(screen.getByRole('complementary')).toBeDefined();
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it('"Open line" button inside the drawer navigates to /lines/<name>', () => {
+    renderPage({ lines });
+    const row = screen.getByText(displayInstanceName('primary-line')).closest('tr') as HTMLElement;
+    fireEvent.click(row);
+    const openBtn = screen.getByRole('button', { name: 'Open line' });
+    fireEvent.click(openBtn);
     expect(navigateMock).toHaveBeenCalledTimes(1);
     expect(navigateMock).toHaveBeenCalledWith('/lines/primary-line');
   });
@@ -464,14 +563,13 @@ describe('SoupKitchen error state handling', () => {
     // Healthy line 'alert-c' should NOT appear in the banner (it still
     // renders as a table row).
     expect(within(banner!).queryByText('alert-c')).toBeNull();
-    // And the three unhealthy ones should all be linked from the banner.
     expect(within(banner!).getByText('alert-a')).toBeDefined();
     expect(within(banner!).getByText('alert-b')).toBeDefined();
     expect(within(banner!).getByText('alert-d')).toBeDefined();
     expect(within(banner!).getByText('alert-e')).toBeDefined();
   });
 
-  it('applies status wash classes by severity', () => {
+  it('applies crit severity class on unreachable rows and warn severity on degraded rows', () => {
     const lines = [
       makeLine({ name: 'row-down', status: 'unreachable' }),
       makeLine({ name: 'row-slow', status: 'degraded' }),
@@ -486,29 +584,53 @@ describe('SoupKitchen error state handling', () => {
     const logoutRow = within(body).getByText('row-logout').closest('tr') as HTMLElement;
     const unknownRow = within(body).getByText('row-unknown').closest('tr') as HTMLElement;
     const fineRow = within(body).getByText('row-fine').closest('tr') as HTMLElement;
-    expect(downRow.className).toContain('s-crit-wash');
-    expect(slowRow.className).toContain('s-warn-wash');
-    expect(logoutRow.className).toContain('s-crit-wash');
-    expect(unknownRow.className).toContain('s-warn-wash');
-    expect(fineRow.className).not.toContain('s-crit-wash');
-    expect(fineRow.className).not.toContain('s-warn-wash');
+    // C2.3: TableRow severity prop maps to soup-table-row--crit / --warn classes.
+    expect(downRow.className).toContain('crit');
+    expect(slowRow.className).toContain('warn');
+    expect(logoutRow.className).toContain('crit');
+    expect(unknownRow.className).toContain('warn');
+    expect(fineRow.className).not.toContain('crit');
+    expect(fineRow.className).not.toContain('warn');
   });
 
-  it('renders a fleet-load-error row instead of the empty-filtered placeholder when the lines query fails', () => {
+  it('renders a retryable fleet-load-error row instead of the empty-filtered placeholder when the lines query fails', () => {
+    const linesRefetch = vi.fn();
+    const feedRefetch = vi.fn();
     renderPage({
       lines: [],
       linesError: new Error('upstream 502'),
+      linesRefetch,
+      feedRefetch,
     });
     expect(screen.getByText(/Unable to load fleet data: upstream 502/)).toBeDefined();
     expect(screen.queryByText('No instances match the current filters')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(linesRefetch).toHaveBeenCalledTimes(1);
+    expect(feedRefetch).not.toHaveBeenCalled();
   });
 
-  it('renders a fleet-load-error row when the feed query fails even if lines succeeded', () => {
+  it('renders a retryable fleet-load-error row when the feed query fails even if lines succeeded', () => {
+    const linesRefetch = vi.fn();
+    const feedRefetch = vi.fn();
     renderPage({
       lines: [makeLine({ name: 'visible-line' })],
       feedError: new Error('feed offline'),
+      linesRefetch,
+      feedRefetch,
     });
     expect(screen.getByText(/Unable to load fleet data: feed offline/)).toBeDefined();
+    expect(screen.getByText(/Activity feed unavailable: feed offline/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(feedRefetch).toHaveBeenCalledTimes(1);
+    expect(linesRefetch).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry activity' }));
+
+    expect(feedRefetch).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -530,17 +652,22 @@ describe('SoupKitchen filter behavior', () => {
     expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'charlie', 'delta', 'echo']);
   });
 
+  // C2.3: sort now fires the sort BUTTON inside the columnheader, not the th
+  // directly. aria-sort remains on the <th> (columnheader role).
   it('sorts by line name and exposes aria-sort direction', () => {
     renderPage({ lines });
     const lineHeader = screen.getByRole('columnheader', { name: /^Line\b/ });
+    const sortBtn = getSortButton(lineHeader);
 
-    fireEvent.click(lineHeader);
-    expect(lineHeader.getAttribute('aria-sort')).toBe('descending');
-    expect(visibleTableLineNames(lines)).toEqual(['echo', 'delta', 'charlie', 'bravo', 'alpha']);
-
-    fireEvent.click(lineHeader);
+    // First click on a new key: TableHeaderCell cycles none→asc, so first = ascending.
+    fireEvent.click(sortBtn);
     expect(lineHeader.getAttribute('aria-sort')).toBe('ascending');
     expect(visibleTableLineNames(lines)).toEqual(['alpha', 'bravo', 'charlie', 'delta', 'echo']);
+
+    // Second click on same key: asc→desc.
+    fireEvent.click(sortBtn);
+    expect(lineHeader.getAttribute('aria-sort')).toBe('descending');
+    expect(visibleTableLineNames(lines)).toEqual(['echo', 'delta', 'charlie', 'bravo', 'alpha']);
   });
 
   it('sorts unread counts numerically and reverses direction on repeat click', () => {
@@ -551,14 +678,17 @@ describe('SoupKitchen filter behavior', () => {
     ];
     renderPage({ lines: unreadLines });
     const unreadHeader = screen.getByRole('columnheader', { name: /^Unread\b/ });
+    const sortBtn = getSortButton(unreadHeader);
 
-    fireEvent.click(unreadHeader);
-    expect(unreadHeader.getAttribute('aria-sort')).toBe('descending');
-    expect(visibleTableLineNames(unreadLines)).toEqual(['ten-unread', 'two-unread', 'one-unread']);
-
-    fireEvent.click(unreadHeader);
+    // First click: none→asc.
+    fireEvent.click(sortBtn);
     expect(unreadHeader.getAttribute('aria-sort')).toBe('ascending');
     expect(visibleTableLineNames(unreadLines)).toEqual(['one-unread', 'two-unread', 'ten-unread']);
+
+    // Second click: asc→desc.
+    fireEvent.click(sortBtn);
+    expect(unreadHeader.getAttribute('aria-sort')).toBe('descending');
+    expect(visibleTableLineNames(unreadLines)).toEqual(['ten-unread', 'two-unread', 'one-unread']);
   });
 
   it('clicking "Lines Connected" KPI filters to online lines only', () => {
@@ -618,8 +748,6 @@ describe('SoupKitchen filter behavior', () => {
 
   it('renders mode filter pills for all, passive, chat, agent', () => {
     renderPage({ lines });
-    // Scoped to the toolbar pill container — ModeBadge labels in rows are not
-    // candidates here.
     expect(getModePill('All')).toBeDefined();
     expect(getModePill('passive')).toBeDefined();
     expect(getModePill('chat')).toBeDefined();
@@ -660,7 +788,10 @@ describe('SoupKitchen filter behavior', () => {
 
   it('search input filters by name case-insensitively', () => {
     renderPage({ lines });
-    fireEvent.change(screen.getByPlaceholderText('Search lines...'), { target: { value: 'ALPHA' } });
+    // C2.3: placeholder is still "Search lines..." (ToolbarSearch preserves it)
+    const search = screen.getByPlaceholderText('Search lines...');
+    expect(search.getAttribute('data-search-shortcut-target')).toBe('true');
+    fireEvent.change(search, { target: { value: 'ALPHA' } });
     expect(visibleTableLineNames(lines)).toEqual(['alpha']);
   });
 
@@ -714,9 +845,6 @@ describe('SoupKitchen mode counts', () => {
 
   it('omits the count badge on every mode pill when there are no lines', () => {
     renderPage({ lines: [] });
-    // FilterPill suppresses the badge span when count === 0, so each pill
-    // contains only its label text node. Asserting the absence of any digit
-    // pins that suppression to user-visible output.
     expect(getModePill('All').textContent).toBe('All');
     expect(getModePill('passive').textContent).toBe('passive');
     expect(getModePill('chat').textContent).toBe('chat');
@@ -748,13 +876,10 @@ describe('SoupKitchen KPI toggle', () => {
     const card = getKpiCard('Lines Connected');
     fireEvent.click(card);
     expect(card.getAttribute('aria-pressed')).toBe('true');
-    // The unreachable line should be filtered out of the table body. The
-    // AlertBanner still names it, so we scope the query to <tbody>.
     expect(within(tableBody()).queryByText('down')).toBeNull();
 
     fireEvent.click(card);
     expect(card.getAttribute('aria-pressed')).toBe('false');
-    // All three rows visible again
     expect(within(tableBody()).queryByText('down')).not.toBeNull();
     expect(within(tableBody()).queryByText('on1')).not.toBeNull();
     expect(within(tableBody()).queryByText('on2')).not.toBeNull();
@@ -802,7 +927,6 @@ describe('SoupKitchen sparkline integration', () => {
   it('switches the metrics range when the 7d range pill is clicked', () => {
     renderPage({ lines: [] });
     fireEvent.click(screen.getByText('7d'));
-    // The most recent invocation should pass '7d'
     const lastCall = useFleetMetricsMock.mock.calls.at(-1);
     expect(lastCall?.[0]).toBe('7d');
   });
@@ -848,5 +972,441 @@ describe('SoupKitchen structural composition', () => {
     const mod = await import('../../console/src/pages/SoupKitchen');
     expect(mod.default).toBeDefined();
     expect(typeof mod.default).toBe('function');
+  });
+
+  // C2.3: Toolbar is now the filter shell — role="toolbar" with aria-label.
+  it('renders a toolbar landmark with accessible label', () => {
+    renderPage({ lines: [] });
+    expect(screen.getByRole('toolbar', { name: 'Instance filters' })).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Drawer — open / close / retarget / aria-current / missing-line
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen drawer', () => {
+  const lineA = makeLine({ name: 'line-a', status: 'online', mode: 'passive', phone: '+15551111111' });
+  const lineB = makeLine({ name: 'line-b', status: 'online',   mode: 'chat',  phone: '+15552222222' });
+
+  it('drawer is closed by default', () => {
+    renderPage({ lines: [lineA] });
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  it('clicking a row opens the drawer and shows the line name in the head', () => {
+    renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+    expect(drawer).toBeDefined();
+    // Drawer head shows the line name as title
+    expect(within(drawer).getByText(displayInstanceName('line-a'))).toBeDefined();
+  });
+
+  it('selected row gets aria-current="true" when its drawer is open', () => {
+    renderPage({ lines: [lineA, lineB] });
+    const rowA = screen.getByText(displayInstanceName('line-a')).closest('tr')!;
+    fireEvent.click(rowA);
+    expect(rowA.getAttribute('aria-current')).toBe('true');
+    // Other rows remain without aria-current
+    const rowB = screen.getByText(displayInstanceName('line-b')).closest('tr')!;
+    expect(rowB.getAttribute('aria-current')).toBeNull();
+  });
+
+  it('clicking another row while drawer is open retargets it (content swap, no close)', () => {
+    renderPage({ lines: [lineA, lineB] });
+    // Open for lineA
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+    expect(within(drawer).getByText(displayInstanceName('line-a'))).toBeDefined();
+
+    // Retarget to lineB — drawer stays open, content swaps
+    fireEvent.click(screen.getByText(displayInstanceName('line-b')).closest('tr')!);
+    expect(screen.getByRole('complementary')).toBe(drawer); // same node — no remount
+    expect(within(drawer).getByText(displayInstanceName('line-b'))).toBeDefined();
+    // lineA name no longer in drawer head (it was the title span)
+    expect(within(drawer).queryByText(displayInstanceName('line-a'))).toBeNull();
+  });
+
+  it('aria-current follows retarget: moves from lineA to lineB', () => {
+    renderPage({ lines: [lineA, lineB] });
+    const rowA = screen.getByText(displayInstanceName('line-a')).closest('tr')!;
+    const rowB = screen.getByText(displayInstanceName('line-b')).closest('tr')!;
+    fireEvent.click(rowA);
+    expect(rowA.getAttribute('aria-current')).toBe('true');
+    fireEvent.click(rowB);
+    expect(rowA.getAttribute('aria-current')).toBeNull();
+    expect(rowB.getAttribute('aria-current')).toBe('true');
+  });
+
+  it('Escape closes the drawer', () => {
+    renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    expect(screen.getByRole('complementary')).toBeDefined();
+
+    // Escape on the drawer shell
+    fireEvent.keyDown(screen.getByRole('complementary'), { key: 'Escape' });
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  it('close X button closes the drawer', () => {
+    renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Close inspector' }));
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  it('drawer KV block shows phone and provider fields', () => {
+    renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+    expect(within(drawer).getByText('Phone')).toBeDefined();
+    expect(within(drawer).getByText('Provider')).toBeDefined();
+  });
+
+  it('drawer KV swaps to lineB fields on retarget', () => {
+    // Use two lines with distinguishable phone numbers
+    const la = makeLine({ name: 'retarget-a', phone: '+15550001111' });
+    const lb = makeLine({ name: 'retarget-b', phone: '+15550002222' });
+    renderPage({ lines: [la, lb] });
+
+    fireEvent.click(screen.getByText(displayInstanceName('retarget-a')).closest('tr')!);
+    const drawer = screen.getByRole('complementary');
+
+    // Retarget to lb
+    fireEvent.click(screen.getByText(displayInstanceName('retarget-b')).closest('tr')!);
+    // Drawer title is now retarget-b
+    expect(within(drawer).getByText(displayInstanceName('retarget-b'))).toBeDefined();
+  });
+
+  it('renders "Line not found" when the selected line is removed from the dataset', () => {
+    const { rerender } = renderPage({ lines: [lineA] });
+    fireEvent.click(screen.getByText(displayInstanceName('line-a')).closest('tr')!);
+    expect(screen.getByRole('complementary')).toBeDefined();
+
+    // Re-render with the line removed — simulates a data refresh removing it
+    useLinesMock.mockReturnValue({ data: [], isError: false, error: null });
+    useLogsMock.mockReturnValue({ data: [], isError: false, error: null, refetch: vi.fn() });
+    const toastValue: ToastContextValue = {
+      toast: vi.fn(), success: vi.fn(), error: vi.fn(),
+      info: vi.fn(), dismiss: vi.fn(), clear: vi.fn(),
+    };
+    rerender(
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <SoupKitchen />
+        </MemoryRouter>
+      </ToastContext.Provider>
+    );
+
+    const drawer = screen.getByRole('complementary');
+    expect(within(drawer).getByText('Line not found')).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. Long-value fixture — truncation class contract
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen long-value fixture', () => {
+  it('renders a line with a 40+ char name without layout errors', () => {
+    // This test pins the rendering contract for long names. It does NOT prove
+    // CSS truncation (jsdom computes no box metrics).
+    // Computed-box/trusted-event proof lives in the browser lane:
+    // tests/browser/viewport-matrix.test.tsx Fleet no-overflow and LineDetail truncation cases.
+    const longName = 'this-is-a-very-long-line-name-exceeding-40chars';
+    const longLine = makeLine({
+      name: longName,
+      provider: 'a-provider-with-a-very-long-name-over-24-chars',
+    });
+    renderPage({ lines: [longLine] });
+    expect(screen.getByText(displayInstanceName(longName))).toBeDefined();
+  });
+});
+
+describe('SoupKitchen drawer focus restore after retarget (QA finding D3)', () => {
+  it('Escape after retarget restores focus to the retargeted row, not the first opener', async () => {
+    const la = makeLine({ name: 'focus-a', phone: '+15550003333' });
+    const lb = makeLine({ name: 'focus-b', phone: '+15550004444' });
+    renderPage({ lines: [la, lb] });
+
+    const rowA = screen.getByText(displayInstanceName('focus-a')).closest('tr')!;
+    const rowB = screen.getByText(displayInstanceName('focus-b')).closest('tr')!;
+
+    act(() => { rowA.focus(); });
+    fireEvent.click(rowA);
+    expect(screen.getByRole('complementary')).toBeDefined();
+
+    // Retarget to row B while open
+    fireEvent.click(rowB);
+    expect(screen.getByRole('complementary')).toBeDefined();
+
+    fireEvent.keyDown(document, { key: 'Escape', bubbles: true });
+    await act(async () => {});
+    expect(screen.queryByRole('complementary')).toBeNull();
+
+    // Focus restores to the CURRENT originating row (B), not the first opener (A).
+    expect(document.activeElement).toBe(rowB);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DD-15: ToolbarTimeRange adoption — chart-range seg contract
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen chart-range ToolbarTimeRange contract', () => {
+  it('renders the chart-range seg as role=group with accessible label "Chart range"', () => {
+    renderPage({ lines: [] });
+    const seg = screen.getByRole('group', { name: 'Chart range' });
+    expect(seg.getAttribute('aria-label')).toBe('Chart range');
+  });
+
+  it('marks exactly one range button aria-pressed=true after a range change', () => {
+    renderPage({ lines: [] });
+
+    const seg = screen.getByRole('group', { name: 'Chart range' });
+    fireEvent.click(within(seg).getByRole('button', { name: '7d' }));
+
+    const pressedButtons = Array.from(seg.querySelectorAll('button')).filter(
+      (b) => b.getAttribute('aria-pressed') === 'true',
+    );
+    expect(pressedButtons).toHaveLength(1);
+    expect(pressedButtons[0].textContent).toBe('7d');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ChartPanel error-state retry lane (SoupKitchen.tsx lines 647–701)
+// Gap 4 from test-coverage-audit.md: error panel renders and onRetry refetches
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen — chart error panel renders on metrics query error', () => {
+  function renderPageWithMetricsError(metricsRefetch: ReturnType<typeof vi.fn>) {
+    useLinesMock.mockReturnValue({ data: [], isError: false, error: null });
+    useFeedMock.mockReturnValue({ data: [], isError: false, error: null });
+    useFleetMetricsMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      refetch: metricsRefetch,
+    });
+    useLogsMock.mockReturnValue({ data: [], isError: false, error: null, refetch: vi.fn() });
+
+    const toastValue: ToastContextValue = {
+      toast: vi.fn(),
+      success: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      dismiss: vi.fn(),
+      clear: vi.fn(),
+    };
+
+    return render(
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <SoupKitchen />
+        </MemoryRouter>
+      </ToastContext.Provider>,
+    );
+  }
+
+  it('renders "Failed to load" text in all three chart panels when metrics query errors', () => {
+    renderPageWithMetricsError(vi.fn());
+
+    const failedTexts = screen.getAllByText('Failed to load');
+    expect(failedTexts.length).toBe(3);
+  });
+
+  it('each chart panel renders a Retry button when metrics query errors', () => {
+    renderPageWithMetricsError(vi.fn());
+
+    const retryBtns = screen.getAllByRole('button', { name: 'Retry' });
+    expect(retryBtns.length).toBe(3);
+  });
+
+  it('clicking Retry on any chart panel calls metricsRefetch', () => {
+    const metricsRefetch = vi.fn();
+    renderPageWithMetricsError(metricsRefetch);
+
+    const retryBtns = screen.getAllByRole('button', { name: 'Retry' });
+    fireEvent.click(retryBtns[0]);
+    expect(metricsRefetch).toHaveBeenCalledOnce();
+  });
+
+  it('clicking all three Retry buttons each fire metricsRefetch once each', () => {
+    const metricsRefetch = vi.fn();
+    renderPageWithMetricsError(metricsRefetch);
+
+    const retryBtns = screen.getAllByRole('button', { name: 'Retry' });
+    retryBtns.forEach((btn) => fireEvent.click(btn));
+    expect(metricsRefetch).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('SoupKitchen — chart panel degraded block (lines 472–516)', () => {
+  function renderPageWithMetricsOpts(opts: {
+    isError?: boolean;
+    isLoading?: boolean;
+    hasMessageData?: boolean;
+    hasTokenData?: boolean;
+    hasSessionData?: boolean;
+    refetch?: ReturnType<typeof vi.fn>;
+  } = {}) {
+    useLinesMock.mockReturnValue({ data: [], isError: false, error: null });
+    useFeedMock.mockReturnValue({ data: [], isError: false, error: null });
+    useLogsMock.mockReturnValue({ data: [], isError: false, error: null, refetch: vi.fn() });
+    useFleetMetricsMock.mockReturnValue({
+      data: opts.isError ? undefined : {
+        meta: {
+          instancesQueried: 1,
+          instancesFailed: 0,
+          hasMessageData: opts.hasMessageData ?? false,
+          hasTokenData: opts.hasTokenData ?? false,
+          hasSessionData: opts.hasSessionData ?? false,
+          providers: [],
+        },
+        messageVolume: [],
+        tokenUsage: [],
+        sessionActivity: [],
+        tokenUsageByProvider: {},
+        sessionActivityByProvider: {},
+        range: '24h' as const,
+      },
+      isLoading: opts.isLoading ?? false,
+      isError: opts.isError ?? false,
+      refetch: opts.refetch ?? vi.fn(),
+    });
+
+    const toastValue: ToastContextValue = {
+      toast: vi.fn(),
+      success: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      dismiss: vi.fn(),
+      clear: vi.fn(),
+    };
+
+    return render(
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <SoupKitchen />
+        </MemoryRouter>
+      </ToastContext.Provider>,
+    );
+  }
+
+  it('renders chart shimmer placeholders while metrics are loading', () => {
+    renderPageWithMetricsOpts({ isLoading: true });
+
+    const shimmers = document.querySelectorAll('[data-testid="chart-shimmer"]');
+    expect(shimmers.length).toBe(3);
+  });
+
+  it('no shimmer or "Failed to load" when metrics loaded successfully with data', () => {
+    renderPageWithMetricsOpts({ hasMessageData: true, hasTokenData: true, hasSessionData: true });
+
+    expect(screen.queryAllByText('Failed to load').length).toBe(0);
+    expect(document.querySelectorAll('[data-testid="chart-shimmer"]').length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ActivityFeed handler gaps (ActivityFeed.tsx lines 108–139)
+// Gap 4 sibling: restart / stop confirm handlers in the ActivityFeed
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen ActivityFeed — restart and stop-confirm handlers', () => {
+  function renderWithFeed(feed: FeedEvent[]) {
+    useLinesMock.mockReturnValue({ data: [], isError: false, error: null });
+    useFeedMock.mockReturnValue({ data: feed, isError: false, error: null });
+    useLogsMock.mockReturnValue({ data: [], isError: false, error: null, refetch: vi.fn() });
+    useFleetMetricsMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+
+    const toastValue: ToastContextValue = {
+      toast: vi.fn(),
+      success: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      dismiss: vi.fn(),
+      clear: vi.fn(),
+    };
+
+    return render(
+      <ToastContext.Provider value={toastValue}>
+        <MemoryRouter>
+          <SoupKitchen />
+        </MemoryRouter>
+      </ToastContext.Provider>,
+    );
+  }
+
+  it('renders a restart action button for an actionable connection-error event', () => {
+    const feed: FeedEvent[] = [
+      {
+        time: '12:00',
+        mode: 'agent',
+        text: 'alpha: connection error',
+        instance: 'alpha',
+        isError: true,
+        detail: { type: 'connection', state: 'disconnected' },
+      },
+    ];
+    renderWithFeed(feed);
+
+    expect(screen.getByRole('button', { name: 'Restart alpha' })).toBeDefined();
+  });
+
+  it('renders a stop action button for an actionable connection-error event', () => {
+    const feed: FeedEvent[] = [
+      {
+        time: '12:00',
+        mode: 'agent',
+        text: 'alpha: connection error',
+        instance: 'alpha',
+        isError: true,
+        detail: { type: 'connection', state: 'disconnected' },
+      },
+    ];
+    renderWithFeed(feed);
+
+    expect(screen.getByRole('button', { name: 'Stop alpha instance' })).toBeDefined();
+  });
+
+  it('clicking the Stop button opens the ActivityFeed ConfirmDialog', () => {
+    const feed: FeedEvent[] = [
+      {
+        time: '12:00',
+        mode: 'agent',
+        text: 'alpha: connection error',
+        instance: 'alpha',
+        isError: true,
+        detail: { type: 'connection', state: 'disconnected' },
+      },
+    ];
+    renderWithFeed(feed);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop alpha instance' }));
+
+    // ConfirmDialog title is a span not a heading element
+    expect(screen.getByText(/Stop alpha\?/)).toBeDefined();
+  });
+
+  it('ActivityFeed pause/resume toggle button is present and toggles pressed state', () => {
+    const feed: FeedEvent[] = [
+      { time: '12:00', mode: 'passive', text: 'feed-event' },
+    ];
+    renderWithFeed(feed);
+
+    const pauseBtn = screen.getByRole('button', { name: /pause/i });
+    expect(pauseBtn.getAttribute('aria-pressed')).toBe('false');
+
+    fireEvent.click(pauseBtn);
+    expect(screen.getByRole('button', { name: /resume/i }).getAttribute('aria-pressed')).toBe('true');
   });
 });

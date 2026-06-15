@@ -1,6 +1,8 @@
-import { type FC, useState } from 'react'
+import { type FC, useId, useState } from 'react'
+import { Tabs, Tab } from '../primitives/Tabs'
+import { Button } from '../primitives/Button'
 import { Check, Eye, EyeOff } from 'lucide-react'
-import { SelectInput } from './form-primitives'
+import { RadioField, SelectInput, TextInput } from '../primitives'
 import WizardStep from './WizardStep'
 
 interface ModelAuthStepProps {
@@ -64,22 +66,16 @@ const ModelAndKeyTabs: FC<{
 
   return (
     <div className="flex flex-col gap-[var(--sp-4)]">
-      {/* Tab bar */}
-      <div className="flex c-border-b" role="tablist">
-        <button type="button" className={`c-tab ${activeTab === 'anthropic' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'anthropic'} onClick={() => setActiveTab('anthropic')}>
-          Anthropic
-        </button>
-        <button type="button" className={`c-tab ${activeTab === 'openai' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'openai'} onClick={() => setActiveTab('openai')}>
-          OpenAI
-        </button>
-        <button type="button" className="c-tab" title="Coming soon" disabled>
-          Local
-        </button>
-      </div>
+      {/* Tab bar — Tabs primitive: roving tabindex, Arrow/Home/End, MANUAL activation. */}
+      <Tabs label="Model provider" value={activeTab} onChange={(id) => setActiveTab(id as 'anthropic' | 'openai' | 'local')}>
+        <Tab id="anthropic">Anthropic</Tab>
+        <Tab id="openai">OpenAI</Tab>
+        <Tab id="local" disabled disabledReason="Coming soon">Local</Tab>
+      </Tabs>
 
       {/* Anthropic tab */}
       {activeTab === 'anthropic' && (
-        <div className="flex flex-col gap-[var(--sp-3)]">
+        <div role="tabpanel" id="tabpanel-anthropic" aria-labelledby="tab-anthropic" className="flex flex-col gap-[var(--sp-3)]">
           {ANTHROPIC_ROLES.map(({ key, label }) => (
             <div key={key} className="flex flex-col gap-[var(--sp-1)]">
               <label className="c-label c-field-label">{label}</label>
@@ -113,7 +109,7 @@ const ModelAndKeyTabs: FC<{
 
       {/* OpenAI tab */}
       {activeTab === 'openai' && (
-        <div className="flex flex-col gap-[var(--sp-3)]">
+        <div role="tabpanel" id="tabpanel-openai" aria-labelledby="tab-openai" className="flex flex-col gap-[var(--sp-3)]">
           {OPENAI_ROLES.map(({ key, label }) => (
             <div key={key} className="flex flex-col gap-[var(--sp-1)]">
               <label className="c-label c-field-label">{label}</label>
@@ -155,46 +151,49 @@ const ApiKeyInput: FC<{
   helper?: string
   error?: string
 }> = ({ label, value, onChange, placeholder, helper, error }) => {
+  const inputId = useId()
+  const errorId = error ? `${inputId}-error` : undefined
+  const helperId = !error && helper ? `${inputId}-helper` : undefined
   const [visible, setVisible] = useState(false)
   const filled = value.trim().length > 0
 
   return (
     <div className="flex flex-col gap-[var(--sp-1)]">
-      <label className="c-label c-field-label">{label}</label>
+      <label htmlFor={inputId} className="c-label c-field-label">{label}</label>
       <div className="flex items-center gap-[var(--sp-2)]">
         <div className="relative flex-1 min-w-0">
-          <input
+          <TextInput
+            id={inputId}
             type={visible ? 'text' : 'password'}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             placeholder={placeholder}
-            className="c-input w-full font-mono pr-[var(--sp-8)]"
-            style={{
-              borderColor: error ? 'var(--color-s-crit)' : filled ? 'var(--wizard-accent)' : 'var(--b2)',
-            }}
+            className="w-full pr-[var(--sp-8)]"
+            aria-invalid={error ? true : undefined}
+            aria-describedby={errorId ?? helperId}
+            error={Boolean(error)}
+            confirmed={filled}
           />
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="xs"
+            aria-label={visible ? 'Hide API key' : 'Show API key'}
             onClick={() => setVisible((v) => !v)}
-            className="absolute cursor-pointer text-t3"
+            icon={visible ? <EyeOff size={16} /> : <Eye size={16} />}
+            className="absolute right-[var(--sp-2)] top-1/2 -translate-y-1/2 cursor-pointer text-t3"
             style={{
-              right: 'var(--sp-2)',
-              top: '50%',
-              transform: 'translateY(-50%)',
               background: 'none',
               border: 'none',
               padding: 0,
             }}
-          >
-            {visible ? <EyeOff size={16} /> : <Eye size={16} />}
-          </button>
+          />
         </div>
         {!error && filled && (
           <Check size={16} className="wizard-check" />
         )}
       </div>
-      {error && <div className="c-error">{error}</div>}
-      {helper && <span className="c-helper">{helper}</span>}
+      {error && <div id={errorId} className="c-error">{error}</div>}
+      {!error && helper && <span id={helperId} className="c-helper">{helper}</span>}
     </div>
   )
 }
@@ -261,27 +260,25 @@ const AgentView: FC<{
       <div className="flex flex-col gap-[var(--sp-2)]">
         <span className="c-heading">Anthropic Auth</span>
         <div className="flex items-center gap-[var(--sp-2)]">
-          <div className="flex flex-1 min-w-0 gap-[var(--sp-4)]">
-            <label className="flex items-center cursor-pointer gap-[var(--sp-2)] text-t2">
-              <input
-                type="radio"
-                name="authMethod"
-                value="api_key"
-                checked={authMethod === 'api_key'}
-                onChange={() => onChange({ authMethod: 'api_key' })}
-              />
-              <span className="c-body">API Key</span>
-            </label>
-            <label className="flex items-center cursor-pointer gap-[var(--sp-2)] text-t2">
-              <input
-                type="radio"
-                name="authMethod"
-                value="oauth"
-                checked={authMethod === 'oauth'}
-                onChange={() => onChange({ authMethod: 'oauth' })}
-              />
-              <span className="c-body">Existing Claude session</span>
-            </label>
+          <div className="flex flex-1 min-w-0 gap-[var(--sp-4)]" role="radiogroup" aria-label="Anthropic Auth">
+            <RadioField
+              name="authMethod"
+              value="api_key"
+              checked={authMethod === 'api_key'}
+              onChange={() => onChange({ authMethod: 'api_key' })}
+              label="API Key"
+              className="cursor-pointer"
+              labelClassName="c-body"
+            />
+            <RadioField
+              name="authMethod"
+              value="oauth"
+              checked={authMethod === 'oauth'}
+              onChange={() => onChange({ authMethod: 'oauth' })}
+              label="Existing Claude session"
+              className="cursor-pointer"
+              labelClassName="c-body"
+            />
           </div>
           <Check size={16} className="wizard-check" />
         </div>

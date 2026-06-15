@@ -1,0 +1,1572 @@
+/* primitives.css — shape, button, and action-button styles for SOUP v3 primitives.
+   Imported from index.css (after composites).
+   Values reference semantic/component tokens; the only remaining raw px are the
+   badge.md shape-geometry constants (8px shape element, focus outline 2px) which are
+   spec-normative geometry, not theme values — tokenizing them would invite per-use drift.
+   Shapes: badge.md shape law (disc/diamond/square/outline).
+   Buttons: button.md v2.html locked spec. */
+
+/* --------------------------------------------------------------------------
+   STATUS SHAPES — 8px shape element (badge.md § The shape law)
+   Classes: .soup-shape-{ok|warn|crit|off}
+   The shape element itself carries width/height via component token --status-shape-size.
+   -------------------------------------------------------------------------- */
+
+.soup-shape {
+  width: var(--status-shape-size, 8px);
+  height: var(--status-shape-size, 8px);
+  flex: none;
+  position: relative;
+  display: inline-block;
+}
+
+/* disc — online (50% radius) */
+.soup-shape--ok {
+  border-radius: 50%;
+  background: var(--status-ok-solid);
+}
+
+/* diamond — degraded (rotated square, scale 0.92, 1px radius per badge.md) */
+.soup-shape--warn {
+  background: var(--status-warn-solid);
+  rotate: 45deg;
+  scale: 0.92;
+  border-radius: var(--bw); /* 1px radius per badge.md shape spec */
+}
+
+/* square — unreachable (1px radius) */
+.soup-shape--crit {
+  background: var(--status-crit-solid);
+  border-radius: var(--bw); /* 1px radius per badge.md shape spec */
+}
+
+/* outline disc — unlinked (transparent fill, --border-strong ring) */
+.soup-shape--off {
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+/* live halo — ok-disc only, the sole ambient loop (motion.md §8) */
+/* waiver:MOTION-AMBIENT-OK — badge.md explicitly grants this loop */
+.soup-shape--ok.soup-shape--live::after {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--sp-0h)); /* halo ring offset, 3px = sp-0h */
+  border-radius: 50%;
+  border: 1px solid var(--status-ok-solid);
+  opacity: 0;
+  animation: breathe-ring 3s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-shape--ok.soup-shape--live::after {
+    display: none;
+  }
+}
+
+/* breathe-ring keyframe defined in composites.css */
+
+/* --------------------------------------------------------------------------
+   STATUS CELL — [shape] [label] inline-flex row (badge.md § Renderers)
+   -------------------------------------------------------------------------- */
+
+.soup-status-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.soup-status-cell__lbl {
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  color: var(--text-2);
+}
+
+.soup-status-cell__lbl--warn {
+  color: var(--status-warn-fg);
+}
+
+.soup-status-cell__lbl--crit {
+  color: var(--status-crit-fg);
+}
+
+.soup-status-cell__name {
+  font: var(--type-body-st, 500 13px/20px var(--font-sans));
+  color: var(--text-1);
+}
+
+/* --------------------------------------------------------------------------
+   MODE BADGE — 6px square dot (2px radius) + label (badge.md § Renderers)
+   -------------------------------------------------------------------------- */
+
+.soup-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dot-badge); /* 5px gap matches mode-dot scale */
+  font: 500 11px/16px var(--font-sans);
+}
+
+.soup-mode__dot {
+  width: var(--dot-feed);
+  height: var(--dot-feed); /* 6px mode dot per badge.md */
+  border-radius: var(--radius-xs);
+  flex: none;
+}
+
+.soup-mode--passive { color: var(--mode-passive-solid); }
+.soup-mode--passive .soup-mode__dot { background: var(--mode-passive-solid); }
+
+.soup-mode--chat { color: var(--mode-chat-solid); }
+.soup-mode--chat .soup-mode__dot { background: var(--mode-chat-solid); }
+
+.soup-mode--agent { color: var(--mode-agent-solid); }
+.soup-mode--agent .soup-mode__dot { background: var(--mode-agent-solid); }
+
+/* Unknown mode fallback dot — uses neutral text-3 */
+.soup-mode__dot--unknown { background: var(--text-3); }
+
+/* --------------------------------------------------------------------------
+   BUTTON PRIMITIVE — 6 variants × 3 sizes (button.md)
+   Base: height --btn-h (32px), padding --sp-3, gap --sp-2, radius --r-2.
+   Sizes: md (default), sm (28px), xs (24px floor).
+   -------------------------------------------------------------------------- */
+
+.soup-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: var(--btn-h);
+  padding: 0 var(--sp-3);
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  border-radius: var(--r-2, var(--radius-md));
+  border: var(--bw) solid transparent;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-enter),
+    border-color var(--dur-fast) var(--ease-enter),
+    color var(--dur-fast) var(--ease-enter);
+}
+
+/* Focus ring — global 2px, 2px offset; never suppressed */
+.soup-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+/* Disabled — opacity token, cursor not-allowed, variant colours kept */
+.soup-btn[disabled],
+.soup-btn[aria-disabled="true"] {
+  opacity: var(--opacity-disabled);
+  cursor: not-allowed;
+}
+
+/* Size modifiers */
+.soup-btn--sm {
+  height: var(--btn-h-sm);
+  padding: 0 var(--sp-2);
+}
+
+.soup-btn--xs {
+  height: var(--btn-h-xs);
+  padding: 0 var(--sp-2);
+  font: 500 11px/16px var(--font-sans);
+}
+
+/* Variant: primary — --accent fill, --accent-fg ink */
+.soup-btn--primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.soup-btn--primary:not([disabled]):not([aria-disabled="true"]):hover {
+  background: var(--accent-hover);
+}
+
+/* Variant: neutral — --btn-neutral-bg fill, --text-1 ink, --border-strong + shadow-xs */
+.soup-btn--neutral {
+  background: var(--btn-neutral-bg);
+  color: var(--text-1);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-xs);
+}
+.soup-btn--neutral:not([disabled]):not([aria-disabled="true"]):hover {
+  background: var(--btn-neutral-bg-hover);
+}
+
+/* Variant: ghost — no fill, --text-2 ink */
+.soup-btn--ghost {
+  color: var(--text-2);
+}
+.soup-btn--ghost:not([disabled]):not([aria-disabled="true"]):hover {
+  color: var(--text-1);
+  background: var(--btn-neutral-bg);
+}
+
+/* Variant: danger — crit channel wash */
+.soup-btn--danger {
+  background: var(--status-crit-wash);
+  color: var(--status-crit-fg);
+  border-color: var(--status-crit-border);
+}
+.soup-btn--danger:not([disabled]):not([aria-disabled="true"]):hover {
+  background: color-mix(in srgb, var(--status-crit-solid) 18%, transparent);
+}
+
+/* Variant: success — ok channel wash */
+.soup-btn--success {
+  background: var(--status-ok-wash);
+  color: var(--status-ok-fg);
+  border-color: var(--status-ok-border);
+}
+.soup-btn--success:not([disabled]):not([aria-disabled="true"]):hover {
+  background: color-mix(in srgb, var(--status-ok-solid) 18%, transparent);
+}
+
+/* Variant: warning — warn channel wash */
+.soup-btn--warning {
+  background: var(--status-warn-wash);
+  color: var(--status-warn-fg);
+  border-color: var(--status-warn-border);
+}
+.soup-btn--warning:not([disabled]):not([aria-disabled="true"]):hover {
+  background: color-mix(in srgb, var(--status-warn-solid) 18%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   ACTION BUTTON — icon-action with reveal-label mechanic (button.md)
+   28×28px minimum hit area; label expands on hover/focus-visible.
+   waiver:MOTION-LABEL-REVEAL — button.md §ActionButton max-width animation sanctioned.
+   -------------------------------------------------------------------------- */
+
+.soup-actbtn {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--input-btn);
+  min-width: var(--input-btn); /* 28px hit area = input-btn token */
+  padding: 0 var(--sp-1h);
+  justify-content: center;
+  color: var(--text-2);
+  border-radius: var(--r-1, var(--radius-sm));
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-enter),
+    background-color var(--dur-fast) var(--ease-enter);
+}
+
+.soup-actbtn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+.soup-actbtn:hover,
+.soup-actbtn:focus-visible {
+  color: var(--text-1);
+  background: var(--btn-neutral-bg);
+}
+
+/* Danger flavor */
+.soup-actbtn--danger:hover,
+.soup-actbtn--danger:focus-visible {
+  color: var(--status-crit-fg);
+  background: var(--status-crit-wash);
+}
+
+/* Reveal label — ONE mechanic (DUP-01 consolidation) */
+.soup-actbtn__label {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  transition:
+    max-width var(--dur-fast) var(--ease-enter),
+    opacity var(--dur-fast) var(--ease-linear),
+    margin-left var(--dur-fast) var(--ease-enter);
+}
+
+.soup-actbtn:hover .soup-actbtn__label,
+.soup-actbtn:focus-visible .soup-actbtn__label {
+  max-width: var(--feed-preview-max); /* 120px reveal-label cap per button.md */
+  opacity: 1;
+  margin-left: var(--sp-1h);
+}
+
+/* Reduced motion: label appears instantly, no width animation */
+@media (prefers-reduced-motion: reduce) {
+  .soup-actbtn__label {
+    transition: none;
+  }
+  .soup-actbtn:hover .soup-actbtn__label,
+  .soup-actbtn:focus-visible .soup-actbtn__label {
+    max-width: var(--feed-preview-max); /* 120px reveal-label cap per button.md */
+    opacity: 1;
+    margin-left: var(--sp-1h);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   MODAL PRIMITIVE — backdrop + shell + header/body/footer (modal.md)
+   Enter: fade + scale(0.985) + 8px rise, --dur-base --ease-enter.
+   Exit:  --dur-fast --ease-exit (faster out per motion.md §5).
+   Reduced-motion: appear/disappear instantly (global policy handles this).
+   -------------------------------------------------------------------------- */
+
+/* Backdrop — fixed scrim, z-overlay */
+.soup-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: clamp(var(--sp-8), 8dvh, 80px);
+  z-index: var(--z-overlay);
+  animation: soup-modal-backdrop-in var(--dur-base) var(--ease-linear) forwards;
+}
+
+/* Shell — elevated surface */
+.soup-modal-shell {
+  background: var(--surface-overlay);
+  border: var(--bw) solid var(--border-subtle);
+  border-radius: var(--r-3, var(--radius-lg));
+  box-shadow: var(--shadow-overlay);
+  max-height: var(--modal-max-h);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: soup-modal-shell-in var(--dur-base) var(--ease-enter) forwards;
+  outline: none; /* focus ring applied via :focus-visible below */
+}
+
+.soup-modal-shell:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+/* Exit animation — applied via data-state="closing" when the presence hook
+   sets the closing phase. The -out keyframes are the reverse of -in.
+   modal.md §States: --dur-fast (120ms) --ease-exit, scrim linear out in parallel. */
+
+/* Closing backdrop: pointer-events off so the next click lands instantly (motion.md §10) */
+.soup-modal-backdrop[data-state="closing"] {
+  animation: soup-modal-backdrop-out var(--dur-fast) var(--ease-linear) forwards;
+  pointer-events: none;
+}
+
+/* Closing shell */
+.soup-modal-shell[data-state="closing"] {
+  animation: soup-modal-shell-out var(--dur-fast) var(--ease-exit) forwards;
+}
+
+/* Size modifiers (modal.md: sm/md/lg) — width consumed from --modal-w-* (DD-18r SSOT) */
+.soup-modal-shell--sm {
+  width: min(var(--modal-w-sm), calc(100% - var(--sp-8)));
+}
+
+.soup-modal-shell--md {
+  width: min(var(--modal-w-md), calc(100% - var(--sp-8)));
+}
+
+.soup-modal-shell--lg {
+  width: min(var(--modal-w-lg), calc(100% - var(--sp-8)));
+}
+
+/* Header — title + optional close X */
+.soup-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: var(--bw) solid var(--border-hairline);
+  flex: none;
+}
+
+.soup-modal-title {
+  font: var(--type-heading, 600 13px/20px var(--font-sans));
+  color: var(--text-1);
+}
+
+/* Body — scrollable, grid layout per modal.md */
+.soup-modal-body {
+  padding: var(--sp-5);
+  overflow-y: auto;
+  flex: 1 1 auto;
+  display: grid;
+  gap: var(--sp-4);
+  align-content: start;
+}
+
+/* Footer — right-aligned actions; split variant for note + actions */
+.soup-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5);
+  border-top: var(--bw) solid var(--border-hairline);
+  flex: none;
+}
+
+.soup-modal-footer__note {
+  flex: 1 1 auto;
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  color: var(--text-2);
+}
+
+.soup-modal-footer__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+/* Enter keyframes — modal.md: fade + 8px rise + scale 0.985 */
+@keyframes soup-modal-backdrop-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes soup-modal-shell-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Exit keyframes — reverse of enter (B5 DD-19): fade + 8px drop + scale 0.985 */
+@keyframes soup-modal-backdrop-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+@keyframes soup-modal-shell-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+
+/* Reduced motion: appear/disappear instantly (off-and-instant, motion.md §9).
+   Covers both enter and exit animations — open state and closing state. */
+@media (prefers-reduced-motion: reduce) {
+  .soup-modal-backdrop,
+  .soup-modal-backdrop[data-state="closing"],
+  .soup-modal-shell,
+  .soup-modal-shell[data-state="closing"] {
+    animation: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   PILL PRIMITIVE — tone × size × static/interactive/removable (pill.md)
+   Base: height 20px static (24px interactive — target floor), font 500 11/16
+   sans, 0.01em tracking, radius --r-1, 1px border, inline-flex.
+   -------------------------------------------------------------------------- */
+
+.soup-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  height: 20px;
+  padding: 0 var(--sp-2);
+  font: 500 11px/16px var(--font-sans);
+  letter-spacing: var(--tracking-pill, 0.01em);
+  border-radius: var(--r-1, var(--radius-sm));
+  border: var(--bw) solid transparent;
+  white-space: nowrap;
+  flex: none;
+}
+
+/* Size modifier: sm — 16px height */
+.soup-pill--sm {
+  height: 16px;
+  padding: 0 var(--sp-1);
+  font: 500 10px/14px var(--font-sans);
+}
+
+/* Interactive: must be a <button> with 24px height target floor (pill.md §Anatomy) */
+button.soup-pill,
+.soup-pill--interactive {
+  height: 24px;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-enter),
+    background-color var(--dur-fast) var(--ease-enter),
+    color var(--dur-fast) var(--ease-enter);
+}
+
+button.soup-pill--sm,
+.soup-pill--sm.soup-pill--interactive {
+  height: var(--btn-h-xs);
+  min-width: var(--btn-h-xs);
+}
+
+button.soup-pill:focus-visible,
+.soup-pill--interactive:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+/* Hover: border -> --border-strong */
+button.soup-pill:not([disabled]):hover,
+.soup-pill--interactive:not([disabled]):hover {
+  border-color: var(--border-strong);
+}
+
+/* Pressed/selected: ink --text-1, border --accent, fill --accent-wash */
+.soup-pill--pressed,
+button.soup-pill[aria-pressed="true"] {
+  color: var(--text-1) !important;
+  border-color: var(--accent) !important;
+  background: var(--accent-wash) !important;
+}
+
+/* Disabled */
+button.soup-pill[disabled],
+button.soup-pill[aria-disabled="true"] {
+  opacity: var(--opacity-disabled);
+  cursor: not-allowed;
+}
+
+/* Reduced motion: remove border transition */
+@media (prefers-reduced-motion: reduce) {
+  button.soup-pill,
+  .soup-pill--interactive {
+    transition: none;
+  }
+}
+
+/* Removable: layout for label + remove button */
+.soup-pill--removable {
+  gap: var(--sp-1h);
+}
+
+.soup-pill__label {
+  flex: 1 1 auto;
+}
+
+.soup-pill__count {
+  font: 600 10px/14px var(--font-sans);
+  min-width: var(--sp-4);
+  text-align: center;
+  border-radius: var(--radius-xs);
+  padding: 0 var(--sp-1);
+}
+
+/* Remove button — override ActionButton to fit within pill.
+   Visual glyph stays 16px; the pointer target is expanded to the 24px floor by
+   the pseudo-element below. jsdom cannot prove the computed box — the DD-10
+   browser suite measures it in real Chromium. */
+.soup-pill__remove.soup-actbtn {
+  min-height: 16px;
+  min-width: 16px;
+  padding: 0;
+  margin: 0 calc(-1 * var(--sp-1));
+  opacity: 0.7;
+  position: relative;
+}
+
+.soup-pill__remove.soup-actbtn::before {
+  content: '';
+  position: absolute;
+  /* 16px glyph + 2x4px reach = 24px in both axes */
+  inset: calc(-1 * var(--sp-1));
+}
+
+.soup-pill__remove.soup-actbtn:hover,
+.soup-pill__remove.soup-actbtn:focus-visible {
+  opacity: 1;
+}
+
+/* ── Tone: neutral ── */
+.soup-pill--neutral {
+  color: var(--text-2);
+  background: var(--btn-neutral-bg);
+  border-color: var(--border-subtle);
+}
+
+.soup-pill__count {
+  background: var(--border-strong);
+  color: var(--text-1);
+}
+
+/* ── Tone: ok ── */
+.soup-pill--ok {
+  color: var(--status-ok-fg);
+  background: var(--status-ok-wash);
+  border-color: var(--status-ok-border);
+}
+
+/* ── Tone: warn ── */
+.soup-pill--warn {
+  color: var(--status-warn-fg);
+  background: var(--status-warn-wash);
+  border-color: var(--status-warn-border);
+}
+
+/* ── Tone: crit ── */
+.soup-pill--crit {
+  color: var(--status-crit-fg);
+  background: var(--status-crit-wash);
+  border-color: var(--status-crit-border);
+}
+
+/* ── Tone: passive ── */
+.soup-pill--passive {
+  color: var(--mode-passive-fg);
+  background: var(--mode-passive-wash);
+  border-color: var(--mode-passive-border);
+}
+
+/* ── Tone: chat ── */
+.soup-pill--chat {
+  color: var(--mode-chat-fg);
+  background: var(--mode-chat-wash);
+  border-color: var(--mode-chat-border);
+}
+
+/* ── Tone: agent ── */
+.soup-pill--agent {
+  color: var(--mode-agent-fg);
+  background: var(--mode-agent-wash);
+  border-color: var(--mode-agent-border);
+}
+
+/* ── Tone: accent ── */
+.soup-pill--accent {
+  color: var(--accent);
+  background: var(--accent-wash);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   TABLE PRIMITIVE — soup-table* (table.md)
+   Outer wrap: --surface-raised, 1px --border-hairline, --r-2, --shadow-raised,
+               overflow-x auto (governed scroll region).
+   thead th: sticky ghost headers, --type-overline, --text-2, 28px,
+             --surface-raised fill, --border-subtle bottom, z above rows.
+   tbody tr: height via --row-default (36px) / --row-compressed (28px) tokens.
+   td default: truncation (white-space nowrap + ellipsis); td.num: right-aligned
+               tabular figures mono lane.
+   Severity rows: channel wash fill + 2px inset left edge (warn/crit only).
+   Interactive rows: pointer cursor, focusable, hover wash (--row-hover).
+   -------------------------------------------------------------------------- */
+
+/* Outer wrap — scrollable surface card */
+.soup-tblwrap {
+  background: var(--surface-raised);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--r-2, var(--radius-md));
+  box-shadow: var(--shadow-raised);
+  overflow-x: auto;
+}
+
+/* Table element — border-collapse separate, spacing 0 */
+.soup-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: auto;
+}
+
+/* thead — sticky ghost header band */
+.soup-table-thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* th — overline style header, 28px height, surface-raised fill */
+.soup-table-th {
+  height: 28px;
+  padding: 0 var(--sp-3);
+  background: var(--surface-raised);
+  border-bottom: var(--bw) solid var(--border-subtle);
+  font: var(--type-overline, 500 10px/16px var(--font-sans));
+  letter-spacing: var(--tracking-caps, 0.08em);
+  text-transform: uppercase;
+  color: var(--text-2);
+  text-align: left;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* Sort button inside th — inline-flex, no visual chrome, full th height.
+   Visual glyph/text stays at font-derived height (~16px); the pointer target
+   is expanded to the 24px floor via the ::before pseudo-element below
+   (same mechanism as .soup-pill__remove — 16px + 2×4px = 24px, sp-1=4px).
+   The th has no overflow:hidden so the pseudo-element is not clipped. */
+.soup-table-th__sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  position: relative; /* anchor for ::before hit-extension */
+}
+
+/* Hit-area extension — 16px visual + 2×4px = 24px effective target (WCAG 2.2 §2.5.8).
+   sp-1 = 4px. The th carries no overflow clip so the extension reaches out freely.
+   jsdom class-contract pin: primitives-table.test.tsx §sort-btn-hit-extension. */
+.soup-table-th__sort-btn::before {
+  content: '';
+  position: absolute;
+  inset: calc(-1 * var(--sp-1));
+}
+
+.soup-table-th__sort-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+  border-radius: var(--radius-xs);
+}
+
+/* Sort glyph — inline, no animation (table.md: instant) */
+.soup-table-th__sort-glyph {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+/* tbody */
+.soup-table-tbody {
+  /* no extra styles — rows carry all geometry */
+}
+
+/* Row base */
+.soup-table-row {
+  height: var(--row-default, 36px);
+  border-bottom: var(--bw) solid var(--border-hairline);
+}
+
+/* Compressed density — driven by data-density attribute on the wrap */
+.soup-tblwrap[data-density="compressed"] .soup-table-row {
+  height: var(--row-compressed, 28px);
+}
+
+/* Interactive row — pointer cursor, hover wash, focus ring */
+.soup-table-row--interactive {
+  cursor: pointer;
+}
+
+.soup-table-row--interactive:hover {
+  background: var(--row-hover);
+}
+
+.soup-table-row--interactive:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px; /* inset ring stays inside the row */
+}
+
+/* Severity: warn — channel wash fill + 2px inset left edge */
+.soup-table-row--warn {
+  background: var(--status-warn-wash);
+  box-shadow: inset 2px 0 0 var(--status-warn-solid);
+}
+
+.soup-table-row--warn:hover {
+  background: color-mix(in srgb, var(--status-warn-solid) 16%, transparent);
+}
+
+/* Severity: crit — channel wash fill + 2px inset left edge */
+.soup-table-row--crit {
+  background: var(--status-crit-wash);
+  box-shadow: inset 2px 0 0 var(--status-crit-solid);
+}
+
+.soup-table-row--crit:hover {
+  background: color-mix(in srgb, var(--status-crit-solid) 16%, transparent);
+}
+
+/* Current/selected row — accent wash + inset accent edge */
+.soup-table-row--current {
+  background: var(--accent-wash);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* State rows (empty/error/loading) */
+.soup-table-row--state {
+  height: auto;
+}
+
+.soup-table-row--skeleton {
+  height: var(--row-default, 36px);
+}
+
+.soup-tblwrap[data-density="compressed"] .soup-table-row--skeleton {
+  height: var(--row-compressed, 28px);
+}
+
+/* td base — truncation by default */
+.soup-table-td {
+  padding: 0 var(--sp-3);
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0; /* required for ellipsis on table cells */
+  vertical-align: middle;
+}
+
+/* Compressed density td type */
+.soup-tblwrap[data-density="compressed"] .soup-table-td {
+  font: var(--type-caption, 400 11px/16px var(--font-sans));
+}
+
+/* Numeric / data lane — right-aligned, tabular figures, mono */
+.soup-table-td--num {
+  font: var(--type-data, 400 12px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+  text-align: right;
+  color: var(--text-2);
+}
+
+.soup-tblwrap[data-density="compressed"] .soup-table-td--num {
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+}
+
+/* State td — centered message layout */
+.soup-table-td--state {
+  text-align: center;
+  padding: var(--sp-6) var(--sp-3);
+  white-space: normal;
+  overflow: visible;
+  max-width: none;
+}
+
+.soup-table-td--error {
+  color: var(--status-crit-fg);
+}
+
+.soup-table-state-msg {
+  display: block;
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+  color: var(--text-2);
+}
+
+.soup-table-state-msg--error {
+  color: var(--status-crit-fg);
+}
+
+.soup-table-state-remedy {
+  display: block;
+  margin-top: var(--sp-2);
+}
+
+/* Ghost em-dash — text-3 tier for absent values */
+.soup-table-ghost {
+  color: var(--text-3);
+  font: var(--type-data, 400 12px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+}
+
+/* Skeleton bar — placeholder geometry */
+.soup-table-skeleton-bar {
+  display: block;
+  height: 10px;
+  border-radius: var(--radius-xs);
+  background: var(--btn-neutral-bg);
+  width: 60%;
+}
+
+/* Reduced motion: remove row-hover transition */
+@media (prefers-reduced-motion: reduce) {
+  .soup-table-row--interactive:hover {
+    background: var(--row-hover);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   TOOLBAR PRIMITIVE — soup-toolbar* (toolbar.md)
+   Shell: --surface-raised, 1px --border-hairline, --r-2, --shadow-raised,
+          padding --sp-2 --sp-3, flex wrap, gap --sp-2.
+   Flush variant: no radius/side borders — joins its table/log block.
+   Density: 28px controls by construction.
+   -------------------------------------------------------------------------- */
+
+/* Toolbar shell */
+.soup-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-raised);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--r-2, var(--radius-md));
+  box-shadow: var(--shadow-raised);
+}
+
+/* Flush variant — no radius/side borders, joins the table/log block */
+.soup-toolbar--flush {
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+}
+
+/* Filter group — role="group", interactive Pills */
+.soup-toolbar-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* Segmented time-range control */
+.soup-toolbar-seg {
+  display: inline-flex;
+  align-items: center;
+  border: var(--bw) solid var(--border-strong);
+  border-radius: var(--r-1, var(--radius-sm));
+  overflow: hidden;
+  flex: none;
+}
+
+/* Seg button — 24px height, data-sm type, pressed = accent fill */
+.soup-toolbar-seg__btn {
+  height: 24px;
+  padding: 0 var(--sp-2);
+  font: var(--type-data-sm, 500 11px/16px var(--font-sans));
+  color: var(--text-2);
+  background: none;
+  border: none;
+  border-right: var(--bw) solid var(--border-strong);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-fast) var(--ease-enter),
+    color var(--dur-fast) var(--ease-enter);
+}
+
+.soup-toolbar-seg__btn:last-child {
+  border-right: none;
+}
+
+.soup-toolbar-seg__btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.soup-toolbar-seg__btn:not([aria-pressed="true"]):hover {
+  background: var(--btn-neutral-bg-hover);
+  color: var(--text-1);
+}
+
+.soup-toolbar-seg__btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px; /* inset, stays inside the seg frame */
+}
+
+/* Search input wrapper */
+.soup-toolbar-search-wrap {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+}
+
+/* Visually hide the label text while keeping it accessible */
+.soup-toolbar-search__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Search input — 28px height, width from component token */
+.soup-toolbar-search {
+  height: 28px;
+  width: var(--toolbar-search-w, 200px);
+  padding: 0 var(--sp-2);
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+  color: var(--text-1);
+  background: var(--surface-inset);
+  border: var(--bw) solid var(--border-subtle);
+  border-radius: var(--r-1, var(--radius-sm));
+}
+
+.soup-toolbar-search::placeholder {
+  color: var(--text-3);
+}
+
+.soup-toolbar-search:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+  border-color: var(--focus-ring);
+}
+
+/* Spring — fills available horizontal space */
+.soup-toolbar-spring {
+  flex: 1 1 auto;
+}
+
+/* Reduced motion: remove seg button transitions */
+@media (prefers-reduced-motion: reduce) {
+  .soup-toolbar-seg__btn {
+    transition: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   LOG STREAM PRIMITIVE — soup-log* (log-stream.md)
+   Four-lane grid: time --log-time-w · level --log-level-w · source --log-source-w · msg 1fr.
+   Lane widths are component tokens (tokens.component.css).
+   Container: --surface-inset, 1px --border-hairline, max-height + overflow auto, role="list".
+   Rows: 24px min-height, hairline rules, role="listitem", tabindex 0, snap expand (no slide).
+   Level tags: 18×16px chip, 600 9px mono, per-level fg + border + wash (triple channel).
+   -------------------------------------------------------------------------- */
+
+/* Log container */
+.soup-log {
+  background: var(--surface-inset);
+  border: var(--bw) solid var(--border-hairline);
+  overflow-y: auto;
+}
+
+/* Compressed density — 28px rows */
+.soup-log--compressed .soup-log__row {
+  min-height: var(--row-compressed, 28px);
+}
+
+/* Row base */
+.soup-log__row {
+  min-height: var(--row-default, 36px);
+  border-bottom: var(--bw) solid var(--border-hairline);
+  cursor: pointer;
+}
+
+.soup-log__row:last-child {
+  border-bottom: none;
+}
+
+.soup-log__row:hover {
+  background: var(--row-hover);
+}
+
+.soup-log__row.is-open {
+  background: var(--row-hover);
+}
+
+/* Focus ring — inset so it stays inside the row */
+.soup-log__row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Severity row tints — message ink (warn fg / crit fg) applied to the msg span */
+.soup-log__row--warn .soup-log__msg {
+  color: var(--status-warn-fg);
+}
+
+.soup-log__row--error .soup-log__msg {
+  color: var(--status-crit-fg);
+}
+
+/* Four-lane grid — spec-normative widths via component tokens */
+.soup-log__grid {
+  display: grid;
+  grid-template-columns:
+    var(--log-time-w, 72px)
+    var(--log-level-w, 24px)
+    var(--log-source-w, 96px)
+    1fr;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  min-height: inherit;
+}
+
+/* Time lane — --type-data-sm, --text-2, monospaced tabular figures.
+   DD-8 decision (Option B): time is essential scan-anchor text, so it carries
+   --text-2 (AA on the log bed in both themes); recession comes from the 11px
+   data-sm size and mono weight, not sub-AA ink. */
+.soup-log__time {
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Level tag — 18×16px chip, 600 9px mono, per-level color+border+wash (triple channel) */
+.soup-log__lvl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 16px;
+  font: 600 9px/1 var(--font-mono);
+  border: var(--bw) solid;
+  border-radius: var(--radius-xs);
+  flex: none;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+/* info — neutral: --text-2 fg, --border-strong border, no wash fill */
+.soup-log__lvl--info {
+  color: var(--text-2);
+  border-color: var(--border-strong);
+  background: transparent;
+}
+
+/* debug — text-3 + dashed border */
+.soup-log__lvl--debug {
+  color: var(--text-3);
+  border-color: var(--text-3);
+  border-style: dashed;
+  background: transparent;
+}
+
+/* warn — warn channel: warn fg + warn border + warn wash */
+.soup-log__lvl--warn {
+  color: var(--status-warn-fg);
+  border-color: var(--status-warn-border);
+  background: var(--status-warn-wash);
+}
+
+/* error — crit channel: crit fg + crit border + crit wash */
+.soup-log__lvl--error {
+  color: var(--status-crit-fg);
+  border-color: var(--status-crit-border);
+  background: var(--status-crit-wash);
+}
+
+/* Source lane — --type-data-sm, --text-2, ellipsis (title attr carries full value) */
+.soup-log__source {
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Message lane — wraps multi-word; breaks long tokens (overflow-wrap: anywhere).
+   Note: class-level assertion in tests confirms the wrap policy is applied;
+   visual proof that wrapping actually occurs requires a layout engine. */
+.soup-log__msg {
+  font: var(--type-data-sm, 400 11px/16px var(--font-sans));
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+  min-width: 0;
+}
+
+/* Detail bed — expanded context; snaps (no slide per motion.md §5, table inline-expand rule) */
+.soup-log__detail {
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) calc(var(--log-time-w, 72px) + var(--log-level-w, 24px) + var(--log-source-w, 96px) + var(--sp-6));
+  background: var(--surface-inset);
+  border-top: var(--bw) solid var(--border-hairline);
+}
+
+.soup-log__detail-component {
+  display: block;
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  color: var(--text-2); /* DD-8 Option B: essential component name, AA ink */
+  margin-bottom: var(--sp-1);
+}
+
+.soup-log__detail-pre {
+  margin: 0;
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* State rows — empty / error / loading */
+.soup-log__state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-3);
+  text-align: center;
+}
+
+.soup-log__state-msg {
+  display: block;
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+  color: var(--text-2);
+}
+
+.soup-log__state--error .soup-log__state-msg {
+  color: var(--status-crit-fg);
+}
+
+.soup-log__state-retry {
+  margin-top: var(--sp-1);
+}
+
+/* Reduced motion: hover wash already instant (no transition on rows) */
+
+/* --------------------------------------------------------------------------
+   DRAWER PRIMITIVE — soup-drawer* (drawer.md)
+   Width: --drawer-w = min(360px, 86%) (component token).
+   Anatomy: head (status shape + title + mode badge + spring + close X) · body (scrolls) · footer.
+   Enter: translateX(100%→0) at --dur-slow --ease-enter.
+   Exit: translateX(0→100%) at --dur-base --ease-exit (180ms, DD-19 closed).
+   Squeeze mode (≥900px container): flex sibling, no scrim, role="complementary".
+   Overlay mode (<900px container): absolute right-0, scrim covers content.
+   Squeeze proof is INCONCLUSIVE in jsdom — manual QA + D7 viewport tests cover it.
+   -------------------------------------------------------------------------- */
+
+/* DrawerLayout — container query root */
+.soup-drawer-layout {
+  position: relative;
+  display: flex;
+  container-type: inline-size;
+  overflow: hidden;
+}
+
+/* Content region — shrinks to give drawer room in squeeze mode */
+.soup-drawer-layout__content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Scrim — visible in overlay mode only; hidden in squeeze mode via container query */
+.soup-drawer-scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+  z-index: calc(var(--z-overlay) - 1);
+}
+
+/* Drawer shell — overlay mode default (absolute, slides in from the right) */
+.soup-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--drawer-w, min(360px, 86%));
+  background: var(--surface-overlay);
+  border-left: var(--bw) solid var(--border-subtle);
+  box-shadow: var(--shadow-overlay);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: var(--z-overlay);
+  /* Enter animation: translateX(100%→0) */
+  animation: soup-drawer-in var(--dur-slow) var(--ease-enter) forwards;
+  outline: none;
+}
+
+/* Closing drawer shell: slide back out to the right (B5 DD-19) */
+.soup-drawer[data-state="closing"] {
+  animation: soup-drawer-out var(--dur-base) var(--ease-exit) forwards;
+}
+
+/* Closing scrim: fades out in parallel — overlay mode only (hidden in squeeze via container query) */
+.soup-drawer-scrim[data-state="closing"] {
+  animation: soup-drawer-scrim-out var(--dur-base) var(--ease-linear) forwards;
+  pointer-events: none;
+}
+
+.soup-drawer:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+/* Squeeze mode: at ≥900px container width the drawer is a flex sibling.
+   No scrim. Drawer becomes position:static so it participates in layout flow. */
+@container (min-width: 900px) {
+  .soup-drawer-scrim {
+    display: none;
+  }
+
+  .soup-drawer {
+    position: static;
+    flex: 0 0 var(--drawer-w, min(360px, 86%));
+    box-shadow: none;
+    z-index: auto;
+    border-left: var(--bw) solid var(--border-subtle);
+  }
+}
+
+/* Enter keyframe — translateX 100%→0 (motion.md §5 Drawer) */
+@keyframes soup-drawer-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+/* Exit keyframe — translateX 0→100% (B5 DD-19 closed) */
+@keyframes soup-drawer-out {
+  from { transform: translateX(0); }
+  to   { transform: translateX(100%); }
+}
+
+/* Scrim fade-out keyframe (overlay mode) */
+@keyframes soup-drawer-scrim-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* Reduced motion: appear/disappear instantly (off-and-instant, motion.md §9).
+   Covers both enter and exit animations — open state and closing state. */
+@media (prefers-reduced-motion: reduce) {
+  .soup-drawer,
+  .soup-drawer[data-state="closing"],
+  .soup-drawer-scrim[data-state="closing"] {
+    animation: none;
+  }
+}
+
+/* Head — status shape + title + mode badge + spring + close X */
+.soup-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: var(--bw) solid var(--border-hairline);
+  flex: none;
+}
+
+.soup-drawer-head__shape {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.soup-drawer-head__title {
+  font: var(--type-heading, 600 13px/20px var(--font-sans));
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.soup-drawer-head__badge {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.soup-drawer-head__spring {
+  flex: 1 1 auto;
+}
+
+/* Body — scrollable */
+.soup-drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+/* Footer — pinned at bottom */
+.soup-drawer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: var(--bw) solid var(--border-hairline);
+  flex: none;
+}
+
+/* ───────────────────────── soup-tabs (tabs.md) ─────────────────────────
+   Tablist with hairline baseline rule; selected = 2px accent underline flush
+   to the rule. Switches are instant — no indicator transition by design. */
+.soup-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--border-hairline);
+  overflow-x: auto;            /* governed overflow valve — tabs never wrap */
+  scrollbar-width: none;
+}
+.soup-tabs::-webkit-scrollbar { display: none; }
+.soup-tabs--inset { padding: 0 var(--sp-4); }
+.soup-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  color: var(--text-2);
+  border-radius: var(--r-1, var(--radius-sm)) var(--r-1, var(--radius-sm)) 0 0;
+  position: relative;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.soup-tab:hover { color: var(--text-1); }
+.soup-tab--selected { color: var(--text-1); }
+.soup-tab--selected::after {
+  content: '';
+  position: absolute;
+  left: var(--sp-2);
+  right: var(--sp-2);
+  bottom: -1px;                /* flush over the baseline rule */
+  height: 2px;
+  background: var(--accent);
+}
+.soup-tab--disabled { color: var(--text-3); cursor: not-allowed; }
+.soup-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.soup-tab__reason {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.soup-tabpanel { padding: var(--sp-3) 0; }
+
+/* ───────────────────────── soup-popover (select.md § Anatomy) ──────────────
+   Anchored panel for custom combobox picker surfaces (B2 Popover primitive).
+   Panel: --surface-overlay fill, 1px --border-subtle, --r-2, --shadow-overlay.
+   min-width governed by --popover-min-w token or by trigger width (span variant).
+   max-height + overflow-y: auto — governed scroll valve (~5 rows visible).
+   Option rows: 28px compressed density (--row-compressed), hover --row-hover,
+   selected --accent-wash + leading check mark.
+   Motion: fade+scale enter at --dur-fast; exit = instant on unmount (DD-19 pattern).
+   Reduced-motion: both instant via the global @media prefers-reduced-motion block. */
+
+.soup-popover {
+  position: absolute;
+  z-index: var(--z-overlay, 100);
+  background: var(--surface-overlay);
+  border: var(--bw) solid var(--border-subtle);
+  border-radius: var(--r-2, var(--radius-md));
+  box-shadow: var(--shadow-overlay);
+  min-width: var(--popover-min-w, 200px);
+  max-height: var(--popover-max-h, 200px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  animation: soup-popover-in var(--dur-fast) var(--ease-enter) forwards;
+}
+
+@keyframes soup-popover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-popover {
+    animation: none;
+  }
+}
+
+.soup-popover__list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+
+/* Option row — 28px compressed row (select.md § Anatomy) */
+.soup-popover__option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--row-compressed, 28px);
+  padding: 0 var(--sp-3);
+  cursor: pointer;
+  user-select: none;
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  color: var(--text-1);
+  position: relative;
+}
+
+.soup-popover__option:hover,
+.soup-popover__option--active {
+  background: var(--row-hover);
+}
+
+/* Selected row: accent-wash fill */
+.soup-popover__option--selected {
+  background: var(--accent-wash);
+  color: var(--text-1);
+}
+
+.soup-popover__option--selected:hover,
+.soup-popover__option--selected.soup-popover__option--active {
+  background: var(--accent-wash);
+}
+
+/* Leading 16px check mark (select.md § Anatomy) */
+.soup-popover__check {
+  display: inline-block;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  position: relative;
+}
+
+.soup-popover__check::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 2px;
+  width: 6px;
+  height: 10px;
+  border-right: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  transform: rotate(45deg);
+}
+
+/* Option label — truncate long names; no panel widening */
+.soup-popover__option-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --------------------------------------------------------------------------
+   INBOX LAYOUT BAND — soup-inbox-layout / soup-inbox-contact (DD-18r)
+   Container query root: the Inbox page flex root carries container-type so
+   the contact-pane collapse is expressed as a container query, not a viewport
+   query (layout-density §5; C2.3 squeeze idiom, second use after soup-drawer-layout).
+   Threshold: ~1080px — "inbox loses contact pane" per layout-density §5, pinned
+   at 1080px container width per C-B4-2.
+   Below 1080px: contact pane is removed from layout (display:none). The chat-list
+   keeps its --inbox-pane-chats fixed width; the thread flexes into the freed space.
+   Re-growing the container restores the pane with identical content (CSS-only —
+   React state is never touched, §6.1).
+   Orphaned actions note: Mark Read / Allow / Block / Save Contact are unreachable
+   below the threshold (DD-24; spec-mandated drop, C-B4-3).
+   -------------------------------------------------------------------------- */
+
+.soup-inbox-layout {
+  container-type: inline-size;
+}
+
+@container (max-width: 1079px) {
+  .soup-inbox-contact {
+    display: none;
+  }
+}

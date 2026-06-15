@@ -4,6 +4,14 @@ import { resolve } from 'node:path'
 
 const repoRoot = resolve(import.meta.dirname, '../..')
 const read = (path: string) => readFileSync(resolve(repoRoot, path), 'utf8')
+// C0 token split: index.css is now a slim importer; design-token assertions read the full tier set.
+const readTokenCss = () => [
+  'console/src/index.css',
+  'console/src/styles/tokens.primitive.css',
+  'console/src/styles/tokens.semantic.css',
+  'console/src/styles/tokens.component.css',
+  'console/src/styles/composites.css',
+].map(read).join('\n')
 
 const lineDetailFiles = [
   'console/src/components/line-detail/ScheduledTab.tsx',
@@ -39,17 +47,28 @@ describe('design system compliance — round 2 shared search inputs', () => {
     const groupCard = read('console/src/components/line-detail/GroupCard.tsx')
     const scheduledRow = read('console/src/components/line-detail/ScheduledMessageRow.tsx')
 
-    for (const modal of [createGroup, scheduleComposer, groupDetail]) {
-      expect(modal).toContain('c-dialog-backdrop')
-      expect(modal).toContain('c-dialog')
-      expect(modal).toContain('c-dialog-header')
-    }
+    // B3 wave 1: CreateGroupModal migrated. B3 wave 2: ScheduleComposerModal migrated.
+    // GroupDetailModal keeps legacy pins until wave 3.
+    expect(createGroup).toContain('Modal')
+    expect(createGroup).toContain('ModalHeader')
+    expect(createGroup).toContain('ModalFooter')
+    expect(createGroup).not.toContain('c-dialog-backdrop')
 
-    expect(createGroup).toContain('c-dialog-footer')
-    expect(scheduleComposer).toContain('c-dialog-footer')
-    expect(createGroup).toContain('className="c-input font-mono text-t2"')
-    expect(scheduleComposer).toContain('className="c-input font-mono text-t2')
-    expect(groupDetail).toContain('className="c-tab"')
+    // groupDetail migrated to Modal primitive (wave 3)
+    expect(groupDetail).toContain('<Modal')
+    expect(groupDetail).not.toContain('c-dialog-backdrop')
+
+    // scheduleComposer now on Modal primitive (B3 wave 2)
+    expect(scheduleComposer).toContain('Modal')
+    expect(scheduleComposer).toContain('ModalHeader')
+    expect(scheduleComposer).toContain('ModalFooter')
+    expect(scheduleComposer).not.toContain('c-dialog-backdrop')
+    expect(createGroup).toContain('<TextInput')
+    expect(createGroup).toContain('className="text-t2"')
+    expect(scheduleComposer).toContain('<TextInput')
+    expect(scheduleComposer).toContain('className="text-t2"')
+    expect(groupDetail).toContain('<Tabs')
+    expect(groupDetail).not.toContain('className="c-tab"')
     expect(groupDetail).toContain('<SearchInput')
     expect(groupCard).toContain('className="c-card')
     expect(scheduledRow).toContain('className="c-card')
@@ -57,11 +76,13 @@ describe('design system compliance — round 2 shared search inputs', () => {
 })
 
 describe('design system compliance — round 2 token cleanup', () => {
-  it('defines the added opacity and circular radius tokens in index.css', () => {
-    const css = read('console/src/index.css')
+  it('defines the added opacity token and keeps orphan tokens deleted', () => {
+    const css = readTokenCss()
 
     expect(css).toContain('--opacity-faint:')
-    expect(css).toContain('--radius-circle:')
+    // --radius-circle was removed at the C0 token split as a zero-consumer orphan
+    // (docs/design-system cutover plan); it must stay deleted.
+    expect(css).not.toContain('--radius-circle:')
   })
 
   it('removes raw hex fallbacks from the new line-detail files', () => {
@@ -124,7 +145,7 @@ describe('design system compliance — round 2 token cleanup', () => {
     ]) {
       expect(groupDetail).not.toContain(literal)
     }
-    expect(groupDetail).toContain('max-h-[var(--modal-max-h)]')
+    expect(groupDetail).not.toContain('max-h-[var(--modal-max-h)]')
 
     for (const literal of [
       "maxWidth: '90%'",

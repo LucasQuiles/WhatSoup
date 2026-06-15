@@ -1,5 +1,6 @@
-import { useState, useCallback, type FormEvent } from 'react'
+import { useState, useCallback, useId, type FormEvent } from 'react'
 import { unlockConsole } from '../lib/api'
+import { Button, TextInput } from './primitives'
 
 /**
  * B1 closure: the console starts locked in production. The operator enters
@@ -10,6 +11,7 @@ export default function UnlockScreen({ onUnlocked }: { onUnlocked: () => void })
   const [token, setToken] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const errorId = useId()
 
   const submit = useCallback(async (e: FormEvent) => {
     e.preventDefault()
@@ -28,30 +30,35 @@ export default function UnlockScreen({ onUnlocked }: { onUnlocked: () => void })
   }, [token, busy, onUnlocked])
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-b1">
-      <form onSubmit={submit} className="flex flex-col gap-3 p-8 rounded border border-b3 bg-b2 w-96">
-        <h1 className="text-t1 font-semibold text-lg">Console locked</h1>
-        <p className="text-t3 text-sm">
+    <div className="min-h-dvh flex items-center justify-center bg-surface-base px-[var(--sp-4)]">
+      <form
+        onSubmit={submit}
+        className="flex w-full max-w-[var(--panel-shortcuts)] flex-col gap-[var(--sp-3)] rounded-[var(--radius-md)] border border-border-subtle bg-surface-raised p-[var(--sp-8)]"
+      >
+        <h1 className="c-heading">Console locked</h1>
+        <p className="c-body text-text-3">
           Enter the fleet token to start a console session. The token is sent
           once to this server and is not stored in the browser.
         </p>
-        <input
+        <TextInput
           type="password"
           autoFocus
           value={token}
           onChange={(e) => setToken(e.target.value)}
           placeholder="fleet token"
           aria-label="fleet token"
-          className="font-mono text-sm p-2 rounded border border-b3 bg-b1 text-t1"
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
+          error={Boolean(error)}
         />
-        {error && <div role="alert" className="text-err text-sm">{error}</div>}
-        <button
+        {error && <div id={errorId} role="alert" className="c-error">{error}</div>}
+        <Button
           type="submit"
+          variant="primary"
           disabled={busy || !token.trim()}
-          className="p-2 rounded bg-accent text-b1 font-semibold disabled:opacity-50"
         >
           {busy ? 'Unlocking…' : 'Unlock'}
-        </button>
+        </Button>
       </form>
     </div>
   )

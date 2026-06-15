@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import type { ProviderCatalogEntry, ProviderStatus } from '../../console/src/types'
@@ -415,13 +415,20 @@ describe('ProvidersKeysCard — fallback states', () => {
 })
 
 describe('ProvidersKeysCard — load + error states', () => {
-  it('renders an error state when provider-status fetch rejects', async () => {
-    getProviderStatusMock.mockRejectedValue(new Error('boom'))
+  it('renders a retryable error state when provider-status fetch rejects', async () => {
+    getProviderStatusMock.mockRejectedValue(new Error('provider API down'))
 
     render(withProviders(<ProvidersKeysCard lineName="line-g" />))
 
     await waitFor(() => {
-      expect(screen.getByText('Failed to load provider status.')).toBeDefined()
+      expect(screen.getByText('Failed to load provider status')).toBeDefined()
+    })
+    expect(screen.getByText('provider API down')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => {
+      expect(getProviderStatusMock).toHaveBeenCalledTimes(2)
     })
   })
 })

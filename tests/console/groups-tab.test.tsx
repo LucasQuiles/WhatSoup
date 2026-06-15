@@ -187,7 +187,7 @@ describe('GroupsTab', () => {
     expect(screen.queryByText('1 groups')).toBeNull();
   });
 
-  it('renders an error EmptyState when the query rejects', async () => {
+  it('renders a retryable error EmptyState when the query rejects', async () => {
     const client = makeClient();
     getGroupsMock.mockRejectedValue(new Error('socket down'));
 
@@ -201,6 +201,10 @@ describe('GroupsTab', () => {
     expect(screen.getByText('socket down')).toBeTruthy();
     // The header / Create button should not render in the error state.
     expect(screen.queryByRole('button', { name: /Create Group/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    await waitFor(() => expect(getGroupsMock).toHaveBeenCalledTimes(2));
   });
 
   it('falls back to the generic MCP error description when the rejection is not an Error', async () => {

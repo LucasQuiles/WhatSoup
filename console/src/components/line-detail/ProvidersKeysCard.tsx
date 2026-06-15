@@ -1,9 +1,11 @@
 import { type FC, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { KeyRound, ShieldOff, ShieldCheck, Zap } from 'lucide-react'
+import EmptyState from '../EmptyState'
 import { useProviders, useProviderStatus } from '../../hooks/use-fleet'
 import { formatRelative } from '../../lib/format-time'
-import { getProvider } from '../../lib/providers'
+import { getProvider, getProviderColor } from '../../lib/providers'
+import { statusBadgeStyle } from '../../lib/status-severity'
 import type { ProviderCatalogEntry, ProviderSlotStatus, ProviderStatus } from '../../types'
 
 /**
@@ -54,13 +56,14 @@ function displayName(
 const KeyBadge: FC<{ keyPresent: boolean | null }> = ({ keyPresent }) => {
   const spec =
     keyPresent === true
-      ? { label: 'key set', icon: KeyRound, color: 'var(--color-s-ok)', bg: 'var(--s-ok-wash)' }
+      ? { label: 'key set', icon: KeyRound, ...statusBadgeStyle('ok') }
       : keyPresent === false
-      ? { label: 'no key', icon: ShieldOff, color: 'var(--color-s-crit)', bg: 'var(--s-crit-wash)' }
-      : { label: 'n/a — native auth', icon: ShieldCheck, color: 'var(--color-t3)', bg: 'var(--color-d4)' }
+      ? { label: 'no key', icon: ShieldOff, ...statusBadgeStyle('crit') }
+      : { label: 'n/a — native auth', icon: ShieldCheck, color: 'var(--text-2)', bg: 'var(--surface-inset)' }
   const Icon = spec.icon
   return (
     <span
+      title={spec.label}
       className="text-xs inline-flex items-center font-mono font-medium rounded-sm tracking-[var(--tracking-pill)] whitespace-nowrap gap-[var(--sp-0h)] py-[var(--bw)] px-[var(--sp-1h)]"
       style={{ color: spec.color, backgroundColor: spec.bg }}
     >
@@ -75,16 +78,19 @@ const SlotRow: FC<{
   slot: ProviderSlotStatus
   catalog: ProviderCatalogEntry[] | undefined
   border?: boolean
-}> = ({ label, slot, catalog, border }) => (
-  <div className={`flex items-center justify-between py-[var(--sp-1h)] px-0${border ? ' c-border-b' : ''}`}>
-    <span className="c-label">{label}</span>
-    <span className="flex items-center gap-[var(--sp-2)]">
-      <span className="font-mono text-m-agt text-data">{displayName(slot.provider, catalog)}</span>
-      <span className="font-mono text-t3 text-data">{slot.model ?? '—'}</span>
-      <KeyBadge keyPresent={slot.keyPresent} />
-    </span>
-  </div>
-)
+}> = ({ label, slot, catalog, border }) => {
+  const providerColor = getProviderColor(slot.provider ?? '').stroke
+  return (
+    <div className={`flex items-center justify-between py-[var(--sp-1h)] px-0${border ? ' c-border-b' : ''}`}>
+      <span className="c-label">{label}</span>
+      <span className="flex items-center gap-[var(--sp-2)]">
+        <span className="font-mono text-data" style={{ color: providerColor }}>{displayName(slot.provider, catalog)}</span>
+        <span className="font-mono text-t3 text-data">{slot.model ?? '—'}</span>
+        <KeyBadge keyPresent={slot.keyPresent} />
+      </span>
+    </div>
+  )
+}
 
 type FallbackChainEntry = ProviderStatus['fallback']['chain'][number]
 
@@ -92,13 +98,14 @@ const ChainEntry: FC<{
   entry: FallbackChainEntry
   catalog: ProviderCatalogEntry[] | undefined
 }> = ({ entry, catalog }) => {
+  const providerColor = getProviderColor(entry.provider ?? '').stroke
   const status =
     entry.eligible === true ? 'ready' :
     entry.eligible === false ? 'unavailable' :
     'unknown'
   return (
     <span className="inline-flex items-center gap-[var(--sp-0h)] text-xs font-mono text-t4">
-      <span className="text-data">{displayName(entry.provider, catalog)}</span>
+      <span className="text-data" style={{ color: providerColor }}>{displayName(entry.provider, catalog)}</span>
       {entry.model && <span>{entry.model}</span>}
       <span>{status}</span>
     </span>
@@ -106,7 +113,7 @@ const ChainEntry: FC<{
 }
 
 export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
-  const { data: status, isLoading, error } = useProviderStatus(lineName)
+  const { data: status, isLoading, error, refetch } = useProviderStatus(lineName)
   const { data: catalog } = useProviders()
   const [now, setNow] = useState(() => Date.now())
 
@@ -150,7 +157,12 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
       </div>
       <div className="py-[var(--sp-3)] px-[var(--sp-4)]">
         {error ? (
-          <div className="text-s-crit text-sm">Failed to load provider status.</div>
+          <EmptyState
+            variant="error"
+            title="Failed to load provider status"
+            description={error.message}
+            onRetry={() => { void refetch() }}
+          />
         ) : isLoading || !status ? (
           <div className="text-t4 text-sm">Loading provider status…</div>
         ) : (

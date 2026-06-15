@@ -1,7 +1,9 @@
 import { useState, useRef, useCallback, type FC, type ReactNode } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
+import { createPortal } from 'react-dom'
+import { AnimatePresence, MotionConfig, motion } from 'framer-motion'
 import Toast from '../components/Toast'
 import { ToastContext, type ToastVariant, type ToastItem, type ToastContextValue } from './toast-context'
+import { toastMotion } from '../lib/motion'
 
 /** Maximum number of toasts displayed simultaneously. When the cap is reached
  *  the oldest toast is evicted to make room for the new one. This prevents
@@ -35,23 +37,22 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
     clear,
   }
 
-  return (
-    <ToastContext.Provider value={value}>
-      {children}
-
-      {/* Toast stack — fixed bottom-right */}
+  // The toast stack portals to document.body so that #root inert (applied when a
+  // modal is open) cannot suppress live-region announcements or dead-zone the
+  // dismiss buttons (B5 §5.6, C-B5-3). Its MotionConfig is local because the
+  // provider wraps App, so App's MotionConfig does not cover the portal stack.
+  const toastStack = (
+    <MotionConfig reducedMotion="user">
       <div
-        className="fixed z-[110] flex flex-col gap-2 pointer-events-none"
-        style={{ bottom: 'var(--sp-5)', right: 'var(--sp-5)' }}
+        className="fixed bottom-[var(--sp-5)] right-[var(--sp-5)] z-[var(--z-toast)] flex flex-col gap-2 pointer-events-none"
       >
         <AnimatePresence>
           {toasts.map(t => (
             <motion.div
               key={t.id}
-              initial={{ opacity: 0, y: 16, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -8, scale: 0.96 }}
-              transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+              initial={toastMotion.initial}
+              animate={toastMotion.animate}
+              exit={toastMotion.exit}
               className="pointer-events-auto"
             >
               <Toast
@@ -63,6 +64,15 @@ export const ToastProvider: FC<{ children: ReactNode }> = ({ children }) => {
           ))}
         </AnimatePresence>
       </div>
+    </MotionConfig>
+  )
+
+  return (
+    <ToastContext.Provider value={value}>
+      {children}
+      {typeof document !== 'undefined'
+        ? createPortal(toastStack, document.body)
+        : toastStack}
     </ToastContext.Provider>
   )
 }

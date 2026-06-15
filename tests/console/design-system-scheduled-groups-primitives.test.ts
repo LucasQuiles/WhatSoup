@@ -54,13 +54,16 @@ describe('scheduled/groups design-system primitives', () => {
     const scheduleComposer = read('console/src/components/line-detail/ScheduleComposerModal.tsx')
     const groupDetail = read('console/src/components/line-detail/GroupDetailModal.tsx')
 
-    expect(scheduleComposer).toContain('c-dialog-backdrop')
-    expect(scheduleComposer).toContain('c-dialog-header')
-    expect(scheduleComposer).toContain('c-dialog-footer')
-    expect(scheduleComposer).toContain('className="c-input font-mono text-t2"')
-    expect(groupDetail).toContain('className="c-tab"')
-    expect(groupDetail).toContain('role="tablist"')
-    expect(groupDetail).toContain('role="tab"')
+    // B3 wave 2: scheduleComposer migrated to Modal primitive — legacy pins flip
+    expect(scheduleComposer).toContain('Modal')
+    expect(scheduleComposer).toContain('ModalHeader')
+    expect(scheduleComposer).toContain('ModalFooter')
+    expect(scheduleComposer).not.toContain('c-dialog-backdrop')
+    expect(scheduleComposer).toContain('<TextInput')
+    expect(scheduleComposer).toContain('className="text-t2"')
+    expect(groupDetail).toContain('<Tabs')
+    expect(groupDetail).toContain('<Tab')
+    expect(groupDetail).not.toContain('className="c-tab"')
   })
 
   it('extends eslint custom rules for hardcoded dimension and color literals', () => {

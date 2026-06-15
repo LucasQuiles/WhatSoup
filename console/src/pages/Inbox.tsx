@@ -11,10 +11,15 @@ import { resolveCurrentChat } from '../lib/inbox-chat-selection'
 import { selectVirtualMessageRows, toChronologicalMessages } from '../lib/inbox-virtualization'
 import type { Message, ChatItem } from '../types'
 import EmptyState from '../components/EmptyState'
-import ChatListItem from '../components/ChatListItem'
+import { SaveContactDialog } from '../components/SaveContactDialog'
+import ChatList from '../components/ChatList'
 import MessageBubble from '../components/MessageBubble'
 import LinePicker from '../components/LinePicker'
 import { MessageSquare, Send, UserCheck, UserPlus, Ban, User, Users, ChevronDown, ChevronsUp, Loader2, Search, X, CheckCheck } from 'lucide-react'
+import { SearchInput } from '../components/shared/SearchInput.js'
+import { Button } from '../components/primitives/Button'
+import { ActionButton } from '../components/primitives/ActionButton'
+import { TextArea } from '../components/primitives'
 import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
@@ -30,7 +35,6 @@ export default function Inbox() {
   const [actionBusy, setActionBusy] = useState(false)
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [saveContactChat, setSaveContactChat] = useState<string | null>(null)
-  const [contactName, setContactName] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const searchScrollRef = useRef<HTMLDivElement>(null)
   const queryClient = useQueryClient()
@@ -99,7 +103,7 @@ export default function Inbox() {
 
   // Search via React Query — cached, deduped, auto loading/error states
   const searchEnabled = !!selectedChat && !!debouncedSearch
-  const { data: searchData, isLoading: searchLoading, error: searchQueryError } = useQuery({
+  const { data: searchData, isLoading: searchLoading, error: searchQueryError, refetch: refetchSearch } = useQuery({
     queryKey: ['search', activeLine, selectedChat, debouncedSearch],
     queryFn: () => api.searchMessages(activeLine, debouncedSearch, selectedChat!),
     enabled: searchEnabled,
@@ -109,6 +113,7 @@ export default function Inbox() {
   const searchTotal = searchData?.total ?? 0
   const searchError = searchQueryError ? (searchQueryError instanceof Error ? searchQueryError.message : String(searchQueryError)) : null
   const isSearchBusy = searchLoading || isDebouncingSearch
+  const searchStatusText = isSearchBusy ? 'Searching…' : `${searchTotal} result${searchTotal === 1 ? '' : 's'}`
 
   const renderedMessages = useMemo(() => toChronologicalMessages(messages ?? []), [messages])
 
@@ -124,6 +129,7 @@ export default function Inbox() {
   })
   const virtualMessageRows = selectVirtualMessageRows(renderedMessages, messageVirtualizer.getVirtualItems())
   const virtualSearchRows = selectVirtualMessageRows(searchResults, searchVirtualizer.getVirtualItems())
+  const currentChatDisplayName = currentChat ? resolveDisplayName(currentChat.name) : ''
 
   const handleLoadOlder = async () => {
     if (!selectedChat || loadingOlder) return
@@ -179,10 +185,10 @@ export default function Inbox() {
     }
   }
 
-  const handleSaveContact = async () => {
-    if (!saveContactChat || !contactName.trim()) return
+  const handleSaveContact = async (name: string) => {
+    if (!saveContactChat || !name) return
     setActionBusy(true)
-    const parts = contactName.trim().split(/\s+/)
+    const parts = name.split(/\s+/)
     const firstName = parts[0]
     const lastName = parts.slice(1).join(' ') || undefined
     const jid = saveContactChat.includes('@')
@@ -190,9 +196,8 @@ export default function Inbox() {
       : saveContactChat + '@s.whatsapp.net'
     try {
       await api.saveContact(activeLine, { jid, firstName, lastName })
-      toast.success(`Saved contact: ${contactName.trim()}`)
+      toast.success(`Saved contact: ${name}`)
       setSaveContactChat(null)
-      setContactName('')
     } catch (err) {
       toast.error(`Failed to save: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
@@ -200,18 +205,13 @@ export default function Inbox() {
     }
   }
 
-  useEffect(() => {
-    if (!saveContactChat) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setSaveContactChat(null) }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [saveContactChat])
+
 
   const ease = [0.22, 1, 0.36, 1] as const
 
   return (
     <motion.div
-      className="flex-1 flex min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"
+      className="soup-inbox-layout flex-1 flex min-h-0 overflow-hidden p-[var(--sp-4)] gap-[var(--sp-3)]"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.5, ease }}
@@ -219,7 +219,7 @@ export default function Inbox() {
 
       {/* ═══ Left: Line picker + Chat list ═══ */}
       <div
-        className="c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--panel-chat-list)]"
+        className="c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-chats)]"
       >
         {/* Line picker — toolbar pattern */}
         <LinePicker
@@ -230,22 +230,12 @@ export default function Inbox() {
         />
 
         {/* Chat list */}
-        <div className="flex-1 overflow-auto scrollbar-hide" role="listbox" aria-label="Chat conversations">
-          {chats?.map(chat => (
-            <ChatListItem
-              key={chat.conversationKey}
-              chat={chat}
-              isSelected={selectedChat === chat.conversationKey}
-              onClick={() => setSelectedChat(chat.conversationKey)}
-              isTyping={typingJids.has(chat.conversationKey)}
-            />
-          ))}
-          {(!chats || chats.length === 0) && (
-            <div className="text-center text-t4 py-[var(--sp-8)] px-[var(--sp-4)]">
-              <span className="text-body">No chats found</span>
-            </div>
-          )}
-        </div>
+        <ChatList
+          chats={chats ?? []}
+          selectedChat={selectedChat}
+          onSelect={setSelectedChat}
+          typingKeys={typingJids}
+        />
       </div>
 
       {/* ═══ Center: Messages ═══ */}
@@ -268,7 +258,7 @@ export default function Inbox() {
               </div>
               <div className="flex-1">
                 <div className="text-t1 font-medium text-body">{resolveDisplayName(currentChat.name)}</div>
-                <div className="text-t5 font-mono text-label">
+                <div className="text-t2 font-mono text-label">
                   {activeLine} · {currentChat.isGroup ? 'group' : 'direct'}
                 </div>
               </div>
@@ -278,41 +268,36 @@ export default function Inbox() {
             <div
               className="flex items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-b bg-d2"
             >
-              <div className="relative flex-1">
-                <Search
-                  size={13}
-                  strokeWidth={1.75}
-                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-t5 pointer-events-none"
-                />
-                <input
-                  type="text"
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
-                  placeholder="Search this conversation..."
-                  aria-label="Search messages in this conversation"
-                  className="c-input c-input-search"
-                />
-                {isSearchBusy ? (
-                  <Loader2
-                    size={14}
-                    strokeWidth={1.75}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 animate-spin text-t4"
-                  />
-                ) : isSearchMode ? (
-                  <button
-                    type="button"
-                    onClick={() => setSearchInput('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 c-hover cursor-pointer text-t5 hover:text-t2 p-[var(--sp-1)]"
-                    title="Clear search"
-                    aria-label="Clear search"
-                  >
-                    <X size={14} strokeWidth={1.75} />
-                  </button>
-                ) : null}
-              </div>
+              <SearchInput
+                containerClassName="flex-1"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder="Search this conversation..."
+                aria-label="Search messages in this conversation" shortcutTarget
+                endAdornment={
+                  isSearchBusy ? (
+                    <Loader2
+                      size={14}
+                      strokeWidth={1.75}
+                      className="animate-spin text-t4"
+                    />
+                  ) : isSearchMode ? (
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      onClick={() => setSearchInput('')}
+                      className="c-hover cursor-pointer text-t5 hover:text-t2 p-[var(--sp-1)]"
+                      title="Clear search"
+                      aria-label="Clear search"
+                    >
+                      <X size={14} strokeWidth={1.75} />
+                    </Button>
+                  ) : null
+                }
+              />
               {isSearchMode && (
-                <span className="c-label whitespace-nowrap">
-                  {isSearchBusy ? 'Searching…' : `${searchTotal} result${searchTotal === 1 ? '' : 's'}`}
+                <span title={searchStatusText} className="c-label whitespace-nowrap">
+                  {searchStatusText}
                 </span>
               )}
             </div>
@@ -321,7 +306,7 @@ export default function Inbox() {
             {isSearchMode ? (
               <div
                 ref={searchScrollRef}
-                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 py-[var(--sp-4)] px-[var(--sp-5)]"
+                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 min-w-0 py-[var(--sp-4)] px-[var(--sp-5)]"
               >
                 {searchError ? (
                   <div className="flex-1 flex items-center justify-center">
@@ -329,6 +314,7 @@ export default function Inbox() {
                       icon={<Search size={40} strokeWidth={1.25} />}
                       title="Search failed"
                       description={searchError}
+                      onRetry={() => { void refetchSearch() }}
                     />
                   </div>
                 ) : searchResults.length > 0 ? (
@@ -365,23 +351,23 @@ export default function Inbox() {
               <div
                 ref={scrollRef}
                 onScroll={handleScroll}
-                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 relative py-[var(--sp-4)] px-[var(--sp-5)]"
+                className="flex-1 overflow-auto scrollbar-hide flex flex-col min-h-0 min-w-0 relative py-[var(--sp-4)] px-[var(--sp-5)]"
               >
                 {messages && messages.length > 0 && hasMore && (
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
                     onClick={handleLoadOlder}
                     disabled={loadingOlder}
-                    className="c-btn c-btn-ghost pt-[var(--sp-2)] pb-[var(--sp-4)] gap-[var(--sp-2)] w-full justify-center text-t5"
-                  >
-                    {loadingOlder
+                    className="pt-[var(--sp-2)] pb-[var(--sp-4)] gap-[var(--sp-2)] w-full justify-center text-t2"
+                    icon={loadingOlder
                       ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
                       : <ChevronsUp size={14} strokeWidth={1.75} />
                     }
+                  >
                     <span className="text-sm">
                       {loadingOlder ? 'Loading…' : 'Load older messages'}
                     </span>
-                  </button>
+                  </Button>
                 )}
                 {renderedMessages.length > 0 ? (
                   <div
@@ -413,13 +399,14 @@ export default function Inbox() {
                   </div>
                 )}
                 {showJump && (
-                  <button
-                    type="button"
+                  <Button
+                    size="sm"
                     onClick={jumpToBottom}
-                    className="c-btn c-btn-sm absolute left-1/2 bottom-16 -translate-x-1/2 shadow-[var(--card-shadow)] z-[var(--z-float)] text-sm"
+                    className="absolute left-1/2 bottom-16 -translate-x-1/2 shadow-[var(--card-shadow)] z-[var(--z-float)] text-sm"
+                    icon={<ChevronDown size={14} />}
                   >
-                    <ChevronDown size={14} /> New messages
-                  </button>
+                    New messages
+                  </Button>
                 )}
               </div>
             )}
@@ -429,15 +416,15 @@ export default function Inbox() {
               className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] border-t border-[var(--b1)] bg-d2"
               style={{ borderTopWidth: 'var(--bw)' }}
             >
-              <textarea
+              <TextArea
                 ref={textareaRef}
-                className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-body"
+                className="flex-1 text-t2 placeholder-t5 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
                 rows={1}
-                style={{
-                  maxHeight: 'var(--feed-preview-max)',
-                  resize: 'none',
-                  overflow: 'hidden',
-                }}
+                minHeight={0}
+                maxHeight="var(--feed-preview-max)"
+                resize="none"
+                overflow="hidden"
+                textFace="sans"
                 placeholder="Type a message..."
                 aria-label="Type a message"
                 value={msgText}
@@ -450,17 +437,15 @@ export default function Inbox() {
                 }}
                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
               />
-              <button
-                type="button"
-                className="c-btn c-btn-primary c-btn-send flex-shrink-0"
-                onClick={handleSend}
-                disabled={isSending || !msgText.trim()}
-              >
-                {isSending
+              <ActionButton
+                className="flex-shrink-0"
+                label={isSending ? 'Sending' : 'Send'}
+                icon={isSending
                   ? <Loader2 size={16} strokeWidth={1.75} className="animate-spin" />
                   : <Send size={16} strokeWidth={1.75} />}
-                <span className="c-btn-send-label">{isSending ? 'Sending' : 'Send'}</span>
-              </button>
+                onClick={handleSend}
+                disabled={isSending || !msgText.trim()}
+              />
             </div>
           </>
         ) : (
@@ -476,7 +461,7 @@ export default function Inbox() {
 
       {/* ═══ Right: Contact details ═══ */}
       <div
-        className="c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--panel-contact)]"
+        className="soup-inbox-contact c-card flex-shrink-0 flex flex-col overflow-hidden w-[var(--inbox-pane-contact)]"
       >
         {currentChat ? (
           <>
@@ -493,13 +478,13 @@ export default function Inbox() {
                 }
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-t1 font-medium truncate text-body">{resolveDisplayName(currentChat.name)}</div>
-                <div className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
+                <div title={currentChatDisplayName} className="text-t1 font-medium truncate text-body">{currentChatDisplayName}</div>
+                <div title={currentChat.conversationKey} className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
               </div>
             </div>
 
             {/* Details body */}
-            <div className="flex-1 overflow-auto scrollbar-hide p-[var(--sp-4)]">
+            <div className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide p-[var(--sp-4)]">
               {/* Info card */}
               <div className="mb-[var(--sp-4)]">
                 <div className="c-col-header mb-[var(--sp-2)]">Details</div>
@@ -528,10 +513,11 @@ export default function Inbox() {
                 <div className="c-col-header mb-[var(--sp-2)]">Actions</div>
                 <div className="flex flex-col gap-[var(--sp-2)]">
                   {currentChat.unreadCount > 0 && (
-                    <button
-                      type="button"
-                      className="c-btn c-btn-sm w-full justify-center border-[var(--b2)] text-t2"
+                    <Button
+                      size="sm"
+                      className="w-full justify-center border-[var(--b2)] text-t2"
                       disabled={actionBusy}
+                      icon={<CheckCheck size={14} strokeWidth={1.75} />}
                       onClick={async () => {
                         setActionBusy(true)
                         queryClient.setQueryData<ChatItem[]>(['chats', activeLine], old =>
@@ -549,13 +535,14 @@ export default function Inbox() {
                         }
                       }}
                     >
-                      <CheckCheck size={14} strokeWidth={1.75} /> Mark Read
-                    </button>
+                      Mark Read
+                    </Button>
                   )}
-                  <button
-                    type="button"
-                    className="c-btn c-btn-success w-full justify-center"
+                  <Button
+                    variant="success"
+                    className="w-full justify-center"
                     disabled={actionBusy}
+                    icon={<UserCheck size={14} strokeWidth={1.75} />}
                     onClick={async () => {
                       setActionBusy(true)
                       try {
@@ -569,12 +556,13 @@ export default function Inbox() {
                       }
                     }}
                   >
-                    <UserCheck size={14} strokeWidth={1.75} /> Allow Contact
-                  </button>
-                  <button
-                    type="button"
-                    className="c-btn c-btn-danger w-full justify-center"
+                    Allow Contact
+                  </Button>
+                  <Button
+                    variant="danger"
+                    className="w-full justify-center"
                     disabled={actionBusy}
+                    icon={<Ban size={14} strokeWidth={1.75} />}
                     onClick={async () => {
                       setActionBusy(true)
                       try {
@@ -588,20 +576,20 @@ export default function Inbox() {
                       }
                     }}
                   >
-                    <Ban size={14} strokeWidth={1.75} /> Block Contact
-                  </button>
+                    Block Contact
+                  </Button>
                   {!currentChat.isGroup && (
-                    <button
-                      type="button"
-                      className="c-btn w-full justify-center border-[var(--b2)] text-t2"
+                    <Button
+                      variant="neutral"
+                      className="w-full justify-center border-[var(--b2)] text-t2"
                       disabled={actionBusy}
+                      icon={<UserPlus size={14} strokeWidth={1.75} />}
                       onClick={() => {
-                        setContactName('')
                         setSaveContactChat(currentChat.conversationKey)
                       }}
                     >
-                      <UserPlus size={14} strokeWidth={1.75} /> Save Contact
-                    </button>
+                      Save Contact
+                    </Button>
                   )}
                 </div>
               </div>
@@ -610,54 +598,19 @@ export default function Inbox() {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center p-[var(--sp-4)]">
-            <div className="text-center text-t5 text-sm">
+            <div className="text-center text-t2 text-sm">
               Select a conversation to see details
             </div>
           </div>
         )}
       </div>
-      {saveContactChat && (
-        <div className="c-dialog-backdrop" onClick={() => setSaveContactChat(null)}>
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="save-contact-title"
-            className="overflow-hidden bg-d2 rounded-lg shadow-[var(--shadow-lg)] w-[var(--panel-confirm)] max-w-[90%] c-border"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between c-border-b py-[var(--sp-4)] px-[var(--sp-5)]">
-              <span id="save-contact-title" className="font-sans font-semibold text-lg">Save Contact</span>
-              <button type="button" onClick={() => setSaveContactChat(null)} aria-label="Close dialog" className="c-btn c-btn-ghost c-btn-sm">
-                <X size={18} strokeWidth={1.75} />
-              </button>
-            </div>
-            <div className="p-[var(--sp-5)]">
-              <label htmlFor="contact-name-input" className="c-field-label block mb-[var(--sp-2)]">Contact name</label>
-              <input
-                id="contact-name-input"
-                type="text"
-                className="c-input font-mono w-full"
-                placeholder="First Last"
-                value={contactName}
-                onChange={e => setContactName(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && contactName.trim()) handleSaveContact() }}
-                autoFocus
-              />
-            </div>
-            <div className="flex justify-end gap-2 c-border-t bg-d1 py-[var(--sp-3)] px-[var(--sp-5)]">
-              <button type="button" onClick={() => setSaveContactChat(null)} className="c-btn c-btn-ghost">Cancel</button>
-              <button
-                type="button"
-                onClick={handleSaveContact}
-                disabled={!contactName.trim() || actionBusy}
-                className="c-btn c-btn-primary"
-              >
-                <UserPlus size={14} strokeWidth={1.75} /> Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <SaveContactDialog
+        key={saveContactChat ?? 'none'}
+        open={saveContactChat !== null}
+        busy={actionBusy}
+        onSave={handleSaveContact}
+        onClose={() => setSaveContactChat(null)}
+      />
     </motion.div>
   )
 }

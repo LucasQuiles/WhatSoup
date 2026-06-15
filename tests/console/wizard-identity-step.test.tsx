@@ -130,10 +130,10 @@ describe('initial render', () => {
         adminPhones: ['15551234567'],
       },
     })
-    const nameInput = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    const nameInput = screen.getByLabelText('Name') as HTMLInputElement
     expect(nameInput.value).toBe('my-line')
 
-    const descInput = screen.getByPlaceholderText('What this line is for') as HTMLInputElement
+    const descInput = screen.getByLabelText(/Description/) as HTMLInputElement
     expect(descInput.value).toBe('A test line')
 
     expect(screen.getByText('15551234567')).toBeDefined()
@@ -141,9 +141,9 @@ describe('initial render', () => {
 
   it('defaults name and description to empty strings when data is empty', () => {
     renderStep({ data: {} })
-    const nameInput = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    const nameInput = screen.getByLabelText('Name') as HTMLInputElement
     expect(nameInput.value).toBe('')
-    const descInput = screen.getByPlaceholderText('What this line is for') as HTMLInputElement
+    const descInput = screen.getByLabelText(/Description/) as HTMLInputElement
     expect(descInput.value).toBe('')
   })
 })
@@ -364,6 +364,17 @@ describe('type selection', () => {
     expect(screen.getByText('Type is required')).toBeDefined()
   })
 
+  it('marks the type radiogroup invalid and describes it with the type error', () => {
+    renderStep({ errors: { type: 'Type is required' } })
+
+    const group = screen.getByRole('radiogroup', { name: 'Line Type' })
+    const error = screen.getByText('Type is required')
+
+    expect(error.id).toBeTruthy()
+    expect(group.getAttribute('aria-invalid')).toBe('true')
+    expect(group.getAttribute('aria-describedby')).toBe(error.id)
+  })
+
   it('renders all three type option descriptions', () => {
     renderStep()
     expect(screen.getByText('Listen & store messages. No AI responses.')).toBeDefined()
@@ -452,6 +463,20 @@ describe('admin phones field', () => {
     expect(screen.getByText('At least one admin required')).toBeDefined()
   })
 
+  it('labels the admin phone input and describes it with helper and error text', () => {
+    renderStep({ errors: { adminPhones: 'At least one admin required' } })
+
+    const input = screen.getByLabelText('Admin Phones') as HTMLInputElement
+    const helper = screen.getByText(/Phone numbers with full admin access/)
+    const error = screen.getByText('At least one admin required')
+    const describedBy = input.getAttribute('aria-describedby')?.split(' ') ?? []
+
+    expect(helper.id).toBeTruthy()
+    expect(error.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(describedBy).toEqual(expect.arrayContaining([helper.id, error.id]))
+  })
+
   it('renders existing phone tags in the display', () => {
     renderStep({ data: { adminPhones: ['15551234567'] } })
     expect(screen.getByText('15551234567')).toBeDefined()
@@ -465,7 +490,7 @@ describe('admin phones field', () => {
 describe('nameLocked prop', () => {
   it('disables the name input when nameLocked is true', () => {
     renderStep({ data: { name: 'locked-line' }, nameLocked: true })
-    const input = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    const input = screen.getByLabelText('Name') as HTMLInputElement
     expect(input.disabled).toBe(true)
   })
 
@@ -497,7 +522,7 @@ describe('nameLocked prop', () => {
 
   it('name input is enabled when nameLocked is false', () => {
     renderStep({ data: { name: 'my-line' }, nameLocked: false })
-    const input = screen.getByPlaceholderText('my-line') as HTMLInputElement
+    const input = screen.getByLabelText('Name') as HTMLInputElement
     expect(input.disabled).toBe(false)
   })
 })
@@ -510,6 +535,17 @@ describe('error display', () => {
   it('shows name error from errors.name prop', () => {
     renderStep({ errors: { name: 'Name is required' } })
     expect(screen.getByText('Name is required')).toBeDefined()
+  })
+
+  it('marks the name input invalid and describes it with the name error', () => {
+    renderStep({ errors: { name: 'Name is required' } })
+
+    const input = screen.getByLabelText('Name') as HTMLInputElement
+    const error = screen.getByText('Name is required')
+
+    expect(error.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(input.getAttribute('aria-describedby')).toBe(error.id)
   })
 
   it('shows type error from errors.type prop', () => {
@@ -538,6 +574,25 @@ describe('error display', () => {
     })
     expect(screen.getByText('Invalid name format')).toBeDefined()
     expect(screen.getByText('Name already exists')).toBeDefined()
+  })
+
+  it('describes the name input with both format and uniqueness errors when both render', async () => {
+    mockCheckExists.mockResolvedValue({ exists: true })
+    renderStep({ data: { name: 'taken' }, errors: { name: 'Invalid name format' } })
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+      await Promise.resolve()
+    })
+
+    const input = screen.getByLabelText('Name') as HTMLInputElement
+    const formatError = screen.getByText('Invalid name format')
+    const uniquenessError = screen.getByText('Name already exists')
+    const describedBy = input.getAttribute('aria-describedby')?.split(' ') ?? []
+
+    expect(formatError.id).toBeTruthy()
+    expect(uniquenessError.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(describedBy).toEqual(expect.arrayContaining([uniquenessError.id, formatError.id]))
   })
 })
 

@@ -6,16 +6,15 @@ import StatusDot from '../components/StatusDot'
 import ModeBadge from '../components/ModeBadge'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
-import FilterPill from '../components/FilterPill'
 import LinePicker from '../components/LinePicker'
+import { LogStream, Toolbar, ToolbarFilters, Pill, Button } from '../components/primitives'
 import type { LogEntry } from '../types'
 import {
   Terminal, Power,
   AlertTriangle, CheckCircle2,
-  Trash2, Link2, Loader2,
+  Trash2, Link2, Loader2, RotateCw,
 } from 'lucide-react'
 
-import { levelColor, levelBg } from '../lib/log-theme'
 import { api } from '../lib/api'
 import { useToast } from '../hooks/toast-context'
 import { useQueryClient } from '@tanstack/react-query'
@@ -24,25 +23,52 @@ import { statusWashClass } from '../lib/status-severity'
 import ConfirmDialog from '../components/ConfirmDialog'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
 
+type LevelFilter = 'all' | 'error' | 'warn' | 'info' | 'debug'
+
+const LOG_LEVELS: LevelFilter[] = ['all', 'error', 'warn', 'info', 'debug']
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function logLevelTone(level: LevelFilter) {
+  if (level === 'error') return 'crit' as const
+  if (level === 'warn') return 'warn' as const
+  return 'neutral' as const
+}
+
 export default function Ops() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [relinkTarget, setRelinkTarget] = useState<string | null>(null)
-  const { data: lines = [], isLoading: linesLoading } = useLines()
-  const { data: feed = [] } = useFeed()
-  const [logFilter, setLogFilter] = useState<string>('all')
+  const { data: lines = [], isLoading: linesLoading, error: linesError, refetch: refetchLines } = useLines()
+  const { data: feed = [], error: feedError, refetch: refetchFeed } = useFeed()
+  const [logFilter, setLogFilter] = useState<LevelFilter>('all')
   const [selectedLine, setSelectedLine] = useState<string>('')
 
   const activeLine = selectedLine || (lines[0]?.name ?? '')
-  const { data: logs = [] } = useLogs(activeLine)
+  const { data: logs = [], error: logsError, refetch: refetchLogs } = useLogs(activeLine)
   const currentLine = lines.find(l => l.name === activeLine)
 
+  // Pre-format timestamps so LogStream renders human-readable times.
+  const formattedLogs = useMemo(
+    () => logs.map((e: LogEntry) => ({ ...e, timestamp: formatTimeWithSeconds(e.timestamp) })),
+    [logs],
+  )
+
   const filteredLogs = useMemo(() => {
-    if (logFilter === 'all') return logs
-    return logs.filter(l => l.level === logFilter)
-  }, [logs, logFilter])
+    if (logFilter === 'all') return formattedLogs
+    return formattedLogs.filter(e => e.level === logFilter)
+  }, [formattedLogs, logFilter])
+
+  // Level counts sourced from the full (unfiltered) log list.
+  const logCounts = useMemo(() => {
+    const acc: Record<string, number> = { error: 0, warn: 0, info: 0, debug: 0 }
+    for (const e of logs) acc[e.level] = (acc[e.level] ?? 0) + 1
+    return acc
+  }, [logs])
 
   const alerts = useMemo(() => feed.filter(e => e.isError), [feed])
 
@@ -80,7 +106,12 @@ export default function Ops() {
           className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
           <span className="c-heading">Fleet Status</span>
-          {alerts.length > 0 ? (
+          {feedError ? (
+            <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)] text-label">
+              <AlertTriangle size={12} strokeWidth={1.75} />
+              alerts unavailable
+            </span>
+          ) : alerts.length > 0 ? (
             <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)] text-label">
               <AlertTriangle size={12} strokeWidth={1.75} />
               {alerts.length} alert{alerts.length !== 1 ? 's' : ''}
@@ -105,18 +136,47 @@ export default function Ops() {
                 {alerts.length} unhealthy
               </span>
             )}
+            {feedError && (
+              <span className="font-mono text-s-crit text-label">
+                Activity feed unavailable: {errorMessage(feedError)}
+              </span>
+            )}
           </div>
+          {feedError && (
+            <Button
+              variant="neutral"
+              size="sm"
+              icon={<RotateCw size={12} strokeWidth={1.75} />}
+              onClick={() => { void refetchFeed() }}
+            >
+              Retry alerts
+            </Button>
+          )}
         </div>
 
         {/* Instance cards */}
-        <div className="flex-1 overflow-auto scrollbar-hide p-[var(--sp-3)]">
+        <div className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide p-[var(--sp-3)]">
           <div className="flex flex-col gap-[var(--sp-2)]">
             {linesLoading ? (
-              <div className="text-t5 text-center py-8 font-mono text-data">
+              <div className="text-t2 text-center py-8 font-mono text-data">
                 Loading fleet status...
               </div>
+            ) : linesError ? (
+              <div className="flex flex-col items-center justify-center gap-[var(--sp-3)] text-center py-8 px-[var(--sp-4)]">
+                <span className="font-mono text-s-crit text-data">
+                  Failed to load fleet status: {errorMessage(linesError)}
+                </span>
+                <Button
+                  variant="neutral"
+                  size="sm"
+                  icon={<RotateCw size={12} strokeWidth={1.75} />}
+                  onClick={() => { void refetchLines() }}
+                >
+                  Retry fleet status
+                </Button>
+              </div>
             ) : lines.length === 0 ? (
-              <div className="text-t5 text-center py-8 font-mono text-data">
+              <div className="text-t2 text-center py-8 font-mono text-data">
                 No instances discovered. Create one from the Soup Kitchen.
               </div>
             ) : lines.map(line => (
@@ -159,7 +219,7 @@ export default function Ops() {
                       </>
                     )}
                     {line.mode === 'agent' && (
-                      <span className="text-m-agt">
+                      <span style={{ color: "var(--text-2)" }}>
                         {line.activeSessions ?? 0} session{(line.activeSessions ?? 0) !== 1 ? 's' : ''}
                       </span>
                     )}
@@ -170,35 +230,38 @@ export default function Ops() {
                 {line.status !== 'online' && (
                   <div className="flex gap-[var(--sp-2)] mt-[var(--sp-3)] pt-[var(--sp-3)] c-border-t">
                     {line.linkedStatus === 'unlinked' ? (
-                      <button
-                        type="button"
-                        className="c-btn py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                      <Button
+                        variant="neutral"
+                        className="py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                        icon={<Link2 size={15} strokeWidth={1.75} />}
                         onClick={e => { e.stopPropagation(); setRelinkTarget(line.name) }}
                       >
-                        <Link2 size={15} strokeWidth={1.75} /> Re-link
-                      </button>
+                        Re-link
+                      </Button>
                     ) : (
-                      <button
-                        type="button"
-                        className="c-btn py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                      <Button
+                        variant="neutral"
+                        className="py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                        icon={<Power size={15} strokeWidth={1.75} />}
                         onClick={e => {
                           e.stopPropagation()
                           toast.info(`Restarting ${line.name}...`)
                           api.restart(line.name)
                             .then(() => toast.success(`${line.name} restart requested`))
-                            .catch(err => toast.error(`Failed: ${err.message}`))
+                            .catch(err => toast.error(`Failed: ${err instanceof Error ? err.message : String(err)}`))
                         }}
                       >
-                        <Power size={15} strokeWidth={1.75} /> Restart
-                      </button>
+                        Restart
+                      </Button>
                     )}
-                    <button
-                      type="button"
-                      className="c-btn text-s-crit py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                    <Button
+                      variant="danger"
+                      className="py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                      icon={<Trash2 size={15} strokeWidth={1.75} />}
                       onClick={e => { e.stopPropagation(); setDeleteTarget(line.name) }}
                     >
-                      <Trash2 size={15} strokeWidth={1.75} /> Delete
-                    </button>
+                      Delete
+                    </Button>
                   </div>
                 )}
               </div>
@@ -213,7 +276,7 @@ export default function Ops() {
         className="c-card flex flex-col min-h-0 overflow-hidden"
         style={{ flex: "1.6" }}
       >
-        {/* Row 1: Line picker toolbar — matches c-toolbar */}
+        {/* Row 1: Line picker toolbar — not a Toolbar primitive; heading + picker stay here */}
         <div
           className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
@@ -230,71 +293,42 @@ export default function Ops() {
           <span className="c-heading">Logs</span>
         </div>
 
-        {/* Row 2: Level filter pills — matches column header row */}
-        <div
-          className="flex items-center justify-between flex-shrink-0 c-cell c-border-b-b2"
-        >
-          <div className="flex gap-[var(--sp-1)]">
-            {['all', 'error', 'warn', 'info', 'debug'].map(l => (
-              <FilterPill
+        {/* Row 2: Level filter toolbar — flush Toolbar fronting the LogStream */}
+        <Toolbar flush aria-label="Log level filter">
+          <ToolbarFilters label="Level">
+            {LOG_LEVELS.map(l => (
+              <Pill
                 key={l}
-                label={l}
-                isActive={logFilter === l}
-                activeColor={l === 'error' ? 'text-s-crit' : l === 'warn' ? 'text-s-warn' : 'text-t2'}
-                activeBorder={logFilter === l ? 'var(--bw) solid var(--b3)' : undefined}
+                variant="interactive"
+                tone={logLevelTone(l)}
+                pressed={logFilter === l}
                 onClick={() => setLogFilter(l)}
-              />
+                count={l !== 'all' ? logCounts[l] : undefined}
+              >
+                {l}
+              </Pill>
             ))}
-          </div>
-
+          </ToolbarFilters>
           <span className="c-label">{filteredLogs.length} entries</span>
-        </div>
+        </Toolbar>
 
         {/* Log stream */}
-        <div className="flex-1 overflow-auto scrollbar-hide font-mono bg-d0 text-data">
-          {filteredLogs.length > 0 ? (
-            filteredLogs.map((log: LogEntry, i: number) => (
-              <div
-                key={`${log.timestamp}-${log.source}-${i}`}
-                className="flex items-start c-row-hover c-border-b"
-              >
-                {/* Timestamp */}
-                <div
-                  className="flex-shrink-0 text-t5 w-[var(--log-col-time)] py-[var(--sp-2)] px-[var(--sp-3)] c-border-r"
-                >
-                  {formatTimeWithSeconds(log.timestamp)}
-                </div>
-                {/* Level badge */}
-                <div
-                  className="flex-shrink-0 text-center w-[var(--log-col-level)] p-[var(--sp-2)] c-border-r"
-                >
-                  <span
-                    className={`inline-block px-1.5 py-0.5 rounded font-medium text-xs ${levelColor[log.level]}`}
-                    style={{ background: levelBg[log.level] }}
-                  >
-                    {log.level}
-                  </span>
-                </div>
-                {/* Source */}
-                <div
-                  className="flex-shrink-0 text-t5 truncate w-[var(--log-col-source)] py-[var(--sp-2)] px-[var(--sp-2)] c-border-r"
-                >
-                  {log.source}
-                </div>
-                {/* Message */}
-                <div className={`flex-1 py-[var(--sp-2)] px-[var(--sp-3)] ${levelColor[log.level]}`}>
-                  {log.msg}
-                </div>
-              </div>
-            ))
-          ) : (
-            <div className="flex items-center justify-center py-20 text-t5 font-mono text-data">
-              {activeLine
-                ? `No ${logFilter === 'all' ? '' : logFilter + ' '}logs for ${activeLine}`
-                : 'Select an instance to view logs'}
-            </div>
-          )}
-        </div>
+        <LogStream
+          entries={filteredLogs}
+          error={logsError ? `Failed to load logs: ${errorMessage(logsError)}` : undefined}
+          onRetry={logsError ? () => { void refetchLogs() } : undefined}
+          isFiltered={logFilter !== 'all'}
+          filteredEmptyMessage={
+            activeLine
+              ? `No ${logFilter} logs for ${activeLine}.`
+              : 'Select an instance to view logs.'
+          }
+          emptyMessage={
+            activeLine
+              ? `No logs for ${activeLine}.`
+              : 'Select an instance to view logs.'
+          }
+        />
 
         {/* Status bar */}
         <div

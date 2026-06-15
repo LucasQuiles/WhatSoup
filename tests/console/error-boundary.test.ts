@@ -44,7 +44,10 @@ describe('ErrorBoundary', () => {
     expect(app).toContain('element={<ErrorBoundary><Inbox /></ErrorBoundary>}')
     expect(app).toContain('element={<ErrorBoundary><Ops /></ErrorBoundary>}')
 
-    expect(boundary).toContain('c-card')
+    // The error fallback surface is the Card primitive (DD-38 no-card-recipe
+    // migration replaced the raw `c-card` recipe class with <Card>).
+    expect(boundary).toContain("import { Card } from './primitives'")
+    expect(boundary).toContain('<Card')
     expect(boundary).toContain('variant="error"')
     expect(boundary).toContain('onRetry={this.handleRetry}')
   })

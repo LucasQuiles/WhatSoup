@@ -1,5 +1,6 @@
 import { type FC } from 'react'
 import { Shield, ShieldAlert, ShieldOff, Lock, Cpu, AlertTriangle } from 'lucide-react'
+import { statusBadgeStyle } from '../lib/status-severity'
 import type { LineInstance } from '../types'
 
 interface LineTagsProps {
@@ -17,7 +18,7 @@ function getAccessTag(accessMode: string): TagDef | null {
   switch (accessMode) {
     case 'allowAll':
     case 'open_dm':
-      return { label: 'open', icon: ShieldOff, color: 'var(--color-s-warn)', bg: 'var(--s-warn-wash)' }
+      return { label: 'open', icon: ShieldOff, ...statusBadgeStyle('warn') }
     case 'allowList':
     case 'allowlist':
       return { label: 'allowlist', icon: Shield, color: 'var(--color-m-cht)', bg: 'var(--m-cht-wash)' }
@@ -37,7 +38,7 @@ function getModelTag(line: LineInstance): TagDef | null {
   if (!fallback) return null
   const isOpenAi = fallback.toLowerCase().includes('gpt') || fallback.toLowerCase().includes('openai')
   if (!isOpenAi) return null
-  return { label: 'openai fb', icon: Cpu, color: 'var(--color-s-warn)', bg: 'var(--s-warn-wash)' }
+  return { label: 'openai fb', icon: Cpu, ...statusBadgeStyle('warn') }
 }
 
 function getProviderMismatchTag(line: LineInstance): TagDef | null {
@@ -47,13 +48,14 @@ function getProviderMismatchTag(line: LineInstance): TagDef | null {
   // Skip if either is missing (health fetch failed, or legacy instance without provider)
   if (!configProvider || !runningProvider) return null
   if (configProvider === runningProvider) return null
-  return { label: 'restart needed', icon: AlertTriangle, color: 'var(--color-s-warn)', bg: 'var(--s-warn-wash)' }
+  return { label: 'restart needed', icon: AlertTriangle, ...statusBadgeStyle('warn') }
 }
 
 const Tag: FC<{ tag: TagDef }> = ({ tag }) => {
   const Icon = tag.icon
   return (
     <span
+      title={tag.label}
       className="text-xs inline-flex items-center font-mono font-medium rounded-sm tracking-[var(--tracking-pill)] whitespace-nowrap gap-[var(--sp-0h)] py-[var(--bw)] px-[var(--sp-1h)]"
       style={{
         color: tag.color,

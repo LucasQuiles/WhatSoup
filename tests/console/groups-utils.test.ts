@@ -19,12 +19,12 @@ describe('roleLabel', () => {
 describe('roleBadgeStyle', () => {
   it('returns warn tokens for superadmin and ok tokens for admin', () => {
     expect(roleBadgeStyle('superadmin')).toEqual({
-      bg: 'var(--s-warn-wash)',
-      color: 'var(--color-s-warn)',
+      bg: 'var(--status-warn-wash)',
+      color: 'var(--status-warn-solid)',
     });
     expect(roleBadgeStyle('admin')).toEqual({
-      bg: 'var(--s-ok-wash)',
-      color: 'var(--color-s-ok)',
+      bg: 'var(--status-ok-wash)',
+      color: 'var(--status-ok-solid)',
     });
   });
 

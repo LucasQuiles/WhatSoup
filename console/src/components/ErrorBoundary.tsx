@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import EmptyState from './EmptyState'
+import { Card } from './primitives'
 
 interface ErrorBoundaryProps {
   children: ReactNode
@@ -36,7 +37,7 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
 
     return (
       <div className="flex-1 flex items-center justify-center p-[var(--sp-4)]" role="alert">
-        <div className="c-card p-[var(--sp-2)]" style={{ width: 'min(100%, 32rem)' }}>
+        <Card className="p-[var(--sp-2)]" style={{ width: 'min(100%, 32rem)' }}>
           <EmptyState
             variant="error"
             title="This page crashed"
@@ -44,7 +45,7 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
             onRetry={this.handleRetry}
             retryLabel="Retry"
           />
-        </div>
+        </Card>
       </div>
     )
   }

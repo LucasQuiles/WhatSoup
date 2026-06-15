@@ -1,10 +1,41 @@
-import React, { useState, useCallback } from 'react'
+/**
+ * ConfigEditDialog — migrated to Modal primitive (B3 wave-2).
+ *
+ * Migration:
+ *   - Removes ad-hoc backdrop div, stopPropagation, and hand-wired aria attrs.
+ *   - dismissable=false: backdrop click was silently destroying the whole patch.
+ *     modal.md: explicit Save/Cancel verbs exist — protective default applied.
+ *   - NEW required `open` prop + LineDetail always-mounts while line.config
+ *     (C-B3W2-1): useDismissable restores focus only on the open→false transition,
+ *     never on unmount; always-mounted ensures focus-restoration works correctly.
+ *   - Restart-warning strip placed as a direct shell child between ModalHeader and
+ *     ModalBody to stay non-scrolling (C-B3W2-6 spec-tension item).
+ *   - GAINS: stacking-aware Escape (previously had NONE), focus trap, focus
+ *     restoration.
+ *   - Width: --panel-config-edit 560px → size="md" 560px (exact match, zero delta).
+ *   - Token deletions: --panel-config-edit and --modal-max-h-sm retired (last
+ *     consumers gone; verified zero remaining references).
+ *   - Title typography normalises to soup-modal-title; X import removed.
+ */
+import React, { useState, useCallback, useEffect, useId } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { X, AlertTriangle, Save } from 'lucide-react'
+import { AlertTriangle, Save } from 'lucide-react'
 import TagInput from '../TagInput'
 import { normalizePhoneInput, validatePhone } from '../../lib/validation'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
+import {
+  CheckboxField,
+  Modal,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+  NumberInput,
+  SelectInput,
+  TextArea,
+  TextInput,
+} from '../primitives'
+import { Button } from '../primitives/Button'
 import {
   CONFIG_EXCLUDE_KEYS,
   AGENT_OPTION_FIELDS,
@@ -20,12 +51,18 @@ import {
   isEqualValue,
 } from './config-helpers'
 
+function fieldIdSegment(key: string): string {
+  return key.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'field'
+}
+
 export function ConfigEditDialog({
+  open,
   config,
   lineName,
   adminPhonesDisplay,
   onClose,
 }: {
+  open: boolean
   config: Record<string, unknown>
   lineName: string
   adminPhonesDisplay?: Record<string, string>
@@ -36,6 +73,17 @@ export function ConfigEditDialog({
   const [patch, setPatch] = useState<Record<string, unknown>>({})
   const [saving, setSaving] = useState(false)
   const [customEnumFields, setCustomEnumFields] = useState<Record<string, true>>({})
+  const fieldIdPrefix = useId()
+
+  // Reset patch and custom-enum state on each open (C-B3W2-1 — mirrors
+  // CreateGroupModal precedent; provides fresh-state-per-open semantics that
+  // mount-gating previously provided).
+  useEffect(() => {
+    if (open) {
+      setPatch({})
+      setCustomEnumFields({})
+    }
+  }, [open])
 
   const editableEntries: [string, unknown][] = React.useMemo(() => {
     const entries: [string, unknown][] = []
@@ -118,34 +166,46 @@ export function ConfigEditDialog({
     }
   }
 
-  const renderField = (key: string, originalValue: unknown) => {
+  const renderField = (
+    key: string,
+    originalValue: unknown,
+    fieldId: string,
+    describedBy: string | undefined,
+    invalid: boolean,
+  ) => {
     const val = currentValue(key)
 
     // Boolean -> checkbox
     if (typeof originalValue === 'boolean') {
       return (
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={val as boolean}
-            onChange={e => setField(key, e.target.checked)}
-            className="accent-current w-[var(--feed-col-icon)] h-[var(--feed-col-icon)]"
-          />
-          <span className="font-mono text-m-agt text-data">
-            {String(val)}
-          </span>
-        </label>
+        <CheckboxField
+          id={fieldId}
+          checked={val as boolean}
+          onChange={checked => setField(key, checked)}
+          className="cursor-pointer"
+          inputClassName="accent-current w-[var(--feed-col-icon)] h-[var(--feed-col-icon)]"
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          label={(
+            <span className="font-mono text-m-agt text-data">
+              {String(val)}
+            </span>
+          )}
+        />
       )
     }
 
     // Number -> number input
     if (typeof originalValue === 'number') {
       return (
-        <input
-          type="number"
+        <NumberInput
+          id={fieldId}
           value={val as number}
           onChange={e => setField(key, Number(e.target.value))}
-          className="c-input font-mono text-s-warn"
+          className="text-s-warn"
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          error={invalid}
         />
       )
     }
@@ -155,6 +215,7 @@ export function ConfigEditDialog({
       const values = (val as string[]) ?? []
       return (
         <TagInput
+          id={fieldId}
           values={values}
           onChange={(newValues) => setField(key, newValues)}
           placeholder={key === 'adminPhones' ? 'Add phone number' : 'Add item'}
@@ -162,6 +223,8 @@ export function ConfigEditDialog({
           normalizeValue={key === 'adminPhones' ? normalizePhoneInput : undefined}
           accentColor={values.length > 0 ? 'var(--color-m-agt)' : undefined}
           displayLabels={key === 'adminPhones' ? adminPhonesDisplay : undefined}
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
         />
       )
     }
@@ -169,11 +232,17 @@ export function ConfigEditDialog({
     // Object -> read-only JSON textarea
     if (typeof originalValue === 'object' && originalValue !== null) {
       return (
-        <textarea
+        <TextArea
+          id={fieldId}
           readOnly
           value={JSON.stringify(val, null, 2)}
-          className="c-input font-mono text-t3"
-          style={{ resize: 'vertical', minHeight: 'calc(var(--sp-10) + var(--sp-5))', filter: 'brightness(0.7)' }}
+          className="text-t3"
+          minHeight="calc(var(--sp-10) + var(--sp-5))"
+          resize="vertical"
+          dimmed
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          error={invalid}
         />
       )
     }
@@ -196,7 +265,8 @@ export function ConfigEditDialog({
 
       return (
         <div className="flex flex-col gap-[var(--sp-2)]">
-          <select
+          <SelectInput
+            id={fieldId}
             value={customEnumActive ? CUSTOM_ENUM_OPTION : val as string}
             onChange={e => {
               const nextValue = e.target.value
@@ -208,7 +278,10 @@ export function ConfigEditDialog({
               clearCustomEnum()
               setField(key, nextValue)
             }}
-            className="c-input font-mono cursor-pointer text-m-pas pr-[var(--sp-8)]"
+            className="font-mono cursor-pointer text-m-pas pr-[var(--sp-8)]"
+            aria-describedby={describedBy}
+            aria-invalid={invalid ? true : undefined}
+            error={invalid && !customEnumActive}
           >
             {enumOpts.map(opt => (
               <option key={opt} value={opt}>{opt || '(default)'}</option>
@@ -216,14 +289,19 @@ export function ConfigEditDialog({
             {CUSTOMIZABLE_ENUM_KEYS.has(key) && (
               <option value={CUSTOM_ENUM_OPTION}>Custom…</option>
             )}
-          </select>
+          </SelectInput>
           {customEnumActive && (
-            <input
+            <TextInput
+              id={`${fieldId}-custom`}
               type="text"
               value={typeof val === 'string' && !enumOpts.includes(val) ? val : ''}
               onChange={e => setField(key, e.target.value)}
+              aria-label="Custom model ID"
               placeholder="Enter custom model ID"
-              className="c-input font-mono text-m-pas"
+              className="text-m-pas"
+              aria-describedby={describedBy}
+              aria-invalid={invalid ? true : undefined}
+              error={invalid}
             />
           )}
         </div>
@@ -233,22 +311,31 @@ export function ConfigEditDialog({
     // String (long) -> textarea
     if (typeof originalValue === 'string' && (originalValue as string).length > 80) {
       return (
-        <textarea
+        <TextArea
+          id={fieldId}
           value={val as string}
           onChange={e => setField(key, e.target.value)}
-          className="c-input font-mono text-m-pas"
-          style={{ resize: 'vertical', minHeight: 'calc(var(--sp-10) * 2)' }}
+          className="text-m-pas"
+          minHeight="calc(var(--sp-10) * 2)"
+          resize="vertical"
+          aria-describedby={describedBy}
+          aria-invalid={invalid ? true : undefined}
+          error={invalid}
         />
       )
     }
 
     // String (short) -> text input
     return (
-      <input
+      <TextInput
+        id={fieldId}
         type="text"
         value={val as string}
         onChange={e => setField(key, e.target.value)}
-        className="c-input font-mono text-m-pas"
+        className="text-m-pas"
+        aria-describedby={describedBy}
+        aria-invalid={invalid ? true : undefined}
+        error={invalid}
       />
     )
   }
@@ -260,77 +347,66 @@ export function ConfigEditDialog({
   })
 
   return (
-    <div
-      className="c-dialog-backdrop"
-      onClick={onClose}
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="md"
+      dismissable={false}
     >
+      <ModalHeader title="Edit Configuration" onClose={onClose} />
+
+      {/* Restart warning — direct shell child between ModalHeader and ModalBody so it
+          does not scroll with the body (C-B3W2-6 non-scrolling anatomy region). */}
       <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="config-edit-dialog-title"
-        className="c-dialog flex flex-col w-[var(--panel-config-edit)] max-h-[var(--modal-max-h-sm)] max-w-[var(--panel-max-inline)]"
-        onClick={e => e.stopPropagation()}
+        className="flex items-center gap-2 flex-shrink-0 py-[var(--sp-3)] px-[var(--sp-5)] bg-[var(--s-warn-wash)] c-border-b text-s-warn text-sm"
       >
-        {/* Header */}
-        <div className="c-dialog-header flex-shrink-0">
-          <span id="config-edit-dialog-title" className="font-sans font-semibold text-lg">
-            Edit Configuration
-          </span>
-          <button type="button" onClick={onClose} className="c-btn c-btn-ghost c-btn-sm" aria-label="Close dialog">
-            <X size={18} strokeWidth={1.75} />
-          </button>
-        </div>
+        <AlertTriangle size={14} strokeWidth={1.75} />
+        <span>Some changes may require a restart to take effect.</span>
+      </div>
 
-        {/* Restart warning */}
-        <div
-          className="flex items-center gap-2 flex-shrink-0 py-[var(--sp-3)] px-[var(--sp-5)] bg-[var(--s-warn-wash)] c-border-b text-s-warn text-sm"
-        >
-          <AlertTriangle size={14} strokeWidth={1.75} />
-          <span>Some changes may require a restart to take effect.</span>
-        </div>
+      <ModalBody>
+        {editableEntries.map(([key, originalValue]) => {
+          const isActive = key in patch || key in customEnumFields
+          const fieldError = isActive ? getFieldError(key) : null
+          const fieldId = `${fieldIdPrefix}-${fieldIdSegment(key)}`
+          const errorId = fieldError ? `${fieldId}-error` : undefined
 
-        {/* Body — scrollable */}
-        <div className="flex-1 overflow-y-auto py-[var(--sp-4)] px-[var(--sp-5)]">
-          <div className="flex flex-col gap-[var(--sp-4)]">
-            {editableEntries.map(([key, originalValue]) => (
-              <div key={key}>
-                <label className="c-label block mb-[var(--sp-1)]">
-                  {key}
-                  {(key in patch || key in customEnumFields) && (
-                    <span
-                      className="font-mono ml-[var(--sp-2)] text-s-warn text-xs"
-                    >
-                      modified
-                    </span>
-                  )}
-                </label>
-                {renderField(key, originalValue)}
-                {(key in patch || key in customEnumFields) && getFieldError(key) && (
-                  <span className="font-mono block text-s-crit mt-[var(--sp-1)] text-xs">
-                    {getFieldError(key)}
+          return (
+            <div key={key}>
+              <label htmlFor={fieldId} className="c-label block mb-[var(--sp-1)]">
+                {key}
+                {isActive && (
+                  <span
+                    className="font-mono ml-[var(--sp-2)] text-s-warn text-xs"
+                  >
+                    modified
                   </span>
                 )}
-              </div>
-            ))}
-          </div>
-        </div>
+              </label>
+              {renderField(key, originalValue, fieldId, errorId, Boolean(fieldError))}
+              {fieldError && (
+                <span id={errorId} className="font-mono block text-s-crit mt-[var(--sp-1)] text-xs">
+                  {fieldError}
+                </span>
+              )}
+            </div>
+          )
+        })}
+      </ModalBody>
 
-        {/* Footer */}
-        <div className="c-dialog-footer">
-          <button type="button" onClick={onClose} className="c-btn c-btn-ghost">
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving || !hasChanges || hasErrors}
-            className={`c-btn ${hasChanges ? 'c-btn-primary' : 'c-btn-ghost'}`}
-          >
-            <Save size={14} strokeWidth={1.75} />
-            {saving ? 'Saving...' : `Save${hasChanges ? ` (${Object.keys(patch).length})` : ''}`}
-          </button>
-        </div>
-      </div>
-    </div>
+      <ModalFooter>
+        <Button variant="ghost" onClick={onClose} disabled={saving}>
+          Cancel
+        </Button>
+        <Button
+          variant={hasChanges ? 'primary' : 'ghost'}
+          onClick={handleSave}
+          disabled={saving || !hasChanges || hasErrors}
+          icon={<Save size={14} strokeWidth={1.75} />}
+        >
+          {saving ? 'Saving...' : `Save${hasChanges ? ` (${Object.keys(patch).length})` : ''}`}
+        </Button>
+      </ModalFooter>
+    </Modal>
   )
 }

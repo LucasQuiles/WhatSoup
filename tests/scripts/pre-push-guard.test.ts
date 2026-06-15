@@ -136,6 +136,37 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).toMatch(/\bnpm run guard:test-integrity\b/);
   });
 
+  it('shared console design verification invokes design guard fixture tests', () => {
+    const chain = packageJson.scripts['verify:console-design'];
+    expect(chain, 'verify:console-design script must exist').toBeDefined();
+    expect(chain).toMatch(/\bnpm run test:design-guards\b/);
+  });
+
+  it('design guard fixture lane covers the scanner contracts used by console design verification', () => {
+    const chain = packageJson.scripts['test:design-guards'];
+    expect(chain, 'test:design-guards script must exist').toBeDefined();
+    expect(chain).toContain('npm test -- ');
+    expect(chain).toContain('--pool=forks');
+    for (const testFile of [
+      'tests/scripts/theme-parity.test.ts',
+      'tests/scripts/token-spec-drift.test.ts',
+      'tests/scripts/contrast-matrix.test.ts',
+      'tests/scripts/shadow-baseline.test.ts',
+      'tests/scripts/shadow-frozen-inventory.test.ts',
+      'tests/scripts/raw-form-control-inventory.test.ts',
+      'tests/scripts/design-regression-guards.test.ts',
+      'tests/scripts/design-metrics.test.ts',
+      'tests/scripts/design-burndown-check.test.ts',
+      'tests/scripts/color-semantics.test.ts',
+      'tests/scripts/design-resilience-audit.test.ts',
+      'tests/scripts/font-assets.test.ts',
+      'tests/scripts/brand-assets.test.ts',
+      'tests/scripts/design-lint-fixtures.test.ts',
+    ]) {
+      expect(chain).toContain(testFile);
+    }
+  });
+
   it('verify chains invoke the commit-author guard', () => {
     for (const scriptName of ['verify:push:branch', 'verify:release']) {
       const chain = packageJson.scripts[scriptName];

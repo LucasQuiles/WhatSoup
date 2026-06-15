@@ -18,6 +18,8 @@ import {
   ChevronUp,
 } from 'lucide-react'
 import type { ScheduledMessage } from '../../types.js'
+import { formatFullTime } from '../../lib/format-time'
+import { Button } from '../primitives/Button'
 import { statusColor, statusLabel, contentTypeLabel, cronToHuman } from './scheduled-utils.js'
 
 interface ScheduledMessageRowProps {
@@ -79,6 +81,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           {/* Top line: preview + status badge */}
           <div className="flex items-center gap-2 flex-wrap">
             <span
+              title={preview || undefined}
               className="c-data truncate flex-1 min-w-0"
             >
               {preview || <span className="text-t4 italic">(no preview)</span>}
@@ -104,7 +107,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           <div className="flex items-center gap-2 flex-wrap c-label mt-[var(--sp-0h)]">
             <span>{message.chatName ?? message.chatJid}</span>
             <span style={metaDividerStyle}>·</span>
-            <span>{new Date(message.scheduledAt * 1000).toLocaleString()}</span>
+            <span>{formatFullTime(message.scheduledAt)}</span>
 
             {/* Recurrence indicator */}
             {isRecurring && (
@@ -140,48 +143,47 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
         <div className="flex items-center gap-1 flex-shrink-0">
           {isPending && (
             <>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => onEdit(message)}
                 aria-label="Edit scheduled message"
-                className="c-btn c-btn-sm c-btn-ghost font-mono"
-              >
-                <Pencil size={15} strokeWidth={1.75} />
-              </button>
-              <button
-                type="button"
+                className="font-mono"
+                icon={<Pencil size={15} strokeWidth={1.75} />}
+              />
+              <Button
+                variant="danger"
+                size="sm"
                 onClick={() => onCancel(message.id)}
                 disabled={cancelling === message.id}
                 aria-label={`Cancel scheduled message to ${message.chatName ?? message.chatJid}`}
-                className="c-btn c-btn-sm c-btn-danger font-mono"
-              >
-                {cancelling === message.id
+                className="font-mono"
+                icon={cancelling === message.id
                   ? <Loader2 size={15} className="animate-spin" />
                   : <Trash2 size={15} strokeWidth={1.75} />}
-              </button>
+              />
             </>
           )}
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => onDuplicate(message)}
             aria-label="Duplicate as new scheduled message"
-            className="c-btn c-btn-sm c-btn-ghost font-mono"
+            className="font-mono"
             title="Duplicate"
-          >
-            <Copy size={15} strokeWidth={1.75} />
-          </button>
+            icon={<Copy size={15} strokeWidth={1.75} />}
+          />
           {/* Expand/collapse for next run + extra details */}
           {(isRecurring || message.retryCount > 0) && (
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setExpanded(!expanded)}
-              className="c-btn c-btn-sm c-btn-ghost"
               aria-label={expanded ? 'Collapse details' : 'Expand details'}
-            >
-              {expanded
+              icon={expanded
                 ? <ChevronUp size={15} strokeWidth={1.75} />
                 : <ChevronDown size={15} strokeWidth={1.75} />}
-            </button>
+            />
           )}
         </div>
       </div>
@@ -192,16 +194,16 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
           className="c-label flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 [border-top:var(--bw)_solid_var(--b1)] gap-[var(--sp-3)]"
         >
           {message.nextRunAt && (
-            <span>Next run: {new Date(message.nextRunAt * 1000).toLocaleString()}</span>
+            <span>Next run: {formatFullTime(message.nextRunAt)}</span>
           )}
           {message.sentAt && (
-            <span>Last sent: {new Date(message.sentAt * 1000).toLocaleString()}</span>
+            <span>Last sent: {formatFullTime(message.sentAt)}</span>
           )}
           {message.retryCount > 0 && (
             <span>Retries: {message.retryCount}</span>
           )}
           <span>ID: {message.id}</span>
-          <span>Created: {new Date(message.createdAt * 1000).toLocaleString()}</span>
+          <span>Created: {formatFullTime(message.createdAt)}</span>
         </div>
       )}
     </div>

@@ -1,13 +1,15 @@
-import { type FC, type ChangeEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type FC, type ChangeEvent, type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Check, Lock, List, MessageCircle, Users } from 'lucide-react'
 import CardSelector from '../CardSelector'
 import TagInput from '../TagInput'
-import { Field, TextInput, NumberInput, SelectInput, TextArea, CheckboxField } from './form-primitives'
+import { Field, TextInput, NumberInput, SelectInput, FileInput, TextArea, CheckboxField } from '../primitives'
 // form-styles static exports replaced by CSS classes (c-field-label, c-helper)
 import { validatePhone } from '../../lib/validation'
 import { PROVIDERS, getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_DETAILS, ACCESS_MODE_VALUES, type AccessModeValue } from '../../lib/access-modes'
+import { Tabs, Tab } from '../primitives/Tabs'
+import { Button } from '../primitives/Button'
 
 interface ConfigStepProps {
   data: Record<string, unknown>
@@ -173,7 +175,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       patch.claudeMd = defaultClaudeMd(name, agentOptions.cwd ?? '')
     }
     if (Object.keys(patch).length > 0) onChange(patch)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- intentional mount-only
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- waiver:WVR-011 intentional mount-only effect; expires 2026-12-31
 
   const pineconeIndex = (data.pineconeIndex as string) ?? ''
   const pineconeSearchMode = (data.pineconeSearchMode as string) ?? 'Memory'
@@ -181,6 +183,8 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
   const pineconeTopK = (data.pineconeTopK as number) ?? 20
   const pineconeAllowedIndexes = (data.pineconeAllowedIndexes as string[]) ?? []
   const toolUpdateMode = (data.toolUpdateMode as string) ?? 'full'
+  const allowedContactsInputId = useId()
+  const allowedContactsHelperId = useId()
 
   const handleFileUpload = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
@@ -330,22 +334,20 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
   return (
     <div className="flex flex-col gap-[var(--sp-4)]">
-      {/* Tab bar */}
-      <div className="flex c-border-b" role="tablist">
-        <button type="button" className={`c-tab ${activeTab === 'access' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'access'} onClick={() => setActiveTab('access')}>Access</button>
-        <button type="button" className={`c-tab ${activeTab === 'behavior' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'behavior'} onClick={() => setActiveTab('behavior')}>Behavior</button>
+      {/* Tab bar — Tabs primitive: roving tabindex, Arrow/Home/End, MANUAL activation. */}
+      <Tabs label="Config sections" value={activeTab} onChange={setActiveTab}>
+        <Tab id="access">Access</Tab>
+        <Tab id="behavior">Behavior</Tab>
         {type === 'agent' && (
-          <button type="button" className={`c-tab ${activeTab === 'permissions' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'permissions'} onClick={() => setActiveTab('permissions')}>Permissions</button>
+          <Tab id="permissions">Permissions</Tab>
         )}
-        <button type="button" className={`c-tab ${activeTab === 'limits' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'limits'} onClick={() => setActiveTab('limits')}>Limits</button>
-        <button type="button" className={`c-tab ${activeTab === 'rag' ? 'active' : ''}`} role="tab" aria-selected={activeTab === 'rag'} onClick={() => setActiveTab('rag')}>
-          RAG <span className="text-t5 text-xs">(optional)</span>
-        </button>
-      </div>
+        <Tab id="limits">Limits</Tab>
+        <Tab id="rag">RAG <span className="text-t5 text-xs">(optional)</span></Tab>
+      </Tabs>
 
-      {/* 1. Access */}
+      {/* 1. Access — conditional-mount panel (Tabs.tsx header §11-13 sanctions this). */}
       {activeTab === 'access' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-access" aria-labelledby="tab-access" className="flex flex-col gap-[var(--sp-4)]">
           <div>
             <label className="c-label c-field-label">
               <span className="inline-flex items-center gap-[var(--sp-1)]">
@@ -354,6 +356,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               </span>
             </label>
             <CardSelector
+              label="Access Mode"
               options={ACCESS_OPTIONS}
               selected={accessMode}
               onChange={(value) => onChange({ accessMode: value })}
@@ -372,15 +375,17 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               <span className="c-heading" style={{ color: 'var(--wizard-accent)' }}>Allowlist</span>
               <p className="c-body text-t3">Only approved contacts can interact. New contacts will be held in a pending queue until an admin approves or blocks them.</p>
               <div className="mt-[var(--sp-3)]">
-                <label className="c-label c-field-label">Pre-approved contacts</label>
+                <label htmlFor={allowedContactsInputId} className="c-label c-field-label">Pre-approved contacts</label>
                 <TagInput
+                  id={allowedContactsInputId}
                   values={allowedContacts}
                   onChange={(values) => onChange({ allowedContacts: values.map(v => v.replace(/\D/g, '')) })}
                   placeholder="Add phone number"
                   validate={validatePhone}
                   accentColor={allowedContacts.length > 0 ? 'var(--wizard-accent)' : undefined}
+                  aria-describedby={allowedContactsHelperId}
                 />
-                <div className="c-helper">These contacts will be automatically approved when they first message.</div>
+                <div id={allowedContactsHelperId} className="c-helper">These contacts will be automatically approved when they first message.</div>
               </div>
             </div>
           )}
@@ -403,7 +408,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 2. Behavior */}
       {activeTab === 'behavior' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-behavior" aria-labelledby="tab-behavior" className="flex flex-col gap-[var(--sp-4)]">
           {/* System Prompt — hidden for passive lines */}
           {type !== 'passive' && (
             <Field label="System Prompt" error={errors.systemPrompt} confirmed={!errors.systemPrompt && systemPrompt.trim().length > 0}>
@@ -432,11 +437,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               </span>
             </label>
             <div className="flex items-center justify-center cursor-pointer rounded-sm p-[var(--sp-4)] bg-d3 mb-[var(--sp-2)] c-border-dashed">
-              <input
-                type="file"
+              <FileInput
                 accept=".md,.txt"
                 onChange={handleFileUpload}
-                className="w-full cursor-pointer text-t3 text-data"
+                className="w-full cursor-pointer text-t3"
               />
             </div>
             <TextArea
@@ -452,7 +456,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 3. Permissions — only for agent type */}
       {activeTab === 'permissions' && type === 'agent' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-permissions" aria-labelledby="tab-permissions" className="flex flex-col gap-[var(--sp-4)]">
           <Field label="Working Directory" error={errors.cwd} helper="Directory will be created if it doesn't exist" confirmed={!errors.cwd && (agentOptions.cwd ?? defaultWorkspace).trim().length > 0}>
             {(id) => (
               <TextInput
@@ -641,17 +645,17 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             </div>
             <div className="flex items-center gap-[var(--sp-2)] mt-[var(--sp-2)] mb-[var(--sp-1)]">
               {agentOptions.enabledPlugins && Object.keys(agentOptions.enabledPlugins).length > 0 && (
-                <button
-                  type="button"
-                  className="c-btn c-btn-ghost c-btn-xs"
+                <Button
+                  variant="ghost"
+                  size="xs"
                   onClick={() => handleAgentOption('enabledPlugins', {})}
                 >
                   Reset to global defaults
-                </button>
+                </Button>
               )}
-              <button
-                type="button"
-                className="c-btn c-btn-ghost c-btn-xs"
+              <Button
+                variant="ghost"
+                size="xs"
                 onClick={() => {
                   const all: Record<string, boolean> = {}
                   ALL_PLUGINS.forEach(p => { all[p.key] = true })
@@ -659,10 +663,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 }}
               >
                 Enable all
-              </button>
-              <button
-                type="button"
-                className="c-btn c-btn-ghost c-btn-xs"
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
                 onClick={() => {
                   const core: Record<string, boolean> = {}
                   ALL_PLUGINS.forEach(p => { core[p.key] = p.category === 'core' })
@@ -670,7 +674,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 }}
               >
                 Core only
-              </button>
+              </Button>
             </div>
             {(Object.entries(CATEGORY_LABELS) as [string, string][]).map(([cat, catLabel]) => {
               const plugins = ALL_PLUGINS.filter(p => p.category === cat)
@@ -684,28 +688,28 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                     const current = agentOptions.enabledPlugins ?? {}
                     const isEnabled = current[plugin.key] ?? true // default: inherit (enabled)
                     return (
-                      <label
+                      <CheckboxField
                         key={plugin.key}
-                        className="flex items-start cursor-pointer gap-[var(--sp-2)] py-[var(--sp-1)] px-0"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isEnabled}
-                          onChange={(e) => {
-                            const updated = { ...current, [plugin.key]: e.target.checked }
-                            handleAgentOption('enabledPlugins', updated)
-                          }}
-                          className="mt-[var(--sp-0h)]"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className={`${isEnabled ? 'text-t1' : 'text-t4'} text-data`}>
-                            {plugin.label}
-                          </div>
-                          <div className="text-t5 text-xs">
-                            {plugin.description}
-                          </div>
-                        </div>
-                      </label>
+                        checked={isEnabled}
+                        onChange={(checked) => {
+                          const updated = { ...current, [plugin.key]: checked }
+                          handleAgentOption('enabledPlugins', updated)
+                        }}
+                        className="cursor-pointer py-[var(--sp-1)] px-0"
+                        inputClassName="self-start mt-[var(--sp-0h)]"
+                        labelClassName="flex-1 min-w-0"
+                        label={(
+                          <span className="block flex-1 min-w-0">
+                            <span className={`${isEnabled ? 'text-t1' : 'text-t4'} text-data block`}>
+                              {plugin.label}
+                            </span>
+                            {' '}
+                            <span className="text-t5 text-xs block">
+                              {plugin.description}
+                            </span>
+                          </span>
+                        )}
+                      />
                     )
                   })}
                 </div>
@@ -748,8 +752,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             {(data.settingsJsonMode as string) === 'custom' && (
               <>
                 <div className="mt-[var(--sp-2)]">
-                  <input
-                    type="file"
+                  <FileInput
                     accept=".json"
                     onChange={(e) => {
                       const file = e.target.files?.[0]
@@ -765,7 +768,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                       }
                       reader.readAsText(file)
                     }}
-                    className="w-full cursor-pointer text-t3 mb-[var(--sp-2)] text-data"
+                    className="w-full cursor-pointer text-t3 mb-[var(--sp-2)]"
                   />
                 </div>
                 <TextArea
@@ -806,7 +809,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 4. Limits */}
       {activeTab === 'limits' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-limits" aria-labelledby="tab-limits" className="flex flex-col gap-[var(--sp-4)]">
           <Field label="Messages per hour" confirmed>
             {(id) => (
               <NumberInput
@@ -860,7 +863,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
 
       {/* 5. RAG */}
       {activeTab === 'rag' && (
-        <div className="flex flex-col gap-[var(--sp-4)]">
+        <div role="tabpanel" id="tabpanel-rag" aria-labelledby="tab-rag" className="flex flex-col gap-[var(--sp-4)]">
           <Field label="Pinecone Index Name" confirmed={pineconeIndex.trim().length > 0}>
             {(id) => (
               <TextInput
@@ -881,10 +884,10 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
             </label>
             <div className="flex">
               {SEARCH_MODES.map((mode) => (
-                <button
+                <Button
                   key={mode}
-                  type="button"
-                  className="c-btn cursor-pointer py-[var(--sp-2)] px-[var(--sp-4)] text-data"
+                  variant="neutral"
+                  className="cursor-pointer py-[var(--sp-2)] px-[var(--sp-4)] text-data"
                   onClick={() => onChange({ pineconeSearchMode: mode })}
                   style={{
                     background:
@@ -899,7 +902,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                   }}
                 >
                   {mode}
-                </button>
+                </Button>
               ))}
             </div>
           </div>
@@ -920,8 +923,9 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               )}
             </Field>
             <Field label="Allowed indexes" helper="Restrict which Pinecone indexes this instance can query" confirmed={pineconeAllowedIndexes.length > 0}>
-              {() => (
+              {(id) => (
                 <TagInput
+                  id={id}
                   values={pineconeAllowedIndexes}
                   onChange={(values) => onChange({ pineconeAllowedIndexes: values })}
                   placeholder="Index name"
@@ -934,13 +938,13 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
       {/* Skip — sticky at bottom, right-aligned */}
       {onSkip && (
         <div className="flex justify-end mt-[var(--sp-4)] pt-[var(--sp-3)] c-border-t">
-          <button
-            type="button"
-            className="c-btn c-btn-ghost c-btn-sm"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={onSkip}
           >
             Skip — Use Defaults
-          </button>
+          </Button>
         </div>
       )}
     </div>

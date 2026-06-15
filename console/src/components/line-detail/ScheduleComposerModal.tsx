@@ -1,11 +1,36 @@
+/**
+ * ScheduleComposerModal — migrated to Modal primitive (B3 wave-2).
+ *
+ * Migration:
+ *   - Removes ad-hoc backdrop div, stopPropagation, bubble-phase Escape effect,
+ *     and `if (!open) return null` gate.
+ *   - dismissable=false: backdrop click was silently destroying eight fields of
+ *     state with no recovery path. modal.md: explicit Cancel/Schedule verbs exist
+ *     — protective default applied. Inverts a tested behaviour (C-B3W2-2).
+ *   - Header Clock icon dropped per modal.md anatomy (ConfirmDialog/CreateGroupModal
+ *     precedent). Clock on the footer primary button is KEPT.
+ *   - Width: --panel-composer 540px → size="md" 560px (+20px, CreateGroupModal
+ *     precedent, tokens-v3 §6.12).
+ *   - Two binary toggle pairs (Text/Media, Recurring/One-shot) → ToolbarTimeRange
+ *     segmented control (DD-15 closure for this file; C-B3W2-4: toolbar-namespaced
+ *     name in modal body accepted this wave).
+ *   - Stray empty style={{ }} on datetime input dropped in passing.
+ *   - Token deletions: --panel-composer, --panel-max-inline-wide, --modal-max-h-lg
+ *     retired (last consumers gone; verified zero remaining references).
+ *   - GAINS: stacking-aware Escape (replaces hand-rolled bubble-phase handler),
+ *     pointerdown outside-click semantics, focus trap, focus restoration.
+ *   - Public prop interface, reset-on-open, submit pipeline, toasts unchanged.
+ */
 import { useState, useEffect, useCallback } from 'react'
-import { X, Clock, RefreshCw, FileText, MessageSquare } from 'lucide-react'
+import { Clock } from 'lucide-react'
 import { api } from '../../lib/api.js'
 import { useToast } from '../../hooks/toast-context.js'
 import { ChatPicker } from '../shared/ChatPicker.js'
 import { cronToHuman } from './scheduled-utils.js'
-import { capitalize } from '../../lib/text-utils.js'
 import type { ChatItem, ScheduledMessage } from '../../types.js'
+import { Modal, ModalHeader, ModalBody, ModalFooter, TextArea, TextInput } from '../primitives'
+import { Button } from '../primitives/Button'
+import { ToolbarTimeRange } from '../primitives/Toolbar'
 
 export interface ScheduleComposerModalProps {
   open: boolean
@@ -22,6 +47,16 @@ const RECURRENCE_PRESETS = [
   { label: 'Daily',   cron: '0 9 * * *' },
   { label: 'Weekly',  cron: '0 9 * * 1' },
   { label: 'Monthly', cron: '0 9 1 * *' },
+]
+
+const CONTENT_TYPE_OPTIONS = [
+  { label: 'Text',  value: 'text' },
+  { label: 'Media', value: 'media' },
+]
+
+const RECURRENCE_OPTIONS = [
+  { label: 'Recurring', value: 'true' },
+  { label: 'One-shot',  value: 'false' },
 ]
 
 /** Convert a unix timestamp (seconds) to datetime-local input value (local time) */
@@ -97,14 +132,6 @@ export function ScheduleComposerModal({
     }
   }, [open, editMessage, chats])
 
-  // Escape key
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open, onClose])
-
   const handleSubmit = useCallback(async () => {
     if (!selectedChat) {
       toast.error('Please select a chat')
@@ -166,215 +193,182 @@ export function ScheduleComposerModal({
     recurring, cronExpr, lineName, isEditing, editMessage, toast, onCreated, onClose,
   ])
 
-  if (!open) return null
-
+  // cronPreview is computed unconditionally (cronToHuman is pure — safe while closed).
   const cronPreview = recurring ? cronToHuman(cronExpr) : ''
 
   return (
-    <div className="c-dialog-backdrop" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="composer-dialog-title"
-        className="c-dialog flex flex-col w-[var(--panel-composer)] max-w-[var(--panel-max-inline-wide)] max-h-[var(--modal-max-h-lg)]"
-        onClick={e => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="c-dialog-header flex-shrink-0">
-          <div className="flex items-center gap-2">
-            <Clock size={16} strokeWidth={1.75} className="text-t4" />
-            <span id="composer-dialog-title" className="c-heading-lg">
-              {isEditing ? 'Edit Scheduled Message' : 'Schedule Message'}
-            </span>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="c-btn c-btn-ghost c-btn-xs">
-            <X size={18} strokeWidth={1.75} />
-          </button>
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="md"
+      dismissable={false}
+    >
+      <ModalHeader
+        title={isEditing ? 'Edit Scheduled Message' : 'Schedule Message'}
+        onClose={onClose}
+      />
+
+      <ModalBody>
+        {/* Chat picker */}
+        <div>
+          <label className="c-field-label">
+            Target chat
+          </label>
+          <ChatPicker
+            chats={chats}
+            selected={selectedChat}
+            onSelect={setSelectedChat}
+            onClear={() => setSelectedChat(null)}
+            placeholder="Search chats..."
+          />
         </div>
 
-        {/* Body — scrollable */}
-        <div className="flex-1 overflow-y-auto py-[var(--sp-4)] px-[var(--sp-5)]">
-          <div className="flex flex-col gap-[var(--sp-4)]">
+        {/* Content type selector — ToolbarTimeRange seg (DD-15, C-B3W2-4) */}
+        <div>
+          <label className="c-field-label">
+            Content type
+          </label>
+          <ToolbarTimeRange
+            label="Content type"
+            options={CONTENT_TYPE_OPTIONS}
+            value={contentType}
+            onChange={(v) => setContentType(v as ContentType)}
+          />
+        </div>
 
-            {/* Chat picker */}
-            <div>
-              <label className="c-field-label">
-                Target chat
-              </label>
-              <ChatPicker
-                chats={chats}
-                selected={selectedChat}
-                onSelect={setSelectedChat}
-                onClear={() => setSelectedChat(null)}
-                placeholder="Search chats..."
-              />
-            </div>
-
-            {/* Content type selector */}
-            <div>
-              <label className="c-field-label">
-                Content type
-              </label>
-              <div className="flex gap-2">
-                {(['text', 'media'] as ContentType[]).map(ct => (
-                  <button
-                    key={ct}
-                    type="button"
-                    onClick={() => setContentType(ct)}
-                    className={`c-btn c-btn-sm font-mono ${contentType === ct ? 'c-btn-primary' : 'c-btn-ghost'}`}
-                  >
-                    {ct === 'text' ? <MessageSquare size={14} strokeWidth={1.75} /> : <FileText size={14} strokeWidth={1.75} />}
-                    {capitalize(ct)}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Composer area */}
-            {contentType === 'text' ? (
-              <div>
-                <label
-                  htmlFor="composer-text"
-                  className="c-field-label"
-                >
-                  Message text
-                </label>
-                <textarea
-                  id="composer-text"
-                  value={text}
-                  onChange={e => setText(e.target.value)}
-                  placeholder="Type your message..."
-                  rows={4}
-                  className="c-input font-mono text-t2 resize-vertical min-h-[var(--sp-16,calc(var(--sp-12)*2))] h-auto"
-                />
-              </div>
-            ) : (
-              <div className="flex flex-col gap-[var(--sp-3)]">
-                <div>
-                  <label
-                    htmlFor="composer-path"
-                    className="c-field-label"
-                  >
-                    File path
-                  </label>
-                  <input
-                    id="composer-path"
-                    type="text"
-                    value={mediaPath}
-                    onChange={e => setMediaPath(e.target.value)}
-                    placeholder="/path/to/file.jpg"
-                    className="c-input font-mono text-t2"
-                  />
-                </div>
-                <div>
-                  <label
-                    htmlFor="composer-caption"
-                    className="c-field-label"
-                  >
-                    Caption (optional)
-                  </label>
-                  <textarea
-                    id="composer-caption"
-                    value={caption}
-                    onChange={e => setCaption(e.target.value)}
-                    placeholder="Optional caption..."
-                    rows={2}
-                    className="c-input font-mono text-t2 resize-vertical h-auto"
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* DateTime picker */}
+        {/* Composer area */}
+        {contentType === 'text' ? (
+          <div>
+            <label
+              htmlFor="composer-text"
+              className="c-field-label"
+            >
+              Message text
+            </label>
+            <TextArea
+              id="composer-text"
+              value={text}
+              onChange={e => setText(e.target.value)}
+              placeholder="Type your message..."
+              rows={4}
+              minHeight={96}
+              className="text-t2 h-auto"
+            />
+          </div>
+        ) : (
+          <div className="flex flex-col gap-[var(--sp-3)]">
             <div>
               <label
-                htmlFor="composer-datetime"
+                htmlFor="composer-path"
                 className="c-field-label"
               >
-                Scheduled time (local)
+                File path
               </label>
-              <input
-                id="composer-datetime"
-                type="datetime-local"
-                value={datetimeLocal}
-                onChange={e => setDatetimeLocal(e.target.value)}
-                className="c-input font-mono text-t2"
-                style={{ colorScheme: 'dark' }}
+              <TextInput
+                id="composer-path"
+                type="text"
+                value={mediaPath}
+                onChange={e => setMediaPath(e.target.value)}
+                placeholder="/path/to/file.jpg"
+                className="text-t2"
               />
             </div>
-
-            {/* Recurrence toggle */}
             <div>
-              <div className={`flex items-center gap-[var(--sp-2)] ${recurring ? 'mb-[var(--sp-3)]' : ''}`}>
-                <button
-                  type="button"
-                  onClick={() => setRecurring(true)}
-                  className={`c-btn c-btn-sm font-mono ${recurring ? 'c-btn-primary' : 'c-btn-ghost'}`}
-                >
-                  <RefreshCw size={14} strokeWidth={1.75} />
-                  Recurring
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecurring(false)}
-                  className={`c-btn c-btn-sm font-mono ${!recurring ? 'c-btn-primary' : 'c-btn-ghost'}`}
-                >
-                  One-shot
-                </button>
-              </div>
+              <label
+                htmlFor="composer-caption"
+                className="c-field-label"
+              >
+                Caption (optional)
+              </label>
+              <TextArea
+                id="composer-caption"
+                value={caption}
+                onChange={e => setCaption(e.target.value)}
+                placeholder="Optional caption..."
+                rows={2}
+                className="text-t2 h-auto"
+              />
+            </div>
+          </div>
+        )}
 
-              {recurring && (
-                <div className="flex flex-col gap-[var(--sp-2)]">
-                  {/* Preset buttons */}
-                  <div className="flex gap-2 flex-wrap">
-                    {RECURRENCE_PRESETS.map(preset => (
-                      <button
-                        key={preset.label}
-                        type="button"
-                        onClick={() => setCronExpr(preset.cron)}
-                        className={`c-btn c-btn-xs font-mono ${cronExpr === preset.cron ? 'c-btn-primary' : 'c-btn-ghost'}`}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-                  {/* Custom cron input */}
-                  <input
-                    type="text"
-                    value={cronExpr}
-                    onChange={e => setCronExpr(e.target.value)}
-                    placeholder="Cron expression (min hr dom mon dow)"
-                    className="c-input font-mono text-t2"
-                  />
-                  {/* Preview */}
-                  {cronPreview && (
-                    <div className="c-meta mt-[var(--sp-1)]">
-                      {cronPreview}
-                    </div>
-                  )}
+        {/* DateTime picker */}
+        <div>
+          <label
+            htmlFor="composer-datetime"
+            className="c-field-label"
+          >
+            Scheduled time (local)
+          </label>
+          <TextInput
+            id="composer-datetime"
+            type="datetime-local"
+            value={datetimeLocal}
+            onChange={e => setDatetimeLocal(e.target.value)}
+            className="text-t2"
+          />
+        </div>
+
+        {/* Recurrence toggle — ToolbarTimeRange seg (DD-15, C-B3W2-4) */}
+        <div>
+          <div className={recurring ? 'mb-[var(--sp-3)]' : ''}>
+            <ToolbarTimeRange
+              label="Recurrence mode"
+              options={RECURRENCE_OPTIONS}
+              value={String(recurring)}
+              onChange={(v) => setRecurring(v === 'true')}
+            />
+          </div>
+
+          {recurring && (
+            <div className="flex flex-col gap-[var(--sp-2)]">
+              {/* Preset buttons */}
+              <div className="flex gap-2 flex-wrap">
+                {RECURRENCE_PRESETS.map(preset => (
+                  <Button
+                    key={preset.label}
+                    size="xs"
+                    variant={cronExpr === preset.cron ? 'primary' : 'ghost'}
+                    onClick={() => setCronExpr(preset.cron)}
+                    className="font-mono"
+                  >
+                    {preset.label}
+                  </Button>
+                ))}
+              </div>
+              {/* Custom cron input */}
+              <TextInput
+                type="text"
+                value={cronExpr}
+                onChange={e => setCronExpr(e.target.value)}
+                placeholder="Cron expression (min hr dom mon dow)"
+                className="text-t2"
+              />
+              {/* Preview */}
+              {cronPreview && (
+                <div className="c-meta mt-[var(--sp-1)]">
+                  {cronPreview}
                 </div>
               )}
             </div>
-
-          </div>
+          )}
         </div>
 
-        {/* Footer */}
-        <div className="c-dialog-footer">
-          <button type="button" onClick={onClose} className="c-btn c-btn-ghost" disabled={submitting}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={submitting || !selectedChat}
-            className="c-btn c-btn-primary font-mono"
-          >
-            <Clock size={13} strokeWidth={1.75} />
-            {submitting ? 'Saving...' : isEditing ? 'Update' : 'Schedule'}
-          </button>
-        </div>
-      </div>
-    </div>
+      </ModalBody>
+
+      <ModalFooter>
+        <Button variant="ghost" onClick={onClose} disabled={submitting}>
+          Cancel
+        </Button>
+        <Button
+          variant="primary"
+          onClick={handleSubmit}
+          disabled={submitting || !selectedChat}
+          icon={<Clock size={13} strokeWidth={1.75} />}
+        >
+          {submitting ? 'Saving...' : isEditing ? 'Update' : 'Schedule'}
+        </Button>
+      </ModalFooter>
+    </Modal>
   )
 }

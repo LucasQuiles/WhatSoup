@@ -1,5 +1,17 @@
-import { type FC, type ReactNode, useEffect } from 'react'
-import { X } from 'lucide-react'
+/**
+ * ConfirmDialog — migrated to Modal primitive (C2 migration, modal.md).
+ *
+ * Public prop interface is PRESERVED for zero consumer breakage.
+ * The migration:
+ *   - Uses Modal (useDismissable: stacking-aware Escape, focus trap, focus restoration)
+ *   - Removes the ad-hoc `useEffect` Escape handler (was the double-close bug source)
+ *   - dismissable=false: no outside-click dismissal. Escape and the X remain available — they CANCEL (safe action).
+ *   - confirm button is NOT default-focused (modal.md: destructive never default-focused)
+ *   - Maps variant prop to Button primitive classes
+ */
+import { type FC, type ReactNode } from 'react'
+import { Modal, ModalHeader, ModalBody, ModalFooter } from './primitives'
+import { Button } from './primitives/Button'
 
 interface ConfirmDialogProps {
   open: boolean
@@ -22,78 +34,32 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
   onConfirm,
   onCancel,
 }) => {
-  // Close on Escape key
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel() }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open, onCancel])
-
-  if (!open) return null
-
   return (
-    <div
-      className="c-dialog-backdrop"
-      onClick={onCancel}
+    <Modal
+      open={open}
+      onClose={onCancel}
+      size="sm"
+      dismissable={false}
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
-        className="overflow-hidden bg-d2 rounded-lg shadow-[var(--shadow-lg)] w-[var(--panel-confirm)] max-w-[90%] c-border"
-        onClick={e => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div
-          className="flex items-center justify-between c-border-b py-[var(--sp-4)] px-[var(--sp-5)]"
+      <ModalHeader title={title} onClose={onCancel} />
+      <ModalBody>
+        <div className="text-body leading-relaxed text-t2">
+          {children}
+        </div>
+      </ModalBody>
+      <ModalFooter>
+        <Button variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          variant={confirmVariant}
+          onClick={onConfirm}
+          icon={confirmIcon}
         >
-          <span id="confirm-dialog-title" className="font-sans font-semibold text-lg">
-            {title}
-          </span>
-          <button
-            type="button"
-            onClick={onCancel}
-            aria-label="Close dialog"
-            className="c-btn c-btn-ghost c-btn-sm"
-          >
-            <X size={18} strokeWidth={1.75} />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="p-[var(--sp-5)]">
-          <div className="text-t2 leading-relaxed text-body">
-            {children}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div
-          className="flex justify-end gap-2 c-border-t bg-d1 py-[var(--sp-3)] px-[var(--sp-5)]"
-        >
-          <button
-            type="button"
-            onClick={onCancel}
-            className="c-btn c-btn-ghost"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            className={`c-btn ${
-              confirmVariant === 'danger' ? 'c-btn-danger'
-              : confirmVariant === 'warning' ? 'c-btn-warning'
-              : 'c-btn-primary'
-            }`}
-          >
-            {confirmIcon}
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
+          {confirmLabel}
+        </Button>
+      </ModalFooter>
+    </Modal>
   )
 }
 

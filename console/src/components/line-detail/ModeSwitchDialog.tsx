@@ -4,6 +4,7 @@ import { GitBranch, AlertTriangle } from 'lucide-react'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
 import ConfirmDialog from '../ConfirmDialog'
+import { Button } from '../primitives/Button'
 import type { Mode } from './types'
 
 const MODE_OPTIONS: { value: Mode; label: string; description: string }[] = [
@@ -67,9 +68,9 @@ export function ModeSwitchDialog({
           const isCurrent = currentMode === opt.value
           const mk = modeKey(opt.value)
           return (
-            <button
+            <Button
               key={opt.value}
-              type="button"
+              variant="ghost"
               onClick={() => !switching && setSelected(opt.value)}
               className="flex items-start gap-3 text-left cursor-pointer c-hover rounded-md py-[var(--sp-3)] px-[var(--sp-4)]"
               style={{
@@ -103,7 +104,7 @@ export function ModeSwitchDialog({
                   {opt.description}
                 </div>
               </div>
-            </button>
+            </Button>
           )
         })}
         {changed && (

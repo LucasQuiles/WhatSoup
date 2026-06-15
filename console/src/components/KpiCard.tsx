@@ -1,4 +1,6 @@
 import { type FC, useId } from "react";
+import { KPI_COLOR_TOKENS, isNeutralKpiColor, kpiStrokeColor } from "../lib/color-semantics";
+import { Button } from "./primitives/Button";
 
 interface KpiCardProps {
   value: string | number;
@@ -10,24 +12,16 @@ interface KpiCardProps {
   suffix?: string;
 }
 
-const colorMap: Record<string, string> = {
-  "text-s-ok": "var(--color-s-ok)",
-  "text-s-crit": "var(--color-s-crit)",
-  "text-s-warn": "var(--color-s-warn)",
-  "text-m-agt": "var(--color-m-agt)",
-  "text-m-cht": "var(--color-m-cht)",
-  "text-m-pas": "var(--color-m-pas)",
-  "text-t2": "var(--color-t2)",
-};
-
 const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = false, sparkData, suffix }) => {
-  const strokeColor = colorMap[color] || "currentColor";
+  const strokeColor = kpiStrokeColor(color);
   const hasSparkline = sparkData && sparkData.length > 1;
   const gradientId = useId();
+  const valueClassName = isNeutralKpiColor(color) ? "c-kpi-value" : `c-kpi-value ${color}`;
+  const valueStyle = isNeutralKpiColor(color) ? { color: KPI_COLOR_TOKENS.neutral } : undefined;
 
   return (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
       aria-pressed={active}
       onClick={onClick}
       className="cursor-pointer select-none relative overflow-hidden c-kpi-pad c-kpi-hover rounded-md"
@@ -37,7 +31,7 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
         boxShadow: active ? "var(--shadow-inset)" : "none",
       }}
     >
-      <div className={`c-kpi-value ${color}`}>
+      <div className={valueClassName} style={valueStyle}>
         {value}
         {suffix && (
           <span className="text-data font-normal ml-[var(--bw-accent)]">
@@ -75,7 +69,7 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
           />
         </svg>
       )}
-    </button>
+    </Button>
   );
 };
 

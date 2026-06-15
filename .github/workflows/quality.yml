@@ -22,6 +22,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Free runner disk before the heavy steps. The full-history checkout +
+      # npm ci (root + console) + Vite build + Playwright chromium overflow the
+      # default ubuntu-latest free space (ENOSPC). Removing unused preinstalled
+      # toolchains (none used by this JS/Python pipeline) reclaims ~20+ GB.
+      # Runs before Setup Node so it can never touch the node toolcache.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h /
+
       # Local dev uses .nvmrc (single version for fast iteration);
       # CI runs a matrix to validate the engines range declared in package.json.
       - name: Setup Node ${{ matrix.node }}
@@ -40,6 +52,13 @@ jobs:
 
       - name: Install Python test dependencies
         run: python3 -m pip install --user pytest pytest-cov
+
+      # ripgrep is a hard requirement of console/scripts/design-regression.sh
+      # (the design:regression gate + tests/scripts/design-regression-guards).
+      # It is not on the default runner image, so install it explicitly;
+      # without it the script's counts go empty and the blocking checks fail.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Typecheck
         run: npm run typecheck
@@ -109,6 +128,14 @@ jobs:
       - name: Documentation drift guard
         run: npm run guard:doc-drift
 
+      - name: Design-system hygiene changed files
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            npm run guard:design-system-hygiene -- --changed-since "origin/${GITHUB_BASE_REF}"
+          else
+            npm run guard:design-system-hygiene -- --changed-since HEAD^
+          fi
+
       - name: Public surface drift guard
         run: npm run guard:public-surface-drift
 
@@ -161,6 +188,14 @@ jobs:
         continue-on-error: true
         run: npm run guard:repo:scan-history -- 100
 
+      # Console deps must be installed before the root test suite: the design
+      # lint gate (tests/console/design-lints.test.ts) builds an ESLint instance
+      # from console/eslint.config.shadow.mjs, which resolves its plugins from
+      # console/node_modules. Installing after the suite left it absent → the
+      # config load threw and the whole 115-case gate failed.
+      - name: Install console dependencies
+        run: npm --prefix console ci
+
       - name: Test suite
         run: npm test -- --pool=forks
 
@@ -170,11 +205,36 @@ jobs:
       - name: Failure-scenario drills
         run: npm run test:drills
 
-      - name: Install console dependencies
-        run: npm --prefix console ci
-
       - name: Console lint
         run: npm --prefix console run lint
 
       - name: Console build
         run: npm --prefix console run build
+
+      - name: Console design verification
+        run: npm run verify:console-design
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Browser test suite
+        run: npm run test:browser
+
+      - name: Browser motion test suite
+        run: npm run test:browser:motion
+
+      - name: Upload browser test failure screenshots
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-screenshots-${{ matrix.node }}
+          path: |
+            tests/browser/__screenshots__
+            tests/browser-motion/__screenshots__
+          if-no-files-found: ignore

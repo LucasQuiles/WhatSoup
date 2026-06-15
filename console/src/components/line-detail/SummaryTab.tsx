@@ -4,13 +4,16 @@ import { RotateCw, SlidersHorizontal, GitBranch, Power } from 'lucide-react'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
 import { formatRelative } from '../../lib/format-time'
-import { getProvider, DEFAULT_PROVIDER_ID } from '../../lib/providers'
+import { formatCount } from '../../lib/text-utils'
+import { getProvider, getProviderColor, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { statusTextClass } from '../../lib/status-severity'
 import ConfirmDialog from '../ConfirmDialog'
+import { Button } from '../primitives/Button'
 import { PipelineNode, PipelineArrow } from './PipelineTab'
 import { ProvidersKeysCard } from './ProvidersKeysCard'
 import { buildConfigEntries, TYPE_COLOR } from './config-helpers'
 import { getModeColor } from './types'
+import { resolveConnection } from '../../lib/status-map'
 import type { LineInstance } from './types'
 
 export function SummaryTab({
@@ -32,11 +35,17 @@ export function SummaryTab({
     typeof agentOptions?.provider === 'string' ? agentOptions.provider : DEFAULT_PROVIDER_ID
   const providerId = line.provider ?? line.health?.instance?.provider ?? configProvider
   const providerDisplay = getProvider(providerId)?.displayName ?? providerId
+  const providerInk = getProviderColor(providerId).stroke
+  const configProviderInk = getProviderColor(configProvider).stroke
 
   // All instance KPIs in one row — health, runtime, identity, tokens
+  // Resolve connection state via the single-owner map (DD-11).
+  // Deliberate behavior change: disconnected is now text-s-crit (was text-t4) — a
+  // disconnected line IS a problem; spec-aligned (CONNECTION_MAP in status-map.ts).
+  const conn = resolveConnection(connectionState)
   const cards = [
     { label: 'STATUS', value: line.status, color: statusTextClass(line.status) },
-    { label: 'CONNECTION', value: connectionState, color: connectionState === 'connected' ? 'text-s-ok' : connectionState === 'connecting' ? 'text-s-warn' : 'text-t4' },
+    { label: 'CONNECTION', value: conn.label, color: conn.inkClass },
     ...(line.linkedStatus
       ? [{
           label: 'LINK',
@@ -56,8 +65,13 @@ export function SummaryTab({
       { label: 'ENRICHMENT', value: String(line.enrichmentUnprocessed ?? 0), color: (line.enrichmentUnprocessed ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
     ] : []),
     ...(line.mode === 'agent' ? [
-      { label: 'PROVIDER', value: providerDisplay, color: 'text-m-agt' },
-      { label: 'SESSIONS', value: String(line.activeSessions ?? 0), color: (line.activeSessions ?? 0) > 0 ? 'text-m-agt' : 'text-t3' },
+      { label: 'PROVIDER', value: providerDisplay, color: '', style: { color: providerInk } },
+      {
+        label: 'SESSIONS',
+        value: String(line.activeSessions ?? 0),
+        color: (line.activeSessions ?? 0) > 0 ? '' : 'text-t3',
+        style: (line.activeSessions ?? 0) > 0 ? { color: 'var(--text-2)' } : undefined,
+      },
       ...(line.health?.runtime?.agent?.lastSessionStatus
         ? [{ label: 'LAST SESSION', value: line.health.runtime.agent.lastSessionStatus, color: line.health.runtime.agent.lastSessionStatus === 'success' ? 'text-s-ok' : 'text-s-warn' }]
         : []),
@@ -70,7 +84,7 @@ export function SummaryTab({
       ? [{ label: 'ISOLATION', value: 'per-chat', color: 'text-m-agt' }]
       : []),
     ...(line.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0)
-      ? [{ label: 'TOKENS', value: `${(line.tokenUsage.input + line.tokenUsage.output).toLocaleString()}`, color: 'text-t2' }]
+      ? [{ label: 'TOKENS', value: formatCount(line.tokenUsage.input + line.tokenUsage.output), color: 'text-t2' }]
       : []),
   ]
 
@@ -121,7 +135,10 @@ export function SummaryTab({
             <div className="c-col-header text-t4 mb-[var(--sp-1)]">
               {card.label}
             </div>
-            <div className={`font-mono font-semibold ${card.color} tracking-[var(--tracking-tight)] text-lg`}>
+            <div
+              className={`font-mono font-semibold ${card.color} tracking-[var(--tracking-tight)] text-lg`}
+              style={card.style}
+            >
               {card.value}
             </div>
           </motion.div>
@@ -160,13 +177,13 @@ export function SummaryTab({
           <div className="flex items-center justify-between c-toolbar bg-d3 c-border-b">
             <span className="c-col-header text-t4">{line.mode} Configuration</span>
             {config && (
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={onEditConfig}
-                className="c-btn c-btn-ghost py-[var(--sp-0h)] px-[var(--sp-2)] text-label"
               >
                 Edit
-              </button>
+              </Button>
             )}
           </div>
           {config ? (
@@ -174,7 +191,7 @@ export function SummaryTab({
               {line.mode === 'agent' && (
                 <div className={`flex items-center justify-between py-[var(--sp-1h)] px-0${config.length > 0 ? ' c-border-b' : ''}`}>
                   <span className="c-label">provider</span>
-                  <span className="font-mono text-m-agt text-data">
+                  <span className="font-mono text-data" style={{ color: configProviderInk }}>
                     {getProvider(
                       ((rawConfig.agentOptions as Record<string, unknown> | undefined)?.provider as string) ?? DEFAULT_PROVIDER_ID
                     )?.displayName ?? DEFAULT_PROVIDER_ID}
@@ -206,37 +223,41 @@ export function SummaryTab({
             <span className="c-col-header text-t4">Actions</span>
           </div>
           <div className="flex flex-col py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-2)]">
-            <button
-              type="button"
+            <Button
+              variant="warning"
+              icon={<RotateCw size={15} strokeWidth={1.75} />}
               onClick={() => setConfirmAction('restart')}
-              className="c-btn w-full justify-center"
+              className="w-full justify-center"
             >
-              <RotateCw size={15} strokeWidth={1.75} /> Restart Instance
-            </button>
+              Restart Instance
+            </Button>
             {line.mode !== 'passive' && (
-              <button
-                type="button"
+              <Button
+                variant="neutral"
+                icon={<SlidersHorizontal size={15} strokeWidth={1.75} />}
                 onClick={onEditConfig}
-                className="c-btn w-full justify-center"
+                className="w-full justify-center"
               >
-                <SlidersHorizontal size={15} strokeWidth={1.75} /> Edit Configuration
-              </button>
+                Edit Configuration
+              </Button>
             )}
-            <button
-              type="button"
+            <Button
+              variant="neutral"
+              icon={<GitBranch size={15} strokeWidth={1.75} />}
               onClick={onChangeMode}
-              className="c-btn w-full justify-center"
+              className="w-full justify-center"
             >
-              <GitBranch size={15} strokeWidth={1.75} /> Change Mode
-            </button>
+              Change Mode
+            </Button>
             <div className="c-border-t pt-[var(--sp-2)] mt-[var(--sp-1)]">
-              <button
-                type="button"
+              <Button
+                variant="danger"
+                icon={<Power size={15} strokeWidth={1.75} />}
                 onClick={() => setConfirmAction('stop')}
-                className="c-btn c-btn-danger w-full justify-center"
+                className="w-full justify-center"
               >
-                <Power size={15} strokeWidth={1.75} /> Stop Instance
-              </button>
+                Stop Instance
+              </Button>
             </div>
           </div>
         </motion.div>

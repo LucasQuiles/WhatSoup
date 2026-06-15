@@ -9,8 +9,8 @@ import {
   YAxis,
 } from 'recharts';
 import type { TokenUsageBucket, MetricsRange } from '../types';
-import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
-import { formatCompact } from '../lib/text-utils';
+import { AXIS_TICK, CHART_MARGIN, LEGEND_STYLE, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
+import { formatCompact, formatCount } from '../lib/text-utils';
 import { getProvider, getProviderColor } from '../lib/providers';
 
 interface FleetTokenChartProps {
@@ -59,11 +59,11 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
             contentStyle={TOOLTIP_STYLE}
             labelFormatter={(v) => formatTooltipLabel(String(v), range)}
             formatter={(value, name) => [
-              (Number(value) || 0).toLocaleString(),
+              formatCount(Number(value) || 0),
               String(name),
             ]}
           />
-          <Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />
+          <Legend wrapperStyle={LEGEND_STYLE} />
           {providers.flatMap((provider) => {
             const color = getProviderColor(provider);
             const prov = getProvider(provider);
@@ -122,7 +122,7 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(v) => formatTooltipLabel(String(v), range)}
           formatter={(value, name) => [
-            (Number(value) || 0).toLocaleString(),
+            formatCount(Number(value) || 0),
             String(name),
           ]}
         />
@@ -131,8 +131,8 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           dataKey="output"
           name="Output Tokens"
           stackId="tokens"
-          stroke="var(--color-m-agt)"
-          fill="var(--color-m-agt)"
+          stroke="var(--data-token-output-solid)"
+          fill="var(--data-token-output-solid)"
           fillOpacity={0.3}
         />
         <Area
@@ -140,9 +140,9 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
           dataKey="input"
           name="Input Tokens"
           stackId="tokens"
-          stroke="var(--color-m-agt)"
+          stroke="var(--data-token-input-solid)"
           strokeDasharray="4 2"
-          fill="var(--color-m-agt)"
+          fill="var(--data-token-input-solid)"
           fillOpacity={0.15}
         />
       </AreaChart>

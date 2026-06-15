@@ -154,7 +154,7 @@ describe('ScheduledTab — loading / error / empty states', () => {
     expect(screen.queryByRole('button', { name: /New Scheduled Message/i })).toBeNull()
   })
 
-  it('renders the error EmptyState with the thrown message when the query rejects', async () => {
+  it('renders a retryable error EmptyState with the thrown message when the query rejects', async () => {
     getScheduledMock.mockRejectedValue(new Error('socket down'))
 
     await renderSettled()
@@ -162,6 +162,10 @@ describe('ScheduledTab — loading / error / empty states', () => {
     expect(screen.getByText('Failed to load scheduled messages')).toBeDefined()
     expect(screen.getByText('socket down')).toBeDefined()
     expect(screen.queryByText(pendingEarly.payload.text as string)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => expect(getScheduledMock).toHaveBeenCalledTimes(2))
   })
 
   it('falls back to the MCP-socket hint when the rejection is not an Error', async () => {
@@ -363,7 +367,7 @@ describe('ScheduledTab — composer open / close / edit / duplicate / new', () =
     fireEvent.click(screen.getByLabelText('Edit scheduled message'))
     expect(screen.getByRole('dialog', { name: 'Edit Scheduled Message' })).toBeDefined()
 
-    fireEvent.click(screen.getByLabelText('Close'))
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
 
     expect(screen.queryByRole('dialog')).toBeNull()
 
@@ -385,7 +389,8 @@ describe('ScheduledTab — composer open / close / edit / duplicate / new', () =
 
     fireEvent.click(screen.getByRole('button', { name: 'New Scheduled Message' }))
     fireEvent.focus(screen.getByLabelText('Search chats...'))
-    fireEvent.click(screen.getByRole('button', { name: 'Group Alpha' }))
+    // ChatPicker options are now <li role="option"> (Popover listbox, B2 rebuild)
+    fireEvent.mouseDown(await waitFor(() => screen.getByRole('option', { name: /Group Alpha/ })))
     fireEvent.change(screen.getByLabelText('Message text'), { target: { value: 'Ship update' } })
     fireEvent.change(screen.getByLabelText('Scheduled time (local)'), { target: { value: scheduledAtValue } })
 

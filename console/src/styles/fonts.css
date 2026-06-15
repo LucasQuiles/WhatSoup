@@ -1,0 +1,56 @@
+/* Geist + Geist Mono — self-hosted woff2, weights 400/500/600.
+   Source: github.com/vercel/geist-font v1.7.2, SIL OFL 1.1.
+   Provenance: console/public/fonts/README.md (sha256 per file).
+   Closes DD-4 (design-debt-register.md). */
+
+/* ── Geist (sans) ────────────────────────────────────────────── */
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/Geist-Regular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/Geist-Medium.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/Geist-SemiBold.woff2") format("woff2");
+}
+
+/* ── Geist Mono ──────────────────────────────────────────────── */
+
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/GeistMono-Regular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/GeistMono-Medium.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/GeistMono-SemiBold.woff2") format("woff2");
+}

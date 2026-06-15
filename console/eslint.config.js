@@ -4,6 +4,15 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
+import soupPlugin from './eslint-rules/index.mjs'
+import {
+  structuralSelectors,
+  rawFormControlSelectors,
+  focusSuppressionSelectors,
+  migratedSurfaceSelectors,
+  legacyTokenSelectors,
+  utilitySmellSelectors,
+} from './eslint-rules/design-selectors.mjs'
 
 // Keep copyable Tailwind class examples in ESLint output without exposing
 // those examples as raw content for Tailwind/Vite class extraction.
@@ -50,12 +59,12 @@ const tw = (...parts) => parts.join('')
 // ║    200px→var(--dropdown-min-w)  256px→var(--panel-contact)      ║
 // ║    260px→var(--panel-actions)   288px→var(--panel-chat-list)    ║
 // ║    320px→var(--empty-max-w)     340px→var(--panel-shortcuts)    ║
-// ║    420px→var(--panel-confirm)   540px→var(--panel-composer)     ║
+// ║    420px→var(--panel-confirm)   560px→var(--modal-w-md)         ║
 // ║    720px→var(--panel-wizard)                                    ║
 // ║                                                                 ║
 // ║  MODAL HEIGHTS:                                                 ║
-// ║    80vh→var(--modal-max-h-sm)   85vh→var(--modal-max-h)        ║
-// ║    90vh→var(--modal-max-h-lg)   90vw→var(--panel-max-inline-wide) ║
+// ║    85vh→var(--modal-max-h)                                     ║
+// ║    90%→var(--panel-max-inline)                                 ║
 // ║                                                                 ║
 // ║  OPACITY:                                                       ║
 // ║    0.3→var(--opacity-soft)      0.4→var(--opacity-faint)       ║
@@ -167,6 +176,10 @@ const designSystemRestrictions = [
           message: '⛔ Compound padding with hardcoded px. FIX: replace each px value with var(--sp-*). Scale: 4px→var(--sp-1) 8px→var(--sp-2) 12px→var(--sp-3) 16px→var(--sp-4) 20px→var(--sp-5) 24px→var(--sp-6).',
         },
         {
+          selector: 'Property[key.name=/^(padding|margin|gap|width|height|minWidth|minHeight|maxWidth|maxHeight|top|bottom|left|right)$/][value.type="ConditionalExpression"] Literal[value=/[1-9]\\d*px/]',
+          message: '⛔ Conditional style branch with hardcoded px. FIX: replace each static branch with tokenized values such as var(--sp-*) or component tokens; measured runtime px values are allowed.',
+        },
+        {
           selector: 'Property[key.name=/^margin/][value.value=/^\\d+px$/]',
           message: '⛔ Hardcoded margin px. FIX: replace with var(--sp-*). Scale: 3px→var(--sp-0h) 4px→var(--sp-1) 6px→var(--sp-1h) 8px→var(--sp-2) 12px→var(--sp-3) 16px→var(--sp-4) 20px→var(--sp-5).',
         },
@@ -181,6 +194,14 @@ const designSystemRestrictions = [
           selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight)$/][value.value=/^\\d+px$/]',
           message: '⛔ Hardcoded size px. FIX: replace with token from index.css. Check --avatar-*, --panel-*, --dot-*, --sp-*, --icon-empty, --input-h, --input-btn, etc. See cheat sheet at top of eslint.config.js.',
         },
+        {
+          selector: 'TemplateLiteral[parent.key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight|padding|margin|gap|top|bottom|left|right)$/]:has(TemplateElement[value.raw=/px/]):has(Literal[raw=/^[1-9]\\d*$/])',
+          message: '⛔ Template literal hardcoded px formula in style. FIX: use tokenized string values such as var(--sp-*) or calc(var(--token) + var(--sp-*)); measured runtime layout values are allowed.',
+        },
+        {
+          selector: 'VariableDeclarator[id.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight|top|bottom|left|right)$/][init.type="ConditionalExpression"] Literal[raw=/^[1-9]\\d*$/]',
+          message: '⛔ Dimensional const with raw numeric branch. FIX: store tokenized string values such as var(--chart-panel-h), then pass that identifier into style.',
+        },
         // Raw numeric literals (React converts to px) — excludes 0
         {
           selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight|padding|margin|gap|top|bottom|left|right)$/][value.type="Literal"][value.raw=/^[1-9]\\d*$/]',
@@ -191,7 +212,7 @@ const designSystemRestrictions = [
           message: '⛔ Raw numeric spacing value (becomes px). FIX: replace N with string var(--sp-*). E.g. 2→"var(--bw-accent)" 4→"var(--sp-1)" 8→"var(--sp-2)" 12→"var(--sp-3)" 16→"var(--sp-4)".',
         },
 
-        // ══��� SIMPLE TEXT COLOR IN STYLE ═���═
+        // ═══ SIMPLE TEXT COLOR IN STYLE ═══
         // color: 'var(--color-tN)' should be a Tailwind text-tN class
         {
           selector: 'JSXAttribute[name.name="style"] Property[key.name="color"][value.value=/^var\\(--color-t\\d\\)$/]',
@@ -241,8 +262,8 @@ const designSystemRestrictions = [
 
         // ═══ FONT SIZE TOKEN IN STYLE ═══
         {
-          selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value=/^var\\(--text-/]',
-          message: '⛔ fontSize token in style. FIX: remove from style, add text-* class. fontSize: "var(--text-data)"→className="text-data". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
+          selector: 'JSXAttribute[name.name=/^(style|wrapperStyle|contentStyle)$/] Property[key.name="fontSize"][value.value=/^var\\(--text-/]',
+          message: '⛔ fontSize token in style prop. FIX: remove from style/wrapperStyle/contentStyle and use a class or shared chart style helper. fontSize: "var(--text-data)"→className="text-data". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
         },
 
         // ═══ LETTER SPACING TOKEN IN STYLE ═══
@@ -418,7 +439,7 @@ const designSystemRestrictions = [
 
         {
           selector: 'Property[key.name=/^(maxHeight|maxWidth|minHeight|minWidth|height|width)$/][value.value=/^\\d+(vh|vw)$/]',
-          message: '⛔ Bare vh/vw unit. FIX: replace with CSS variable. 80vh→var(--modal-max-h-sm) 85vh→var(--modal-max-h) 90vh→var(--modal-max-h-lg) 90vw→var(--panel-max-inline-wide). Or use dvh for mobile safety.',
+          message: '⛔ Bare vh/vw unit. FIX: replace with CSS variable. 85vh→var(--modal-max-h) 90%→var(--panel-max-inline). Or use dvh for mobile safety.',
         },
 
         // ═══ INLINE TRANSITION ═══
@@ -603,7 +624,7 @@ const scheduledGroupsDesignSystemRestrictions = [
   // ═══ MAX-HEIGHT TOKEN IN STYLE ═══
   {
     selector: 'JSXAttribute[name.name="style"] Property[key.name="maxHeight"][value.value=/^var\\(--modal/]',
-    message: '⛔ Inline maxHeight modal token. FIX: remove from style, add max-h-[var(--modal-max-h)] to className. Variants: max-h-[var(--modal-max-h-sm)] or max-h-[var(--modal-max-h-lg)].',
+    message: '⛔ Inline maxHeight modal token. FIX: remove from style, add max-h-[var(--modal-max-h)] to className.',
   },
 
   // ═══ TOP/LEFT/RIGHT POSITIONING ═══
@@ -657,6 +678,20 @@ const scheduledGroupsDesignSystemRestrictions = [
 
 export default defineConfig([
   globalIgnores(['dist']),
+
+  {
+    files: ['**/*.{ts,tsx}'],
+    plugins: {
+      soup: soupPlugin,
+    },
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 1 — Base rule set for all TS/TSX.
+  // Includes: designSystemRestrictions (existing wall) + Group S (structural,
+  // zero-violation console-wide) + Group F (focus suppression, console-wide).
+  // Last-match-wins: files matched by a later block get that block's full array.
+  // ─────────────────────────────────────────────────────────────────────────
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
@@ -670,6 +705,12 @@ export default defineConfig([
       globals: globals.browser,
     },
     rules: {
+      'soup/protected-identifiers': 'error',
+      'soup/icon-family': 'error',
+      'soup/no-format-bypass': 'error',
+      'soup/no-literal-status-colors': 'error',
+      'soup/no-inline-dismiss-handler': 'error',
+
       // ═══════════════════════════════════════════════════════════════
       // DESIGN SYSTEM ENFORCEMENT
       //
@@ -682,15 +723,30 @@ export default defineConfig([
       // the information in the error message + the cheat sheet above.
       // ═══════════════════════════════════════════════════════════════
 
-      'no-restricted-syntax': ['error', ...designSystemRestrictions],
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        // Group S: structural (console-wide, excludes primitives/**):
+        ...structuralSelectors,
+        // Raw form controls are also console-wide except primitives/**:
+        ...rawFormControlSelectors,
+        // Group F: focus suppression (console-wide):
+        ...focusSuppressionSelectors,
+      ],
     },
   },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 3 — Scheduled/groups ratchet (existing strict set, re-carried).
+  // Must re-carry the full base array PLUS Group S + Group F because flat-config
+  // last-match-wins replaces, not merges, the no-restricted-syntax rule.
+  // CreateGroupModal is also in the M list — it gets the full union in Block 4b.
+  // ─────────────────────────────────────────────────────────────────────────
   {
     files: [
       'src/components/shared/SearchInput.tsx',
       'src/components/shared/ContactSearchPicker.tsx',
       'src/components/shared/ChatPicker.tsx',
-      'src/components/line-detail/CreateGroupModal.tsx',
       'src/components/line-detail/ScheduleComposerModal.tsx',
       'src/components/line-detail/GroupDetailModal.tsx',
       'src/components/line-detail/GroupCard.tsx',
@@ -701,7 +757,96 @@ export default defineConfig([
       'src/components/line-detail/groups-utils.ts',
     ],
     rules: {
-      'no-restricted-syntax': ['error', ...designSystemRestrictions, ...scheduledGroupsDesignSystemRestrictions],
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        ...scheduledGroupsDesignSystemRestrictions,
+        // Re-carry Group S, raw form controls, and Group F so they aren't silently dropped for these files:
+        ...structuralSelectors,
+        ...rawFormControlSelectors,
+        ...focusSuppressionSelectors,
+      ],
+    },
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 4a — Migrated surfaces (M list, excluding CreateGroupModal).
+  // These files have zero no-raw-button and no-adhoc-modal violations in the
+  // shadow baseline. Promoting to scoped-error prevents re-introduction.
+  // Full array: base + structural + focus + migrated selectors.
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    files: [
+      'src/components/AddLineWizard.tsx',
+      'src/pages/LineDetail.tsx',
+      'src/pages/SoupKitchen.tsx',
+      'src/components/TagInput.tsx',
+      'src/components/CardSelector.tsx',
+      'src/components/ConfirmDialog.tsx',
+      'src/components/RelinkModal.tsx',
+      'src/components/SaveContactDialog.tsx',
+      'src/components/UpdateModal.tsx',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        // Group S, raw form controls, F, and M:
+        ...structuralSelectors,
+        ...rawFormControlSelectors,
+        ...focusSuppressionSelectors,
+        ...migratedSurfaceSelectors,
+      ],
+    },
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 4b — CreateGroupModal full union.
+  // CreateGroupModal is in BOTH the scheduled/groups list AND the M list.
+  // It must carry the union of all: base + scheduled + structural + focus + migrated.
+  // Placing it in 4a alone would silently strip the scheduled ratchet (flat-config
+  // replace semantics — last match wins). Constraint §3 in d6-investigation.md.
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    files: [
+      'src/components/line-detail/CreateGroupModal.tsx',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        ...scheduledGroupsDesignSystemRestrictions,
+        // Full union — Group S, raw form controls, F, M:
+        ...structuralSelectors,
+        ...rawFormControlSelectors,
+        ...focusSuppressionSelectors,
+        ...migratedSurfaceSelectors,
+      ],
+    },
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Block 5 — Primitives strict tier (Group P).
+  // components/primitives/** is born-clean: grep-verified zero legacy tokens and
+  // utility smells (d6-investigation.md §3). Error here prevents any re-entry.
+  // Deliberately NO structural or migrated selectors (Table/LogStream/Button/Modal
+  // ARE the canonical renderers; they must render the raw elements).
+  // Carries base + focus + legacyToken + utilitySmell only.
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    files: [
+      'src/components/primitives/**/*.{ts,tsx}',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...designSystemRestrictions,
+        // Group F (focus suppression applies in primitives):
+        ...focusSuppressionSelectors,
+        // Group P: legacy tokens and utility smell (primitives-only):
+        ...legacyTokenSelectors,
+        ...utilitySmellSelectors,
+      ],
     },
   },
 ])

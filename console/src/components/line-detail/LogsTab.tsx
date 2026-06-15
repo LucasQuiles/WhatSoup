@@ -1,70 +1,73 @@
-import { levelColor, levelBg, levelLineBg } from '../../lib/log-theme'
+import { useMemo } from 'react'
 import { formatTime } from '../../lib/format-time'
-import FilterPill from '../FilterPill'
+import { Card, LogStream, Toolbar, ToolbarFilters, Pill } from '../primitives'
 import type { LogEntry } from './types'
 
-export function LogsTab({ logs, filter, onFilterChange }: { logs: LogEntry[]; filter: string; onFilterChange: (f: string) => void }) {
-  const levels = ['all', 'info', 'warn', 'error', 'debug']
+type LevelFilter = 'all' | 'info' | 'warn' | 'error' | 'debug'
 
-  const filtered = filter === 'all' ? logs : logs.filter(l => l.level === filter)
+const LEVELS: LevelFilter[] = ['all', 'info', 'warn', 'error', 'debug']
+
+function levelTone(level: LevelFilter) {
+  if (level === 'error') return 'crit' as const
+  if (level === 'warn') return 'warn' as const
+  return 'neutral' as const
+}
+
+export function LogsTab({
+  logs,
+  filter,
+  onFilterChange,
+}: {
+  logs: LogEntry[]
+  filter: string
+  onFilterChange: (f: string) => void
+}) {
+  // Pre-format timestamps so LogStream renders human-readable times.
+  const formattedEntries = useMemo(
+    () => logs.map(e => ({ ...e, timestamp: formatTime(e.timestamp) })),
+    [logs],
+  )
+
+  const filteredEntries = useMemo(
+    () =>
+      filter === 'all'
+        ? formattedEntries
+        : formattedEntries.filter(e => e.level === filter),
+    [formattedEntries, filter],
+  )
+
+  // Level counts sourced from the full (unfiltered) log list.
+  const counts = useMemo(() => {
+    const acc: Record<string, number> = { info: 0, warn: 0, error: 0, debug: 0 }
+    for (const e of logs) acc[e.level] = (acc[e.level] ?? 0) + 1
+    return acc
+  }, [logs])
 
   return (
-    <div className="c-card overflow-hidden flex flex-col">
-      {/* Toolbar with level filter pills */}
-      <div
-        className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
-      >
+    <Card className="overflow-hidden flex flex-col">
+      <Toolbar flush aria-label="Log level filter">
         <span className="c-heading">Logs</span>
-        <div className="flex gap-[var(--sp-1)]">
-          {levels.map(l => (
-            <FilterPill
+        <ToolbarFilters label="Level">
+          {LEVELS.map(l => (
+            <Pill
               key={l}
-              label={l}
-              isActive={filter === l}
-              activeColor={l === 'error' ? 'text-s-crit' : l === 'warn' ? 'text-s-warn' : 'text-t2'}
-              activeBorder={filter === l ? 'var(--bw) solid var(--b3)' : undefined}
+              variant="interactive"
+              tone={levelTone(l)}
+              pressed={filter === l}
               onClick={() => onFilterChange(l)}
-            />
-          ))}
-        </div>
-      </div>
-
-      {/* Log viewer */}
-      <div
-        className="overflow-hidden font-mono bg-d1 text-data"
-      >
-        {filtered.map((log, i) => (
-          <div
-            key={`${log.timestamp}-${log.source}-${i}`}
-            className="flex gap-0 c-row-hover leading-relaxed c-border-b"
-            style={{ background: levelLineBg[log.level] }}
-          >
-            {/* Timestamp */}
-            <div className="px-3 py-1 text-t5 flex-shrink-0 w-[var(--log-col-time)] min-w-[var(--log-col-time)]">
-              {formatTime(log.timestamp)}
-            </div>
-            {/* Level badge */}
-            <div className="px-2 py-1 flex-shrink-0 text-center w-[var(--log-col-level)] min-w-[var(--log-col-level)]">
-              <span
-                className={`inline-block px-1.5 py-0.5 rounded font-medium text-label ${levelColor[log.level]}`}
-                style={{ background: levelBg[log.level] }}
-              >
-                {log.level}
-              </span>
-            </div>
-            {/* Source */}
-            <div
-              className="px-2 py-1 text-t5 truncate flex-shrink-0 w-[var(--log-col-source)] min-w-[var(--log-col-source)]"
+              count={l !== 'all' ? counts[l] : undefined}
             >
-              {log.source}
-            </div>
-            {/* Message */}
-            <div className={`px-3 py-1 flex-1 ${levelColor[log.level]}`}>
-              {log.msg}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
+              {l}
+            </Pill>
+          ))}
+        </ToolbarFilters>
+      </Toolbar>
+
+      <LogStream
+        entries={filteredEntries}
+        isFiltered={filter !== 'all'}
+        filteredEmptyMessage={`No ${filter} logs.`}
+      />
+    </Card>
   )
 }

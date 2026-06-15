@@ -71,11 +71,21 @@ vi.mock('recharts', async () => {
         </div>
       );
     },
-    Area({ dataKey, name }: { dataKey?: string; name?: string }) {
+    Area({
+      dataKey,
+      name,
+      stroke,
+      fill,
+    }: {
+      dataKey?: string;
+      name?: string;
+      stroke?: string;
+      fill?: string;
+    }) {
       const data = React.useContext(ChartDataContext);
       const seriesName = name ?? dataKey ?? 'Series';
       return (
-        <section aria-label={`${seriesName} series`} role="region">
+        <section aria-label={`${seriesName} series`} data-fill={fill} data-stroke={stroke} role="region">
           <h3>{seriesName}</h3>
           <ul aria-label={`${seriesName} data points`}>
             {data.map((datum) => (
@@ -132,6 +142,11 @@ describe('FleetTokenChart single-provider rendering', () => {
     expect(within(series('Output Tokens')).getByText(/Output Tokens: 2026-04-05T19:00:00.000Z - 600 tokens/)).toBeDefined();
     expect(within(series('Input Tokens')).getByText(/Input Tokens: 2026-04-05T18:00:00.000Z - 1200 tokens/)).toBeDefined();
     expect(within(series('Input Tokens')).getByText(/Input Tokens: 2026-04-05T19:00:00.000Z - 1500 tokens/)).toBeDefined();
+
+    expect(series('Output Tokens').dataset.stroke).toBe('var(--data-token-output-solid)');
+    expect(series('Output Tokens').dataset.fill).toBe('var(--data-token-output-solid)');
+    expect(series('Input Tokens').dataset.stroke).toBe('var(--data-token-input-solid)');
+    expect(series('Input Tokens').dataset.fill).toBe('var(--data-token-input-solid)');
   });
 
   it('uses range-aware labels for the visible time axis and active tooltip bucket', () => {

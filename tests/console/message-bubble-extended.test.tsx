@@ -5,7 +5,8 @@
  * Scope: text rendering with WA formats, image/media branches, reply-quote,
  * DeliveryStatus states (optimistic pk<0 / failed pk===-1 / persisted pk>0),
  * incoming vs outgoing layout, sender label + createContact button,
- * hover-detail card, animate class, onRetry handler, type badge.
+ * hover-detail card, animate class, onRetry handler, type badge,
+ * keyboard alternative (DD-18r: focus-reveal, Escape dismiss, edge placement).
  *
  * NOT covered here (see message-bubble.test.tsx):
  *   - display-safe timestamp regressions (null/invalid timestamp → "—" marker)
@@ -568,5 +569,195 @@ describe('media vs text padding', () => {
     render(<MessageBubble msg={msg({ type: 'text', content: 'hi' })} />)
     const bubble = document.querySelector('.c-msg-bubble') as HTMLElement
     expect(bubble.style.padding).toBe('var(--sp-2h) var(--msg-pad-h)')
+  })
+})
+
+// ── Keyboard alternative — focus reveal + Escape dismiss (DD-18r) ──────────
+//
+// Regression proof: the hover path must survive unchanged (all 10 hover-card
+// tests above pass). These cases cover the additive keyboard/focus contract.
+
+describe('keyboard alternative — focus reveal (DD-18r)', () => {
+  it('wrapper is focusable (tabIndex=0)', () => {
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    expect(wrapper.getAttribute('tabIndex')).toBe('0')
+  })
+
+  it('wrapper carries accessible name "Message detail"', () => {
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    expect(wrapper.getAttribute('aria-label')).toBe('Message detail')
+  })
+
+  it('focus reveals the detail card with no timer advance', () => {
+    render(<MessageBubble msg={msg({ senderJid: '155501230001@s.whatsapp.net' })} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    fireEvent.focus(wrapper)
+    // No act + timer advance needed — focus reveal is instant
+    expect(screen.getByText('Sender')).toBeDefined()
+  })
+
+  it('blur hides the detail card', () => {
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    fireEvent.focus(wrapper)
+    expect(screen.getByText('Sender')).toBeDefined()
+    fireEvent.blur(wrapper)
+    expect(screen.queryByText('Sender')).toBeNull()
+  })
+
+  it('Escape hides the card when shown via focus', () => {
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    fireEvent.focus(wrapper)
+    expect(screen.getByText('Sender')).toBeDefined()
+    fireEvent.keyDown(wrapper, { key: 'Escape' })
+    expect(screen.queryByText('Sender')).toBeNull()
+  })
+
+  it('Escape stops propagation (one-layer law §2)', () => {
+    const outerHandler = vi.fn()
+    render(
+      <div onKeyDown={outerHandler}>
+        <MessageBubble msg={msg()} />
+      </div>,
+    )
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    fireEvent.focus(wrapper)
+    fireEvent.keyDown(wrapper, { key: 'Escape' })
+    // Escape consumed by the card; outer handler must not fire
+    expect(outerHandler).not.toHaveBeenCalled()
+  })
+
+  it('Escape does NOT stop propagation when card is hidden', () => {
+    const outerHandler = vi.fn()
+    render(
+      <div onKeyDown={outerHandler}>
+        <MessageBubble msg={msg()} />
+      </div>,
+    )
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    // Do NOT focus — card is hidden
+    fireEvent.keyDown(wrapper, { key: 'Escape' })
+    expect(outerHandler).toHaveBeenCalledOnce()
+  })
+})
+
+// ── Hover + focus OR semantics (§6.9) ─────────────────────────────────────
+
+describe('hover + focus OR semantics (§6.9)', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+
+  it('mouse leave while focused keeps the card visible', () => {
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    // Focus first — card shows instantly
+    fireEvent.focus(wrapper)
+    expect(screen.getByText('Sender')).toBeDefined()
+    // Mouse leave — card stays because focus holds it
+    fireEvent.mouseLeave(wrapper)
+    expect(screen.getByText('Sender')).toBeDefined()
+  })
+
+  it('blur while hovered keeps the card visible', () => {
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    // Hover to show card
+    fireEvent.mouseEnter(wrapper)
+    act(() => { vi.advanceTimersByTime(500) })
+    expect(screen.getByText('Sender')).toBeDefined()
+    // Blur — card stays because hover holds it
+    fireEvent.blur(wrapper)
+    expect(screen.getByText('Sender')).toBeDefined()
+  })
+
+  it('both cleared — card hides', () => {
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    // Hover and focus both active
+    fireEvent.mouseEnter(wrapper)
+    act(() => { vi.advanceTimersByTime(500) })
+    fireEvent.focus(wrapper)
+    expect(screen.getByText('Sender')).toBeDefined()
+    // Clear hover first — card stays
+    fireEvent.mouseLeave(wrapper)
+    expect(screen.getByText('Sender')).toBeDefined()
+    // Clear focus — card hides
+    fireEvent.blur(wrapper)
+    expect(screen.queryByText('Sender')).toBeNull()
+  })
+})
+
+// ── Edge placement — data-placement + rect flip (§6.7) ────────────────────
+//
+// jsdom getBoundingClientRect returns all zeros by default — this exercises
+// the no-clip path (placement='above', left-anchored) for free, which matches
+// the existing hover tests. Stubbed rects prove the flip branches.
+
+describe('edge placement — data-placement attribute', () => {
+  it('defaults to data-placement="above" with jsdom zero rects', () => {
+    vi.useFakeTimers()
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    fireEvent.mouseEnter(wrapper)
+    act(() => { vi.advanceTimersByTime(500) })
+    const card = document.querySelector('[data-placement]') as HTMLElement
+    expect(card.getAttribute('data-placement')).toBe('above')
+  })
+
+  it('flips to data-placement="below" when card would clip the viewport top', () => {
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    // Stub: wrapper is near the top — card height (160px) exceeds rect.top
+    vi.spyOn(wrapper, 'getBoundingClientRect').mockReturnValue({
+      top: 50,
+      left: 200,
+      right: 400,
+      bottom: 80,
+      width: 200,
+      height: 30,
+      x: 200,
+      y: 50,
+      toJSON: () => ({}),
+    })
+    fireEvent.focus(wrapper)
+    const card = document.querySelector('[data-placement]') as HTMLElement
+    expect(card.getAttribute('data-placement')).toBe('below')
+  })
+
+  it('right-anchors the card when left + estimatedWidth would exceed viewport width', () => {
+    // Default jsdom window.innerWidth is 1024 in most env; override to a known value
+    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 800 })
+    render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    // Stub: wrapper starts at left=700; card width 220 → 700+220=920 > 800
+    vi.spyOn(wrapper, 'getBoundingClientRect').mockReturnValue({
+      top: 400,
+      left: 700,
+      right: 850,
+      bottom: 430,
+      width: 150,
+      height: 30,
+      x: 700,
+      y: 400,
+      toJSON: () => ({}),
+    })
+    fireEvent.focus(wrapper)
+    const card = document.querySelector('[data-placement]') as HTMLElement
+    // Right-anchored: card element should have right:0 style
+    expect(card.style.right).toBe('0px')
+    // Restore
+    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 1024 })
+  })
+
+  it('unmount while focused leaves no card and does not throw (§6.3)', () => {
+    const { unmount } = render(<MessageBubble msg={msg()} />)
+    const wrapper = document.querySelector('.relative') as HTMLElement
+    fireEvent.focus(wrapper)
+    expect(screen.getByText('Sender')).toBeDefined()
+    // Unmount — should not throw; card disappears with the component
+    expect(() => unmount()).not.toThrow()
+    expect(document.querySelector('[data-placement]')).toBeNull()
   })
 })

@@ -1,6 +1,7 @@
 import React from 'react'
 import { SlidersHorizontal, GitBranch, Bot } from 'lucide-react'
 import EmptyState from '../EmptyState'
+import { Button } from '../primitives/Button'
 import { buildConfigEntries, TYPE_COLOR } from './config-helpers'
 import type { Mode, LineInstance } from './types'
 
@@ -24,13 +25,13 @@ export function ModeTab({
           description="Passive instances listen and store — no configuration required."
         />
         <div className="flex justify-center mt-[var(--sp-5)]">
-          <button
-            type="button"
+          <Button
+            variant="neutral"
             onClick={onChangeMode}
-            className="c-btn"
+            icon={<GitBranch size={15} strokeWidth={1.75} />}
           >
-            <GitBranch size={15} strokeWidth={1.75} /> Change Mode
-          </button>
+            Change Mode
+          </Button>
         </div>
       </div>
     )
@@ -48,20 +49,20 @@ export function ModeTab({
           {mode} Configuration
         </div>
         <div className="flex flex-wrap gap-[var(--sp-2)]">
-          <button
-            type="button"
+          <Button
+            variant="neutral"
             onClick={onEditConfig}
-            className="c-btn"
+            icon={<SlidersHorizontal size={15} strokeWidth={1.75} />}
           >
-            <SlidersHorizontal size={15} strokeWidth={1.75} /> Edit Configuration
-          </button>
-          <button
-            type="button"
+            Edit Configuration
+          </Button>
+          <Button
+            variant="neutral"
             onClick={onChangeMode}
-            className="c-btn"
+            icon={<GitBranch size={15} strokeWidth={1.75} />}
           >
-            <GitBranch size={15} strokeWidth={1.75} /> Change Mode
-          </button>
+            Change Mode
+          </Button>
         </div>
       </div>
       {/* Config entries — structured key-value grid */}

@@ -83,7 +83,7 @@ afterEach(() => {
 });
 
 describe('MetricsTab — range selector', () => {
-  it('renders the three supported ranges and highlights the active one', () => {
+  it('renders the three supported ranges and marks the active one via aria-pressed', () => {
     const setRange = vi.fn();
     render(
       <MetricsTab
@@ -95,14 +95,51 @@ describe('MetricsTab — range selector', () => {
       />,
     );
 
+    // ToolbarTimeRange renders role="group" with aria-label
+    const seg = screen.getByRole('group', { name: 'Time range' });
+    expect(seg).toBeTruthy();
+
     const button24h = screen.getByRole('button', { name: '24h' });
     const button7d = screen.getByRole('button', { name: '7d' });
     const button30d = screen.getByRole('button', { name: '30d' });
 
-    expect(button24h.className).toContain('c-btn-ghost');
-    expect(button7d.className).toContain('c-btn-primary');
-    expect(button30d.className).toContain('c-btn-ghost');
-    expect(screen.getByText('Range')).toBeTruthy();
+    // Exactly one button pressed (the active range)
+    expect(button24h.getAttribute('aria-pressed')).toBe('false');
+    expect(button7d.getAttribute('aria-pressed')).toBe('true');
+    expect(button30d.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('maintains exactly-one aria-pressed after a click', () => {
+    const setRange = vi.fn();
+    const { rerender } = render(
+      <MetricsTab
+        metrics={buildMetrics()}
+        metricsLoading={false}
+        metricsError={null}
+        metricsRange="24h"
+        setMetricsRange={setRange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '30d' }));
+    expect(setRange).toHaveBeenCalledWith('30d');
+
+    // Simulate controlled re-render with new value
+    rerender(
+      <MetricsTab
+        metrics={buildMetrics()}
+        metricsLoading={false}
+        metricsError={null}
+        metricsRange="30d"
+        setMetricsRange={setRange}
+      />,
+    );
+
+    const pressedButtons = screen
+      .getAllByRole('button')
+      .filter((b) => b.closest('[aria-label="Time range"]') && b.getAttribute('aria-pressed') === 'true');
+    expect(pressedButtons).toHaveLength(1);
+    expect(pressedButtons[0].textContent).toBe('30d');
   });
 
   it('invokes setMetricsRange with the clicked range token', () => {
@@ -274,10 +311,13 @@ describe('MetricsTab — detail tab', () => {
       range: '30d',
     });
 
-    const tokensBtn = screen.getByRole('button', { name: 'Tokens' });
-    const sessionsBtn = screen.getByRole('button', { name: 'Sessions' });
-    expect(tokensBtn.className).toContain('c-btn-primary');
-    expect(sessionsBtn.className).toContain('c-btn-ghost');
+    const tabs = screen.getByRole('tablist', { name: 'Metric detail series' });
+    const tokensTab = screen.getByRole('tab', { name: 'Tokens' });
+    const sessionsTab = screen.getByRole('tab', { name: 'Sessions' });
+    expect(tabs).toBeTruthy();
+    expect(tokensTab.getAttribute('aria-selected')).toBe('true');
+    expect(sessionsTab.getAttribute('aria-selected')).toBe('false');
+    expect(tokensTab.className).toContain('soup-tab--selected');
   });
 
   it('switches to the Sessions chart when the Sessions tab is clicked', () => {
@@ -292,7 +332,7 @@ describe('MetricsTab — detail tab', () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Sessions' }));
 
     expect(screen.getByTestId('fleet-session-chart')).toBeTruthy();
     expect(screen.queryByTestId('fleet-token-chart')).toBeNull();
@@ -319,13 +359,13 @@ describe('MetricsTab — detail tab', () => {
 
     // The hero chart still renders because hasMessageData is true.
     expect(screen.getByTestId('metrics-chart')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Tokens' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Sessions' })).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'Tokens' })).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'Sessions' })).toBeNull();
     expect(screen.queryByTestId('fleet-token-chart')).toBeNull();
     expect(screen.queryByTestId('fleet-session-chart')).toBeNull();
   });
 
-  it('shows only Sessions when token data is absent and defaults the active tab to tokens (which renders nothing)', () => {
+  it('shows only Sessions when token data is absent and renders the Sessions chart immediately', () => {
     const metrics = buildMetrics({ hasTokenData: false });
     render(
       <MetricsTab
@@ -337,14 +377,37 @@ describe('MetricsTab — detail tab', () => {
       />,
     );
 
-    expect(screen.queryByRole('button', { name: 'Tokens' })).toBeNull();
-    const sessionsBtn = screen.getByRole('button', { name: 'Sessions' });
-    // detailTab still defaults to 'tokens', so neither chart renders until user clicks.
+    expect(screen.queryByRole('tab', { name: 'Tokens' })).toBeNull();
+    const sessionsTab = screen.getByRole('tab', { name: 'Sessions' });
+    expect(sessionsTab.getAttribute('aria-selected')).toBe('true');
     expect(screen.queryByTestId('fleet-token-chart')).toBeNull();
+    expect(screen.getByTestId('fleet-session-chart')).toBeTruthy();
+  });
+
+  it('uses manual Tabs activation for keyboard focus movement', () => {
+    const metrics = buildMetrics();
+    render(
+      <MetricsTab
+        metrics={metrics}
+        metricsLoading={false}
+        metricsError={null}
+        metricsRange="24h"
+        setMetricsRange={vi.fn()}
+      />,
+    );
+
+    const tokensTab = screen.getByRole('tab', { name: 'Tokens' });
+    const sessionsTab = screen.getByRole('tab', { name: 'Sessions' });
+
+    tokensTab.focus();
+    fireEvent.keyDown(tokensTab, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(sessionsTab);
+    expect(screen.getByTestId('fleet-token-chart')).toBeTruthy();
     expect(screen.queryByTestId('fleet-session-chart')).toBeNull();
 
-    fireEvent.click(sessionsBtn);
+    fireEvent.keyDown(sessionsTab, { key: 'Enter' });
     expect(screen.getByTestId('fleet-session-chart')).toBeTruthy();
+    expect(screen.queryByTestId('fleet-token-chart')).toBeNull();
   });
 });
 

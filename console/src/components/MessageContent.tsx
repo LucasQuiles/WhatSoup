@@ -129,7 +129,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
           <div className="flex items-center gap-[var(--sp-3)] py-[var(--sp-1)] px-0">
             <FileText size={16} strokeWidth={1.75} className="text-s-warn flex-shrink-0" />
             <div className="min-w-0">
-              <div className="text-data text-t1 truncate">{fileName}</div>
+              <div title={fileName} className="text-data text-t1 truncate">{fileName}</div>
               <div className="text-xs text-t4 font-mono">
                 {[ext, fileSize].filter(Boolean).join(' \u00b7 ')}
               </div>
@@ -226,12 +226,12 @@ const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participa
     }}
   >
     {participant && (
-      <div className="text-xs font-sans font-medium text-m-cht truncate">
+      <div title={participant} className="text-xs font-sans font-medium text-m-cht truncate">
         {participant.replace(/@.*/, '')}
       </div>
     )}
     {text && (
-      <div className="text-t3 truncate leading-snug">
+      <div title={text} className="text-t3 truncate leading-snug">
         {text}
       </div>
     )}

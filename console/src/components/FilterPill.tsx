@@ -1,48 +1,83 @@
+/**
+ * FilterPill — thin wrapper over the Pill primitive (C2 migration, pill.md).
+ *
+ * Public prop interface preserved for zero consumer breakage.
+ * Maps the old ad-hoc prop surface onto Pill's interactive variant.
+ *
+ * Migration notes:
+ *   - aria-pressed preserved (interactive variant)
+ *   - count badge preserved (Pill's built-in count lane)
+ *   - suffix prop: Pill doesn't have a suffix lane; we wrap it inline
+ *   - activeColor / activeBorder / style: the Pill primitive uses semantic
+ *     tone tokens instead of caller-provided color strings. These props are
+ *     accepted but intentionally not forwarded — they represented the exact
+ *     anti-pattern pill.md consolidates away (per-use color overrides).
+ *     Callers that need per-tone styling should use the Pill tone prop directly.
+ *   - Default tone "neutral" provides the equivalent of the old text-t2 / bg-d4 style.
+ *
+ * Test contract: aria-pressed/click behavior preserved; the design-token state
+ * contract tests were updated in the same slice to the soup-pill class contract.
+ */
 import { type FC, type ReactNode } from 'react'
+import { Pill, type PillTone } from './primitives'
 
 interface FilterPillProps {
   label: string
   isActive: boolean
+  /**
+   * @deprecated Pass tone prop to the underlying Pill directly instead.
+   * Accepted for backward compat but not forwarded — use PillTone.
+   */
   activeColor?: string
+  /**
+   * @deprecated Use Pill's tone tokens instead of inline border strings.
+   */
   activeBorder?: string
   onClick: () => void
   count?: number
+  /** DECORATIVE content only — rendered OUTSIDE the interactive control (not part of
+   *  its accessible name or pointer target). Meaningful state must live in the label. */
   suffix?: ReactNode
+  /** @deprecated */
   style?: React.CSSProperties
+  /** Optional Pill tone override. Defaults to "neutral". */
+  tone?: PillTone
 }
 
+/** Legacy activeColor utility-class -> Pill tone mapping, so existing callers keep
+ *  their semantic toning until each is migrated to the tone prop directly. */
+const LEGACY_COLOR_TONE: Record<string, PillTone> = {
+  'text-s-crit': 'crit',
+  'text-s-warn': 'warn',
+  'text-s-ok': 'ok',
+  'text-m-pas': 'passive',
+  'text-m-cht': 'chat',
+  'text-m-agt': 'agent',
+};
+
 const FilterPill: FC<FilterPillProps> = ({
-  label, isActive, activeColor = 'text-t2', activeBorder, onClick, count, suffix, style,
+  label,
+  isActive,
+  onClick,
+  count,
+  suffix,
+  activeColor,
+  tone,
 }) => {
+  const resolvedTone: PillTone = tone ?? ((activeColor ? LEGACY_COLOR_TONE[activeColor] : undefined) ?? 'neutral');
   return (
-    <button
-      type="button"
-      aria-pressed={isActive}
-      onClick={onClick}
-      className={`text-sm font-mono cursor-pointer c-hover inline-flex items-center rounded-sm tracking-[var(--tracking-pill)] py-[var(--sp-1)] px-[var(--sp-2h)] gap-[var(--sp-1h)] ${
-        isActive ? `${activeColor} bg-d4` : 'text-t4 hover:text-t2 hover:bg-d3'
-      }`}
-      style={{
-        border: isActive
-          ? (activeBorder ?? 'var(--bw) solid var(--b4)')
-          : 'var(--bw) solid var(--b1)',
-        ...style,
-      }}
-    >
-      {label}
-      {count !== undefined && count > 0 && (
-        <span
-          className="text-label font-semibold leading-snug text-center rounded-xs min-w-[var(--sp-4)] px-[var(--sp-1)]"
-          style={{
-            backgroundColor: isActive ? 'var(--b3)' : 'var(--b2)',
-            color: isActive ? 'var(--color-t1)' : 'var(--color-t4)',
-          }}
-        >
-          {count}
-        </span>
-      )}
+    <span className="inline-flex items-center gap-[var(--sp-1)]">
+      <Pill
+        variant="interactive"
+        tone={resolvedTone}
+        pressed={isActive}
+        onClick={onClick}
+        count={count && count > 0 ? count : undefined}
+      >
+        {label}
+      </Pill>
       {suffix}
-    </button>
+    </span>
   )
 }
 

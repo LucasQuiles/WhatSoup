@@ -1,0 +1,129 @@
+/* tokens.primitive.css - primitive tier (raw scales, physics, @theme inline aliases)
+   Primitives are theme-agnostic; never referenced from component CSS or TSX (tokens-v3 §1).
+   C1: @theme block converted to @theme inline aliases pointing at semantic tokens per §7.
+   Spacing/radii/type-scale/motion values updated to v3 spec (tokens-v3 §2). */
+
+/* --------------------------------------------------------------------------
+   @theme inline — legacy utility aliases pointing at semantic tokens (§7).
+   The legacy @theme block froze dark values; inline re-resolves through var()
+   so bg-d* etc. flip with data-theme (C1 alias inversion per d1-1-evidence.md).
+   -------------------------------------------------------------------------- */
+@theme inline {
+  /* Surface aliases (§7) */
+  --color-d0: var(--surface-base);
+  --color-d1: var(--surface-inset);
+  --color-d2: var(--surface-raised);
+  --color-d3: var(--surface-raised);
+  --color-d4: var(--btn-neutral-bg);
+  --color-d5: var(--surface-overlay);
+  --color-d6: var(--surface-overlay);
+
+  /* Ink aliases (§7) */
+  --color-t1: var(--text-1);
+  --color-t2: var(--text-2);
+  --color-t3: var(--text-2);
+  --color-t4: var(--text-2);
+  --color-t5: var(--text-3);
+
+  /* Mode aliases (§7) */
+  --color-m-pas: var(--mode-passive-solid);
+  --color-m-cht: var(--mode-chat-solid);
+  --color-m-agt: var(--mode-agent-solid);
+
+  /* Status aliases (§7) */
+  --color-s-ok:   var(--status-ok-solid);
+  --color-s-warn: var(--status-warn-solid);
+  --color-s-crit: var(--status-crit-solid);
+
+  /* Type scale — Tailwind maps --text-* to text-* utilities (tokens-v3 §2.6) */
+  --text-xs:   0.6rem;  /* 9.6px */
+  --text-xs--line-height: 1.4;
+  --text-label: 0.65rem; /* 10.4px */
+  --text-sm:    0.7rem;  /* 11.2px */
+  --text-sm--line-height: 1.4;
+  --text-data:  0.78rem; /* 12.5px */
+  --text-heading: 0.82rem; /* 13.1px */
+  --text-body:  0.85rem; /* 13.6px */
+  --text-lg:    1rem;    /* 16px */
+  --text-lg--line-height: 1.35;
+  --text-xl:    1.4rem;  /* 22.4px */
+  --text-xl--line-height: 1.2;
+  --text-2xl:   1.7rem;  /* 27.2px */
+
+  /* Border radius (§2.3) */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* Font stacks (§2.1) — updated to Geist pair */
+  --font-sans: "Geist", "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+:root {
+  /* Avatar hue palette — 8 fixed hues for group/contact avatars.
+     CONSUMED DYNAMICALLY via template string at components/line-detail/groups-utils.ts:41
+     (invisible to static var() greps) — never remove in a dead-token sweep.
+     DD-44: lightness is 34% (not 55%) and initials use the fixed --avatar-ink, which
+     together clear WCAG AA 4.5:1 for all 8 hues × both themes (L55+--t1 bottomed at 1.78:1). */
+  --avatar-hue-0: hsl(0, 45%, 34%);
+  --avatar-hue-1: hsl(45, 45%, 34%);
+  --avatar-hue-2: hsl(90, 45%, 34%);
+  --avatar-hue-3: hsl(135, 45%, 34%);
+  --avatar-hue-4: hsl(180, 45%, 34%);
+  --avatar-hue-5: hsl(225, 45%, 34%);
+  --avatar-hue-6: hsl(270, 45%, 34%);
+  --avatar-hue-7: hsl(315, 45%, 34%);
+  --avatar-ink: #fff; /* fixed, theme-independent initials ink — equal contrast both themes (DD-44) */
+
+  /* Spacing — 4px grid (§2.2); half-steps retained for legacy consumers pending C2 migration */
+  --sp-0h: 3px;
+  --sp-1h: 6px;
+  --sp-2h: 10px;
+  --msg-pad-h: 14px;
+  --btn-pad-v: 7px;
+  --sp-0:  0px;
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  20px;
+  --sp-6:  24px;
+  --sp-7:  28px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* Border width — legacy kept for consumers pending C2 */
+  --bw: 1px;
+  --bw-accent: 2px;
+  --bw-focus: 1px;
+  --bw-focus-outer: 1.5px;
+
+  /* Letter spacing — legacy kept for consumers pending C2 */
+  --tracking-tighter: -0.06em;
+  --tracking-tight:   -0.04em;
+  --tracking-pill:    0.02em;
+  --tracking-label:   0.06em;
+  --tracking-caps:    0.12em;
+
+  /* Font weights — legacy kept for consumers pending C2 */
+  --fw-normal:   400;
+  --fw-medium:   500;
+  --fw-semibold: 600;
+
+  /* Radius aliases — keep legacy names pointing at §2.3 values */
+  --radius-xs: 2px;
+
+  /* Motion tokens — §2.5 v3 values */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 280ms;
+  --ease-enter: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit:  cubic-bezier(0.4, 0, 1, 1);
+  --ease-linear: linear;
+
+  /* Legacy motion aliases — §7 */
+  --ease:     var(--ease-enter);
+  --dur-norm: var(--dur-base);
+}

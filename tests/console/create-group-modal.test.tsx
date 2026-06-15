@@ -1,5 +1,13 @@
 /**
  * CreateGroupModal — open/close, subject input, participants via ContactSearchPicker, submit pipeline, Escape, validation.
+ * Updated for B3 wave-1 Modal migration (was: ad-hoc backdrop; now: Modal dismissable=false).
+ *
+ * Test changes from pre-migration version:
+ *   - aria-labelledby: literal id check → resolution check (Modal auto-generates id)
+ *   - Close button label: Close → Close dialog (ModalHeader ActionButton)
+ *   - Backdrop: INVERTS from "closes on click" → "does NOT dismiss (dismissable=false)" (C-B3W1-3)
+ *   - container.querySelector .c-dialog-backdrop → document.querySelector .soup-modal-backdrop
+ *   - NEW: subject input holds initial focus after open (C-B3W1-1)
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
@@ -93,7 +101,8 @@ afterEach(() => {
 })
 
 function searchInput(): HTMLInputElement {
-  return screen.getByRole('textbox', { name: 'Search contacts...' }) as HTMLInputElement
+  // ContactSearchPicker: input has role="combobox" (combobox aria contract, B2 rebuild)
+  return screen.getByRole('combobox', { name: 'Search contacts...' }) as HTMLInputElement
 }
 
 async function searchFor(query: string, contacts: ContactResult[] = [alice, bob]) {
@@ -107,7 +116,11 @@ async function searchFor(query: string, contacts: ContactResult[] = [alice, bob]
 
 async function chooseContact(contact: ContactResult, query = contact.name?.slice(0, 2) ?? contact.jid.slice(0, 2)) {
   await searchFor(query, [contact])
-  fireEvent.click(screen.getByText(contact.name ?? contact.notify ?? contact.jid).closest('button')!)
+  // Options are now <li role="option"> (Popover listbox), not <button>.
+  // Use mouseDown (prevents focus loss) to trigger onSelect in the Popover.
+  const label = contact.name ?? contact.notify ?? contact.jid
+  const option = await waitFor(() => screen.getByRole('option', { name: new RegExp(label) }))
+  fireEvent.mouseDown(option)
   await waitFor(() => {
     expect(screen.getByRole('button', { name: `Remove ${contact.name ?? contact.jid}` })).toBeDefined()
   })
@@ -146,9 +159,12 @@ describe('CreateGroupModal initial render', () => {
 
     const dialog = screen.getByRole('dialog')
     expect(dialog.getAttribute('aria-modal')).toBe('true')
-    expect(dialog.getAttribute('aria-labelledby')).toBe('create-group-dialog-title')
-    const title = document.getElementById('create-group-dialog-title')
-    expect(title?.textContent).toBe('Create Group')
+    // Modal auto-generates the id; resolve it rather than pin the literal value
+    const labelledById = dialog.getAttribute('aria-labelledby')
+    expect(labelledById).toBeTruthy()
+    const title = document.getElementById(labelledById!)
+    expect(title).not.toBeNull()
+    expect(title!.textContent).toBe('Create Group')
 
     const subject = screen.getByLabelText(/Group subject/i) as HTMLInputElement
     expect(subject.value).toBe('')
@@ -163,6 +179,19 @@ describe('CreateGroupModal initial render', () => {
   })
 })
 
+describe('CreateGroupModal initial focus (C-B3W1-1)', () => {
+  it('subject input holds initial focus after open', () => {
+    render(
+      <Wrap client={makeClient()} toast={makeToast()}>
+        <CreateGroupModal open lineName="primary" onClose={() => {}} onCreated={() => {}} />
+      </Wrap>,
+    )
+
+    const subject = screen.getByLabelText(/Group subject/i)
+    expect(document.activeElement).toBe(subject)
+  })
+})
+
 describe('CreateGroupModal participant list', () => {
   it('searches contacts for the current line, adds a result, and shows the selected count', async () => {
     render(
@@ -173,7 +202,9 @@ describe('CreateGroupModal participant list', () => {
 
     await searchFor('Ali', [alice])
     expect(searchContactsMock).toHaveBeenLastCalledWith('alpha-line', 'Ali')
-    fireEvent.click(screen.getByText('Alice Johnson').closest('button')!)
+    // Option is <li role="option"> (Popover listbox) — use mouseDown
+  const opt = await waitFor(() => screen.getByRole('option', { name: /Alice Johnson/ }))
+  fireEvent.mouseDown(opt)
 
     expect(screen.getByRole('button', { name: 'Remove Alice Johnson' })).toBeDefined()
     expect(screen.getByText('(1 selected)')).toBeDefined()
@@ -417,7 +448,7 @@ describe('CreateGroupModal close affordances', () => {
       </Wrap>,
     )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(onCreated).not.toHaveBeenCalled()
     expect(createGroupMock).not.toHaveBeenCalled()
@@ -437,22 +468,24 @@ describe('CreateGroupModal close affordances', () => {
     expect(createGroupMock).not.toHaveBeenCalled()
   })
 
-  it('invokes onClose when the backdrop is clicked but not when clicking inside the dialog', () => {
+  it('backdrop pointerdown does NOT dismiss (dismissable=false, C-B3W1-3 inversion)', () => {
+    // Migration note (B3 wave-1): CreateGroupModal uses Modal with dismissable=false.
+    // Previously backdrop click destroyed subject + participants silently — corrected.
+    // Mirrors confirm-dialog.test.tsx C2-migration test verbatim.
     const onClose = vi.fn()
 
-    const { container } = render(
+    render(
       <Wrap client={makeClient()} toast={makeToast()}>
         <CreateGroupModal open lineName="primary" onClose={onClose} onCreated={() => {}} />
       </Wrap>,
     )
 
-    fireEvent.click(screen.getByRole('dialog'))
-    expect(onClose).not.toHaveBeenCalled()
-
-    const backdrop = container.querySelector('.c-dialog-backdrop')
+    // Modal portals to document.body — use document.querySelector
+    const backdrop = document.querySelector('.soup-modal-backdrop')
     expect(backdrop).not.toBeNull()
-    fireEvent.click(backdrop as Element)
-    expect(onClose).toHaveBeenCalledTimes(1)
+    // dismissable=false: pointerdown on body outside shell must NOT call onClose
+    fireEvent.pointerDown(document.body)
+    expect(onClose).not.toHaveBeenCalled()
   })
 
   it('invokes onClose when Escape is pressed while open, and unbinds on unmount', () => {

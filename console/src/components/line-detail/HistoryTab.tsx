@@ -1,5 +1,5 @@
 import React from 'react'
-import { Send, MessageSquareOff, Loader2, ChevronsUp } from 'lucide-react'
+import { Send, MessageSquareOff, ChevronsUp } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useToast } from '../../hooks/toast-context'
 import { api } from '../../lib/api'
@@ -9,6 +9,9 @@ import { useStickyScroll } from '../../hooks/use-sticky-scroll'
 import EmptyState from '../EmptyState'
 import ChatListItem from '../ChatListItem'
 import MessageBubble from '../MessageBubble'
+import { TextArea } from '../primitives'
+import { Button } from '../primitives/Button'
+import { ActionButton } from '../primitives/ActionButton'
 import type { Mode, ChatItem, Message } from './types'
 
 /* HistoryMessages — scroll-to-bottom + load older + send input */
@@ -125,27 +128,26 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       <div
         ref={stickyScrollRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto scrollbar-hide py-[var(--sp-4)] px-[var(--sp-5)]"
+        className="flex-1 min-h-0 overflow-y-auto scrollbar-hide py-[var(--sp-4)] px-[var(--sp-5)]"
       >
         {/* Load older messages */}
         {reversed.length > 0 && (
           hasMore ? (
-            <div
-              className={`flex items-center justify-center c-hover text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)] ${loadingOlder ? '' : 'cursor-pointer hover:text-t2'}`}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full flex items-center justify-center c-hover text-t2 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
               onClick={loadOlder}
+              loading={loadingOlder}
+              icon={<ChevronsUp size={14} strokeWidth={1.75} />}
             >
-              {loadingOlder ? (
-                <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
-              ) : (
-                <ChevronsUp size={14} strokeWidth={1.75} />
-              )}
               <span className="text-sm">
                 {loadingOlder ? 'Loading...' : 'Load older messages'}
               </span>
-            </div>
+            </Button>
           ) : (
             <div
-              className="flex items-center justify-center text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
+              className="flex items-center justify-center text-t2 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
             >
               <span className="text-sm">No more messages</span>
             </div>
@@ -181,19 +183,20 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
       {/* Jump to newest */}
       {showJumpToBottom && (
-        <button
-          type="button"
-          className="c-btn c-btn-sm absolute flex items-center justify-center hover:text-t2 c-hover text-t5 left-1/2 -translate-x-1/2 bottom-[var(--sp-4)] py-[var(--sp-2)] px-[var(--sp-5)] gap-[var(--sp-2)] rounded-md z-[var(--z-float)]"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="absolute flex items-center justify-center c-hover text-t2 left-1/2 -translate-x-1/2 bottom-[var(--sp-4)] py-[var(--sp-2)] px-[var(--sp-5)] gap-[var(--sp-2)] rounded-md z-[var(--z-float)]"
           style={{
             background: 'color-mix(in srgb, var(--color-d4) 80%, transparent)',
             backdropFilter: 'blur(4px)',
           }}
           onClick={jumpToBottom}
           aria-label="Jump to newest"
+          icon={<ChevronsUp size={14} strokeWidth={1.75} className="rotate-180" />}
         >
-          <ChevronsUp size={14} strokeWidth={1.75} className="rotate-180" />
           <span className="text-sm">Jump to newest</span>
-        </button>
+        </Button>
       )}
       </div>
 
@@ -201,15 +204,15 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
       <div
         className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-t bg-d2"
       >
-        <textarea
+        <TextArea
           ref={textareaRef}
-          className="flex-1 text-t2 font-sans placeholder-t5 outline-none leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] bg-d1 rounded-md c-border-b2 text-body"
+          className="flex-1 text-t2 placeholder-t5 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
           rows={1}
-          style={{
-            maxHeight: 'var(--feed-preview-max)',
-            resize: 'none',
-            overflow: 'hidden',
-          }}
+          minHeight={0}
+          maxHeight="var(--feed-preview-max)"
+          resize="none"
+          overflow="hidden"
+          textFace="sans"
           placeholder="Type a reply..."
           aria-label="Type a reply"
           value={msgText}
@@ -222,15 +225,13 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
           }}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
         />
-        <button
-          type="button"
-          className="c-btn c-btn-primary c-btn-send flex-shrink-0"
+        <ActionButton
+          label="Send"
+          icon={<Send size={16} strokeWidth={1.75} />}
+          className="flex-shrink-0"
           onClick={handleSend}
           disabled={isSending || !msgText.trim()}
-        >
-          <Send size={16} strokeWidth={1.75} />
-          <span className="c-btn-send-label">Send</span>
-        </button>
+        />
       </div>
     </>
   )
@@ -256,7 +257,7 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
           <span className="c-label">{chats.length} chats</span>
         </div>
 
-        <div className="flex-1 overflow-auto scrollbar-hide">
+        <div className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide">
           {chats.map(chat => (
             <ChatListItem
               key={chat.conversationKey}

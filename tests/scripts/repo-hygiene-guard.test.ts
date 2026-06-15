@@ -580,6 +580,36 @@ The migrated group was 1203631234567890@g.us.
     expect(issues[0].message).toContain('[branch history');
   });
 
+  it('does not flag branch-history secret lines byte-identical to the base ref (merge re-exposure)', () => {
+    // Mirrors the real cutover false-positive: a secret-shaped sentinel that ALREADY
+    // exists on the base (origin/main) is re-exposed in a branch-unique merge commit's
+    // per-commit diff. Because the line is byte-identical to main it is already-published,
+    // not branch-introduced, and must not be flagged. (A genuinely-new transient secret is
+    // still flagged — see the preceding test.)
+    const repo = makeBranchRepo(); // leaves us on 'feature', branched off 'main'
+    const sentinel = 'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\n';
+
+    // feature gets a unique commit so the later merge is a real (non-fast-forward) merge.
+    writeFileSync(join(repo, 'feature-only.txt'), 'x\n');
+    git(repo, ['add', 'feature-only.txt']);
+    git(repo, ['commit', '-m', 'test: feature-only commit']);
+
+    // The sentinel lands on main (the base) — already-published content.
+    git(repo, ['checkout', 'main']);
+    mkdirSync(join(repo, 'tests', 'drills'), { recursive: true });
+    writeFileSync(join(repo, 'tests', 'drills', 'drill.sh'), sentinel);
+    git(repo, ['add', 'tests/drills/drill.sh']);
+    git(repo, ['commit', '-m', 'chore: base drill sentinel']);
+
+    // feature merges main → a branch-unique merge commit re-exposes main's drill line.
+    git(repo, ['checkout', 'feature']);
+    git(repo, ['merge', 'main', '--no-edit']);
+
+    const issues = scanBranchDiff(repo, 'main');
+
+    expect(issues.filter((issue) => issue.code === 'secret-assignment')).toEqual([]);
+  });
+
   it('flags sensitive artifacts added and removed before the final branch diff', () => {
     const repo = makeBranchRepo();
     writeFileSync(join(repo, '.env.local'), "TOKEN='fixture'\n");

@@ -56,7 +56,7 @@ export function formatWhatsAppText(text: string | null | undefined, highlightQue
 
     if (match[1] !== undefined) {
       parts.push(
-        <code key={keyRef.value++} className="font-mono block py-[var(--sp-1)] px-[var(--sp-2)] bg-d1 rounded-sm my-[var(--sp-1)] whitespace-pre-wrap overflow-x-auto" style={{
+        <code key={keyRef.value++} className="font-mono block min-w-0 py-[var(--sp-1)] px-[var(--sp-2)] bg-d1 rounded-sm my-[var(--sp-1)] whitespace-pre-wrap overflow-x-auto" style={{
           fontSize: 'inherit',
         }}>{renderHighlightedText(match[1], highlightQuery, keyRef)}</code>
       );

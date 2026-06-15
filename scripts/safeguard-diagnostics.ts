@@ -66,6 +66,7 @@ const REQUIRED_SCRIPTS = [
   'guard:publication:all',
   'guard:publication:release',
   'guard:publication:staged',
+  'guard:design-system-hygiene',
   'guard:repo:staged',
   'guard:repo:branch-diff',
   'guard:repo:commit-authors',
@@ -77,12 +78,37 @@ const REQUIRED_SCRIPTS = [
   'guard:safeguard-diagnostics',
   'guard:fleet-bot-hardening-parity',
   'guard:bot-errors-runtime-manifest',
+  'test:design-guards',
+  'test:browser',
+  'test:browser:motion',
+  'verify:console-design',
   'verify:push:branch',
   'verify:release',
   'verify:publish',
 ];
 
 const CHAIN_REQUIREMENTS: ChainRequirement[] = [
+  {
+    id: 'console-design-chain',
+    scriptName: 'verify:console-design',
+    orderedSteps: [
+      'npm --prefix console run design:theme-parity',
+      'npm --prefix console run design:token-drift',
+      'npm --prefix console run design:contrast',
+      'npm --prefix console run lint:shadow:baseline',
+      'npm --prefix console run design:shadow-frozen-inventory',
+      'npm --prefix console run design:raw-form-control-inventory',
+      'npm --prefix console run design:regression',
+      'npm --prefix console run design:metrics',
+      'npm --prefix console run design:burndown',
+      'npm --prefix console run design:color-semantics',
+      'npm --prefix console run design:resilience',
+      'npm --prefix console run design:font-assets',
+      'npm --prefix console run design:brand-assets',
+      'npm --prefix console run design:lint-fixtures',
+      'npm run test:design-guards',
+    ],
+  },
   {
     id: 'branch-push-chain',
     scriptName: 'verify:push:branch',
@@ -106,6 +132,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:lint:src',
       'npm run typecheck:all',
       'npm test',
+      'npm run verify:console-design',
     ],
   },
   {
@@ -133,6 +160,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm test',
       'npm run coverage:check',
       'npm --prefix console run build',
+      'npm run verify:console-design',
     ],
   },
   {
@@ -147,6 +175,11 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
     ],
   },
 ];
+
+const CONSOLE_DESIGN_CHAIN_EXEMPTIONS = new Set([
+  'design:capture',
+  'design:capture:validate',
+]);
 
 const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
   {
@@ -274,6 +307,54 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     remediation: 'Restore CI fail-closed behavior for missing test-integrity tooling.',
   },
   {
+    id: 'quality-ci-console-design-chain',
+    category: 'guard-chain',
+    file: '.github/workflows/quality.yml',
+    anchors: [
+      'name: Install console dependencies',
+      'name: Design-system hygiene changed files',
+      'npm run guard:design-system-hygiene -- --changed-since',
+      'name: Console build',
+      'name: Console design verification',
+      'run: npm run verify:console-design',
+      'name: Install Playwright chromium',
+      'run: npx playwright install chromium --with-deps',
+      'name: Browser test suite',
+      'run: npm run test:browser',
+      'name: Browser motion test suite',
+      'run: npm run test:browser:motion',
+      'tests/browser/__screenshots__',
+      'tests/browser-motion/__screenshots__',
+    ],
+    remediation: 'Restore the shared console design verification chain in quality.yml CI.',
+  },
+  {
+    id: 'tag-release-console-design-chain',
+    category: 'guard-chain',
+    file: '.github/workflows/tag-release-gate.yml',
+    anchors: [
+      'name: Install console dependencies',
+      'name: Console build',
+      'name: Console design verification',
+      'run: npm run verify:console-design',
+    ],
+    remediation: 'Restore the shared console design verification chain in tag-release-gate.yml.',
+  },
+  {
+    id: 'pre-commit-design-system-hygiene',
+    category: 'guard-chain',
+    file: '.husky/pre-commit',
+    anchors: [
+      'npm run guard:repo:staged',
+      'npm run guard:publication:staged',
+      'npm run guard:design-system-hygiene',
+      'npm run guard:node-pin-consistency',
+      'npm run guard:claude-settings',
+      'lint-staged',
+    ],
+    remediation: 'Restore the pre-commit hook so staged repo, publication, docs-hygiene, node-pin, settings, and console lint checks run before commit.',
+  },
+  {
     id: 'bot-errors-runtime-manifest-required-paths',
     category: 'guard-chain',
     file: 'scripts/check-bot-errors-runtime-manifest.ts',
@@ -288,9 +369,9 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
   },
 ];
 
-function loadPackageScripts(cwd: string): Record<string, string> {
-  const text = readText(cwd, 'package.json');
-  if (text === null) throw new Error('package.json is missing');
+function loadPackageScripts(cwd: string, packagePath = 'package.json'): Record<string, string> {
+  const text = readText(cwd, packagePath);
+  if (text === null) throw new Error(`${packagePath} is missing`);
   const parsed = JSON.parse(text) as { scripts?: Record<string, unknown> };
   const scripts: Record<string, string> = {};
   for (const [name, value] of Object.entries(parsed.scripts ?? {})) {
@@ -437,6 +518,41 @@ function checkChainRequirement(scripts: Record<string, string>, requirement: Cha
   };
 }
 
+function consoleDesignScriptSteps(consoleScripts: Record<string, string>): string[] {
+  return Object.keys(consoleScripts)
+    .filter((scriptName) => scriptName.startsWith('design:'))
+    .filter((scriptName) => !CONSOLE_DESIGN_CHAIN_EXEMPTIONS.has(scriptName))
+    .sort()
+    .map((scriptName) => `npm --prefix console run ${scriptName}`);
+}
+
+function checkConsoleDesignScriptCoverage(rootScripts: Record<string, string>, consoleScripts: Record<string, string>): DiagnosticCheck {
+  const chain = rootScripts['verify:console-design'];
+  if (!chain) {
+    return {
+      id: 'console-design-script-coverage',
+      category: 'guard-chain',
+      status: 'fail',
+      message: 'verify:console-design is missing.',
+      evidence: ['verify:console-design'],
+      remediation: 'Restore verify:console-design before relying on console design guard coverage.',
+    };
+  }
+
+  const requiredSteps = consoleDesignScriptSteps(consoleScripts);
+  const missing = requiredSteps.filter((step) => !chain.includes(step));
+  return {
+    id: 'console-design-script-coverage',
+    category: 'guard-chain',
+    status: missing.length === 0 ? 'pass' : 'fail',
+    message: missing.length === 0
+      ? 'All non-capture console design scripts are wired into verify:console-design.'
+      : `verify:console-design omits ${missing.length} console design script(s).`,
+    evidence: missing.length === 0 ? requiredSteps : missing.map((step) => `missing ${step}`),
+    remediation: 'Add the missing console design guard scripts to verify:console-design, or explicitly classify them as visual capture-only.',
+  };
+}
+
 function checkAnchors(cwd: string, requirement: AnchorRequirement): DiagnosticCheck {
   const text = readText(cwd, requirement.file);
   if (text === null) {
@@ -542,9 +658,11 @@ function summarize(checks: DiagnosticCheck[]): Record<DiagnosticStatus, number> 
 
 export function checkSafeguards(cwd = process.cwd(), strict = false): SafeguardDiagnosticsReport {
   const scripts = loadPackageScripts(cwd);
+  const consoleScripts = loadPackageScripts(cwd, 'console/package.json');
   const gitContext = collectGitContext(cwd);
   const checks = [
     checkScriptPresence(scripts),
+    checkConsoleDesignScriptCoverage(scripts, consoleScripts),
     ...CHAIN_REQUIREMENTS.map((requirement) => checkChainRequirement(scripts, requirement)),
     ...ANCHOR_REQUIREMENTS.map((requirement) => checkAnchors(cwd, requirement)),
     ...portableArtifactChecks(gitContext),

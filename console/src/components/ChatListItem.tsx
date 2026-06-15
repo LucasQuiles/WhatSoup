@@ -7,16 +7,22 @@ interface ChatListItemProps {
   chat: ChatItem
   isSelected: boolean
   onClick: () => void
+  /** Roving-tabindex stop: 0 when this row is the current stop, -1 otherwise.
+   *  Owned by ChatList; ChatListItem is a pure presentation row. */
+  tabIndex?: number
   isTyping?: boolean
 }
 
-const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTyping }) => {
+const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabIndex = 0, isTyping }) => {
   const displayName = resolveDisplayName(chat.name)
+  const lastMessageTime = formatChatTime(chat.lastMessageAt)
+  const previewText = stripMarkdown(chat.lastMessagePreview ?? '')
 
   return (
     <div
       role="option"
-      tabIndex={0}
+      tabIndex={tabIndex}
+      data-conv-key={chat.conversationKey}
       onClick={onClick}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       aria-label={`Open conversation with ${displayName}`}
@@ -36,12 +42,13 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTypi
         {/* Row 1: Name + Time */}
         <div className="flex items-baseline gap-[var(--sp-2)] mb-[var(--sp-0h)]">
           <span
+            title={displayName}
             className="text-t1 font-medium flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-body"
           >
             {displayName}
           </span>
-          <span className="c-label flex-shrink-0 whitespace-nowrap">
-            {formatChatTime(chat.lastMessageAt)}
+          <span title={lastMessageTime} className="c-label flex-shrink-0 whitespace-nowrap">
+            {lastMessageTime}
           </span>
         </div>
 
@@ -56,9 +63,10 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, isTypi
             </span>
           ) : (
           <span
+            title={previewText || undefined}
             className="text-t4 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-data"
           >
-            {stripMarkdown(chat.lastMessagePreview ?? '')}
+            {previewText}
           </span>
           )}
           {chat.unreadCount > 0 && (

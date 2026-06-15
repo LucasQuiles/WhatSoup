@@ -93,7 +93,9 @@ describe('ConfigStep — access and behavior tabs', () => {
   it('writes access mode changes and normalizes allowlist contacts to digits only', () => {
     const { onChange } = renderConfigStep({ initialData: { accessMode: 'self_only', allowedContacts: [] } })
 
-    fireEvent.click(screen.getByRole('button', { name: /Allowlist Approved contacts only/i }))
+    // Access-mode options are a WAI radiogroup (CardSelector, DD-14) — each option
+    // is role="radio" with its accessible name composed from label + description.
+    fireEvent.click(screen.getByRole('radio', { name: /Allowlist Approved contacts only/i }))
     expect(onChange).toHaveBeenLastCalledWith({ accessMode: 'allowlist' })
 
     onChange.mockClear()
@@ -105,12 +107,12 @@ describe('ConfigStep — access and behavior tabs', () => {
     expect(onChange).toHaveBeenLastCalledWith({ allowedContacts: ['5551234567'] })
 
     onChange.mockClear()
-    fireEvent.click(screen.getByRole('button', { name: /Open DMs Anyone can send direct messages/i }))
+    fireEvent.click(screen.getByRole('radio', { name: /Open DMs Anyone can send direct messages/i }))
     expect(onChange).toHaveBeenLastCalledWith({ accessMode: 'open_dm' })
     expect(screen.getByText(/Anyone can send a direct message/)).toBeDefined()
 
     onChange.mockClear()
-    fireEvent.click(screen.getByRole('button', { name: /Groups Only Only responds in group chats/i }))
+    fireEvent.click(screen.getByRole('radio', { name: /Groups Only Only responds in group chats/i }))
     expect(onChange).toHaveBeenLastCalledWith({ accessMode: 'groups_only' })
     expect(screen.getByText(/Direct messages are ignored/)).toBeDefined()
   })

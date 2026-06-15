@@ -83,6 +83,15 @@ describe('ChatListItem', () => {
     expect(row.getAttribute('style')).toContain('border-left')
   })
 
+  it('carries the c-chat-item class that owns the row focus-visible ring', () => {
+    render(<ChatListItem chat={chat()} isSelected={false} onClick={() => {}} tabIndex={0} />)
+    const row = screen.getByRole('option')
+
+    expect(row.classList.contains('c-chat-item')).toBe(true)
+    expect(row.getAttribute('tabIndex')).toBe('0')
+    expect(row.getAttribute('role')).toBe('option')
+  })
+
   it('omits the active class and inline style when not selected', () => {
     render(<ChatListItem chat={chat()} isSelected={false} onClick={() => {}} />)
     const row = screen.getByRole('option')
@@ -149,6 +158,31 @@ describe('ChatListItem', () => {
     const row = screen.getByRole('option')
 
     expect(row.getAttribute('aria-label')).toBe('Open conversation with Friendly Group')
+  })
+
+  it('accepts tabIndex prop: tabIndex=0 when the row is the roving stop', () => {
+    // Roving tabindex is owned by ChatList; ChatListItem is a pure row.
+    // When ChatList passes tabIndex=0 the row is the current keyboard stop.
+    render(<ChatListItem chat={chat()} isSelected={false} onClick={() => {}} tabIndex={0} />)
+    const row = screen.getByRole('option')
+
+    expect(row.getAttribute('tabIndex')).toBe('0')
+  })
+
+  it('accepts tabIndex prop: tabIndex=-1 when the row is not the roving stop', () => {
+    // All non-stop rows receive tabIndex=-1 from ChatList, removing them from
+    // the tab sequence while keeping them reachable via arrow keys.
+    render(<ChatListItem chat={chat()} isSelected={false} onClick={() => {}} tabIndex={-1} />)
+    const row = screen.getByRole('option')
+
+    expect(row.getAttribute('tabIndex')).toBe('-1')
+  })
+
+  it('defaults tabIndex to 0 when no prop is provided (standalone use)', () => {
+    // The default keeps ChatListItem usable outside ChatList without breaking.
+    render(<ChatListItem chat={chat()} isSelected={false} onClick={() => {}} />)
+    const row = screen.getByRole('option')
+
     expect(row.getAttribute('tabIndex')).toBe('0')
   })
 })

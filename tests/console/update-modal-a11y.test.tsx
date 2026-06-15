@@ -85,12 +85,12 @@ afterEach(() => {
 })
 
 describe('UpdateModal close controls', () => {
-  it('keeps the icon-only close button labelled and the confirm Cancel button text-labelled', () => {
+  it('keeps the header close button labelled "Close dialog" and the confirm Cancel button text-labelled', () => {
     renderModal()
 
-    const closeButtons = screen.getAllByRole('button', { name: 'Close' })
-    expect(closeButtons).toHaveLength(1)
-    expect(closeButtons[0].getAttribute('aria-label')).toBe('Close')
+    // The header X ActionButton uses label="Close dialog" (modal.md anatomy, wave-3 migration)
+    const closeBtn = screen.getByRole('button', { name: 'Close dialog' })
+    expect(closeBtn.getAttribute('aria-label')).toBe('Close dialog')
 
     const cancelButton = screen.getByRole('button', { name: 'Cancel' })
     expect(cancelButton.getAttribute('aria-label')).toBeNull()
@@ -103,11 +103,12 @@ describe('UpdateModal close controls', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Update' }))
 
     await screen.findByText('Update failed: 500')
-    const closeButtons = screen.getAllByRole('button', { name: 'Close' })
-    const textCloseButton = closeButtons.find(button => button.textContent === 'Close')
-
-    expect(textCloseButton).toBeDefined()
-    expect(textCloseButton?.getAttribute('aria-label')).toBeNull()
+    // Header X is "Close dialog"; error-phase footer button is "Close" — no collision
+    const textCloseButton = screen.getByRole('button', { name: 'Close' })
+    expect(textCloseButton.textContent).toBe('Close')
+    expect(textCloseButton.getAttribute('aria-label')).toBeNull()
+    const retryButton = screen.getByRole('button', { name: 'Try again' })
+    expect(retryButton.getAttribute('aria-label')).toBeNull()
   })
 
   it('keeps the restart-instance Skip button text-labelled', async () => {

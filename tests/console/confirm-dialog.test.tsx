@@ -40,10 +40,11 @@ describe('ConfirmDialog open state', () => {
 
     const dialog = screen.getByRole('dialog')
     expect(dialog.getAttribute('aria-modal')).toBe('true')
-    expect(dialog.getAttribute('aria-labelledby')).toBe('confirm-dialog-title')
+    // Migration note (C2): Modal generates a stable aria-labelledby ID (no longer hardcoded
+    // 'confirm-dialog-title'). Verify the attribute is set and non-empty.
+    expect(dialog.getAttribute('aria-labelledby')).toBeTruthy()
 
-    const titleEl = screen.getByText('Delete chat?')
-    expect(titleEl.id).toBe('confirm-dialog-title')
+    expect(screen.getByText('Delete chat?')).toBeDefined()
     expect(screen.getByText('This action is permanent.')).toBeDefined()
   })
 })
@@ -110,11 +111,15 @@ describe('ConfirmDialog actions', () => {
     expect(onCancel).toHaveBeenCalledTimes(1)
   })
 
-  it('invokes onCancel when the backdrop is clicked', () => {
+  it('backdrop click does NOT dismiss: ConfirmDialog is dismissable=false (C2 migration)', () => {
+    // Migration note (C2): ConfirmDialog uses Modal with dismissable=false (modal.md: destructive
+    // confirms must require an explicit button). The old test asserted backdrop click dismissed;
+    // this is WRONG for destructive confirms — the migration fixes this design bug.
+    // The backdrop renders in a portal (document.body), so we use document.querySelector.
     const onConfirm = vi.fn()
     const onCancel = vi.fn()
 
-    const { container } = render(
+    render(
       <ConfirmDialog
         open
         title="Proceed?"
@@ -125,11 +130,12 @@ describe('ConfirmDialog actions', () => {
       </ConfirmDialog>,
     )
 
-    const backdrop = container.querySelector('.c-dialog-backdrop')
+    const backdrop = document.querySelector('.soup-modal-backdrop')
     expect(backdrop).not.toBeNull()
-    fireEvent.click(backdrop as Element)
+    // dismissable=false: backdrop click (pointerdown) should NOT call onCancel
+    fireEvent.pointerDown(document.body)
 
-    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onCancel).not.toHaveBeenCalled()
     expect(onConfirm).not.toHaveBeenCalled()
   })
 
@@ -188,10 +194,11 @@ describe('ConfirmDialog labels and variants', () => {
       </ConfirmDialog>,
     )
 
+    // Migration note (C2): c-btn-danger replaced by soup-btn--danger (Button primitive).
     const btn = screen.getByRole('button', { name: 'Confirm' })
-    expect(btn.className).toContain('c-btn-danger')
-    expect(btn.className).not.toContain('c-btn-warning')
-    expect(btn.className).not.toContain('c-btn-primary')
+    expect(btn.className).toContain('soup-btn--danger')
+    expect(btn.className).not.toContain('soup-btn--warning')
+    expect(btn.className).not.toContain('soup-btn--primary')
   })
 
   it('applies the warning class when confirmVariant="warning"', () => {
@@ -207,10 +214,11 @@ describe('ConfirmDialog labels and variants', () => {
       </ConfirmDialog>,
     )
 
+    // Migration note (C2): c-btn-warning replaced by soup-btn--warning (Button primitive).
     const btn = screen.getByRole('button', { name: 'Confirm' })
-    expect(btn.className).toContain('c-btn-warning')
-    expect(btn.className).not.toContain('c-btn-danger')
-    expect(btn.className).not.toContain('c-btn-primary')
+    expect(btn.className).toContain('soup-btn--warning')
+    expect(btn.className).not.toContain('soup-btn--danger')
+    expect(btn.className).not.toContain('soup-btn--primary')
   })
 
   it('applies the primary class when confirmVariant="primary"', () => {
@@ -226,10 +234,11 @@ describe('ConfirmDialog labels and variants', () => {
       </ConfirmDialog>,
     )
 
+    // Migration note (C2): c-btn-primary replaced by soup-btn--primary (Button primitive).
     const btn = screen.getByRole('button', { name: 'Confirm' })
-    expect(btn.className).toContain('c-btn-primary')
-    expect(btn.className).not.toContain('c-btn-danger')
-    expect(btn.className).not.toContain('c-btn-warning')
+    expect(btn.className).toContain('soup-btn--primary')
+    expect(btn.className).not.toContain('soup-btn--danger')
+    expect(btn.className).not.toContain('soup-btn--warning')
   })
 
   it('keeps the Cancel button on a neutral ghost class regardless of variant', () => {
@@ -245,11 +254,12 @@ describe('ConfirmDialog labels and variants', () => {
       </ConfirmDialog>,
     )
 
+    // Migration note (C2): c-btn-ghost replaced by soup-btn--ghost (Button primitive).
     const cancel = screen.getByRole('button', { name: 'Cancel' })
-    expect(cancel.className).toContain('c-btn-ghost')
-    expect(cancel.className).not.toContain('c-btn-danger')
-    expect(cancel.className).not.toContain('c-btn-warning')
-    expect(cancel.className).not.toContain('c-btn-primary')
+    expect(cancel.className).toContain('soup-btn--ghost')
+    expect(cancel.className).not.toContain('soup-btn--danger')
+    expect(cancel.className).not.toContain('soup-btn--warning')
+    expect(cancel.className).not.toContain('soup-btn--primary')
   })
 
   it('renders the confirmIcon node alongside the confirm label', () => {

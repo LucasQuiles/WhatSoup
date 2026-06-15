@@ -1,5 +1,17 @@
 /**
  * GroupDetailModal - query states, info edits, participant actions, settings, and close affordances.
+ *
+ * Superset suite: combines main's functional coverage with the soup-v3 design
+ * branch's accessibility/token-class assertions (C-B3W3 / DD-44):
+ *   - aria-labelledby resolves to explicit id group-detail-dialog-title
+ *   - backdrop pointerdown does NOT dismiss (dismissable=false, fresh pin)
+ *   - nested Leave-confirm Escape ordering (confirm first, then modal)
+ *   - tablist roving tabindex (ArrowRight focuses without selecting, Enter selects)
+ *   - tabpanel aria-labelledby wiring
+ *   - settings seg pairs: aria-label, exactly-one aria-pressed, disabled-while-saving
+ *   - subject/description/select token classes (c-input, c-select, font-mono)
+ *   - tab reset to Info on group change
+ *
  * @vitest-environment jsdom
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -282,6 +294,34 @@ describe('GroupDetailModal query and shell states', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledTimes(1)
   })
+
+  it('aria-labelledby resolves to the element with id group-detail-dialog-title', async () => {
+    renderModal()
+    const dialog = await screen.findByRole('dialog')
+    const labelledById = dialog.getAttribute('aria-labelledby')
+    expect(labelledById).toBeTruthy()
+    const titleEl = document.getElementById(labelledById!)
+    expect(titleEl).not.toBeNull()
+    // The subject text is the label
+    expect(titleEl!.textContent).toBe('Team Atlas')
+    // The id is explicitly group-detail-dialog-title (preserved via labelledById prop, C-B3W3-4)
+    expect(labelledById).toBe('group-detail-dialog-title')
+  })
+
+  it('does NOT close on backdrop pointerdown (dismissable=false, fresh pin)', async () => {
+    const { onClose } = renderModal()
+    const dialog = await screen.findByRole('dialog')
+    const backdrop = dialog.parentElement!
+    fireEvent.pointerDown(backdrop)
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('calls onClose when the X (Close dialog) button is clicked', async () => {
+    const { onClose } = renderModal()
+    await screen.findByRole('dialog')
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('GroupDetailModal info actions', () => {
@@ -333,6 +373,19 @@ describe('GroupDetailModal info actions', () => {
       expect(updateGroupDescriptionMock).toHaveBeenCalledWith(lineName, groupId, undefined)
     })
     expect(toast.success).toHaveBeenCalledWith('Description updated')
+  })
+
+  it('labels the editable subject and description fields with form-control token classes', async () => {
+    renderModal()
+    await waitForDetail()
+
+    const subject = screen.getByLabelText('Subject') as HTMLInputElement
+    expect(subject.className).toContain('c-input')
+    expect(subject.className).toContain('font-mono')
+
+    const description = screen.getByLabelText('Description') as HTMLTextAreaElement
+    expect(description.className).toContain('c-input')
+    expect(description.className).toContain('font-mono')
   })
 
   it('copies and revokes an existing invite link', async () => {
@@ -575,5 +628,165 @@ describe('GroupDetailModal settings actions', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
     expect(screen.queryByRole('button', { name: 'Admins only' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Leave group' })).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Accessibility / token-class assertions folded in from the soup-v3 design
+// branch (C-B3W3 / DD-44). These cover behaviours main's functional suite
+// does not assert: stack-aware Escape ordering, tablist roving-tabindex,
+// tabpanel aria wiring, seg-pair aria-pressed/disabled, and form-control
+// token classes.
+// ---------------------------------------------------------------------------
+
+describe('GroupDetailModal nested confirm Escape ordering', () => {
+  it('Escape with Leave confirm open closes only the confirm, second Escape closes modal', async () => {
+    const { onClose } = renderModal()
+    await waitForDetail()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Leave group' }))
+
+    // Leave confirm dialog should now be open
+    await waitFor(() => expect(screen.getByText('Leave group?')).toBeDefined())
+
+    // First Escape — closes the confirm dialog only
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByText('Leave group?')).toBeNull())
+    expect(onClose).not.toHaveBeenCalled()
+
+    // Second Escape — closes the modal
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('GroupDetailModal tablist (roving tabindex)', () => {
+  it('renders a labelled tablist with Info, Participants, and Settings tabs', async () => {
+    renderModal()
+    await waitForDetail()
+    const tablist = screen.getByRole('tablist')
+    expect(tablist.getAttribute('aria-label')).toBeTruthy()
+    expect(screen.getByRole('tab', { name: /Info/i })).toBeDefined()
+    expect(screen.getByRole('tab', { name: /Participants/i })).toBeDefined()
+    expect(screen.getByRole('tab', { name: /Settings/i })).toBeDefined()
+  })
+
+  it('Info tab is selected by default (aria-selected=true)', async () => {
+    renderModal()
+    await waitForDetail()
+    const infoTab = screen.getByRole('tab', { name: /Info/i })
+    expect(infoTab.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('ArrowRight moves focus to the next tab without selecting it (manual activation)', async () => {
+    renderModal()
+    await waitForDetail()
+    const infoTab = screen.getByRole('tab', { name: /Info/i })
+    const participantsTab = screen.getByRole('tab', { name: /Participants/i })
+    infoTab.focus()
+    fireEvent.keyDown(infoTab, { key: 'ArrowRight' })
+    // Info remains selected; focus moves to Participants under the roving model
+    expect(infoTab.getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(participantsTab)
+  })
+
+  it('Enter on the focused tab selects it (manual activation)', async () => {
+    renderModal()
+    await waitForDetail()
+    const infoTab = screen.getByRole('tab', { name: /Info/i })
+    const participantsTab = screen.getByRole('tab', { name: /Participants/i })
+    infoTab.focus()
+    fireEvent.keyDown(infoTab, { key: 'ArrowRight' })
+    fireEvent.keyDown(participantsTab, { key: 'Enter' })
+    expect(participantsTab.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('selected tabpanel has correct aria-labelledby wiring', async () => {
+    renderModal()
+    await waitForDetail()
+    const infoTab = screen.getByRole('tab', { name: /Info/i })
+    const controlsId = infoTab.getAttribute('aria-controls')
+    expect(controlsId).toBeTruthy()
+    const panel = document.getElementById(controlsId!)
+    expect(panel).not.toBeNull()
+    expect(panel!.getAttribute('aria-labelledby')).toBe(infoTab.id)
+  })
+
+  it('resets to the Info tab when the group prop changes', async () => {
+    const { rerender, client, toast } = renderModal()
+    await waitForDetail()
+
+    const participantsTab = screen.getByRole('tab', { name: /Participants/i })
+    fireEvent.click(participantsTab)
+    fireEvent.keyDown(participantsTab, { key: 'Enter' })
+    await waitFor(() => expect(participantsTab.getAttribute('aria-selected')).toBe('true'))
+
+    const newGroup = makeGroup({ id: '1555000002@g.us', subject: 'Team Beta' })
+    getGroupDetailMock.mockResolvedValue(makeDetail({ id: newGroup.id, subject: 'Team Beta' }))
+
+    rerender(
+      <Wrap client={client} toast={toast}>
+        <GroupDetailModal open group={newGroup} lineName={lineName} myJid={currentUserJid} onClose={vi.fn()} />
+      </Wrap>,
+    )
+
+    await waitFor(() => {
+      const infoTab = screen.getByRole('tab', { name: /Info/i })
+      expect(infoTab.getAttribute('aria-selected')).toBe('true')
+    })
+  })
+})
+
+describe('GroupDetailModal settings seg pairs', () => {
+  async function openSettingsAsAdmin() {
+    const ctx = renderModal({ myJid: currentUserJid })
+    await waitForDetail()
+    fireEvent.click(screen.getByRole('tab', { name: /Settings/i }))
+    await waitFor(() => expect(screen.getByRole('group', { name: 'Messaging' })).toBeDefined())
+    return ctx
+  }
+
+  it('the Messaging seg group exposes an aria-label', async () => {
+    await openSettingsAsAdmin()
+    const group = screen.getByRole('group', { name: 'Messaging' })
+    expect(group.getAttribute('aria-label')).toBe('Messaging')
+  })
+
+  it('exactly one button per seg pair has aria-pressed=true', async () => {
+    await openSettingsAsAdmin()
+    const messagingGroup = screen.getByRole('group', { name: 'Messaging' })
+    const btns = Array.from(messagingGroup.querySelectorAll('button'))
+    const pressed = btns.filter(b => b.getAttribute('aria-pressed') === 'true')
+    expect(pressed).toHaveLength(1)
+  })
+
+  it('seg buttons are disabled while a save is in-flight (double-fire protection)', async () => {
+    updateGroupSettingsMock.mockReturnValue(new Promise(() => {}))
+    await openSettingsAsAdmin()
+
+    const messagingGroup = screen.getByRole('group', { name: 'Messaging' })
+    const btns = Array.from(messagingGroup.querySelectorAll('button')) as HTMLButtonElement[]
+    const unpressed = btns.find(b => b.getAttribute('aria-pressed') === 'false')!
+    fireEvent.click(unpressed)
+
+    await waitFor(() => {
+      const freshBtns = Array.from(messagingGroup.querySelectorAll('button')) as HTMLButtonElement[]
+      expect(freshBtns.every(b => b.disabled)).toBe(true)
+    })
+  })
+
+  it('the disappearing-messages select uses form-control token classes', async () => {
+    await openSettingsAsAdmin()
+
+    const select = screen.getByRole('combobox', { name: 'Disappearing messages' }) as HTMLSelectElement
+    expect(select.className).toContain('c-input')
+    expect(select.className).toContain('c-select')
+    expect(select.className).not.toContain('c-btn')
+
+    fireEvent.change(select, { target: { value: '86400' } })
+    await waitFor(() => {
+      expect(updateGroupEphemeralMock).toHaveBeenCalledWith(lineName, groupId, 86400)
+    })
   })
 })

@@ -8,8 +8,8 @@ import { ActiveHoursHeatmap } from '../../console/src/components/ActiveHoursHeat
 
 afterEach(() => cleanup());
 
-const ACCENT_FULL = 'var(--color-m-cht)';
-const ZERO_FILL = 'var(--color-d2)';
+const ACTIVITY_FULL = 'var(--data-activity-solid)';
+const ZERO_FILL = 'var(--surface-raised)';
 
 function zeroGrid(): number[][] {
   return Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0));
@@ -100,7 +100,7 @@ describe('ActiveHoursHeatmap — 7d range', () => {
 
     const hot = container.querySelector('div[title="Wed 2p: 10 messages"]') as HTMLElement;
     expect(hot).not.toBeNull();
-    expect(hot.style.background).toBe(ACCENT_FULL);
+    expect(hot.style.background).toBe(ACTIVITY_FULL);
 
     const cold = container.querySelector('div[title="Sun 12a: 0 messages"]') as HTMLElement;
     expect(cold).not.toBeNull();
@@ -134,16 +134,28 @@ describe('ActiveHoursHeatmap — 30d with byDate', () => {
     );
 
     expect(container.textContent).toContain('Active Hours (3 days)');
-    const cells = container.querySelectorAll('div[title]');
+    // Count grid cells by their cell-specific class. The date-header labels also
+    // carry a `title` (truncation-resilience disclosure, commit ebe3a7c7), so a
+    // bare `div[title]` query over-counts; the cells are the heatmap-cell divs.
+    const cells = container.querySelectorAll('div.rounded-sm.h-\\[var\\(--heatmap-cell\\)\\]');
     // 3 dates x 24 hours = 72 cells
     expect(cells.length).toBe(72);
+
+    // Regression guard: the labeled date headers must expose their full date via
+    // `title` so a truncated label stays disclosed (no-unsafe-truncation guard).
+    // With 3 dates labelEvery=1, so all 3 header labels carry a title.
+    const headerTitles = Array.from(
+      container.querySelectorAll('div.truncate[title]'),
+    ).map((el) => el.getAttribute('title'));
+    expect(headerTitles).toHaveLength(3);
+    expect(headerTitles.every((t) => t && t.length > 0)).toBe(true);
 
     // Hour title incorporates locale-formatted date — match by suffix
     const hot = Array.from(cells).find((el) =>
       (el.getAttribute('title') ?? '').endsWith('10a: 4 messages'),
     ) as HTMLElement | undefined;
     expect(hot).toBeDefined();
-    expect(hot!.style.background).toBe(ACCENT_FULL);
+    expect(hot!.style.background).toBe(ACTIVITY_FULL);
   });
 
   it('thins date labels when the range grows past 10 and 20 days', () => {
@@ -196,7 +208,7 @@ describe('ActiveHoursHeatmap — weekly-pattern fallback', () => {
     expect(container.textContent).toContain('(weekly pattern)');
     const hot = container.querySelector('div[title="Fri 6p: 8 messages"]') as HTMLElement;
     expect(hot).not.toBeNull();
-    expect(hot.style.background).toBe(ACCENT_FULL);
+    expect(hot.style.background).toBe(ACTIVITY_FULL);
 
     // 7 days x 24 hours = 168 cells in the fallback grid
     const cells = container.querySelectorAll('div[title]');
@@ -239,10 +251,10 @@ describe('ActiveHoursHeatmap — intensity ramp', () => {
       (container.querySelector(`div[title="Sun ${h === 0 ? '12a' : `${h}a`}: ${data[0][h]} messages"]`) as HTMLElement)
         .style.background;
 
-    expect(at(0)).toBe('var(--color-m-cht)');
+    expect(at(0)).toBe(ACTIVITY_FULL);
     expect(at(1)).toContain('60%');
     expect(at(2)).toContain('35%');
     expect(at(3)).toContain('15%');
-    expect(at(4)).toBe('var(--color-d2)');
+    expect(at(4)).toBe(ZERO_FILL);
   });
 });

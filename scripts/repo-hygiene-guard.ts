@@ -673,13 +673,63 @@ function branchCommitShas(cwd: string, mergeBase: string): string[] {
     .filter(Boolean);
 }
 
-function scanBranchCommitSecretLines(cwd: string, sha: string): GuardIssue[] {
+// Raw line-set of a file as it exists at the base ref (origin/main), cached per file.
+// Used by the branch-history scan to skip matches byte-identical to already-published
+// content. Returns an empty set when the file is absent at the base (every line is then
+// genuinely branch-new and must be scanned).
+function baseRefFileLines(
+  cwd: string,
+  baseRef: string,
+  filePath: string,
+  cache: Map<string, Set<string>>,
+): Set<string> {
+  const cached = cache.get(filePath);
+  if (cached) return cached;
+  let lines = new Set<string>();
+  // ls-tree is quiet for paths absent at the base (empty output, no stderr), so a
+  // branch-new file never emits a `fatal: path ... not in <base>` line. Only read the
+  // blob when the path exists at the base.
+  let existsAtBase = false;
+  try {
+    existsAtBase = git(['ls-tree', baseRef, '--', filePath], cwd).trim() !== '';
+  } catch {
+    existsAtBase = false;
+  }
+  if (existsAtBase) {
+    try {
+      lines = new Set(git(['show', `${baseRef}:${filePath}`], cwd).split(/\r?\n/));
+    } catch {
+      lines = new Set();
+    }
+  }
+  cache.set(filePath, lines);
+  return lines;
+}
+
+function scanBranchCommitSecretLines(
+  cwd: string,
+  sha: string,
+  baseRef?: string,
+  baseLineCache?: Map<string, Set<string>>,
+): GuardIssue[] {
   const issues: GuardIssue[] = [];
   const diff = git(['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha], cwd);
 
   for (const line of parseUnifiedDiffAddedLines(diff)) {
     const filePath = normalizeRepoPath(line.filePath);
     if (fixtureFiles.has(filePath)) continue;
+    // Correctness (not a detection weakening): a line byte-identical to the base ref
+    // (origin/main) is already-published content, not branch-introduced. Merge commits
+    // re-expose the base's own lines as branch-unique per-commit diffs; skipping those
+    // removes that false-positive class. A genuinely new secret cannot already exist in
+    // origin/main, so every real introduction is still flagged.
+    if (
+      baseRef
+      && baseLineCache
+      && baseRefFileLines(cwd, baseRef, line.filePath, baseLineCache).has(line.text)
+    ) {
+      continue;
+    }
     for (const pattern of secretPatterns) {
       if (findDisallowedMatch(filePath, pattern, line.text)) {
         issues.push({
@@ -708,12 +758,17 @@ function scanBranchCommitSensitiveArtifacts(cwd: string, sha: string): GuardIssu
   );
 }
 
-export function scanBranchSecretHistory(cwd: string, mergeBase: string): GuardIssue[] {
+export function scanBranchSecretHistory(
+  cwd: string,
+  mergeBase: string,
+  baseRef?: string,
+): GuardIssue[] {
   const issues: GuardIssue[] = [];
+  const baseLineCache = new Map<string, Set<string>>();
   for (const sha of branchCommitShas(cwd, mergeBase)) {
     issues.push(
       ...scanBranchCommitSensitiveArtifacts(cwd, sha),
-      ...scanBranchCommitSecretLines(cwd, sha),
+      ...scanBranchCommitSecretLines(cwd, sha, baseRef, baseLineCache),
     );
   }
   return issues;
@@ -838,7 +893,7 @@ export function scanBranchDiff(cwd: string, requestedBaseRef?: string): GuardIss
       .map((issue) => issue.filePath),
   );
   const seen = new Set(finalDiffIssues.map((issue) => `${issue.code}:${issue.filePath ?? ''}:${issue.line ?? 0}`));
-  const historyIssues = scanBranchSecretHistory(cwd, mergeBase)
+  const historyIssues = scanBranchSecretHistory(cwd, mergeBase, baseRef)
     .filter((issue) => {
       if (
         issue.code === 'branch-history-sensitive-artifact'

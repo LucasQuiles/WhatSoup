@@ -1,17 +1,37 @@
-import { type CSSProperties, type FC, useState, useCallback, useEffect, useRef } from 'react'
-import { X, Check, ChevronRight, ChevronLeft, Loader2 } from 'lucide-react'
-import { AnimatePresence, motion } from 'framer-motion'
+/**
+ * AddLineWizard — migrated to Modal primitive (B3 wave 4).
+ *
+ * Migration details:
+ *   - Modal open size="lg" dismissable={false} (role-on-backdrop defect dies by construction)
+ *   - open prop added (C-B3W4-3 mount contract: latched mount + reset-on-open)
+ *   - ModalHeader + wizard step strip (option c, wizard-local composite) + ModalBody + conditional ModalFooter
+ *   - Step strip rebuilt to locked v2 anatomy via soup-wiz-steps CSS (composites.css)
+ *   - framer-motion removed; step transitions are instant (motion.md §1, C-B3W4-4)
+ *   - TYPE_ACCENT map + inline --wizard-accent injection removed (WVR-014 retired)
+ *   - accent delivered via data-line-type attribute on wizard-accent-scope wrapper
+ *   - discard flow: option α — post-creation close keeps the instance (C-B3W4-2)
+ *     "Save and close" is safe; deletion is an explicit dashboard action (LineDetail)
+ *   - createError block moved to ModalBody (D2 duplicate-error fix)
+ *   - ConfirmDialog exits the wizard subtree as a sibling fragment
+ *   - SoupKitchen contract: this component expects open prop; caller uses latched mount
+ */
+import { type FC, useState, useCallback, useEffect, useRef } from 'react'
+import { X, ChevronRight, ChevronLeft } from 'lucide-react'
 import IdentityStep from './wizard/IdentityStep'
 import ModelAuthStep from './wizard/ModelAuthStep'
 import ConfigStep from './wizard/ConfigStep'
 import ReviewStep from './wizard/ReviewStep'
 import LinkStep from './wizard/LinkStep'
 import ConfirmDialog from './ConfirmDialog'
+import { Modal, ModalHeader, ModalBody, ModalFooter } from './primitives/Modal'
+import { Button } from './primitives/Button'
 import { api } from '../lib/api'
 import { withDefaultAgentWorkspace } from '../lib/agent-cwd'
 import { DEFAULT_PROVIDER_ID } from '../lib/providers'
 
 interface AddLineWizardProps {
+  /** Controls visibility. SoupKitchen latches mount on first open (C-B3W4-3). */
+  open: boolean
   onClose: () => void
 }
 
@@ -26,59 +46,47 @@ interface AddLineWizardProps {
  */
 const STEPS = ['Identity', 'Link', 'Model', 'Config', 'Review'] as const
 
-/* ── Stepper sub-component ── */
+/* ── Wizard progress strip (option c: wizard-local composite, C-B3W4-1) ──
+ *
+ * Non-interactive status strip rebuilt to the locked v2 .wiz-steps anatomy:
+ * numbered 18px mono circles, accent active ring, ok-colored done state,
+ * 16×1px hairline separators. CSS lives in composites.css (soup-wiz-steps block).
+ *
+ * A11y: aria-label="Wizard progress" on container, aria-current="step" on active
+ * step, aria-hidden on separators. Non-interactive by construction (spans, not
+ * buttons) — gated linear flow semantics, not tab semantics (see §7 in packet).
+ */
 const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
   steps,
   currentStep,
 }) => (
   <div
-    className="flex items-center justify-center flex-shrink-0 py-[var(--sp-4)] px-[var(--sp-5)] gap-[var(--sp-1)] mb-[var(--sp-4)]"
+    className="soup-wiz-steps"
+    aria-label="Wizard progress"
   >
     {steps.map((label, i) => {
       const completed = i < currentStep
       const active = i === currentStep
       return (
-        <div key={label} className="flex items-center gap-[var(--sp-1)]">
+        <div key={label} className="soup-wiz-steps__item">
           {i > 0 && (
             <div
-              className="w-[var(--stepper-line-w)] h-[var(--bw)]"
-              style={{
-                background: completed ? 'var(--color-s-ok)' : 'var(--color-t5)',
-                opacity: completed ? 1 : 0.4,
-                transition: 'background var(--dur-norm) var(--ease)',
-              }}
+              className="soup-wiz-steps__sep"
+              aria-hidden="true"
             />
           )}
-          <div className="flex flex-col items-center gap-[var(--sp-1)]">
-            <div
-              className="flex items-center justify-center w-[var(--badge-unread)] h-[var(--badge-unread)] rounded-full"
-              style={{
-                background: completed || active ? 'var(--color-s-ok)' : 'transparent',
-                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: completed || active ? 'var(--color-s-ok)' : 'var(--color-t5)',
-                transition: 'all var(--dur-norm) var(--ease)',
-              }}
-            >
-              {completed ? (
-                <Check size={11} strokeWidth={1.75} className="text-d0" />
-              ) : (
-                <div
-                  className="w-[var(--stepper-dot)] h-[var(--stepper-dot)] rounded-full"
-                  style={{
-                    background: active ? 'var(--color-d0)' : 'var(--color-t5)',
-                    opacity: active ? 1 : 0.5,
-                  }}
-                />
-              )}
-            </div>
-            <span
-              className="font-mono font-medium tracking-[var(--tracking-label)] text-label"
-              style={{
-                color: active ? 'var(--color-s-ok)' : completed ? 'var(--color-t2)' : 'var(--color-t5)',
-                transition: 'color var(--dur-norm) var(--ease)',
-              }}
-            >
-              {label}
+          <div
+            className={[
+              'soup-wiz-steps__step',
+              active ? 'soup-wiz-steps__step--active' : '',
+              completed ? 'soup-wiz-steps__step--done' : '',
+            ].filter(Boolean).join(' ')}
+            aria-current={active ? 'step' : undefined}
+          >
+            <span className="soup-wiz-steps__circle">
+              {i + 1}
             </span>
+            <span className="soup-wiz-steps__label">{label}</span>
           </div>
         </div>
       )
@@ -111,14 +119,8 @@ const validateStep = (step: number, formData: Record<string, unknown>): Record<s
   return errs
 }
 
-const TYPE_ACCENT: Record<string, string> = {
-  passive: 'var(--color-m-pas)',
-  chat: 'var(--color-m-cht)',
-  agent: 'var(--color-m-agt)',
-}
-
 /* ── Wizard shell ── */
-const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
+const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
   const [currentStep, setCurrentStep] = useState(0)
   const [formData, setFormData] = useState<Record<string, unknown>>({
     type: '',
@@ -155,6 +157,56 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
   const [createError, setCreateError] = useState<string | null>(null)
   const isDirtyRef = useRef(false)
   const [showConfirmExit, setShowConfirmExit] = useState(false)
+
+  // Reset-on-open: when the wizard re-opens after a close, reset to step 0 with
+  // fresh state (C-B3W4-3). The latched mount keeps the component alive between
+  // opens; this effect restores the initial condition so the user always starts
+  // at Identity — the same guarantee legacy got for free from unmount.
+  const prevOpenRef = useRef(open)
+  useEffect(() => {
+    if (open && !prevOpenRef.current) {
+      setCurrentStep(0)
+      setFormData({
+        type: '',
+        accessMode: 'self_only',
+        adminPhones: [],
+        agentOptions: {
+          cwd: '',
+          sessionScope: 'per_chat',
+          sandboxPerChat: true,
+          sandbox: {
+            allowedPaths: [],
+            bash: { enabled: true, pathRestricted: true },
+          },
+          mcp: { send_media: true },
+          perUserDirs: { enabled: false, basePath: 'users' },
+          provider: DEFAULT_PROVIDER_ID,
+          providerConfig: {},
+        },
+        models: {
+          conversation: 'claude-sonnet-4-6',
+          extraction: 'claude-haiku-4-5-20251001',
+          validation: 'claude-haiku-4-5-20251001',
+          fallback: '',
+          openaiExtraction: '',
+          openaiValidation: '',
+        },
+        rateLimitPerHour: 60,
+        maxTokens: 4096,
+        tokenBudget: 50000,
+        toolUpdateMode: 'full',
+      })
+      setErrors({})
+      setCreating(false)
+      setCreateError(null)
+      isDirtyRef.current = false
+      setShowConfirmExit(false)
+      setInstanceCreated(false)
+      setWizardCompleted(false)
+      setLockedName(null)
+    }
+    prevOpenRef.current = open
+  }, [open])
 
   const patchForm = useCallback(
     (patch: Record<string, unknown>) => {
@@ -220,17 +272,16 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     }
   }, [onClose, instanceCreated])
 
-  // Cleanup: if user confirms discard after instance was created, tear it down
+  // Option α (C-B3W4-2): post-creation close KEEPS the instance (save unlinked).
+  // The user can link it later from the dashboard (LineDetail delete is the
+  // explicit destructive action with consequence copy — never silent deletion).
+  // Pre-creation discard: nothing was provisioned, nothing to keep.
   const handleConfirmDiscard = useCallback(async () => {
-    if (instanceCreated && formData.name) {
-      try {
-        await api.deleteLine(formData.name as string)
-      } catch (err) {
-        console.warn('deleteLine failed during discard:', err)
-      }
-    }
+    // No deleteLine call here — the instance is kept unlinked (option α).
+    // Legacy called api.deleteLine here; that contradicted the confirm copy's
+    // "You can reconfigure it later from the dashboard" promise (D1 defect).
     onClose()
-  }, [instanceCreated, formData.name, onClose])
+  }, [onClose])
 
   const handleCreateLine = useCallback(async () => {
     setCreating(true)
@@ -250,143 +301,116 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ onClose }) => {
     }
   }, [formData, onClose])
 
-  return (
-    <div
-      className="c-dialog-backdrop"
-      onClick={handleClose}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="wizard-title"
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="wizard-accent-scope bg-d2 c-border rounded-lg shadow-[var(--shadow-lg)] flex flex-col overflow-hidden w-[var(--panel-wizard)] min-w-[var(--panel-wizard)] max-w-[90%] min-h-[var(--modal-min-h)] h-[var(--modal-max-h)] max-h-[var(--modal-max-h)]"
-        style={{
-          '--wizard-accent': TYPE_ACCENT[(formData.type as string)] ?? 'var(--color-s-ok)',
-        } as CSSProperties & Record<'--wizard-accent', string>}
-      >
-        {/* Header */}
-        <div
-          className="flex items-center justify-between c-toolbar c-border-b"
-        >
-          <h2 id="wizard-title" className="c-heading-lg">Add New Line</h2>
-          <button type="button" onClick={handleClose} aria-label="Close wizard" className="c-btn c-btn-ghost">
-            <X size={16} strokeWidth={1.75} />
-          </button>
-        </div>
+  // Accent: delivered via data-line-type; CSS resolves --wizard-accent statically
+  // (WVR-014 retired — no runtime injection, no CSSProperties cast needed).
+  const lineType = (formData.type as string) || undefined
 
-        {/* Stepper */}
+  return (
+    <>
+      <Modal
+        open={open}
+        onClose={handleClose}
+        size="lg"
+        dismissable={false}
+      >
+        <ModalHeader title="Add New Line" onClose={handleClose} />
+
+        {/* Step strip — wizard-local composite (option c, C-B3W4-1) */}
         <WizardStepper steps={STEPS} currentStep={currentStep} />
 
-        {/* Content */}
-        <div className="flex-1 overflow-auto p-[var(--sp-6)]">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={currentStep}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-            >
-              {currentStep === 0 && (
-                <IdentityStep
-                  data={formData}
-                  onChange={patchForm}
-                  errors={errors}
-                  nameLocked={!!lockedName}
-                />
-              )}
-              {currentStep === 1 && (
-                <LinkStep
-                  lineName={formData.name as string}
-                  onComplete={() => setCurrentStep(2)}
-                />
-              )}
-              {currentStep === 2 && (
-                <ModelAuthStep data={formData} onChange={patchForm} errors={errors} />
-              )}
-              {currentStep === 3 && (
-                <ConfigStep data={formData} onChange={patchForm} errors={errors} onSkip={handleNext} />
-              )}
-              {currentStep === 4 && (
-                <ReviewStep
-                  data={formData}
-                  onEditPhase={(phase) => setCurrentStep(phase)}
-                  onCreateLine={handleCreateLine}
-                  creating={creating}
-                  error={createError}
-                />
-              )}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-
-        {/* Footer — hidden on Link (step 1, has own controls) */}
-        {currentStep !== 1 && (
-          <div
-            className="flex flex-col c-toolbar c-border-t gap-[var(--sp-2)]"
-          >
-            {createError && (
-              <div
-                className="flex items-center gap-[var(--sp-2)] text-s-crit py-[var(--sp-2)] px-[var(--sp-3)] bg-d3 rounded-sm text-data"
-              >
-                <X size={14} strokeWidth={1.75} style={{ flexShrink: 0 }} />
+        <ModalBody>
+          {/* wizard-accent-scope carries data-line-type for static CSS accent resolution */}
+          <div className="wizard-accent-scope" data-line-type={lineType}>
+            {/* createError in body anatomy (D2: no longer duplicated in footer + ReviewStep) */}
+            {createError && currentStep !== 4 && (
+              <div className="flex items-center gap-[var(--sp-2)] text-s-crit py-[var(--sp-2)] px-[var(--sp-3)] bg-[var(--surface-raised)] rounded-sm text-data mb-[var(--sp-3)]">
+                <X size={14} strokeWidth={1.75} aria-hidden="true" className="shrink-0" />
                 <span>{createError}</span>
               </div>
             )}
-            <div className="flex items-center justify-end gap-[var(--sp-3)]">
-            <button
-              type="button"
-              className="c-btn c-btn-ghost c-btn-nav"
+
+            {currentStep === 0 && (
+              <IdentityStep
+                data={formData}
+                onChange={patchForm}
+                errors={errors}
+                nameLocked={!!lockedName}
+              />
+            )}
+            {currentStep === 1 && (
+              <LinkStep
+                lineName={formData.name as string}
+                onComplete={() => setCurrentStep(2)}
+              />
+            )}
+            {currentStep === 2 && (
+              <ModelAuthStep data={formData} onChange={patchForm} errors={errors} />
+            )}
+            {currentStep === 3 && (
+              <ConfigStep data={formData} onChange={patchForm} errors={errors} onSkip={handleNext} />
+            )}
+            {currentStep === 4 && (
+              <ReviewStep
+                data={formData}
+                onEditPhase={(phase) => setCurrentStep(phase)}
+                onCreateLine={handleCreateLine}
+                creating={creating}
+                error={createError}
+              />
+            )}
+          </div>
+        </ModalBody>
+
+        {/* Footer — hidden on Link (step 1, has own controls) */}
+        {currentStep !== 1 && (
+          <ModalFooter
+            note={instanceCreated ? (
+              <span className="text-data text-2">
+                Your line is provisioned and can be configured from the dashboard.
+              </span>
+            ) : undefined}
+          >
+            <Button
+              variant="ghost"
+              icon={currentStep > 0 ? <ChevronLeft size={16} strokeWidth={1.75} /> : undefined}
+              iconEnd={currentStep === 0 ? <X size={16} strokeWidth={1.75} /> : undefined}
               onClick={() =>
                 currentStep > 0 ? setCurrentStep((s) => s - 1) : handleClose()
               }
               disabled={creating}
             >
-              {currentStep > 0 && <ChevronLeft size={16} strokeWidth={1.75} />}
-              <span className="c-btn-nav-label">{currentStep > 0 ? 'Back' : 'Cancel'}</span>
-              {currentStep === 0 && <X size={16} strokeWidth={1.75} />}
-            </button>
+              {currentStep > 0 ? 'Back' : 'Cancel'}
+            </Button>
             {/* Hide Next on Review step — ReviewStep has its own Create button */}
             {currentStep !== 4 && (
-              <button
-                type="button"
-                className="c-btn c-btn-primary c-btn-nav"
+              <Button
+                variant="primary"
+                iconEnd={!creating ? <ChevronRight size={16} strokeWidth={1.75} /> : undefined}
                 onClick={handleNext}
+                loading={creating}
                 disabled={creating}
               >
-                {creating ? (
-                  <>
-                    <Loader2 size={16} strokeWidth={1.75} className="animate-spin" />
-                    <span className="c-btn-nav-label">Creating...</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="c-btn-nav-label">Next</span>
-                    <ChevronRight size={16} strokeWidth={1.75} />
-                  </>
-                )}
-              </button>
+                {creating ? 'Creating…' : 'Next'}
+              </Button>
             )}
-            </div>
-          </div>
+          </ModalFooter>
         )}
-      </div>
+      </Modal>
 
-      {/* Exit confirmation dialog */}
+      {/* Exit confirmation dialog — sibling fragment, NOT inside the dialog subtree (C-B3W4-3) */}
       <ConfirmDialog
         open={showConfirmExit}
         title={instanceCreated ? 'Abandon new line?' : 'Discard changes?'}
-        confirmLabel={instanceCreated ? 'Abandon' : 'Discard'}
-        confirmVariant="danger"
+        confirmLabel={instanceCreated ? 'Save and close' : 'Discard'}
+        confirmVariant={instanceCreated ? 'primary' : 'danger'}
         onConfirm={handleConfirmDiscard}
         onCancel={() => setShowConfirmExit(false)}
       >
         {instanceCreated
-          ? `The instance "${formData.name}" has been created and linked. Abandoning will stop it. You can reconfigure it later from the dashboard.`
+          ? `The line "${formData.name}" has been created. Save and close to keep it unlinked — you can configure and link it later from the dashboard. To delete it, use the delete action on the dashboard.`
           : 'You have unsaved configuration. Closing the wizard will discard all changes.'}
       </ConfirmDialog>
-    </div>
+    </>
   )
 }
 

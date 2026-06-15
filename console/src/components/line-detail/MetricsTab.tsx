@@ -6,6 +6,9 @@ import { FleetSessionChart } from '../FleetSessionChart'
 import { ActiveHoursHeatmap } from '../ActiveHoursHeatmap'
 import EmptyState from '../EmptyState'
 import { metricsToCSV, downloadCSV } from '../../lib/csv-export'
+import { formatCount } from '../../lib/text-utils'
+import { ToolbarTimeRange, Tabs, Tab, TabPanel } from '../primitives'
+import { Button } from '../primitives/Button'
 import type { MetricsRange, LineMetrics, LineInstance } from './types'
 
 type DetailTab = 'tokens' | 'sessions';
@@ -32,35 +35,41 @@ export function MetricsTab({
   const [detailTab, setDetailTab] = useState<DetailTab>('tokens')
   const hasAnyData = metrics?.hasMessageData || metrics?.hasTokenData || metrics?.hasSessionData
   const hasDetailData = metrics?.hasTokenData || metrics?.hasSessionData
+  const activeDetailTab: DetailTab =
+    detailTab === 'sessions' && metrics?.hasSessionData
+      ? 'sessions'
+      : metrics?.hasTokenData
+        ? 'tokens'
+        : metrics?.hasSessionData
+          ? 'sessions'
+          : detailTab
 
   return (
-    <div className="flex-1 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
+    <div className="flex-1 min-h-0 min-w-0 overflow-auto py-[var(--sp-4)] px-[var(--sp-5)]">
       {/* Range selector */}
       <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-4)]">
-        <span className="c-section-label">Range</span>
-        {(['24h', '7d', '30d'] as const).map((r) => (
-          <button
-            type="button"
-            key={r}
-            className={`c-btn c-btn-sm ${metricsRange === r ? 'c-btn-primary' : 'c-btn-ghost'}`}
-            onClick={() => setMetricsRange(r)}
-          >
-            {r}
-          </button>
-        ))}
+        <ToolbarTimeRange
+          label="Time range"
+          options={[
+            { label: '24h', value: '24h' },
+            { label: '7d', value: '7d' },
+            { label: '30d', value: '30d' },
+          ]}
+          value={metricsRange}
+          onChange={(v) => setMetricsRange(v as MetricsRange)}
+        />
         {metrics?.messageVolume && metrics.messageVolume.length > 0 && (
-          <button
-            type="button"
-            className="c-btn c-btn-sm c-btn-ghost"
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => {
               const csv = metricsToCSV(metrics.messageVolume);
               downloadCSV(csv, `${lineName ?? 'metrics'}-${metricsRange}.csv`);
             }}
             title="Export metrics as CSV"
             aria-label="Export metrics as CSV"
-          >
-            <Download size={14} />
-          </button>
+            icon={<Download size={14} />}
+          />
         )}
       </div>
 
@@ -93,42 +102,39 @@ export function MetricsTab({
           {/* Detail metrics — tabbed */}
           {hasDetailData && (
             <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
-              <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-3)]">
+              <Tabs
+                label="Metric detail series"
+                value={activeDetailTab}
+                onChange={(id) => setDetailTab(id as DetailTab)}
+                className="mb-[var(--sp-3)]"
+              >
                 {metrics?.hasTokenData && (
-                  <button
-                    type="button"
-                    className={`c-btn c-btn-sm ${detailTab === 'tokens' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-                    onClick={() => setDetailTab('tokens')}
-                  >
-                    Tokens
-                  </button>
+                  <Tab id="tokens">Tokens</Tab>
                 )}
                 {metrics?.hasSessionData && (
-                  <button
-                    type="button"
-                    className={`c-btn c-btn-sm ${detailTab === 'sessions' ? 'c-btn-primary' : 'c-btn-ghost'}`}
-                    onClick={() => setDetailTab('sessions')}
-                  >
-                    Sessions
-                  </button>
+                  <Tab id="sessions">Sessions</Tab>
                 )}
-              </div>
+              </Tabs>
               <div className="h-[var(--chart-min-h)]">
-                {detailTab === 'tokens' && metrics?.hasTokenData && (
-                  <FleetTokenChart
-                    data={metrics.tokenUsage}
-                    byProvider={metrics.tokenUsageByProvider}
-                    providers={metrics.providers}
-                    range={metricsRange}
-                  />
+                {activeDetailTab === 'tokens' && metrics?.hasTokenData && (
+                  <TabPanel id="tokens" active={activeDetailTab} className="h-full">
+                    <FleetTokenChart
+                      data={metrics.tokenUsage}
+                      byProvider={metrics.tokenUsageByProvider}
+                      providers={metrics.providers}
+                      range={metricsRange}
+                    />
+                  </TabPanel>
                 )}
-                {detailTab === 'sessions' && metrics?.hasSessionData && (
-                  <FleetSessionChart
-                    data={metrics.sessionActivity}
-                    byProvider={metrics.sessionActivityByProvider}
-                    providers={metrics.providers}
-                    range={metricsRange}
-                  />
+                {activeDetailTab === 'sessions' && metrics?.hasSessionData && (
+                  <TabPanel id="sessions" active={activeDetailTab} className="h-full">
+                    <FleetSessionChart
+                      data={metrics.sessionActivity}
+                      byProvider={metrics.sessionActivityByProvider}
+                      providers={metrics.providers}
+                      range={metricsRange}
+                    />
+                  </TabPanel>
                 )}
               </div>
             </section>
@@ -140,24 +146,24 @@ export function MetricsTab({
               <div className="c-section-label mb-[var(--sp-3)]">Token Usage</div>
               <div className="flex items-center gap-[var(--sp-5)]">
                 <div className="flex items-center gap-[var(--sp-2)]">
-                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-agt)] opacity-50" />
+                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--data-token-input-solid)] opacity-50" />
                   <span className="text-data text-t3">Input</span>
                   <span className="font-medium text-t1 text-data">
-                    {line.tokenUsage.input.toLocaleString()}
+                    {formatCount(line.tokenUsage.input)}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
-                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--color-m-agt)]" />
+                  <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--data-token-output-solid)]" />
                   <span className="text-data text-t3">Output</span>
                   <span className="font-medium text-t1 text-data">
-                    {line.tokenUsage.output.toLocaleString()}
+                    {formatCount(line.tokenUsage.output)}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
                   <Cpu size={13} strokeWidth={1.5} className="text-t4" />
                   <span className="text-data text-t4">Total</span>
                   <span className="text-t2 text-data">
-                    {(line.tokenUsage.input + line.tokenUsage.output).toLocaleString()}
+                    {formatCount(line.tokenUsage.input + line.tokenUsage.output)}
                   </span>
                 </div>
               </div>
@@ -167,9 +173,9 @@ export function MetricsTab({
                     width: `${(line.tokenUsage.input / (line.tokenUsage.input + line.tokenUsage.output)) * 100}%`,
                     height: '100%',
                   }}
-                  className="bg-[var(--color-m-agt)] opacity-50"
+                  className="bg-[var(--data-token-input-solid)] opacity-50"
                 />
-                <div className="flex-1 bg-[var(--color-m-agt)]" style={{ height: '100%' }} />
+                <div className="flex-1 bg-[var(--data-token-output-solid)]" style={{ height: '100%' }} />
               </div>
             </section>
           )}

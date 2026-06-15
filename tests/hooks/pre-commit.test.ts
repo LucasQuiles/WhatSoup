@@ -14,4 +14,13 @@ describe('pre-commit hook', () => {
     expect(source).toContain('cd console && npm ci');
     expect(source).not.toContain('npx lint-staged');
   });
+
+  it('runs the design-system documentation hygiene guard before lint-staged', () => {
+    const source = readFileSync(HOOK_PATH, 'utf8');
+
+    expect(source).toContain('npm run guard:design-system-hygiene');
+    expect(source.indexOf('npm run guard:design-system-hygiene')).toBeLessThan(
+      source.indexOf('console/node_modules/.bin/lint-staged'),
+    );
+  });
 });

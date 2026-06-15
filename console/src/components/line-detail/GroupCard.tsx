@@ -2,6 +2,7 @@ import { Users, Shield } from 'lucide-react'
 import type { GroupInfo } from '../../types.js'
 import { avatarColor, roleLabel, roleBadgeStyle } from './groups-utils.js'
 import { getInitials } from '../../lib/text-utils.js'
+import { Button } from '../primitives/Button'
 
 interface GroupCardProps {
   group: GroupInfo
@@ -20,14 +21,14 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
   const color = avatarColor(group.id)
 
   return (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
       className="c-card w-full flex items-center gap-3 c-hover text-left py-[var(--sp-3)] px-[var(--sp-4)]"
       onClick={() => onSelect(group)}
     >
       {/* Avatar */}
       <div
-        className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-md)] h-[var(--avatar-md)] rounded-full text-t1 text-sm"
+        className="flex-shrink-0 flex items-center justify-center font-sans font-semibold w-[var(--avatar-md)] h-[var(--avatar-md)] rounded-full text-[var(--avatar-ink)] text-sm"
         style={{
           background: color,
         }}
@@ -38,7 +39,7 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
       {/* Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="c-body truncate">
+          <span title={group.subject} className="c-body truncate">
             {group.subject}
           </span>
           {badge && (
@@ -60,6 +61,6 @@ export function GroupCard({ group, onSelect, myJid }: GroupCardProps) {
           {group.desc ? ` · ${group.desc.length > 80 ? group.desc.slice(0, 77) + '...' : group.desc}` : ''}
         </div>
       </div>
-    </button>
+    </Button>
   )
 }

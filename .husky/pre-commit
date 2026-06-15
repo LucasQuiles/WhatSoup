@@ -3,6 +3,17 @@ set -e
 
 npm run guard:repo:staged
 
+# Sub-second deterministic guards — no console deps required, always run.
+npm run guard:publication:staged
+npm run guard:design-system-hygiene
+npm run guard:node-pin-consistency
+npm run guard:claude-settings
+
+# Theme parity only when token file is staged — avoids console dep for unrelated commits.
+if git diff --cached --name-only | grep -q 'console/src/styles/tokens\.semantic\.css'; then
+  npm --prefix console run design:theme-parity
+fi
+
 if git diff --cached --name-only -- console/src | grep -Eq '\.(ts|tsx)$'; then
   if [ ! -x console/node_modules/.bin/lint-staged ] || [ ! -x console/node_modules/.bin/eslint ]; then
     echo "console lint dependencies are missing; run: cd console && npm ci" >&2

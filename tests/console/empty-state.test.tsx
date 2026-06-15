@@ -114,11 +114,13 @@ describe('EmptyState retry button', () => {
     expect(onRetry).toHaveBeenCalledTimes(1)
   })
 
-  it('applies the primary button design-system classes', () => {
+  it('applies the primary Button primitive classes', () => {
     render(<EmptyState title="Empty" onRetry={() => {}} />)
 
     const button = screen.getByRole('button')
-    expect(button.className).toContain('c-btn')
-    expect(button.className).toContain('c-btn-primary')
+    expect(button.className).toContain('soup-btn')
+    expect(button.className).toContain('soup-btn--primary')
+    expect(button.className).toContain('soup-btn--sm')
+    expect(button.className).not.toContain('c-btn')
   })
 })

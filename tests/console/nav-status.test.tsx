@@ -159,7 +159,8 @@ describe('Nav — version display', () => {
 describe('Nav — update button', () => {
   it('shows update button when updateAvailable and remoteSha are set', () => {
     renderNav({ version: 'abc1234', updateAvailable: true, remoteSha: 'def5678' });
-    const btn = screen.getByRole('button');
+    // C1: Nav now includes a theme toggle button; use the update button's aria-label for specificity
+    const btn = screen.getByRole('button', { name: /Update available: abc1234 to def5678/ });
     expect(btn).toBeDefined();
     expect(btn.textContent).toContain('abc1234');
     expect(btn.textContent).toContain('def5678');
@@ -167,13 +168,15 @@ describe('Nav — update button', () => {
 
   it('calls onUpdateClick when update button is clicked', () => {
     renderNav({ version: 'abc1234', updateAvailable: true, remoteSha: 'def5678' });
-    fireEvent.click(screen.getByRole('button'));
+    // C1: Nav now includes a theme toggle button; click the update button specifically
+    fireEvent.click(screen.getByRole('button', { name: /Update available/ }));
     expect(onUpdateClick).toHaveBeenCalledTimes(1);
   });
 
   it('shows plain version when no update available', () => {
     renderNav({ version: 'abc1234', updateAvailable: false });
     expect(screen.getByText('vabc1234')).toBeDefined();
-    expect(screen.queryByRole('button')).toBeNull();
+    // C1: Nav includes a theme toggle button; assert no UPDATE button (not zero buttons)
+    expect(screen.queryByRole('button', { name: /Update available/ })).toBeNull();
   });
 });

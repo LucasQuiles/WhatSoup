@@ -6,14 +6,16 @@ import { useLine, useChats, useMessages, useAccess, useLogs, useTyping } from '.
 import { useMetrics } from '../hooks/use-metrics'
 import type { MetricsRange } from '../types'
 import { getPreference, setPreference } from '../lib/preferences'
+import { formatCount } from '../lib/text-utils'
 import { useToast } from '../hooks/toast-context'
 import { api } from '../lib/api'
-import { statusSeverity } from '../lib/status-severity'
 import ModeBadge from '../components/ModeBadge'
+import { StatusCell, Tabs, Tab, Button, ActionButton } from '../components/primitives'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import ConfirmDialog from '../components/ConfirmDialog'
 import Skeleton, { TableSkeleton } from '../components/Skeleton'
+import EmptyState from '../components/EmptyState'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
 import {
   ArrowLeft, Info, SlidersHorizontal, GitBranch, Shield,
@@ -62,10 +64,25 @@ export default function LineDetail() {
     () => getPreference('metricsRange', '7d') as MetricsRange
   )
   const setMetricsRange = (r: MetricsRange) => { setMetricsRangeRaw(r); setPreference('metricsRange', r); }
-  const { data: line } = useLine(name || '')
+  const {
+    data: line,
+    isLoading: lineLoading,
+    error: lineError,
+    refetch: refetchLine,
+  } = useLine(name || '')
   const { data: chats } = useChats(name || '')
-  const { data: access } = useAccess(name || '')
-  const { data: logs } = useLogs(name || '')
+  const {
+    data: access,
+    isLoading: accessLoading,
+    error: accessError,
+    refetch: refetchAccess,
+  } = useAccess(name || '')
+  const {
+    data: logs,
+    isLoading: logsLoading,
+    error: logsError,
+    refetch: refetchLogs,
+  } = useLogs(name || '')
   const { data: metrics, isLoading: metricsLoading, error: metricsError, refetch: refetchMetrics } = useMetrics(name || '', metricsRange)
   const { data: typingData } = useTyping()
   const typingJids = React.useMemo(() =>
@@ -99,6 +116,23 @@ export default function LineDetail() {
     }
   }, [line, toast, navigate])
 
+  if (!line && !lineLoading) {
+    const lineLabel = name ?? 'This line'
+    const isNotFound = !lineError || /(?:not found|404)/i.test(lineError.message)
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center p-[var(--sp-6)]">
+        <EmptyState
+          variant="error"
+          title={isNotFound ? 'Line not found' : 'Failed to load line'}
+          description={isNotFound ? `${lineLabel} may have been deleted or renamed.` : lineError.message}
+          onRetry={lineError ? () => { void refetchLine() } : undefined}
+          retryLabel="Retry line"
+        />
+        <Button variant="ghost" onClick={() => navigate('/')}>Back to fleet</Button>
+      </div>
+    )
+  }
+
   if (!line) {
     return (
       <div className="flex-1 flex flex-col">
@@ -116,7 +150,6 @@ export default function LineDetail() {
   }
 
   const modeColor = line.mode === 'passive' ? 'pas' : line.mode === 'chat' ? 'cht' : 'agt'
-  const severity = statusSeverity(line.status)
 
   // MCP-dependent tabs only for modes with a global MCP socket:
   // - passive: always has socket in state dir
@@ -137,35 +170,22 @@ export default function LineDetail() {
     >
       {/* ═══ Line Header ═══ */}
       <div
-        className="flex items-center gap-4 c-toolbar flex-shrink-0 bg-d2 c-border rounded-lg"
+        className="flex flex-wrap md:flex-nowrap items-center gap-4 c-toolbar flex-shrink-0 bg-d2 c-border rounded-lg"
       >
-        <button
-          type="button"
+        <ActionButton
+          label="Back"
+          icon={<ArrowLeft size={18} strokeWidth={1.75} />}
           onClick={() => navigate('/')}
-          className="text-t4 hover:text-t1 c-hover cursor-pointer"
-        >
-          <ArrowLeft size={18} strokeWidth={1.75} />
-        </button>
 
-        {/* Status dot */}
-        <span
-          className={`inline-block rounded-full flex-shrink-0 w-[var(--dot-header)] h-[var(--dot-header)] ${
-            line.status === 'online' ? 'bg-s-ok animate-breathe' :
-            severity === 'warn' ? 'bg-s-warn' : 'bg-s-crit'
-          }`}
-          style={{
-            boxShadow: line.status === 'online'
-              ? '0 0 12px var(--s-ok-glow)'
-              : severity === 'warn'
-              ? '0 0 12px var(--s-warn-glow)'
-              : '0 0 12px var(--s-crit-glow)',
-          }}
         />
 
+        {/* Status — shape law: disc/diamond/square/outline + label */}
+        <StatusCell status={line.status} live={line.status === 'online'} />
+
         {/* Identity */}
-        <div className="flex-1">
-          <div className="flex items-center gap-2">
-            <h1 className="text-t1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl">
+        <div className="flex-1 min-w-[var(--header-identity-min)]">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <h1 title={line.name} className="text-t1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl truncate min-w-0 flex-1">
               {line.name}
             </h1>
             <ModeBadge mode={line.mode} />
@@ -177,40 +197,30 @@ export default function LineDetail() {
         </div>
 
         {/* Meta */}
-        <div className="flex gap-4 font-mono text-t4 text-sm">
+        <div className="hidden lg:flex gap-4 font-mono text-t4 text-sm">
           <span>uptime: {line.uptime ?? '—'}</span>
           <span>port: {line.healthPort}</span>
-          <span>msgs: {(line.messagesTotal ?? 0).toLocaleString()}</span>
+          <span>msgs: {formatCount(line.messagesTotal)}</span>
         </div>
 
         {/* Heartbeat + Actions */}
-        <HeartbeatStrip beats={line.heartbeat} />
+        <div className="hidden md:block">
+          <HeartbeatStrip beats={line.heartbeat} />
+        </div>
         <div className="flex items-center gap-[var(--sp-2)]">
           {line.linkedStatus === 'unlinked' && (
-            <button
-              type="button"
-              onClick={() => setShowRelink(true)}
-              className="c-btn c-btn-ghost text-label"
-            >
-              <Link2 size={15} strokeWidth={1.75} /> Re-link
-            </button>
+            <Button variant="ghost" size="sm" icon={<Link2 size={15} strokeWidth={1.75} />} onClick={() => setShowRelink(true)}>
+              Re-link
+            </Button>
           )}
           {line.linkedStatus !== 'unlinked' && (
-            <button
-              type="button"
-              onClick={() => { toast.info(`Restarting ${line.name}...`); api.restart(line.name).then(() => toast.success(`${line.name} restart requested`)).catch(e => toast.error(`Restart failed: ${e.message}`)); }}
-              className="c-btn c-btn-ghost text-label"
-            >
-              <RotateCw size={15} strokeWidth={1.75} /> Restart
-            </button>
+            <Button variant="ghost" size="sm" icon={<RotateCw size={15} strokeWidth={1.75} />} onClick={() => { toast.info(`Restarting ${line.name}...`); api.restart(line.name).then(() => toast.success(`${line.name} restart requested`)).catch(e => toast.error(`Restart failed: ${e.message}`)); }}>
+              Restart
+            </Button>
           )}
-          <button
-            type="button"
-            onClick={() => setShowDeleteConfirm(true)}
-            className="c-btn c-btn-ghost text-s-crit text-label"
-          >
-            <Trash2 size={15} strokeWidth={1.75} /> Delete
-          </button>
+          <Button variant="danger" size="sm" icon={<Trash2 size={15} strokeWidth={1.75} />} onClick={() => setShowDeleteConfirm(true)}>
+            Delete
+          </Button>
         </div>
       </div>
 
@@ -218,41 +228,23 @@ export default function LineDetail() {
       <div
         className="flex-1 flex flex-col min-h-0 bg-d1 c-border rounded-lg overflow-hidden"
       >
-      <div
-        className="flex gap-0 flex-shrink-0 py-0 px-[var(--sp-4)] c-border-b bg-d2"
-        role="tablist"
-        aria-label="Line detail tabs"
+      <Tabs
+        label="Line detail tabs"
+        value={activeTab}
+        onChange={(id) => setActiveTab(id as TabId)}
+        inset
+        className="flex-shrink-0 bg-d2"
       >
         {tabs.map(tab => {
           const Icon = tab.icon
-          const isActive = activeTab === tab.id
           return (
-            <button
-              type="button"
-              key={tab.id}
-              role="tab"
-              aria-selected={isActive}
-              aria-controls={`tabpanel-${tab.id}`}
-              id={`tab-${tab.id}`}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 font-sans font-medium c-hover relative py-[var(--sp-2h)] px-[var(--sp-4)] text-data ${
-                isActive
-                  ? 'text-t1 cursor-pointer'
-                  : 'text-t4 hover:text-t3 cursor-pointer'
-              }`}
-            >
+            <Tab key={tab.id} id={tab.id}>
               <Icon size={15} strokeWidth={1.75} />
               {tab.label}
-              {isActive && (
-                <div
-                  className="absolute bottom-0 left-2 right-2 h-[var(--bw-accent)] rounded-t"
-                  style={{ background: `var(--color-m-${modeColor})` }}
-                />
-              )}
-            </button>
+            </Tab>
           )
         })}
-      </div>
+      </Tabs>
 
       {/* ═══ Tab content ═══ */}
       <div
@@ -268,7 +260,7 @@ export default function LineDetail() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-            className="flex-1 min-h-0 flex flex-col overflow-auto px-[var(--sp-5)] pt-[var(--sp-4)] pb-[var(--sp-8)]"
+            className="flex-1 min-h-0 min-w-0 flex flex-col overflow-auto px-[var(--sp-5)] pt-[var(--sp-4)] pb-[var(--sp-8)]"
           >
             {activeTab === 'summary' && (
               <SummaryTab
@@ -286,7 +278,20 @@ export default function LineDetail() {
               />
             )}
             {activeTab === 'pipeline' && <PipelineTab mode={line.mode} line={line} modeColor={modeColor} />}
-            {activeTab === 'access' && <AccessTab access={access || []} lineName={name || ''} />}
+            {activeTab === 'access' && (
+              accessLoading ? (
+                <EmptyState title="Loading access list..." description="Fetching access decisions for this line." />
+              ) : accessError ? (
+                <EmptyState
+                  variant="error"
+                  title="Failed to load access list"
+                  description={accessError.message}
+                  onRetry={() => { void refetchAccess() }}
+                />
+              ) : (
+                <AccessTab access={access ?? []} lineName={name || ''} />
+              )
+            )}
             {activeTab === 'history' && (
               <HistoryTab
                 chats={chats || []}
@@ -298,7 +303,20 @@ export default function LineDetail() {
                 typingJids={typingJids}
               />
             )}
-            {activeTab === 'logs' && <LogsTab logs={logs || []} filter={logFilter} onFilterChange={setLogFilter} />}
+            {activeTab === 'logs' && (
+              logsLoading ? (
+                <EmptyState title="Loading logs..." description="Fetching recent log entries for this line." />
+              ) : logsError ? (
+                <EmptyState
+                  variant="error"
+                  title="Failed to load logs"
+                  description={logsError.message}
+                  onRetry={() => { void refetchLogs() }}
+                />
+              ) : (
+                <LogsTab logs={logs ?? []} filter={logFilter} onFilterChange={setLogFilter} />
+              )
+            )}
             {activeTab === 'metrics' && (
               <MetricsTab
                 metrics={metrics}
@@ -343,8 +361,9 @@ export default function LineDetail() {
           onLinked={() => { setShowRelink(false); queryClient.invalidateQueries({ queryKey: ['lines', name] }); toast.success(`${line?.name} re-linked!`); }}
         />
       </Suspense>
-      {showConfigEditor && line.config && (
+      {line.config && (
         <ConfigEditDialog
+          open={showConfigEditor}
           config={line.config}
           lineName={line.name}
           adminPhonesDisplay={(line as unknown as { adminPhonesDisplay?: Record<string, string> }).adminPhonesDisplay}

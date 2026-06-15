@@ -73,12 +73,30 @@ vi.mock('recharts', async () => {
         </div>
       );
     },
-    Area({ dataKey, name }: { dataKey?: string; name?: string }) {
+    Area({
+      dataKey,
+      fill,
+      fillOpacity,
+      name,
+      stroke,
+    }: {
+      dataKey?: string;
+      fill?: string;
+      fillOpacity?: number;
+      name?: string;
+      stroke?: string;
+    }) {
       const data = React.useContext(ChartDataContext);
       const seriesName = name ?? dataKey ?? 'Series';
 
       return (
-        <section aria-label={`${seriesName} series`} role="region">
+        <section
+          aria-label={`${seriesName} series`}
+          data-fill={fill}
+          data-fill-opacity={fillOpacity}
+          data-stroke={stroke}
+          role="region"
+        >
           <h3>{seriesName}</h3>
           <ul aria-label={`${seriesName} data points`}>
             {data.map((datum) => (
@@ -168,6 +186,23 @@ describe('FleetMetricsChart', () => {
     for (const name of ['Inbound', 'Outbound', 'Media']) {
       expect(within(series(name)).getByRole('heading', { name })).toBeDefined();
       expect(within(series(name)).queryAllByRole('listitem')).toHaveLength(0);
+    }
+  });
+
+  it('uses the data-series token palette for aggregate message dimensions', () => {
+    render(<FleetMetricsChart data={SAMPLE} />);
+
+    const expected = {
+      Inbound: 'var(--data-inbound-solid)',
+      Outbound: 'var(--data-outbound-solid)',
+      Media: 'var(--data-media-solid)',
+    };
+
+    for (const [name, token] of Object.entries(expected)) {
+      const region = series(name);
+      expect(region.getAttribute('data-stroke')).toBe(token);
+      expect(region.getAttribute('data-fill')).toBe(token);
+      expect(region.getAttribute('data-stroke')).not.toMatch(/--(?:color-[ms]-|provider-|status-|mode-)/);
     }
   });
 });

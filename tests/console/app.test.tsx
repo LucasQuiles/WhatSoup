@@ -52,7 +52,16 @@ vi.mock('../../console/src/hooks/use-websocket', () => ({
 
 // Stub heavy lazy pages — prevents real chunk loading in jsdom
 vi.mock('../../console/src/pages/SoupKitchen', () => ({
-  default: () => createElement('div', { 'data-testid': 'page-soup-kitchen' }, 'SoupKitchen'),
+  default: () => createElement(
+    'div',
+    { 'data-testid': 'page-soup-kitchen' },
+    'SoupKitchen',
+    createElement('input', {
+      'aria-label': 'Stub global search',
+      'data-search-shortcut-target': 'true',
+      defaultValue: 'needle',
+    }),
+  ),
 }));
 vi.mock('../../console/src/pages/LineDetail', () => ({
   default: () => createElement('div', { 'data-testid': 'page-line-detail' }, 'LineDetail'),
@@ -260,13 +269,25 @@ describe('App — KeyboardShortcutsHelp modal', () => {
     });
   });
 
+  it('pressing Cmd+K focuses the mounted search shortcut target', async () => {
+    await act(async () => { renderApp('/'); });
+    const search = await screen.findByLabelText('Stub global search');
+
+    expect(document.activeElement).not.toBe(search);
+    await act(async () => { fireEvent.keyDown(document, { key: 'k', metaKey: true }); });
+
+    expect(document.activeElement).toBe(search);
+  });
+
   it('clicking the backdrop closes the dialog (onClose prop)', async () => {
     await act(async () => { renderApp('/'); });
     await act(async () => { fireEvent.keyDown(document, { key: '?' }); });
     await waitFor(() => screen.getByRole('dialog'));
     const dialog = screen.getByRole('dialog');
     const backdrop = dialog.parentElement!;
-    await act(async () => { fireEvent.click(backdrop); });
+    // Real browsers fire pointerdown before click; outside dismissal is owned by
+    // useDismissable's pointerdown handler (single owner — no backdrop onClick).
+    await act(async () => { fireEvent.pointerDown(backdrop); fireEvent.click(backdrop); });
     await waitFor(() => {
       expect(screen.queryByRole('dialog')).toBeNull();
     });
@@ -346,7 +367,8 @@ describe('App — nav counts and update check integration', () => {
     mockUpdateData = { sha: 'live-sha', remoteSha: 'new-sha', updateAvailable: true };
     await act(async () => { renderApp('/'); });
     await waitFor(() => {
-      const btn = screen.getByRole('button');
+      // C1: Nav now includes a theme toggle button; use the update button's aria-label for specificity
+      const btn = screen.getByRole('button', { name: /Update available/ });
       expect(btn.textContent).toContain('live-sha');
       expect(btn.textContent).toContain('new-sha');
       expect(btn.textContent).not.toContain('static-sha');
@@ -356,8 +378,9 @@ describe('App — nav counts and update check integration', () => {
   it('clicking the update button calls openUpdateModal', async () => {
     mockUpdateData = { sha: 'live-sha', remoteSha: 'new-sha', updateAvailable: true };
     await act(async () => { renderApp('/'); });
-    await waitFor(() => screen.getByRole('button'));
-    fireEvent.click(screen.getByRole('button'));
+    // C1: Nav now includes a theme toggle button; click the update button specifically
+    await waitFor(() => screen.getByRole('button', { name: /Update available/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Update available/ }));
     expect(mockOpenUpdateModal).toHaveBeenCalledTimes(1);
   });
 

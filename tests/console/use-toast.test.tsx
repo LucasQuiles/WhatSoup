@@ -11,6 +11,13 @@ import {
 import { act, cleanup, fireEvent, render, renderHook, screen, within } from '@testing-library/react';
 import { createElement, type FC, type ReactNode } from 'react';
 
+const motionDivCalls = vi.hoisted(() => [] as Array<{
+  initial: unknown;
+  animate: unknown;
+  exit: unknown;
+  transition: unknown;
+}>);
+
 vi.mock('../../console/src/components/Toast.tsx', () => ({
   default: ({
     variant,
@@ -33,14 +40,42 @@ vi.mock('../../console/src/components/Toast.tsx', () => ({
 }));
 
 vi.mock('framer-motion', () => ({
+  MotionConfig: ({
+    reducedMotion,
+    children,
+  }: {
+    reducedMotion: string;
+    children: ReactNode;
+  }) => createElement(
+    'div',
+    { 'data-testid': 'toast-motion-config', 'data-reduced-motion': reducedMotion },
+    children,
+  ),
   AnimatePresence: ({ children }: { children: ReactNode }) =>
     createElement('div', null, children),
   motion: {
-    div: ({ children }: { children?: ReactNode }) =>
-      createElement('div', null, children),
+    div: ({
+      children,
+      initial,
+      animate,
+      exit,
+      transition,
+      className,
+    }: {
+      children?: ReactNode;
+      initial?: unknown;
+      animate?: unknown;
+      exit?: unknown;
+      transition?: unknown;
+      className?: string;
+    }) => {
+      motionDivCalls.push({ initial, animate, exit, transition });
+      return createElement('div', { 'data-testid': 'toast-motion-item', className }, children);
+    },
   },
 }));
 
+import { toastMotion } from '../../console/src/lib/motion.ts';
 import { useToast } from '../../console/src/hooks/toast-context.ts';
 import { ToastProvider, MAX_TOASTS } from '../../console/src/hooks/use-toast.tsx';
 
@@ -85,6 +120,7 @@ function alertWithText(text: string) {
 
 afterEach(() => {
   cleanup();
+  motionDivCalls.length = 0;
   vi.clearAllMocks();
 });
 
@@ -150,6 +186,22 @@ describe('ToastProvider', () => {
       'success',
       'error',
     ]);
+  });
+
+  it('uses shared tokenized toast motion and reduced-motion config for the toast stack', () => {
+    const { getApi } = renderProvider();
+
+    act(() => {
+      getApi().success('motion token check');
+    });
+
+    expect(screen.getByTestId('toast-motion-config').getAttribute('data-reduced-motion')).toBe('user');
+    expect(motionDivCalls).toHaveLength(1);
+    expect(motionDivCalls[0].initial).toBe(toastMotion.initial);
+    expect(motionDivCalls[0].animate).toBe(toastMotion.animate);
+    expect(motionDivCalls[0].exit).toBe(toastMotion.exit);
+    expect(motionDivCalls[0].transition).toBeUndefined();
+    expect(alertTexts()).toEqual(['motion token checkDismiss notification']);
   });
 
   it('renders duplicate messages as separate notifications', () => {

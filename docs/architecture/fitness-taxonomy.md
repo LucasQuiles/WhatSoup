@@ -112,9 +112,14 @@ reasons:
 1. **Visibility without blocking.** Known violations (notably the `AgentRuntime`
    god-class and several oversized files) surface as warnings rather than breaking
    CI before they are refactored.
-2. **No redundant block** (`meta.no-redundant-gates`). `arch.file-size` is already
-   *blocked* by the guard/ci ring against the ratchet baseline above; the eslint
-   copy is an advisory mirror so blocking authority is not duplicated.
+2. **Advisory mirror, no blocking ratchet guard today** (`meta.no-redundant-gates`).
+   The eslint `max-lines` copy of `arch.file-size` is warn-only because it mirrors
+   a guard/ci enforcement surface — but that blocking ratchet guard does not yet
+   exist. The registry marks the rule `block` in the `guard` and `ci` rings; the
+   baseline file (`.claude/fitness/baseline.json`) is present, but no guard script
+   reads it and enforces a line-count ceiling. Whether to implement the blocking
+   guard or demote the rule's severity/rings is an **open decision** (needs explicit
+   operator approval before implementation).
 
 Because the ring is warn-only, the known violations are intentionally **not**
 baseline-suppressed here — they stay visible in the lint output. Local runs use

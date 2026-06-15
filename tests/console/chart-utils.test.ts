@@ -17,6 +17,8 @@ import { describe, expect, it } from 'vitest';
 import {
   AXIS_TICK,
   CHART_MARGIN,
+  LEGEND_STYLE,
+  MESSAGE_VOLUME_SERIES_COLORS,
   TOOLTIP_STYLE,
   formatBucketLabel,
   formatTooltipLabel,
@@ -29,6 +31,10 @@ describe('chart style constants', () => {
 
   it('CHART_MARGIN exposes the recharts-style { top, right, left, bottom } shape', () => {
     expect(CHART_MARGIN).toEqual({ top: 4, right: 8, left: -12, bottom: 0 });
+  });
+
+  it('LEGEND_STYLE exposes the shared recharts legend typography style', () => {
+    expect(LEGEND_STYLE).toEqual({ fontSize: 'var(--text-xs)' });
   });
 
   it('TOOLTIP_STYLE exposes the full inline-style block including required CSS-token references', () => {
@@ -44,6 +50,18 @@ describe('chart style constants', () => {
       fontFamily: 'var(--font-mono)',
       padding: 'var(--sp-2) var(--sp-3)',
     });
+  });
+
+  it('MESSAGE_VOLUME_SERIES_COLORS maps aggregate message dimensions to data tokens', () => {
+    expect(MESSAGE_VOLUME_SERIES_COLORS).toEqual({
+      inbound: 'var(--data-inbound-solid)',
+      outbound: 'var(--data-outbound-solid)',
+      media: 'var(--data-media-solid)',
+    });
+    for (const color of Object.values(MESSAGE_VOLUME_SERIES_COLORS)) {
+      expect(color).toMatch(/^var\(--data-/);
+      expect(color).not.toMatch(/--(?:color-[ms]-|provider-|status-|mode-)/);
+    }
   });
 });
 

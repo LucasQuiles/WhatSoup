@@ -1,4 +1,6 @@
 import React, { useState } from 'react'
+import { Button } from '../primitives/Button'
+import { formatCount } from '../../lib/text-utils'
 import type { Mode, LineInstance } from './types'
 
 /* Pipeline Node — compact inline pill */
@@ -19,7 +21,7 @@ function PipelineNode({
 }) {
   const modeKey = color === 'pas' ? 'pas' : color === 'cht' ? 'cht' : 'agt'
   const pillStyle = {
-    padding: onClick ? 'var(--sp-0h) var(--sp-3)' : '5px var(--sp-3)',
+    padding: onClick ? 'var(--sp-0h) var(--sp-3)' : 'var(--pipeline-node-pad-y) var(--sp-3)',
     borderRadius: 'var(--radius-sm)',
     background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
     color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',
@@ -32,10 +34,11 @@ function PipelineNode({
 
   if (onClick) {
     return (
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={onClick}
-        className="c-btn c-btn-sm font-mono inline-flex items-center gap-1.5 text-data"
+        className="font-mono inline-flex items-center gap-1.5 text-data"
         style={pillStyle}
       >
         <span>{label}</span>
@@ -44,7 +47,7 @@ function PipelineNode({
             {value}
           </span>
         )}
-      </button>
+      </Button>
     )
   }
 
@@ -101,8 +104,8 @@ function getNodeDetails(
     case 'API':
       if (line.models?.conversation) details.push({ label: 'Model', value: line.models.conversation })
       if (line.tokenUsage) {
-        details.push({ label: 'Input tokens', value: line.tokenUsage.input.toLocaleString() })
-        details.push({ label: 'Output tokens', value: line.tokenUsage.output.toLocaleString() })
+        details.push({ label: 'Input tokens', value: formatCount(line.tokenUsage.input) })
+        details.push({ label: 'Output tokens', value: formatCount(line.tokenUsage.output) })
       }
       break
     case 'SDK Loop':

@@ -9,17 +9,35 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
 
-// SOURCE SURPRISE: TagInput is default-exported and uses useState + useRef internally.
+// SOURCE SURPRISE: TagInput is default-exported and owns local input state.
 // Stub it so all array-of-strings fields (adminPhones, etc.) are testable without
 // keyboard-simulation complexity; the TagInput unit is covered by its own tests.
 vi.mock('../../console/src/components/TagInput', () => ({
-  default: ({ values, onChange, placeholder, displayLabels }: {
+  default: ({
+    values,
+    onChange,
+    id,
+    placeholder,
+    displayLabels,
+    'aria-describedby': ariaDescribedBy,
+    'aria-invalid': ariaInvalid,
+  }: {
     values: string[]
     onChange: (v: string[]) => void
+    id?: string
     placeholder?: string
     displayLabels?: Record<string, string>
+    'aria-describedby'?: string
+    'aria-invalid'?: true
   }) => (
     <div data-testid="tag-input" data-placeholder={placeholder}>
+      <input
+        id={id}
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={ariaInvalid}
+        data-testid="tag-input-control"
+        readOnly
+      />
       {values.map((v, i) => (
         <span key={i} data-testid={`tag-${i}`}>{displayLabels?.[v] ?? v}</span>
       ))}
@@ -119,18 +137,22 @@ afterEach(() => cleanup())
 describe('ConfigEditDialog — structural render', () => {
   it('renders the dialog with correct role and aria attributes', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const dialog = screen.getByRole('dialog')
     expect(dialog.getAttribute('aria-modal')).toBe('true')
-    expect(dialog.getAttribute('aria-labelledby')).toBe('config-edit-dialog-title')
-    expect(screen.getByText('Edit Configuration')).toBeDefined()
+    // Modal generates the id; assert it resolves to the title element
+    const labelId = dialog.getAttribute('aria-labelledby')
+    expect(labelId).not.toBeNull()
+    const titleEl = document.getElementById(labelId as string)
+    expect(titleEl).not.toBeNull()
+    expect(titleEl!.textContent).toBe('Edit Configuration')
   })
 
   it('renders the restart warning banner', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     expect(screen.getByText(/Some changes may require a restart/i)).toBeDefined()
@@ -138,7 +160,7 @@ describe('ConfigEditDialog — structural render', () => {
 
   it('renders close button with accessible label', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const closeBtn = screen.getByRole('button', { name: 'Close dialog' })
@@ -148,7 +170,7 @@ describe('ConfigEditDialog — structural render', () => {
 
   it('does NOT render excluded config keys (name, type, paths, healthPort)', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     // Excluded keys must not appear as field labels
@@ -160,7 +182,7 @@ describe('ConfigEditDialog — structural render', () => {
 
   it('renders included config keys as field labels', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     expect(screen.getByText('accessMode')).toBeDefined()
@@ -177,7 +199,7 @@ describe('ConfigEditDialog — structural render', () => {
 describe('ConfigEditDialog — agentOptions nested expansion', () => {
   it('expands agentOptions.sessionScope as a separate field instead of raw agentOptions', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     // SOURCE SURPRISE: agentOptions is decomposed into agentOptions.sessionScope / agentOptions.cwd
@@ -197,7 +219,7 @@ describe('ConfigEditDialog — agentOptions nested expansion', () => {
     }
 
     render(withProviders(
-      <ConfigEditDialog config={configWithExtra} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={configWithExtra} lineName={LINE} onClose={() => {}} />,
     ))
 
     expect(screen.getByText('agentOptions (other)')).toBeDefined()
@@ -209,9 +231,20 @@ describe('ConfigEditDialog — agentOptions nested expansion', () => {
 // ---------------------------------------------------------------------------
 
 describe('ConfigEditDialog — field type rendering', () => {
+  it('associates dynamic scalar field labels with their controls', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    expect((screen.getByLabelText('enabled') as HTMLInputElement).type).toBe('checkbox')
+    expect((screen.getByLabelText('maxTokens') as HTMLInputElement).type).toBe('number')
+    expect((screen.getByLabelText('accessMode') as HTMLSelectElement).tagName).toBe('SELECT')
+    expect((screen.getByLabelText('systemPrompt') as HTMLTextAreaElement).tagName).toBe('TEXTAREA')
+  })
+
   it('renders a checkbox for boolean fields', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -223,7 +256,7 @@ describe('ConfigEditDialog — field type rendering', () => {
 
   it('renders a number input for numeric fields', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const numberInputs = screen.getAllByRole('spinbutton')
@@ -233,7 +266,7 @@ describe('ConfigEditDialog — field type rendering', () => {
 
   it('renders a select for string fields with known enum options', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     // accessMode is in ENUM_OPTIONS → should render <select>
@@ -248,7 +281,7 @@ describe('ConfigEditDialog — field type rendering', () => {
 
   it('renders a TagInput stub for string-array fields', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     expect(screen.getByTestId('tag-input')).toBeDefined()
@@ -259,7 +292,7 @@ describe('ConfigEditDialog — field type rendering', () => {
 
   it('renders a textarea for long string fields (>80 chars)', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const textareas = screen.getAllByRole('textbox')
@@ -273,7 +306,7 @@ describe('ConfigEditDialog — field type rendering', () => {
 
   it('renders a read-only textarea for object fields', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     // agentOptions (other) is only rendered when there are unrecognised nested keys.
@@ -283,13 +316,34 @@ describe('ConfigEditDialog — field type rendering', () => {
     }
     cleanup()
     render(withProviders(
-      <ConfigEditDialog config={configWithObj} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={configWithObj} lineName={LINE} onClose={() => {}} />,
     ))
 
     const textareas = screen.getAllByRole('textbox')
     const readOnly = textareas.find(el => (el as HTMLTextAreaElement).readOnly)
     expect(readOnly).not.toBeNull()
     expect((readOnly as HTMLTextAreaElement).value).toContain('"nested"')
+  })
+
+  it('routes scalar controls through shared form primitives', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const enabledCheckbox = screen.getAllByRole('checkbox').find(
+      checkbox => (checkbox as HTMLInputElement).checked === true,
+    )
+    expect(enabledCheckbox).not.toBeNull()
+    expect(enabledCheckbox!.closest('.c-checkbox-row')).not.toBeNull()
+
+    const numberInput = screen.getAllByRole('spinbutton')[0]
+    expect(numberInput.classList.contains('c-input-number')).toBe(true)
+
+    const accessModeSelect = screen.getAllByRole('combobox').find(
+      select => (select as HTMLSelectElement).value === 'self_only',
+    )
+    expect(accessModeSelect).not.toBeNull()
+    expect(accessModeSelect!.classList.contains('c-select')).toBe(true)
   })
 })
 
@@ -300,7 +354,7 @@ describe('ConfigEditDialog — field type rendering', () => {
 describe('ConfigEditDialog — dirty tracking', () => {
   it('shows no "modified" markers initially', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     expect(screen.queryByText('modified')).toBeNull()
@@ -308,7 +362,7 @@ describe('ConfigEditDialog — dirty tracking', () => {
 
   it('shows a "modified" marker after changing a boolean field', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -319,7 +373,7 @@ describe('ConfigEditDialog — dirty tracking', () => {
 
   it('shows a "modified" marker after changing a number field', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const numberInput = screen.getAllByRole('spinbutton')[0]
@@ -330,7 +384,7 @@ describe('ConfigEditDialog — dirty tracking', () => {
 
   it('removes the "modified" marker when value is reverted to original', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const numberInput = screen.getAllByRole('spinbutton')[0]
@@ -345,7 +399,7 @@ describe('ConfigEditDialog — dirty tracking', () => {
 
   it('shows "modified" marker after TagInput adds an item', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     fireEvent.click(screen.getByTestId('tag-add'))
@@ -361,7 +415,7 @@ describe('ConfigEditDialog — dirty tracking', () => {
 describe('ConfigEditDialog — save button state', () => {
   it('renders the Save button disabled when there are no changes', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const saveBtn = screen.getByRole('button', { name: /^Save$/ })
@@ -371,7 +425,7 @@ describe('ConfigEditDialog — save button state', () => {
 
   it('enables Save button when at least one field has changed', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -384,7 +438,7 @@ describe('ConfigEditDialog — save button state', () => {
 
   it('shows change count in Save button label', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     // Change two fields
@@ -398,7 +452,7 @@ describe('ConfigEditDialog — save button state', () => {
 
   it('disables Save button when there are field validation errors', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     // Set maxTokens below the 256 minimum (FIELD_VALIDATORS.maxTokens enforces this)
@@ -411,13 +465,17 @@ describe('ConfigEditDialog — save button state', () => {
 
   it('shows validation error text for fields below minimum', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const numberInput = screen.getAllByRole('spinbutton')[0]
     fireEvent.change(numberInput, { target: { value: '10' } })
 
-    expect(screen.getByText('Min 256')).toBeDefined()
+    const error = screen.getByText('Min 256')
+    expect(error).toBeDefined()
+    expect(error.id).toBeTruthy()
+    expect(numberInput.getAttribute('aria-invalid')).toBe('true')
+    expect(numberInput.getAttribute('aria-describedby')).toBe(error.id)
   })
 })
 
@@ -430,7 +488,7 @@ describe('ConfigEditDialog — save success', () => {
     updateConfigMock.mockResolvedValue(undefined)
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -450,7 +508,7 @@ describe('ConfigEditDialog — save success', () => {
     updateConfigMock.mockResolvedValue(undefined)
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -471,7 +529,7 @@ describe('ConfigEditDialog — save success', () => {
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
       client,
     ))
 
@@ -490,7 +548,7 @@ describe('ConfigEditDialog — save success', () => {
     const onClose = vi.fn()
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -508,7 +566,7 @@ describe('ConfigEditDialog — save success', () => {
     updateConfigMock.mockReturnValue(new Promise<void>(res => { resolveUpdate = res }))
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -530,7 +588,7 @@ describe('ConfigEditDialog — save success', () => {
     updateConfigMock.mockReturnValue(new Promise<void>(res => { resolveUpdate = res }))
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -550,7 +608,7 @@ describe('ConfigEditDialog — save success', () => {
     const onClose = vi.fn()
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
     ))
 
     const saveBtn = screen.getByRole('button', { name: /^Save$/ })
@@ -573,7 +631,7 @@ describe('ConfigEditDialog — save error', () => {
     updateConfigMock.mockRejectedValue(new Error('network timeout'))
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -592,7 +650,7 @@ describe('ConfigEditDialog — save error', () => {
     const onClose = vi.fn()
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -612,7 +670,7 @@ describe('ConfigEditDialog — save error', () => {
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
       client,
     ))
 
@@ -630,7 +688,7 @@ describe('ConfigEditDialog — save error', () => {
     updateConfigMock.mockRejectedValue(new Error('retry-me'))
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const checkboxes = screen.getAllByRole('checkbox')
@@ -654,7 +712,7 @@ describe('ConfigEditDialog — cancel and backdrop', () => {
     const onClose = vi.fn()
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
     ))
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
@@ -666,7 +724,7 @@ describe('ConfigEditDialog — cancel and backdrop', () => {
     const onClose = vi.fn()
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
     ))
 
     fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
@@ -674,30 +732,109 @@ describe('ConfigEditDialog — cancel and backdrop', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
-  it('calls onClose when the backdrop is clicked', () => {
-    const onClose = vi.fn()
-
-    const { container } = render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
-    ))
-
-    const backdrop = container.querySelector('.c-dialog-backdrop')
-    expect(backdrop).not.toBeNull()
-    fireEvent.click(backdrop as Element)
-
-    expect(onClose).toHaveBeenCalledTimes(1)
-  })
-
-  it('does not call onClose when clicking inside the dialog panel', () => {
+  it('backdrop pointerdown does NOT dismiss (dismissable=false)', () => {
+    // C-B3W2-2: inverted assertion — form dialogs use protective default.
     const onClose = vi.fn()
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
     ))
 
-    fireEvent.click(screen.getByRole('dialog'))
+    // The Modal primitive portals to body; the backdrop is document.querySelector
+    const backdrop = document.querySelector('.soup-modal-backdrop')
+    expect(backdrop).not.toBeNull()
+    fireEvent.pointerDown(backdrop as Element)
 
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('does not call onClose when pointerdown is inside the dialog panel', () => {
+    // stopPropagation mechanism replaced by useDismissable pointerdown semantics
+    const onClose = vi.fn()
+
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
+    ))
+
+    fireEvent.pointerDown(screen.getByRole('dialog'))
+
+    expect(onClose).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Modal-primitive behaviour (gained by migration — C-B3W2-1)
+// ---------------------------------------------------------------------------
+
+describe('ConfigEditDialog — closed state, Escape, reset-on-open, focus', () => {
+  it('renders nothing when open=false', () => {
+    render(withProviders(
+      <ConfigEditDialog open={false} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByText('Edit Configuration')).toBeNull()
+  })
+
+  it('renders the dialog when open=true', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    expect(screen.getByRole('dialog')).toBeDefined()
+    expect(screen.getByText('Edit Configuration')).toBeDefined()
+  })
+
+  it('Escape key calls onClose when the dialog is open (gained: was missing pre-migration)', () => {
+    const onClose = vi.fn()
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
+    ))
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('Escape does NOT call onClose when dialog is closed (listener unbound)', () => {
+    const onClose = vi.fn()
+    render(withProviders(
+      <ConfigEditDialog open={false} config={BASE_CONFIG} lineName={LINE} onClose={onClose} />,
+    ))
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('resets patch and custom-enum state when reopened (C-B3W2-1 reset-on-open effect)', () => {
+    const { rerender } = render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    // Change a field to make patch dirty
+    const numberInput = screen.getAllByRole('spinbutton')[0]
+    fireEvent.change(numberInput, { target: { value: '9000' } })
+    expect(screen.getByText('modified')).toBeDefined()
+
+    // Close and reopen
+    rerender(withProviders(
+      <ConfigEditDialog open={false} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+    rerender(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    // modified marker must be gone — patch was reset
+    expect(screen.queryByText('modified')).toBeNull()
+  })
+
+  it('initial focus lands inside the dialog (accessible: focus trap engaged)', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const dialog = screen.getByRole('dialog')
+    // document.activeElement must be the dialog shell or a descendant
+    expect(dialog.contains(document.activeElement)).toBe(true)
   })
 })
 
@@ -708,7 +845,7 @@ describe('ConfigEditDialog — cancel and backdrop', () => {
 describe('ConfigEditDialog — enum and custom-enum field', () => {
   it('renders select options for enum keys', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const selects = screen.getAllByRole('combobox')
@@ -723,7 +860,7 @@ describe('ConfigEditDialog — enum and custom-enum field', () => {
 
   it('marks the field modified when the select value changes', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const selects = screen.getAllByRole('combobox')
@@ -742,7 +879,7 @@ describe('ConfigEditDialog — enum and custom-enum field', () => {
     }
 
     render(withProviders(
-      <ConfigEditDialog config={configWithModel} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={configWithModel} lineName={LINE} onClose={() => {}} />,
     ))
 
     const selects = screen.getAllByRole('combobox')
@@ -759,7 +896,7 @@ describe('ConfigEditDialog — enum and custom-enum field', () => {
     }
 
     render(withProviders(
-      <ConfigEditDialog config={configWithModel} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={configWithModel} lineName={LINE} onClose={() => {}} />,
     ))
 
     const selects = screen.getAllByRole('combobox')
@@ -767,6 +904,23 @@ describe('ConfigEditDialog — enum and custom-enum field', () => {
     fireEvent.change(modelSelect as Element, { target: { value: '__custom__' } })
 
     expect(screen.getByPlaceholderText('Enter custom model ID')).toBeDefined()
+  })
+
+  it('gives the custom model text input an explicit accessible name', () => {
+    const configWithModel: Record<string, unknown> = {
+      model: 'claude-sonnet-4-6',
+    }
+
+    render(withProviders(
+      <ConfigEditDialog open={true} config={configWithModel} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    const selects = screen.getAllByRole('combobox')
+    const modelSelect = selects.find(s => (s as HTMLSelectElement).value === 'claude-sonnet-4-6')
+    fireEvent.change(modelSelect as Element, { target: { value: '__custom__' } })
+
+    const customInput = screen.getByRole('textbox', { name: 'Custom model ID' })
+    expect(customInput).toBe(screen.getByPlaceholderText('Enter custom model ID'))
   })
 })
 
@@ -777,7 +931,7 @@ describe('ConfigEditDialog — enum and custom-enum field', () => {
 describe('ConfigEditDialog — agentOptions.sessionScope enum', () => {
   it('renders a select for agentOptions.sessionScope with the correct current value', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     // agentOptions.sessionScope has enum ['single', 'shared', 'per_chat']
@@ -791,7 +945,7 @@ describe('ConfigEditDialog — agentOptions.sessionScope enum', () => {
 
   it('marks agentOptions.sessionScope modified when changed', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const selects = screen.getAllByRole('combobox')
@@ -809,7 +963,7 @@ describe('ConfigEditDialog — agentOptions.sessionScope enum', () => {
     updateConfigMock.mockResolvedValue(undefined)
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const selects = screen.getAllByRole('combobox')
@@ -831,9 +985,18 @@ describe('ConfigEditDialog — agentOptions.sessionScope enum', () => {
 // ---------------------------------------------------------------------------
 
 describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
+  it('associates the adminPhones label with the TagInput control', () => {
+    render(withProviders(
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+    ))
+
+    expect(screen.getByLabelText('adminPhones')).toBeDefined()
+  })
+
   it('passes adminPhones values into TagInput stub', () => {
     render(withProviders(
       <ConfigEditDialog
+        open={true}
         config={BASE_CONFIG}
         lineName={LINE}
         adminPhonesDisplay={{ '15551234567': 'Alice' }}
@@ -846,7 +1009,7 @@ describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
 
   it('shows "Add phone number" placeholder for adminPhones TagInput', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     const tagInput = screen.getByTestId('tag-input')
@@ -855,7 +1018,7 @@ describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
 
   it('marks adminPhones modified after adding a tag', () => {
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     fireEvent.click(screen.getByTestId('tag-add'))
@@ -867,7 +1030,7 @@ describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
     updateConfigMock.mockResolvedValue(undefined)
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     fireEvent.click(screen.getByTestId('tag-add'))
@@ -886,7 +1049,7 @@ describe('ConfigEditDialog — adminPhones TagInput wiring', () => {
     updateConfigMock.mockResolvedValue(undefined)
 
     render(withProviders(
-      <ConfigEditDialog config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={BASE_CONFIG} lineName={LINE} onClose={() => {}} />,
     ))
 
     // Remove the only existing phone — FIELD_VALIDATORS.adminPhones rejects empty array.
@@ -912,7 +1075,7 @@ describe('ConfigEditDialog — empty config', () => {
     }
 
     render(withProviders(
-      <ConfigEditDialog config={excludedOnly} lineName={LINE} onClose={() => {}} />,
+      <ConfigEditDialog open={true} config={excludedOnly} lineName={LINE} onClose={() => {}} />,
     ))
 
     // Dialog still renders

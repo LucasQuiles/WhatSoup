@@ -201,7 +201,10 @@ describe('SummaryTab — agent-mode PROVIDER card', () => {
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
     const sessionsCard = screen.getByText('SESSIONS').closest('div.c-card') as HTMLElement
-    expect(within(sessionsCard).getByText('3')).toBeDefined()
+    const sessionsValue = within(sessionsCard).getByText('3')
+    expect(sessionsValue).toBeDefined()
+    expect(sessionsValue.className).not.toMatch(/text-(m-|s-)/)
+    expect(sessionsValue.getAttribute('style')).toContain('--text-2')
   })
 })
 
@@ -298,5 +301,51 @@ describe('SummaryTab — KPI row structural contract', () => {
     render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
 
     expect(screen.queryByRole('button', { name: /Edit Configuration/i })).toBeNull()
+  })
+})
+
+describe('SummaryTab — action buttons use the Button primitive', () => {
+  it('all ACTIONS panel buttons carry the soup-btn-- class marker (primitive adoption)', () => {
+    // This assertion pins the D3 finding closure: legacy c-btn class → Button primitive.
+    // The Button primitive always emits soup-btn--<variant> on the root element.
+    const line = makeLine({ mode: 'agent', provider: 'openai-api' })
+
+    render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
+
+    const restartBtn = screen.getByRole('button', { name: /Restart Instance/i })
+    const editConfigBtn = screen.getByRole('button', { name: /Edit Configuration/i })
+    const changeModeBtn = screen.getByRole('button', { name: /Change Mode/i })
+    const stopBtn = screen.getByRole('button', { name: /Stop Instance/i })
+
+    // Each must carry the base soup-btn class (emitted by the Button primitive)
+    expect(restartBtn.className).toContain('soup-btn--')
+    expect(editConfigBtn.className).toContain('soup-btn--')
+    expect(changeModeBtn.className).toContain('soup-btn--')
+    expect(stopBtn.className).toContain('soup-btn--')
+
+    // Variant-specific: warning for Restart (destructive with confirm), danger for Stop
+    expect(restartBtn.className).toContain('soup-btn--warning')
+    expect(stopBtn.className).toContain('soup-btn--danger')
+
+    // Neutral for standard secondary panel actions
+    expect(editConfigBtn.className).toContain('soup-btn--neutral')
+    expect(changeModeBtn.className).toContain('soup-btn--neutral')
+  })
+
+  it('the Config-panel "Edit" header button uses the ghost variant', () => {
+    // Config panel header edit button — ghost (tertiary, per button.md §variants)
+    const line = makeLine({ mode: 'agent', provider: 'openai-api' })
+
+    render(withToast(<SummaryTab line={line} onEditConfig={vi.fn()} onChangeMode={vi.fn()} />))
+
+    // The "Edit" button lives in the Config panel toolbar — distinct from "Edit Configuration"
+    // in the Actions panel. Filter by exact text to avoid ambiguity.
+    const editBtns = screen.getAllByRole('button', { name: /^Edit$/i })
+    // At least one "Edit" toolbar button must exist in non-passive mode
+    expect(editBtns.length).toBeGreaterThan(0)
+    // All "Edit" toolbar buttons should use ghost variant
+    for (const btn of editBtns) {
+      expect(btn.className).toContain('soup-btn--ghost')
+    }
   })
 })

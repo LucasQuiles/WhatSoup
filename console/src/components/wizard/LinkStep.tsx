@@ -3,6 +3,7 @@ import { CheckCircle2, XCircle, Loader2, Clock } from 'lucide-react'
 import QrDisplay from '../QrDisplay'
 import { parseAuthErrorMessage, parseQrPayload } from './link-step-events'
 import { getApiTicket, isProductionConsole } from '../../lib/api'
+import { Button } from '../primitives/Button'
 
 interface LinkStepProps {
   lineName: string
@@ -131,9 +132,9 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
             <strong>{lineName}</strong> is now connected and running.
           </span>
         </div>
-        <button type="button" className="c-btn c-btn-primary" onClick={onComplete}>
+        <Button variant="primary" onClick={onComplete}>
           View Line
-        </button>
+        </Button>
       </div>
     )
   }
@@ -157,9 +158,9 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
             {errorMsg || 'An unexpected error occurred. Check that the fleet server is running.'}
           </span>
         </div>
-        <button type="button" className="c-btn c-btn-primary" onClick={handleRetry}>
+        <Button variant="primary" onClick={handleRetry}>
           Try Again
-        </button>
+        </Button>
       </div>
     )
   }

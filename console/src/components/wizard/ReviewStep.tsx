@@ -1,9 +1,11 @@
 import { type FC } from 'react'
-import { Pencil, Loader2, AlertCircle } from 'lucide-react'
+import { Pencil, AlertCircle } from 'lucide-react'
 import ModeBadge from '../ModeBadge'
 import { getProviderConfigFields, DEFAULT_PROVIDER_ID } from '../../lib/providers'
 import { defaultAgentWorkspacePath } from '../../lib/agent-cwd'
 import { ACCESS_MODE_LABELS } from '../../lib/access-modes'
+import { formatCount } from '../../lib/text-utils'
+import { Button } from '../primitives/Button'
 
 interface ReviewStepProps {
   data: Record<string, unknown>
@@ -52,28 +54,28 @@ const kvValueStyle: React.CSSProperties = {
 /* ── Edit button ── */
 
 const EditBtn: FC<{ onClick: () => void }> = ({ onClick }) => (
-  <button
-    type="button"
-    className="c-btn c-btn-ghost flex items-center gap-[var(--sp-1)] py-[var(--sp-1)] px-[var(--sp-2)]"
+  <Button
+    variant="ghost"
+    className="flex items-center gap-[var(--sp-1)] py-[var(--sp-1)] px-[var(--sp-2)]"
+    icon={<Pencil size={12} strokeWidth={1.75} />}
     onClick={onClick}
   >
-    <Pencil size={12} strokeWidth={1.75} />
     <span className="text-xs">Edit</span>
-  </button>
+  </Button>
 )
 
 /* ── Key-value row ── */
 
-const KV: FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+const KV: FC<{ label: string; value: React.ReactNode; fullValue?: string }> = ({ label, value, fullValue }) => (
   <div style={kvRowStyle}>
     <span className="text-label" style={kvLabelStyle}>{label}</span>
-    <span className="font-mono text-data" style={kvValueStyle}>{value}</span>
+    <span title={fullValue} className="font-mono text-data" style={kvValueStyle}>{value}</span>
   </div>
 )
 
-/* ── Truncate helper ── */
+/* ── First-line preview helper ── */
 
-function truncate(text: string, max: number): string {
+function previewFirstLine(text: string, max: number): string {
   const firstLine = text.split('\n')[0] ?? ''
   if (firstLine.length <= max) return firstLine
   return firstLine.slice(0, max) + '...'
@@ -169,10 +171,10 @@ const ReviewStep: FC<ReviewStepProps> = ({
         </div>
         <KV label="Access mode" value={ACCESS_MODE_LABELS[accessMode as keyof typeof ACCESS_MODE_LABELS] ?? accessMode} />
         {type !== 'passive' && systemPrompt && (
-          <KV label="System prompt" value={truncate(systemPrompt, 60)} />
+          <KV label="System prompt" value={previewFirstLine(systemPrompt, 60)} fullValue={systemPrompt} />
         )}
         <KV label="Rate limit" value={`${rateLimitPerHour}/hr`} />
-        <KV label="Token budget" value={tokenBudget.toLocaleString()} />
+        <KV label="Token budget" value={formatCount(tokenBudget)} />
         {type === 'agent' && (
           <>
             <KV label="CWD" value={agentCwd} />
@@ -208,15 +210,14 @@ const ReviewStep: FC<ReviewStepProps> = ({
       )}
 
       {/* Create button */}
-      <button
-        type="button"
-        className="c-btn c-btn-primary flex items-center justify-center self-stretch gap-[var(--sp-2)] p-[var(--sp-3)]"
+      <Button
+        variant="primary"
+        className="flex items-center justify-center self-stretch gap-[var(--sp-2)] p-[var(--sp-3)]"
         onClick={onCreateLine}
-        disabled={creating}
+        loading={creating}
       >
-        {creating && <Loader2 size={16} className="animate-spin" />}
         {creating ? 'Creating...' : 'Create Line'}
-      </button>
+      </Button>
     </div>
   )
 }

@@ -1,5 +1,6 @@
 import { type FC, type ReactNode } from 'react';
 import { BarChart3 } from 'lucide-react';
+import { Button } from './primitives/Button';
 
 export type ChartKey = 'messages' | 'tokens' | 'sessions';
 
@@ -24,7 +25,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
   onRetry,
   children,
 }) => {
-  const height = expanded ? 240 : 140;
+  const panelHeight = expanded ? 'var(--chart-panel-h-expanded)' : 'var(--chart-panel-h)';
 
   return (
     <section
@@ -53,30 +54,31 @@ export const ChartPanel: FC<ChartPanelProps> = ({
         <div
           data-testid="chart-shimmer"
           className="animate-shimmer rounded-sm bg-d4"
-          style={{ height }}
+          style={{ height: panelHeight }}
         />
       ) : isError ? (
         <div
           className="flex flex-col items-center justify-center text-center"
-          style={{ height }}
+          style={{ height: panelHeight }}
         >
           <span className="text-s-crit font-sans text-sm">
             Failed to load
           </span>
           {onRetry && (
-            <button
-              type="button"
-              className="c-btn c-btn-sm c-btn-ghost mt-[var(--sp-2)]"
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mt-[var(--sp-2)]"
               onClick={onRetry}
             >
               Retry
-            </button>
+            </Button>
           )}
         </div>
       ) : !hasData ? (
         <div
-          className="flex flex-col items-center justify-center text-center text-t5"
-          style={{ height }}
+          className="flex flex-col items-center justify-center text-center text-t2"
+          style={{ height: panelHeight }}
         >
           <BarChart3 size={24} strokeWidth={1.25} className="mb-[var(--sp-2)]" />
           <span className="font-sans text-sm">
@@ -84,7 +86,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
           </span>
         </div>
       ) : (
-        <div style={{ height }}>
+        <div style={{ height: panelHeight }}>
           {children}
         </div>
       )}

@@ -8,20 +8,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import { createElement, type ReactNode } from 'react'
 
-import { Field, TextInput } from '../../console/src/components/wizard/form-primitives'
+import { Field, TextInput } from '../../console/src/components/primitives/FormControl'
 import HeartbeatStrip from '../../console/src/components/HeartbeatStrip'
 import { PipelineTab } from '../../console/src/components/line-detail/PipelineTab'
 import AddLineWizard from '../../console/src/components/AddLineWizard'
 
-vi.mock('framer-motion', async () => {
-  const React = await import('react');
-  return {
-    AnimatePresence: ({ children }: { children?: ReactNode }) => children,
-    motion: {
-      div: ({ children, ...props }: { children?: ReactNode } & Record<string, unknown>) => React.createElement('div', props, children),
-    },
-  };
-})
+// framer-motion mock removed (B3W4): AddLineWizard no longer uses framer-motion
 
 afterEach(() => cleanup())
 
@@ -68,12 +60,19 @@ describe('PipelineTab node interaction', () => {
 })
 
 describe('AddLineWizard dialog semantics', () => {
-  it('marks the wizard overlay as an accessible dialog', () => {
-    render(createElement(AddLineWizard, { onClose: vi.fn() }))
+  it('dialog role wired via Modal; aria-labelledby resolves to the title element', () => {
+    // AddLineWizard now uses open prop (C-B3W4-3 latched-mount contract)
+    render(createElement(AddLineWizard, { open: true, onClose: vi.fn() }))
 
     const dialog = screen.getByRole('dialog', { name: 'Add New Line' })
     expect(dialog.getAttribute('aria-modal')).toBe('true')
-    expect(dialog.getAttribute('aria-labelledby')).toBe('wizard-title')
-    expect(screen.getByRole('heading', { name: 'Add New Line' }).id).toBe('wizard-title')
+    // aria-labelledby resolves to the generated id from Modal/ModalHeader — not the literal "wizard-title"
+    const labelledById = dialog.getAttribute('aria-labelledby')
+    expect(labelledById).toBeTruthy()
+    const titleEl = document.getElementById(labelledById!)
+    expect(titleEl).toBeTruthy()
+    expect(titleEl!.textContent).toBe('Add New Line')
+    // ModalHeader renders a span, not a heading (consistent with every migrated dialog)
+    expect(screen.queryByRole('heading', { name: 'Add New Line' })).toBeNull()
   })
 })

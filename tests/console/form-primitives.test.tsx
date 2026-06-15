@@ -1,5 +1,5 @@
 /**
- * Behavioral contract-lock for wizard form-primitives.
+ * Behavioral contract-lock for the FormControl primitive.
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -12,9 +12,11 @@ import {
   TextInput,
   NumberInput,
   SelectInput,
+  FileInput,
   TextArea,
+  RadioField,
   CheckboxField,
-} from '../../console/src/components/wizard/form-primitives'
+} from '../../console/src/components/primitives/FormControl'
 
 afterEach(() => cleanup())
 
@@ -47,7 +49,13 @@ describe('Field', () => {
       </Field>,
     )
 
-    expect(screen.getByText('bad value')).toBeDefined()
+    const input = screen.getByLabelText('Field') as HTMLInputElement
+    const error = screen.getByText('bad value')
+
+    expect(error).toBeDefined()
+    expect(error.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(input.getAttribute('aria-describedby')).toBe(error.id)
     expect(screen.queryByText('should be hidden')).toBeNull()
     expect(container.querySelector('.wizard-check')).toBeNull()
   })
@@ -59,8 +67,41 @@ describe('Field', () => {
       </Field>,
     )
 
-    expect(screen.getByText('try this')).toBeDefined()
+    const input = screen.getByLabelText('Field') as HTMLInputElement
+    const helper = screen.getByText('try this')
+
+    expect(helper).toBeDefined()
+    expect(helper.id).toBeTruthy()
+    expect(input.getAttribute('aria-invalid')).toBeNull()
+    expect(input.getAttribute('aria-describedby')).toBe(helper.id)
     expect(container.querySelector('.wizard-check')).toBeDefined()
+  })
+
+  it('merges existing control descriptions with Field helper text', () => {
+    render(
+      <Field label="Field" helper="try this">
+        {id => <TextInput id={id} aria-describedby="external-note" value="" onChange={() => {}} />}
+      </Field>,
+    )
+
+    const input = screen.getByLabelText('Field') as HTMLInputElement
+    const helper = screen.getByText('try this')
+
+    expect(input.getAttribute('aria-describedby')).toBe(`external-note ${helper.id}`)
+  })
+
+  it('marks required controls without invoking native validation', () => {
+    render(
+      <Field label="Field" required>
+        {id => <TextInput id={id} value="" onChange={() => {}} />}
+      </Field>,
+    )
+
+    const input = screen.getByLabelText('Field') as HTMLInputElement
+
+    expect(input.getAttribute('aria-required')).toBe('true')
+    expect(input.required).toBe(false)
+    expect(screen.getByText('*').getAttribute('aria-hidden')).toBe('true')
   })
 })
 
@@ -92,7 +133,7 @@ describe('TextInput', () => {
     expect(input.classList.contains('c-input')).toBe(true)
     expect(input.classList.contains('font-mono')).toBe(true)
     expect(input.classList.contains('extra-cls')).toBe(true)
-    expectBorderColor(input, 'var(--b2)')
+    expectBorderColor(input, 'var(--border-subtle)')
 
     await user.clear(input)
     await user.type(input, 'changed')
@@ -103,13 +144,13 @@ describe('TextInput', () => {
     const { rerender } = render(<TextInput aria-label="Status" value="" onChange={() => {}} error />)
     const input = screen.getByLabelText('Status') as HTMLInputElement
 
-    expectBorderColor(input, 'var(--color-s-crit)')
+    expectBorderColor(input, 'var(--status-crit-fg)')
 
     rerender(<TextInput aria-label="Status" value="" onChange={() => {}} confirmed />)
     expectBorderColor(input, 'var(--wizard-accent)')
 
     rerender(<TextInput aria-label="Status" value="" onChange={() => {}} error confirmed />)
-    expectBorderColor(input, 'var(--color-s-crit)')
+    expectBorderColor(input, 'var(--status-crit-fg)')
   })
 })
 
@@ -156,7 +197,7 @@ describe('NumberInput', () => {
     const { rerender } = render(<NumberInput aria-label="Amount" value={1} onChange={() => {}} error />)
     const input = screen.getByLabelText('Amount') as HTMLInputElement
 
-    expectBorderColor(input, 'var(--color-s-crit)')
+    expectBorderColor(input, 'var(--status-crit-fg)')
 
     rerender(<NumberInput aria-label="Amount" value={1} onChange={() => {}} confirmed />)
     expectBorderColor(input, 'var(--wizard-accent)')
@@ -207,7 +248,7 @@ describe('SelectInput', () => {
     )
     const select = screen.getByLabelText('Mode') as HTMLSelectElement
 
-    expectBorderColor(select, 'var(--color-s-crit)')
+    expectBorderColor(select, 'var(--status-crit-fg)')
 
     rerender(
       <SelectInput aria-label="Mode" value="" onChange={() => {}} confirmed>
@@ -215,6 +256,33 @@ describe('SelectInput', () => {
       </SelectInput>,
     )
     expectBorderColor(select, 'var(--wizard-accent)')
+  })
+})
+
+// FileInput
+
+describe('FileInput', () => {
+  it('renders file attributes without accepting controlled value props', () => {
+    const onChange = vi.fn()
+
+    render(
+      <FileInput
+        aria-label="Upload instructions"
+        accept=".md,.txt"
+        className="file-extra"
+        onChange={onChange}
+        confirmed
+      />,
+    )
+
+    const input = screen.getByLabelText('Upload instructions') as HTMLInputElement
+    expect(input.type).toBe('file')
+    expect(input.accept).toBe('.md,.txt')
+    expect(input.classList.contains('c-input')).toBe(true)
+    expect(input.classList.contains('c-file-input')).toBe(true)
+    expect(input.classList.contains('text-data')).toBe(true)
+    expect(input.classList.contains('file-extra')).toBe(true)
+    expectBorderColor(input, 'var(--wizard-accent)')
   })
 })
 
@@ -255,15 +323,131 @@ describe('TextArea', () => {
     expect(textarea.value).toBe('updated')
   })
 
+  it('supports tokenized sizing and dimmed styling for read-only inspection fields', () => {
+    render(
+      <TextArea
+        aria-label="JSON"
+        value="{}"
+        onChange={() => {}}
+        readOnly
+        minHeight="calc(var(--sp-10) + var(--sp-5))"
+        dimmed
+      />,
+    )
+
+    const textarea = screen.getByLabelText('JSON') as HTMLTextAreaElement
+    expect(textarea.readOnly).toBe(true)
+    expect(textarea.getAttribute('style')).toContain('min-height: calc(var(--sp-10) + var(--sp-5))')
+    expect(textarea.getAttribute('style')).toContain('filter: brightness(0.7)')
+  })
+
   it('defaults minHeight and uses error and confirmed border styling', () => {
     const { rerender } = render(<TextArea aria-label="Body" value="" onChange={() => {}} error />)
     const textarea = screen.getByLabelText('Body') as HTMLTextAreaElement
 
     expect(textarea.getAttribute('style')).toContain('min-height: 80px')
-    expectBorderColor(textarea, 'var(--color-s-crit)')
+    expectBorderColor(textarea, 'var(--status-crit-fg)')
 
     rerender(<TextArea aria-label="Body" value="" onChange={() => {}} confirmed />)
     expectBorderColor(textarea, 'var(--wizard-accent)')
+  })
+
+  it('supports bounded non-resizable sans textareas without a style escape hatch', () => {
+    render(
+      <TextArea
+        aria-label="Reply"
+        value=""
+        onChange={() => {}}
+        textFace="sans"
+        minHeight={0}
+        maxHeight="var(--feed-preview-max)"
+        overflow="hidden"
+        resize="none"
+      />,
+    )
+
+    const textarea = screen.getByLabelText('Reply') as HTMLTextAreaElement
+    expect(textarea.classList.contains('font-sans')).toBe(true)
+    expect(textarea.classList.contains('font-mono')).toBe(false)
+    expect(textarea.getAttribute('style')).toContain('min-height: 0')
+    expect(textarea.getAttribute('style')).toContain('max-height: var(--feed-preview-max)')
+    expect(textarea.getAttribute('style')).toContain('overflow: hidden')
+    expect(textarea.getAttribute('style')).toContain('resize: none')
+  })
+})
+
+// RadioField
+
+describe('RadioField', () => {
+  it('renders checked state, label text, value, and optional classes', () => {
+    render(
+      <RadioField
+        label="API key"
+        name="authMethod"
+        value="api_key"
+        checked
+        onChange={() => {}}
+        className="row-extra"
+        inputClassName="accent-extra"
+        labelClassName="label-extra"
+      />,
+    )
+
+    const radio = screen.getByRole('radio', { name: 'API key' }) as HTMLInputElement
+    const row = radio.closest('label')
+    const labelText = screen.getByText('API key')
+
+    expect(radio.checked).toBe(true)
+    expect(radio.name).toBe('authMethod')
+    expect(radio.value).toBe('api_key')
+    expect(radio.classList.contains('accent-extra')).toBe(true)
+    expect(row?.classList.contains('c-checkbox-row')).toBe(true)
+    expect(row?.classList.contains('row-extra')).toBe(true)
+    expect(labelText.classList.contains('label-extra')).toBe(true)
+  })
+
+  it('emits the selected value through user interaction', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+
+    function Harness() {
+      const [selected, setSelected] = useState('api_key')
+      const handleChange = (next: string) => {
+        onChange(next)
+        setSelected(next)
+      }
+
+      return (
+        <div role="radiogroup" aria-label="Auth method">
+          <RadioField
+            label="API key"
+            name="authMethod"
+            value="api_key"
+            checked={selected === 'api_key'}
+            onChange={handleChange}
+          />
+          <RadioField
+            label="Existing session"
+            name="authMethod"
+            value="oauth"
+            checked={selected === 'oauth'}
+            onChange={handleChange}
+          />
+        </div>
+      )
+    }
+
+    render(<Harness />)
+
+    const apiKey = screen.getByRole('radio', { name: 'API key' }) as HTMLInputElement
+    const oauth = screen.getByRole('radio', { name: 'Existing session' }) as HTMLInputElement
+    expect(apiKey.checked).toBe(true)
+    expect(oauth.checked).toBe(false)
+
+    await user.click(oauth)
+    expect(apiKey.checked).toBe(false)
+    expect(oauth.checked).toBe(true)
+    expect(onChange).toHaveBeenLastCalledWith('oauth')
   })
 })
 
@@ -290,6 +474,32 @@ describe('CheckboxField', () => {
 
     expect(screen.getByRole('checkbox', { name: 'Enable feature' })).toBeDefined()
     expect(screen.queryByText('Only applies to new messages')).toBeNull()
+  })
+
+  it('supports disabled state, input class, row class, label class, and suffix content', () => {
+    render(
+      <CheckboxField
+        label="Restart line"
+        checked={false}
+        disabled
+        onChange={() => {}}
+        className="row-extra"
+        inputClassName="accent-extra"
+        labelClassName="label-extra"
+        suffix={<span data-testid="suffix">offline</span>}
+      />,
+    )
+
+    const checkbox = screen.getByRole('checkbox', { name: 'Restart line' }) as HTMLInputElement
+    const row = checkbox.closest('label')
+    const labelText = screen.getByText('Restart line')
+
+    expect(checkbox.disabled).toBe(true)
+    expect(checkbox.classList.contains('accent-extra')).toBe(true)
+    expect(row?.classList.contains('c-checkbox-row')).toBe(true)
+    expect(row?.classList.contains('row-extra')).toBe(true)
+    expect(labelText.classList.contains('label-extra')).toBe(true)
+    expect(screen.getByTestId('suffix').textContent).toBe('offline')
   })
 
   it('changes checked state through user interaction', async () => {

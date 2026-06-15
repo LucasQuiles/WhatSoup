@@ -21,6 +21,7 @@ const requiredPackageScripts = {
   'guard:publication:all': 'npm run guard:publication -- --all',
   'guard:publication:release': 'npm run guard:publication -- --release',
   'guard:publication:staged': 'npm run guard:publication -- --staged',
+  'guard:design-system-hygiene': 'node scripts/design-system-hygiene-guard.ts',
   'guard:repo:staged': 'npm run guard:repo -- --staged',
   'guard:repo:branch-diff': 'npm run guard:repo -- --branch-diff',
   'guard:repo:commit-authors': 'npm run guard:repo -- --commit-authors',
@@ -32,6 +33,26 @@ const requiredPackageScripts = {
   'guard:safeguard-diagnostics': 'node scripts/safeguard-diagnostics.ts',
   'guard:fleet-bot-hardening-parity': 'node scripts/check-fleet-bot-hardening-parity.ts',
   'guard:bot-errors-runtime-manifest': 'node scripts/check-bot-errors-runtime-manifest.ts',
+  'test:design-guards': 'npm test -- tests/scripts/theme-parity.test.ts tests/scripts/token-spec-drift.test.ts tests/scripts/contrast-matrix.test.ts tests/scripts/shadow-baseline.test.ts tests/scripts/shadow-frozen-inventory.test.ts tests/scripts/raw-form-control-inventory.test.ts tests/scripts/design-regression-guards.test.ts tests/scripts/design-metrics.test.ts tests/scripts/design-burndown-check.test.ts tests/scripts/color-semantics.test.ts tests/scripts/design-resilience-audit.test.ts tests/scripts/font-assets.test.ts tests/scripts/brand-assets.test.ts tests/scripts/design-lint-fixtures.test.ts --pool=forks',
+  'test:browser': 'vitest run --config vitest.browser.config.ts',
+  'test:browser:motion': 'vitest run --config vitest.browser.motion.config.ts',
+  'verify:console-design': [
+    'npm --prefix console run design:theme-parity',
+    'npm --prefix console run design:token-drift',
+    'npm --prefix console run design:contrast',
+    'npm --prefix console run lint:shadow:baseline',
+    'npm --prefix console run design:shadow-frozen-inventory',
+    'npm --prefix console run design:raw-form-control-inventory',
+    'npm --prefix console run design:regression',
+    'npm --prefix console run design:metrics',
+    'npm --prefix console run design:burndown',
+    'npm --prefix console run design:color-semantics',
+    'npm --prefix console run design:resilience',
+    'npm --prefix console run design:font-assets',
+    'npm --prefix console run design:brand-assets',
+    'npm --prefix console run design:lint-fixtures',
+    'npm run test:design-guards',
+  ].join(' && '),
   'verify:push:branch': [
     'npm run guard:repo:staged',
     'npm run guard:repo:branch-diff',
@@ -52,6 +73,7 @@ const requiredPackageScripts = {
     'npm run guard:lint:src',
     'npm run typecheck:all',
     'npm test',
+    'npm run verify:console-design',
   ].join(' && '),
   'verify:release': [
     'npm run guard:repo:release-hygiene',
@@ -75,6 +97,7 @@ const requiredPackageScripts = {
     'npm test',
     'npm run coverage:check',
     'npm --prefix console run build',
+    'npm run verify:console-design',
   ].join(' && '),
   'verify:publish': [
     'npm run guard:claude-settings',
@@ -83,6 +106,25 @@ const requiredPackageScripts = {
     'npm run guard:publication:release',
     'npm run verify:release',
   ].join(' && '),
+};
+
+const requiredConsolePackageScripts = {
+  'design:brand-assets': 'node scripts/check-brand-assets.mjs --fail-on-rule soup/brand-favicon-link-required',
+  'design:burndown': 'node scripts/check-design-burndown.mjs',
+  'design:capture': 'node scripts/capture-visual-matrix.mjs',
+  'design:capture:validate': 'node scripts/validate-visual-manifest.mjs',
+  'design:color-semantics': 'node scripts/check-color-semantics.mjs --fail-on-rule soup/no-component-local-palette --fail-on-rule soup/provider-palette-only --fail-on-rule soup/data-series-token-only --fail-on-rule soup/traffic-neutrality',
+  'design:contrast': 'node scripts/check-contrast-matrix.mjs',
+  'design:font-assets': 'node scripts/check-font-assets.mjs',
+  'design:lint-fixtures': 'node scripts/check-design-lint-fixtures.mjs',
+  'design:metrics': 'node scripts/design-metrics.mjs',
+  'design:raw-form-control-inventory': 'node scripts/check-raw-form-control-inventory.mjs',
+  'design:regression': 'bash scripts/design-regression.sh',
+  'design:resilience': 'node scripts/check-design-resilience.mjs --fail-on-rule soup/layer-owner-required --fail-on-rule soup/no-hover-only-content --fail-on-rule soup/no-layout-shift-interaction --fail-on-rule soup/no-raw-viewport-js --fail-on-rule soup/no-static-viewport-height --fail-on-rule soup/no-unsafe-truncation --fail-on-rule soup/no-vw-font-size --fail-on-rule soup/scroll-owner-required',
+  'design:shadow-frozen-inventory': 'node scripts/check-shadow-frozen-inventory.mjs',
+  'design:theme-parity': 'node scripts/check-theme-parity.mjs',
+  'design:token-drift': 'node scripts/check-token-spec-drift.mjs',
+  'lint:shadow:baseline': 'node scripts/check-shadow-baseline.mjs',
 };
 
 const requiredFiles: Record<string, string> = {
@@ -156,6 +198,36 @@ const requiredFiles: Record<string, string> = {
     'GITHUB_ACTIONS=true',
     'baseline --check --ci',
   ].join('\n'),
+  '.github/workflows/quality.yml': [
+    'name: Install console dependencies',
+    'name: Design-system hygiene changed files',
+    'npm run guard:design-system-hygiene -- --changed-since',
+    'name: Console build',
+    'name: Console design verification',
+    'run: npm run verify:console-design',
+    'name: Install Playwright chromium',
+    'run: npx playwright install chromium --with-deps',
+    'name: Browser test suite',
+    'run: npm run test:browser',
+    'name: Browser motion test suite',
+    'run: npm run test:browser:motion',
+    'tests/browser/__screenshots__',
+    'tests/browser-motion/__screenshots__',
+  ].join('\n'),
+  '.github/workflows/tag-release-gate.yml': [
+    'name: Install console dependencies',
+    'name: Console build',
+    'name: Console design verification',
+    'run: npm run verify:console-design',
+  ].join('\n'),
+  '.husky/pre-commit': [
+    'npm run guard:repo:staged',
+    'npm run guard:publication:staged',
+    'npm run guard:design-system-hygiene',
+    'npm run guard:node-pin-consistency',
+    'npm run guard:claude-settings',
+    'lint-staged',
+  ].join('\n'),
   'scripts/check-bot-errors-runtime-manifest.ts': [
     'REQUIRED_RUNTIME_MANIFEST_PATHS',
     'missing-required-path',
@@ -175,6 +247,7 @@ function writeRepoFile(repo: string, relativePath: string, text: string): void {
 }
 
 function makeRepo(options: {
+  consoleScripts?: Record<string, string | undefined>;
   scripts?: Record<string, string | undefined>;
   files?: Record<string, string | undefined>;
   trackedExtras?: Record<string, string>;
@@ -186,6 +259,12 @@ function makeRepo(options: {
     if (value === undefined) delete scripts[name as keyof typeof scripts];
   }
   writeRepoFile(repo, 'package.json', JSON.stringify({ scripts }, null, 2));
+
+  const consoleScripts = { ...requiredConsolePackageScripts, ...(options.consoleScripts ?? {}) };
+  for (const [name, value] of Object.entries(consoleScripts)) {
+    if (value === undefined) delete consoleScripts[name as keyof typeof consoleScripts];
+  }
+  writeRepoFile(repo, 'console/package.json', JSON.stringify({ scripts: consoleScripts }, null, 2));
 
   const files = { ...requiredFiles, ...(options.files ?? {}) };
   for (const [filePath, text] of Object.entries(files)) {
@@ -207,6 +286,7 @@ function makeNonGitTree(): string {
   const repo = mkdtempSync(path.join(tmpdir(), 'safeguard-diagnostics-nongit-'));
   tempRepos.push(repo);
   writeRepoFile(repo, 'package.json', JSON.stringify({ scripts: requiredPackageScripts }, null, 2));
+  writeRepoFile(repo, 'console/package.json', JSON.stringify({ scripts: requiredConsolePackageScripts }, null, 2));
   for (const [filePath, text] of Object.entries(requiredFiles)) {
     writeRepoFile(repo, filePath, `${text}\n`);
   }
@@ -239,6 +319,17 @@ describe('safeguard diagnostics', () => {
     });
   });
 
+  it('fails when the browser motion proof script is missing', () => {
+    const fixture = makeRepo({ scripts: { 'test:browser:motion': undefined } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'required-package-scripts')).toMatchObject({
+      status: 'fail',
+      evidence: expect.arrayContaining(['test:browser:motion']),
+    });
+  });
+
   it('fails when a verify chain omits the diagnostic guard', () => {
     const fixture = makeRepo({
       scripts: {
@@ -251,6 +342,155 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'branch-push-chain')?.evidence)
       .toContain('missing npm run guard:safeguard-diagnostics');
+  });
+
+  it('fails when the shared console design verification chain omits resilience coverage', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:console-design': requiredPackageScripts['verify:console-design']
+          .replace(' && npm --prefix console run design:resilience', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+      .toContain('missing npm --prefix console run design:resilience');
+  });
+
+  it('fails when the shared console design verification chain omits raw form-control inventory coverage', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:console-design': requiredPackageScripts['verify:console-design']
+          .replace(' && npm --prefix console run design:raw-form-control-inventory', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+      .toContain('missing npm --prefix console run design:raw-form-control-inventory');
+  });
+
+  it('fails when the shared console design verification chain omits scanner fixture tests', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:console-design': requiredPackageScripts['verify:console-design']
+          .replace(' && npm run test:design-guards', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+      .toContain('missing npm run test:design-guards');
+  });
+
+  it('fails when the shared console design verification chain omits frozen shadow inventory coverage', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:console-design': requiredPackageScripts['verify:console-design']
+          .replace(' && npm --prefix console run design:shadow-frozen-inventory', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-design-chain')?.evidence)
+      .toContain('missing npm --prefix console run design:shadow-frozen-inventory');
+  });
+
+  it('fails when a new non-capture console design script is not wired into shared verification', () => {
+    const fixture = makeRepo({
+      consoleScripts: {
+        'design:new-audit': 'node scripts/check-new-audit.mjs',
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-design-script-coverage')?.evidence)
+      .toContain('missing npm --prefix console run design:new-audit');
+  });
+
+  it('does not require visual capture-only scripts in shared console design verification', () => {
+    const fixture = makeRepo();
+    const result = checkSafeguards(fixture);
+    const coverage = result.checks.find((check) => check.id === 'console-design-script-coverage');
+
+    expect(coverage).toMatchObject({ status: 'pass' });
+    expect(coverage?.evidence).not.toContain('npm --prefix console run design:capture');
+    expect(coverage?.evidence).not.toContain('npm --prefix console run design:capture:validate');
+  });
+
+  it('fails when the pre-commit hook omits design-system documentation hygiene', () => {
+    const fixture = makeRepo({
+      files: {
+        '.husky/pre-commit': requiredFiles['.husky/pre-commit']
+          .replace('npm run guard:design-system-hygiene\n', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'pre-commit-design-system-hygiene'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['npm run guard:design-system-hygiene']) });
+  });
+
+  it('fails when CI omits the shared console design verification chain', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': requiredFiles['.github/workflows/quality.yml']
+          .replace('run: npm run verify:console-design', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
+  });
+
+  it('fails when CI omits the no-reduce browser motion proof', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': requiredFiles['.github/workflows/quality.yml']
+          .replace('run: npm run test:browser:motion', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run test:browser:motion']) });
+  });
+
+  it('fails when CI omits design-system hygiene changed-range coverage', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': requiredFiles['.github/workflows/quality.yml']
+          .replace('npm run guard:design-system-hygiene -- --changed-since', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['npm run guard:design-system-hygiene -- --changed-since']) });
+  });
+
+  it('fails when tag release CI omits the shared console design verification chain', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/tag-release-gate.yml': requiredFiles['.github/workflows/tag-release-gate.yml']
+          .replace('run: npm run verify:console-design', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
   });
 
   it('fails when a sensitive-surface anchor is removed', () => {
