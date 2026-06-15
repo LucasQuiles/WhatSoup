@@ -1448,7 +1448,9 @@ button.soup-pill[aria-disabled="true"] {
    max-height + overflow-y: auto — governed scroll valve (~5 rows visible).
    Option rows: 28px compressed density (--row-compressed), hover --row-hover,
    selected --accent-wash + leading check mark.
-   Motion: fade+scale enter at --dur-fast; exit = instant on unmount (DD-19 pattern).
+   Motion: fade+scale enter at --dur-fast --ease-enter; exit faster-out per
+   motion.md §5: --dur-fast --ease-exit, gated on data-state="closing" via
+   use-exit-presence deferred unmount (same pattern as Modal/Drawer, B5 §4.2).
    Reduced-motion: both instant via the global @media prefers-reduced-motion block. */
 
 .soup-popover {
@@ -1466,6 +1468,14 @@ button.soup-pill[aria-disabled="true"] {
   animation: soup-popover-in var(--dur-fast) var(--ease-enter) forwards;
 }
 
+/* Exit animation — applied via data-state="closing" by use-exit-presence.
+   Faster-out per motion.md §5: --dur-fast --ease-exit.
+   pointer-events: none so clicks land immediately on the content beneath. */
+.soup-popover[data-state="closing"] {
+  animation: soup-popover-out var(--dur-fast) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+
 @keyframes soup-popover-in {
   from {
     opacity: 0;
@@ -1477,8 +1487,21 @@ button.soup-pill[aria-disabled="true"] {
   }
 }
 
+/* Exit keyframe — reverse of enter: fade + slight scale-down + translate up */
+@keyframes soup-popover-out {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.97) translateY(-4px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .soup-popover {
+  .soup-popover,
+  .soup-popover[data-state="closing"] {
     animation: none;
   }
 }
