@@ -58,3 +58,30 @@ def test_trust_rejects_unstamped_pin():
 def test_load_approved_f10_reads_ledger(tmp_path):
     led = tmp_path / "ledger.json"; led.write_text(json.dumps({"approved_f10": ["1448da21"+"0"*56]}))
     assert sp.load_approved_f10(led) == {"1448da21"+"0"*56}
+
+
+# ---------------------------------------------------------------------------
+# Increment 3 — bundle integrity
+# ---------------------------------------------------------------------------
+
+import hashlib
+
+
+def _write(p, content):
+    p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(content); return hashlib.sha256(content).hexdigest()
+
+
+def test_bundle_ok_when_all_files_match(tmp_path):
+    b = tmp_path / "bundle"
+    s1 = _write(b / "deploy/scripts/bot-errors-emit.py", b"emit\n")
+    s2 = _write(b / sp.F10_PATH, b"redact\n")
+    pin = sp.Pin(head_sha="a"*40, files={"deploy/scripts/bot-errors-emit.py": s1, sp.F10_PATH: s2}, f10_sha=s2)
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is True and mismatches == []
+
+
+def test_bundle_flags_missing_and_mismatch(tmp_path):
+    b = tmp_path / "bundle"; _write(b / sp.F10_PATH, b"WRONG\n")
+    pin = sp.Pin(head_sha="a"*40, files={"deploy/scripts/bot-errors-emit.py": "0"*64, sp.F10_PATH: "1"*64}, f10_sha="1"*64)
+    ok, mismatches = sp.verify_bundle(b, pin)
+    assert ok is False and {m[1] for m in mismatches} == {"missing", "sha"}
