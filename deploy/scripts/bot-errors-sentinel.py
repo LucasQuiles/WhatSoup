@@ -372,6 +372,14 @@ def default_host_record() -> dict:
     return {"alertState": "closed", "consecutive": 0, "transitions": []}
 
 
+def state_record(state: dict, key: str) -> dict:
+    record = state.get(key)
+    if not isinstance(record, dict):
+        record = {}
+        state[key] = record
+    return record
+
+
 def save_state(config: SentinelConfig, state: dict) -> None:
     atomic_write_json(state_path(config), state)
 
@@ -1162,7 +1170,7 @@ def emit_q_unavailable_event(state: dict, config: SentinelConfig, now: float, co
     if record is None:
         return []
     key = q_unavailable_key(record)
-    timeout_record = state.setdefault("qUnavailableEvent", {})
+    timeout_record = state_record(state, "qUnavailableEvent")
     if event_recently_emitted(timeout_record, key, now, config.action_event_cooldown_seconds):
         state.pop("qRemediation", None)
         return []
@@ -1225,7 +1233,7 @@ def emit_action_events(
         record["lastActionEventRequestId"] = request_id
 
     if fleet_action != "none":
-        fleet_record = state.setdefault("fleetActionEvent", {})
+        fleet_record = state_record(state, "fleetActionEvent")
         key = f"fleet:{fleet_action}"
         if not event_recently_emitted(fleet_record, key, now, config.action_event_cooldown_seconds):
             request_id = request_id_for(now, "fleet", "all", fleet_action, fleet_action)

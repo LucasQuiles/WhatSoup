@@ -832,6 +832,33 @@ def test_recent_q_unavailable_timeout_is_deduped_and_clears_inflight(tmp_path: P
     assert state["qUnavailableEvent"]["lastActionEventKey"] == key
 
 
+def test_malformed_q_unavailable_event_state_is_reinitialized(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {},
+            "qUnavailableEvent": ["corrupt"],
+            "qRemediation": {
+                "requestId": "request-1",
+                "host": "host-q",
+                "actionHash": "action-hash-1",
+                "expiresAtEpoch": 900.0,
+            },
+        },
+    )
+
+    result = _mod.run_once(config, _deps(1000.0, {"host-q": {"reachable": True, "healthy": True, "class": "healthy"}}))
+
+    assert result["actionEvents"][0]["action"] == "q_unavailable"
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert isinstance(state["qUnavailableEvent"], dict)
+    assert state["qUnavailableEvent"]["timedOutRequestId"] == "request-1"
+
+
 def test_expired_q_remediation_helper_edges():
     assert _mod.expired_q_remediation({}, 1000.0) is None
     assert _mod.expired_q_remediation({"qRemediation": []}, 1000.0) is None
@@ -874,6 +901,29 @@ def test_q_unavailable_timeout_respects_critical_whatsapp_cap(tmp_path: Path):
     assert q_event["criticalWhatsAppSuppressedReason"] == "daily_cap"
     assert digest["criticalWhatsAppAllowedCount"] == 1
     assert digest["criticalWhatsAppOverflowCount"] == 1
+
+
+def test_malformed_fleet_action_event_state_is_reinitialized(tmp_path: Path):
+    hosts_payload = []
+    probes = {}
+    for name in ("host-a", "host-b"):
+        hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=True, mtime=100.0)
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        probes[name] = {"reachable": False, "healthy": False, "class": "unreachable"}
+    hosts = _hosts_file(tmp_path, hosts_payload)
+    config = _config(tmp_path, hosts, connectivity_hysteresis_cycles=1)
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": {}, "fleetActionEvent": ["corrupt"]},
+    )
+
+    result = _mod.run_once(config, _deps(1000.0, probes))
+
+    assert result["fleetAction"] == "mass_unreachable_confirmed"
+    assert any(ref["scope"] == "fleet" and ref["action"] == "mass_unreachable_confirmed" for ref in result["actionEvents"])
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert isinstance(state["fleetActionEvent"], dict)
+    assert state["fleetActionEvent"]["lastActionEventKey"] == "fleet:mass_unreachable_confirmed"
 
 
 def test_probe_path_default_and_bad_heartbeat_json(tmp_path: Path):
