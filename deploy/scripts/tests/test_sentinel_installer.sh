@@ -46,6 +46,8 @@ common_env=(
   BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS=300
   BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS=21600
   BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY=8
+  BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS=1800
+  BOT_ERRORS_FLEET_SENTINEL_Q_HOST="q-agent-host"
 )
 
 PATH="$fakebin:$PATH" env "${common_env[@]}" \
@@ -69,6 +71,8 @@ grep -q 'BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD' "$plist" |
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd clock skew env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd action cooldown env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd whatsapp cap env"; cat "$plist"; exit 1; }
+grep -q 'BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd tier2 token ttl env"; cat "$plist"; exit 1; }
+grep -q 'BOT_ERRORS_FLEET_SENTINEL_Q_HOST' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd q host env"; cat "$plist"; exit 1; }
 grep -q 'dry_run=1' "$tmp/launchd.out" || { echo "SENTINEL_INSTALLER_FAIL launchd dry-run output"; cat "$tmp/launchd.out"; exit 1; }
 [[ ! -s "$tmp/launchd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL launchd invoked activation"; cat "$tmp/launchd.err"; exit 1; }
 
@@ -90,6 +94,8 @@ grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHO
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd clock skew env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd action cooldown env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd whatsapp cap env"; cat "$service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd tier2 token ttl env"; cat "$service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_Q_HOST=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd q host env"; cat "$service"; exit 1; }
 grep -q '^OnUnitActiveSec=1800s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd interval"; cat "$timer"; exit 1; }
 grep -q '^Persistent=true$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd persistent"; cat "$timer"; exit 1; }
 grep -q 'dry_run=1' "$tmp/systemd.out" || { echo "SENTINEL_INSTALLER_FAIL systemd dry-run output"; cat "$tmp/systemd.out"; exit 1; }

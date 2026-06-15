@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 import shlex
@@ -33,6 +34,8 @@ DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD = 2
 DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5 * 60
 DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS = 6 * 60 * 60
 DEFAULT_MAX_CRITICAL_WHATSAPP_PER_DAY = 8
+DEFAULT_TIER2_TOKEN_TTL_SECONDS = 30 * 60
+DEFAULT_Q_HOST = "q-agent-host"
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
 ACTION_EVENT_ACTIONS = {
     "tier1_heal_candidate",
@@ -125,6 +128,8 @@ class SentinelConfig:
     max_clock_skew_seconds: int = DEFAULT_MAX_CLOCK_SKEW_SECONDS
     action_event_cooldown_seconds: int = DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS
     max_critical_whatsapp_per_day: int = DEFAULT_MAX_CRITICAL_WHATSAPP_PER_DAY
+    tier2_token_ttl_seconds: int = DEFAULT_TIER2_TOKEN_TTL_SECONDS
+    q_host: str = DEFAULT_Q_HOST
 
 
 @dataclass(frozen=True)
@@ -209,6 +214,12 @@ def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] 
             DEFAULT_MAX_CRITICAL_WHATSAPP_PER_DAY,
             1,
         ),
+        tier2_token_ttl_seconds=positive_int_env(
+            "BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS",
+            DEFAULT_TIER2_TOKEN_TTL_SECONDS,
+            60,
+        ),
+        q_host=os.environ.get("BOT_ERRORS_FLEET_SENTINEL_Q_HOST", DEFAULT_Q_HOST).strip() or DEFAULT_Q_HOST,
     )
 
 
@@ -759,6 +770,96 @@ def stable_request_id(*parts: object) -> str:
     return hashlib.sha256(material).hexdigest()[:16]
 
 
+def remediation_action_hash(payload: dict) -> str:
+    material = json.dumps(
+        {
+            "scope": payload.get("scope"),
+            "host": payload.get("host"),
+            "class": payload.get("class"),
+            "action": payload.get("action"),
+            "reason": payload.get("reason"),
+            "evidence": payload.get("evidence"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def remediation_token_hash(token: str, host: str, action_hash: str, request_id: str) -> str:
+    material = f"{token}\0{host}\0{action_hash}\0{request_id}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def active_q_remediation(state: dict, now: float) -> Optional[dict]:
+    record = state.setdefault("qRemediation", {})
+    try:
+        expires_at = float(record.get("expiresAtEpoch"))
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    if expires_at > now and not record.get("redeemedAt"):
+        return record
+    record.clear()
+    return None
+
+
+def add_tier2_remediation(payload: dict, state: dict, config: SentinelConfig, now: float) -> None:
+    if payload.get("tier") != "tier2":
+        return
+    host = str(payload.get("host") or "unknown")
+    if host == config.q_host:
+        payload["remediation"] = {
+            "qEligible": False,
+            "reason": "q_host_self_failure",
+            "qHost": config.q_host,
+            "handledBy": "central_direct",
+        }
+        return
+    inflight = active_q_remediation(state, now)
+    if inflight:
+        payload["remediation"] = {
+            "qEligible": False,
+            "reason": "q_remediation_inflight",
+            "qHost": config.q_host,
+            "activeRequestId": inflight.get("requestId"),
+            "activeHost": inflight.get("host"),
+            "expiresAt": inflight.get("expiresAt"),
+        }
+        return
+
+    action_hash = remediation_action_hash(payload)
+    request_id = str(payload.get("requestId") or "")
+    token = secrets.token_urlsafe(24)
+    token_id = stable_request_id("tier2-token", host, request_id, action_hash)
+    expires_at_epoch = now + config.tier2_token_ttl_seconds
+    expires_at = now_iso(expires_at_epoch)
+    token_hash = remediation_token_hash(token, host, action_hash, request_id)
+    state["qRemediation"] = {
+        "tokenId": token_id,
+        "tokenHash": token_hash,
+        "requestId": request_id,
+        "host": host,
+        "actionHash": action_hash,
+        "issuedAt": now_iso(now),
+        "expiresAt": expires_at,
+        "expiresAtEpoch": expires_at_epoch,
+        "qHost": config.q_host,
+    }
+    payload["remediation"] = {
+        "kind": "q-remediation-request",
+        "qEligible": True,
+        "qHost": config.q_host,
+        "singleHost": True,
+        "requestId": request_id,
+        "targetHost": host,
+        "actionHash": action_hash,
+        "tokenId": token_id,
+        "token": token,
+        "tokenTtlSeconds": config.tier2_token_ttl_seconds,
+        "tokenExpiresAt": expires_at,
+    }
+
+
 def int_or_zero(value: object) -> int:
     try:
         return max(0, int(value))
@@ -935,6 +1036,7 @@ def emit_action_events(
         request_id = request_id_for(now, "host", subject, action, str(result.get("class") or "unknown"))
         path = action_event_path(config, now, "host", subject, action, request_id)
         payload = build_host_action_event(result, now, controller_host, fleet_action, request_id)
+        add_tier2_remediation(payload, state, config, now)
         digest_ref = apply_critical_whatsapp_budget(payload, state, config, now, controller_host)
         atomic_write_json(path, payload)
         ref = {"scope": "host", "host": subject, "action": action, "requestId": request_id, "path": str(path)}

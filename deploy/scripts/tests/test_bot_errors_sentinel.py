@@ -70,6 +70,8 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
         max_clock_skew_seconds=kwargs.get("max_clock_skew_seconds", 300),
         action_event_cooldown_seconds=kwargs.get("action_event_cooldown_seconds", 3600),
         max_critical_whatsapp_per_day=kwargs.get("max_critical_whatsapp_per_day", 8),
+        tier2_token_ttl_seconds=kwargs.get("tier2_token_ttl_seconds", 1800),
+        q_host=kwargs.get("q_host", "q-agent-host"),
     )
 
 
@@ -462,6 +464,86 @@ def test_critical_whatsapp_daily_cap_suppresses_overflow_and_updates_digest(tmp_
     assert state["criticalWhatsApp"]["overflowCount"] == 1
 
 
+def test_tier2_action_event_includes_q_remediation_token(tmp_path: Path, monkeypatch):
+    hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, tier2_token_ttl_seconds=900, q_host="q-agent-host")
+    monkeypatch.setattr(_mod.secrets, "token_urlsafe", lambda _length: "fixed-token")
+    result = _mod.run_once(
+        config,
+        _deps(1000.0, {"host-q": {"reachable": True, "healthy": False, "class": "permission_denied"}}),
+    )
+    assert len(result["actionEvents"]) == 1
+    payload = json.loads(Path(result["actionEvents"][0]["path"]).read_text(encoding="utf-8"))
+    remediation = payload["remediation"]
+    assert payload["tier"] == "tier2"
+    assert remediation["kind"] == "q-remediation-request"
+    assert remediation["qEligible"] is True
+    assert remediation["qHost"] == "q-agent-host"
+    assert remediation["targetHost"] == "host-q"
+    assert remediation["token"] == "fixed-token"
+    assert remediation["tokenTtlSeconds"] == 900
+    assert remediation["tokenExpiresAt"] == "1970-01-01T00:31:40Z"
+    assert remediation["actionHash"] == _mod.remediation_action_hash(payload)
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    q_state = state["qRemediation"]
+    assert q_state["host"] == "host-q"
+    assert q_state["requestId"] == remediation["requestId"]
+    assert q_state["actionHash"] == remediation["actionHash"]
+    assert q_state["tokenHash"] == _mod.remediation_token_hash(
+        "fixed-token",
+        "host-q",
+        remediation["actionHash"],
+        remediation["requestId"],
+    )
+    assert "fixed-token" not in json.dumps(q_state)
+
+
+def test_q_host_self_failure_is_not_routed_to_q(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "q-agent-host-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "q-agent-host", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, q_host="q-agent-host")
+    result = _mod.run_once(
+        config,
+        _deps(1000.0, {"q-agent-host": {"reachable": True, "healthy": False, "class": "permission_denied"}}),
+    )
+    payload = json.loads(Path(result["actionEvents"][0]["path"]).read_text(encoding="utf-8"))
+    assert payload["tier"] == "tier2"
+    assert payload["remediation"] == {
+        "qEligible": False,
+        "reason": "q_host_self_failure",
+        "qHost": "q-agent-host",
+        "handledBy": "central_direct",
+    }
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert state.get("qRemediation") in (None, {})
+
+
+def test_q_remediation_is_one_host_at_a_time(tmp_path: Path, monkeypatch):
+    hosts_payload = []
+    probes = {}
+    for name in ("host-a", "host-b"):
+        hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        probes[name] = {"reachable": True, "healthy": False, "class": "permission_denied"}
+    hosts = _hosts_file(tmp_path, hosts_payload)
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, q_host="q-agent-host")
+    monkeypatch.setattr(_mod.secrets, "token_urlsafe", lambda _length: "first-token")
+    result = _mod.run_once(config, _deps(1000.0, probes))
+    host_events = [
+        json.loads(Path(ref["path"]).read_text(encoding="utf-8"))
+        for ref in result["actionEvents"]
+        if ref["scope"] == "host"
+    ]
+    assert host_events[0]["host"] == "host-a"
+    assert host_events[0]["remediation"]["qEligible"] is True
+    assert host_events[0]["remediation"]["token"] == "first-token"
+    assert host_events[1]["host"] == "host-b"
+    assert host_events[1]["remediation"]["qEligible"] is False
+    assert host_events[1]["remediation"]["reason"] == "q_remediation_inflight"
+    assert host_events[1]["remediation"]["activeHost"] == "host-a"
+
+
 def test_probe_path_default_and_bad_heartbeat_json(tmp_path: Path):
     probe = _write_json(tmp_path / "probe.json", {"reachable": True, "healthy": True, "class": "healthy"})
     spec = _mod.HostSpec(host="host-a", probe_path=probe)
@@ -698,6 +780,8 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY", "0")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS", "0")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_Q_HOST", "q-custom")
     config = _mod.default_config(tmp_path / "hosts.json", tmp_path / "state")
     assert config.heartbeat_max_age_seconds == _mod.DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     assert config.hysteresis_cycles == 1
@@ -709,6 +793,8 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
     assert config.max_clock_skew_seconds == 1
     assert config.action_event_cooldown_seconds == 1
     assert config.max_critical_whatsapp_per_day == 1
+    assert config.tier2_token_ttl_seconds == 60
+    assert config.q_host == "q-custom"
 
     healthy_hb = _heartbeat(tmp_path / "healthy.json", healthy=True, mtime=1000.0)
     healthy_probe = _write_json(tmp_path / "healthy-probe.json", {"reachable": True, "healthy": True, "class": "healthy"})

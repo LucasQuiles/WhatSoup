@@ -59,7 +59,7 @@ resolve_platform() {
 
 write_launchd() {
   local plist="$LAUNCH_AGENTS/$LABEL.plist"
-  local label_xml repo_xml py_xml script_xml state_xml sentinel_xml hosts_xml oracle_xml action_outbox_xml heartbeat_xml hysteresis_xml connectivity_hysteresis_xml flap_window_xml flap_threshold_xml max_tier1_xml correlated_xml clock_skew_xml action_cooldown_xml whatsapp_cap_xml stdout_xml stderr_xml
+  local label_xml repo_xml py_xml script_xml state_xml sentinel_xml hosts_xml oracle_xml action_outbox_xml heartbeat_xml hysteresis_xml connectivity_hysteresis_xml flap_window_xml flap_threshold_xml max_tier1_xml correlated_xml clock_skew_xml action_cooldown_xml whatsapp_cap_xml tier2_token_ttl_xml q_host_xml stdout_xml stderr_xml
   label_xml=$(xml_escape "$LABEL")
   repo_xml=$(xml_escape "$REPO_ROOT")
   py_xml=$(xml_escape "$PYTHON")
@@ -79,6 +79,8 @@ write_launchd() {
   clock_skew_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS:-300}")
   action_cooldown_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS:-21600}")
   whatsapp_cap_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY:-8}")
+  tier2_token_ttl_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS:-1800}")
+  q_host_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_Q_HOST:-q-agent-host}")
   stdout_xml=$(xml_escape "$STATE_DIR/logs/sentinel.out.log")
   stderr_xml=$(xml_escape "$STATE_DIR/logs/sentinel.err.log")
 
@@ -116,6 +118,8 @@ write_launchd() {
     <key>BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS</key><string>$clock_skew_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS</key><string>$action_cooldown_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY</key><string>$whatsapp_cap_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS</key><string>$tier2_token_ttl_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_Q_HOST</key><string>$q_host_xml</string>
   </dict>
   <key>WorkingDirectory</key><string>$repo_xml</string>
   <key>RunAtLoad</key><true/>
@@ -142,7 +146,7 @@ PLIST
 write_systemd() {
   local service="$SYSTEMD_USER_DIR/$UNIT.service"
   local timer="$SYSTEMD_USER_DIR/$UNIT.timer"
-  local repo_q py_q script_q state_q sentinel_q hosts_q oracle_q action_outbox_q heartbeat_q hysteresis_q connectivity_hysteresis_q flap_window_q flap_threshold_q max_tier1_q correlated_q clock_skew_q action_cooldown_q whatsapp_cap_q
+  local repo_q py_q script_q state_q sentinel_q hosts_q oracle_q action_outbox_q heartbeat_q hysteresis_q connectivity_hysteresis_q flap_window_q flap_threshold_q max_tier1_q correlated_q clock_skew_q action_cooldown_q whatsapp_cap_q tier2_token_ttl_q q_host_q
   repo_q=$(systemd_quote "$REPO_ROOT")
   py_q=$(systemd_quote "$PYTHON")
   script_q=$(systemd_quote "$SENTINEL_SCRIPT")
@@ -161,6 +165,8 @@ write_systemd() {
   clock_skew_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS:-300}")
   action_cooldown_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS:-21600}")
   whatsapp_cap_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY:-8}")
+  tier2_token_ttl_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS:-1800}")
+  q_host_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_Q_HOST:-q-agent-host}")
 
   mkdir -p "$SYSTEMD_USER_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR"
   chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR" 2>/dev/null || true
@@ -187,6 +193,8 @@ Environment="BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD=$correl
 Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS=$clock_skew_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS=$action_cooldown_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY=$whatsapp_cap_q"
+Environment="BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS=$tier2_token_ttl_q"
+Environment="BOT_ERRORS_FLEET_SENTINEL_Q_HOST=$q_host_q"
 ExecStart=$py_q $script_q --hosts $hosts_q --state-dir $sentinel_q
 SyslogIdentifier=bot-errors-sentinel
 SERVICE
