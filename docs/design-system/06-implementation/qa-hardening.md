@@ -580,7 +580,7 @@ The audit scans `console/src` for promoted and report-only findings:
 - `soup/layer-owner-required` candidates: raw z-index utilities that do not consume `--z-*` tokens;
 - `soup/no-raw-viewport-js` candidates: component-local `window.innerWidth`, `window.innerHeight`,
   `window.matchMedia`, or global `matchMedia` reads outside sanctioned breakpoint/placement owner
-  hooks (report-only until the single `MessageBubble` debt site migrates).
+  hooks (promoted: fails the package script);
 
 Reviewers apply these rule-of-thumb checks before accepting any migrated surface:
 
@@ -598,16 +598,16 @@ Reviewers apply these rule-of-thumb checks before accepting any migrated surface
 | Motion and reveal | Motion clarifies state changes but does not carry required information; reduced motion has an equivalent static state. | Information appears only during animation or reveal timing. |
 
 A finding in any current `check-design-resilience.mjs` lane fails the package script through explicit
-`--fail-on-rule` flags: raw `z-*` / `z-[N]` layering, missing full-value paths for clipped text,
-missing scroll-owner min-size proof, geometry-changing interaction states, hover-only content, and
-viewport-width typography are all blocking. The checker still emits structured JSON with per-rule
-counts and sample file/line evidence; `--fail-on-findings` remains available for future lanes before
-they receive named `--fail-on-rule` promotion flags.
+`--fail-on-rule` flags: raw `z-*` / `z-[N]` layering, component-local raw viewport JS, missing
+full-value paths for clipped text, missing scroll-owner min-size proof, geometry-changing interaction
+states, hover-only content, and viewport-width typography are all blocking. The checker still emits
+structured JSON with per-rule counts and sample file/line evidence; `--fail-on-findings` remains
+available for future lanes before they receive named `--fail-on-rule` promotion flags.
 
-A PASS means the current source scan has zero findings in the promoted resilience lanes; report-only
-lanes must still be read from `by_rule` and the sample findings. It does not replace long-string
-screenshots, reduced-height screenshots, keyboard/touch tests, focus-ring checks, or reviewer
-inspection.
+A PASS means the current source scan has zero findings in the promoted resilience lanes; any future
+report-only lanes must still be read from `by_rule` and the sample findings. It does not replace
+long-string screenshots, reduced-height screenshots, keyboard/touch tests, focus-ring checks, or
+reviewer inspection.
 
 ### 17.6 Font Asset Integrity Guard
 

@@ -91,7 +91,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-hover-only-content | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | hover-revealed content needs keyboard/focus parity |
 | soup/no-vw-font-size | package-script fail-on-rule | global-error | P4/G7 | typography must use tokenized type scale, not viewport width |
 | soup/layer-owner-required | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | z-index uses `--z-*` layer tokens or a documented owner |
-| soup/no-raw-viewport-js | report-only resilience script + exact inventory test | scoped-error after hook exists | P4/G7 | viewport branching must route through `useBreakpoint` / `useViewportPlacement`, not local `window.innerWidth` or `matchMedia` reads |
+| soup/no-raw-viewport-js | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | viewport branching must route through `useBreakpoint` / `useViewportPlacement`, not local `window.innerWidth` or `matchMedia` reads |
 | soup/no-duplicate-shell | shadow (advisory) | warn-on-changed-files | P2 | heuristic; routes to duplication-register, never error |
 | soup/theme-parity (script) | CI-blocking script | CI-blocking script | P1 | not an ESLint rule; section 5 |
 | soup/icon-family | scoped-error | global-error | P1 | zero current violations (lucide-react only) |
@@ -653,16 +653,17 @@ cannot express the check).
 - **Purpose:** viewport branching has one owner. Components must not hand-roll breakpoint or placement
   decisions from `window.innerWidth`, `window.innerHeight`, `window.matchMedia`, or global
   `matchMedia`; those reads belong in a sanctioned `useBreakpoint` / `useViewportPlacement` helper.
-- **Mechanism:** report-only resilience script plus an exact real-source inventory test. The package
-  script does not fail on this rule yet because `MessageBubble` still has one direct placement read.
-- **Scope:** `console/src/**`, excluding the future sanctioned hook owners
+- **Mechanism:** package-script fail-on-rule resilience script plus an exact real-source inventory
+  test. The package script fails on new component-local raw viewport reads.
+- **Scope:** `console/src/**`, excluding the sanctioned hook/helper owners
   `console/src/hooks/useBreakpoint.*` and `console/src/hooks/useViewportPlacement.*`.
 - **Violation / valid:** `const clipped = rect.left + w > window.innerWidth` in a component ->
   delegate to a viewport placement helper; raw viewport reads inside the helper are valid.
 - **FP strategy:** fixtures cover invalid component-local reads, valid sanctioned-owner hook reads,
-  and the real-tree inventory pinned to the single current `MessageBubble` site.
-- **Autofix:** no. **Phase:** P4/G7. **Entry:** report-only script + inventory ratchet; promote only
-  after the debt site migrates to a hook and the real-source count reaches zero.
+  and the real-tree inventory pinned to zero.
+- **Autofix:** no. **Phase:** P4/G7. **Entry:** package-script fail-on-rule; promoted 2026-06-15
+  after the `MessageBubble` placement read migrated to `useViewportPlacement` and the real-source
+  count reached zero.
 
 ### soup/no-duplicate-shell
 

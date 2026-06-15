@@ -2,6 +2,7 @@ import { type FC, useState, useRef, useCallback } from 'react'
 import { UserPlus, Check, X, RotateCw } from 'lucide-react'
 import { resolveDisplayName } from '../lib/text-utils'
 import { formatFullTime, formatTime } from '../lib/format-time'
+import { resolveViewportPlacement, type ViewportPlacement } from '../hooks/useViewportPlacement'
 import MessageContent from './MessageContent'
 import { Button } from './primitives/Button'
 import type { Message } from '../types'
@@ -17,13 +18,10 @@ interface MessageBubbleProps {
   onRetry?: (msg: Message) => void
 }
 
-/** Card placement resolved by edge measurement. */
-type CardPlacement = 'above' | 'below'
-
 const isRawJid = (name: string) => /^\d{5,}$/.test(name)
 
 /** Styled hover/focus detail card — shown on hover or focus. */
-const DetailCard: FC<{ msg: Message; placement: CardPlacement; rightAnchored: boolean }> = ({
+const DetailCard: FC<{ msg: Message; placement: ViewportPlacement; rightAnchored: boolean }> = ({
   msg,
   placement,
   rightAnchored,
@@ -107,7 +105,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
   const isMedia = msg.type !== 'text'
   const [showByHover, setShowByHover] = useState(false)
   const [showByFocus, setShowByFocus] = useState(false)
-  const [placement, setPlacement] = useState<CardPlacement>('above')
+  const [placement, setPlacement] = useState<ViewportPlacement>('above')
   const [rightAnchored, setRightAnchored] = useState(false)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
@@ -131,10 +129,13 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
     if (rect.width === 0 && rect.height === 0 && rect.top === 0 && rect.left === 0) return
     const estimatedCardHeight = 160
     const estimatedCardWidth = 220
-    const wouldClipTop = rect.top - estimatedCardHeight < 0
-    const wouldClipRight = rect.left + estimatedCardWidth > window.innerWidth
-    setPlacement(wouldClipTop ? 'below' : 'above')
-    setRightAnchored(wouldClipRight)
+    const nextPlacement = resolveViewportPlacement({
+      anchorRect: rect,
+      estimatedCardHeight,
+      estimatedCardWidth,
+    })
+    setPlacement(nextPlacement.placement)
+    setRightAnchored(nextPlacement.rightAnchored)
   }, [])
 
   // ── Hover path (500ms delay — byte-identical to original semantics) ────────
