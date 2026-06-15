@@ -976,6 +976,11 @@ button.soup-pill[aria-disabled="true"] {
   outline-offset: -2px; /* inset, stays inside the seg frame */
 }
 
+.soup-toolbar-seg__btn:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: not-allowed;
+}
+
 /* Search input wrapper */
 .soup-toolbar-search-wrap {
   display: inline-flex;
@@ -989,7 +994,7 @@ button.soup-pill[aria-disabled="true"] {
   width: 1px;
   height: 1px;
   overflow: hidden;
-  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 

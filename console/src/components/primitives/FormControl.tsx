@@ -15,7 +15,9 @@ import {
 
 function borderColor(error?: boolean, confirmed?: boolean): string {
   if (error) return 'var(--status-crit-fg)';
-  if (confirmed) return 'var(--wizard-accent)';
+  // Product-global accent: --wizard-accent only resolves inside .wizard-accent-scope,
+  // leaving the confirmed border invisible for non-wizard consumers of this primitive.
+  if (confirmed) return 'var(--accent)';
   return 'var(--border-subtle)';
 }
 
@@ -181,7 +183,7 @@ export const TextArea: FC<TextAreaProps> = ({
       maxHeight,
       overflow,
       resize: resize ?? 'vertical',
-      filter: dimmed ? 'brightness(0.7)' : undefined,
+      opacity: dimmed ? 'var(--opacity-muted)' : undefined,
       borderColor: borderColor(error, confirmed),
     }}
   />
