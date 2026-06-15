@@ -324,14 +324,15 @@ function synthesizeHealthEvents(
 
     if (prevStatus && prevStatus !== currStatus) {
       if (currStatus === 'online' && prevStatus !== 'online') {
+        const level = healthStatusLevel(currStatus);
         events.push({
           time: now,
           mode: inst.type,
-          text: `${inst.name}: came online`,
+          text: `${inst.name}: ${healthStatusMessage(currStatus, poll.error)}`,
           instance: inst.name,
           provider: inst.provider,
           component: 'health',
-          level: 'info',
+          level,
           detail: healthDetail(poll, prevStatus),
         });
       } else {
@@ -626,7 +627,7 @@ function enrichMessagePreviews(
       // 2. Enrich events that matched by messageId
       for (const e of withIds) {
         const d = e.detail as MessageDetail;
-        const row = d.messageId ? dbRows.get(d.messageId) : undefined;
+        const row = dbRows.get(d.messageId as string);
         if (row) {
           d.preview = sanitizePreview(row.content);
           d.senderName = d.senderName ?? row.sender_name ?? undefined;
