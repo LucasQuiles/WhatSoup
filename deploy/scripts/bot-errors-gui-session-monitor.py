@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -125,3 +126,53 @@ def _norm(value) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+# --- emit-decision (consecutive-failure threshold gating) ------------------
+
+DEFAULT_FAILURE_THRESHOLD = 2
+
+
+def default_failure_threshold() -> int:
+    """Configurable consecutive-failure threshold before emitting (default 2).
+
+    Honors BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD; a non-positive or
+    unparseable override falls back to the safe default rather than ever
+    disabling alerting (fail-closed configuration).
+    """
+    raw = os.environ.get("BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD", "").strip()
+    if not raw:
+        return DEFAULT_FAILURE_THRESHOLD
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_FAILURE_THRESHOLD
+    return value if value >= 1 else DEFAULT_FAILURE_THRESHOLD
+
+
+@dataclass(frozen=True)
+class EmitDecision:
+    should_emit: bool
+    reason: str
+
+
+def evaluate_emit_decision(*, state: str, consecutive_failures: int, threshold: int) -> EmitDecision:
+    """Decide whether a non-ok state has persisted long enough to alert.
+
+    A single transient blip must not page; we require ``threshold`` consecutive
+    non-ok observations. ``ok`` never emits.
+    """
+    if state == STATE_OK:
+        return EmitDecision(should_emit=False, reason="state_ok")
+    if state not in NON_OK_STATES:
+        # Unknown state is itself a problem, but gate it like any non-ok state.
+        pass
+    if consecutive_failures < threshold:
+        return EmitDecision(
+            should_emit=False,
+            reason=f"below_threshold:{consecutive_failures}/{threshold}",
+        )
+    return EmitDecision(
+        should_emit=True,
+        reason=f"threshold_met:{consecutive_failures}/{threshold}",
+    )

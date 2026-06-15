@@ -38,6 +38,10 @@ def _load_module(extra_env: dict[str, str] | None = None):
         spec = importlib.util.spec_from_file_location("bot_errors_gui_session_monitor", _SCRIPT)
         mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
         assert spec and spec.loader
+        # Register before exec so dataclass field-type resolution under
+        # `from __future__ import annotations` can find the module's namespace
+        # (importlib best practice; see feedback_dataclass_future_annotations_importlib).
+        sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
         return mod
     finally:
@@ -221,3 +225,60 @@ def test_classify_inconclusive_when_expected_user_unknown(mod):
     )
     assert result != "ok"
     assert result == "inconclusive"
+
+
+# ---------------------------------------------------------------------------
+# Test 7: consecutive-failure threshold gating (default 2)
+# ---------------------------------------------------------------------------
+
+
+def test_threshold_default_is_two(mod):
+    assert mod.default_failure_threshold() == 2
+
+
+def test_should_emit_false_when_state_ok(mod):
+    # An ok state never emits, regardless of count.
+    decision = mod.evaluate_emit_decision(
+        state="ok", consecutive_failures=5, threshold=2,
+    )
+    assert decision.should_emit is False
+
+
+def test_should_emit_false_below_threshold(mod):
+    # First non-ok observation (count==1) must NOT emit at threshold 2.
+    decision = mod.evaluate_emit_decision(
+        state="gui_session_absent", consecutive_failures=1, threshold=2,
+    )
+    assert decision.should_emit is False
+
+
+def test_should_emit_true_at_threshold(mod):
+    decision = mod.evaluate_emit_decision(
+        state="gui_session_absent", consecutive_failures=2, threshold=2,
+    )
+    assert decision.should_emit is True
+
+
+def test_should_emit_true_above_threshold(mod):
+    decision = mod.evaluate_emit_decision(
+        state="agent_unloaded", consecutive_failures=4, threshold=2,
+    )
+    assert decision.should_emit is True
+
+
+def test_unreachable_also_gated_by_threshold(mod):
+    below = mod.evaluate_emit_decision(
+        state="unreachable", consecutive_failures=1, threshold=2,
+    )
+    at = mod.evaluate_emit_decision(
+        state="unreachable", consecutive_failures=2, threshold=2,
+    )
+    assert below.should_emit is False
+    assert at.should_emit is True
+
+
+def test_threshold_one_emits_immediately(mod):
+    decision = mod.evaluate_emit_decision(
+        state="inconclusive", consecutive_failures=1, threshold=1,
+    )
+    assert decision.should_emit is True
