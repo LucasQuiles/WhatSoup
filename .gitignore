@@ -92,3 +92,7 @@ codex-exec-deep-dive.md
 tests/browser/__screenshots__/
 # vitest 4 attachment artifacts (failure screenshots routed through the attachments API)
 .vitest-attachments/
+
+# pytest-cov data file
+.coverage
+.coverage.*

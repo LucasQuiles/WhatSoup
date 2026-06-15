@@ -278,6 +278,19 @@ describe('quality workflow composition', () => {
     expect(qualityWorkflow).toContain("WHATSOUP_REQUIRE_TEST_INTEGRITY: '1'");
   });
 
+  it('sets up Python 3.12 with pytest-cov before Python-backed gates run', () => {
+    const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
+    const pythonDepsIndex = qualityWorkflow.indexOf('name: Install Python test dependencies');
+    const testIntegrityIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
+
+    expect(setupPythonIndex).toBeGreaterThanOrEqual(0);
+    expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
+    expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
+    expect(qualityWorkflow).toContain('uses: actions/setup-python@v5');
+    expect(qualityWorkflow).toContain("python-version: '3.12'");
+    expect(qualityWorkflow).toContain('python3 -m pip install --user pytest pytest-cov');
+  });
+
   it('runs the commit-author guard in CI quality workflow', () => {
     expect(qualityWorkflow).toContain('npm run guard:repo:commit-authors');
   });
@@ -297,6 +310,17 @@ describe('quality workflow composition', () => {
 
     expect(runtimeManifestIndex).toBeGreaterThanOrEqual(0);
     expect(simulationIndex).toBeGreaterThan(runtimeManifestIndex);
+  });
+
+  it('runs the sentinel coverage and deployer mutation gate in CI after the simulation matrix', () => {
+    const simulationIndex = qualityWorkflow.indexOf('npm run guard:bot-errors-simulation-matrix');
+    const sentinelGateIndex = qualityWorkflow.indexOf('bash deploy/scripts/run-sentinel-tests.sh');
+    const testSuiteIndex = qualityWorkflow.indexOf('name: Test suite');
+
+    expect(simulationIndex).toBeGreaterThanOrEqual(0);
+    expect(sentinelGateIndex).toBeGreaterThan(simulationIndex);
+    expect(testSuiteIndex).toBeGreaterThan(sentinelGateIndex);
+    expect(qualityWorkflow).toContain('name: BOT ERRORS sentinel coverage and deployer mutation gate');
   });
 
   it('runs the standalone guard package test workflow', () => {

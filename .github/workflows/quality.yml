@@ -42,11 +42,16 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
 
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install dependencies
         run: npm ci
 
       - name: Install Python test dependencies
-        run: python3 -m pip install --user pytest
+        run: python3 -m pip install --user pytest pytest-cov
 
       # ripgrep is a hard requirement of console/scripts/design-regression.sh
       # (the design:regression gate + tests/scripts/design-regression-guards).
@@ -154,6 +159,9 @@ jobs:
 
       - name: Simulation matrix guard
         run: npm run guard:bot-errors-simulation-matrix
+
+      - name: BOT ERRORS sentinel coverage and deployer mutation gate
+        run: bash deploy/scripts/run-sentinel-tests.sh
 
       - name: Harness maintenance manifest guard
         run: npm run guard:harness-maintenance
