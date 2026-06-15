@@ -1340,7 +1340,16 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
             record = default_host_record()
             host_state[spec.host] = record
         heartbeat = heartbeat_inventory(spec, now, config.heartbeat_max_age_seconds, config.max_clock_skew_seconds)
-        probe = normalize_probe(deps.pull_probe(spec))
+        try:
+            raw_probe = deps.pull_probe(spec)
+        except Exception as exc:
+            raw_probe = {
+                "reachable": True,
+                "healthy": False,
+                "class": "probe_error",
+                "error": f"{type(exc).__name__}: {exc}"[:300],
+            }
+        probe = normalize_probe(raw_probe)
         result = evaluate_host(spec, heartbeat, probe, record, now, config)
         results.append(result)
 

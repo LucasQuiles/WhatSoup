@@ -1331,6 +1331,25 @@ def test_malformed_pull_probe_payload_fails_closed_without_crashing(tmp_path: Pa
     assert host["probe"]["error"] == "probe payload must be a JSON object"
 
 
+def test_pull_probe_exception_is_contained_per_host(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    deps = _mod.SentinelDeps(
+        now_epoch=lambda: 1000.0,
+        hostname=lambda: "central-test",
+        pull_probe=lambda _spec: (_ for _ in ()).throw(RuntimeError("probe exploded")),
+        reachability_oracle=lambda: {"configured": False, "reachable": True, "class": "not_configured"},
+    )
+
+    result = _mod.run_once(_config(tmp_path, hosts), deps)
+
+    host = result["hosts"][0]
+    assert host["class"] == "probe_unhealthy"
+    assert host["action"] == "monitor_only"
+    assert host["probe"]["class"] == "probe_error"
+    assert host["probe"]["error"] == "RuntimeError: probe exploded"
+
+
 def test_transition_pruning_and_state_cleanup(tmp_path: Path):
     record = {"transitions": ["bad", 1.0, 995.0, 1005.0, float("inf")]}
     assert _mod.prune_transition_times(record, 1000.0, 10) == [995.0]
