@@ -239,6 +239,29 @@ describe('check-brand-assets.mjs', () => {
     ]));
   });
 
+  it('fails on legacy product or channel copy in referenced public SVG assets', () => {
+    const fixture = makeFixture({
+      extraConsoleFiles: {
+        'src/IconPreview.tsx': 'export const iconPath = "/icons/used.svg";\n',
+      },
+      extraPublicFiles: {
+        'icons/used.svg': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><title>Soup Kitchen via WhatsApp</title></svg>\n',
+      },
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.failures.filter((failure) => failure.code === 'PERIPHERAL_BRAND_COPY')).toHaveLength(2);
+    expect(output.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'PERIPHERAL_BRAND_COPY',
+        target: join(fixture.root, 'console/public/icons/used.svg'),
+      }),
+    ]));
+  });
+
   it('fails when a public SVG asset is not referenced by the shell, manifest, or console source', () => {
     const fixture = makeFixture({
       extraPublicFiles: {

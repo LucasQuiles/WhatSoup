@@ -659,9 +659,10 @@ The audit is report-only until the approved asset set lands. It checks:
 
 The package script currently promotes only the already-zero canonical favicon-link rule with
 `--fail-on-rule soup/brand-favicon-link-required`. Peripheral legacy copy and orphan public SVGs
-hard-fail independently. Public SVG reachability is path-normalized against actual SVG references
-(`href`/`src`, manifest `src`, CSS `url()`, imports, and path-like string references); comments or
-bare prose mentions of an asset basename do not count as usage. The favicon artwork, badge, PWA, and
+hard-fail independently. Peripheral legacy copy is scanned in HTML, JSON/webmanifest, and SVG
+metadata/text. Public SVG reachability is path-normalized against actual SVG references (`href`/`src`,
+manifest `src`, CSS `url()`, imports, and path-like string references); comments or bare prose
+mentions of an asset basename do not count as usage. The favicon artwork, badge, PWA, and
 maskable asset findings remain report-only until the approved asset set lands and is visually proven.
 `--fail-on-findings` exists for that later promotion packet. A PASS with report-only findings must
 never be cited as visual approval or 16px legibility proof.

@@ -12,7 +12,7 @@ const DEFAULT_FAVICON = resolve(consoleRoot, 'public/favicon.svg');
 const DEFAULT_INDEX = resolve(consoleRoot, 'index.html');
 const DEFAULT_MANIFEST = resolve(consoleRoot, 'public/manifest.webmanifest');
 const LEGACY_BOLT_COLORS = ['#863bff', '#7e14ff', '#47bfff', '#aa3bff'];
-const PERIPHERAL_TEXT_EXT = /\.(?:json|webmanifest|html)$/i;
+const PERIPHERAL_TEXT_EXT = /\.(?:json|webmanifest|html|svg)$/i;
 const REFERENCE_TEXT_EXT = /\.(?:css|html|json|ts|tsx|webmanifest)$/i;
 const FORBIDDEN_PERIPHERAL_COPY = [
   { label: 'legacy product name "Soup Kitchen"', pattern: /Soup Kitchen/i },
