@@ -5,6 +5,7 @@
 #   deploy:   whatsoup-bot-errors-deploy.sh deploy   <root> <staging-dir>
 #   verify:   whatsoup-bot-errors-deploy.sh verify   <root>
 #   rollback: whatsoup-bot-errors-deploy.sh rollback <root> <backup-dir>
+#   pin:      whatsoup-bot-errors-deploy.sh pin      <manifest.json> <ledger.json> <head_sha>
 #
 # Fail-closed: any sha mismatch or smoke failure exits non-zero. Backup is taken BEFORE
 # any write so rollback is always possible. Does NOT touch git, restart services, or
@@ -101,6 +102,29 @@ case "$MODE" in
       while IFS= read -r p; do [[ -n "$p" ]] && rm -f "$ROOT/$p"; done < "$BKDIR/.was-absent"
     fi
     echo "ROLLBACK_OK"
+    ;;
+  pin)
+    # pin <manifest.json> <ledger.json> <head_sha>: stamp expected_head_sha + append F10 to the approved ledger.
+    MAN="${2:?manifest}"; LEDGER="${3:?ledger}"; HEAD="${4:?head_sha}"
+    f10=$(python3 - "$MAN" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(next((f["sha256"] for f in d.get("files",[]) if f["path"].endswith("lib/bot_errors_redaction.py")), ""))
+PY
+)
+    [ -n "$f10" ] || { echo "FATAL: no F10 in manifest"; exit 3; }
+    python3 - "$MAN" "$LEDGER" "$HEAD" "$f10" <<'PY'
+import json,sys
+man_p,led_p,head,f10=sys.argv[1:5]
+with open(man_p) as fh: m=json.load(fh)
+m["expected_head_sha"]=head
+with open(man_p,"w") as fh: json.dump(m,fh,indent=2)
+with open(led_p) as fh: l=json.load(fh)
+a=l.setdefault("approved_f10",[])
+if f10 not in a: a.append(f10)
+with open(led_p,"w") as fh: json.dump(l,fh,indent=2)
+PY
+    echo "PIN_OK head=$HEAD f10=${f10:0:12}"
     ;;
   *) echo "unknown mode $MODE"; exit 2;;
 esac
