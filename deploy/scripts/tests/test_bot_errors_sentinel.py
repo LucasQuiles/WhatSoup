@@ -34,18 +34,18 @@ def _write_json(path: Path, payload: dict) -> Path:
     return path
 
 
-def _heartbeat(path: Path, *, healthy: bool = True, klass: str = "healthy", mtime: float = 1000.0) -> Path:
-    _write_json(
-        path,
-        {
-            "kind": "bot-errors-selfcheck-heartbeat",
-            "host": path.stem,
-            "healthy": healthy,
-            "class": klass,
-            "action": "noop" if healthy else "hysteresis_wait",
-            "pin": {"headSha": "a" * 40, "f10Sha": "b" * 64},
-        },
-    )
+def _heartbeat(path: Path, *, healthy: bool = True, klass: str = "healthy", mtime: float = 1000.0, checked_at: str | None = None) -> Path:
+    payload = {
+        "kind": "bot-errors-selfcheck-heartbeat",
+        "host": path.stem,
+        "healthy": healthy,
+        "class": klass,
+        "action": "noop" if healthy else "hysteresis_wait",
+        "pin": {"headSha": "a" * 40, "f10Sha": "b" * 64},
+    }
+    if checked_at is not None:
+        payload["checkedAt"] = checked_at
+    _write_json(path, payload)
     os.utime(path, (mtime, mtime))
     return path
 
@@ -65,6 +65,7 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
         flap_threshold=kwargs.get("flap_threshold", 4),
         max_tier1_heal_candidates=kwargs.get("max_tier1_heal_candidates", 2),
         correlated_drift_freeze_threshold=kwargs.get("correlated_drift_freeze_threshold", 2),
+        max_clock_skew_seconds=kwargs.get("max_clock_skew_seconds", 300),
     )
 
 
@@ -248,6 +249,36 @@ def test_single_signal_failures_monitor_only(tmp_path: Path):
     assert by_host["host-b"]["action"] == "monitor_only"
 
 
+def test_clock_skew_escalates_even_with_healthy_probe(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-skew-hb.json", healthy=True, mtime=1000.0, checked_at="1970-01-01T00:00:00Z")
+    hosts = _hosts_file(tmp_path, [{"host": "host-skew", "heartbeatPath": str(hb)}])
+    result = _mod.run_once(
+        _config(tmp_path, hosts, hysteresis_cycles=2, max_clock_skew_seconds=60),
+        _deps(1000.0, {"host-skew": {"reachable": True, "healthy": True, "class": "healthy"}}),
+    )
+    host = result["hosts"][0]
+    assert host["class"] == "clock_skew"
+    assert host["twoSignals"] is True
+    assert host["action"] == "escalate"
+    assert host["heartbeat"]["status"] == "clock_skew"
+    assert host["heartbeat"]["clockSkewSeconds"] == -1000
+    assert host["heartbeat"]["maxClockSkewSeconds"] == 60
+
+
+def test_fresh_older_heartbeat_is_not_clock_skew(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-fresh-hb.json", healthy=True, mtime=600.0, checked_at="1970-01-01T00:10:00Z")
+    hosts = _hosts_file(tmp_path, [{"host": "host-fresh", "heartbeatPath": str(hb)}])
+    result = _mod.run_once(
+        _config(tmp_path, hosts, heartbeat_max_age_seconds=600, max_clock_skew_seconds=60),
+        _deps(1000.0, {"host-fresh": {"reachable": True, "healthy": True, "class": "healthy"}}),
+    )
+    host = result["hosts"][0]
+    assert host["class"] == "healthy"
+    assert host["action"] == "noop"
+    assert host["heartbeat"]["status"] == "fresh"
+    assert host["heartbeat"]["clockSkewSeconds"] == 0
+
+
 def test_safe_runtime_drift_becomes_tier1_heal_candidate(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-d-hb.json", healthy=False, klass="drift", mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-d", "heartbeatPath": str(hb)}])
@@ -268,13 +299,19 @@ def test_correlated_safe_drift_freezes_fleet_autoheal(tmp_path: Path):
         hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=False, klass="drift", mtime=995.0)
         hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
         probes[name] = {"reachable": True, "healthy": False, "class": "drift"}
+    hb = _heartbeat(tmp_path / "host-d-hb.json", healthy=False, klass="manifest_missing", mtime=995.0)
+    hosts_payload.append({"host": "host-d", "heartbeatPath": str(hb)})
+    probes["host-d"] = {"reachable": True, "healthy": False, "class": "manifest_missing"}
     hosts = _hosts_file(tmp_path, hosts_payload)
     result = _mod.run_once(_config(tmp_path, hosts, hysteresis_cycles=1), _deps(1000.0, probes))
     assert result["fleetAction"] == "correlated_runtime_drift_freeze"
-    assert {host["action"] for host in result["hosts"]} == {"freeze_correlated_drift"}
-    assert {host["correlatedDriftClass"] for host in result["hosts"]} == {"drift"}
+    by_host = {host["host"]: host for host in result["hosts"]}
+    assert {by_host[name]["action"] for name in ("host-a", "host-b", "host-c")} == {"freeze_correlated_drift"}
+    assert by_host["host-d"]["action"] == "tier1_heal_candidate"
+    assert {by_host[name]["correlatedDriftClass"] for name in ("host-a", "host-b", "host-c")} == {"drift"}
     state = json.loads(_mod.state_path(_config(tmp_path, hosts, hysteresis_cycles=1)).read_text(encoding="utf-8"))
-    assert {record["lastAction"] for record in state["hosts"].values()} == {"freeze_correlated_drift"}
+    assert {state["hosts"][name]["lastAction"] for name in ("host-a", "host-b", "host-c")} == {"freeze_correlated_drift"}
+    assert state["hosts"]["host-d"]["lastAction"] == "tier1_heal_candidate"
 
 
 def test_tier1_candidate_count_is_capped_without_correlated_freeze(tmp_path: Path):
@@ -340,7 +377,7 @@ def test_probe_path_default_and_bad_heartbeat_json(tmp_path: Path):
 
     bad_hb = tmp_path / "bad-heartbeat.json"
     bad_hb.write_text("{bad", encoding="utf-8")
-    assert _mod.heartbeat_inventory(_mod.HostSpec(host="host-a", heartbeat_path=bad_hb), 1000.0, 60)["status"] == "invalid_json"
+    assert _mod.heartbeat_inventory(_mod.HostSpec(host="host-a", heartbeat_path=bad_hb), 1000.0, 60, 300)["status"] == "invalid_json"
 
     missing_probe = _mod.default_pull_probe(_mod.HostSpec(host="host-b", probe_path=tmp_path / "missing.json"))
     assert missing_probe == {"reachable": False, "healthy": False, "class": "invalid_probe"}
@@ -444,12 +481,12 @@ def test_ssh_runtime_probe_failure_modes(tmp_path: Path, monkeypatch):
 
 
 def test_signal_classification_and_inventory_edges(tmp_path: Path, monkeypatch):
-    assert _mod.heartbeat_inventory(_mod.HostSpec(host="host-a"), 1000.0, 60) == {
+    assert _mod.heartbeat_inventory(_mod.HostSpec(host="host-a"), 1000.0, 60, 300) == {
         "configured": False,
         "signal": "unknown",
         "status": "not_configured",
     }
-    missing_hb = _mod.heartbeat_inventory(_mod.HostSpec(host="host-a", heartbeat_path=tmp_path / "missing.json"), 1000.0, 60)
+    missing_hb = _mod.heartbeat_inventory(_mod.HostSpec(host="host-a", heartbeat_path=tmp_path / "missing.json"), 1000.0, 60, 300)
     assert missing_hb["status"] == "missing"
     assert missing_hb["signal"] == "stale"
 
@@ -463,7 +500,7 @@ def test_signal_classification_and_inventory_edges(tmp_path: Path, monkeypatch):
         return original_stat(path)
 
     monkeypatch.setattr(Path, "stat", stat)
-    stat_error = _mod.heartbeat_inventory(_mod.HostSpec(host="host-a", heartbeat_path=target), 1000.0, 60)
+    stat_error = _mod.heartbeat_inventory(_mod.HostSpec(host="host-a", heartbeat_path=target), 1000.0, 60, 300)
     assert stat_error["status"] == "stat_error:PermissionError"
 
     assert _mod.normalize_probe({}) == {"configured": False, "signal": "unknown", "class": "not_configured"}
@@ -478,10 +515,21 @@ def test_signal_classification_and_inventory_edges(tmp_path: Path, monkeypatch):
     down_result = _mod.oracle_inventory(down_oracle)
     assert down_result["class"] == "unreachable"
     assert down_result["error"] == "gateway timeout"
+    assert _mod.parse_iso_epoch(None) is None
+    assert _mod.parse_iso_epoch("   ") is None
+    assert _mod.parse_iso_epoch("not-a-date") is None
+    assert _mod.parse_iso_epoch("1970-01-01T00:00:00") is None
+    assert _mod.parse_iso_epoch("1970-01-01T00:00:00Z") == 0.0
     assert _mod.parse_probe_stdout("\n[]\n{\"class\":\"healthy\"}\n") == {"class": "healthy"}
     assert _mod.parse_probe_stdout("\n") is None
+    assert (
+        _mod.safe_runtime_drift_key({"heartbeat": {"class": "manifest_missing"}, "probe": {"class": "permission_denied"}})
+        == "manifest_missing"
+    )
+    assert _mod.safe_runtime_drift_key({"heartbeat": {"class": "permission_denied"}, "probe": {"class": "permission_denied"}}) == "safe_runtime_drift"
 
     cases = [
+        ({"signal": "unhealthy", "class": "clock_skew"}, {"signal": "healthy", "class": "healthy"}, "clock_skew"),
         ({"signal": "unhealthy", "class": "permission_denied"}, {"signal": "unreachable", "class": "unreachable"}, "runtime_unverified"),
         ({"signal": "unhealthy", "class": "permission_denied"}, {"signal": "healthy", "class": "healthy"}, "heartbeat_unhealthy"),
         ({"signal": "healthy", "class": "healthy"}, {"signal": "unhealthy", "class": "permission_denied"}, "probe_unhealthy"),
@@ -549,12 +597,14 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ORACLE", str(tmp_path / "oracle.json"))
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD", "0")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS", "0")
     config = _mod.default_config(tmp_path / "hosts.json", tmp_path / "state")
     assert config.heartbeat_max_age_seconds == _mod.DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     assert config.hysteresis_cycles == 1
     assert config.oracle_path == tmp_path / "oracle.json"
     assert config.max_tier1_heal_candidates == 1
     assert config.correlated_drift_freeze_threshold == 1
+    assert config.max_clock_skew_seconds == 1
 
     healthy_hb = _heartbeat(tmp_path / "healthy.json", healthy=True, mtime=1000.0)
     healthy_probe = _write_json(tmp_path / "healthy-probe.json", {"reachable": True, "healthy": True, "class": "healthy"})

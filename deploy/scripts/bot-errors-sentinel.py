@@ -9,6 +9,7 @@ decisions. Later rollout slices can wire the action sink to heal/alert workers.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ DEFAULT_FLAP_WINDOW_SECONDS = 6 * 60 * 60
 DEFAULT_FLAP_THRESHOLD = 4
 DEFAULT_MAX_TIER1_HEAL_CANDIDATES = 2
 DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD = 2
+DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5 * 60
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
 REMOTE_RUNTIME_PROBE = r"""
 import json
@@ -100,6 +102,7 @@ class SentinelConfig:
     flap_threshold: int = DEFAULT_FLAP_THRESHOLD
     max_tier1_heal_candidates: int = DEFAULT_MAX_TIER1_HEAL_CANDIDATES
     correlated_drift_freeze_threshold: int = DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD
+    max_clock_skew_seconds: int = DEFAULT_MAX_CLOCK_SKEW_SECONDS
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,21 @@ class SentinelError(RuntimeError):
 
 def now_iso(epoch: Optional[float] = None) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() if epoch is None else epoch))
+
+
+def parse_iso_epoch(value: object) -> Optional[float]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(f"{text[:-1]}+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).timestamp()
 
 
 def state_root() -> Path:
@@ -150,6 +168,7 @@ def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] 
             DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD,
             1,
         ),
+        max_clock_skew_seconds=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS", DEFAULT_MAX_CLOCK_SKEW_SECONDS, 1),
     )
 
 
@@ -297,7 +316,7 @@ def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     return str(heartbeat_path(config))
 
 
-def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int) -> dict:
+def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int, max_clock_skew_seconds: int) -> dict:
     if spec.heartbeat_path is None:
         return {"configured": False, "signal": "unknown", "status": "not_configured"}
     path = spec.heartbeat_path
@@ -314,13 +333,21 @@ def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int) -> dic
     fresh = age <= max_age_seconds
     healthy = payload.get("healthy") is True
     status = "fresh" if fresh else "stale"
-    if not fresh:
+    heartbeat_class = str(payload.get("class") or "unknown")
+    checked_at_epoch = parse_iso_epoch(payload.get("checkedAt"))
+    clock_skew_seconds = int(checked_at_epoch - stat.st_mtime) if checked_at_epoch is not None else None
+    if clock_skew_seconds is not None and abs(clock_skew_seconds) > max_clock_skew_seconds:
+        status = "clock_skew"
+        signal = "unhealthy"
+        healthy = False
+        heartbeat_class = "clock_skew"
+    elif not fresh:
         signal = "stale"
     elif healthy:
         signal = "healthy"
     else:
         signal = "unhealthy"
-    return {
+    result = {
         "configured": True,
         "signal": signal,
         "status": status,
@@ -328,10 +355,14 @@ def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int) -> dic
         "ageSeconds": age,
         "maxAgeSeconds": max_age_seconds,
         "healthy": healthy,
-        "class": str(payload.get("class") or "unknown"),
+        "class": heartbeat_class,
         "action": str(payload.get("action") or "unknown"),
         "pin": payload.get("pin"),
     }
+    if clock_skew_seconds is not None:
+        result["clockSkewSeconds"] = clock_skew_seconds
+        result["maxClockSkewSeconds"] = max_clock_skew_seconds
+    return result
 
 
 def normalize_probe(payload: dict) -> dict:
@@ -466,6 +497,8 @@ def classify_signals(heartbeat: dict, probe: dict) -> tuple[str, bool, str]:
     hb_class = str(heartbeat.get("class") or "unknown")
     probe_class = str(probe.get("class") or "unknown")
 
+    if hb_class == "clock_skew" or probe_class == "clock_skew":
+        return "clock_skew", True, "host and central clocks differ beyond bound"
     if hb_signal == "healthy" and probe_signal == "healthy":
         return "healthy", False, "heartbeat and probe healthy"
     if hb_signal == "stale" and probe_signal == "unreachable":
@@ -519,6 +552,8 @@ def update_record(record: dict, observed_class: str, now: float, config: Sentine
 def decide_action(observed_class: str, two_signals: bool, consecutive: int, flaps: int, config: SentinelConfig) -> str:
     if observed_class == "healthy":
         return "noop"
+    if observed_class == "clock_skew":
+        return "escalate"
     if not two_signals:
         return "monitor_only"
     if consecutive < config.hysteresis_cycles:
@@ -650,7 +685,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     results = []
     for spec in hosts:
         record = host_state.setdefault(spec.host, {"alertState": "closed", "consecutive": 0, "transitions": []})
-        heartbeat = heartbeat_inventory(spec, now, config.heartbeat_max_age_seconds)
+        heartbeat = heartbeat_inventory(spec, now, config.heartbeat_max_age_seconds, config.max_clock_skew_seconds)
         probe = normalize_probe(deps.pull_probe(spec))
         result = evaluate_host(spec, heartbeat, probe, record, now, config)
         ack_path = write_ack(spec, result, now)

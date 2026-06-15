@@ -41,6 +41,7 @@ common_env=(
   BOT_ERRORS_FLEET_SENTINEL_FLAP_THRESHOLD=4
   BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES=2
   BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD=2
+  BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS=300
 )
 
 PATH="$fakebin:$PATH" env "${common_env[@]}" \
@@ -59,6 +60,7 @@ grep -q 'oracle&amp;gateway.json' "$plist" || { echo "SENTINEL_INSTALLER_FAIL la
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd threshold env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd tier1 cap env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd correlated freeze env"; cat "$plist"; exit 1; }
+grep -q 'BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd clock skew env"; cat "$plist"; exit 1; }
 grep -q 'dry_run=1' "$tmp/launchd.out" || { echo "SENTINEL_INSTALLER_FAIL launchd dry-run output"; cat "$tmp/launchd.out"; exit 1; }
 [[ ! -s "$tmp/launchd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL launchd invoked activation"; cat "$tmp/launchd.err"; exit 1; }
 
@@ -75,6 +77,7 @@ grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_HOSTS=' "$service" || { echo "S
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_ORACLE=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd oracle env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd tier1 cap env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd correlated freeze env"; cat "$service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd clock skew env"; cat "$service"; exit 1; }
 grep -q '^OnUnitActiveSec=1800s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd interval"; cat "$timer"; exit 1; }
 grep -q '^Persistent=true$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd persistent"; cat "$timer"; exit 1; }
 grep -q 'dry_run=1' "$tmp/systemd.out" || { echo "SENTINEL_INSTALLER_FAIL systemd dry-run output"; cat "$tmp/systemd.out"; exit 1; }
