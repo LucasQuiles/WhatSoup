@@ -16,8 +16,8 @@
  *   - Actions moved to conditional ModalFooter (confirm/error/restart-instances
  *     phases). Phases without actions (updating/restarting-fleet/done) omit the
  *     footer region.
- *   - Raw c-btn buttons → Button primitives (all six sites: header X, footer
- *     Cancel, Update, Close, Skip, Restart Selected).
+ *   - Raw c-btn buttons → Button primitives (header X plus footer actions:
+ *     Cancel, Update, Close, Try again, Skip, Restart Selected).
  *   - GAINS: stacking-aware Escape, focus trap, focus restoration.
  *   - handleClose is the single onClose target — wired through Modal's onClose
  *     prop so Escape, header X, and any future path share the same cleanup.
@@ -77,6 +77,7 @@ interface ModalState {
 
 type ModalAction =
   | { type: 'reset'; toggles: Record<string, boolean> }
+  | { type: 'beginUpdate' }
   | { type: 'setPhase'; phase: Phase }
   | { type: 'stepProgress'; step: string; status: StepStatus; message?: string }
   | { type: 'setError'; message: string; step?: string }
@@ -108,6 +109,13 @@ function reducer(state: ModalState, action: ModalAction): ModalState {
         error: null,
         instanceToggles: action.toggles,
         instanceStatus: {},
+      }
+    case 'beginUpdate':
+      return {
+        ...state,
+        phase: 'updating',
+        steps: makeInitialSteps(),
+        error: null,
       }
     case 'setPhase':
       return { ...state, phase: action.phase }
@@ -171,6 +179,13 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
     prevOpenRef.current = open
   }, [open, lines])
 
+  const clearPendingUpdate = useCallback(() => {
+    abortRef.current?.abort()
+    abortRef.current = null
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
+  }, [])
+
   const waitForFleetRestart = useCallback(() => {
     // Guard: if already polling, don't spawn duplicate intervals (RES-002)
     if (pollRef.current) return
@@ -204,7 +219,8 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   }, [currentSha, queryClient])
 
   const startUpdate = useCallback(() => {
-    dispatch({ type: 'setPhase', phase: 'updating' })
+    clearPendingUpdate()
+    dispatch({ type: 'beginUpdate' })
     // Reset error flag for this update run (F-058).
     hasErroredRef.current = false
 
@@ -290,16 +306,18 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
             await read()
           } catch {
             // Connection dropped — expected during restart; skip if already errored (F-058).
+            if (controller.signal.aborted) return
             if (!hasErroredRef.current) waitForFleetRestart()
           }
         }
         await read()
       } catch {
         // Aborted or network error — fleet may be restarting; skip if already errored (F-058).
+        if (controller.signal.aborted) return
         if (!hasErroredRef.current) waitForFleetRestart()
       }
     })()
-  }, [waitForFleetRestart])
+  }, [clearPendingUpdate, waitForFleetRestart])
 
   const restartSelectedInstances = useCallback(async () => {
     const selected = Object.entries(instanceToggles).filter(([, on]) => on).map(([name]) => name)
@@ -327,12 +345,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
   // target so Escape, header X, and any footer Cancel/Close/Skip path all share
   // the same cleanup (C-B3W3-8).
   const handleClose = () => {
-    // Abort in-flight fetch stream (RES-006)
-    abortRef.current?.abort()
-    abortRef.current = null
-    // Clear any pending poll/timeout (RES-002)
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
-    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null }
+    clearPendingUpdate()
     onClose()
   }
 
@@ -464,6 +477,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       {phase === 'error' && (
         <ModalFooter>
           <Button variant="ghost" onClick={handleClose}>Close</Button>
+          <Button variant="primary" onClick={startUpdate} icon={<RotateCcw size={14} />}>Try again</Button>
         </ModalFooter>
       )}
       {phase === 'restart-instances' && (

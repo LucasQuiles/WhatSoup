@@ -137,6 +137,27 @@ function makeHangingStream() {
   return new ReadableStream({ pull() { /* never enqueue or close */ } })
 }
 
+function makeOneChunkThenPendingBody(
+  chunk: string,
+  onPendingRead?: (reject: (reason?: unknown) => void) => void,
+) {
+  const encoder = new TextEncoder()
+  let readCount = 0
+  return {
+    getReader: () => ({
+      read: vi.fn(() => {
+        readCount += 1
+        if (readCount === 1) {
+          return Promise.resolve({ done: false, value: encoder.encode(chunk) })
+        }
+        return new Promise<ReadableStreamReadResult<Uint8Array>>((_resolve, reject) => {
+          onPendingRead?.(reject)
+        })
+      }),
+    }),
+  } as unknown as ReadableStream<Uint8Array>
+}
+
 // ---------------------------------------------------------------------------
 // describe: closed state
 // ---------------------------------------------------------------------------
@@ -416,6 +437,59 @@ describe('UpdateModal — error phase', () => {
     await waitFor(() => expect(screen.getByText('Update failed: 500')).toBeDefined())
     fireEvent.click(screen.getByText('Close'))
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('lets operators retry after an update request failure', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, body: null })
+      .mockResolvedValueOnce({ ok: true, body: makeHangingStream() })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<UpdateModal {...defaultProps()} />)
+    const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
+    fireEvent.click(updateBtn)
+    await waitFor(() => expect(screen.getByText('Update failed: 503')).toBeDefined())
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('Pulling latest code')).toBeDefined()
+    expect(screen.queryByText('Update failed: 503')).toBeNull()
+  })
+
+  it('aborts an errored stream before retrying so stale reads cannot enter restart polling', async () => {
+    const errChunk = 'event: error\ndata: {"message":"git pull failed","step":"pull"}\n\n'
+    let callCount = 0
+    let firstSignal: AbortSignal | undefined
+    let rejectStaleRead: ((reason?: unknown) => void) | undefined
+    const fetchMock = vi.fn((_url: string, opts: RequestInit) => {
+      callCount += 1
+      if (callCount === 1) {
+        firstSignal = opts.signal as AbortSignal
+        return Promise.resolve({
+          ok: true,
+          body: makeOneChunkThenPendingBody(errChunk, (reject) => {
+            rejectStaleRead = reject
+          }),
+        })
+      }
+      return Promise.resolve({ ok: true, body: makeHangingStream() })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<UpdateModal {...defaultProps()} />)
+    const updateBtn = screen.getAllByRole('button').find(b => b.textContent?.includes('Update'))!
+    fireEvent.click(updateBtn)
+    await waitFor(() => expect(screen.getByText('git pull failed')).toBeDefined())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(firstSignal?.aborted).toBe(true)
+
+    await act(async () => {
+      rejectStaleRead?.(new Error('old stream aborted'))
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText('Pulling latest code')).toBeDefined()
+    expect(screen.queryByText('Waiting for fleet server...')).toBeNull()
+    expect(mockApiGetVersion).not.toHaveBeenCalled()
   })
 })
 

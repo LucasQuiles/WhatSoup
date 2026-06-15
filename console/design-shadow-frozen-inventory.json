@@ -89,7 +89,7 @@
       },
       "file": "console/src/components/UpdateModal.tsx",
       "lines": [
-        357
+        370
       ],
       "total": 1
     },
@@ -266,7 +266,7 @@
       "category": "brand-regression",
       "column": 88,
       "file": "console/src/components/UpdateModal.tsx",
-      "line": 357,
+      "line": 370,
       "message": "[soup/no-brand-regression] \"WhatSoup\" in JSX text — replace with the locked brand name. See lint-plan section 3 for P4 copy dispositions.",
       "rule": "soup/no-brand-regression"
     }

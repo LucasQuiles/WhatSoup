@@ -107,6 +107,8 @@ describe('UpdateModal close controls', () => {
     const textCloseButton = screen.getByRole('button', { name: 'Close' })
     expect(textCloseButton.textContent).toBe('Close')
     expect(textCloseButton.getAttribute('aria-label')).toBeNull()
+    const retryButton = screen.getByRole('button', { name: 'Try again' })
+    expect(retryButton.getAttribute('aria-label')).toBeNull()
   })
 
   it('keeps the restart-instance Skip button text-labelled', async () => {
