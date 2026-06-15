@@ -28,6 +28,7 @@ SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
 HEAL_WINDOW_SECONDS = 6 * 60 * 60
 MAX_HEALS_PER_WINDOW = 2
 DEFAULT_CENTRAL_DOWN_ALERT_SECONDS = 2 * 60 * 60
+DEFAULT_HEAL_MIN_FREE_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,51 @@ def heal_allowed(memory: dict, now: float) -> tuple[bool, str]:
     if len(kept) >= MAX_HEALS_PER_WINDOW:
         return False, "rate_limited"
     return True, "ok"
+
+
+def heal_min_free_bytes() -> int:
+    raw = os.environ.get("BOT_ERRORS_SELFCHECK_HEAL_MIN_FREE_BYTES", str(DEFAULT_HEAL_MIN_FREE_BYTES))
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_HEAL_MIN_FREE_BYTES
+
+
+def heal_disk_preflight(root: Path, bundle: Path, pin: sp.Pin) -> dict:
+    bundle_bytes = 0
+    backup_bytes = 0
+    for rel in pin.files:
+        bundle_file = bundle / rel
+        root_file = root / rel
+        try:
+            bundle_bytes += bundle_file.stat().st_size
+        except OSError as exc:
+            return {"ok": False, "status": f"bundle_stat_error:{type(exc).__name__}", "path": str(bundle_file)}
+        try:
+            backup_bytes += root_file.stat().st_size
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            return {"ok": False, "status": f"root_stat_error:{type(exc).__name__}", "path": str(root_file)}
+
+    reserve_bytes = heal_min_free_bytes()
+    required_bytes = bundle_bytes + backup_bytes + reserve_bytes
+    probe_path = root.parent
+    try:
+        statvfs = os.statvfs(probe_path)
+    except OSError as exc:
+        return {"ok": False, "status": f"statvfs_error:{type(exc).__name__}", "probePath": str(probe_path)}
+    available_bytes = int(statvfs.f_bavail) * int(statvfs.f_frsize)
+    return {
+        "ok": available_bytes >= required_bytes,
+        "status": "ok" if available_bytes >= required_bytes else "low_disk_space",
+        "probePath": str(probe_path),
+        "availableBytes": available_bytes,
+        "requiredBytes": required_bytes,
+        "bundleBytes": bundle_bytes,
+        "backupBytes": backup_bytes,
+        "reserveBytes": reserve_bytes,
+    }
 
 
 def record_heal(memory: dict, now: float) -> None:
@@ -766,14 +812,19 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
                     if current_bundle_path(config.current_link) != bundle:
                         status["action"] = "current_changed"
                     else:
-                        rc, output = deps.deploy(config.root, bundle, config.deployer_path)
-                        status["deployerOutput"] = output[-1000:]
-                        if rc == 0:
-                            record_heal(memory, now)
-                            status["action"] = "healed"
+                        status["healDiskPreflight"] = heal_disk_preflight(config.root, bundle, pin)
+                        if status["healDiskPreflight"]["ok"] is not True:
+                            status["action"] = "heal_preflight_failed"
+                            status["problems"].append(status["healDiskPreflight"]["status"])
                         else:
-                            status["action"] = "heal_failed"
-                            status["problems"].append(f"deployer_rc={rc}")
+                            rc, output = deps.deploy(config.root, bundle, config.deployer_path)
+                            status["deployerOutput"] = output[-1000:]
+                            if rc == 0:
+                                record_heal(memory, now)
+                                status["action"] = "healed"
+                            else:
+                                status["action"] = "heal_failed"
+                                status["problems"].append(f"deployer_rc={rc}")
                 finally:
                     release_lock(config.lock_path, fd)
 

@@ -442,6 +442,8 @@ def test_heartbeat_helper_fallbacks_and_local_write_failure(tmp_path: Path, monk
     assert _mod.tail_text(None) == ""
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEARTBEAT_TIMEOUT_SECONDS", "bad")
     assert _mod.heartbeat_push_timeout() == 5.0
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEAL_MIN_FREE_BYTES", "bad")
+    assert _mod.heal_min_free_bytes() == 64 * 1024 * 1024
 
     config, deps, _calls, _head = _fixture(tmp_path)
     status = {
@@ -590,7 +592,71 @@ def test_manifest_missing_is_safe_heal_class_after_hysteresis(tmp_path: Path):
     status = _mod.run_selfcheck(config, deps)
     assert status["class"] == "manifest_missing"
     assert status["action"] == "healed"
+    assert status["healDiskPreflight"]["ok"] is True
     assert len(calls) == 1
+
+
+def test_low_disk_preflight_blocks_autoheal_before_deploy(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEAL_MIN_FREE_BYTES", "1000")
+
+    class StatVfs:
+        f_bavail = 1
+        f_frsize = 1
+
+    monkeypatch.setattr(_mod.os, "statvfs", lambda _path: StatVfs())
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "drift"
+    assert status["action"] == "heal_preflight_failed"
+    assert status["healDiskPreflight"]["status"] == "low_disk_space"
+    assert status["healDiskPreflight"]["availableBytes"] == 1
+    assert "low_disk_space" in status["problems"]
+    assert calls == []
+
+
+def test_disk_preflight_stat_error_blocks_autoheal(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+
+    def statvfs(_path):
+        raise OSError("statvfs denied")
+
+    monkeypatch.setattr(_mod.os, "statvfs", statvfs)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["action"] == "heal_preflight_failed"
+    assert status["healDiskPreflight"]["status"] == "statvfs_error:OSError"
+    assert "statvfs_error:OSError" in status["problems"]
+    assert calls == []
+
+
+def test_disk_preflight_bundle_stat_error_is_fail_closed(tmp_path: Path):
+    pin = _mod.sp.Pin(head_sha="a" * 40, files={_mod.sp.F10_PATH: "0" * 64}, f10_sha="0" * 64)
+    result = _mod.heal_disk_preflight(tmp_path / "root", tmp_path / "bundle", pin)
+    assert result["ok"] is False
+    assert result["status"] == "bundle_stat_error:FileNotFoundError"
+
+
+def test_disk_preflight_root_stat_error_is_fail_closed(tmp_path: Path, monkeypatch):
+    rel = _mod.sp.F10_PATH
+    bundle = tmp_path / "bundle"
+    root = tmp_path / "root"
+    _write(bundle / rel, b"redact\n")
+    _write(root / rel, b"wrong\n")
+    pin = _mod.sp.Pin(head_sha="a" * 40, files={rel: _sha(b"redact\n")}, f10_sha=_sha(b"redact\n"))
+    root_file = root / rel
+    original_stat = Path.stat
+
+    def stat(path: Path):
+        if path == root_file:
+            raise PermissionError("denied")
+        return original_stat(path)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    result = _mod.heal_disk_preflight(root, bundle, pin)
+    assert result["ok"] is False
+    assert result["status"] == "root_stat_error:PermissionError"
+    assert result["path"] == str(root_file)
 
 
 def test_autoheal_off_checks_before_hysteresis_and_never_deploys(tmp_path: Path):

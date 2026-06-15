@@ -36,6 +36,7 @@ common_env=(
   BOT_ERRORS_SELFCHECK_CENTRAL_ACK="$tmp/state/fleet-sentinel/central-ack.json"
   BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT="$tmp/state/sentinel/actions/central-down&alert.json"
   BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS=7200
+  BOT_ERRORS_SELFCHECK_HEAL_MIN_FREE_BYTES=67108864
 )
 
 PATH="$fakebin:$PATH" env "${common_env[@]}" \
@@ -52,6 +53,7 @@ grep -q "$repo/deploy/scripts/bot-errors-selfcheck.py" "$plist" || { echo "SELFC
 grep -q '/tmp/last&amp;run' "$plist" || { echo "SELFCHECK_INSTALLER_FAIL launchd xml escaping"; cat "$plist"; exit 1; }
 grep -q 'central-down&amp;alert.json' "$plist" || { echo "SELFCHECK_INSTALLER_FAIL launchd central alert escaping"; cat "$plist"; exit 1; }
 grep -q '<key>BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS</key><string>7200</string>' "$plist" || { echo "SELFCHECK_INSTALLER_FAIL launchd central down threshold"; cat "$plist"; exit 1; }
+grep -q '<key>BOT_ERRORS_SELFCHECK_HEAL_MIN_FREE_BYTES</key><string>67108864</string>' "$plist" || { echo "SELFCHECK_INSTALLER_FAIL launchd heal disk reserve"; cat "$plist"; exit 1; }
 grep -q 'dry_run=1' "$tmp/launchd.out" || { echo "SELFCHECK_INSTALLER_FAIL launchd dry-run output"; cat "$tmp/launchd.out"; exit 1; }
 [[ ! -s "$tmp/launchd.err" ]] || { echo "SELFCHECK_INSTALLER_FAIL launchd invoked activation"; cat "$tmp/launchd.err"; exit 1; }
 
@@ -67,6 +69,7 @@ grep -q '^ExecStart=/usr/bin/python3 .*bot-errors-selfcheck.py --root ' "$servic
 grep -q '^Environment="BOT_ERRORS_STATE_DIR=' "$service" || { echo "SELFCHECK_INSTALLER_FAIL systemd state env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT=.*central-down&alert.json"' "$service" || { echo "SELFCHECK_INSTALLER_FAIL systemd central alert env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS=7200"' "$service" || { echo "SELFCHECK_INSTALLER_FAIL systemd central down threshold"; cat "$service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_SELFCHECK_HEAL_MIN_FREE_BYTES=67108864"' "$service" || { echo "SELFCHECK_INSTALLER_FAIL systemd heal disk reserve"; cat "$service"; exit 1; }
 grep -q '^OnUnitActiveSec=1800s$' "$timer" || { echo "SELFCHECK_INSTALLER_FAIL systemd interval"; cat "$timer"; exit 1; }
 grep -q '^Persistent=true$' "$timer" || { echo "SELFCHECK_INSTALLER_FAIL systemd persistent"; cat "$timer"; exit 1; }
 grep -q 'dry_run=1' "$tmp/systemd.out" || { echo "SELFCHECK_INSTALLER_FAIL systemd dry-run output"; cat "$tmp/systemd.out"; exit 1; }
