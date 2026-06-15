@@ -42,9 +42,10 @@ ACTION_EVENT_ACTIONS = {
     "escalate",
     "escalate_flapping",
     "freeze_correlated_drift",
+    "q_unavailable",
     "clear",
 }
-ATTENTION_ACTIONS = {"tier1_heal_candidate", "escalate", "escalate_flapping", "freeze_correlated_drift"}
+ATTENTION_ACTIONS = {"tier1_heal_candidate", "escalate", "escalate_flapping", "freeze_correlated_drift", "q_unavailable"}
 ATTENTION_FLEET_ACTIONS = {
     "central_connectivity_suspect",
     "mass_unreachable_confirmed",
@@ -357,12 +358,14 @@ def save_state(config: SentinelConfig, state: dict) -> None:
 def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     hosts = result.get("hosts") if isinstance(result.get("hosts"), list) else []
     problem_hosts = [host for host in hosts if isinstance(host, dict) and host.get("healthy") is not True]
+    events = result.get("actionEvents") if isinstance(result.get("actionEvents"), list) else []
+    attention_events = [event for event in events if isinstance(event, dict) and event.get("action") in ATTENTION_ACTIONS]
     payload = {
         "schemaVersion": 1,
         "kind": "bot-errors-sentinel-heartbeat",
         "checkedAt": result.get("checkedAt"),
         "controllerHost": result.get("controllerHost"),
-        "healthy": result.get("fleetAction") == "none" and not problem_hosts,
+        "healthy": result.get("fleetAction") == "none" and not problem_hosts and not attention_events,
         "fleetAction": result.get("fleetAction"),
         "hostCount": len(hosts),
         "problemHostCount": len(problem_hosts),
@@ -734,6 +737,8 @@ def action_event_route(action: str) -> tuple[str, str, str, bool]:
         return "tier1", "host_selfcheck_heal_request", "warning", False
     if action == "clear":
         return "clear", "resolved_state_change", "info", False
+    if action == "q_unavailable":
+        return "tier3", "human_critical_q_unavailable", "critical", True
     if action == "freeze_correlated_drift":
         return "tier3", "human_critical_correlated_freeze", "critical", True
     return "tier2", "agentic_or_human_remediation", "critical", True
@@ -803,6 +808,19 @@ def active_q_remediation(state: dict, now: float) -> Optional[dict]:
     return None
 
 
+def expired_q_remediation(state: dict, now: float) -> Optional[dict]:
+    record = state.get("qRemediation")
+    if not isinstance(record, dict) or not record or record.get("redeemedAt"):
+        return None
+    try:
+        expires_at = float(record.get("expiresAtEpoch"))
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    if expires_at > now:
+        return None
+    return dict(record)
+
+
 def add_tier2_remediation(payload: dict, state: dict, config: SentinelConfig, now: float) -> None:
     if payload.get("tier") != "tier2":
         return
@@ -858,6 +876,14 @@ def add_tier2_remediation(payload: dict, state: dict, config: SentinelConfig, no
         "tokenTtlSeconds": config.tier2_token_ttl_seconds,
         "tokenExpiresAt": expires_at,
     }
+
+
+def q_unavailable_key(record: dict) -> str:
+    return f"q_unavailable:{record.get('host')}:{record.get('requestId')}:{record.get('actionHash')}"
+
+
+def q_unavailable_event_path(config: SentinelConfig, now: float, host: str, request_id: str) -> Path:
+    return action_event_path(config, now, "host", host, "q_unavailable", request_id)
 
 
 def int_or_zero(value: object) -> int:
@@ -1013,6 +1039,67 @@ def build_fleet_action_event(
     }
 
 
+def build_q_unavailable_event(record: dict, now: float, controller_host: str, request_id: str) -> dict:
+    tier, lane, severity, critical = action_event_route("q_unavailable")
+    host = str(record.get("host") or "unknown")
+    return {
+        "schemaVersion": 1,
+        "kind": "bot-errors-sentinel-action",
+        "scope": "host",
+        "requestId": request_id,
+        "createdAt": now_iso(now),
+        "controllerHost": controller_host,
+        "host": host,
+        "class": "q_unavailable",
+        "action": "q_unavailable",
+        "tier": tier,
+        "lane": lane,
+        "severity": severity,
+        "criticalWhatsAppEligible": critical,
+        "reason": "q_remediation_ack_timeout",
+        "remediation": {
+            "qEligible": False,
+            "reason": "ack_timeout",
+            "qHost": record.get("qHost"),
+            "originalRequestId": record.get("requestId"),
+            "actionHash": record.get("actionHash"),
+            "tokenId": record.get("tokenId"),
+            "issuedAt": record.get("issuedAt"),
+            "expiresAt": record.get("expiresAt"),
+        },
+    }
+
+
+def emit_q_unavailable_event(state: dict, config: SentinelConfig, now: float, controller_host: str) -> list[dict]:
+    record = expired_q_remediation(state, now)
+    if record is None:
+        return []
+    key = q_unavailable_key(record)
+    timeout_record = state.setdefault("qUnavailableEvent", {})
+    if event_recently_emitted(timeout_record, key, now, config.action_event_cooldown_seconds):
+        state.pop("qRemediation", None)
+        return []
+    host = str(record.get("host") or "unknown")
+    request_id = stable_request_id("q_unavailable", host, record.get("requestId"), record.get("actionHash"))
+    path = q_unavailable_event_path(config, now, host, request_id)
+    payload = build_q_unavailable_event(record, now, controller_host, request_id)
+    digest_ref = apply_critical_whatsapp_budget(payload, state, config, now, controller_host)
+    atomic_write_json(path, payload)
+    ref = {"scope": "host", "host": host, "action": "q_unavailable", "requestId": request_id, "path": str(path)}
+    emitted = [ref]
+    if digest_ref is not None:
+        emitted.append(digest_ref)
+    timeout_record["lastActionEventKey"] = key
+    timeout_record["lastActionEventAt"] = now
+    timeout_record["lastActionEventPath"] = str(path)
+    timeout_record["lastActionEventRequestId"] = request_id
+    timeout_record["timedOutRequestId"] = record.get("requestId")
+    timeout_record["timedOutHost"] = host
+    timeout_record["timedOutAt"] = now_iso(now)
+    state.pop("qRemediation", None)
+    return emitted
+
+
 def emit_action_events(
     results: list[dict],
     state: dict,
@@ -1022,7 +1109,7 @@ def emit_action_events(
     fleet_action: str,
     oracle: dict,
 ) -> list[dict]:
-    emitted = []
+    emitted = emit_q_unavailable_event(state, config, now, controller_host)
     host_state = state.setdefault("hosts", {})
     for result in results:
         action = str(result.get("action") or "")
@@ -1166,6 +1253,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def result_requires_attention(result: dict) -> bool:
     if result.get("fleetAction") in ATTENTION_FLEET_ACTIONS:
+        return True
+    if any(event.get("action") in ATTENTION_ACTIONS for event in result.get("actionEvents", [])):
         return True
     return any(host.get("action") in ATTENTION_ACTIONS for host in result.get("hosts", []))
 

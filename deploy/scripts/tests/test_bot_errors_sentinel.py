@@ -544,6 +544,126 @@ def test_q_remediation_is_one_host_at_a_time(tmp_path: Path, monkeypatch):
     assert host_events[1]["remediation"]["activeHost"] == "host-a"
 
 
+def test_expired_q_remediation_emits_q_unavailable_tier3_event(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, hysteresis_cycles=1)
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {},
+            "qRemediation": {
+                "tokenId": "tok-1",
+                "tokenHash": "hash-1",
+                "requestId": "request-1",
+                "host": "host-q",
+                "actionHash": "action-hash-1",
+                "issuedAt": "1970-01-01T00:10:00Z",
+                "expiresAt": "1970-01-01T00:15:00Z",
+                "expiresAtEpoch": 900.0,
+                "qHost": "q-agent-host",
+            },
+        },
+    )
+    result = _mod.run_once(config, _deps(1000.0, {"host-q": {"reachable": True, "healthy": True, "class": "healthy"}}))
+    assert result["fleetAction"] == "none"
+    assert result["hosts"][0]["healthy"] is True
+    assert len(result["actionEvents"]) == 1
+    ref = result["actionEvents"][0]
+    assert ref["action"] == "q_unavailable"
+    payload = json.loads(Path(ref["path"]).read_text(encoding="utf-8"))
+    assert payload["class"] == "q_unavailable"
+    assert payload["tier"] == "tier3"
+    assert payload["lane"] == "human_critical_q_unavailable"
+    assert payload["criticalWhatsAppEligible"] is True
+    assert payload["criticalWhatsAppAllowed"] is True
+    assert payload["reason"] == "q_remediation_ack_timeout"
+    assert payload["remediation"] == {
+        "qEligible": False,
+        "reason": "ack_timeout",
+        "qHost": "q-agent-host",
+        "originalRequestId": "request-1",
+        "actionHash": "action-hash-1",
+        "tokenId": "tok-1",
+        "issuedAt": "1970-01-01T00:10:00Z",
+        "expiresAt": "1970-01-01T00:15:00Z",
+    }
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "qRemediation" not in state
+    assert state["qUnavailableEvent"]["timedOutRequestId"] == "request-1"
+    heartbeat = json.loads(_mod.heartbeat_path(config).read_text(encoding="utf-8"))
+    assert heartbeat["healthy"] is False
+    assert heartbeat["problemHostCount"] == 0
+    assert _mod.result_requires_attention(result) is True
+
+
+def test_recent_q_unavailable_timeout_is_deduped_and_clears_inflight(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, action_event_cooldown_seconds=3600)
+    key = "q_unavailable:host-q:request-1:action-hash-1"
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {},
+            "qRemediation": {
+                "requestId": "request-1",
+                "host": "host-q",
+                "actionHash": "action-hash-1",
+                "expiresAtEpoch": 900.0,
+            },
+            "qUnavailableEvent": {"lastActionEventKey": key, "lastActionEventAt": 999.0},
+        },
+    )
+    result = _mod.run_once(config, _deps(1000.0, {"host-q": {"reachable": True, "healthy": True, "class": "healthy"}}))
+    assert result["actionEvents"] == []
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "qRemediation" not in state
+    assert state["qUnavailableEvent"]["lastActionEventKey"] == key
+
+
+def test_expired_q_remediation_helper_edges():
+    assert _mod.expired_q_remediation({}, 1000.0) is None
+    assert _mod.expired_q_remediation({"qRemediation": []}, 1000.0) is None
+    assert _mod.expired_q_remediation({"qRemediation": {"redeemedAt": "1970-01-01T00:10:00Z"}}, 1000.0) is None
+    assert _mod.expired_q_remediation({"qRemediation": {"expiresAtEpoch": 1001.0}}, 1000.0) is None
+    invalid = {"qRemediation": {"host": "host-q", "expiresAtEpoch": "bad"}}
+    assert _mod.expired_q_remediation(invalid, 1000.0) == invalid["qRemediation"]
+
+
+def test_q_unavailable_timeout_respects_critical_whatsapp_cap(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, max_critical_whatsapp_per_day=1)
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {},
+            "criticalWhatsApp": {"day": "1970-01-01", "allowedCount": 1, "overflowCount": 0},
+            "qRemediation": {
+                "tokenId": "tok-1",
+                "requestId": "request-1",
+                "host": "host-q",
+                "actionHash": "action-hash-1",
+                "expiresAtEpoch": 900.0,
+                "qHost": "q-agent-host",
+            },
+        },
+    )
+    result = _mod.run_once(config, _deps(1000.0, {"host-q": {"reachable": True, "healthy": True, "class": "healthy"}}))
+    q_ref = next(ref for ref in result["actionEvents"] if ref["action"] == "q_unavailable")
+    digest_ref = next(ref for ref in result["actionEvents"] if ref["action"] == "critical_whatsapp_daily_cap_digest")
+    q_event = json.loads(Path(q_ref["path"]).read_text(encoding="utf-8"))
+    digest = json.loads(Path(digest_ref["path"]).read_text(encoding="utf-8"))
+    assert q_event["criticalWhatsAppAllowed"] is False
+    assert q_event["criticalWhatsAppSuppressedReason"] == "daily_cap"
+    assert digest["criticalWhatsAppAllowedCount"] == 1
+    assert digest["criticalWhatsAppOverflowCount"] == 1
+
+
 def test_probe_path_default_and_bad_heartbeat_json(tmp_path: Path):
     probe = _write_json(tmp_path / "probe.json", {"reachable": True, "healthy": True, "class": "healthy"})
     spec = _mod.HostSpec(host="host-a", probe_path=probe)
