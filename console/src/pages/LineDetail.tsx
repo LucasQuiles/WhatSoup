@@ -64,7 +64,12 @@ export default function LineDetail() {
     () => getPreference('metricsRange', '7d') as MetricsRange
   )
   const setMetricsRange = (r: MetricsRange) => { setMetricsRangeRaw(r); setPreference('metricsRange', r); }
-  const { data: line } = useLine(name || '')
+  const {
+    data: line,
+    isLoading: lineLoading,
+    error: lineError,
+    refetch: refetchLine,
+  } = useLine(name || '')
   const { data: chats } = useChats(name || '')
   const {
     data: access,
@@ -110,6 +115,23 @@ export default function LineDetail() {
       setShowDeleteConfirm(false)
     }
   }, [line, toast, navigate])
+
+  if (!line && !lineLoading) {
+    const lineLabel = name ?? 'This line'
+    const isNotFound = !lineError || /(?:not found|404)/i.test(lineError.message)
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center p-[var(--sp-6)]">
+        <EmptyState
+          variant="error"
+          title={isNotFound ? 'Line not found' : 'Failed to load line'}
+          description={isNotFound ? `${lineLabel} may have been deleted or renamed.` : lineError.message}
+          onRetry={lineError ? () => { void refetchLine() } : undefined}
+          retryLabel="Retry line"
+        />
+        <Button variant="ghost" onClick={() => navigate('/')}>Back to fleet</Button>
+      </div>
+    )
+  }
 
   if (!line) {
     return (

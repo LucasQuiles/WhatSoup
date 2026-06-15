@@ -166,12 +166,16 @@ function renderLineDetail(opts: { line?: LineInstance } = {}) {
   useLineMock.mockReturnValue({ data: line });
   useParamsMock.mockReturnValue({ name: line.name });
 
+  return renderLineDetailRoute(line.name);
+}
+
+function renderLineDetailRoute(routeName: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
   return render(
     <QueryClientProvider client={client}>
       <ToastContext.Provider value={toastValue}>
-        <MemoryRouter initialEntries={[`/lines/${line.name}`]}>
+        <MemoryRouter initialEntries={[`/lines/${routeName}`]}>
           <LineDetail />
         </MemoryRouter>
       </ToastContext.Provider>
@@ -264,6 +268,33 @@ describe('LineDetail header — primitive buttons + overflow contract', () => {
     });
     const h1 = screen.getByRole('heading', { level: 1 });
     expect(h1.className).toContain('truncate');
+  });
+});
+
+describe('LineDetail missing-line route state', () => {
+  it('renders a retryable not-found state instead of a permanent loading skeleton', async () => {
+    const refetch = vi.fn();
+    useParamsMock.mockReturnValue({ name: 'missing-line' });
+    useLineMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      error: new Error('not found'),
+      refetch,
+    });
+
+    await act(async () => {
+      renderLineDetailRoute('missing-line');
+    });
+
+    expect(screen.getByText('Line not found')).toBeDefined();
+    expect(screen.getByText('missing-line may have been deleted or renamed.')).toBeDefined();
+    expect(screen.queryByRole('tablist', { name: 'Line detail tabs' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry line' }));
+    expect(refetch).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to fleet' }));
+    expect(navigateMock).toHaveBeenCalledWith('/');
   });
 });
 
