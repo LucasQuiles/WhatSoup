@@ -517,4 +517,46 @@ export function Fixture() {
     expect(output.by_rule['soup/layer-owner-required']).toBeUndefined();
     expect(output.finding_count).toBe(0);
   });
+
+  it('H4: flags raw viewport reads in a non-sanctioned file like useBreakpointDebug.tsx', () => {
+    // A file named useBreakpointDebug is NOT a sanctioned owner (the old regex /use(?:Breakpoint|ViewportPlacement)\.tsx?$/ would
+    // have exempted it because "useBreakpointDebug" contains "useBreakpoint" as a prefix, but
+    // the pinned exact-path guard must reject it).
+    const root = makeFixture(`
+export function useBreakpointDebug() {
+  return { width: window.innerWidth }
+}
+`, 'console/src/hooks/useBreakpointDebug.tsx');
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule['soup/no-raw-viewport-js']).toBe(1);
+    expect(output.findings.some((f) => f.rule === 'soup/no-raw-viewport-js')).toBe(true);
+  });
+
+  it('H4: stays silent for the exact sanctioned useViewportPlacement.ts owner path', () => {
+    const root = makeFixture(`
+export function useViewportPlacement() {
+  return { rightEdge: window.innerWidth }
+}
+`, 'console/src/hooks/useViewportPlacement.ts');
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule['soup/no-raw-viewport-js']).toBeUndefined();
+    expect(output.finding_count).toBe(0);
+  });
+
+  it('H4: stays silent for the exact sanctioned useBreakpoint.ts owner path', () => {
+    const root = makeFixture(`
+export function useBreakpoint() {
+  return { md: matchMedia('(min-width: 768px)').matches }
+}
+`, 'console/src/hooks/useBreakpoint.ts');
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule['soup/no-raw-viewport-js']).toBeUndefined();
+    expect(output.finding_count).toBe(0);
+  });
 });

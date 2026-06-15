@@ -167,4 +167,40 @@ describe('check-contrast-matrix.mjs', () => {
     expect(result.status).toBe(1);
     expect(output.rows.some((row) => row.status === 'FAIL' && row.ratio === null)).toBe(true);
   });
+
+  it('exits 2 with a named EMPTY_SCAN error when no [data-theme] token blocks are present', () => {
+    // A CSS file with no [data-theme="dark"] or [data-theme="light"] blocks means
+    // parseThemeTokens() returns {} — the script must refuse to PASS on a degenerate scan.
+    const fixture = makeFixture(`
+/* no theme blocks */
+:root {
+  --unrelated: #123456;
+}
+`);
+    const result = runScript(fixture.tokensPath, fixture.outPath);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toMatch(/EMPTY_SCAN/);
+    expect(result.stderr).toMatch(/no \[data-theme\] tokens parsed/);
+  });
+
+  it('still passes and is byte-identical in exit/summary when run against the real token file', () => {
+    // Guard: the empty-scan check must not affect the normal code path.
+    const realTokens = resolve(process.cwd(), 'console/src/styles/tokens.semantic.css');
+    const dir = mkdtempSync(join(tmpdir(), 'contrast-matrix-real-'));
+    tmpDirs.push(dir);
+    const outPath = join(dir, 'contrast-matrix.json');
+    const result = spawnSync(
+      'node',
+      [SCRIPT, '--tokens', realTokens, '--out', outPath, '--no-write'],
+      { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    const parsed = JSON.parse(result.stdout) as { verdict: string; pair_count: number; failed_count: number };
+    expect(parsed.verdict).toBe('PASS');
+    expect(parsed.failed_count).toBe(0);
+    expect(parsed.pair_count).toBeGreaterThan(60);
+  });
 });

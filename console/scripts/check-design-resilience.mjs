@@ -124,7 +124,10 @@ const focusRingOutlinePattern = /\boutline\s*:\s*(?!(?:none|0(?:px)?)(?=\s*(?:!i
 const outlineOffsetPattern = /\boutline-offset\s*:\s*[^;{}]+(?:;|$)/i;
 
 function isViewportOwnerFile(file) {
-  return /^console\/src\/(?:hooks|lib)\/use(?:Breakpoint|ViewportPlacement)\.tsx?$/.test(file);
+  return file === 'console/src/hooks/useBreakpoint.ts'
+    || file === 'console/src/hooks/useBreakpoint.tsx'
+    || file === 'console/src/hooks/useViewportPlacement.ts'
+    || file === 'console/src/hooks/useViewportPlacement.tsx';
 }
 
 function maskCssComments(text) {
