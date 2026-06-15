@@ -48,6 +48,13 @@ jobs:
       - name: Install Python test dependencies
         run: python3 -m pip install --user pytest
 
+      # ripgrep is a hard requirement of console/scripts/design-regression.sh
+      # (the design:regression gate + tests/scripts/design-regression-guards).
+      # It is not on the default runner image, so install it explicitly;
+      # without it the script's counts go empty and the blocking checks fail.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Typecheck
         run: npm run typecheck
 
