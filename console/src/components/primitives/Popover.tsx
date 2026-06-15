@@ -46,6 +46,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useDismissable } from '../../hooks/use-dismissable';
+import { useExitPresence } from '../../hooks/use-exit-presence';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -117,6 +118,9 @@ export function popoverOptionId(listboxId: string, value: string): string {
 // Popover (portal-based anchored panel)
 // ---------------------------------------------------------------------------
 
+/** CSS animation name for the popover exit keyframe (B5 §4.2 guard, motion.md §5). */
+const POPOVER_OUT_ANIM = 'soup-popover-out';
+
 export const Popover: FC<PopoverProps> = ({
   open,
   onClose,
@@ -137,6 +141,8 @@ export const Popover: FC<PopoverProps> = ({
   // Register with overlay stack — trapFocus: false + autoFocus: false so focus
   // stays on the combobox trigger/input. Escape handled via capture-phase stack.
   // dismissable: true — outside-click closes (select.md § Accessibility).
+  // useDismissable receives the REAL open prop: Escape deregisters and focus
+  // restores at close-start; the closing panel never captures input.
   useDismissable(panelRef, {
     onClose,
     open,
@@ -145,13 +151,18 @@ export const Popover: FC<PopoverProps> = ({
     autoFocus: false,
   });
 
+  // Exit presence: deferred unmount while soup-popover-out keyframe plays (B5 §4.2).
+  // In jsdom (no stylesheet) the dwell is instant — all existing suites stable (C-B5-1).
+  const { mounted, phase } = useExitPresence(open, panelRef, POPOVER_OUT_ANIM);
+
   // Apply anchor-based positioning to the portal panel after paint (safe DOM write).
   // Using useLayoutEffect + direct style mutation avoids:
   //   (a) reading anchorRef.current during render (react-hooks/refs rule)
   //   (b) setState-in-effect cascade (react-hooks/set-state-in-effect rule)
   // jsdom returns all zeros for getBoundingClientRect — tests rely on CSS classes.
+  // Run when open OR during closing dwell so the panel stays positioned while it fades.
   useLayoutEffect(() => {
-    if (!open) return;
+    if (!mounted) return;
     const panel = panelRef.current;
     const anchor = anchorRef.current;
     if (!panel || !anchor) return;
@@ -164,9 +175,9 @@ export const Popover: FC<PopoverProps> = ({
     if (placement === 'span' && rect.width > 0) {
       panel.style.minWidth = `${rect.width}px`;
     }
-  }, [open, anchorRef, placement]);
+  }, [mounted, anchorRef, placement]);
 
-  if (!open) return null;
+  if (!mounted) return null;
 
   const panelClass = ['soup-popover', className].filter(Boolean).join(' ');
 
@@ -174,7 +185,7 @@ export const Popover: FC<PopoverProps> = ({
     <div
       ref={panelRef}
       className={panelClass}
-      data-state="open"
+      data-state={phase}
     >
       <ul
         id={listboxId}

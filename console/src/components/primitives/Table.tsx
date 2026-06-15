@@ -135,7 +135,7 @@ export const TableHeaderCell: FC<TableHeaderCellProps> = ({
   };
 
   return (
-    <th className={thClass} aria-sort={ariaSortValue} {...rest}>
+    <th className={thClass} scope="col" aria-sort={ariaSortValue} {...rest}>
       {isSortable ? (
         <button
           type="button"
@@ -293,7 +293,7 @@ export const TableCell: FC<TableCellProps> = ({
 // ---------------------------------------------------------------------------
 
 export const EM_DASH: FC = () => (
-  <span className="soup-table-ghost" aria-label="none">
+  <span className="soup-table-ghost" aria-hidden="true">
     &mdash;
   </span>
 );

@@ -36,10 +36,13 @@ describe('LogsTab', () => {
     const logs = makeLogs()
     render(<LogsTab logs={logs} filter="all" onFilterChange={vi.fn()} />)
 
-    // Toolbar still renders heading and all pills
+    // Toolbar still renders heading and all pills. Scope the count to the filter
+    // pills (interactive Pills carry aria-pressed) — LogStream rows now each carry
+    // their own disclosure button (aria-expanded), so a bare button count would
+    // include those too.
     expect(screen.getByText('Logs')).toBeDefined()
-    const buttons = screen.getAllByRole('button')
-    expect(buttons).toHaveLength(LEVELS.length)
+    const filterPills = screen.getAllByRole('button').filter((b) => b.hasAttribute('aria-pressed'))
+    expect(filterPills).toHaveLength(LEVELS.length)
     for (const lvl of LEVELS) {
       expect(getPill(lvl)).toBeDefined()
     }

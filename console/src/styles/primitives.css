@@ -976,6 +976,11 @@ button.soup-pill[aria-disabled="true"] {
   outline-offset: -2px; /* inset, stays inside the seg frame */
 }
 
+.soup-toolbar-seg__btn:disabled {
+  opacity: var(--opacity-disabled);
+  cursor: not-allowed;
+}
+
 /* Search input wrapper */
 .soup-toolbar-search-wrap {
   display: inline-flex;
@@ -989,7 +994,7 @@ button.soup-pill[aria-disabled="true"] {
   width: 1px;
   height: 1px;
   overflow: hidden;
-  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 
@@ -1048,8 +1053,9 @@ button.soup-pill[aria-disabled="true"] {
   min-height: var(--row-compressed, 28px);
 }
 
-/* Row base */
+/* Row base — position:relative anchors the disclosure button overlay (P1-9) */
 .soup-log__row {
+  position: relative;
   min-height: var(--row-default, 36px);
   border-bottom: var(--bw) solid var(--border-hairline);
   cursor: pointer;
@@ -1067,8 +1073,24 @@ button.soup-pill[aria-disabled="true"] {
   background: var(--row-hover);
 }
 
-/* Focus ring — inset so it stays inside the row */
-.soup-log__row:focus-visible {
+/* Disclosure button (P1-9 ARIA fix) — transparent overlay that covers the full
+   row so any click/keyboard activation reaches the widget role button that
+   carries aria-expanded. Reset all button chrome; inherit cursor from row. */
+.soup-log__row-toggle {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* Focus ring on disclosure button — inset so it stays inside the row */
+.soup-log__row-toggle:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
@@ -1443,7 +1465,9 @@ button.soup-pill[aria-disabled="true"] {
    max-height + overflow-y: auto — governed scroll valve (~5 rows visible).
    Option rows: 28px compressed density (--row-compressed), hover --row-hover,
    selected --accent-wash + leading check mark.
-   Motion: fade+scale enter at --dur-fast; exit = instant on unmount (DD-19 pattern).
+   Motion: fade+scale enter at --dur-fast --ease-enter; exit faster-out per
+   motion.md §5: --dur-fast --ease-exit, gated on data-state="closing" via
+   use-exit-presence deferred unmount (same pattern as Modal/Drawer, B5 §4.2).
    Reduced-motion: both instant via the global @media prefers-reduced-motion block. */
 
 .soup-popover {
@@ -1461,6 +1485,14 @@ button.soup-pill[aria-disabled="true"] {
   animation: soup-popover-in var(--dur-fast) var(--ease-enter) forwards;
 }
 
+/* Exit animation — applied via data-state="closing" by use-exit-presence.
+   Faster-out per motion.md §5: --dur-fast --ease-exit.
+   pointer-events: none so clicks land immediately on the content beneath. */
+.soup-popover[data-state="closing"] {
+  animation: soup-popover-out var(--dur-fast) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+
 @keyframes soup-popover-in {
   from {
     opacity: 0;
@@ -1472,8 +1504,21 @@ button.soup-pill[aria-disabled="true"] {
   }
 }
 
+/* Exit keyframe — reverse of enter: fade + slight scale-down + translate up */
+@keyframes soup-popover-out {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.97) translateY(-4px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .soup-popover {
+  .soup-popover,
+  .soup-popover[data-state="closing"] {
     animation: none;
   }
 }

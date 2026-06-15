@@ -15,7 +15,9 @@ import {
 
 function borderColor(error?: boolean, confirmed?: boolean): string {
   if (error) return 'var(--status-crit-fg)';
-  if (confirmed) return 'var(--wizard-accent)';
+  // Product-global accent: --wizard-accent only resolves inside .wizard-accent-scope,
+  // leaving the confirmed border invisible for non-wizard consumers of this primitive.
+  if (confirmed) return 'var(--accent)';
   return 'var(--border-subtle)';
 }
 
@@ -181,7 +183,7 @@ export const TextArea: FC<TextAreaProps> = ({
       maxHeight,
       overflow,
       resize: resize ?? 'vertical',
-      filter: dimmed ? 'brightness(0.7)' : undefined,
+      opacity: dimmed ? 'var(--opacity-muted)' : undefined,
       borderColor: borderColor(error, confirmed),
     }}
   />
@@ -220,7 +222,7 @@ export const RadioField: FC<RadioFieldProps> = ({
       onChange={event => onChange(event.target.value)}
       className={inputClassName}
     />
-    <span className={`text-data ${labelClassName ?? ''}`} style={{ color: 'var(--text-2)' }}>{label}</span>
+    <span className={`text-data c-checkbox-label ${labelClassName ?? ''}`}>{label}</span>
   </label>
 );
 
@@ -265,7 +267,7 @@ export const CheckboxField: FC<CheckboxFieldProps> = ({
         aria-describedby={ariaDescribedBy}
         aria-invalid={ariaInvalid}
       />
-      <span className={`text-data ${labelClassName ?? ''}`} style={{ color: 'var(--text-2)' }}>{label}</span>
+      <span className={`text-data c-checkbox-label ${labelClassName ?? ''}`}>{label}</span>
       {suffix && <span aria-hidden="true">{suffix}</span>}
     </label>
     {helper && <div className="c-helper ml-[var(--sp-5)]">{helper}</div>}
