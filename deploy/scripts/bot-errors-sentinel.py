@@ -3,8 +3,8 @@
 
 This is the central-side state-machine foundation. It consumes host selfcheck
 heartbeats and independent probe snapshots, applies the two-signal and
-hysteresis rules, and records action decisions. Later rollout slices can wire
-the probe source to SSH and the action sink to heal/alert workers.
+hysteresis rules, runs optional SSH runtime probes, and records action
+decisions. Later rollout slices can wire the action sink to heal/alert workers.
 """
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import shlex
 import socket
+import subprocess
 import sys
 import time
 from typing import Callable, Optional
@@ -24,6 +26,53 @@ DEFAULT_HYSTERESIS_CYCLES = 2
 DEFAULT_FLAP_WINDOW_SECONDS = 6 * 60 * 60
 DEFAULT_FLAP_THRESHOLD = 4
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
+REMOTE_RUNTIME_PROBE = r"""
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(sys.argv[1]).expanduser()
+deployer = root / "deploy" / "scripts" / "whatsoup-bot-errors-deploy.sh"
+
+def emit(payload):
+    print(json.dumps(payload, sort_keys=True))
+
+if not deployer.is_file():
+    emit({"reachable": True, "healthy": False, "class": "manifest_missing", "error": f"missing deployer: {deployer}"})
+    raise SystemExit(0)
+
+try:
+    proc = subprocess.run(
+        ["bash", str(deployer), "verify", str(root)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+except subprocess.TimeoutExpired as exc:
+    emit({"reachable": True, "healthy": False, "class": "probe_timeout", "error": str(exc)})
+    raise SystemExit(0)
+except OSError as exc:
+    emit({"reachable": True, "healthy": False, "class": "probe_exec_error", "error": f"{type(exc).__name__}: {exc}"})
+    raise SystemExit(0)
+
+output = (proc.stdout or "")[-4000:]
+if proc.returncode == 0:
+    klass = "healthy"
+elif "SYMLINK" in output or "NOTDIR" in output or "unsafe" in output.lower():
+    klass = "unsafe_runtime_path"
+elif "MISSING" in output:
+    klass = "manifest_missing"
+elif "DRIFT" in output:
+    klass = "drift"
+elif "SMOKE" in output or "LEAK" in output or "redaction" in output.lower():
+    klass = "redaction_smoke_failed"
+else:
+    klass = "runtime_verify_failed"
+emit({"reachable": True, "healthy": proc.returncode == 0, "class": klass, "verifyRc": proc.returncode, "output": output[-1000:]})
+"""
 
 
 @dataclass(frozen=True)
@@ -33,6 +82,9 @@ class HostSpec:
     heartbeat_path: Optional[Path] = None
     probe_path: Optional[Path] = None
     ack_path: Optional[Path] = None
+    ssh_host: Optional[str] = None
+    root: Optional[Path] = None
+    python: str = "python3"
 
 
 @dataclass(frozen=True)
@@ -154,6 +206,11 @@ def path_or_none(value: object) -> Optional[Path]:
     return Path(text).expanduser() if text else None
 
 
+def text_or_none(value: object) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
+
+
 def load_hosts(path: Path) -> list[HostSpec]:
     data = read_json_object(path)
     if data.get("schemaVersion") != 1:
@@ -179,6 +236,9 @@ def load_hosts(path: Path) -> list[HostSpec]:
                 heartbeat_path=path_or_none(item.get("heartbeatPath")),
                 probe_path=path_or_none(item.get("probePath")),
                 ack_path=path_or_none(item.get("ackPath")),
+                ssh_host=text_or_none(item.get("sshHost")),
+                root=path_or_none(item.get("root")),
+                python=str(item.get("python") or "python3").strip() or "python3",
             )
         )
     return result
@@ -261,9 +321,92 @@ def normalize_probe(payload: dict) -> dict:
 
 
 def default_pull_probe(spec: HostSpec) -> dict:
-    if spec.probe_path is None:
-        return {}
-    return optional_json_object(spec.probe_path) or {"reachable": False, "healthy": False, "class": "invalid_probe"}
+    if spec.probe_path is not None:
+        return optional_json_object(spec.probe_path) or {"reachable": False, "healthy": False, "class": "invalid_probe"}
+    if spec.ssh_host or spec.root is not None:
+        return ssh_runtime_probe(spec)
+    return {}
+
+
+def env_key_segment(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in value).strip("_").upper()
+
+
+def ssh_command() -> list[str]:
+    raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND", "")
+    return shlex.split(raw) if raw else ["ssh"]
+
+
+def remote_exec_prefix(host: str) -> list[str]:
+    raw = os.environ.get(f"BOT_ERRORS_FLEET_SENTINEL_EXEC_{env_key_segment(host)}", "")
+    return shlex.split(raw) if raw else []
+
+
+def ssh_probe_connect_timeout_seconds() -> int:
+    return positive_int_env("BOT_ERRORS_FLEET_SENTINEL_SSH_CONNECT_TIMEOUT_SECONDS", 8, 1)
+
+
+def ssh_probe_timeout_seconds() -> int:
+    return positive_int_env("BOT_ERRORS_FLEET_SENTINEL_SSH_PROBE_TIMEOUT_SECONDS", 30, 1)
+
+
+def ssh_probe_command(spec: HostSpec) -> list[str]:
+    host = spec.ssh_host or spec.host
+    return [
+        *ssh_command(),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={ssh_probe_connect_timeout_seconds()}",
+        host,
+        *remote_exec_prefix(host),
+        spec.python,
+        "-",
+        str(spec.root),
+    ]
+
+
+def parse_probe_stdout(stdout: str) -> Optional[dict]:
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            loaded = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(loaded, dict):
+            return loaded
+    return None
+
+
+def ssh_runtime_probe(spec: HostSpec) -> dict:
+    if spec.root is None:
+        return {"reachable": True, "healthy": False, "class": "probe_config_error", "error": "sshHost requires root"}
+    try:
+        proc = subprocess.run(
+            ssh_probe_command(spec),
+            input=REMOTE_RUNTIME_PROBE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=ssh_probe_timeout_seconds(),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {"reachable": False, "healthy": False, "class": "ssh_timeout", "error": str(exc)[:300]}
+    except OSError as exc:
+        return {"reachable": False, "healthy": False, "class": "ssh_exec_error", "error": f"{type(exc).__name__}: {exc}"[:300]}
+    if proc.returncode != 0:
+        error = (proc.stderr or proc.stdout or "")[-500:]
+        return {"reachable": False, "healthy": False, "class": "ssh_failed", "error": error}
+    payload = parse_probe_stdout(proc.stdout or "")
+    if payload is None:
+        return {"reachable": True, "healthy": False, "class": "invalid_probe_output", "error": "remote probe did not emit JSON"}
+    payload.setdefault("reachable", True)
+    payload.setdefault("healthy", False)
+    payload.setdefault("class", "unknown")
+    return payload
 
 
 def classify_signals(heartbeat: dict, probe: dict) -> tuple[str, bool, str]:

@@ -78,13 +78,23 @@ def test_load_hosts_validates_schema_and_duplicates(tmp_path: Path):
         tmp_path,
         [
             {"host": "host-a", "role": "runtime", "heartbeatPath": str(tmp_path / "host-a.json")},
-            {"host": "host-z", "probePath": str(tmp_path / "probe.json"), "ackPath": str(tmp_path / "ack.json")},
+            {
+                "host": "host-z",
+                "probePath": str(tmp_path / "probe.json"),
+                "ackPath": str(tmp_path / "ack.json"),
+                "sshHost": "host-z.example",
+                "root": str(tmp_path / "runtime"),
+                "python": "/opt/python/bin/python3",
+            },
         ],
     )
     hosts = _mod.load_hosts(good)
     assert [host.host for host in hosts] == ["host-a", "host-z"]
     assert hosts[0].role == "runtime"
     assert hosts[1].ack_path == tmp_path / "ack.json"
+    assert hosts[1].ssh_host == "host-z.example"
+    assert hosts[1].root == tmp_path / "runtime"
+    assert hosts[1].python == "/opt/python/bin/python3"
 
     bad_schema = _write_json(tmp_path / "bad-schema.json", {"schemaVersion": 2, "hosts": []})
     with pytest.raises(_mod.SentinelError, match="schemaVersion"):
@@ -275,6 +285,103 @@ def test_probe_path_default_and_bad_heartbeat_json(tmp_path: Path):
 
     missing_probe = _mod.default_pull_probe(_mod.HostSpec(host="host-b", probe_path=tmp_path / "missing.json"))
     assert missing_probe == {"reachable": False, "healthy": False, "class": "invalid_probe"}
+
+
+def test_ssh_runtime_probe_success_uses_batchmode_and_remote_script(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    class Proc:
+        returncode = 0
+        stdout = '{"reachable": true, "healthy": false, "class": "drift", "verifyRc": 1}\n'
+        stderr = ""
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["input"] = kwargs["input"]
+        seen["timeout"] = kwargs["timeout"]
+        seen["check"] = kwargs["check"]
+        return Proc()
+
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND", "ssh -F none")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_EXEC_HOST_A_EXAMPLE", "env FOO=bar")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_SSH_CONNECT_TIMEOUT_SECONDS", "4")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_SSH_PROBE_TIMEOUT_SECONDS", "9")
+    monkeypatch.setattr(_mod.subprocess, "run", run)
+    spec = _mod.HostSpec(host="host-a", ssh_host="host-a.example", root=tmp_path / "runtime", python="/usr/bin/python3")
+    result = _mod.default_pull_probe(spec)
+    assert result["reachable"] is True
+    assert result["healthy"] is False
+    assert result["class"] == "drift"
+    assert seen["cmd"] == [
+        "ssh",
+        "-F",
+        "none",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=4",
+        "host-a.example",
+        "env",
+        "FOO=bar",
+        "/usr/bin/python3",
+        "-",
+        str(tmp_path / "runtime"),
+    ]
+    assert "whatsoup-bot-errors-deploy.sh" in seen["input"]
+    assert seen["timeout"] == 9
+    assert seen["check"] is False
+
+    result = _mod.default_pull_probe(_mod.HostSpec(host="host-b", root=tmp_path / "runtime"))
+    assert result["class"] == "drift"
+    assert seen["cmd"][7] == "host-b"
+
+
+def test_ssh_runtime_probe_failure_modes(tmp_path: Path, monkeypatch):
+    assert _mod.default_pull_probe(_mod.HostSpec(host="host-a", ssh_host="host-a.example")) == {
+        "reachable": True,
+        "healthy": False,
+        "class": "probe_config_error",
+        "error": "sshHost requires root",
+    }
+
+    def timeout(_cmd, **_kwargs):
+        raise _mod.subprocess.TimeoutExpired(cmd="ssh", timeout=9)
+
+    monkeypatch.setattr(_mod.subprocess, "run", timeout)
+    timeout_result = _mod.default_pull_probe(_mod.HostSpec(host="host-a", ssh_host="host-a.example", root=tmp_path))
+    assert timeout_result["reachable"] is False
+    assert timeout_result["class"] == "ssh_timeout"
+
+    def exec_error(_cmd, **_kwargs):
+        raise OSError("missing ssh")
+
+    monkeypatch.setattr(_mod.subprocess, "run", exec_error)
+    exec_result = _mod.default_pull_probe(_mod.HostSpec(host="host-a", ssh_host="host-a.example", root=tmp_path))
+    assert exec_result["reachable"] is False
+    assert exec_result["class"] == "ssh_exec_error"
+
+    class FailedProc:
+        returncode = 255
+        stdout = ""
+        stderr = "connection refused"
+
+    monkeypatch.setattr(_mod.subprocess, "run", lambda *_args, **_kwargs: FailedProc())
+    failed = _mod.default_pull_probe(_mod.HostSpec(host="host-a", ssh_host="host-a.example", root=tmp_path))
+    assert failed == {"reachable": False, "healthy": False, "class": "ssh_failed", "error": "connection refused"}
+
+    class BadJsonProc:
+        returncode = 0
+        stdout = "not json\n"
+        stderr = ""
+
+    monkeypatch.setattr(_mod.subprocess, "run", lambda *_args, **_kwargs: BadJsonProc())
+    invalid = _mod.default_pull_probe(_mod.HostSpec(host="host-a", ssh_host="host-a.example", root=tmp_path))
+    assert invalid == {
+        "reachable": True,
+        "healthy": False,
+        "class": "invalid_probe_output",
+        "error": "remote probe did not emit JSON",
+    }
 
 
 def test_signal_classification_and_inventory_edges(tmp_path: Path, monkeypatch):
