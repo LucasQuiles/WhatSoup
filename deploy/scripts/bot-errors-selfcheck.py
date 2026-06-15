@@ -166,9 +166,16 @@ def load_memory(path: Path) -> dict:
     return memory
 
 
+def int_or_zero(value: object) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def update_consecutive(memory: dict, observed_class: str) -> int:
     if memory.get("lastClass") == observed_class:
-        consecutive = int(memory.get("consecutive") or 0) + 1
+        consecutive = int_or_zero(memory.get("consecutive")) + 1
     else:
         consecutive = 1
     memory["lastClass"] = observed_class
