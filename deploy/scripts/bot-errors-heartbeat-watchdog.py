@@ -75,7 +75,12 @@ def validate_thresholds() -> None:
 
 def now_epoch() -> int:
     override = os.environ.get("BOT_ERRORS_DRY_NOW")
-    return int(override) if override is not None else int(time.time())
+    if override is not None:
+        try:
+            return int(override)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return int(time.time())
 
 
 def now_iso(ts: int | None = None) -> str:
@@ -909,7 +914,13 @@ def daily_health_events() -> list[tuple[Path, int, dict[str, Any] | None]]:
 def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
     dry_age = os.environ.get("BOT_ERRORS_DRY_DAILY_HEALTH_AGE_SECONDS")
     if dry_age is not None and host is None:
-        return int(dry_age), "dry daily-health age"
+        try:
+            age = int(dry_age)
+        except (TypeError, ValueError, OverflowError):
+            return None, f"invalid dry daily-health age: value={dry_age!r}"
+        if age < 0:
+            return None, f"invalid dry daily-health age: value={dry_age!r}"
+        return age, "dry daily-health age"
     newest: int | None = None
     newest_path = ""
     try:

@@ -49,6 +49,15 @@ def test_now_iso_formats_explicit_epoch_zero(monkeypatch):
     assert mod.now_iso(0) == "1970-01-01T00:00:00Z"
 
 
+def test_bad_dry_now_falls_back_to_wall_clock(monkeypatch):
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_DRY_NOW", "bad")
+    monkeypatch.setattr(mod.time, "time", lambda: 1234.9)
+
+    assert mod.now_epoch() == 1234
+    assert mod.now_iso() == "1970-01-01T00:20:34Z"
+
+
 def test_fleet_sentinel_heartbeat_check_is_quiet_when_fresh(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
@@ -513,6 +522,19 @@ def test_daily_health_future_event_time_is_reported_not_fresh(tmp_path: Path, mo
         "daily-health cadence stale: age_seconds=missing max=90000 "
         f"detail=future daily-health event time: path={target} "
         "timestamp=1100 now=1000 future_by_seconds=100"
+    )
+
+
+def test_bad_dry_daily_health_age_is_reported_not_crashed(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    _private_state(monkeypatch, mod, tmp_path)
+    monkeypatch.setenv("BOT_ERRORS_DRY_DAILY_HEALTH_AGE_SECONDS", "bad")
+
+    problems = mod.collect_problems(_watchdog_args(), {"daily_health"})
+
+    assert problems["daily_health"] == (
+        "daily-health cadence stale: age_seconds=missing max=90000 "
+        "detail=invalid dry daily-health age: value='bad'"
     )
 
 
