@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+S=deploy/scripts/install-bot-errors-sentinel.sh
+bash -n "$S" || { echo "SENTINEL_INSTALLER_FAIL syntax"; exit 1; }
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+fakebin="$tmp/fakebin"
+mkdir -p "$fakebin"
+for cmd in launchctl plutil systemctl; do
+  cat > "$fakebin/$cmd" <<'SH'
+#!/usr/bin/env bash
+echo "unexpected activation command: $0 $*" >&2
+exit 99
+SH
+  chmod +x "$fakebin/$cmd"
+done
+
+repo="$tmp/root"
+mkdir -p "$repo/deploy/scripts"
+touch "$repo/deploy/scripts/bot-errors-sentinel.py"
+hosts="$tmp/hosts&fleet.json"
+cat > "$hosts" <<'JSON'
+{"schemaVersion":1,"hosts":[{"host":"host-a"}]}
+JSON
+
+common_env=(
+  BOT_ERRORS_REPO_ROOT="$repo"
+  BOT_ERRORS_STATE_DIR="$tmp/state"
+  BOT_ERRORS_FLEET_SENTINEL_STATE_DIR="$tmp/state/fleet-sentinel"
+  BOT_ERRORS_FLEET_SENTINEL_HOSTS="$hosts"
+  BOT_ERRORS_PYTHON="/usr/bin/python3"
+  BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN=1
+  BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS=1800
+  BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS=2700
+  BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES=2
+  BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS=21600
+  BOT_ERRORS_FLEET_SENTINEL_FLAP_THRESHOLD=4
+)
+
+PATH="$fakebin:$PATH" env "${common_env[@]}" \
+  BOT_ERRORS_FLEET_SENTINEL_PLATFORM=launchd \
+  BOT_ERRORS_LAUNCH_AGENTS_DIR="$tmp/LaunchAgents" \
+  bash "$S" > "$tmp/launchd.out" 2> "$tmp/launchd.err"
+
+plist="$tmp/LaunchAgents/com.bot-errors.sentinel.plist"
+[[ -f "$plist" ]] || { echo "SENTINEL_INSTALLER_FAIL missing launchd plist"; cat "$tmp/launchd.err"; exit 1; }
+grep -q '<key>StartInterval</key><integer>1800</integer>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd interval"; cat "$plist"; exit 1; }
+grep -q '<string>--hosts</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd hosts arg missing"; cat "$plist"; exit 1; }
+grep -q '<string>--state-dir</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd state arg missing"; cat "$plist"; exit 1; }
+grep -q "$repo/deploy/scripts/bot-errors-sentinel.py" "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd script path"; cat "$plist"; exit 1; }
+grep -q 'hosts&amp;fleet.json' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd xml escaping"; cat "$plist"; exit 1; }
+grep -q 'BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd threshold env"; cat "$plist"; exit 1; }
+grep -q 'dry_run=1' "$tmp/launchd.out" || { echo "SENTINEL_INSTALLER_FAIL launchd dry-run output"; cat "$tmp/launchd.out"; exit 1; }
+[[ ! -s "$tmp/launchd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL launchd invoked activation"; cat "$tmp/launchd.err"; exit 1; }
+
+PATH="$fakebin:$PATH" env "${common_env[@]}" \
+  BOT_ERRORS_FLEET_SENTINEL_PLATFORM=systemd \
+  BOT_ERRORS_SYSTEMD_USER_DIR="$tmp/systemd" \
+  bash "$S" > "$tmp/systemd.out" 2> "$tmp/systemd.err"
+
+service="$tmp/systemd/bot-errors-sentinel.service"
+timer="$tmp/systemd/bot-errors-sentinel.timer"
+[[ -f "$service" && -f "$timer" ]] || { echo "SENTINEL_INSTALLER_FAIL missing systemd files"; cat "$tmp/systemd.err"; exit 1; }
+grep -q '^ExecStart=/usr/bin/python3 .*bot-errors-sentinel.py --hosts ' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd exec"; cat "$service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_HOSTS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd hosts env"; cat "$service"; exit 1; }
+grep -q '^OnUnitActiveSec=1800s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd interval"; cat "$timer"; exit 1; }
+grep -q '^Persistent=true$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd persistent"; cat "$timer"; exit 1; }
+grep -q 'dry_run=1' "$tmp/systemd.out" || { echo "SENTINEL_INSTALLER_FAIL systemd dry-run output"; cat "$tmp/systemd.out"; exit 1; }
+[[ ! -s "$tmp/systemd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL systemd invoked activation"; cat "$tmp/systemd.err"; exit 1; }
+
+badroot="$tmp/bad-root"
+mkdir -p "$badroot/deploy/scripts"
+if env BOT_ERRORS_REPO_ROOT="$badroot" BOT_ERRORS_FLEET_SENTINEL_HOSTS="$hosts" BOT_ERRORS_FLEET_SENTINEL_PLATFORM=launchd BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN=1 bash "$S" > "$tmp/missing-script.out" 2> "$tmp/missing-script.err"; then
+  echo "SENTINEL_INSTALLER_FAIL accepted missing sentinel script"
+  exit 1
+fi
+grep -q 'NOT READY: missing required BOT ERRORS sentinel file' "$tmp/missing-script.err" || { echo "SENTINEL_INSTALLER_FAIL missing-script reason"; cat "$tmp/missing-script.err"; exit 1; }
+
+if env "${common_env[@]}" BOT_ERRORS_FLEET_SENTINEL_HOSTS="$tmp/missing-hosts.json" BOT_ERRORS_FLEET_SENTINEL_PLATFORM=systemd bash "$S" > "$tmp/missing-hosts.out" 2> "$tmp/missing-hosts.err"; then
+  echo "SENTINEL_INSTALLER_FAIL accepted missing hosts file"
+  exit 1
+fi
+grep -q 'NOT READY: missing required BOT ERRORS sentinel hosts file' "$tmp/missing-hosts.err" || { echo "SENTINEL_INSTALLER_FAIL missing-hosts reason"; cat "$tmp/missing-hosts.err"; exit 1; }
+
+if env "${common_env[@]}" BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS=299 BOT_ERRORS_FLEET_SENTINEL_PLATFORM=systemd bash "$S" > "$tmp/interval.out" 2> "$tmp/interval.err"; then
+  echo "SENTINEL_INSTALLER_FAIL accepted too-short interval"
+  exit 1
+fi
+grep -q 'must be at least 300' "$tmp/interval.err" || { echo "SENTINEL_INSTALLER_FAIL interval reason"; cat "$tmp/interval.err"; exit 1; }
+
+echo "SENTINEL_INSTALLER_PASS"
