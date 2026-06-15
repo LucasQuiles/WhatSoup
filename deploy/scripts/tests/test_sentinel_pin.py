@@ -85,3 +85,17 @@ def test_bundle_flags_missing_and_mismatch(tmp_path):
     pin = sp.Pin(head_sha="a"*40, files={"deploy/scripts/bot-errors-emit.py": "0"*64, sp.F10_PATH: "1"*64}, f10_sha="1"*64)
     ok, mismatches = sp.verify_bundle(b, pin)
     assert ok is False and {m[1] for m in mismatches} == {"missing", "sha"}
+
+
+# ---------------------------------------------------------------------------
+# Increment 4 — edge cases for coverage >= 98%
+# ---------------------------------------------------------------------------
+
+def test_sha256_file_large_chunked(tmp_path):
+    p = tmp_path / "big.bin"; data = b"x" * (65536 * 2 + 7); p.write_bytes(data)
+    assert sp._sha256_file(p) == hashlib.sha256(data).hexdigest()
+
+
+def test_trust_reason_when_f10_none():
+    ok, reason = sp.verify_pin_trust(sp.Pin(head_sha="a"*40, files={}, f10_sha=None), approved_f10={"x"}, commit_exists=lambda s: True)
+    assert ok is False and "none" in reason
