@@ -689,7 +689,8 @@ export default defineConfig([
   // ─────────────────────────────────────────────────────────────────────────
   // Block 1 — Base rule set for all TS/TSX.
   // Includes: designSystemRestrictions (existing wall) + Group S (structural,
-  // zero-violation console-wide) + Group F (focus suppression, console-wide).
+  // zero-violation console-wide, now also includes no-raw-button / no-adhoc-modal /
+  // no-infinite-animation promoted 2026-06-15) + Group F (focus suppression, console-wide).
   // Last-match-wins: files matched by a later block get that block's full array.
   // ─────────────────────────────────────────────────────────────────────────
   {
@@ -740,6 +741,8 @@ export default defineConfig([
   // Block 3 — Scheduled/groups ratchet (existing strict set, re-carried).
   // Must re-carry the full base array PLUS Group S + Group F because flat-config
   // last-match-wins replaces, not merges, the no-restricted-syntax rule.
+  // Group S now includes no-raw-button / no-adhoc-modal / no-infinite-animation
+  // (promoted 2026-06-15) so this re-carry automatically enforces those console-wide.
   // CreateGroupModal is also in the M list — it gets the full union in Block 4b.
   // ─────────────────────────────────────────────────────────────────────────
   {
@@ -771,9 +774,10 @@ export default defineConfig([
 
   // ─────────────────────────────────────────────────────────────────────────
   // Block 4a — Migrated surfaces (M list, excluding CreateGroupModal).
-  // These files have zero no-raw-button and no-adhoc-modal violations in the
-  // shadow baseline. Promoting to scoped-error prevents re-introduction.
-  // Full array: base + structural + focus + migrated selectors.
+  // NOTE: no-raw-button, no-adhoc-modal, and no-infinite-animation are now
+  // console-wide (promoted 2026-06-15 into structuralSelectors/Group S).
+  // migratedSurfaceSelectors spread is kept for forward-compat but is now empty.
+  // Full array: base + structural (incl. promoted M rules) + focus + (empty M spread).
   // ─────────────────────────────────────────────────────────────────────────
   {
     files: [
@@ -806,6 +810,7 @@ export default defineConfig([
   // It must carry the union of all: base + scheduled + structural + focus + migrated.
   // Placing it in 4a alone would silently strip the scheduled ratchet (flat-config
   // replace semantics — last match wins). Constraint §3 in d6-investigation.md.
+  // migratedSurfaceSelectors is now empty (rules promoted into structuralSelectors 2026-06-15).
   // ─────────────────────────────────────────────────────────────────────────
   {
     files: [

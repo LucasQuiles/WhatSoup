@@ -17,8 +17,11 @@
 
 // ── Group S — structural, console-wide ──────────────────────────────────────
 // Scope: all console/src TS/TSX except components/primitives/**
-// (Table/LogStream ARE the canonical renderers; raw elements must not reappear outside them)
+// (Table/LogStream/Button/Modal ARE the canonical renderers; raw elements must not reappear outside them)
 // Current violations in scope: 0 (no baseline keys; design-regression check 16 PASS)
+// 2026-06-15: Expanded to include no-raw-button, no-adhoc-modal (promoted from Group M scoped-error
+// to console-wide error; pre-promotion rg audit: 0 violations), and no-infinite-animation
+// (promoted from shadow; pre-promotion rg audit: 0 TSX violations).
 export const structuralSelectors = [
   {
     selector: 'JSXOpeningElement[name.name="table"]',
@@ -41,6 +44,40 @@ export const structuralSelectors = [
       'Log surfaces render through the LogStream primitive; use its component tokens ' +
       '--log-time-w / --log-level-w / --log-source-w instead. ' +
       'FIX: replace var(--log-col-*) with the LogStream component token.',
+  },
+  // ── no-raw-button (promoted 2026-06-15 from Group M scoped → console-wide) ──
+  {
+    selector: 'JSXOpeningElement[name.name="button"]',
+    message:
+      '[soup/no-raw-button] Raw <button> element. ' +
+      'FIX: render through the Button primitive (components/primitives/Button.tsx). ' +
+      'E.g. <button className="c-btn">…</button> → <Button>…</Button>.',
+  },
+  // ── no-adhoc-modal (promoted 2026-06-15 from Group M scoped → console-wide) ──
+  {
+    selector: 'Literal[value=/c-dialog-backdrop/]',
+    message:
+      '[soup/no-adhoc-modal] Ad-hoc dialog backdrop class "c-dialog-backdrop". ' +
+      'FIX: render all dialog surfaces through the Modal primitive ' +
+      '(components/primitives/Modal.tsx).',
+  },
+  {
+    selector: 'JSXAttribute[name.name="role"][value.value="dialog"]',
+    message:
+      '[soup/no-adhoc-modal] role="dialog" outside the Modal primitive. ' +
+      'FIX: render all dialog surfaces through the Modal primitive ' +
+      '(components/primitives/Modal.tsx).',
+  },
+  // ── no-infinite-animation (promoted 2026-06-15 from shadow → console-wide error) ──
+  // TSX-side inline animation: ...infinite tripwire.
+  // CSS-side infinite animations are covered by design-regression.sh check 13 + waiver registry.
+  {
+    selector: 'Property[key.name="animation"][value.value=/infinite/]',
+    message:
+      '[soup/no-infinite-animation] Inline style animation with "infinite" keyword. ' +
+      'Only the sanctioned ok-breathing animation token is permitted for infinite animations. ' +
+      'FIX: move animation to a CSS @keyframes rule in index.css with a waiver entry, ' +
+      'or replace with a finite animation. See design-regression.sh check 13.',
   },
 ]
 
@@ -73,32 +110,12 @@ export const focusSuppressionSelectors = [
   },
 ]
 
-// ── Group M — migrated surfaces ──────────────────────────────────────────────
-// Scope: the 8 files in the M list (scoped-error block 4a + 4b in eslint.config.js)
-// Current violations in scope: 0 (no baseline keys for these rules in these files)
-export const migratedSurfaceSelectors = [
-  {
-    selector: 'JSXOpeningElement[name.name="button"]',
-    message:
-      '[soup/no-raw-button] Raw <button> element on a migrated surface. ' +
-      'FIX: render through the Button primitive (components/primitives/Button.tsx). ' +
-      'E.g. <button className="c-btn">…</button> → <Button>…</Button>.',
-  },
-  {
-    selector: 'Literal[value=/c-dialog-backdrop/]',
-    message:
-      '[soup/no-adhoc-modal] Ad-hoc dialog backdrop class "c-dialog-backdrop" on a migrated surface. ' +
-      'FIX: render all dialog surfaces through the Modal primitive ' +
-      '(components/primitives/Modal.tsx).',
-  },
-  {
-    selector: 'JSXAttribute[name.name="role"][value.value="dialog"]',
-    message:
-      '[soup/no-adhoc-modal] role="dialog" outside the Modal primitive on a migrated surface. ' +
-      'FIX: render all dialog surfaces through the Modal primitive ' +
-      '(components/primitives/Modal.tsx).',
-  },
-]
+// ── Group M — DEPRECATED (selectors promoted into structuralSelectors 2026-06-15) ──
+// Previously scoped to 9 files (blocks 4a/4b). All 3 selectors (no-raw-button, no-adhoc-modal x2)
+// have been moved into structuralSelectors above for console-wide enforcement.
+// This export is kept so existing spread references in blocks 4a/4b remain valid (empty = no-op).
+// TODO: remove this export and its spreads in the next config cleanup pass.
+export const migratedSurfaceSelectors = []
 
 // ── Group P — primitives strict tier ────────────────────────────────────────
 // Scope: components/primitives/** ONLY (born-clean enforcement)
