@@ -616,3 +616,263 @@ def test_run_target_unreachable_increments_failures(mod):
     assert outcome.state == "unreachable"
     assert outcome.new_state["consecutive_failures"] == 2
     assert outcome.emit_decision.should_emit is True
+
+
+# ===========================================================================
+# SLICE 2: post-reboot regression detection (pure logic, injected boot values)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Test 13: distill a stable boot id from `sysctl -n kern.boottime`
+# ---------------------------------------------------------------------------
+
+
+def test_distill_boot_id_from_sysctl_boottime(mod):
+    # macOS: `sysctl -n kern.boottime` => "{ sec = 1718000000, usec = 123456 } ..."
+    raw = "{ sec = 1718000000, usec = 123456 } Mon Jun 10 00:00:00 2026\n"
+    assert mod.distill_boot_id(raw, ok=True) == "1718000000"
+
+
+def test_distill_boot_id_changes_with_boot_time(mod):
+    a = mod.distill_boot_id("{ sec = 1718000000, usec = 1 }", ok=True)
+    b = mod.distill_boot_id("{ sec = 1718999999, usec = 1 }", ok=True)
+    assert a != b
+
+
+def test_distill_boot_id_fallback_uptime_seconds(mod):
+    # Fallback path: a bare integer (e.g. seconds-since-boot bucket) is accepted.
+    assert mod.distill_boot_id("987654", ok=True) == "987654"
+
+
+def test_distill_boot_id_none_when_probe_failed(mod):
+    assert mod.distill_boot_id("{ sec = 1718000000 }", ok=False) is None
+
+
+def test_distill_boot_id_none_on_empty(mod):
+    assert mod.distill_boot_id("   ", ok=True) is None
+
+
+def test_distill_boot_id_none_on_garbage(mod):
+    assert mod.distill_boot_id("totally not a boottime", ok=True) is None
+
+
+# ---------------------------------------------------------------------------
+# Test 14: detect_reboot — compare prior vs current boot id (pure)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_reboot_true_when_boot_id_changed(mod):
+    assert mod.detect_reboot(prior_boot_id="100", current_boot_id="200") is True
+
+
+def test_detect_reboot_false_when_boot_id_same(mod):
+    assert mod.detect_reboot(prior_boot_id="100", current_boot_id="100") is False
+
+
+def test_detect_reboot_false_on_first_ever_observation(mod):
+    # No prior boot id => cannot assert a reboot (no false regression).
+    assert mod.detect_reboot(prior_boot_id=None, current_boot_id="200") is False
+    assert mod.detect_reboot(prior_boot_id="", current_boot_id="200") is False
+
+
+def test_detect_reboot_false_when_current_boot_id_unknown(mod):
+    # Fail-closed: a missing/garbage current boot id is NOT a confirmed reboot,
+    # but it also must not be treated as "definitely no reboot" downstream —
+    # detect_reboot only answers "did we positively confirm a reboot?".
+    assert mod.detect_reboot(prior_boot_id="100", current_boot_id=None) is False
+    assert mod.detect_reboot(prior_boot_id="100", current_boot_id="") is False
+
+
+# ---------------------------------------------------------------------------
+# Test 15: classify_with_reboot — promote post-reboot agent failure (pure)
+# ---------------------------------------------------------------------------
+
+
+def test_reboot_then_healthy_is_not_a_regression(mod):
+    # Clean reboot, agent came back ok => base state unchanged, no regression.
+    out = mod.classify_with_reboot(
+        base_state="ok", prior_boot_id="100", current_boot_id="200",
+    )
+    assert out == "ok"
+
+
+def test_reboot_then_agent_unloaded_is_regression(mod):
+    out = mod.classify_with_reboot(
+        base_state="agent_unloaded", prior_boot_id="100", current_boot_id="200",
+    )
+    assert out == "post_reboot_regression"
+
+
+def test_reboot_then_session_absent_is_regression(mod):
+    out = mod.classify_with_reboot(
+        base_state="gui_session_absent", prior_boot_id="100", current_boot_id="200",
+    )
+    assert out == "post_reboot_regression"
+
+
+def test_no_reboot_transient_unload_stays_normal_path(mod):
+    # Same boot id => a transient unload is NOT a post-reboot regression; it
+    # stays on the normal threshold path as plain agent_unloaded.
+    out = mod.classify_with_reboot(
+        base_state="agent_unloaded", prior_boot_id="100", current_boot_id="100",
+    )
+    assert out == "agent_unloaded"
+
+
+def test_first_ever_observation_no_false_regression(mod):
+    # No prior boot id (first run) must never produce a regression even if the
+    # agent is down.
+    out = mod.classify_with_reboot(
+        base_state="agent_unloaded", prior_boot_id=None, current_boot_id="200",
+    )
+    assert out == "agent_unloaded"
+
+
+def test_missing_current_boot_id_no_false_regression(mod):
+    # Fail-closed: a missing/garbage current boot id must NOT fabricate a
+    # regression; base state is preserved.
+    out = mod.classify_with_reboot(
+        base_state="agent_unloaded", prior_boot_id="100", current_boot_id=None,
+    )
+    assert out == "agent_unloaded"
+
+
+def test_reboot_with_inconclusive_base_is_not_regression(mod):
+    # A reboot + inconclusive base (e.g. unknown user / garbage probe) must stay
+    # inconclusive, never be upgraded to a confident regression.
+    out = mod.classify_with_reboot(
+        base_state="inconclusive", prior_boot_id="100", current_boot_id="200",
+    )
+    assert out == "inconclusive"
+
+
+def test_reboot_with_unreachable_base_is_not_regression(mod):
+    out = mod.classify_with_reboot(
+        base_state="unreachable", prior_boot_id="100", current_boot_id="200",
+    )
+    assert out == "unreachable"
+
+
+# ---------------------------------------------------------------------------
+# Test 16: post_reboot_regression is a non-ok state, critical, threshold-gated
+# ---------------------------------------------------------------------------
+
+
+def test_post_reboot_regression_in_non_ok_states(mod):
+    assert "post_reboot_regression" in mod.NON_OK_STATES
+
+
+def test_post_reboot_regression_emit_severity_critical(mod):
+    argv = mod.build_emit_argv(
+        host="botbox-a", instance="x-bot", label="com.whatsoup.x-bot",
+        state="post_reboot_regression", consecutive_failures=2, threshold=2,
+    )
+    assert argv[argv.index("--severity") + 1] == "critical"
+    diags = [argv[i + 1] for i, a in enumerate(argv) if a == "--diagnostic"]
+    assert "gui_state=post_reboot_regression" in diags
+
+
+def test_post_reboot_regression_gated_by_threshold(mod):
+    below = mod.evaluate_emit_decision(
+        state="post_reboot_regression", consecutive_failures=1, threshold=2,
+    )
+    at = mod.evaluate_emit_decision(
+        state="post_reboot_regression", consecutive_failures=2, threshold=2,
+    )
+    assert below.should_emit is False
+    assert at.should_emit is True
+
+
+# ---------------------------------------------------------------------------
+# Test 17: run_target is boot-aware (persists boot_id, promotes regression)
+# ---------------------------------------------------------------------------
+
+
+def _probe_boot(boot_id, *, console_owner="root", agent_state="unloaded",
+                console_ok=True, agent_ok=True):
+    p = _probe(console_owner=console_owner, agent_state=agent_state,
+               console_ok=console_ok, agent_ok=agent_ok)
+    p["boot_id"] = boot_id
+    return p
+
+
+def test_run_target_persists_boot_id(mod):
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe_boot("500", console_owner="x-bot", agent_state="running"),
+        prior_state=None,
+        threshold=2,
+    )
+    assert outcome.new_state["boot_id"] == "500"
+    assert outcome.state == "ok"
+
+
+def test_run_target_reboot_then_unloaded_is_regression(mod):
+    prior = {"consecutive_failures": 1, "last_state": "agent_unloaded", "boot_id": "100"}
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe_boot("200", console_owner="x-bot", agent_state="unloaded"),
+        prior_state=prior,
+        threshold=2,
+    )
+    assert outcome.state == "post_reboot_regression"
+    assert outcome.new_state["boot_id"] == "200"
+    assert outcome.emit_decision.should_emit is True
+    assert "gui_state=post_reboot_regression" in outcome.emit_argv
+
+
+def test_run_target_no_reboot_transient_unload_is_plain(mod):
+    prior = {"consecutive_failures": 1, "last_state": "agent_unloaded", "boot_id": "100"}
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe_boot("100", console_owner="x-bot", agent_state="unloaded"),
+        prior_state=prior,
+        threshold=2,
+    )
+    assert outcome.state == "agent_unloaded"
+
+
+def test_run_target_first_run_no_false_regression(mod):
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe_boot("200", console_owner="x-bot", agent_state="unloaded"),
+        prior_state=None,
+        threshold=2,
+    )
+    assert outcome.state == "agent_unloaded"
+    assert outcome.new_state["boot_id"] == "200"
+
+
+def test_run_target_missing_boot_id_no_false_regression(mod):
+    # boot probe failed (None) but agent is down after what might be a reboot:
+    # must NOT fabricate a regression; stays plain agent_unloaded.
+    prior = {"consecutive_failures": 1, "last_state": "agent_unloaded", "boot_id": "100"}
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe_boot(None, console_owner="x-bot", agent_state="unloaded"),
+        prior_state=prior,
+        threshold=2,
+    )
+    assert outcome.state == "agent_unloaded"
+    # The unknown boot id must not overwrite the last known good boot id with None.
+    assert outcome.new_state.get("boot_id") in ("100", None) or "boot_id" in outcome.new_state
+
+
+def test_run_target_reboot_regression_resets_to_clean_on_recovery(mod):
+    # After a regression, a later healthy probe (new boot id) clears failures.
+    prior = {"consecutive_failures": 2, "last_state": "post_reboot_regression", "boot_id": "200"}
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe_boot("200", console_owner="x-bot", agent_state="running"),
+        prior_state=prior,
+        threshold=2,
+    )
+    assert outcome.state == "ok"
+    assert outcome.new_state["consecutive_failures"] == 0

@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -56,11 +57,14 @@ STATE_AGENT_UNLOADED = "agent_unloaded"
 STATE_UNREACHABLE = "unreachable"
 STATE_INCONCLUSIVE = "inconclusive"
 
+STATE_POST_REBOOT_REGRESSION = "post_reboot_regression"
+
 NON_OK_STATES = (
     STATE_GUI_SESSION_ABSENT,
     STATE_AGENT_UNLOADED,
     STATE_UNREACHABLE,
     STATE_INCONCLUSIVE,
+    STATE_POST_REBOOT_REGRESSION,
 )
 
 # Distilled agent states (the host-iteration layer maps ``launchctl print``
@@ -187,6 +191,69 @@ def _has_live_pid(text: str) -> bool:
     return False
 
 
+def distill_boot_id(raw, ok: bool):
+    """Distill a stable boot identifier from a boot-time probe.
+
+    Primary source is macOS ``sysctl -n kern.boottime`` which emits e.g.
+    ``{ sec = 1718000000, usec = 123456 } Mon Jun 10 ...``; the ``sec`` value is
+    a stable, monotonic-per-boot identifier. A bare integer (e.g. a fallback
+    uptime/boot-epoch bucket) is also accepted. Returns the id as a string, or
+    ``None`` when the probe failed, was empty, or was unrecognizable —
+    fail-closed so the caller can never read garbage as a confirmed boot id.
+    """
+    if not ok:
+        return None
+    text = _norm(raw)
+    if not text:
+        return None
+    # `sysctl kern.boottime` form: capture the `sec = <int>` field.
+    match = re.search(r"sec\s*=\s*(\d+)", text)
+    if match:
+        return match.group(1)
+    # Fallback: a bare integer boot identifier.
+    if text.isdigit():
+        return text
+    return None
+
+
+# --- post-reboot regression detection --------------------------------------
+
+# Base states that, when observed right after a confirmed reboot, indicate the
+# bot's GUI LaunchAgent failed to come back up (the regression we alert on).
+_REBOOT_REGRESSION_BASE_STATES = (STATE_AGENT_UNLOADED, STATE_GUI_SESSION_ABSENT)
+
+
+def detect_reboot(*, prior_boot_id, current_boot_id) -> bool:
+    """Return True only when a reboot is POSITIVELY confirmed.
+
+    A reboot is confirmed when both boot ids are known and differ. A missing
+    prior id (first-ever observation) or a missing/garbage current id yields
+    False — we never fabricate a reboot from incomplete information.
+    """
+    prior = _norm(prior_boot_id)
+    current = _norm(current_boot_id)
+    if not prior or not current:
+        return False
+    return prior != current
+
+
+def classify_with_reboot(*, base_state: str, prior_boot_id, current_boot_id) -> str:
+    """Promote a post-reboot agent failure to ``post_reboot_regression``.
+
+    When a reboot is positively confirmed AND the GUI agent is now unloaded or
+    its session is absent, the agent failed to recover across the reboot — a
+    distinct, higher-signal failure than a steady-state drop. Otherwise the base
+    classification is returned unchanged (transient unloads stay on the normal
+    threshold path; inconclusive/unreachable are never masked).
+    """
+    if (
+        detect_reboot(prior_boot_id=prior_boot_id, current_boot_id=current_boot_id)
+        and base_state in _REBOOT_REGRESSION_BASE_STATES
+    ):
+        return STATE_POST_REBOOT_REGRESSION
+    return base_state
+
+
 # --- emit-decision (consecutive-failure threshold gating) ------------------
 
 DEFAULT_FAILURE_THRESHOLD = 2
@@ -264,6 +331,7 @@ EMIT_SOURCE = "gui_session_monitor"
 _STATE_SEVERITY = {
     STATE_GUI_SESSION_ABSENT: "critical",
     STATE_AGENT_UNLOADED: "critical",
+    STATE_POST_REBOOT_REGRESSION: "critical",
     STATE_UNREACHABLE: "warning",
     STATE_INCONCLUSIVE: "warning",
 }
@@ -322,13 +390,26 @@ def run_target(*, target: dict, expected_user, probe, prior_state, threshold: in
     ``new_state`` is what the caller should persist. ``emit_argv`` is populated
     only when the threshold is met for a non-ok state.
     """
-    state = classify_gui_session(expected_user=expected_user, probe=probe)
+    base_state = classify_gui_session(expected_user=expected_user, probe=probe)
     prior = prior_state if isinstance(prior_state, dict) else {}
     prior_count = prior.get("consecutive_failures", 0)
     try:
         prior_count = int(prior_count)
     except (TypeError, ValueError):
         prior_count = 0
+
+    # Boot-aware promotion: an agent failure right after a confirmed reboot is a
+    # distinct post_reboot_regression. The current boot id comes from the probe;
+    # carry the last known boot id forward when the boot probe failed so we do
+    # not lose the reboot baseline (and so we never fabricate a reboot).
+    prior_boot_id = prior.get("boot_id")
+    current_boot_id = probe.get("boot_id") if isinstance(probe, dict) else None
+    state = classify_with_reboot(
+        base_state=base_state,
+        prior_boot_id=prior_boot_id,
+        current_boot_id=current_boot_id,
+    )
+    persisted_boot_id = current_boot_id if _norm(current_boot_id) else prior_boot_id
 
     if state == STATE_OK:
         consecutive = 0
@@ -348,7 +429,11 @@ def run_target(*, target: dict, expected_user, probe, prior_state, threshold: in
             consecutive_failures=consecutive,
             threshold=threshold,
         )
-    new_state = {"consecutive_failures": consecutive, "last_state": state}
+    new_state = {
+        "consecutive_failures": consecutive,
+        "last_state": state,
+        "boot_id": persisted_boot_id,
+    }
     return TargetOutcome(
         state=state,
         new_state=new_state,
@@ -525,11 +610,18 @@ def probe_host(host: str, expected_user: str | None, label: str) -> dict:
     else:
         agent_ok, agent_raw = False, ""
     agent_state = distill_agent_state(agent_raw, ok=agent_ok)
+
+    # Boot identifier for post-reboot regression detection (best-effort; a
+    # failed boot probe yields None and never fabricates a reboot downstream).
+    boot_ok, boot_raw = _run_ssh(host, ["sysctl", "-n", "kern.boottime"])
+    boot_id = distill_boot_id(boot_raw, ok=boot_ok)
+
     return {
         "console_owner": console_owner,
         "agent_state": agent_state,
         "console_ok": console_ok,
         "agent_ok": agent_ok,
+        "boot_id": boot_id,
         "error": None,
     }
 
@@ -564,6 +656,7 @@ def run_once(*, dry_run: bool) -> int:
             probe = {
                 "console_owner": None, "agent_state": None,
                 "console_ok": False, "agent_ok": False,
+                "boot_id": None,
                 "error": "expected_user_unresolved",
             }
         else:
