@@ -30,7 +30,7 @@ export default function UnlockScreen({ onUnlocked }: { onUnlocked: () => void })
   }, [token, busy, onUnlocked])
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-surface-base px-[var(--sp-4)]">
+    <div className="min-h-dvh flex items-center justify-center bg-surface-base px-[var(--sp-4)]">
       <form
         onSubmit={submit}
         className="flex w-full max-w-[var(--panel-shortcuts)] flex-col gap-[var(--sp-3)] rounded-[var(--radius-md)] border border-border-subtle bg-surface-raised p-[var(--sp-8)]"

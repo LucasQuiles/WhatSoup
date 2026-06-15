@@ -118,6 +118,7 @@ function hasAxisMin(context, axis) {
 const interactionLayoutUtilityPattern = /\b(?:hover|focus|focus-visible|focus-within|active):(?:(?:w|h|min-w|max-w|min-h|max-h|p|px|py|pt|pr|pb|pl|m|mx|my|mt|mr|mb|ml|gap|basis|grid-cols|grid-rows)-|border(?:-[xytrblse])?(?:-\d|-\[|(?=\s|["'`}])))/;
 const interactionLayoutCssPattern = /:(?:hover|focus|focus-visible|focus-within|active)[^{]*\{[^}]*\b(?:width|height|min-width|max-width|min-height|max-height|padding|padding-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|margin|margin-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|gap|row-gap|column-gap|flex-basis|grid-template-columns|grid-template-rows|border-width|border-(?:top|right|bottom|left)-width)\s*:/;
 const rawViewportJsPattern = /\bwindow\s*\.\s*(?:innerWidth|innerHeight|matchMedia|visualViewport)\b|\bmatchMedia\s*\(/;
+const staticViewportHeightPattern = /\b(?:min-|max-)?h-screen\b|(?<![a-z])\d*\.?\d+vh\b/i;
 
 function isViewportOwnerFile(file) {
   return /^console\/src\/(?:hooks|lib)\/use(?:Breakpoint|ViewportPlacement)\.tsx?$/.test(file);
@@ -191,6 +192,17 @@ function scanLine(findings, file, lines, index) {
       lineNumber,
       line,
       'Typography must use the type scale, not viewport-width math.',
+    );
+  }
+
+  if (staticViewportHeightPattern.test(line)) {
+    addFinding(
+      findings,
+      'soup/no-static-viewport-height',
+      file,
+      lineNumber,
+      line,
+      'Viewport-height sizing must use dynamic viewport units (dvh), not static vh or h-screen.',
     );
   }
 

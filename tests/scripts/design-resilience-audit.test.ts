@@ -10,6 +10,7 @@ const PROMOTED_RULES = [
   'soup/no-hover-only-content',
   'soup/no-layout-shift-interaction',
   'soup/no-raw-viewport-js',
+  'soup/no-static-viewport-height',
   'soup/no-unsafe-truncation',
   'soup/no-vw-font-size',
   'soup/scroll-owner-required',
@@ -71,12 +72,13 @@ describe('check-design-resilience.mjs', () => {
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-hover-only-content');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-layout-shift-interaction');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-raw-viewport-js');
+    expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-static-viewport-height');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-unsafe-truncation');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-vw-font-size');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/scroll-owner-required');
   });
 
-  it('reports text, scroll, geometry, hover, viewport-font, and layer risks in report-only mode', () => {
+  it('reports text, scroll, geometry, hover, viewport, and layer risks in report-only mode', () => {
     const root = makeFixture(`
 export function Fixture() {
   const narrow = window.innerWidth < 768
@@ -87,6 +89,7 @@ export function Fixture() {
       <button className="px-[var(--sp-2)] hover:px-[var(--sp-4)]">Action</button>
       <span className="opacity-0 group-hover:opacity-100">Hidden action</span>
       <h1 className="text-[4vw]">Fleet</h1>
+      <main className="min-h-screen">Screen</main>
       <div className="fixed z-50">Overlay</div>
     </section>
   )
@@ -103,11 +106,12 @@ export function Fixture() {
       'soup/no-hover-only-content': 1,
       'soup/no-layout-shift-interaction': 1,
       'soup/no-raw-viewport-js': 1,
+      'soup/no-static-viewport-height': 1,
       'soup/no-unsafe-truncation': 1,
       'soup/no-vw-font-size': 1,
       'soup/scroll-owner-required': 1,
     });
-    expect(output.finding_count).toBe(7);
+    expect(output.finding_count).toBe(8);
   });
 
   it('fails when promoted raw viewport JS has component-local findings', () => {
@@ -215,6 +219,7 @@ export function Fixture() {
       <button className="px-[var(--sp-2)] hover:px-[var(--sp-4)]">Action</button>
       <span className="opacity-0 group-hover:opacity-100">Hidden action</span>
       <h1 className="text-[4vw]">Fleet</h1>
+      <main className="min-h-screen">Screen</main>
     </section>
   )
 }
@@ -229,16 +234,18 @@ export function Fixture() {
     expect(output.failed_rules).toEqual([
       'soup/no-hover-only-content',
       'soup/no-layout-shift-interaction',
+      'soup/no-static-viewport-height',
       'soup/no-vw-font-size',
     ]);
     expect(output.by_rule).toEqual({
       'soup/no-hover-only-content': 1,
       'soup/no-layout-shift-interaction': 1,
+      'soup/no-static-viewport-height': 1,
       'soup/no-vw-font-size': 1,
     });
   });
 
-  it('stays silent for documented full-value, scroll-owner, stable-state, focus-parity, type-scale, and layer-token patterns', () => {
+  it('stays silent for documented full-value, scroll-owner, stable-state, focus-parity, type-scale, dynamic-viewport, and layer-token patterns', () => {
     const root = makeFixture(`
 export function Fixture({ name }: { name: string }) {
   return (
@@ -250,6 +257,7 @@ export function Fixture({ name }: { name: string }) {
       <button className="px-[var(--sp-2)] hover:bg-[var(--surface-inset)] focus-visible:outline-none">Action</button>
       <span className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">Hidden action</span>
       <h1 className="text-t1">Fleet</h1>
+      <main className="min-h-dvh">Screen</main>
       <div className="fixed z-[var(--z-float)]">Overlay</div>
     </section>
   )
@@ -274,6 +282,58 @@ export function Fixture() {
     const output = parsedOutput(result);
 
     expect(output.by_rule).toEqual({ 'soup/scroll-owner-required': 1 });
+  });
+
+  it('flags static viewport-height units and Tailwind screen-height shorthands', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return (
+    <section>
+      <div className="min-h-screen">screen</div>
+      <div className="max-h-[85vh]">modal</div>
+    </section>
+  )
+}
+`);
+    const cssPath = join(root, 'console/src/fixture.css');
+    writeFileSync(cssPath, `
+.panel { height: calc(100vh - var(--sp-4)); }
+`);
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule).toEqual({ 'soup/no-static-viewport-height': 3 });
+  });
+
+  it('stays silent for dynamic viewport-height units', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  return (
+    <section>
+      <div className="min-h-dvh">screen</div>
+      <div className="max-h-[85dvh]">modal</div>
+    </section>
+  )
+}
+`);
+    const cssPath = join(root, 'console/src/fixture.css');
+    writeFileSync(cssPath, `
+.panel { height: calc(100dvh - var(--sp-4)); }
+`);
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.finding_count).toBe(0);
+  });
+
+  it('pins the real-source static viewport-height inventory to zero', () => {
+    const result = runScript(process.cwd());
+    const output = parsedOutput(result);
+    const findings = output.findings.filter((f) => f.rule === 'soup/no-static-viewport-height');
+
+    expect(result.status).toBe(0);
+    expect(output.by_rule['soup/no-static-viewport-height']).toBeUndefined();
+    expect(findings).toEqual([]);
   });
 
   it('can fail when findings are promoted from report-only to blocking mode', () => {

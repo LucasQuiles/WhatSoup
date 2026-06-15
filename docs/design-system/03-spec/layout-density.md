@@ -122,7 +122,8 @@ overrides on table/list internals), and the 320px reflow check in the visual QA 
 themes, per cutover plan).
 
 The blocking `design:resilience` source audit covers unsafe truncation, scroll-owner proof,
-layout-shifting interaction states, viewport-width typography, hover-only content, and raw layer
-values. Promotion is allowed only after current findings are inventoried, false positives are
-classified, visual/behavior proof exists for the affected surfaces, and sanctioned exceptions are
-documented; the current lanes have reached that state and now fail the package script on any finding.
+layout-shifting interaction states, viewport-width typography, static viewport-height sizing,
+hover-only content, raw viewport JS, and raw layer values. Promotion is allowed only after current
+findings are inventoried, false positives are classified, visual/behavior proof exists for the
+affected surfaces, and sanctioned exceptions are documented; the current lanes have reached that
+state and now fail the package script on any finding.

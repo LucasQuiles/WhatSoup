@@ -108,7 +108,7 @@ const requiredConsolePackageScripts = {
   'design:metrics': 'node scripts/design-metrics.mjs',
   'design:raw-form-control-inventory': 'node scripts/check-raw-form-control-inventory.mjs',
   'design:regression': 'bash scripts/design-regression.sh',
-  'design:resilience': 'node scripts/check-design-resilience.mjs --fail-on-rule soup/layer-owner-required --fail-on-rule soup/no-hover-only-content --fail-on-rule soup/no-layout-shift-interaction --fail-on-rule soup/no-unsafe-truncation --fail-on-rule soup/no-vw-font-size --fail-on-rule soup/scroll-owner-required',
+  'design:resilience': 'node scripts/check-design-resilience.mjs --fail-on-rule soup/layer-owner-required --fail-on-rule soup/no-hover-only-content --fail-on-rule soup/no-layout-shift-interaction --fail-on-rule soup/no-raw-viewport-js --fail-on-rule soup/no-static-viewport-height --fail-on-rule soup/no-unsafe-truncation --fail-on-rule soup/no-vw-font-size --fail-on-rule soup/scroll-owner-required',
   'design:shadow-frozen-inventory': 'node scripts/check-shadow-frozen-inventory.mjs',
   'design:theme-parity': 'node scripts/check-theme-parity.mjs',
   'design:token-drift': 'node scripts/check-token-spec-drift.mjs',

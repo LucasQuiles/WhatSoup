@@ -559,7 +559,7 @@ script exit code.
 
 ### 17.5 Design Resilience Audit
 
-Layout, text, scroll, layer, and interaction resilience risks are inventoried by
+Layout, text, scroll, viewport, layer, and interaction resilience risks are inventoried by
 `console/scripts/check-design-resilience.mjs` and exposed as:
 
 ```bash
@@ -581,6 +581,8 @@ The audit scans `console/src` for promoted and report-only findings:
 - `soup/no-hover-only-content` candidates: hover/group-hover reveal without focus parity or an
   explicit exception (promoted: fails the package script);
 - `soup/no-vw-font-size` candidates: viewport-width typography (promoted: fails the package script);
+- `soup/no-static-viewport-height` candidates: static `vh` height values and Tailwind `h-screen`
+  shorthands that should use `dvh` (promoted: fails the package script);
 - `soup/layer-owner-required` candidates: raw z-index utilities that do not consume `--z-*` tokens;
 - `soup/no-raw-viewport-js` candidates: component-local `window.innerWidth`, `window.innerHeight`,
   `window.matchMedia`, or global `matchMedia` reads outside sanctioned breakpoint/placement owner
@@ -604,9 +606,10 @@ Reviewers apply these rule-of-thumb checks before accepting any migrated surface
 A finding in any current `check-design-resilience.mjs` lane fails the package script through explicit
 `--fail-on-rule` flags: raw `z-*` / `z-[N]` layering, component-local raw viewport JS, missing
 full-value paths for clipped text, missing scroll-owner min-size proof, geometry-changing interaction
-states, hover-only content, and viewport-width typography are all blocking. The checker still emits
-structured JSON with per-rule counts and sample file/line evidence; `--fail-on-findings` remains
-available for future lanes before they receive named `--fail-on-rule` promotion flags.
+states, hover-only content, viewport-width typography, and static viewport-height sizing are all
+blocking. The checker still emits structured JSON with per-rule counts and sample file/line
+evidence; `--fail-on-findings` remains available for future lanes before they receive named
+`--fail-on-rule` promotion flags.
 
 A PASS means the current source scan has zero findings in the promoted resilience lanes; any future
 report-only lanes must still be read from `by_rule` and the sample findings. It does not replace

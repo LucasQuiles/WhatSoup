@@ -90,6 +90,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-layout-shift-interaction | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | hover/focus/active states must not change layout dimensions |
 | soup/no-hover-only-content | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | hover-revealed content needs keyboard/focus parity |
 | soup/no-vw-font-size | package-script fail-on-rule | global-error | P4/G7 | typography must use tokenized type scale, not viewport width |
+| soup/no-static-viewport-height | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | full-height surfaces use `dvh`, not static `vh` / `h-screen` |
 | soup/layer-owner-required | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | z-index uses `--z-*` layer tokens or a documented owner |
 | soup/no-raw-viewport-js | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | viewport branching must route through `useBreakpoint` / `useViewportPlacement`, not local `window.innerWidth` or `matchMedia` reads |
 | soup/no-duplicate-shell | shadow (advisory) | warn-on-changed-files | P2 | heuristic; routes to duplication-register, never error |
@@ -630,6 +631,21 @@ cannot express the check).
   a non-UI generated artifact exception.
 - **Autofix:** no. **Phase:** P4/G7. **Entry:** package-script fail-on-rule; promoted
   2026-06-14 after the inventory reached zero.
+
+### soup/no-static-viewport-height
+
+- **Purpose:** full-height surfaces must account for mobile dynamic browser chrome. Static `vh` and
+  Tailwind `h-screen` shorthands can clip modal footers, unlock screens, and other fixed-height
+  surfaces when the browser viewport expands or contracts.
+- **Mechanism:** package-script fail-on-rule resilience script. Flag raw `Nvh` values and
+  `h-screen` / `min-h-screen` / `max-h-screen`; `dvh` forms are valid.
+- **Scope:** `console/src/**` CSS/TS/TSX.
+- **Violation / valid:** `min-h-screen` or `max-h-[85vh]` -> `min-h-dvh` or `max-h-[85dvh]`.
+- **FP strategy:** fixtures cover invalid Tailwind screen-height shorthand, invalid arbitrary/static
+  `vh`, valid `dvh`, and the real-source inventory pinned to zero.
+- **Autofix:** mechanical when the value maps directly (`vh` -> `dvh`, `*-h-screen` -> `*-h-dvh`).
+  **Phase:** P4/G7. **Entry:** package-script fail-on-rule; promoted 2026-06-15 after the two
+  outliers migrated and the inventory reached zero.
 
 ### soup/layer-owner-required
 
