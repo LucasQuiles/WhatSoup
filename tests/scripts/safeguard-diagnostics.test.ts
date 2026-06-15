@@ -31,6 +31,8 @@ const requiredPackageScripts = {
   'guard:agent-decision-polls': 'node scripts/agent-decision-polls-guard.ts',
   'guard:safeguard-diagnostics': 'node scripts/safeguard-diagnostics.ts',
   'test:design-guards': 'npm test -- tests/scripts/theme-parity.test.ts tests/scripts/token-spec-drift.test.ts tests/scripts/contrast-matrix.test.ts tests/scripts/shadow-baseline.test.ts tests/scripts/shadow-frozen-inventory.test.ts tests/scripts/raw-form-control-inventory.test.ts tests/scripts/design-regression-guards.test.ts tests/scripts/design-metrics.test.ts tests/scripts/design-burndown-check.test.ts tests/scripts/color-semantics.test.ts tests/scripts/design-resilience-audit.test.ts tests/scripts/font-assets.test.ts tests/scripts/brand-assets.test.ts tests/scripts/design-lint-fixtures.test.ts --pool=forks',
+  'test:browser': 'vitest run --config vitest.browser.config.ts',
+  'test:browser:motion': 'vitest run --config vitest.browser.motion.config.ts',
   'verify:console-design': [
     'npm --prefix console run design:theme-parity',
     'npm --prefix console run design:token-drift',
@@ -184,6 +186,14 @@ const requiredFiles: Record<string, string> = {
     'name: Console build',
     'name: Console design verification',
     'run: npm run verify:console-design',
+    'name: Install Playwright chromium',
+    'run: npx playwright install chromium --with-deps',
+    'name: Browser test suite',
+    'run: npm run test:browser',
+    'name: Browser motion test suite',
+    'run: npm run test:browser:motion',
+    'tests/browser/__screenshots__',
+    'tests/browser-motion/__screenshots__',
   ].join('\n'),
   '.github/workflows/tag-release-gate.yml': [
     'name: Install console dependencies',
@@ -280,6 +290,17 @@ describe('safeguard diagnostics', () => {
     expect(result.checks.find((check) => check.id === 'required-package-scripts')).toMatchObject({
       status: 'fail',
       evidence: expect.arrayContaining(['guard:test-integrity']),
+    });
+  });
+
+  it('fails when the browser motion proof script is missing', () => {
+    const fixture = makeRepo({ scripts: { 'test:browser:motion': undefined } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'required-package-scripts')).toMatchObject({
+      status: 'fail',
+      evidence: expect.arrayContaining(['test:browser:motion']),
     });
   });
 
@@ -402,6 +423,20 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
+  });
+
+  it('fails when CI omits the no-reduce browser motion proof', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': requiredFiles['.github/workflows/quality.yml']
+          .replace('run: npm run test:browser:motion', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run test:browser:motion']) });
   });
 
   it('fails when CI omits design-system hygiene changed-range coverage', () => {

@@ -518,7 +518,8 @@ packet evidence.
 The hook and CI wiring are protected by `scripts/safeguard-diagnostics.ts`: the safeguard diagnostics
 must fail if `.husky/pre-commit` drops repo hygiene, publication, design-system documentation
 hygiene, node-pin, settings, or console lint coverage, or if quality.yml drops the changed-range
-design-system hygiene step.
+design-system hygiene step, shared console design verification, Playwright install, either browser
+proof suite, or browser screenshot artifacts.
 
 ### 17.4 Shared Console Design Verification Chain
 
@@ -535,14 +536,17 @@ This chain is the DRY owner for non-browser console design checks in `verify:pus
 2. `npm --prefix console run design:token-drift`
 3. `npm --prefix console run design:contrast`
 4. `npm --prefix console run lint:shadow:baseline`
-5. `npm --prefix console run design:regression`
-6. `npm --prefix console run design:metrics`
-7. `npm --prefix console run design:burndown`
-8. `npm --prefix console run design:color-semantics`
-9. `npm --prefix console run design:resilience`
-10. `npm --prefix console run design:font-assets`
-11. `npm --prefix console run design:brand-assets`
-12. `npm --prefix console run design:lint-fixtures`
+5. `npm --prefix console run design:shadow-frozen-inventory`
+6. `npm --prefix console run design:raw-form-control-inventory`
+7. `npm --prefix console run design:regression`
+8. `npm --prefix console run design:metrics`
+9. `npm --prefix console run design:burndown`
+10. `npm --prefix console run design:color-semantics`
+11. `npm --prefix console run design:resilience`
+12. `npm --prefix console run design:font-assets`
+13. `npm --prefix console run design:brand-assets`
+14. `npm --prefix console run design:lint-fixtures`
+15. `npm run test:design-guards`
 
 `scripts/safeguard-diagnostics.ts` enforces the shared chain and the fact that push/release
 verification plus CI workflows call it. Removing, reordering, or bypassing this chain is a
