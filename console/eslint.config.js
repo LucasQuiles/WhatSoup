@@ -262,8 +262,8 @@ const designSystemRestrictions = [
 
         // ═══ FONT SIZE TOKEN IN STYLE ═══
         {
-          selector: 'JSXAttribute[name.name="style"] Property[key.name="fontSize"][value.value=/^var\\(--text-/]',
-          message: '⛔ fontSize token in style. FIX: remove from style, add text-* class. fontSize: "var(--text-data)"→className="text-data". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
+          selector: 'JSXAttribute[name.name=/^(style|wrapperStyle|contentStyle)$/] Property[key.name="fontSize"][value.value=/^var\\(--text-/]',
+          message: '⛔ fontSize token in style prop. FIX: remove from style/wrapperStyle/contentStyle and use a class or shared chart style helper. fontSize: "var(--text-data)"→className="text-data". Scale: xs, label, sm, data, heading, body, lg, xl, 2xl.',
         },
 
         // ═══ LETTER SPACING TOKEN IN STYLE ═══

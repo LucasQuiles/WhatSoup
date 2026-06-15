@@ -9,7 +9,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { MessageVolumeBucket, MetricsRange } from '../types';
-import { AXIS_TICK, CHART_MARGIN, MESSAGE_VOLUME_SERIES_COLORS, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
+import { AXIS_TICK, CHART_MARGIN, LEGEND_STYLE, MESSAGE_VOLUME_SERIES_COLORS, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
 
 interface MetricsChartProps {
   data: MessageVolumeBucket[];
@@ -40,7 +40,7 @@ export function MetricsChart({ data, range = '24h' }: MetricsChartProps) {
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(v) => formatTooltipLabel(String(v), range)}
         />
-        <Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />
+        <Legend wrapperStyle={LEGEND_STYLE} />
         <Bar dataKey="inbound" name="Inbound" stackId="messages" fill={MESSAGE_VOLUME_SERIES_COLORS.inbound} radius={[2, 2, 0, 0]} />
         <Bar dataKey="outbound" name="Outbound" stackId="messages" fill={MESSAGE_VOLUME_SERIES_COLORS.outbound} radius={[2, 2, 0, 0]} />
         <Bar dataKey="media" name="Media" stackId="messages" fill={MESSAGE_VOLUME_SERIES_COLORS.media} radius={[2, 2, 0, 0]} />

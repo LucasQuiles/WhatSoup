@@ -7,6 +7,10 @@ export const AXIS_TICK = {
   fill: 'var(--color-t4)',
 };
 
+export const LEGEND_STYLE = {
+  fontSize: 'var(--text-xs)',
+};
+
 export const MESSAGE_VOLUME_SERIES_COLORS = {
   inbound: 'var(--data-inbound-solid)',
   outbound: 'var(--data-outbound-solid)',

@@ -761,6 +761,13 @@ describe('soup/no-utility-smell', () => {
     expect(hasWarning(messages, 'Dimensional const with raw numeric branch')).toBe(true)
   })
 
+  it('fires on Recharts wrapperStyle fontSize token inline objects', async () => {
+    const messages = await lintWarnings(
+      'const x = <Legend wrapperStyle={{ fontSize: "var(--text-xs)" }} />'
+    )
+    expect(hasWarning(messages, 'fontSize token in style prop')).toBe(true)
+  })
+
   it('is silent on w-[var(--x)] — var() payload is compliant', async () => {
     const messages = await lintWarnings(
       'const x = <div className="w-[var(--sidebar-w)] flex-shrink-0" />'
@@ -808,6 +815,13 @@ describe('soup/no-utility-smell', () => {
       'const height = expanded ? "var(--chart-panel-h-expanded)" : "var(--chart-panel-h)"; const x = <div style={{ height }} />'
     )
     expect(hasWarning(messages, 'Dimensional const with raw numeric branch')).toBe(false)
+  })
+
+  it('is silent on Recharts wrapperStyle shared helper identifiers', async () => {
+    const messages = await lintWarnings(
+      'const LEGEND_STYLE = { fontSize: "var(--text-xs)" }; const x = <Legend wrapperStyle={LEGEND_STYLE} />'
+    )
+    expect(hasWarning(messages, 'fontSize token in style prop')).toBe(false)
   })
 
   it('is silent on standard Tailwind utilities without arbitrary values', async () => {

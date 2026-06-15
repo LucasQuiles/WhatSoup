@@ -10,7 +10,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { SessionActivityBucket, MetricsRange } from '../types';
-import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
+import { AXIS_TICK, CHART_MARGIN, LEGEND_STYLE, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
 import { formatCompact } from '../lib/text-utils';
 import { getProvider, getProviderColor } from '../lib/providers';
 
@@ -43,7 +43,7 @@ export function FleetSessionChart({ data, byProvider, providers, range = '24h' }
           <XAxis dataKey="bucket" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: 'var(--b1)' }} minTickGap={40} tickFormatter={(v) => formatBucketLabel(v, range)} />
           <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={32} allowDecimals={false} tickFormatter={(v) => formatCompact(Number(v) || 0)} />
           <Tooltip contentStyle={TOOLTIP_STYLE} labelFormatter={(v) => formatTooltipLabel(String(v), range)} />
-          <Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />
+          <Legend wrapperStyle={LEGEND_STYLE} />
           {providers.flatMap((provider) => {
             const color = getProviderColor(provider);
             const label = getProvider(provider)?.shortName ?? provider;

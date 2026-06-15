@@ -319,10 +319,8 @@ cannot express the check).
   `:481-488` z-index, `:544-551` opacity, `:227-229` arbitrary px utilities). DUP-08's observed
   evasion shapes are closed: `HeartbeatStrip.tsx` is tokenized, `Skeleton.tsx` uses tokenized
   widths, `PipelineTab.tsx` uses tokenized padding, `ChartPanel.tsx` uses tokenized body heights,
-  and selector coverage pins re-entry for template-literal, conditional, and dimensional-const
-  branches. The Recharts non-`style` prop hole remains:
-  `wrapperStyle`/`contentStyle` (4
-  Legend copies, DUP-09).
+  and selector coverage pins re-entry for template-literal, conditional, dimensional-const, and
+  inline Recharts `wrapperStyle`/`contentStyle` fontSize branches.
 - **CSS-side coverage:** `check-design-burndown.mjs` owns CSS-only gaps that ESLint cannot see,
   including `raw-font-size-css` (zero ceiling) for non-token `font-size:` literals and `font:`
   shorthands outside the primitive type scale and `transition-all-css` (zero ceiling) for CSS
@@ -334,8 +332,9 @@ cannot express the check).
   with non-`var()` payloads and hardcoded dimensional px formulas, and `ConditionalExpression`
   branches now catch static hardcoded px values in dimensional style positions. Dimensional consts
   initialized from raw numeric conditional branches are rejected before they flow into style props.
-  Add a custom rule for the remaining closure: extend the style-prop attribute set to
-  `/^(style|wrapperStyle|contentStyle)$/`.
+  Inline Recharts `wrapperStyle`/`contentStyle` fontSize objects are included in the style-prop
+  attribute set; shared chart style helpers remain explicit waiver-tracked constants where Recharts
+  cannot accept classes.
 - **Scope:** all TSX. Exemptions stay where they are today via documented waivers (recharts
   `CHART_MARGIN`, QR `margin: 2`).
 - **Violation / valid:** `const height = expanded ? 240 : 140; … style={{ height }}` →
@@ -858,7 +857,7 @@ bar for the enforcement phase.
 | SSOT clarity | C | tokens split @theme vs :root with no tier semantics (token-census §17: 50 vs 130); 60+ component constants in global :root (P1-6); two extractor-style styling dialects + BEM feed (P2-5) | B+: one token SSOT with tiered files (P0 split), theme-parity script green; A after P2 when composite classes have single owners |
 | DRY improvement | C | 17 DUPs, 0 structurally guarded (duplication-register summary: 13/17 fully unguarded) | B: DUP-01..07, 12 closed by primitives with soup/no-raw-* + no-adhoc-modal at scoped-error; no-duplicate-shell advisory live |
 | SOC boundaries | C | screens carry raw values + style forks (DUP-08: 125 style objects); helpers duplicated into components (DUP-07: 8 maps) | B: layer ownership map enforced via raw-control bans + no-literal-status-colors; screens import primitives only |
-| Token discipline | B- | 106-selector wall live and effective for Literal shapes (DUP-08: "the lint wall works") but 3 evasion shapes proven + wrapperStyle hole (DUP-09) | A-: evasion shapes closed (soup/no-untokenized-values custom rule), waiver registry replaces inline disables |
+| Token discipline | B | 106-selector wall live and effective for Literal shapes; observed DUP-08/DUP-09 evasion paths are now pinned, with remaining JS style-helper escapes waiver-tracked | A-: broader dataflow custom rule, waiver registry replaces inline disables |
 | Primitive coverage | C- | Button 82% adoption but 24 raw + 11 variants (P1-1); Modal/Pill/Select/Spinner primitives absent (P1-2, P1-5, DUP-11) | B+: Button/Modal/Pill/Select/Table/LogStream landed (P2) with per-directory scoped-error flips complete |
 | Lint readiness | B- | wall exists, error-severity, husky-wired with --max-warnings 0; but zero custom rules, no soup/* namespace, no baseline tooling, stale plugin reference in program docs | A-: soup plugin registered, lifecycle table live, baselines collected, CI suite wired |
 | Migration reversibility | C | no alias layer; legacy names ARE the only names | A at P0/P1: alias layer means every phase is a one-commit revert (cutover plan §5) |

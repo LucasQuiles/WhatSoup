@@ -8,7 +8,7 @@ Conventions:
 
 - Every occurrence cites repo-relative `file:line`. Items that could not be pinned to evidence are marked Inconclusive.
 - "Classification" is the consolidation target type: `primitive` | `composite` | `token` | `helper` | `docs rule` | `lint rule` | `deferred`.
-- "Guarded" cites the eslint selector line(s) that already block the drift, or "unguarded". A recurring theme: every design-system selector matches `Literal` values or `JSXAttribute[name.name="style"]`, so ternaries, identifiers, template-literal classNames, and non-`style` props (e.g. recharts `wrapperStyle`) all evade the lint wall. Those evasion paths are flagged per entry.
+- "Guarded" cites the eslint selector line(s) that already block the drift, or "unguarded". A recurring theme: design-system selectors historically matched only `Literal` values or `JSXAttribute[name.name="style"]`, so ternaries, identifiers, template-literal classNames, and non-`style` props all evaded the lint wall. Closed evasion paths are flagged per entry.
 
 ---
 
@@ -199,16 +199,16 @@ Related single-purpose tables counted under DUP-06: `console/src/components/line
 
 **Occurrences.**
 
-- Chart legend fontSize duplicated 4x through a non-`style` prop: `console/src/components/FleetSessionChart.tsx:46`, `console/src/components/MetricsChart.tsx:43`, `console/src/components/FleetTokenChart.tsx:66`, `console/src/components/FleetMetricsChart.tsx:44` (`<Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />`). The fontSize-token-in-style rule (`console/eslint.config.js:244-246`) matches only `JSXAttribute[name.name="style"]`, so `wrapperStyle` evades. Shared chart constants already exist (`AXIS_TICK`/`TOOLTIP_STYLE`/`CHART_MARGIN` in `console/src/lib/chart-utils.ts:10-27`, imported at `console/src/components/MetricsChart.tsx:12` etc.) — the Legend style just never joined them.
+- Chart legend fontSize duplicated 4x through a non-`style` prop: closed — the four `<Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />` copies now consume `LEGEND_STYLE` from `console/src/lib/chart-utils.ts`, and the fontSize-token rule covers inline `style`/`wrapperStyle`/`contentStyle` objects.
 - JS heading role re-roll: `console/src/components/wizard/ReviewStep.tsx:32-36` (`headingStyle` = tracking-label + t2 — restates the `c-label`/`c-section-label` role as a style object).
 - Ad-hoc mono+text-size+text-color combos duplicating `c-data`/`c-meta`: only 1 regex hit tree-wide (`font-mono text-* ... text-tN`), e.g. the recipe is effectively migrated. Residual mixed-role strings: `console/src/pages/Inbox.tsx:629` (`font-sans font-semibold text-lg` instead of `c-heading-lg`).
 - `fontSize: 'inherit'` at `console/src/lib/format-wa-text.tsx:60,66` — benign (escape hatch, not a one-off scale value).
 
-**Classification.** helper (add `LEGEND_STYLE` to `console/src/lib/chart-utils.ts`) + lint rule (extend fontSize selectors to `wrapperStyle`/`contentStyle`).
+**Classification.** helper + lint rule.
 
-**Proposed consolidation.** Export a `LEGEND_STYLE` constant beside `AXIS_TICK` and consume it in all four charts; replace `ReviewStep` `headingStyle` with `c-section-label`.
+**Proposed consolidation.** Remaining: replace `ReviewStep` `headingStyle` with `c-section-label`. Closed: `LEGEND_STYLE` now lives beside `AXIS_TICK` and is consumed by all four charts.
 
-**Guarded by lint?** Hardcoded fontSize is guarded (`console/eslint.config.js:81-87`); token-in-`style` guarded (`:244-246`); `wrapperStyle` and JS style objects assigned outside JSX attributes are unguarded.
+**Guarded by lint?** Hardcoded fontSize is guarded (`console/eslint.config.js:81-87`); token-in-style props are guarded for inline `style`/`wrapperStyle`/`contentStyle` objects; JS style objects assigned outside JSX attributes remain waiver-tracked (`WVR-007`).
 
 ---
 
@@ -381,8 +381,8 @@ Related single-purpose tables counted under DUP-06: `console/src/components/line
 | DUP-05 | Card/panel shells | 4 recipes (.c-card/.c-section/ChartPanel/ReviewStep) + 7 ad-hoc combos | composite | unguarded |
 | DUP-06 | Status dot/badge visuals | 7 visual implementations; 2 token misuses | token + primitive | partial (style-prop colors: eslint.config.js:202-204) |
 | DUP-07 | Mode/status->color TS maps | 8 copies | helper | unguarded |
-| DUP-08 | Inline-style spacing one-offs | 125 style={{ }}; 3 lint-evasion shapes | lint rule + token | mostly guarded (eslint.config.js:157-191, 227-229); evasions unguarded |
-| DUP-09 | Typography one-offs | 4 Legend fontSize copies + 2 JS role re-rolls | helper + lint rule | partial (eslint.config.js:81-87, 244-246; wrapperStyle evades) |
+| DUP-08 | Inline-style spacing one-offs | 125 style={{ }}; observed lint-evasion shapes closed | lint rule + token | guarded for observed evasion shapes |
+| DUP-09 | Typography one-offs | Legend fontSize copies closed; 2 JS role re-rolls remain | helper + lint rule | partial (inline wrapperStyle guarded; JS style-object helpers waiver-tracked) |
 | DUP-10 | Table/log-viewer cells | 4 padding schemes; 2 whole-component log viewers | composite + primitive | unguarded |
 | DUP-11 | Empty/error/loading states | 6 ad-hoc empties; 9 ad-hoc spinners; skeleton used 1x | primitive + composite | unguarded |
 | DUP-12 | Form field kit vs dialog re-rolls | kit used by 2 wizard files; 4 dialog surfaces re-roll | primitive | unguarded |

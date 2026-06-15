@@ -9,7 +9,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { TokenUsageBucket, MetricsRange } from '../types';
-import { AXIS_TICK, CHART_MARGIN, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
+import { AXIS_TICK, CHART_MARGIN, LEGEND_STYLE, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
 import { formatCompact, formatCount } from '../lib/text-utils';
 import { getProvider, getProviderColor } from '../lib/providers';
 
@@ -63,7 +63,7 @@ export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: 
               String(name),
             ]}
           />
-          <Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />
+          <Legend wrapperStyle={LEGEND_STYLE} />
           {providers.flatMap((provider) => {
             const color = getProviderColor(provider);
             const prov = getProvider(provider);

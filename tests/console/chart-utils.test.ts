@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AXIS_TICK,
   CHART_MARGIN,
+  LEGEND_STYLE,
   MESSAGE_VOLUME_SERIES_COLORS,
   TOOLTIP_STYLE,
   formatBucketLabel,
@@ -30,6 +31,10 @@ describe('chart style constants', () => {
 
   it('CHART_MARGIN exposes the recharts-style { top, right, left, bottom } shape', () => {
     expect(CHART_MARGIN).toEqual({ top: 4, right: 8, left: -12, bottom: 0 });
+  });
+
+  it('LEGEND_STYLE exposes the shared recharts legend typography style', () => {
+    expect(LEGEND_STYLE).toEqual({ fontSize: 'var(--text-xs)' });
   });
 
   it('TOOLTIP_STYLE exposes the full inline-style block including required CSS-token references', () => {

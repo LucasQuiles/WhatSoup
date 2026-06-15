@@ -9,7 +9,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { MessageVolumeBucket, MetricsRange } from '../types';
-import { AXIS_TICK, CHART_MARGIN, MESSAGE_VOLUME_SERIES_COLORS, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
+import { AXIS_TICK, CHART_MARGIN, LEGEND_STYLE, MESSAGE_VOLUME_SERIES_COLORS, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
 
 interface FleetMetricsChartProps {
   data: MessageVolumeBucket[];
@@ -41,7 +41,7 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
           contentStyle={TOOLTIP_STYLE}
           labelFormatter={(v) => formatTooltipLabel(String(v), range)}
         />
-        <Legend wrapperStyle={{ fontSize: 'var(--text-xs)' }} />
+        <Legend wrapperStyle={LEGEND_STYLE} />
         <Area
           type="monotone"
           dataKey="inbound"
