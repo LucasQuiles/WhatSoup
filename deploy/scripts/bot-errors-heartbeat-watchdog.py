@@ -942,10 +942,17 @@ def incident_epoch(incident: dict[str, Any], key: str, fallback: int) -> int:
     return parsed if parsed is not None else fallback
 
 
+def int_or_zero(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def incident_age_seconds(incident: dict[str, Any], current: int) -> int:
     first_seen = incident_epoch(incident, "firstSeenAt", current)
     wall_age = max(0, current - first_seen)
-    previous_age = int(incident.get("ageSeconds") or 0)
+    previous_age = int_or_zero(incident.get("ageSeconds"))
     return max(previous_age, wall_age)
 
 
@@ -958,12 +965,12 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
         redacted_evidence = redact_watchdog_text(evidence)
         if key in open_incidents:
             incident = open_incidents[key]
-            incident["suppressed"] = int(incident.get("suppressed", 0)) + 1
+            incident["suppressed"] = int_or_zero(incident.get("suppressed")) + 1
             incident["lastSeenAt"] = now_iso(current)
             incident["lastEvidence"] = redacted_evidence
             incident.pop("recoveryObservations", None)
             incident.pop("lastRecoveryObservedAt", None)
-            suppressed = int(incident.get("suppressed", 0))
+            suppressed = int_or_zero(incident.get("suppressed"))
             first_seen = incident_epoch(incident, "firstSeenAt", current)
             last_notified = incident_epoch(incident, "lastNotifiedAt", first_seen)
             age_seconds = incident_age_seconds(incident, current)
@@ -1031,7 +1038,7 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
         if not key_in_active_scope(key, active_prefixes):
             continue
         incident = open_incidents[key]
-        recovery_observations = int(incident.get("recoveryObservations") or 0) + 1
+        recovery_observations = int_or_zero(incident.get("recoveryObservations")) + 1
         incident["recoveryObservations"] = recovery_observations
         incident["lastRecoveryObservedAt"] = now_iso(current)
         required_observations = watchdog_recovery_confirmations()

@@ -90,6 +90,62 @@ def test_fleet_sentinel_heartbeat_check_flags_stale_and_writes_deadman_event(tmp
     assert "sentinel-heartbeat.json" in event["evidence"]
 
 
+def test_malformed_open_incident_counters_do_not_crash_reconcile(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    mod.atomic_write_json(
+        state / "heartbeat-watchdog-state.json",
+        {
+            "version": 1,
+            "open": {
+                "fleet_sentinel": {
+                    "firstSeenAt": "1970-01-01T00:00:00Z",
+                    "lastNotifiedAt": "1970-01-01T00:16:00Z",
+                    "ageSeconds": "bad",
+                    "suppressed": "bad",
+                    "lastEvidence": "prior evidence",
+                }
+            },
+        },
+    )
+
+    written = mod.reconcile({"fleet_sentinel": "fleet sentinel heartbeat stale"}, ["fleet_sentinel"])
+
+    assert written == []
+    saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
+    incident = saved["open"]["fleet_sentinel"]
+    assert incident["suppressed"] == 1
+    assert incident["ageSeconds"] == 1000
+    assert incident["lastEvidence"] == "fleet sentinel heartbeat stale"
+
+
+def test_malformed_recovery_counter_restarts_recovery_confirmation(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    mod.atomic_write_json(
+        state / "heartbeat-watchdog-state.json",
+        {
+            "version": 1,
+            "open": {
+                "fleet_sentinel": {
+                    "firstSeenAt": "1970-01-01T00:00:00Z",
+                    "lastSeenAt": "1970-01-01T00:10:00Z",
+                    "lastNotifiedAt": "1970-01-01T00:00:00Z",
+                    "recoveryObservations": "bad",
+                    "suppressed": 0,
+                    "lastEvidence": "prior evidence",
+                }
+            },
+        },
+    )
+
+    written = mod.reconcile({}, ["fleet_sentinel"])
+
+    assert written == []
+    saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
+    assert saved["open"]["fleet_sentinel"]["recoveryObservations"] == 1
+
+
 def test_local_instance_health_flags_terminal_auth_class_as_physical_intervention(
     tmp_path: Path,
     monkeypatch,
