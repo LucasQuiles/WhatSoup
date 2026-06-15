@@ -79,7 +79,7 @@ def now_epoch() -> int:
 
 
 def now_iso(ts: int | None = None) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts or now_epoch()))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_epoch() if ts is None else ts))
 
 
 def finite_epoch(value: Any) -> int | None:

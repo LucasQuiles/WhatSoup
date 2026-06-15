@@ -42,6 +42,13 @@ def _private_state(monkeypatch, mod, tmp_path: Path) -> Path:
     return state
 
 
+def test_now_iso_formats_explicit_epoch_zero(monkeypatch):
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_DRY_NOW", "1000")
+
+    assert mod.now_iso(0) == "1970-01-01T00:00:00Z"
+
+
 def test_fleet_sentinel_heartbeat_check_is_quiet_when_fresh(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
