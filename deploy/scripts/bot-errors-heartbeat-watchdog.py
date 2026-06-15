@@ -701,6 +701,13 @@ def dry_local_health_responses() -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def dry_local_health_status(value: Any) -> tuple[int, str | None]:
+    try:
+        return int(value), None
+    except (TypeError, ValueError, OverflowError):
+        return 0, f"invalid dry local health status={value!r}"
+
+
 def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
     url = f"http://127.0.0.1:{port}/health"
     dry = dry_local_health_responses()
@@ -709,13 +716,16 @@ def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
         entry = dry.get(str(port))
     if entry is not None:
         if isinstance(entry, dict):
-            status = int(entry.get("status", 200))
+            status, status_error = dry_local_health_status(entry.get("status", 200))
+            if status_error is not None:
+                return status, status_error, url
             body = entry.get("body", entry.get("json", ""))
             if not isinstance(body, str):
                 body = json.dumps(body)
             return status, body, url
         if isinstance(entry, str):
-            return int(os.environ.get("BOT_ERRORS_DRY_LOCAL_HEALTH_STATUS", "200")), entry, url
+            status, status_error = dry_local_health_status(os.environ.get("BOT_ERRORS_DRY_LOCAL_HEALTH_STATUS", "200"))
+            return status, status_error or entry, url
     req = Request(url, method="GET")
     try:
         with urlopen(req, timeout=local_health_timeout()) as response:

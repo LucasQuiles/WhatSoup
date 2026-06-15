@@ -520,6 +520,77 @@ def test_daily_health_event_stat_error_is_reported_not_crashed(tmp_path: Path, m
     )
 
 
+def test_local_instance_health_bad_dry_status_is_reported_not_crashed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    mod = _load_module()
+    profile = tmp_path / "profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "instances": [
+                    {
+                        "name": "line-alpha",
+                        "service": "whatsoup-line-alpha.service",
+                        "expected": "always_on",
+                        "healthPort": 3201,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(profile))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps({"line-alpha": {"status": "bad", "body": "untrusted dry body"}}),
+    )
+
+    problems = mod.local_instance_health_problems()
+
+    detail = problems["local_health:line-alpha"]
+    assert "local health probe failed" in detail
+    assert "http_status=0" in detail
+    assert "invalid dry local health status='bad'" in detail
+
+
+def test_local_instance_health_bad_dry_env_status_is_reported_not_crashed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    mod = _load_module()
+    profile = tmp_path / "profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "instances": [
+                    {
+                        "name": "line-alpha",
+                        "service": "whatsoup-line-alpha.service",
+                        "expected": "always_on",
+                        "healthPort": 3201,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(profile))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps({"line-alpha": "untrusted dry body"}),
+    )
+    monkeypatch.setenv("BOT_ERRORS_DRY_LOCAL_HEALTH_STATUS", "bad")
+
+    problems = mod.local_instance_health_problems()
+
+    detail = problems["local_health:line-alpha"]
+    assert "local health probe failed" in detail
+    assert "http_status=0" in detail
+    assert "invalid dry local health status='bad'" in detail
+
+
 def test_local_instance_health_flags_terminal_auth_class_as_physical_intervention(
     tmp_path: Path,
     monkeypatch,
