@@ -33,6 +33,10 @@ class QueueDirectoryError(RuntimeError):
     pass
 
 
+class DailyHealthEventError(RuntimeError):
+    pass
+
+
 def positive_env_int(name: str, default: int) -> int:
     value = int(os.environ.get(name, str(default)))
     if value <= 0:
@@ -850,12 +854,23 @@ def daily_health_events() -> list[tuple[Path, int, dict[str, Any] | None]]:
         directory = root / dirname
         if not directory.exists():
             continue
-        for path in directory.glob("*.json*"):
+        try:
+            paths = list(directory.glob("*.json*"))
+        except OSError as exc:
+            raise DailyHealthEventError(
+                f"directory={directory} pattern=*.json* error={type(exc).__name__}: {exc}"
+            ) from exc
+        for path in paths:
             data = load_json(path)
             if "daily-health" not in path.name and (not data or data.get("source") != "daily-health"):
                 continue
             created = parse_iso_epoch(data.get("createdAt")) if data else None
-            events.append((path, created if created is not None else int(path.stat().st_mtime), data))
+            if created is None:
+                try:
+                    created = int(path.stat().st_mtime)
+                except OSError as exc:
+                    raise DailyHealthEventError(f"path={path} error={type(exc).__name__}: {exc}") from exc
+            events.append((path, created, data))
     return events
 
 
@@ -865,7 +880,11 @@ def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
         return int(dry_age), "dry daily-health age"
     newest: int | None = None
     newest_path = ""
-    for path, mtime, data in daily_health_events():
+    try:
+        events = daily_health_events()
+    except DailyHealthEventError as exc:
+        return None, f"failed to scan daily-health events under {state_root()}: {exc}"
+    for path, mtime, data in events:
         if host is not None:
             event_host = daily_health_event_host(path, data)
             if event_host != host:

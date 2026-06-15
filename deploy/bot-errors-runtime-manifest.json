@@ -74,7 +74,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "e24c1cd4777a6d19de0f68ac90c68d22ed3505049bd4b5e69394015bdd2e3bdf",
+      "sha256": "db01770b2577dff1993015e6c9b542249939fd2d6bcf7d73e877e51bf25f66e5",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",

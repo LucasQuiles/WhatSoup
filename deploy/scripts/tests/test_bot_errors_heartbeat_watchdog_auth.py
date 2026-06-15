@@ -320,6 +320,55 @@ def test_queue_backlog_file_stat_error_is_reported_not_crashed(tmp_path: Path, m
     )
 
 
+def test_daily_health_directory_scan_error_is_reported_not_crashed(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    sent = state / "sent"
+    sent.mkdir()
+    original_glob = Path.glob
+
+    def glob(path: Path, pattern: str):
+        if path == sent:
+            raise PermissionError("denied")
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", glob)
+
+    problems = mod.collect_problems(_watchdog_args(), {"daily_health"})
+
+    assert problems["daily_health"] == (
+        "daily-health cadence stale: age_seconds=missing max=90000 "
+        f"detail=failed to scan daily-health events under {state}: "
+        f"directory={sent} pattern=*.json* error=PermissionError: denied"
+    )
+
+
+def test_daily_health_event_stat_error_is_reported_not_crashed(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    sent = state / "sent"
+    sent.mkdir()
+    target = sent / "bot-errors-health.daily-health.event.json"
+    target.write_text(json.dumps({"source": "daily-health"}) + "\n", encoding="utf-8")
+    target.chmod(0o600)
+    original_stat = Path.stat
+
+    def stat(path: Path, *args, **kwargs):
+        if path == target:
+            raise PermissionError("denied")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    problems = mod.collect_problems(_watchdog_args(), {"daily_health"})
+
+    assert problems["daily_health"] == (
+        "daily-health cadence stale: age_seconds=missing max=90000 "
+        f"detail=failed to scan daily-health events under {state}: "
+        f"path={target} error=PermissionError: denied"
+    )
+
+
 def test_local_instance_health_flags_terminal_auth_class_as_physical_intervention(
     tmp_path: Path,
     monkeypatch,
