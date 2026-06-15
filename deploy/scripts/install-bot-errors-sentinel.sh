@@ -13,6 +13,7 @@ PYTHON=${BOT_ERRORS_PYTHON:-/usr/bin/python3}
 STATE_DIR=${BOT_ERRORS_STATE_DIR:-$HOME/.local/state/bot-errors}
 SENTINEL_STATE_DIR=${BOT_ERRORS_FLEET_SENTINEL_STATE_DIR:-$STATE_DIR/fleet-sentinel}
 HOSTS_PATH=${BOT_ERRORS_FLEET_SENTINEL_HOSTS:-$SENTINEL_STATE_DIR/hosts.json}
+ORACLE_PATH=${BOT_ERRORS_FLEET_SENTINEL_ORACLE:-}
 INTERVAL_SECONDS=${BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS:-1800}
 PLATFORM=${BOT_ERRORS_FLEET_SENTINEL_PLATFORM:-auto}
 DRY_RUN=${BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN:-0}
@@ -57,7 +58,7 @@ resolve_platform() {
 
 write_launchd() {
   local plist="$LAUNCH_AGENTS/$LABEL.plist"
-  local label_xml repo_xml py_xml script_xml state_xml sentinel_xml hosts_xml heartbeat_xml hysteresis_xml flap_window_xml flap_threshold_xml stdout_xml stderr_xml
+  local label_xml repo_xml py_xml script_xml state_xml sentinel_xml hosts_xml oracle_xml heartbeat_xml hysteresis_xml flap_window_xml flap_threshold_xml stdout_xml stderr_xml
   label_xml=$(xml_escape "$LABEL")
   repo_xml=$(xml_escape "$REPO_ROOT")
   py_xml=$(xml_escape "$PYTHON")
@@ -65,6 +66,7 @@ write_launchd() {
   state_xml=$(xml_escape "$STATE_DIR")
   sentinel_xml=$(xml_escape "$SENTINEL_STATE_DIR")
   hosts_xml=$(xml_escape "$HOSTS_PATH")
+  oracle_xml=$(xml_escape "$ORACLE_PATH")
   heartbeat_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS:-2700}")
   hysteresis_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES:-2}")
   flap_window_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS:-21600}")
@@ -94,6 +96,7 @@ write_launchd() {
     <key>BOT_ERRORS_STATE_DIR</key><string>$state_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_STATE_DIR</key><string>$sentinel_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_HOSTS</key><string>$hosts_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_ORACLE</key><string>$oracle_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS</key><string>$heartbeat_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES</key><string>$hysteresis_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS</key><string>$flap_window_xml</string>
@@ -124,13 +127,14 @@ PLIST
 write_systemd() {
   local service="$SYSTEMD_USER_DIR/$UNIT.service"
   local timer="$SYSTEMD_USER_DIR/$UNIT.timer"
-  local repo_q py_q script_q state_q sentinel_q hosts_q heartbeat_q hysteresis_q flap_window_q flap_threshold_q
+  local repo_q py_q script_q state_q sentinel_q hosts_q oracle_q heartbeat_q hysteresis_q flap_window_q flap_threshold_q
   repo_q=$(systemd_quote "$REPO_ROOT")
   py_q=$(systemd_quote "$PYTHON")
   script_q=$(systemd_quote "$SENTINEL_SCRIPT")
   state_q=$(systemd_quote "$STATE_DIR")
   sentinel_q=$(systemd_quote "$SENTINEL_STATE_DIR")
   hosts_q=$(systemd_quote "$HOSTS_PATH")
+  oracle_q=$(systemd_quote "$ORACLE_PATH")
   heartbeat_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS:-2700}")
   hysteresis_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES:-2}")
   flap_window_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS:-21600}")
@@ -149,6 +153,7 @@ EnvironmentFile=-%h/.config/whatsoup/bot-errors.env
 Environment="BOT_ERRORS_STATE_DIR=$state_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_STATE_DIR=$sentinel_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_HOSTS=$hosts_q"
+Environment="BOT_ERRORS_FLEET_SENTINEL_ORACLE=$oracle_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS=$heartbeat_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES=$hysteresis_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS=$flap_window_q"

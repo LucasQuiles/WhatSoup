@@ -252,6 +252,10 @@ def state_path(config: SentinelConfig) -> Path:
     return config.state_dir / "fleet-sentinel-state.json"
 
 
+def heartbeat_path(config: SentinelConfig) -> Path:
+    return config.state_dir / "sentinel-heartbeat.json"
+
+
 def load_state(config: SentinelConfig) -> dict:
     try:
         state = read_json_object(state_path(config))
@@ -264,6 +268,23 @@ def load_state(config: SentinelConfig) -> dict:
 
 def save_state(config: SentinelConfig, state: dict) -> None:
     atomic_write_json(state_path(config), state)
+
+
+def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
+    hosts = result.get("hosts") if isinstance(result.get("hosts"), list) else []
+    problem_hosts = [host for host in hosts if isinstance(host, dict) and host.get("healthy") is not True]
+    payload = {
+        "schemaVersion": 1,
+        "kind": "bot-errors-sentinel-heartbeat",
+        "checkedAt": result.get("checkedAt"),
+        "controllerHost": result.get("controllerHost"),
+        "healthy": result.get("fleetAction") == "none" and not problem_hosts,
+        "fleetAction": result.get("fleetAction"),
+        "hostCount": len(hosts),
+        "problemHostCount": len(problem_hosts),
+    }
+    atomic_write_json(heartbeat_path(config), payload)
+    return str(heartbeat_path(config))
 
 
 def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int) -> dict:
@@ -607,7 +628,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     state["lastFleetAction"] = fleet_action
     state["lastReachabilityOracle"] = oracle
     save_state(config, state)
-    return {
+    result = {
         "schemaVersion": 1,
         "checkedAt": now_iso(now),
         "controllerHost": deps.hostname(),
@@ -616,6 +637,8 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
         "hosts": results,
         "statePath": str(state_path(config)),
     }
+    result["heartbeatPath"] = save_central_heartbeat(config, result)
+    return result
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

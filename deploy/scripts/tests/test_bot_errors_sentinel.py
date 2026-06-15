@@ -185,6 +185,19 @@ def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
     assert host["action"] == "clear"
     assert host["alertState"] == "closed"
     assert json.loads(ack.read_text(encoding="utf-8"))["centralAction"] == "clear"
+    heartbeat = json.loads((_mod.heartbeat_path(config)).read_text(encoding="utf-8"))
+    assert heartbeat == {
+        "schemaVersion": 1,
+        "kind": "bot-errors-sentinel-heartbeat",
+        "checkedAt": result["checkedAt"],
+        "controllerHost": "central-test",
+        "healthy": True,
+        "fleetAction": "none",
+        "hostCount": 1,
+        "problemHostCount": 0,
+    }
+    assert host["ackPath"] == str(ack)
+    assert result["heartbeatPath"] == str(_mod.heartbeat_path(config))
     state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
     assert state["hosts"]["host-a"]["alertState"] == "closed"
 
