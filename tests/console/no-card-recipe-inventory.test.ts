@@ -17,14 +17,15 @@ const srcRoot = 'console/src'
 
 const CARD_RECIPE = /\bc-card\b/
 
-// Current raw-recipe consumers — tracked debt to migrate onto <Card>.
+// Card.tsx IS the primitive — the single sanctioned home of the `.c-card` recipe. It is not
+// migration debt; it stays allowlisted until `.c-card` is renamed/absorbed at the end of the
+// migration. Every OTHER entry is a raw-recipe consumer still owed a migration onto <Card>.
 const ALLOWLIST = new Set<string>([
+  'console/src/components/primitives/Card.tsx',
   'console/src/components/ActiveHoursHeatmap.tsx',
-  'console/src/components/ErrorBoundary.tsx',
   'console/src/components/MessageBubble.tsx',
   'console/src/components/line-detail/AccessTab.tsx',
   'console/src/components/line-detail/GroupCard.tsx',
-  'console/src/components/line-detail/LogsTab.tsx',
   'console/src/components/line-detail/MetricsTab.tsx',
   'console/src/components/line-detail/ProvidersKeysCard.tsx',
   'console/src/components/line-detail/ScheduledMessageRow.tsx',
@@ -32,6 +33,7 @@ const ALLOWLIST = new Set<string>([
   'console/src/pages/Inbox.tsx',
   'console/src/pages/Ops.tsx',
   'console/src/pages/SoupKitchen.tsx',
+  // MIGRATED onto <Card> (DD-38): ErrorBoundary.tsx, line-detail/LogsTab.tsx
 ])
 
 function tsxFiles(dir: string): string[] {

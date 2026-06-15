@@ -56,5 +56,29 @@ mirrors the icon-size-ramp / typography-floor ratchets. (Build it when migration
 mid-migration is premature; the value is preventing NEW spread, so land it alongside the first migration commit.)
 
 ## Status
-Scoping/proposal only — the `Card.tsx` build + consumer migration is a product change to land carefully
-(explicit-path commits, no push). Visual target is locked (§18). Next: owner go-ahead to build.
+**IN PROGRESS (owner-approved 1→2→3, item 2).** `Card.tsx` built (5-variant API: base/interactive/kpi/
+selectable/status-edge) + barrel export + `tests/console/primitives-card.test.tsx` (6 contract tests). The
+`base` variant renders the `.c-card` recipe verbatim → zero visual change for migrated consumers. Token-only;
+typecheck:all + `verify:console-design` PASS; shadow baseline fell 348→346 as raw usages left.
+
+Deferred (held for separately-gated steps): the §18 "lit-from-above" inset highlight (needs a new token →
+theme-parity/token-drift/burndown surface); ref forwarding (polymorphic div|button|a ref needs typed overload +
+trips react-hooks/refs — added when a consumer needs it).
+
+**Migrated onto `<Card>` so far (allowlist 13 → 11):**
+- `components/ErrorBoundary.tsx` — base (single panel; `style` forwarded)
+- `line-detail/LogsTab.tsx` — base (single panel)
+
+**Remaining consumers (11), with the handling each needs (NOT a plain base swap — left for later passes):**
+- `pages/Ops.tsx` — has an **interactive** card (`c-card c-hover cursor-pointer`) → `interactive` variant (div→button).
+- `pages/SoupKitchen.tsx` — a `<motion.div>` c-card (framer-motion) → needs motion-aware handling, not a plain `<Card>`.
+- `pages/Inbox.tsx` — 3 base panels but in a deeply-nested file; migrate carefully (open/close matching).
+- `components/ActiveHoursHeatmap.tsx` — uses `<section>` (landmark) → needs `as="section"` support or stays.
+- `line-detail/{AccessTab,MetricsTab,SummaryTab}` — multi-card (3–4 each), some KPI-leading → `base` + `kpi`.
+- `line-detail/{ProvidersKeysCard}` — single base panel (clean; next-up candidate).
+- `line-detail/GroupCard.tsx` — already a `<Button variant=ghost class=c-card>` → fold into `interactive`.
+- `line-detail/ScheduledMessageRow.tsx` — expandable row → base + future Accordion for the toggle.
+- `components/MessageBubble.tsx` — the `.c-card--detail` hover card → Tooltip/Popover primitive, **not** Card.
+
+Final steps (deferred): migrate the rest → delete `.c-card`/`.c-card--detail` from composites.css → promote the
+`no-card-recipe` guard to a resilience/eslint error. **No push** until all of item 2 lands (push is item 3).

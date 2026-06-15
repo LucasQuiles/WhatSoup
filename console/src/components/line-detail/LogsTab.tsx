@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { formatTime } from '../../lib/format-time'
-import { LogStream, Toolbar, ToolbarFilters, Pill } from '../primitives'
+import { Card, LogStream, Toolbar, ToolbarFilters, Pill } from '../primitives'
 import type { LogEntry } from './types'
 
 type LevelFilter = 'all' | 'info' | 'warn' | 'error' | 'debug'
@@ -44,7 +44,7 @@ export function LogsTab({
   }, [logs])
 
   return (
-    <div className="c-card overflow-hidden flex flex-col">
+    <Card className="overflow-hidden flex flex-col">
       <Toolbar flush aria-label="Log level filter">
         <span className="c-heading">Logs</span>
         <ToolbarFilters label="Level">
@@ -68,6 +68,6 @@ export function LogsTab({
         isFiltered={filter !== 'all'}
         filteredEmptyMessage={`No ${filter} logs.`}
       />
-    </div>
+    </Card>
   )
 }
