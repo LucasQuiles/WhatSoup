@@ -83,6 +83,7 @@ def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: byt
         memory_path=state / "selfcheck-state.json",
         heartbeat_path=state / "heartbeat.json",
         central_ack_path=central_ack_path,
+        central_down_alert_path=state / "actions" / "central-down-alert.json",
     )
     calls: list[tuple[Path, Path, Path]] = []
 
@@ -265,6 +266,8 @@ def test_central_ack_fresh_records_central_acked(tmp_path: Path):
     assert status["centralAck"]["mode"] == "central_acked"
     assert status["centralAck"]["status"] == "fresh"
     assert status["centralAck"]["ageSeconds"] == 20
+    assert status["centralAck"]["centralDownSuspected"] is False
+    assert "centralDownAlert" not in status
     assert status["healthy"] is True
     assert calls == []
 
@@ -275,6 +278,9 @@ def test_central_ack_missing_or_stale_records_local_only(tmp_path: Path, monkeyp
     status = _mod.run_selfcheck(config, deps)
     assert status["centralAck"]["mode"] == "local_only"
     assert status["centralAck"]["status"] == "missing"
+    assert status["centralAck"]["localOnlySeconds"] == 0
+    assert status["centralAck"]["centralDownSuspected"] is False
+    assert "centralDownAlert" not in status
 
     stale_root = tmp_path / "stale-case"
     stale_root.mkdir()
@@ -287,6 +293,125 @@ def test_central_ack_missing_or_stale_records_local_only(tmp_path: Path, monkeyp
     assert status["centralAck"]["mode"] == "local_only"
     assert status["centralAck"]["status"] == "stale"
     assert status["centralAck"]["ageSeconds"] == 100
+    assert status["centralAck"]["centralDownSuspected"] is False
+    assert calls == []
+
+
+def test_long_stale_central_ack_writes_central_down_alert(tmp_path: Path, monkeypatch):
+    ack = tmp_path / "central-ack.json"
+    ack.write_text("{}", encoding="utf-8")
+    os.utime(ack, (100.0, 100.0))
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    assert status["centralAck"]["status"] == "stale"
+    assert status["centralAck"]["ageSeconds"] == 900
+    assert status["centralAck"]["centralDownSuspected"] is True
+    assert status["centralDownAlert"] == {
+        "active": True,
+        "path": str(config.central_down_alert_path),
+        "ok": True,
+    }
+    alert = json.loads(config.central_down_alert_path.read_text(encoding="utf-8"))
+    assert alert["kind"] == "bot-errors-selfcheck-central-down-alert"
+    assert alert["host"] == "test-host"
+    assert alert["action"] == "central_down_suspected"
+    assert alert["tier"] == "tier3"
+    assert alert["centralAck"]["status"] == "stale"
+    heartbeat = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
+    assert heartbeat["centralDownAlert"]["ok"] is True
+    assert calls == []
+
+
+def test_missing_central_ack_alerts_after_local_only_threshold(tmp_path: Path, monkeypatch):
+    missing = tmp_path / "missing-ack.json"
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=missing)
+    _seed_memory(
+        config,
+        {
+            "lastClass": "healthy",
+            "consecutive": 1,
+            "healHistory": [],
+            "centralAckLocalOnlySince": 100.0,
+        },
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    assert status["centralAck"]["status"] == "missing"
+    assert status["centralAck"]["localOnlySeconds"] == 900
+    assert status["centralAck"]["centralDownSuspected"] is True
+    assert status["centralDownAlert"]["ok"] is True
+    assert json.loads(config.central_down_alert_path.read_text(encoding="utf-8"))["centralAck"]["status"] == "missing"
+    assert calls == []
+
+
+def test_central_down_alert_write_failure_is_reported(tmp_path: Path, monkeypatch):
+    ack = tmp_path / "central-ack.json"
+    ack.write_text("{}", encoding="utf-8")
+    os.utime(ack, (100.0, 100.0))
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    original_atomic_write_json = _mod.atomic_write_json
+
+    def atomic_write_json(path: Path, payload: dict) -> None:
+        if path == config.central_down_alert_path:
+            raise OSError("disk full")
+        original_atomic_write_json(path, payload)
+
+    monkeypatch.setattr(_mod, "atomic_write_json", atomic_write_json)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    assert status["centralDownAlert"]["ok"] is False
+    assert "disk full" in status["centralDownAlert"]["error"]
+    heartbeat = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
+    assert heartbeat["centralDownAlert"]["ok"] is False
+    assert calls == []
+
+
+def test_future_central_ack_local_only_since_is_clamped(tmp_path: Path, monkeypatch):
+    missing = tmp_path / "missing-ack.json"
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=missing)
+    _seed_memory(
+        config,
+        {
+            "lastClass": "healthy",
+            "consecutive": 1,
+            "healHistory": [],
+            "centralAckLocalOnlySince": 2000.0,
+        },
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["localOnlySeconds"] == 0
+    assert status["centralAck"]["localOnlySince"] == "1970-01-01T00:16:40Z"
+    assert status["centralAck"]["centralDownSuspected"] is False
+    assert "centralDownAlert" not in status
+    assert calls == []
+
+
+def test_fresh_central_ack_clears_local_only_watch(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    ack.write_text("{}", encoding="utf-8")
+    os.utime(ack, (990.0, 990.0))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    _seed_memory(
+        config,
+        {
+            "lastClass": "healthy",
+            "consecutive": 1,
+            "healHistory": [],
+            "centralAckLocalOnlySince": 100.0,
+        },
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "central_acked"
+    assert status["centralAck"]["centralDownSuspected"] is False
+    assert "centralDownAlert" not in status
+    assert "centralAckLocalOnlySince" not in json.loads(config.memory_path.read_text(encoding="utf-8"))
     assert calls == []
 
 
@@ -302,6 +427,8 @@ def test_central_ack_stat_error_and_invalid_max_age_fallback(tmp_path: Path, mon
     monkeypatch.setattr(Path, "stat", stat)
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "bad")
     result = _mod.central_ack_inventory(ack, 1000.0)
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "bad")
+    assert _mod.central_down_max_age_seconds() == 2 * 60 * 60
     assert result == {
         "configured": True,
         "mode": "local_only",
@@ -732,12 +859,15 @@ def test_default_config_uses_env_overrides(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(manifest))
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEARTBEAT", str(heartbeat))
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK", str(ack))
+    central_alert = tmp_path / "central-down-alert.json"
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT", str(central_alert))
     assert _mod.default_state_dir() == tmp_path / "state-root" / "sentinel"
     config = _mod.default_config(root, state)
     assert config.manifest_path == manifest
     assert config.current_link == state / "current"
     assert config.heartbeat_path == heartbeat
     assert config.central_ack_path == ack
+    assert config.central_down_alert_path == central_alert
 
 
 def test_private_dir_chmod_error_is_nonfatal(tmp_path: Path, monkeypatch):

@@ -57,7 +57,7 @@ resolve_platform() {
 
 write_launchd() {
   local plist="$LAUNCH_AGENTS/$LABEL.plist"
-  local label_xml repo_xml py_xml script_xml state_xml sentinel_xml units_xml fresh_xml heartbeat_xml ack_xml stdout_xml stderr_xml
+  local label_xml repo_xml py_xml script_xml state_xml sentinel_xml units_xml fresh_xml heartbeat_xml ack_xml central_alert_xml central_down_max_xml stdout_xml stderr_xml
   label_xml=$(xml_escape "$LABEL")
   repo_xml=$(xml_escape "$REPO_ROOT")
   py_xml=$(xml_escape "$PYTHON")
@@ -68,6 +68,8 @@ write_launchd() {
   fresh_xml=$(xml_escape "${BOT_ERRORS_SELFCHECK_FRESHNESS_JSON:-}")
   heartbeat_xml=$(xml_escape "${BOT_ERRORS_SELFCHECK_HEARTBEAT_URL:-}")
   ack_xml=$(xml_escape "${BOT_ERRORS_SELFCHECK_CENTRAL_ACK:-}")
+  central_alert_xml=$(xml_escape "${BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT:-}")
+  central_down_max_xml=$(xml_escape "${BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS:-}")
   stdout_xml=$(xml_escape "$STATE_DIR/logs/selfcheck.out.log")
   stderr_xml=$(xml_escape "$STATE_DIR/logs/selfcheck.err.log")
 
@@ -94,6 +96,8 @@ write_launchd() {
     <key>BOT_ERRORS_SELFCHECK_FRESHNESS_JSON</key><string>$fresh_xml</string>
     <key>BOT_ERRORS_SELFCHECK_HEARTBEAT_URL</key><string>$heartbeat_xml</string>
     <key>BOT_ERRORS_SELFCHECK_CENTRAL_ACK</key><string>$ack_xml</string>
+    <key>BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT</key><string>$central_alert_xml</string>
+    <key>BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS</key><string>$central_down_max_xml</string>
   </dict>
   <key>WorkingDirectory</key><string>$repo_xml</string>
   <key>RunAtLoad</key><true/>
@@ -120,7 +124,7 @@ PLIST
 write_systemd() {
   local service="$SYSTEMD_USER_DIR/$UNIT.service"
   local timer="$SYSTEMD_USER_DIR/$UNIT.timer"
-  local repo_q py_q script_q state_q sentinel_q units_q fresh_q heartbeat_q ack_q
+  local repo_q py_q script_q state_q sentinel_q units_q fresh_q heartbeat_q ack_q central_alert_q central_down_max_q
   repo_q=$(systemd_quote "$REPO_ROOT")
   py_q=$(systemd_quote "$PYTHON")
   script_q=$(systemd_quote "$SELFCHECK_SCRIPT")
@@ -130,6 +134,8 @@ write_systemd() {
   fresh_q=$(systemd_quote "${BOT_ERRORS_SELFCHECK_FRESHNESS_JSON:-}")
   heartbeat_q=$(systemd_quote "${BOT_ERRORS_SELFCHECK_HEARTBEAT_URL:-}")
   ack_q=$(systemd_quote "${BOT_ERRORS_SELFCHECK_CENTRAL_ACK:-}")
+  central_alert_q=$(systemd_quote "${BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT:-}")
+  central_down_max_q=$(systemd_quote "${BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS:-}")
 
   mkdir -p "$SYSTEMD_USER_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR"
   chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" 2>/dev/null || true
@@ -147,6 +153,8 @@ Environment="BOT_ERRORS_SELFCHECK_UNITS=$units_q"
 Environment="BOT_ERRORS_SELFCHECK_FRESHNESS_JSON=$fresh_q"
 Environment="BOT_ERRORS_SELFCHECK_HEARTBEAT_URL=$heartbeat_q"
 Environment="BOT_ERRORS_SELFCHECK_CENTRAL_ACK=$ack_q"
+Environment="BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT=$central_alert_q"
+Environment="BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS=$central_down_max_q"
 ExecStart=$py_q $script_q --root $repo_q
 SyslogIdentifier=bot-errors-selfcheck
 SERVICE

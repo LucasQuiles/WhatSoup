@@ -27,6 +27,7 @@ import sentinel_pin as sp  # noqa: E402
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
 HEAL_WINDOW_SECONDS = 6 * 60 * 60
 MAX_HEALS_PER_WINDOW = 2
+DEFAULT_CENTRAL_DOWN_ALERT_SECONDS = 2 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class SelfcheckConfig:
     memory_path: Path
     heartbeat_path: Path
     central_ack_path: Optional[Path]
+    central_down_alert_path: Path
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ def default_config(root: Path, state_dir: Optional[Path] = None) -> SelfcheckCon
     scripts = root / "deploy" / "scripts"
     sentinel_state = state_dir or default_state_dir()
     central_ack = os.environ.get("BOT_ERRORS_SELFCHECK_CENTRAL_ACK")
+    central_down_alert = os.environ.get("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_ALERT")
     return SelfcheckConfig(
         root=root,
         state_dir=sentinel_state,
@@ -88,6 +91,7 @@ def default_config(root: Path, state_dir: Optional[Path] = None) -> SelfcheckCon
         memory_path=sentinel_state / "selfcheck-state.json",
         heartbeat_path=Path(os.environ.get("BOT_ERRORS_SELFCHECK_HEARTBEAT", sentinel_state / "heartbeat.json")).expanduser(),
         central_ack_path=Path(central_ack).expanduser() if central_ack else None,
+        central_down_alert_path=Path(central_down_alert or sentinel_state / "actions" / "central-down-alert.json").expanduser(),
     )
 
 
@@ -470,6 +474,14 @@ def central_ack_max_age_seconds() -> int:
         return 3 * 30 * 60
 
 
+def central_down_max_age_seconds() -> int:
+    raw = os.environ.get("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", str(DEFAULT_CENTRAL_DOWN_ALERT_SECONDS))
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_CENTRAL_DOWN_ALERT_SECONDS
+
+
 def central_ack_inventory(path: Optional[Path], now: float) -> dict:
     if path is None:
         return {"configured": False, "mode": "local_only", "status": "not_configured"}
@@ -492,6 +504,33 @@ def central_ack_inventory(path: Optional[Path], now: float) -> dict:
     return {"configured": True, "mode": mode, "status": status, "path": str(path), "ageSeconds": age, "maxAgeSeconds": max_age}
 
 
+def update_central_ack_watch(memory: dict, central_ack: dict, now: float) -> None:
+    if central_ack.get("configured") is not True:
+        memory.pop("centralAckLocalOnlySince", None)
+        return
+    threshold = central_down_max_age_seconds()
+    central_ack["centralDownMaxAgeSeconds"] = threshold
+    if central_ack.get("mode") == "central_acked":
+        memory.pop("centralAckLocalOnlySince", None)
+        central_ack["centralDownSuspected"] = False
+        return
+
+    raw_since = memory.get("centralAckLocalOnlySince")
+    try:
+        since = float(raw_since)
+    except (TypeError, ValueError):
+        since = now
+    if since > now:
+        since = now
+    memory["centralAckLocalOnlySince"] = since
+    local_only_seconds = max(0, int(now - since))
+    age_seconds = central_ack.get("ageSeconds")
+    age_long_stale = isinstance(age_seconds, int) and age_seconds >= threshold
+    central_ack["localOnlySince"] = now_iso(since)
+    central_ack["localOnlySeconds"] = local_only_seconds
+    central_ack["centralDownSuspected"] = age_long_stale or local_only_seconds >= threshold
+
+
 def heartbeat_payload(status: dict) -> dict:
     keys = (
         "schemaVersion",
@@ -510,6 +549,7 @@ def heartbeat_payload(status: dict) -> dict:
         "freshness",
         "runtimeVerify",
         "centralAck",
+        "centralDownAlert",
     )
     payload = {"kind": "bot-errors-selfcheck-heartbeat"}
     payload.update({key: status[key] for key in keys if key in status})
@@ -547,7 +587,36 @@ def publish_heartbeat(config: SelfcheckConfig, deps: SelfcheckDeps, status: dict
     status["heartbeat"] = result
 
 
+def publish_central_down_alert(config: SelfcheckConfig, status: dict) -> None:
+    central_ack = status.get("centralAck", {})
+    if central_ack.get("centralDownSuspected") is not True:
+        return
+    payload = {
+        "schemaVersion": 1,
+        "kind": "bot-errors-selfcheck-central-down-alert",
+        "scope": "host",
+        "createdAt": status.get("checkedAt"),
+        "host": status.get("host"),
+        "root": status.get("root"),
+        "class": status.get("class"),
+        "action": "central_down_suspected",
+        "tier": "tier3",
+        "lane": "human",
+        "severity": "critical",
+        "criticalWhatsAppEligible": True,
+        "centralAck": central_ack,
+    }
+    result = {"active": True, "path": str(config.central_down_alert_path), "ok": False}
+    try:
+        atomic_write_json(config.central_down_alert_path, payload)
+        result["ok"] = True
+    except Exception as exc:  # noqa: BLE001 - alert artifact failure must be visible without masking runtime status.
+        result["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    status["centralDownAlert"] = result
+
+
 def finalize_status(config: SelfcheckConfig, deps: SelfcheckDeps, memory: dict, status: dict) -> dict:
+    publish_central_down_alert(config, status)
     publish_heartbeat(config, deps, status)
     atomic_write_json(config.memory_path, memory)
     atomic_write_json(config.status_path, status)
@@ -593,6 +662,7 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         "autohealOff": autoheal_reason,
     }
     status["centralAck"] = central_ack_inventory(config.central_ack_path, now)
+    update_central_ack_watch(memory, status["centralAck"], now)
 
     try:
         pin = sp.load_pin(config.manifest_path)
