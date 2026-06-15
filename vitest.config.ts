@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { coverageConfigDefaults, defineConfig } from 'vitest/config';
 import path from 'path';
 
 export default defineConfig({
@@ -37,6 +37,10 @@ export default defineConfig({
       include: ['src/**/*.ts', 'src/**/*.tsx'],
       reporter: ['text', 'html', 'json', 'json-summary'],
       reportsDirectory: 'coverage',
+      exclude: [
+        ...coverageConfigDefaults.exclude,
+        'tools/whatsoup_guard/**',
+      ],
       thresholds: {
         lines: 82,
         branches: 73,

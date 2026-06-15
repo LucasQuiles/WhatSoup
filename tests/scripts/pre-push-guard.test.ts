@@ -190,6 +190,11 @@ describe('verify chain composition (package.json)', () => {
     expect(chain).not.toMatch(/\bnpm --prefix tools\/whatsoup_guard run coverage:proof\b/);
   });
 
+  it('root coverage excludes the standalone whatsoup guard package', () => {
+    expect(vitestConfig).toContain('coverageConfigDefaults.exclude');
+    expect(vitestConfig).toContain("'tools/whatsoup_guard/**'");
+  });
+
   it('verify:release invokes full publication audit guard', () => {
     const chain = packageJson.scripts['verify:release'];
     expect(chain, 'verify:release script must exist').toBeDefined();
