@@ -131,8 +131,17 @@ write_last_known_good_pointer() {
   mv -f "$tmp" "$pointer"
 }
 
+is_managed_path() {
+  local candidate="$1" entry path
+  for entry in "${FILES[@]}"; do
+    path="${entry%%:*}"
+    [[ "$candidate" == "$path" ]] && return 0
+  done
+  return 1
+}
+
 require_backup_dir() {
-  local root="$1" bkdir="$2" root_parent root_abs backup_abs
+  local root="$1" bkdir="$2" root_parent root_abs backup_abs absent_path entry local_path
   [ -n "$bkdir" ] || { echo "FATAL: backup dir missing"; return 3; }
   [ -d "$bkdir" ] || { echo "FATAL: backup dir not found: $bkdir"; return 3; }
   [ -f "$bkdir/.was-absent" ] || { echo "FATAL: backup missing .was-absent ledger: $bkdir"; return 3; }
@@ -142,6 +151,14 @@ require_backup_dir() {
   case "$backup_abs" in
     "$root_abs"|"$root_abs"/*) echo "FATAL: backup is inside runtime root: $backup_abs"; return 3 ;;
   esac
+  while IFS= read -r absent_path || [[ -n "$absent_path" ]]; do
+    [[ -z "$absent_path" ]] && continue
+    is_managed_path "$absent_path" || { echo "FATAL: backup .was-absent contains unmanaged path: $absent_path"; return 3; }
+  done < "$bkdir/.was-absent"
+  for entry in "${FILES[@]}"; do
+    local_path="${entry%%:*}"
+    assert_no_symlink_path "$bkdir" "$local_path" || { echo "FATAL: backup path is unsafe"; return 3; }
+  done
 }
 
 prune_backup_dir() {

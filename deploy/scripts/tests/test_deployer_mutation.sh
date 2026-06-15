@@ -170,6 +170,31 @@ grep -q "backup dir not found" "$tmp/missing-backup.log" || {
   fail "missing backup was not reported"
 }
 
+bad_absent_backup="$tmp/bad-absent-backup"
+mkdir -p "$bad_absent_backup"
+printf '../../outside-victim\n' > "$bad_absent_backup/.was-absent"
+if bash "$D" rollback "$clean_root" "$bad_absent_backup" > "$tmp/bad-absent.log" 2>&1; then
+  cat "$tmp/bad-absent.log"
+  fail "rollback accepted unmanaged .was-absent path"
+fi
+grep -q "unmanaged path" "$tmp/bad-absent.log" || {
+  cat "$tmp/bad-absent.log"
+  fail "unmanaged .was-absent path was not reported"
+}
+
+bad_symlink_backup="$tmp/bad-symlink-backup"
+mkdir -p "$bad_symlink_backup/deploy/scripts/lib"
+: > "$bad_symlink_backup/.was-absent"
+ln -s "$tmp/outside-source" "$bad_symlink_backup/deploy/scripts/lib/bot_errors_redaction.py"
+if bash "$D" rollback "$clean_root" "$bad_symlink_backup" > "$tmp/bad-backup-symlink.log" 2>&1; then
+  cat "$tmp/bad-backup-symlink.log"
+  fail "rollback accepted symlinked backup path"
+fi
+grep -q "backup path is unsafe" "$tmp/bad-backup-symlink.log" || {
+  cat "$tmp/bad-backup-symlink.log"
+  fail "symlinked backup path was not reported"
+}
+
 fail_root="$tmp/fail-runtime"
 prepare_old_root "$fail_root"
 fakebin="$tmp/fakebin"
