@@ -724,8 +724,8 @@ zero-duration read. Background inert is a refcounted hook on the app root, Modal
 drawer keeps its documented non-modal exception); the toast live region portals to body in
 the same change so alerts are never silenced under inert; inert release precedes focus
 restore, pinned by test. A separate no-reduce browser-motion config + suite proves the
-animated exit path (3/3, reproduced fresh in d7-evidence.md; deliberately NOT in test:browser
-or CI pending the gate-placement decision — C-B5-7, recorded not silent). Suite 2,296 green,
+animated exit path (3/3, reproduced fresh in d7-evidence.md; now wired as
+`test:browser:motion` and a separate CI browser-motion step — C-B5-7). Suite 2,296 green,
 ratchet flat (commit record). Harvested from a context-terminated lane; integrator-verified.
 The per-directory coverage ratchet later caught the two new hooks under the hooks floor —
 closed by the B5 hook suites entry below. DD-25 (toast motion literals) remains open against
@@ -966,8 +966,9 @@ re-validated under the vitest-4 stack (93/93 + motion 3/3 at `76012b68`). The pa
 full-suite run FOUND F-B5-1 — the default vitest config collected the browser-motion lane,
 failing full-repo `npm test` — fixed same evening (`76012b68`, fresh 601 files/10,148 green,
 zero unhandled errors; the EventSource rejections it also surfaced fixed in the same commit).
-C-B5-7 met with recorded deviation (motion config delivered; npm script deliberately unwired
-pending the gate-placement decision). Deferred debt: DD-25 re-homed to C3, DD-30 escalated
+C-B5-7's original recorded deviation (motion config delivered before the npm script and CI
+step) is now closed by `test:browser:motion` plus the CI browser-motion step. Deferred debt:
+DD-25 re-homed to C3, DD-30 escalated
 per c3-investigation (make-live), escape-while-closing pin + header corrections bundled to C3.
 
 ---

@@ -70,6 +70,7 @@
     "coverage:check": "bash scripts/run-coverage-check.sh",
     "test:watch": "vitest",
     "test:browser": "vitest run --config vitest.browser.config.ts",
+    "test:browser:motion": "vitest run --config vitest.browser.motion.config.ts",
     "guard:bot-errors-simulation-matrix": "bash scripts/run-with-pinned-node.sh scripts/bot-errors-simulation-matrix.ts"
   },
   "dependencies": {

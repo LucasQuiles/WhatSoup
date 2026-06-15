@@ -17,7 +17,7 @@ provenance: `b2-evidence.md` ("PASS WITH DEFERRED PROOF"). Wave-3 before-claim:
 | Command | Result |
 |---|---|
 | `npm run test:browser` (vitest.browser.config.ts, chromium headless, reducedMotion: reduce) | **76/76, 5 files** — viewport-matrix 23 · keyboard-proofs 9 · smoke 4 · target-size 37 · b5-inert-toast 3 (3.19s) |
-| `npx vitest run --config vitest.browser.motion.config.ts` (no-reduce context) | **3/3** — b5-exit-motion (modal dwell+keyframe, backdrop pointer-events, drawer dwell+keyframe) |
+| `npm run test:browser:motion` (vitest.browser.motion.config.ts, no-reduce context) | **3/3** — b5-exit-motion (modal dwell+keyframe, backdrop pointer-events, drawer dwell+keyframe) |
 
 Capture environment note: at evidence time the `soup-impl` working tree was mid-merge
 (active integrator lane; package.json carried conflict markers, so no npm/vitest
@@ -29,7 +29,7 @@ tree — same exact-pinned playwright 1.60.0 chromium build). Zero writes to `so
 
 | Review | Verdict | Evidence |
 |---|---|---|
-| Positive-path | **PASS** | fresh 76/76 + 3/3 above · deps exact-pinned (`@vitest/browser` 3.2.6, `playwright` 1.60.0, `vitest-browser-react` 1.0.1, `tailwindcss`/`@tailwindcss/vite` 4.2.2 — no carets, package.json devDependencies) · `test:browser` script + `vitest.config.ts:35` exclude · CI browser step live on both Node matrix legs (quality.yml) |
+| Positive-path | **PASS** | fresh 76/76 + 3/3 above · deps exact-pinned (`@vitest/browser` 3.2.6, `playwright` 1.60.0, `vitest-browser-react` 1.0.1, `tailwindcss`/`@tailwindcss/vite` 4.2.2 — no carets, package.json devDependencies) · `test:browser` + `test:browser:motion` scripts + `vitest.config.ts:35` exclude · CI browser steps live on both Node matrix legs (quality.yml) |
 | Negative-path | **PASS** | network sentinel throws named errors on any `/api`/`/ws` fetch or WebSocket (setup.ts — WebSocket guarded via subclass, no type suppression) · FINDING cases assert the measured defect values numerically instead of skipping (target-size §4/§5/§8) · the focus-trap case asserts a definite outcome on both branches (trap-holds OR escape-without-recapture) |
 | Omission review | below | |
 | Regression review | **PASS** | jsdom/node suite excluded by config and untouched at commit 1 (2,131 green at `c3b1ac52`; 2,296 at `25629451` per its commit battery — integrator record, not re-run for this packet) · B5 kept the jsdom modal suite byte-stable via the synchronous-instant exit path (jsdom's empty computed duration) · no console/src TSX changes in the D7 commits; C-D7-2 is CSS + one jsdom test file |
@@ -169,21 +169,21 @@ DD-12's closure note ("D7 confirms trusted-event") is now backed by executed evi
   `data-state="closing"` with computed `animation-name: soup-modal-shell-out` and is
   removed within a bounded window; closing backdrop computes `pointer-events: none`
   (motion.md §10); drawer closing dwell with `soup-drawer-out`, bounded removal.
-- **C-B5-7 standing**: the motion config is deliberately NOT in `test:browser` or CI
-  pending the gate-placement decision — recorded, not silent.
+- **C-B5-7 standing**: the motion config is intentionally separate from `test:browser`,
+  and CI runs `npm run test:browser:motion` after the reduced-motion browser suite.
 - **DD-19 note**: the register row's expiration condition ("paired exit motion + inert
   background") now has committed implementation (`25629451`) plus browser proof (above,
   reproduced fresh). This packet's register scope is DD-10/DD-18r only — the DD-19
   closure flip is the integrator's, with this packet citable as the evidence.
 
-## CI wiring (`8c26fbb1`)
+## CI wiring (`8c26fbb1`, current branch extended)
 
-`quality.yml`: `npx playwright install chromium --with-deps` + `npm run test:browser`
-placed after the design gates, root deps only (the step order the packet verified in
-§0.4), running on BOTH Node matrix legs (24.x/25.x). The trusted-event proof surface is
-exercised in CI for the first time. NOT delivered from the packet's CI plan: the
-playwright browser cache (≈170MB download per leg per run) and the failure-screenshot
-`upload-artifact (if: failure())` step — both named in omissions.
+`quality.yml`: `npx playwright install chromium --with-deps`, `npm run test:browser`, and
+`npm run test:browser:motion` are placed after the design gates, root deps only (the step
+order the packet verified in §0.4), running on BOTH Node matrix legs (24.x/25.x). The
+trusted-event proof surface and no-reduce animated-exit proof surface are exercised in CI.
+The failure-screenshot `upload-artifact (if: failure())` step now collects both
+`tests/browser/__screenshots__` and `tests/browser-motion/__screenshots__`.
 
 ## Omission audit (each item triaged, none silent)
 

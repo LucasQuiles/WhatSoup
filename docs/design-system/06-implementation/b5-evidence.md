@@ -31,12 +31,14 @@ Commit set confirmed via
 | `npx vitest run --pool=forks` (full repo, = the CI "Test suite" step) | Tests **10,114 passed / 1 skipped**; **Test Files 1 FAILED** — `tests/browser-motion/b5-exit-motion.test.tsx` fails at collection under the default config (finding F-B5-1 below); plus 4 unhandled `ReferenceError: EventSource is not defined` errors from `add-line-wizard.test.tsx`/`LinkStep.tsx:41` (file itself passes; not B5-owned, routed below) |
 
 **Browser suites — proof-of-record, NOT re-run by this packet** (per tasking: no browser
-launches). The committed wiring: root `package.json:76` `"test:browser": "vitest run --config
-vitest.browser.config.ts"` (include `tests/browser/**`, chromium, `reducedMotion: 'reduce'`
-context — `vitest.browser.config.ts:83,96`); `.github/workflows/quality.yml` steps "Cache
-Playwright browsers" → "Install Playwright chromium" → "Browser test suite" (`npm run
-test:browser`) → "Upload browser test failure screenshots". Recorded results, labeled as
-records: d7-evidence.md fresh runs **76/76 + 3/3** (reproduced integrator-independent from an
+launches). Current committed wiring: root `package.json` exposes `test:browser` (include
+`tests/browser/**`, chromium, `reducedMotion: 'reduce'` context —
+`vitest.browser.config.ts:83,96`) and `test:browser:motion` (include
+`tests/browser-motion/**`, no-reduce context — `vitest.browser.motion.config.ts:64,75`);
+`.github/workflows/quality.yml` runs "Browser test suite" followed by "Browser motion test
+suite" after Playwright install, and uploads failure screenshots from both browser proof
+directories. Recorded results, labeled as records: d7-evidence.md fresh runs **76/76 + 3/3**
+(reproduced integrator-independent from an
 unmutated clone at `b260800e`); commit record `4fbad4ef` **"Browser suite 93/93 across 5
 files"** after the Inbox/drawer-flip rows landed; visual-qa-b-stages.md row 14 cites the same
 **93/93 + 3/3** as the canonical B5 motion/toast proof. The branch is push-gated, so these CI
@@ -69,7 +71,7 @@ runs are local.
 - **`use-toast.tsx`**: stack portals to `document.body` (`:73–75`) with the rationale comment
   naming C-B5-3 and the deliberate DD-25 non-fix (`:39–43`).
 - **`vitest.browser.motion.config.ts`**: no-reduce context (`context: {}`, `:75`), separate
-  include `tests/browser-motion/**` (`:64`), deliberately unwired (header `:13–19`).
+  include `tests/browser-motion/**` (`:64`), wired as `npm run test:browser:motion`.
 
 Because B3 waves 3–4 completed the dialog burn-down after B5 landed (ad-hoc-modal shadow set
 EMPTY), every dialog surface in the console now inherits exit motion + background inert
@@ -86,7 +88,7 @@ has since emptied itself.
 | **C-B5-4** inert release precedes focus restoration | **MET** | Release-on-cleanup: `use-background-inert.ts:19–23`; React runs cleanups before setups in the same commit (design per packet §5.4; `Modal.tsx:18,111–112`). Pins: `primitives-modal.test.tsx:776–823` (opener inside a `#root` fixture regains focus on Escape-close with inert machinery active), `use-background-inert.test.tsx:231–261` (end-state pin — its own comments honestly state it cannot interleave effect order), browser `b5-inert-toast.test.tsx:82–124` (focus refusal under inert, refocusable after close, in-engine). Honest bound: the literal opener-refocus-in-browser case is jsdom-only — recorded in d7-evidence's strong-claim audit (header enumerates 4 proofs, file carries 3) and still true |
 | **C-B5-5** refcounted, StrictMode-symmetric inert | **MET** | `use-background-inert.ts:2–17` module counter, over-release guard `:11`; P1-2 stacked-modal pin extended: `primitives-modal.test.tsx:727–773` (close top → still inert; close both → released); `use-background-inert.test.tsx:121–229` (2-deep, 3-deep, unmount-while-open, refcount-never-negative), `:350–398` StrictMode symmetric |
 | **C-B5-6** guarded animationend (target + name) | **MET** | `use-exit-presence.ts:140–144`; expected names pinned at call sites (`Modal.tsx:92` `soup-modal-shell-out`, `Drawer.tsx:101` `soup-drawer-out`). Pins: `use-exit-presence.test.tsx:256–355` (matching name unmounts; child-target does NOT; wrong-name arm documented), `primitives-modal.test.tsx:597–631` (bubbling child animationend does not unmount). jsdom limit held honestly: jsdom has no `AnimationEvent`, so the wrong-name arm is browser-territory — pinned by an explicit labeled test (`primitives-modal.test.tsx:633–641`) and by the browser-motion suite's computed `animation-name` asserts |
-| **C-B5-7** separate no-reduce motion lane; existing reduce context untouched | **MET WITH DEVIATION + 1 NEW DEFECT** | Config delivered: `vitest.browser.motion.config.ts:64,75` (separate include, no-reduce context); `vitest.browser.config.ts:96` still `reducedMotion: 'reduce'` (untouched). Deviation (recorded, not silent): the packet asked "config file + script"; no `test:browser:motion` npm script exists — the config header `:13–19` records the deliberate non-wiring pending the gate-placement decision and gives the manual invocation (`npx vitest run --config vitest.browser.motion.config.ts`); execution log and d7-evidence both record the same standing. NEW DEFECT found by this packet: **F-B5-1** below — the lane leaks into the DEFAULT config |
+| **C-B5-7** separate no-reduce motion lane; existing reduce context untouched | **MET** | Config delivered: `vitest.browser.motion.config.ts:64,75` (separate include, no-reduce context); `vitest.browser.config.ts:96` still `reducedMotion: 'reduce'` (untouched). The originally missing script/gate leg is now closed: `package.json` exposes `test:browser:motion` and `quality.yml` runs it after `test:browser`, keeping the no-reduce lane separate and CI-wired. NEW DEFECT found by this packet: **F-B5-1** below — the lane leaked into the DEFAULT config until the integrator addendum fix |
 | **C-B5-8** live checkpoint, both themes | **MET BY RECORDED DISPOSITION, perceptual leg open** | visual-qa-b-stages.md row 13: **PASS** — inert behavioral live observation (nav theme toggle suppressed while GroupDetailModal open, fires after close; by-design). Row 14: B5 toast/exit motion **delegated** to the committed browser suites (93/93 + 3/3) rather than re-proven manually — the matrix's recorded disposition for this round. The §8.3 perceptual checks (120ms "accelerate away" read, squeeze-snap feel, both-themes scrim fade as scrim *fade*) were NOT eyeballed — named in the omission audit, routed to the C3 per-screen polish passes |
 | **C-B5-9** duration-stub seam without public props | **MET** | No motion/duration prop added: `Modal.tsx:51–81` props are open/onClose/size/dismissable/children/initialFocus/labelledById; Drawer props unchanged. Seam = inline `animation-duration` style on the shell (`primitives-modal.test.tsx:537–548` with the C-B5-9 citation in-comment) and a persistent-ref element for the hook suite (`use-exit-presence.test.tsx:84–93`); the duration resolver stays un-exported |
 
@@ -133,9 +135,9 @@ packet (docs-only write). **Blocking-before-push; owner: integrator, next impl c
   single-fire pins (`primitives-modal.test.tsx:270+`, drawer stack tests) cover the stack
   contract. The specific during-dwell behavior is exercised nowhere — candidate case for the
   DD-30 browser round-trip suite (same mid-dwell apparatus).
-- **C-B5-7 script leg not delivered** — deviation recorded in the config header and execution
-  log; manual `npx` invocation documented; gate-placement decision (CI wiring of the motion
-  lane) still pending with the D7 lane.
+- **C-B5-7 script leg was initially not delivered** — the deviation is retained as packet
+  history, but the current repo closes it with `npm run test:browser:motion` plus the CI
+  "Browser motion test suite" step.
 - **C-B5-8 perceptual checks not performed manually** — row 14's delegation is the recorded
   disposition; the feel-level checks ride C3 polish.
 - **DD-25 deliberately not fixed** — the toast portal commit changed mounting only; the
@@ -172,9 +174,8 @@ suites, 87/87 adjacent suites); DD-19's expiration condition is met and the regi
 stands; the animated path's proof-of-record is the committed browser suites (93/93 + 3/3,
 recorded — not re-run here). The deferred debt is named and owned: **F-B5-1 (one-line vitest
 exclude fix, blocking before any push — the only item that must not wait)**, DD-25 re-homed to
-C3, DD-30 + escape-while-closing + docblock/header corrections bundled to C3, the motion
-lane's CI gate-placement decision with the D7 lane, and the C-B5-8 perceptual leg riding the
-C3 polish passes. No overclaims: browser results are cited as records, jsdom limits are
+C3, DD-30 + escape-while-closing + docblock/header corrections bundled to C3, and the C-B5-8
+perceptual leg riding the C3 polish passes. No overclaims: browser results are cited as records, jsdom limits are
 labeled, and the one defect this packet found is reported, not absorbed.
 
 ---
@@ -189,6 +190,9 @@ migration):
   alongside `tests/browser/**`. Fresh full-repo proof at `76012b68`: 601 files /
   10,148 tests passed, zero collection failures. Per this packet's preferred
   resolution, no DD-31 register row is filed.
+- **C-B5-7 SCRIPT/GATE LEG RESOLVED** — `package.json` now exposes
+  `test:browser:motion`, and `quality.yml` runs it after `test:browser` while uploading
+  failure screenshots from both browser proof directories.
 - **EventSource unhandled rejections RESOLVED** — `add-line-wizard.test.tsx` now stubs
   a minimal inert `EventSource` (jsdom has none); LinkStep's SSE behavior remains
   pinned by its own suite's controllable FakeEventSource. Fresh run: zero unhandled

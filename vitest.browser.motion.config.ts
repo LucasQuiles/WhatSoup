@@ -10,13 +10,13 @@
  * changed. This config is additive and uses a separate test include glob
  * (tests/browser-motion/**) so it never overlaps with the existing D7 suite.
  *
- * This file is intentionally NOT wired to npm scripts or the verify chain —
- * it is produced for the D7 lane to wire (as noted in the B5 packet §8.2 and
- * the evidence packet). The D7 lane owns the decision on whether to use this
- * config split or a per-test emulation route (playwright.context API).
+ * This file is wired as `npm run test:browser:motion` and runs in CI after
+ * the reduced-motion browser suite. Keep it separate from `test:browser` so
+ * the main D7 suite stays deterministic while these proofs exercise the real
+ * animated path.
  *
- * To run manually (for local development of the motion lane proofs):
- *   npx vitest run --config vitest.browser.motion.config.ts
+ * Local run:
+ *   npm run test:browser:motion
  */
 import { defineConfig } from 'vitest/config';
 import { playwright } from '@vitest/browser-playwright';
