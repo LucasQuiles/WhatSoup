@@ -215,6 +215,7 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
   it('rejects non-positive watchdog escalation thresholds at startup', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-heartbeat-'));
     let status = 0;
+    let stderr = '';
     try {
       execFileSync('python3', ['deploy/scripts/bot-errors-heartbeat-watchdog.py', '--once'], {
         cwd: process.cwd(),
@@ -227,10 +228,13 @@ m.reconcile({"credential_probe": evidence}, ["credential_probe"])
         stdio: ['ignore', 'ignore', 'pipe'],
       });
     } catch (error) {
-      status = (error as { status?: number }).status ?? 1;
+      const failed = error as { status?: number; stderr?: Buffer | string };
+      status = failed.status ?? 1;
+      stderr = String(failed.stderr ?? '');
     }
 
     expect(status).not.toBe(0);
+    expect(stderr).toContain('BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS must be a positive integer');
   });
 
   it('does not emit when configured heartbeats are fresh', () => {

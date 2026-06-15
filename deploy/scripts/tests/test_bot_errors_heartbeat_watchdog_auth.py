@@ -326,14 +326,14 @@ def test_dispatcher_heartbeat_critical_inspect_error_is_reported_not_crashed(tmp
     state = _private_state(monkeypatch, mod, tmp_path)
     target = state / "dispatcher-state.json"
     mod.atomic_write_json(target, {"updated_at": 1000})
-    original_stat = Path.stat
+    original_lstat = Path.lstat
 
-    def stat(path: Path, *args, **kwargs):
+    def lstat(path: Path, *args, **kwargs):
         if path == target:
             raise PermissionError("denied")
-        return original_stat(path, *args, **kwargs)
+        return original_lstat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(Path, "lstat", lstat)
 
     problems = mod.collect_problems(_watchdog_args(), {"dispatcher"})
 
@@ -555,19 +555,27 @@ def test_parse_args_falls_back_for_bad_max_age_env(monkeypatch):
     assert args.max_daily_health_age == 25 * 60 * 60
 
 
-def test_watchdog_threshold_env_falls_back_for_bad_values(monkeypatch):
+def test_watchdog_threshold_env_rejects_bad_values(monkeypatch):
     mod = _load_module()
-    monkeypatch.setenv("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", "bad")
-    monkeypatch.setenv("BOT_ERRORS_WATCHDOG_ESCALATE_SECONDS", "0")
-    monkeypatch.setenv("BOT_ERRORS_WATCHDOG_ESCALATE_SUPPRESSED", "-1")
-    monkeypatch.setenv("BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS", "")
+    cases = [
+        ("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", "bad"),
+        ("BOT_ERRORS_WATCHDOG_ESCALATE_SECONDS", "0"),
+        ("BOT_ERRORS_WATCHDOG_ESCALATE_SUPPRESSED", "-1"),
+        ("BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS", ""),
+    ]
+    names = [name for name, _ in cases]
 
-    mod.validate_thresholds()
+    for name, value in cases:
+        for env_name in names:
+            monkeypatch.delenv(env_name, raising=False)
+        monkeypatch.setenv(name, value)
 
-    assert mod.watchdog_renotify_seconds() == 6 * 60 * 60
-    assert mod.watchdog_escalate_seconds() == 24 * 60 * 60
-    assert mod.watchdog_escalate_suppressed() == 72
-    assert mod.watchdog_recovery_confirmations() == 2
+        try:
+            mod.validate_thresholds()
+        except ValueError as exc:
+            assert str(exc) == f"{name} must be a positive integer"
+        else:
+            assert False, f"{name}={value!r} should be rejected"
 
 
 def test_queue_backlog_threshold_env_falls_back_for_bad_values(tmp_path: Path, monkeypatch):

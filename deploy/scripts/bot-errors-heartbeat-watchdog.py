@@ -39,7 +39,16 @@ class DailyHealthEventError(RuntimeError):
 
 
 def positive_env_int(name: str, default: int) -> int:
-    return positive_env_int_or_default(name, default)
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
 
 
 def positive_env_int_or_default(name: str, default: int) -> int:
