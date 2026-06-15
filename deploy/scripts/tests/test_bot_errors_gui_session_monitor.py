@@ -448,3 +448,171 @@ def test_distill_console_owner_none_when_probe_failed(mod):
 
 def test_distill_console_owner_none_on_empty(mod):
     assert mod.distill_console_owner("\n", ok=True) is None
+
+
+# ---------------------------------------------------------------------------
+# Test 11: build emit argv for a non-ok GUI state (no live subprocess)
+# ---------------------------------------------------------------------------
+
+
+def test_build_emit_argv_carries_instance_and_source(mod):
+    argv = mod.build_emit_argv(
+        host="botbox-a",
+        instance="x-bot",
+        label="com.whatsoup.x-bot",
+        state="gui_session_absent",
+        consecutive_failures=2,
+        threshold=2,
+    )
+    assert "--instance" in argv
+    assert argv[argv.index("--instance") + 1] == "x-bot"
+    assert "--source" in argv
+    assert argv[argv.index("--source") + 1] == "gui_session_monitor"
+
+
+def test_build_emit_argv_encodes_event_class_diagnostic(mod):
+    argv = mod.build_emit_argv(
+        host="botbox-a", instance="x-bot", label="com.whatsoup.x-bot",
+        state="agent_unloaded", consecutive_failures=3, threshold=2,
+    )
+    diags = [argv[i + 1] for i, a in enumerate(argv) if a == "--diagnostic"]
+    assert "gui_state=agent_unloaded" in diags
+    assert any(d.startswith("host=botbox-a") for d in diags)
+    assert any(d.startswith("consecutive_failures=3") for d in diags)
+
+
+def test_build_emit_argv_summary_names_state_and_host(mod):
+    argv = mod.build_emit_argv(
+        host="botbox-a", instance="x-bot", label="com.whatsoup.x-bot",
+        state="gui_session_absent", consecutive_failures=2, threshold=2,
+    )
+    summary = argv[argv.index("--summary") + 1]
+    assert "gui_session_absent" in summary
+    assert "botbox-a" in summary
+
+
+def test_build_emit_argv_severity_critical_for_session_absent(mod):
+    argv = mod.build_emit_argv(
+        host="botbox-a", instance="x-bot", label="com.whatsoup.x-bot",
+        state="gui_session_absent", consecutive_failures=2, threshold=2,
+    )
+    assert argv[argv.index("--severity") + 1] == "critical"
+
+
+def test_build_emit_argv_severity_warning_for_unreachable(mod):
+    # Unreachable is a softer signal than a confirmed logged-out session.
+    argv = mod.build_emit_argv(
+        host="botbox-a", instance="x-bot", label="com.whatsoup.x-bot",
+        state="unreachable", consecutive_failures=2, threshold=2,
+    )
+    assert argv[argv.index("--severity") + 1] == "warning"
+
+
+def test_build_emit_argv_no_secrets_or_private_labels(mod):
+    # The label is a public reverse-DNS service id; nothing else leaks.
+    argv = mod.build_emit_argv(
+        host="botbox-a", instance="x-bot", label="com.whatsoup.x-bot",
+        state="agent_unloaded", consecutive_failures=2, threshold=2,
+    )
+    joined = " ".join(argv)
+    assert "/Users/" not in joined
+    assert "token" not in joined.lower()
+
+
+def test_build_emit_argv_rejects_ok_state(mod):
+    # ok must never produce an alert argv.
+    with pytest.raises(ValueError):
+        mod.build_emit_argv(
+            host="botbox-a", instance="x-bot", label="com.whatsoup.x-bot",
+            state="ok", consecutive_failures=9, threshold=2,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 12: per-target orchestration with injected probe + persisted state
+# ---------------------------------------------------------------------------
+
+
+def _target(host="botbox-a", instance="x-bot", label="com.whatsoup.x-bot"):
+    return {"host": host, "instance": instance, "label": label}
+
+
+def test_run_target_ok_resets_failure_count(mod):
+    prior = {"consecutive_failures": 5, "last_state": "gui_session_absent"}
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe(console_owner="x-bot", agent_state="running"),
+        prior_state=prior,
+        threshold=2,
+    )
+    assert outcome.state == "ok"
+    assert outcome.new_state["consecutive_failures"] == 0
+    assert outcome.emit_decision.should_emit is False
+
+
+def test_run_target_first_failure_increments_but_does_not_emit(mod):
+    prior = {"consecutive_failures": 0, "last_state": "ok"}
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe(console_owner="root", agent_state="running"),
+        prior_state=prior,
+        threshold=2,
+    )
+    assert outcome.state == "gui_session_absent"
+    assert outcome.new_state["consecutive_failures"] == 1
+    assert outcome.emit_decision.should_emit is False
+
+
+def test_run_target_second_failure_emits(mod):
+    prior = {"consecutive_failures": 1, "last_state": "gui_session_absent"}
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe(console_owner="root", agent_state="running"),
+        prior_state=prior,
+        threshold=2,
+    )
+    assert outcome.state == "gui_session_absent"
+    assert outcome.new_state["consecutive_failures"] == 2
+    assert outcome.emit_decision.should_emit is True
+    assert outcome.emit_argv is not None
+    assert "--source" in outcome.emit_argv
+
+
+def test_run_target_handles_missing_prior_state(mod):
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe(console_owner="root", agent_state="running"),
+        prior_state=None,
+        threshold=2,
+    )
+    assert outcome.new_state["consecutive_failures"] == 1
+    assert outcome.emit_decision.should_emit is False
+
+
+def test_run_target_ok_has_no_emit_argv(mod):
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe(console_owner="x-bot", agent_state="running"),
+        prior_state=None,
+        threshold=2,
+    )
+    assert outcome.emit_argv is None
+
+
+def test_run_target_unreachable_increments_failures(mod):
+    outcome = mod.run_target(
+        target=_target(),
+        expected_user="x-bot",
+        probe=_probe(console_owner=None, agent_state=None,
+                     console_ok=False, agent_ok=False),
+        prior_state={"consecutive_failures": 1, "last_state": "unreachable"},
+        threshold=2,
+    )
+    assert outcome.state == "unreachable"
+    assert outcome.new_state["consecutive_failures"] == 2
+    assert outcome.emit_decision.should_emit is True

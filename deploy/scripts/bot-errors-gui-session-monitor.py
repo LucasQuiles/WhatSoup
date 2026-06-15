@@ -31,7 +31,11 @@ non-ok state, only after a configurable consecutive-failure threshold.
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
+import shlex
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +43,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+EMIT_SCRIPT = SCRIPT_DIR / "bot-errors-emit.py"
 
 
 # --- classification states -------------------------------------------------
@@ -250,6 +257,106 @@ class EmitDecision:
     reason: str
 
 
+EMIT_SOURCE = "gui_session_monitor"
+
+# A confirmed logged-out session / unloaded agent is a hard outage; a probe we
+# could not complete is a softer (warning) signal pending confirmation.
+_STATE_SEVERITY = {
+    STATE_GUI_SESSION_ABSENT: "critical",
+    STATE_AGENT_UNLOADED: "critical",
+    STATE_UNREACHABLE: "warning",
+    STATE_INCONCLUSIVE: "warning",
+}
+
+
+def build_emit_argv(
+    *,
+    host: str,
+    instance: str,
+    label: str,
+    state: str,
+    consecutive_failures: int,
+    threshold: int,
+) -> list[str]:
+    """Build the argv for bot-errors-emit.py for a non-ok GUI-session state.
+
+    Pure (no subprocess): returns the flag list so the emit path is unit-tested
+    without writing to the outbox. Carries only public identifiers (host,
+    instance, reverse-DNS label) — no filesystem paths, tokens, or phone
+    numbers.
+    """
+    if state == STATE_OK:
+        raise ValueError("build_emit_argv must not be called for an ok state")
+    severity = _STATE_SEVERITY.get(state, "warning")
+    summary = (
+        f"GUI-session monitor: {state} for {instance} on {host} "
+        f"(agent {label}); persisted {consecutive_failures} consecutive checks"
+    )
+    return [
+        "--severity", severity,
+        "--instance", instance,
+        "--source", EMIT_SOURCE,
+        "--summary", summary,
+        "--diagnostic", f"gui_state={state}",
+        "--diagnostic", f"host={host}",
+        "--diagnostic", f"agent_label={label}",
+        "--diagnostic", f"consecutive_failures={consecutive_failures}",
+        "--diagnostic", f"failure_threshold={threshold}",
+        "--log-hint", f"ssh {host} stat -f %Su /dev/console",
+        "--log-hint", f"ssh {host} launchctl print gui/<uid>/{label}",
+    ]
+
+
+@dataclass(frozen=True)
+class TargetOutcome:
+    state: str
+    new_state: dict
+    emit_decision: "EmitDecision"
+    emit_argv: "list[str] | None"
+
+
+def run_target(*, target: dict, expected_user, probe, prior_state, threshold: int) -> TargetOutcome:
+    """Classify one target, update its consecutive-failure counter, and decide.
+
+    ``prior_state`` is the persisted per-target record (or None). The returned
+    ``new_state`` is what the caller should persist. ``emit_argv`` is populated
+    only when the threshold is met for a non-ok state.
+    """
+    state = classify_gui_session(expected_user=expected_user, probe=probe)
+    prior = prior_state if isinstance(prior_state, dict) else {}
+    prior_count = prior.get("consecutive_failures", 0)
+    try:
+        prior_count = int(prior_count)
+    except (TypeError, ValueError):
+        prior_count = 0
+
+    if state == STATE_OK:
+        consecutive = 0
+    else:
+        consecutive = prior_count + 1
+
+    decision = evaluate_emit_decision(
+        state=state, consecutive_failures=consecutive, threshold=threshold
+    )
+    emit_argv = None
+    if decision.should_emit:
+        emit_argv = build_emit_argv(
+            host=str(target.get("host", "")),
+            instance=str(target.get("instance", "")),
+            label=str(target.get("label", "")),
+            state=state,
+            consecutive_failures=consecutive,
+            threshold=threshold,
+        )
+    new_state = {"consecutive_failures": consecutive, "last_state": state}
+    return TargetOutcome(
+        state=state,
+        new_state=new_state,
+        emit_decision=decision,
+        emit_argv=emit_argv,
+    )
+
+
 def evaluate_emit_decision(*, state: str, consecutive_failures: int, threshold: int) -> EmitDecision:
     """Decide whether a non-ok state has persisted long enough to alert.
 
@@ -270,3 +377,236 @@ def evaluate_emit_decision(*, state: str, consecutive_failures: int, threshold: 
         should_emit=True,
         reason=f"threshold_met:{consecutive_failures}/{threshold}",
     )
+
+
+# ===========================================================================
+# Production I/O glue (thin shell around the unit-tested pure core above).
+# The pure functions above are the behavior under test; everything below is
+# the fail-closed SSH/persistence/emit plumbing exercised by integration runs.
+# ===========================================================================
+
+
+def ssh_command() -> list[str]:
+    raw = os.environ.get("BOT_ERRORS_SSH_COMMAND", "").strip()
+    return shlex.split(raw) if raw else ["ssh"]
+
+
+def ssh_timeout_seconds() -> float:
+    raw = os.environ.get("BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS", "15")
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 15.0
+
+
+def fleet_path() -> Path:
+    raw = os.environ.get("BOT_ERRORS_EXPECTED_FLEET", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"
+
+
+def load_fleet() -> dict:
+    try:
+        with fleet_path().open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        # Fail-closed: an unreadable SSOT yields no targets rather than a crash;
+        # the caller logs the empty enumeration.
+        return {}
+
+
+def state_path() -> Path:
+    raw = os.environ.get("BOT_ERRORS_GUI_MONITOR_STATE", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    base = os.environ.get("BOT_ERRORS_STATE_DIR", "").strip()
+    root = Path(base) if base else (Path.home() / ".local/state/bot-errors")
+    return root / "gui-session-monitor-state.json"
+
+
+def load_state() -> dict:
+    try:
+        with state_path().open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(state: dict) -> None:
+    path = state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def resolve_expected_user(host: str) -> str | None:
+    """Resolve the expected GUI/login user for ``host``.
+
+    SSOT GAP: deploy/health-profiles/*.json do not yet carry a bot GUI user.
+    Until they do (component 3), resolve the SSH login user from ``ssh -G`` and
+    allow an explicit override map via BOT_ERRORS_GUI_MONITOR_USERS=host=user,...
+    Returns None when it cannot be resolved (caller -> inconclusive, fail-closed).
+    """
+    overrides = _parse_user_overrides()
+    if host in overrides:
+        return overrides[host]
+    try:
+        proc = subprocess.run(
+            [*ssh_command(), "-G", host],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=ssh_timeout_seconds(),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "user" and parts[1].strip():
+            return parts[1].strip()
+    return None
+
+
+def _parse_user_overrides() -> dict[str, str]:
+    raw = os.environ.get("BOT_ERRORS_GUI_MONITOR_USERS", "").strip()
+    result: dict[str, str] = {}
+    for item in raw.split(","):
+        if "=" in item:
+            host, user = item.split("=", 1)
+            if host.strip() and user.strip():
+                result[host.strip()] = user.strip()
+    return result
+
+
+def _run_ssh(host: str, remote_cmd: list[str]) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(
+            [*ssh_command(), host, *remote_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=ssh_timeout_seconds(),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    if proc.returncode != 0:
+        # Nonzero with stdout (e.g. "Could not find service") is still usable
+        # output for distillation; nonzero with no stdout is a transport/remote
+        # failure -> not ok.
+        return (bool(proc.stdout.strip()), proc.stdout)
+    return True, proc.stdout
+
+
+def probe_host(host: str, expected_user: str | None, label: str) -> dict:
+    """Run the two read-only SSH probes and distill them into a probe dict.
+
+    Never raises: any failure becomes a fail-closed probe (console_ok/agent_ok
+    False), which the classifier maps to ``unreachable``.
+    """
+    console_ok, console_raw = _run_ssh(host, ["stat", "-f", "%Su", "/dev/console"])
+    console_owner = distill_console_owner(console_raw, ok=console_ok)
+
+    uid = None
+    if expected_user:
+        uid_ok, uid_raw = _run_ssh(host, ["id", "-u", expected_user])
+        if uid_ok and _norm(uid_raw).isdigit():
+            uid = _norm(uid_raw)
+    if uid:
+        agent_ok, agent_raw = _run_ssh(host, ["launchctl", "print", f"gui/{uid}/{label}"])
+    else:
+        agent_ok, agent_raw = False, ""
+    agent_state = distill_agent_state(agent_raw, ok=agent_ok)
+    return {
+        "console_owner": console_owner,
+        "agent_state": agent_state,
+        "console_ok": console_ok,
+        "agent_ok": agent_ok,
+        "error": None,
+    }
+
+
+def emit_event(emit_argv: list[str], *, dry_run: bool) -> int:
+    if dry_run:
+        print("[dry-run] would emit:", " ".join(shlex.quote(a) for a in emit_argv))
+        return 0
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(EMIT_SCRIPT), *emit_argv],
+            check=False,
+        )
+        return proc.returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"emit failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def run_once(*, dry_run: bool) -> int:
+    threshold = default_failure_threshold()
+    fleet = load_fleet()
+    targets = gui_targets_from_fleet(fleet)
+    state = load_state()
+    exit_code = 0
+    for target in targets:
+        host = target["host"]
+        label = target["label"]
+        key = f"{host}/{label}"
+        expected_user = resolve_expected_user(host)
+        if expected_user is None:
+            probe = {
+                "console_owner": None, "agent_state": None,
+                "console_ok": False, "agent_ok": False,
+                "error": "expected_user_unresolved",
+            }
+        else:
+            probe = probe_host(host, expected_user, label)
+        outcome = run_target(
+            target=target,
+            expected_user=expected_user or "",
+            probe=probe,
+            prior_state=state.get(key),
+            threshold=threshold,
+        )
+        state[key] = outcome.new_state
+        print(f"{key}: state={outcome.state} "
+              f"failures={outcome.new_state['consecutive_failures']} "
+              f"emit={outcome.emit_decision.should_emit}")
+        if outcome.emit_argv is not None:
+            rc = emit_event(outcome.emit_argv, dry_run=dry_run)
+            if rc != 0:
+                exit_code = 1
+    if not dry_run:
+        save_state(state)
+    return exit_code
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="External off-GUI WhatSoup GUI-session monitor."
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Classify and report; do not write state or emit events.",
+    )
+    parser.add_argument(
+        "--once", action="store_true",
+        help="Run a single cycle (default; reserved for future loop mode).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    return run_once(dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
