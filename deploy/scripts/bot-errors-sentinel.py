@@ -25,6 +25,8 @@ DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 45 * 60
 DEFAULT_HYSTERESIS_CYCLES = 2
 DEFAULT_FLAP_WINDOW_SECONDS = 6 * 60 * 60
 DEFAULT_FLAP_THRESHOLD = 4
+DEFAULT_MAX_TIER1_HEAL_CANDIDATES = 2
+DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD = 2
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
 REMOTE_RUNTIME_PROBE = r"""
 import json
@@ -96,6 +98,8 @@ class SentinelConfig:
     hysteresis_cycles: int = DEFAULT_HYSTERESIS_CYCLES
     flap_window_seconds: int = DEFAULT_FLAP_WINDOW_SECONDS
     flap_threshold: int = DEFAULT_FLAP_THRESHOLD
+    max_tier1_heal_candidates: int = DEFAULT_MAX_TIER1_HEAL_CANDIDATES
+    correlated_drift_freeze_threshold: int = DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -140,6 +144,12 @@ def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] 
         hysteresis_cycles=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES", DEFAULT_HYSTERESIS_CYCLES, 1),
         flap_window_seconds=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS", DEFAULT_FLAP_WINDOW_SECONDS),
         flap_threshold=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_FLAP_THRESHOLD", DEFAULT_FLAP_THRESHOLD, 1),
+        max_tier1_heal_candidates=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES", DEFAULT_MAX_TIER1_HEAL_CANDIDATES, 1),
+        correlated_drift_freeze_threshold=positive_int_env(
+            "BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD",
+            DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD,
+            1,
+        ),
     )
 
 
@@ -560,6 +570,45 @@ def central_connectivity_suspect(results: list[dict], oracle: dict) -> bool:
     return mass_out_of_rotation(results) and oracle.get("reachable") is False
 
 
+def safe_runtime_drift_key(result: dict) -> str:
+    heartbeat_class = str(result.get("heartbeat", {}).get("class") or "")
+    probe_class = str(result.get("probe", {}).get("class") or "")
+    if probe_class in SAFE_HEAL_CLASSES:
+        return probe_class
+    if heartbeat_class in SAFE_HEAL_CLASSES:
+        return heartbeat_class
+    return "safe_runtime_drift"
+
+
+def apply_tier1_bounds(results: list[dict], host_state: dict, config: SentinelConfig) -> Optional[str]:
+    candidates = [result for result in results if result.get("action") == "tier1_heal_candidate"]
+    if not candidates:
+        return None
+    by_drift_class: dict[str, list[dict]] = {}
+    for result in candidates:
+        by_drift_class.setdefault(safe_runtime_drift_key(result), []).append(result)
+    frozen_classes = {
+        drift_class
+        for drift_class, grouped in by_drift_class.items()
+        if len(grouped) > config.correlated_drift_freeze_threshold
+    }
+    if frozen_classes:
+        for result in candidates:
+            drift_class = safe_runtime_drift_key(result)
+            if drift_class in frozen_classes:
+                result["action"] = "freeze_correlated_drift"
+                result["correlatedDriftClass"] = drift_class
+                host_state[result["host"]]["lastAction"] = result["action"]
+        return "correlated_runtime_drift_freeze"
+
+    if len(candidates) > config.max_tier1_heal_candidates:
+        for result in candidates[config.max_tier1_heal_candidates:]:
+            result["action"] = "defer_tier1_concurrency_cap"
+            host_state[result["host"]]["lastAction"] = result["action"]
+        return "tier1_concurrency_cap"
+    return None
+
+
 def write_ack(spec: HostSpec, result: dict, now: float) -> Optional[str]:
     if spec.ack_path is None:
         return None
@@ -624,6 +673,10 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
                 host_state[result["host"]]["lastAction"] = result["action"]
     elif mass_out_of_rotation(results):
         fleet_action = "mass_unreachable_confirmed"
+    else:
+        tier1_action = apply_tier1_bounds(results, host_state, config)
+        if tier1_action is not None:
+            fleet_action = tier1_action
 
     state["lastFleetAction"] = fleet_action
     state["lastReachabilityOracle"] = oracle

@@ -58,7 +58,7 @@ resolve_platform() {
 
 write_launchd() {
   local plist="$LAUNCH_AGENTS/$LABEL.plist"
-  local label_xml repo_xml py_xml script_xml state_xml sentinel_xml hosts_xml oracle_xml heartbeat_xml hysteresis_xml flap_window_xml flap_threshold_xml stdout_xml stderr_xml
+  local label_xml repo_xml py_xml script_xml state_xml sentinel_xml hosts_xml oracle_xml heartbeat_xml hysteresis_xml flap_window_xml flap_threshold_xml max_tier1_xml correlated_xml stdout_xml stderr_xml
   label_xml=$(xml_escape "$LABEL")
   repo_xml=$(xml_escape "$REPO_ROOT")
   py_xml=$(xml_escape "$PYTHON")
@@ -71,6 +71,8 @@ write_launchd() {
   hysteresis_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES:-2}")
   flap_window_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS:-21600}")
   flap_threshold_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_FLAP_THRESHOLD:-4}")
+  max_tier1_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES:-2}")
+  correlated_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD:-2}")
   stdout_xml=$(xml_escape "$STATE_DIR/logs/sentinel.out.log")
   stderr_xml=$(xml_escape "$STATE_DIR/logs/sentinel.err.log")
 
@@ -101,6 +103,8 @@ write_launchd() {
     <key>BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES</key><string>$hysteresis_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS</key><string>$flap_window_xml</string>
     <key>BOT_ERRORS_FLEET_SENTINEL_FLAP_THRESHOLD</key><string>$flap_threshold_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES</key><string>$max_tier1_xml</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD</key><string>$correlated_xml</string>
   </dict>
   <key>WorkingDirectory</key><string>$repo_xml</string>
   <key>RunAtLoad</key><true/>
@@ -127,7 +131,7 @@ PLIST
 write_systemd() {
   local service="$SYSTEMD_USER_DIR/$UNIT.service"
   local timer="$SYSTEMD_USER_DIR/$UNIT.timer"
-  local repo_q py_q script_q state_q sentinel_q hosts_q oracle_q heartbeat_q hysteresis_q flap_window_q flap_threshold_q
+  local repo_q py_q script_q state_q sentinel_q hosts_q oracle_q heartbeat_q hysteresis_q flap_window_q flap_threshold_q max_tier1_q correlated_q
   repo_q=$(systemd_quote "$REPO_ROOT")
   py_q=$(systemd_quote "$PYTHON")
   script_q=$(systemd_quote "$SENTINEL_SCRIPT")
@@ -139,6 +143,8 @@ write_systemd() {
   hysteresis_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES:-2}")
   flap_window_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS:-21600}")
   flap_threshold_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_FLAP_THRESHOLD:-4}")
+  max_tier1_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES:-2}")
+  correlated_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD:-2}")
 
   mkdir -p "$SYSTEMD_USER_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR"
   chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" 2>/dev/null || true
@@ -158,6 +164,8 @@ Environment="BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS=$heartbeat_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES=$hysteresis_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS=$flap_window_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_FLAP_THRESHOLD=$flap_threshold_q"
+Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES=$max_tier1_q"
+Environment="BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD=$correlated_q"
 ExecStart=$py_q $script_q --hosts $hosts_q --state-dir $sentinel_q
 SyslogIdentifier=bot-errors-sentinel
 SERVICE

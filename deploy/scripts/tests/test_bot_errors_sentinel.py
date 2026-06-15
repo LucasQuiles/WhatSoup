@@ -63,6 +63,8 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
         hysteresis_cycles=kwargs.get("hysteresis_cycles", 2),
         flap_window_seconds=kwargs.get("flap_window_seconds", 300),
         flap_threshold=kwargs.get("flap_threshold", 4),
+        max_tier1_heal_candidates=kwargs.get("max_tier1_heal_candidates", 2),
+        correlated_drift_freeze_threshold=kwargs.get("correlated_drift_freeze_threshold", 2),
     )
 
 
@@ -257,6 +259,42 @@ def test_safe_runtime_drift_becomes_tier1_heal_candidate(tmp_path: Path):
     assert host["class"] == "safe_runtime_drift"
     assert host["action"] == "tier1_heal_candidate"
     assert host["alertState"] == "open"
+
+
+def test_correlated_safe_drift_freezes_fleet_autoheal(tmp_path: Path):
+    hosts_payload = []
+    probes = {}
+    for name in ("host-a", "host-b", "host-c"):
+        hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=False, klass="drift", mtime=995.0)
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        probes[name] = {"reachable": True, "healthy": False, "class": "drift"}
+    hosts = _hosts_file(tmp_path, hosts_payload)
+    result = _mod.run_once(_config(tmp_path, hosts, hysteresis_cycles=1), _deps(1000.0, probes))
+    assert result["fleetAction"] == "correlated_runtime_drift_freeze"
+    assert {host["action"] for host in result["hosts"]} == {"freeze_correlated_drift"}
+    assert {host["correlatedDriftClass"] for host in result["hosts"]} == {"drift"}
+    state = json.loads(_mod.state_path(_config(tmp_path, hosts, hysteresis_cycles=1)).read_text(encoding="utf-8"))
+    assert {record["lastAction"] for record in state["hosts"].values()} == {"freeze_correlated_drift"}
+
+
+def test_tier1_candidate_count_is_capped_without_correlated_freeze(tmp_path: Path):
+    classes = {"host-a": "drift", "host-b": "manifest_missing", "host-c": "drift"}
+    hosts_payload = []
+    probes = {}
+    for name, klass in classes.items():
+        hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=False, klass=klass, mtime=995.0)
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        probes[name] = {"reachable": True, "healthy": False, "class": klass}
+    hosts = _hosts_file(tmp_path, hosts_payload)
+    result = _mod.run_once(
+        _config(tmp_path, hosts, hysteresis_cycles=1, max_tier1_heal_candidates=2, correlated_drift_freeze_threshold=10),
+        _deps(1000.0, probes),
+    )
+    assert result["fleetAction"] == "tier1_concurrency_cap"
+    by_host = {host["host"]: host for host in result["hosts"]}
+    assert by_host["host-a"]["action"] == "tier1_heal_candidate"
+    assert by_host["host-b"]["action"] == "tier1_heal_candidate"
+    assert by_host["host-c"]["action"] == "defer_tier1_concurrency_cap"
 
 
 def test_flapping_suppresses_auto_heal_candidate(tmp_path: Path):
@@ -509,10 +547,14 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS", "bad")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ORACLE", str(tmp_path / "oracle.json"))
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES", "0")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD", "0")
     config = _mod.default_config(tmp_path / "hosts.json", tmp_path / "state")
     assert config.heartbeat_max_age_seconds == _mod.DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     assert config.hysteresis_cycles == 1
     assert config.oracle_path == tmp_path / "oracle.json"
+    assert config.max_tier1_heal_candidates == 1
+    assert config.correlated_drift_freeze_threshold == 1
 
     healthy_hb = _heartbeat(tmp_path / "healthy.json", healthy=True, mtime=1000.0)
     healthy_probe = _write_json(tmp_path / "healthy-probe.json", {"reachable": True, "healthy": True, "class": "healthy"})
