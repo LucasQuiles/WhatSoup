@@ -412,7 +412,11 @@ def save_state(config: SentinelConfig, state: dict) -> None:
 
 def save_central_heartbeat(config: SentinelConfig, result: dict) -> str:
     hosts = result.get("hosts") if isinstance(result.get("hosts"), list) else []
-    problem_hosts = [host for host in hosts if isinstance(host, dict) and host.get("healthy") is not True]
+    problem_hosts = [
+        host
+        for host in hosts
+        if isinstance(host, dict) and (host.get("healthy") is not True or "ackError" in host)
+    ]
     events = result.get("actionEvents") if isinstance(result.get("actionEvents"), list) else []
     attention_events = [event for event in events if isinstance(event, dict) and event.get("action") in ATTENTION_ACTIONS]
     payload = {
@@ -1374,9 +1378,13 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
             fleet_action = tier1_action
 
     for spec, result in zip(hosts, results):
-        ack_path = write_ack(spec, result, now)
-        if ack_path is not None:
-            result["ackPath"] = ack_path
+        try:
+            ack_path = write_ack(spec, result, now)
+        except Exception as exc:
+            result["ackError"] = f"{type(exc).__name__}: {exc}"[:300]
+        else:
+            if ack_path is not None:
+                result["ackPath"] = ack_path
 
     state["lastFleetAction"] = fleet_action
     state["lastReachabilityOracle"] = oracle
@@ -1407,6 +1415,8 @@ def result_requires_attention(result: dict) -> bool:
     if result.get("fleetAction") in ATTENTION_FLEET_ACTIONS:
         return True
     if any(event.get("action") in ATTENTION_ACTIONS for event in result.get("actionEvents", [])):
+        return True
+    if any(host.get("ackError") for host in result.get("hosts", [])):
         return True
     return any(host.get("action") in ATTENTION_ACTIONS for host in result.get("hosts", []))
 

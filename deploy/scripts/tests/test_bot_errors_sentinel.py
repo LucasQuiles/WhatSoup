@@ -282,6 +282,33 @@ def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
     assert state["hosts"]["host-a"]["alertState"] == "closed"
 
 
+def test_ack_write_failure_is_reported_without_aborting_run(tmp_path: Path, monkeypatch):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=1000.0)
+    ack = tmp_path / "acks" / "host-a.json"
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb), "ackPath": str(ack)}])
+    config = _config(tmp_path, hosts)
+    original_atomic_write_json = _mod.atomic_write_json
+
+    def atomic_write_json(path: Path, payload: dict) -> None:
+        if path == ack:
+            raise OSError("ack denied")
+        original_atomic_write_json(path, payload)
+
+    monkeypatch.setattr(_mod, "atomic_write_json", atomic_write_json)
+
+    result = _mod.run_once(config, _deps(1010.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+
+    host = result["hosts"][0]
+    assert host["class"] == "healthy"
+    assert host["action"] == "noop"
+    assert host["ackError"] == "OSError: ack denied"
+    assert "ackPath" not in host
+    heartbeat = json.loads((_mod.heartbeat_path(config)).read_text(encoding="utf-8"))
+    assert heartbeat["healthy"] is False
+    assert heartbeat["problemHostCount"] == 1
+    assert _mod.result_requires_attention(result) is True
+
+
 def test_two_signal_unreachable_requires_hysteresis_then_escalates(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-h-hb.json", healthy=True, mtime=100.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-h", "heartbeatPath": str(hb)}])
