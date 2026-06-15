@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -29,7 +30,22 @@ DEFAULT_FLAP_THRESHOLD = 4
 DEFAULT_MAX_TIER1_HEAL_CANDIDATES = 2
 DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD = 2
 DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5 * 60
+DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS = 6 * 60 * 60
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
+ACTION_EVENT_ACTIONS = {
+    "tier1_heal_candidate",
+    "escalate",
+    "escalate_flapping",
+    "freeze_correlated_drift",
+    "clear",
+}
+ATTENTION_ACTIONS = {"tier1_heal_candidate", "escalate", "escalate_flapping", "freeze_correlated_drift"}
+ATTENTION_FLEET_ACTIONS = {
+    "central_connectivity_suspect",
+    "mass_unreachable_confirmed",
+    "correlated_runtime_drift_freeze",
+    "tier1_concurrency_cap",
+}
 REMOTE_RUNTIME_PROBE = r"""
 import json
 from pathlib import Path
@@ -96,6 +112,7 @@ class SentinelConfig:
     state_dir: Path
     hosts_path: Path
     oracle_path: Optional[Path] = None
+    action_outbox_dir: Optional[Path] = None
     heartbeat_max_age_seconds: int = DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     hysteresis_cycles: int = DEFAULT_HYSTERESIS_CYCLES
     flap_window_seconds: int = DEFAULT_FLAP_WINDOW_SECONDS
@@ -103,6 +120,7 @@ class SentinelConfig:
     max_tier1_heal_candidates: int = DEFAULT_MAX_TIER1_HEAL_CANDIDATES
     correlated_drift_freeze_threshold: int = DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD
     max_clock_skew_seconds: int = DEFAULT_MAX_CLOCK_SKEW_SECONDS
+    action_event_cooldown_seconds: int = DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS
 
 
 @dataclass(frozen=True)
@@ -154,10 +172,13 @@ def positive_int_env(name: str, default: int, minimum: int = 0) -> int:
 
 def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] = None) -> SentinelConfig:
     oracle_raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_ORACLE", "").strip()
+    action_outbox_raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_DIR", "").strip()
+    resolved_state_dir = state_dir or state_root()
     return SentinelConfig(
-        state_dir=state_dir or state_root(),
+        state_dir=resolved_state_dir,
         hosts_path=hosts_path or default_hosts_path(),
         oracle_path=Path(oracle_raw).expanduser() if oracle_raw else None,
+        action_outbox_dir=Path(action_outbox_raw).expanduser() if action_outbox_raw else resolved_state_dir / "actions",
         heartbeat_max_age_seconds=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS", DEFAULT_HEARTBEAT_MAX_AGE_SECONDS),
         hysteresis_cycles=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES", DEFAULT_HYSTERESIS_CYCLES, 1),
         flap_window_seconds=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS", DEFAULT_FLAP_WINDOW_SECONDS),
@@ -169,6 +190,11 @@ def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] 
             1,
         ),
         max_clock_skew_seconds=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS", DEFAULT_MAX_CLOCK_SKEW_SECONDS, 1),
+        action_event_cooldown_seconds=positive_int_env(
+            "BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS",
+            DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS,
+            1,
+        ),
     )
 
 
@@ -283,6 +309,10 @@ def state_path(config: SentinelConfig) -> Path:
 
 def heartbeat_path(config: SentinelConfig) -> Path:
     return config.state_dir / "sentinel-heartbeat.json"
+
+
+def action_outbox_dir(config: SentinelConfig) -> Path:
+    return config.action_outbox_dir or config.state_dir / "actions"
 
 
 def load_state(config: SentinelConfig) -> dict:
@@ -644,6 +674,181 @@ def apply_tier1_bounds(results: list[dict], host_state: dict, config: SentinelCo
     return None
 
 
+def safe_slug(value: object) -> str:
+    text = str(value or "unknown")
+    slug = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in text).strip("-")
+    return (slug or "unknown")[:80]
+
+
+def compact_signal(payload: dict) -> dict:
+    keep = (
+        "signal",
+        "status",
+        "class",
+        "action",
+        "reachable",
+        "healthy",
+        "ageSeconds",
+        "maxAgeSeconds",
+        "clockSkewSeconds",
+        "maxClockSkewSeconds",
+        "verifyRc",
+        "headSha",
+        "f10Sha",
+        "pin",
+    )
+    result = {key: payload[key] for key in keep if key in payload}
+    if "error" in payload:
+        result["error"] = str(payload["error"])[:300]
+    return result
+
+
+def action_event_route(action: str) -> tuple[str, str, str, bool]:
+    if action == "tier1_heal_candidate":
+        return "tier1", "host_selfcheck_heal_request", "warning", False
+    if action == "clear":
+        return "clear", "resolved_state_change", "info", False
+    if action == "freeze_correlated_drift":
+        return "tier3", "human_critical_correlated_freeze", "critical", True
+    return "tier2", "agentic_or_human_remediation", "critical", True
+
+
+def fleet_event_route(fleet_action: str) -> tuple[str, str, str, bool]:
+    if fleet_action == "tier1_concurrency_cap":
+        return "tier1", "fleet_heal_concurrency_cap", "warning", False
+    return "tier3", "fleet_critical_escalation", "critical", True
+
+
+def event_recently_emitted(record: dict, key: str, now: float, cooldown_seconds: int) -> bool:
+    if record.get("lastActionEventKey") != key:
+        return False
+    try:
+        last_at = float(record.get("lastActionEventAt"))
+    except (TypeError, ValueError):
+        return False
+    return now - last_at < cooldown_seconds
+
+
+def action_event_path(config: SentinelConfig, now: float, scope: str, subject: str, action: str, request_id: str) -> Path:
+    filename = f"{int(now)}-{safe_slug(scope)}-{safe_slug(subject)}-{safe_slug(action)}-{request_id}.json"
+    return action_outbox_dir(config) / filename
+
+
+def request_id_for(now: float, scope: str, subject: str, action: str, klass: str) -> str:
+    material = f"{int(now)}\0{scope}\0{subject}\0{action}\0{klass}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
+def build_host_action_event(result: dict, now: float, controller_host: str, fleet_action: str, request_id: str) -> dict:
+    action = str(result.get("action") or "unknown")
+    tier, lane, severity, critical = action_event_route(action)
+    return {
+        "schemaVersion": 1,
+        "kind": "bot-errors-sentinel-action",
+        "scope": "host",
+        "requestId": request_id,
+        "createdAt": now_iso(now),
+        "controllerHost": controller_host,
+        "fleetAction": fleet_action,
+        "host": result.get("host"),
+        "role": result.get("role"),
+        "class": result.get("class"),
+        "action": action,
+        "tier": tier,
+        "lane": lane,
+        "severity": severity,
+        "criticalWhatsAppEligible": critical,
+        "reason": result.get("reason"),
+        "consecutive": result.get("consecutive"),
+        "flapCount": result.get("flapCount"),
+        "evidence": {
+            "heartbeat": compact_signal(result.get("heartbeat", {})),
+            "probe": compact_signal(result.get("probe", {})),
+        },
+    }
+
+
+def build_fleet_action_event(
+    fleet_action: str,
+    results: list[dict],
+    now: float,
+    controller_host: str,
+    oracle: dict,
+    request_id: str,
+) -> dict:
+    tier, lane, severity, critical = fleet_event_route(fleet_action)
+    problem_hosts = [result for result in results if result.get("healthy") is not True]
+    return {
+        "schemaVersion": 1,
+        "kind": "bot-errors-sentinel-action",
+        "scope": "fleet",
+        "requestId": request_id,
+        "createdAt": now_iso(now),
+        "controllerHost": controller_host,
+        "fleetAction": fleet_action,
+        "tier": tier,
+        "lane": lane,
+        "severity": severity,
+        "criticalWhatsAppEligible": critical,
+        "hostCount": len(results),
+        "problemHostCount": len(problem_hosts),
+        "problemHosts": [
+            {"host": item.get("host"), "class": item.get("class"), "action": item.get("action")}
+            for item in problem_hosts
+        ],
+        "reachabilityOracle": compact_signal(oracle),
+    }
+
+
+def emit_action_events(
+    results: list[dict],
+    state: dict,
+    config: SentinelConfig,
+    now: float,
+    controller_host: str,
+    fleet_action: str,
+    oracle: dict,
+) -> list[dict]:
+    emitted = []
+    host_state = state.setdefault("hosts", {})
+    for result in results:
+        action = str(result.get("action") or "")
+        if action not in ACTION_EVENT_ACTIONS:
+            continue
+        subject = str(result.get("host") or "unknown")
+        key = f"host:{subject}:{result.get('class')}:{action}"
+        record = host_state.setdefault(subject, {})
+        if event_recently_emitted(record, key, now, config.action_event_cooldown_seconds):
+            continue
+        request_id = request_id_for(now, "host", subject, action, str(result.get("class") or "unknown"))
+        path = action_event_path(config, now, "host", subject, action, request_id)
+        payload = build_host_action_event(result, now, controller_host, fleet_action, request_id)
+        atomic_write_json(path, payload)
+        ref = {"scope": "host", "host": subject, "action": action, "requestId": request_id, "path": str(path)}
+        result["actionEvent"] = ref
+        emitted.append(ref)
+        record["lastActionEventKey"] = key
+        record["lastActionEventAt"] = now
+        record["lastActionEventPath"] = str(path)
+        record["lastActionEventRequestId"] = request_id
+
+    if fleet_action != "none":
+        fleet_record = state.setdefault("fleetActionEvent", {})
+        key = f"fleet:{fleet_action}"
+        if not event_recently_emitted(fleet_record, key, now, config.action_event_cooldown_seconds):
+            request_id = request_id_for(now, "fleet", "all", fleet_action, fleet_action)
+            path = action_event_path(config, now, "fleet", "all", fleet_action, request_id)
+            payload = build_fleet_action_event(fleet_action, results, now, controller_host, oracle, request_id)
+            atomic_write_json(path, payload)
+            ref = {"scope": "fleet", "action": fleet_action, "requestId": request_id, "path": str(path)}
+            emitted.append(ref)
+            fleet_record["lastActionEventKey"] = key
+            fleet_record["lastActionEventAt"] = now
+            fleet_record["lastActionEventPath"] = str(path)
+            fleet_record["lastActionEventRequestId"] = request_id
+    return emitted
+
+
 def write_ack(spec: HostSpec, result: dict, now: float) -> Optional[str]:
     if spec.ack_path is None:
         return None
@@ -671,11 +876,12 @@ def default_deps(config: Optional[SentinelConfig] = None) -> SentinelDeps:
 def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dict:
     deps = deps or default_deps(config)
     now = deps.now_epoch()
+    controller_host = deps.hostname()
     hosts = load_hosts(config.hosts_path)
     state = load_state(config)
     state["schemaVersion"] = 1
     state["updatedAt"] = now_iso(now)
-    state["controllerHost"] = deps.hostname()
+    state["controllerHost"] = controller_host
     host_state = state.setdefault("hosts", {})
     configured_hosts = {spec.host for spec in hosts}
     for host in list(host_state):
@@ -715,14 +921,16 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
 
     state["lastFleetAction"] = fleet_action
     state["lastReachabilityOracle"] = oracle
+    action_events = emit_action_events(results, state, config, now, controller_host, fleet_action, oracle)
     save_state(config, state)
     result = {
         "schemaVersion": 1,
         "checkedAt": now_iso(now),
-        "controllerHost": deps.hostname(),
+        "controllerHost": controller_host,
         "fleetAction": fleet_action,
         "reachabilityOracle": oracle,
         "hosts": results,
+        "actionEvents": action_events,
         "statePath": str(state_path(config)),
     }
     result["heartbeatPath"] = save_central_heartbeat(config, result)
@@ -736,6 +944,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def result_requires_attention(result: dict) -> bool:
+    if result.get("fleetAction") in ATTENTION_FLEET_ACTIONS:
+        return True
+    return any(host.get("action") in ATTENTION_ACTIONS for host in result.get("hosts", []))
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     config = default_config(Path(args.hosts).expanduser(), Path(args.state_dir).expanduser())
@@ -745,7 +959,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"schemaVersion": 1, "healthy": False, "class": "fleet_sentinel_error", "problems": [str(exc)]}, sort_keys=True), file=sys.stderr)
         return 2
     print(json.dumps(result, sort_keys=True))
-    if any(host.get("action") in {"tier1_heal_candidate", "escalate", "escalate_flapping"} for host in result["hosts"]):
+    if result_requires_attention(result):
         return 1
     return 0
 

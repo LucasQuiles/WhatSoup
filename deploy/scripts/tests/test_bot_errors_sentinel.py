@@ -59,6 +59,7 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
         state_dir=tmp_path / "state",
         hosts_path=hosts_path,
         oracle_path=kwargs.get("oracle_path"),
+        action_outbox_dir=kwargs.get("action_outbox_dir", tmp_path / "state" / "actions"),
         heartbeat_max_age_seconds=kwargs.get("heartbeat_max_age_seconds", 60),
         hysteresis_cycles=kwargs.get("hysteresis_cycles", 2),
         flap_window_seconds=kwargs.get("flap_window_seconds", 300),
@@ -66,6 +67,7 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
         max_tier1_heal_candidates=kwargs.get("max_tier1_heal_candidates", 2),
         correlated_drift_freeze_threshold=kwargs.get("correlated_drift_freeze_threshold", 2),
         max_clock_skew_seconds=kwargs.get("max_clock_skew_seconds", 300),
+        action_event_cooldown_seconds=kwargs.get("action_event_cooldown_seconds", 3600),
     )
 
 
@@ -188,6 +190,12 @@ def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
     assert host["action"] == "clear"
     assert host["alertState"] == "closed"
     assert json.loads(ack.read_text(encoding="utf-8"))["centralAction"] == "clear"
+    assert len(result["actionEvents"]) == 1
+    event = json.loads(Path(result["actionEvents"][0]["path"]).read_text(encoding="utf-8"))
+    assert event["scope"] == "host"
+    assert event["action"] == "clear"
+    assert event["lane"] == "resolved_state_change"
+    assert event["criticalWhatsAppEligible"] is False
     heartbeat = json.loads((_mod.heartbeat_path(config)).read_text(encoding="utf-8"))
     assert heartbeat == {
         "schemaVersion": 1,
@@ -292,6 +300,32 @@ def test_safe_runtime_drift_becomes_tier1_heal_candidate(tmp_path: Path):
     assert host["alertState"] == "open"
 
 
+def test_tier1_action_outbox_emits_local_heal_request_once_per_cooldown(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-d-hb.json", healthy=False, klass="drift", mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-d", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, action_event_cooldown_seconds=3600)
+    deps = _deps(1000.0, {"host-d": {"reachable": True, "healthy": False, "class": "drift", "output": "redacted"}})
+
+    first = _mod.run_once(config, deps)
+    assert len(first["actionEvents"]) == 1
+    ref = first["actionEvents"][0]
+    payload = json.loads(Path(ref["path"]).read_text(encoding="utf-8"))
+    assert payload["kind"] == "bot-errors-sentinel-action"
+    assert payload["scope"] == "host"
+    assert payload["host"] == "host-d"
+    assert payload["action"] == "tier1_heal_candidate"
+    assert payload["tier"] == "tier1"
+    assert payload["lane"] == "host_selfcheck_heal_request"
+    assert payload["criticalWhatsAppEligible"] is False
+    assert "output" not in payload["evidence"]["probe"]
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert state["hosts"]["host-d"]["lastActionEventRequestId"] == ref["requestId"]
+
+    second = _mod.run_once(config, _deps(1001.0, {"host-d": {"reachable": True, "healthy": False, "class": "drift"}}))
+    assert second["actionEvents"] == []
+    assert len(list(_mod.action_outbox_dir(config).glob("*.json"))) == 1
+
+
 def test_correlated_safe_drift_freezes_fleet_autoheal(tmp_path: Path):
     hosts_payload = []
     probes = {}
@@ -364,6 +398,13 @@ def test_central_connectivity_suspect_requires_failed_oracle_to_suppress(tmp_pat
     assert result["fleetAction"] == "central_connectivity_suspect"
     assert {host["action"] for host in result["hosts"]} == {"suppress_central_connectivity_suspect"}
     assert result["reachabilityOracle"] == oracle_down
+    assert len(result["actionEvents"]) == 1
+    fleet_event = json.loads(Path(result["actionEvents"][0]["path"]).read_text(encoding="utf-8"))
+    assert fleet_event["scope"] == "fleet"
+    assert fleet_event["fleetAction"] == "central_connectivity_suspect"
+    assert fleet_event["tier"] == "tier3"
+    assert fleet_event["criticalWhatsAppEligible"] is True
+    assert fleet_event["problemHostCount"] == 3
 
     waiting = _mod.run_once(_config(tmp_path / "waiting", hosts, hysteresis_cycles=2), _deps(1000.0, probes, oracle_down))
     assert waiting["fleetAction"] == "central_connectivity_suspect"
@@ -538,6 +579,9 @@ def test_signal_classification_and_inventory_edges(tmp_path: Path, monkeypatch):
     for heartbeat, probe, expected in cases:
         observed, _two_signals, _reason = _mod.classify_signals(heartbeat, probe)
         assert observed == expected
+    assert _mod.result_requires_attention({"fleetAction": "central_connectivity_suspect", "hosts": []}) is True
+    assert _mod.result_requires_attention({"fleetAction": "none", "hosts": [{"action": "freeze_correlated_drift"}]}) is True
+    assert _mod.result_requires_attention({"fleetAction": "none", "hosts": [{"action": "monitor_only"}]}) is False
 
 
 def test_transition_pruning_and_state_cleanup(tmp_path: Path):
@@ -595,16 +639,20 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS", "bad")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ORACLE", str(tmp_path / "oracle.json"))
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_DIR", str(tmp_path / "actions"))
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS", "0")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS", "0")
     config = _mod.default_config(tmp_path / "hosts.json", tmp_path / "state")
     assert config.heartbeat_max_age_seconds == _mod.DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     assert config.hysteresis_cycles == 1
     assert config.oracle_path == tmp_path / "oracle.json"
+    assert config.action_outbox_dir == tmp_path / "actions"
     assert config.max_tier1_heal_candidates == 1
     assert config.correlated_drift_freeze_threshold == 1
     assert config.max_clock_skew_seconds == 1
+    assert config.action_event_cooldown_seconds == 1
 
     healthy_hb = _heartbeat(tmp_path / "healthy.json", healthy=True, mtime=1000.0)
     healthy_probe = _write_json(tmp_path / "healthy-probe.json", {"reachable": True, "healthy": True, "class": "healthy"})
