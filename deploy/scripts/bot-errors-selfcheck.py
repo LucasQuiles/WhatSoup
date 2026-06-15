@@ -422,7 +422,13 @@ def current_bundle_path(current_link: Path) -> Path:
     target_path = Path(target)
     if not target_path.is_absolute():
         target_path = current_link.parent / target_path
-    return target_path.resolve()
+    resolved = target_path.resolve()
+    cache_dir = (current_link.parent / "bundle").resolve()
+    try:
+        resolved.relative_to(cache_dir)
+    except ValueError as exc:
+        raise SelfcheckError(f"current bundle outside bundle cache: {resolved}") from exc
+    return resolved
 
 
 def classify_runtime_mismatches(mismatches: list[tuple[str, str]]) -> str:
@@ -809,22 +815,28 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
             else:
                 try:
                     deps.before_heal()
-                    if current_bundle_path(config.current_link) != bundle:
+                    try:
+                        fresh_bundle = current_bundle_path(config.current_link)
+                    except SelfcheckError as exc:
                         status["action"] = "current_changed"
+                        status["problems"].append(str(exc))
                     else:
-                        status["healDiskPreflight"] = heal_disk_preflight(config.root, bundle, pin)
-                        if status["healDiskPreflight"]["ok"] is not True:
-                            status["action"] = "heal_preflight_failed"
-                            status["problems"].append(status["healDiskPreflight"]["status"])
+                        if fresh_bundle != bundle:
+                            status["action"] = "current_changed"
                         else:
-                            rc, output = deps.deploy(config.root, bundle, config.deployer_path)
-                            status["deployerOutput"] = output[-1000:]
-                            if rc == 0:
-                                record_heal(memory, now)
-                                status["action"] = "healed"
+                            status["healDiskPreflight"] = heal_disk_preflight(config.root, bundle, pin)
+                            if status["healDiskPreflight"]["ok"] is not True:
+                                status["action"] = "heal_preflight_failed"
+                                status["problems"].append(status["healDiskPreflight"]["status"])
                             else:
-                                status["action"] = "heal_failed"
-                                status["problems"].append(f"deployer_rc={rc}")
+                                rc, output = deps.deploy(config.root, bundle, config.deployer_path)
+                                status["deployerOutput"] = output[-1000:]
+                                if rc == 0:
+                                    record_heal(memory, now)
+                                    status["action"] = "healed"
+                                else:
+                                    status["action"] = "heal_failed"
+                                    status["problems"].append(f"deployer_rc={rc}")
                 finally:
                     release_lock(config.lock_path, fd)
 

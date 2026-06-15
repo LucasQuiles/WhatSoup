@@ -698,6 +698,23 @@ def test_current_bundle_name_must_match_pin_head(tmp_path: Path):
     assert calls == []
 
 
+def test_current_bundle_must_stay_under_sentinel_bundle_cache(tmp_path: Path):
+    config, deps, calls, head = _fixture(tmp_path)
+    external = tmp_path / "outside-cache" / head
+    external_file = external / _mod.sp.F10_PATH
+    external_file.parent.mkdir(parents=True)
+    source_file = config.current_link.parent / "bundle" / head / _mod.sp.F10_PATH
+    external_file.write_bytes(source_file.read_bytes())
+    config.current_link.unlink()
+    os.symlink(external, config.current_link)
+
+    status = _mod.run_selfcheck(config, deps)
+
+    assert status["class"] == "bundle_missing"
+    assert "outside bundle cache" in status["problems"][0]
+    assert calls == []
+
+
 def test_missing_current_bundle_records_bundle_missing(tmp_path: Path):
     config, deps, calls, _head = _fixture(tmp_path)
     config.current_link.unlink()
