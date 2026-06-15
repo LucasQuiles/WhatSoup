@@ -141,7 +141,7 @@ Ranking:
 
 ### P3-2. Lint wall evasion shapes
 
-The ~106-selector eslint guard matches only `Literal`/`style` AST shapes; ternary strings (`console/src/components/line-detail/PipelineTab.tsx:22`), identifier-passed numbers (ChartPanel heights), template-literal classNames (`HeartbeatStrip` `w-[3px]`), and recharts `wrapperStyle` all slip through. Evidence: duplication-register.md DUP-08/DUP-09 with selector-line citations into `console/eslint.config.js`. **Direction:** extend selectors to ConditionalExpression/TemplateLiteral shapes; add wrapperStyle rule.
+The ~106-selector eslint guard still has evasion shapes: ternary strings (`console/src/components/line-detail/PipelineTab.tsx:22`), identifier-passed numbers (ChartPanel heights), and recharts `wrapperStyle` all slip through. Closed since the original audit: template-literal arbitrary utility values (`HeartbeatStrip` `w-[3px]`) and hardcoded px formulas (`Skeleton` widths) are tokenized and pinned by selectors. Evidence: duplication-register.md DUP-08/DUP-09 with selector-line citations into `console/eslint.config.js`. **Direction:** extend selectors to ConditionalExpression/identifier-flow shapes; add wrapperStyle rule.
 
 ### P3-3. Time/number formatting helpers duplicated
 

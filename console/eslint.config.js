@@ -190,6 +190,10 @@ const designSystemRestrictions = [
           selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight)$/][value.value=/^\\d+px$/]',
           message: '⛔ Hardcoded size px. FIX: replace with token from index.css. Check --avatar-*, --panel-*, --dot-*, --sp-*, --icon-empty, --input-h, --input-btn, etc. See cheat sheet at top of eslint.config.js.',
         },
+        {
+          selector: 'TemplateLiteral[parent.key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight|padding|margin|gap|top|bottom|left|right)$/]:has(TemplateElement[value.raw=/px/]):has(Literal[raw=/^[1-9]\\d*$/])',
+          message: '⛔ Template literal hardcoded px formula in style. FIX: use tokenized string values such as var(--sp-*) or calc(var(--token) + var(--sp-*)); measured runtime layout values are allowed.',
+        },
         // Raw numeric literals (React converts to px) — excludes 0
         {
           selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight|padding|margin|gap|top|bottom|left|right)$/][value.type="Literal"][value.raw=/^[1-9]\\d*$/]',

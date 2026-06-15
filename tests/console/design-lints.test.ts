@@ -733,9 +733,30 @@ describe('soup/no-utility-smell', () => {
     expect(hasWarning(messages, 'no-utility-smell')).toBe(true)
   })
 
+  it('fires on arbitrary px utility values inside className template literals', async () => {
+    const messages = await lintWarnings(
+      'const tone = "bg-s-ok"; const x = <div className={`w-[3px] ${tone}`} />'
+    )
+    expect(hasWarning(messages, 'no-utility-smell')).toBe(true)
+  })
+
+  it('fires on template-literal raw px inline style values', async () => {
+    const messages = await lintWarnings(
+      'const i = 1; const x = <div style={{ width: `${140 + i * 20}px` }} />'
+    )
+    expect(hasWarning(messages, 'Template literal hardcoded px formula')).toBe(true)
+  })
+
   it('is silent on w-[var(--x)] — var() payload is compliant', async () => {
     const messages = await lintWarnings(
       'const x = <div className="w-[var(--sidebar-w)] flex-shrink-0" />'
+    )
+    expect(hasWarning(messages, 'no-utility-smell')).toBe(false)
+  })
+
+  it('is silent on var() payloads inside className template literals', async () => {
+    const messages = await lintWarnings(
+      'const tone = "bg-s-ok"; const x = <div className={`w-[var(--sp-0h)] ${tone}`} />'
     )
     expect(hasWarning(messages, 'no-utility-smell')).toBe(false)
   })
@@ -745,6 +766,20 @@ describe('soup/no-utility-smell', () => {
       'const x = <div className="h-[var(--panel-height)] overflow-auto" />'
     )
     expect(hasWarning(messages, 'no-utility-smell')).toBe(false)
+  })
+
+  it('is silent on tokenized calc() inline style values', async () => {
+    const messages = await lintWarnings(
+      'const x = <div style={{ width: "calc(var(--config-key-col) + var(--sp-5))" }} />'
+    )
+    expect(hasWarning(messages, 'Template literal hardcoded px formula')).toBe(false)
+  })
+
+  it('is silent on measured runtime px values for virtualized layout', async () => {
+    const messages = await lintWarnings(
+      'const total = measureRows(); const x = <div style={{ height: `${total}px` }} />'
+    )
+    expect(hasWarning(messages, 'Template literal hardcoded px formula')).toBe(false)
   })
 
   it('is silent on standard Tailwind utilities without arbitrary values', async () => {

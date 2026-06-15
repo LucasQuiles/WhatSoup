@@ -318,11 +318,12 @@ cannot express the check).
   (`console/eslint.config.js:157-191` spacing/sizing, `:95-106` radius, `:459-466` shadow,
   `:481-488` z-index, `:544-551` opacity, `:227-229` arbitrary px utilities). Three proven evasion
   shapes remain (DUP-08): ternaries (`console/src/components/line-detail/PipelineTab.tsx:22`,
-  `'5px var(--sp-3)'` inside a ConditionalExpression), identifier-passed numerics
-  (`console/src/components/ChartPanel.tsx:27` heights 240/140 applied at `:57,:62,:81,:91`),
-  template literals (`console/src/components/HeartbeatStrip.tsx:34` `w-[3px]`;
-  `console/src/components/StatusDot.tsx:34`; `console/src/components/Skeleton.tsx:18`). Plus the
-  recharts non-`style` prop hole: `wrapperStyle`/`contentStyle` (4 Legend copies, DUP-09).
+  `'5px var(--sp-3)'` inside a ConditionalExpression), and identifier-passed numerics
+  (`console/src/components/ChartPanel.tsx:27` heights 240/140 applied at `:57,:62,:81,:91`).
+  The former template-literal utility/class and hardcoded px-formula residues are closed:
+  `HeartbeatStrip.tsx` is tokenized, `Skeleton.tsx` uses tokenized widths, and selector coverage
+  pins re-entry. The recharts non-`style` prop hole remains: `wrapperStyle`/`contentStyle` (4
+  Legend copies, DUP-09).
 - **CSS-side coverage:** `check-design-burndown.mjs` owns CSS-only gaps that ESLint cannot see,
   including `raw-font-size-css` (zero ceiling) for non-token `font-size:` literals and `font:`
   shorthands outside the primitive type scale and `transition-all-css` (zero ceiling) for CSS
@@ -330,11 +331,12 @@ cannot express the check).
   transition declarations that target `all`. It also tracks `raw-dimension-css` for direct raw
   CSS layout/spacing/radius lengths outside token files, ignoring `var()` fallbacks so resilient
   token fallbacks do not dominate the debt signal.
-- **Mechanism:** keep the selector wall; add a custom rule for the closures: (a) visit
-  `ConditionalExpression` string branches under style-value positions; (b) track numeric-literal
-  constants flowing into style props within the same file (one-hop identifier resolution — no
-  cross-file dataflow, by design); (c) `TemplateLiteral` quasi scanning for `\[\d+px\]` and
-  `\d+px`; (d) extend the style-prop attribute set to `/^(style|wrapperStyle|contentStyle)$/`.
+- **Mechanism:** keep the selector wall; `TemplateLiteral` quasis now catch arbitrary utility values
+  with non-`var()` payloads and hardcoded dimensional px formulas. Add a custom rule for the
+  remaining closures: (a) visit `ConditionalExpression` string branches under style-value positions;
+  (b) track numeric-literal constants flowing into style props within the same file (one-hop
+  identifier resolution — no cross-file dataflow, by design); (c) extend the style-prop attribute
+  set to `/^(style|wrapperStyle|contentStyle)$/`.
 - **Scope:** all TSX. Exemptions stay where they are today via documented waivers (recharts
   `CHART_MARGIN`, QR `margin: 2`).
 - **Violation / valid:** `const height = expanded ? 240 : 140; … style={{ height }}` →

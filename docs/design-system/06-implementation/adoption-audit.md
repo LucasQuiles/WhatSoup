@@ -157,7 +157,7 @@ are the shadow-baseline falls for that file.
 | AlertBanner.tsx | none | raw `<button>` 37 (alert chips); LT×2: 44, 45 (s-crit wash/soft inline) | 0/1 | yes |
 | ActiveHoursHeatmap.tsx | none | LT×19 (largest component token debt): 31-237 incl. legacy vars 8, 11, 12, 13, 86 | — | yes (tokens) |
 | FilterPill.tsx | Pill | LT×1: 16 | 1/1 | yes (token) |
-| HeartbeatStrip.tsx | none | arbitrary px `w-[3px]` 34 (DUP-08 template-literal evasion, still open); sp-half 12 | — | no (polish) |
+| HeartbeatStrip.tsx | none | template-literal px evasion closed: `w-[var(--heartbeat-bar-w)] rounded-[var(--bw)]`; sp-half 12 | — | no (polish) |
 | StatusDot.tsx | StatusCell wrapper | none | 1/1 | no |
 | ModeBadge.tsx | ModeBadge wrapper | none | 1/1 | no |
 
@@ -170,7 +170,7 @@ are the shadow-baseline falls for that file.
 | MessageBubble.tsx | none | raw `<button>`×2: 81 (retry, c-btn recipe), 186; hand-rolled hover detail card via `c-card--detail` composite (40; DD-18r positioning leg, M1); LT×8; sp-half 215 | 0/2 | yes |
 | MessageContent.tsx | none | LT×15: 44-258 (second-largest component token debt); sp-half 163; no-restricted-syntax×5 | — | yes (tokens) |
 | EmptyState.tsx | none (TableEmpty exists separately in Table primitive) | LT×3: 38, 47, 56 (text-t5/t4 essential-text tiering — DD-8 names empty-state tiering); c-btn-primary retry 66; framer-motion entrance | — | yes (DD-8) |
-| Skeleton.tsx | none | TableSkeleton hardcoded inline px widths (`${140 + i * 20}px`, line ~19) — untokenized-values evasion not in any baseline; shimmer waivered WVR-005 | — | no (polish, M3) |
+| Skeleton.tsx | none | TableSkeleton widths tokenized via `TABLE_SKELETON_WIDTHS`; shimmer waivered WVR-005 | — | no (polish, M3) |
 | Toast.tsx (+hooks/use-toast.tsx) | none — Toast is its own renderer per toast.md | raw dismiss `<button>` 50; LT×2: 43, 49; sp-half 43; hardcoded `z-[110]` (use-toast, no-restricted-syntax fall ×1); DD-25 motion literals | 0/1 | yes |
 
 ### 3.9 Primitives layer (reference)
@@ -204,7 +204,7 @@ was not decomposed).
 |---|---|---|---|---|
 | M1 | Hover-cards & tooltips: 63 native `title=` attributes (unthemed native browser tooltips) + one hand-rolled hover detail card (`c-card--detail`) | title= across components/pages (63 occurrences); MessageBubble.tsx:40 | interaction-patterns.md §"Tooltips never carry sole information" is the ONLY tooltip law; no tooltip/hover-card component spec in 03-spec/components/, no primitive | Spec decision at C3: either a Tooltip/HoverCard spec+primitive or an explicit ruling that native titles are sanctioned redundant affordances; MessageBubble card rides DD-18r positioning leg |
 | ~~M2~~ | **DONE** — ChatListItem rows (`div role="option" tabIndex`) now receive `.c-chat-item:focus-visible`, with an inset tokenized ring and a real-browser trusted-Tab proof that the focused option has non-`none` `box-shadow`. | ChatListItem.tsx; composites.css `.c-chat-item:focus-visible`; `tests/browser/a11y-contracts.test.tsx` | focus-visible-required rule remains shadow/primitives-first; this closes the known keyboard-visible consumer gap for the chat list row family. | Closed; DD-17 is no longer half-stale on the focus-visibility leg. |
-| M3 | Loading/skeleton states: TableSkeleton hardcodes inline px widths; no skeleton component spec | Skeleton.tsx (~line 19, `${140 + i * 20}px`) | state-taxonomy covers loading as a state; no skeleton spec/primitive; shimmer waivered WVR-005 pending C5 motion disposition | Tokenize widths or rule skeleton geometry exempt; fold into C5 shimmer disposition |
+| M3 | Loading/skeleton states: TableSkeleton widths are tokenized; no skeleton component spec | Skeleton.tsx (`TABLE_SKELETON_WIDTHS`) | state-taxonomy covers loading as a state; no skeleton spec/primitive; shimmer waivered WVR-005 pending C5 motion disposition | Decide whether skeleton geometry gets a component spec or stays a local loading-state recipe; fold into C5 shimmer disposition |
 | M4 | Charts family unspecced: 4 chart wrappers + ChartPanel render recharts with legacy-token axis/series/tooltip styling | FleetMetricsChart/FleetSessionChart/FleetTokenChart/MetricsChart, chart-utils.ts:7-20 | no chart spec in 03-spec/components/; WVR-001 covers margins only, not the legacy color refs | C3 chart surface slice (already named as WVR-001's cleanup_trigger): chart token adapter + retoken axis/tooltip styles |
 | ~~M5~~ | **DONE** — UnlockScreen is sliced onto `TextInput` + `Button`, with semantic surface wrappers and no caller legacy-token overrides. | UnlockScreen.tsx; `tests/console/unlock-screen.test.tsx` | input.md/button.md specs adopted; focused test pins primitive-owned styling. | Closed 2026-06-14; shadow ratchet lowered `soup/no-legacy-tokens :: src/components/UnlockScreen.tsx` 3→0. |
 | ~~M6~~ | **DONE / RE-NARROWED** — HistoryTab cursor controls now route through `Button` (`Load older messages`, `Jump to newest`); no raw pagination buttons remain. | HistoryTab.tsx (cursor state ~35-40, load-more controls) | No standalone pagination primitive is needed until a reusable cursor-pagination family exists. | Closed for the raw-control gap; future reusable pagination is a product-pattern trigger, not current debt. |
@@ -330,10 +330,10 @@ Blocking items (14 tracked; B12 now closed):
     modal sizing SSOT, nav width pressure, MessageBubble hover-card positioning, non-Fleet
     side-panel law) (register: blocks final acceptance).
 
-Polish (non-blocking): M1 tooltip/hover-card spec ruling · M3 skeleton px · M4 chart token
+Polish (non-blocking): M1 tooltip/hover-card spec ruling · M3 skeleton spec · M4 chart token
 adapter (WVR-001 expiry 2026-12-31) · M7 kbd · M10 datetime ruling · M13 ModeSwitchDialog →
-CardSelector (could be folded into B8) · ChatListItem animationDelay literals · HeartbeatStrip
-`w-[3px]` · DD-9 half-steps (incl. primitives.css's 6 lines) · DD-22/23/25/26/27/28/29/30 per
+CardSelector (could be folded into B8) · ChatListItem animationDelay literals · DD-9 half-steps
+(incl. primitives.css's 6 lines) · DD-22/23/25/26/27/28/29/30 per
 register · WizardStepper extraction · type-ramp definition (DD-26).
 
 ## 9. Strong-claim audit and limits of static analysis

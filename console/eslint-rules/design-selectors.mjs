@@ -136,4 +136,12 @@ export const utilitySmellSelectors = [
       'FIX: replace [Npx/rem/%] with [var(--token)]. Define new tokens in index.css if needed. ' +
       'Exemption: var() payloads are compliant — e.g. w-[var(--avatar-sm)].',
   },
+  {
+    selector:
+      'TemplateLiteral:has(TemplateElement[value.raw=/\\b(w|h|mt|mb|ml|mr|px|py|p|m|gap|min-w|max-w|min-h|max-h|top|bottom|left|right)-\\[(?!var\\()[^\\]]+\\]/])',
+    message:
+      '[soup/no-utility-smell] Arbitrary-value utility with non-var() payload in a template literal. ' +
+      'FIX: replace [Npx/rem/%] with [var(--token)]. Define new tokens in index.css if needed. ' +
+      'Exemption: var() payloads are compliant — e.g. w-[var(--avatar-sm)].',
+  },
 ]

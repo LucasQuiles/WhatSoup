@@ -127,11 +127,11 @@ Conventions:
 
 ## DUP-06 — Status dot/badge visual variants
 
-**Pattern.** "Render a status as colored dot/badge" exists as at least seven visual implementations, two of which hardcode or misuse size tokens.
+**Pattern.** "Render a status as colored dot/badge" exists as at least seven visual implementations, with one remaining radius-as-size misuse.
 
 **Occurrences.**
 
-- `StatusDot`: `console/src/components/StatusDot.tsx:11-26` — `sizePx` hardcodes `6`/`8` (bypassing `--dot-feed`/`--dot-table`, `console/src/index.css:113-114`), `colorMap` + `glowMap`; applied via template-literal `style={{ width: `${px}px` }}` at `:34` which evades the px-size lint (selector at `console/eslint.config.js:181-183` matches `Literal` only).
+- `StatusDot`: `console/src/components/StatusDot.tsx` is now a thin `StatusCell` wrapper; the former `sizePx`/`colorMap`/`glowMap` copy and template-literal px sizing path are closed.
 - `ModeBadge` dot: `console/src/components/ModeBadge.tsx:42-44` (`--dot-badge` token, separate dot recipe).
 - Re-rolled status dot: `console/src/components/line-detail/ScheduledMessageRow.tsx:92-98` — dot sized with `w-[var(--radius-md)] h-[var(--radius-md)]` (a border-radius token used as a width) and colored by `statusColor(...)` inline.
 - Line-header mode dot: `console/src/pages/LineDetail.tsx:247` (`background: var(--color-m-${modeColor})` inline).
@@ -144,7 +144,7 @@ Conventions:
 
 **Proposed consolidation.** Define one semantic status token map in CSS, make StatusDot/Pill consume it, and replace the six per-domain color tables with domain->semantic-status adapters.
 
-**Guarded by lint?** Partially — inline `color: var(--color-s-*)` in style is pushed to classes (`console/eslint.config.js:202-204`) and hex/hsl blocked (`:115-117`, `:577-583`), while `soup/no-component-local-palette` now reaches all `console/src/**` TS/TSX files except the canonical `console/src/lib/color-semantics.ts` helper. Remaining gaps include component-specific status maps such as `StatusDot.tsx:16-26` and the token-misuse (`w-[var(--radius-md)]` as a size).
+**Guarded by lint?** Partially — inline `color: var(--color-s-*)` in style is pushed to classes (`console/eslint.config.js:202-204`) and hex/hsl blocked (`:115-117`, `:577-583`), while `soup/no-component-local-palette` now reaches all `console/src/**` TS/TSX files except the canonical `console/src/lib/color-semantics.ts` helper. Remaining gaps include component-specific status maps and the token-misuse (`w-[var(--radius-md)]` as a size).
 
 ---
 
@@ -182,14 +182,14 @@ Related single-purpose tables counted under DUP-06: `console/src/components/line
 - Volume: 125 `style={{` across `console/src` TSX; top files: `console/src/components/wizard/ConfigStep.tsx` (9), `console/src/components/ActiveHoursHeatmap.tsx` (8), `console/src/pages/Inbox.tsx` (6), `console/src/components/AddLineWizard.tsx` (6), `console/src/components/MessageContent.tsx` (5), `console/src/components/ChartPanel.tsx` (5).
 - Inline `padding:` keys: only 8 remain, 6 tokenized (e.g. `console/src/components/MessageBubble.tsx:140`, `console/src/components/wizard/ReviewStep.tsx:22`) — but `console/src/components/line-detail/PipelineTab.tsx:22` hardcodes `'5px var(--sp-3)'` inside a ternary: the value node is a `ConditionalExpression`, so the compound-padding selectors (`console/eslint.config.js:162-167`, matching `value.value`) never fire. Lint-evasion path 1: ternaries.
 - Identifier-passed numerics: `console/src/components/ChartPanel.tsx:27` (`const height = expanded ? 240 : 140`) applied at `:57`, `:62`, `:81`, `:91` via `style={{ height }}` — shorthand `Identifier`, not `Literal`, so the raw-numeric-size rule (`console/eslint.config.js:186-188`) never fires. Lint-evasion path 2: identifiers.
-- Template-literal classNames: `console/src/components/HeartbeatStrip.tsx:34` (`w-[3px] rounded-[1px]` inside a template literal) — the arbitrary-px selector (`console/eslint.config.js:227-229`) and `rounded-[Npx]` selector (`:104-106`) match `Literal` only, so template literals pass. These are the only 2 arbitrary `[Npx]` values left in the tree. Lint-evasion path 3: template literals.
-- Template-literal sizes in style: `console/src/components/StatusDot.tsx:34` (`width: `${px}px``), `console/src/components/Skeleton.tsx:18` (`width: `${140 + i * 20}px``) — same evasion.
+- Template-literal classNames: closed for utility-size payloads — `HeartbeatStrip.tsx` now uses `w-[var(--heartbeat-bar-w)] rounded-[var(--bw)]`, and `soup/no-utility-smell` scans `TemplateLiteral` quasis for non-`var()` arbitrary utility payloads.
+- Template-literal hardcoded px formulas in style: closed for numeric-literal formulas — `Skeleton.tsx` now uses tokenized `TABLE_SKELETON_WIDTHS`, and `eslint.config.js` rejects dimensional style template literals that combine `px` quasis with numeric literals. Measured runtime layout values such as virtualizer heights remain allowed.
 
-**Classification.** lint rule (close the three evasion shapes) + token (add `--heartbeat-bar-w` etc. for the survivors).
+**Classification.** lint rule (close remaining evasion shapes) + tokens for surviving hardcoded geometry.
 
-**Proposed consolidation.** Add `TemplateLiteral`/`ConditionalExpression`/identifier-aware variants of the px selectors (or a custom rule), then tokenize the residue (`5px`, `3px`, `1px`, chart heights `240/140`).
+**Proposed consolidation.** Add `ConditionalExpression`/identifier-aware variants of the px selectors (or a custom rule), then tokenize the remaining residue (`5px`, chart heights `240/140`). Template-literal utility px and hardcoded px-formula re-entry are now pinned.
 
-**Guarded by lint?** Mostly guarded for `Literal` values (`console/eslint.config.js:157-191`, `:227-229`); the three evasion paths above are unguarded.
+**Guarded by lint?** Mostly guarded for `Literal` values (`console/eslint.config.js:157-191`, `:227-229`) plus the newly covered `TemplateLiteral` class/style shapes. Remaining unguarded paths are ternaries, identifier-passed numerics, and Recharts wrapper props.
 
 ---
 

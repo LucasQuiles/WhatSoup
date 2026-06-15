@@ -31,7 +31,7 @@ const HeartbeatStrip: FC<HeartbeatStripProps> = ({ beats }) => {
         return (
           <div
             key={i}
-            className={`w-[3px] rounded-[1px] ${colorClass}`}
+            className={`w-[var(--heartbeat-bar-w)] rounded-[var(--bw)] ${colorClass}`}
             style={{ height, opacity }}
           />
         );

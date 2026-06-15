@@ -179,7 +179,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
 
   return (
     <div
-      className={`flex flex-col max-w-[65%] ${msg.fromMe ? 'self-end' : 'self-start'}${animate ? ' msg-slide-in' : ''}`}
+      className={`flex flex-col max-w-[var(--message-bubble-max-w)] ${msg.fromMe ? 'self-end' : 'self-start'}${animate ? ' msg-slide-in' : ''}`}
     >
       {/* Sender label (incoming only) */}
       {!msg.fromMe && (

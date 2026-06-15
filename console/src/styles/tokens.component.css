@@ -10,6 +10,7 @@
   --dot-feed: 6px;           /* status dot in feeds */
   --dot-badge: 5px;          /* mode badge dot */
   --dot-header: 10px;        /* status dot in line header */
+  --heartbeat-bar-w: 3px;    /* heartbeat strip bar width */
   --avatar-sm: 32px;         /* access list, small contexts */
   --avatar-md: 36px;         /* chat list items */
   --icon-empty: 40px;        /* empty state icon */
@@ -30,6 +31,7 @@
   --popover-max-h: 200px;    /* popover panel max height (~5 compressed rows + padding) */
   /* ═══ Text constraints ═══ */
   --empty-max-w: 320px;      /* empty state description max */
+  --message-bubble-max-w: 65%; /* chat bubble max inline size */
   --panel-access-col: 280px; /* access tab two-column min width */
   --media-thumb-h: 200px;    /* max height for image/video thumbnails */
   --media-thumb-w: 180px;    /* min width for image/video placeholder */
