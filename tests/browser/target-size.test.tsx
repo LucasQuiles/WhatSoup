@@ -34,13 +34,11 @@
  *   .soup-pill__remove). 16px visual + 2×4px = 24px effective target.
  *   §8 assertions now verify the floor is met (closure leg (a) of DD-10).
  *
- * PSEUDO-ELEMENT HIT-TEST FINDING (see §4):
- *   The sm interactive pill ::before inset expansion registers upward (top
- *   probe passes) but in Chromium, the absolute pseudo-element extending
- *   downward is occluded by the inline block following it. Only the top
- *   extension is reliably hit-testable. Documented; visual hit-area claim
- *   in the CSS comment (primitives.css:522) is partially confirmed (top)
- *   and partially unconfirmed (bottom). Not a src fix — recorded for DD-10.
+ * PILL CLOSURE (§4–5):
+ *   The sm interactive pill now uses a real 24px computed box instead of
+ *   relying on a bottom-side pseudo-element that Chromium would not hit-test.
+ *   The removable-X keeps its 16px visual glyph and proves both top and bottom
+ *   ::before reach via elementFromPoint plus symmetric inset math.
  *
  * OVERFLOW RULE (d7-investigation §6.5)
  * ----------------------------------------
@@ -221,71 +219,37 @@ describe('DD-10 Pill interactive/md — computed height ≥ 24px', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. Pill interactive/sm — pseudo-element hit area (partial proof)
+// 4. Pill interactive/sm — computed box meets the 24px floor
 //
-//    CSS evidence (primitives.css:518–523):
-//      button.soup-pill--sm::before { content: ''; position: absolute;
-//        inset: calc(-1 * var(--sp-0h)) 0; /* -3px top/bottom */ }
-//    sp-0h = 3px → visual 20px + 3+3 = 26px intended effective target.
-//
-//    FINDING: Chromium's elementFromPoint hits the TOP pseudo-element
-//    extension reliably. The BOTTOM extension may be occluded by following
-//    inline content in the rendering order. Top probe: confirmed. Bottom
-//    probe: not reliably hit-testable in this mount configuration.
-//
-//    Per d7-investigation §13: "if a measurement FAILS the floor, report it
-//    as a finding with the measured numbers — do not fix src."
-//
-//    TECHNIQUE: elementFromPoint(cx, Y) with 40px padding container so the
-//    probe stays in-viewport. Padded to ensure no scrollbar interference.
+//    CSS evidence: button.soup-pill--sm / .soup-pill--sm.soup-pill--interactive
+//    computes to 24px height and 24px min-width. Earlier 20px + ::before
+//    expansion was rejected because Chromium did not hit-test the bottom
+//    extension reliably.
 // ---------------------------------------------------------------------------
 
-describe('DD-10 Pill interactive/sm — pseudo-element hit area (partial proof + finding)', () => {
-  it('visual height < 24px — the 24px target relies on ::before expansion', async () => {
+describe('DD-10 Pill interactive/sm — computed box ≥ 24px', () => {
+  it('sm interactive pill height ≥ 24 (WCAG floor)', async () => {
     const { getByRole } = await render(
       <Pill variant="interactive" size="sm" pressed={false} tone="neutral">Sm</Pill>,
     );
     const { height } = getRect(getByRole('button').element());
-    // soup-pill--sm height is 20px (primitives.css:514) — below WCAG floor.
-    expect(height).toBeLessThan(WCAG_FLOOR_PX);
-    // Numeric finding: document the actual visual height.
-    expect(height).toBeGreaterThanOrEqual(16); // At least text line-height
+    expect(height).toBeGreaterThanOrEqual(WCAG_FLOOR_PX);
   });
 
-  it('elementFromPoint 2px ABOVE visual rect resolves to pill (top ::before confirmed)', async () => {
+  it('sm interactive pressed state height ≥ 24', async () => {
     const { getByRole } = await render(
-      <div style={{ padding: '40px', display: 'block' }}>
-        <Pill variant="interactive" size="sm" pressed={false} tone="neutral">Hit</Pill>
-      </div>,
+      <Pill variant="interactive" size="sm" pressed tone="accent">Sm</Pill>,
     );
-    const btn = getByRole('button').element();
-    const rect = getRect(btn);
-    const cx = rect.left + rect.width / 2;
-    // Probe 2px above visual top — inside the ::before expansion zone (sp-0h=3px).
-    const hit = document.elementFromPoint(cx, rect.top - 2);
-    expect(hit).not.toBeNull();
-    // ::before is hit-tested as its originating element.
-    const resolvedToPill = hit === btn || btn.contains(hit!);
-    expect(resolvedToPill).toBe(true);
+    const { height } = getRect(getByRole('button').element());
+    expect(height).toBeGreaterThanOrEqual(WCAG_FLOOR_PX);
   });
 
-  it('sm pill ::before top expansion: probe at rect.top-2 resolves to pill (numeric confirmation)', async () => {
-    // Additional numeric confirmation — measures effective reach above the visual box.
+  it('sm interactive pill width ≥ 24 for short labels', async () => {
     const { getByRole } = await render(
-      <div style={{ padding: '40px', display: 'block' }}>
-        <Pill variant="interactive" size="sm" pressed={false} tone="neutral">Sm</Pill>
-      </div>,
+      <Pill variant="interactive" size="sm" pressed={false} tone="neutral">A</Pill>,
     );
-    const btn = getByRole('button').element();
-    const rect = getRect(btn);
-    const cx = rect.left + rect.width / 2;
-
-    // Verify the pseudo-element reaches at least 2px above the visual top.
-    const hit = document.elementFromPoint(cx, rect.top - 2);
-    // This is the probe that confirms the top expansion is active.
-    const topReachPx = hit === btn || btn.contains(hit!) ? 2 : 0;
-    // Report: top expansion reach ≥ 2px (within the 3px spec).
-    expect(topReachPx).toBeGreaterThanOrEqual(2);
+    const { width } = getRect(getByRole('button').element());
+    expect(width).toBeGreaterThanOrEqual(WCAG_FLOOR_PX);
   });
 });
 
@@ -300,12 +264,11 @@ describe('DD-10 Pill interactive/sm — pseudo-element hit area (partial proof +
 //    Visual box: 16px (primitives.css:550 min-height override).
 //    Intended effective: 16 + 2×4 = 24px.
 //
-//    FINDING: Top pseudo-element extension confirmed via elementFromPoint.
-//    Bottom extension behavior matches sm-pill finding above (Chromium).
-//    This confirms the hit-area claim in the CSS comment is partially working.
+//    Top and bottom pseudo-element extension are confirmed via elementFromPoint.
+//    Effective height is then pinned by the visual box + symmetric 4px insets.
 // ---------------------------------------------------------------------------
 
-describe('DD-10 Pill removable remove-button — hit area (partial proof + finding)', () => {
+describe('DD-10 Pill removable remove-button — hit area ≥ 24px', () => {
   function findRemoveBtn(container: HTMLElement): HTMLButtonElement | undefined {
     return Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
       (b) => b.getAttribute('aria-label')?.toLowerCase().includes('remove'),
@@ -356,6 +319,47 @@ describe('DD-10 Pill removable remove-button — hit area (partial proof + findi
     const topReachPx = hit === el || el!.contains(hit!) ? 2 : 0;
     // Top expansion confirmed at ≥ 2px (within sp-1=4px spec reach).
     expect(topReachPx).toBeGreaterThanOrEqual(2);
+  });
+
+  it('elementFromPoint 2px BELOW rect resolves to remove-button (bottom ::before confirmed)', async () => {
+    const { container } = await render(
+      <div style={{ padding: '40px', display: 'block' }}>
+        <Pill variant="removable" tone="neutral" onRemove={() => undefined}>Tag</Pill>
+      </div>,
+    );
+    const el = findRemoveBtn(container);
+    expect(el).not.toBeUndefined();
+    const rect = getRect(el!);
+    const cx = rect.left + rect.width / 2;
+    const hit = document.elementFromPoint(cx, rect.bottom + 2);
+    expect(hit).not.toBeNull();
+    // sp-1 = 4px; probe at 2px below should hit the ::before.
+    expect(hit === el || el!.contains(hit!)).toBe(true);
+  });
+
+  it('remove-X effective hit area ≥ 24px (visual + symmetric ::before reach)', async () => {
+    const SP1_PX = 4; // --sp-1 (tokens.primitive.css)
+    const { container } = await render(
+      <div style={{ padding: '40px', display: 'block' }}>
+        <Pill variant="removable" tone="neutral" onRemove={() => undefined}>Tag</Pill>
+      </div>,
+    );
+    const el = findRemoveBtn(container);
+    expect(el).not.toBeUndefined();
+    const rect = getRect(el!);
+    const cx = rect.left + rect.width / 2;
+    const before = getComputedStyle(el!, '::before');
+
+    expect(before.top).toBe('-4px');
+    expect(before.bottom).toBe('-4px');
+
+    const hitAbove = document.elementFromPoint(cx, rect.top - 2);
+    const hitBelow = document.elementFromPoint(cx, rect.bottom + 2);
+    expect(hitAbove === el || el!.contains(hitAbove!)).toBe(true);
+    expect(hitBelow === el || el!.contains(hitBelow!)).toBe(true);
+
+    const effectiveHeight = rect.height + SP1_PX + SP1_PX;
+    expect(effectiveHeight).toBeGreaterThanOrEqual(WCAG_FLOOR_PX);
   });
 });
 

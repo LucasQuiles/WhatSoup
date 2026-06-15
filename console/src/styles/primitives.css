@@ -508,18 +508,8 @@ button.soup-pill,
 
 button.soup-pill--sm,
 .soup-pill--sm.soup-pill--interactive {
-  /* Visual height 20px; the pointer target keeps the 24px floor via an invisible
-     expanded hit area (pseudo-element), satisfying the WCAG 2.2 target-size posture
-     without inflating the visual density. */
-  height: 20px;
-  position: relative;
-}
-
-button.soup-pill--sm::before,
-.soup-pill--sm.soup-pill--interactive::before {
-  content: '';
-  position: absolute;
-  inset: calc(-1 * var(--sp-0h)) 0; /* 20px + 2x3px >= 24px vertical target */
+  height: var(--btn-h-xs);
+  min-width: var(--btn-h-xs);
 }
 
 button.soup-pill:focus-visible,
@@ -576,8 +566,8 @@ button.soup-pill[aria-disabled="true"] {
 
 /* Remove button — override ActionButton to fit within pill.
    Visual glyph stays 16px; the pointer target is expanded to the 24px floor by
-   the pseudo-element below (same mechanism as the sm interactive pill).
-   jsdom cannot prove the computed box — D7 measures it (DD-10). */
+   the pseudo-element below. jsdom cannot prove the computed box — the DD-10
+   browser suite measures it in real Chromium. */
 .soup-pill__remove.soup-actbtn {
   min-height: 16px;
   min-width: 16px;

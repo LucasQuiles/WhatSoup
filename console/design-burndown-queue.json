@@ -2,17 +2,17 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 657,
-    "blocking": 592,
+    "total": 655,
+    "blocking": 591,
     "byCategory": {
       "accent-law": 0,
       "base-wall": 18,
       "brand-regression": 2,
-      "half-step": 64,
+      "half-step": 63,
       "legacy-token-tsx": 327,
       "legacy-var-css": 211,
       "raw-color-css": 0,
-      "raw-dimension-css": 34,
+      "raw-dimension-css": 33,
       "raw-font-size-css": 0,
       "transition-all-css": 0,
       "utility-smell": 1
@@ -551,7 +551,7 @@
       "id": "burndown:raw-dimension-css",
       "category": "raw-dimension-css",
       "severity": "blocking",
-      "count": 34,
+      "count": 33,
       "files": [
         {
           "path": "src/styles/composites.css",
@@ -568,32 +568,31 @@
         },
         {
           "path": "src/styles/primitives.css",
-          "count": 26,
+          "count": 25,
           "lines": [
             325,
             481,
             493,
             501,
-            514,
-            582,
-            583,
-            702,
-            895,
-            956,
-            999,
-            1000,
-            1008,
-            1127,
-            1128,
-            1434,
-            1435,
-            1442,
+            572,
+            573,
+            692,
+            885,
+            946,
+            989,
+            990,
+            998,
+            1117,
+            1118,
+            1424,
+            1425,
+            1432,
+            1523,
+            1524,
+            1531,
+            1532,
             1533,
-            1534,
-            1541,
-            1542,
-            1543,
-            1544
+            1534
           ]
         }
       ],
@@ -613,7 +612,7 @@
       "id": "burndown:half-step",
       "category": "half-step",
       "severity": "polish",
-      "count": 64,
+      "count": 63,
       "files": [
         {
           "path": "src/components/ChartPanel.tsx",
@@ -800,14 +799,13 @@
         },
         {
           "path": "src/styles/primitives.css",
-          "count": 6,
+          "count": 5,
           "lines": [
             55,
             247,
             294,
             306,
-            522,
-            562
+            552
           ]
         }
       ],
