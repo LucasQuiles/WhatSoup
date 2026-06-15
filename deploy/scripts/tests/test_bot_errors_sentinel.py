@@ -1108,15 +1108,21 @@ def test_signal_classification_and_inventory_edges(tmp_path: Path, monkeypatch):
     missing_hb = _mod.heartbeat_inventory(_mod.HostSpec(host="host-a", heartbeat_path=tmp_path / "missing.json"), 1000.0, 60, 300)
     assert missing_hb["status"] == "missing"
     assert missing_hb["signal"] == "stale"
+    assert _mod.normalize_probe(["corrupt"]) == {
+        "configured": True,
+        "signal": "unhealthy",
+        "class": "invalid_probe",
+        "error": "probe payload must be a JSON object",
+    }
 
     target = tmp_path / "heartbeat.json"
     target.write_text("{}", encoding="utf-8")
     original_stat = Path.stat
 
-    def stat(path: Path):
+    def stat(path: Path, *args, **kwargs):
         if path == target:
             raise PermissionError("denied")
-        return original_stat(path)
+        return original_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "stat", stat)
     stat_error = _mod.heartbeat_inventory(_mod.HostSpec(host="host-a", heartbeat_path=target), 1000.0, 60, 300)
@@ -1161,6 +1167,19 @@ def test_signal_classification_and_inventory_edges(tmp_path: Path, monkeypatch):
     assert _mod.result_requires_attention({"fleetAction": "central_connectivity_suspect", "hosts": []}) is True
     assert _mod.result_requires_attention({"fleetAction": "none", "hosts": [{"action": "freeze_correlated_drift"}]}) is True
     assert _mod.result_requires_attention({"fleetAction": "none", "hosts": [{"action": "monitor_only"}]}) is False
+
+
+def test_malformed_pull_probe_payload_fails_closed_without_crashing(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+
+    result = _mod.run_once(_config(tmp_path, hosts), _deps(1000.0, {"host-a": ["corrupt"]}))
+
+    host = result["hosts"][0]
+    assert host["class"] == "probe_unhealthy"
+    assert host["action"] == "monitor_only"
+    assert host["probe"]["class"] == "invalid_probe"
+    assert host["probe"]["error"] == "probe payload must be a JSON object"
 
 
 def test_transition_pruning_and_state_cleanup(tmp_path: Path):

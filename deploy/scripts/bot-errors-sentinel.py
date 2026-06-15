@@ -469,9 +469,16 @@ def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int, max_cl
     return result
 
 
-def normalize_probe(payload: dict) -> dict:
-    if not payload:
+def normalize_probe(payload: object) -> dict:
+    if payload == {}:
         return {"configured": False, "signal": "unknown", "class": "not_configured"}
+    if not isinstance(payload, dict):
+        return {
+            "configured": True,
+            "signal": "unhealthy",
+            "class": "invalid_probe",
+            "error": "probe payload must be a JSON object",
+        }
     reachable = payload.get("reachable")
     healthy = payload.get("healthy")
     probe_class = str(payload.get("class") or "unknown")
