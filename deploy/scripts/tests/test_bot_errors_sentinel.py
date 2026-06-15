@@ -542,6 +542,30 @@ def test_critical_whatsapp_daily_cap_suppresses_overflow_and_updates_digest(tmp_
     assert state["criticalWhatsApp"]["overflowCount"] == 1
 
 
+def test_malformed_critical_whatsapp_state_is_reinitialized(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, hysteresis_cycles=1)
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": {}, "criticalWhatsApp": ["corrupt"]},
+    )
+
+    result = _mod.run_once(
+        config,
+        _deps(1000.0, {"host-a": {"reachable": True, "healthy": False, "class": "permission_denied"}}),
+    )
+
+    payload = json.loads(Path(result["actionEvents"][0]["path"]).read_text(encoding="utf-8"))
+    assert payload["host"] == "host-a"
+    assert payload["criticalWhatsAppAllowed"] is True
+    assert payload["criticalWhatsAppAllowedCount"] == 1
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert state["criticalWhatsApp"]["day"] == "1970-01-01"
+    assert state["criticalWhatsApp"]["allowedCount"] == 1
+    assert state["criticalWhatsApp"]["overflowCount"] == 0
+
+
 def test_tier2_action_event_includes_q_remediation_token(tmp_path: Path, monkeypatch):
     hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
     q_hb = _heartbeat(tmp_path / "q-agent-host-hb.json", healthy=True, klass="healthy", mtime=995.0)

@@ -979,7 +979,10 @@ def critical_whatsapp_day(now: float) -> str:
 
 def critical_whatsapp_record(state: dict, now: float) -> dict:
     day = critical_whatsapp_day(now)
-    record = state.setdefault("criticalWhatsApp", {})
+    record = state.get("criticalWhatsApp")
+    if not isinstance(record, dict):
+        record = {}
+        state["criticalWhatsApp"] = record
     if record.get("day") != day:
         record.clear()
         record["day"] = day
