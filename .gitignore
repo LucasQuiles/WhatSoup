@@ -87,3 +87,7 @@ output.txt
 bead-output.md
 codex-exec-deep-dive.md
 
+
+# pytest-cov data file
+.coverage
+.coverage.*

@@ -1,0 +1,4 @@
+{
+  "approved_f10": ["1448da21ae9b598d4cafb342fc1c7aa042141ec3db7fee11c8ff1368cf94812f"],
+  "note": "Append-only. The deployer `pin` mode appends each owner-approved F10 sha at deploy time."
+}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -29,11 +30,33 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 
 
+class QueueDirectoryError(RuntimeError):
+    pass
+
+
+class DailyHealthEventError(RuntimeError):
+    pass
+
+
 def positive_env_int(name: str, default: int) -> int:
-    value = int(os.environ.get(name, str(default)))
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
     if value <= 0:
-        raise ValueError(f"{name} must be > 0")
+        raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def positive_env_int_or_default(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def watchdog_renotify_seconds() -> int:
@@ -61,11 +84,22 @@ def validate_thresholds() -> None:
 
 def now_epoch() -> int:
     override = os.environ.get("BOT_ERRORS_DRY_NOW")
-    return int(override) if override is not None else int(time.time())
+    if override is not None:
+        try:
+            return int(override)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return int(time.time())
 
 
 def now_iso(ts: int | None = None) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts or now_epoch()))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_epoch() if ts is None else ts))
+
+
+def finite_epoch(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return int(value)
 
 
 def parse_iso_epoch(value: Any) -> int | None:
@@ -97,6 +131,13 @@ def q_loop_state_path() -> Path:
 
 def watchdog_state_path() -> Path:
     return state_root() / "heartbeat-watchdog-state.json"
+
+
+def fleet_sentinel_heartbeat_path() -> Path:
+    raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return state_root() / "fleet-sentinel" / "sentinel-heartbeat.json"
 
 
 def ensure_private_dir(path: Path) -> None:
@@ -191,7 +232,10 @@ def redacted_watchdog_payload(value: Any) -> Any:
 
 def append_log(kind: str, payload: dict[str, Any]) -> None:
     path = state_root() / "logs" / "heartbeat-watchdog.jsonl"
-    append_private_jsonl(path, {"time": now_iso(), "kind": kind, **redacted_watchdog_payload(payload)})
+    try:
+        append_private_jsonl(path, {"time": now_iso(), "kind": kind, **redacted_watchdog_payload(payload)})
+    except Exception:  # noqa: BLE001 - diagnostic log failure must not block alerts or state updates.
+        pass
 
 
 def critical_file_problem(path: Path) -> str | None:
@@ -199,6 +243,8 @@ def critical_file_problem(path: Path) -> str | None:
         st = path.lstat()
     except FileNotFoundError:
         return f"missing {path}"
+    except OSError as exc:
+        return f"failed to inspect critical file {path}: {type(exc).__name__}: {exc}"
     if path.is_symlink():
         return f"refusing to trust symlinked critical file {path}"
     if not os.path.isfile(path):
@@ -210,6 +256,8 @@ def critical_file_problem(path: Path) -> str | None:
         parent_stat = path.parent.lstat()
     except FileNotFoundError:
         return f"missing critical file parent {path.parent}"
+    except OSError as exc:
+        return f"failed to inspect critical file parent {path.parent}: {type(exc).__name__}: {exc}"
     if path.parent.is_symlink():
         return f"refusing to trust critical file under symlinked directory {path.parent}"
     if not os.path.isdir(path.parent):
@@ -309,9 +357,13 @@ def json_updated_age(path: Path, key: str = "updated_at") -> tuple[int | None, s
     if not isinstance(data, dict):
         return None, f"invalid JSON object in {path}: {type(data).__name__}"
     value = data.get(key)
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None, f"missing numeric {key} in {path}"
-    updated = int(value)
+    updated = finite_epoch(value)
+    if updated is None:
+        return None, f"non-finite {key} in {path}: value={value}"
+    if updated > current:
+        return None, f"future {key} in {path}: value={updated} now={current} future_by_seconds={updated - current}"
     return max(0, current - updated), f"{path} {key}={updated}"
 
 
@@ -319,23 +371,67 @@ def file_age(path: Path) -> tuple[int | None, str]:
     problem = critical_file_problem(path)
     if problem is not None:
         return None, problem
-    return max(0, now_epoch() - int(path.stat().st_mtime)), f"{path} mtime={int(path.stat().st_mtime)}"
+    try:
+        mtime = int(path.stat().st_mtime)
+    except OSError as exc:
+        return None, f"failed to stat {path}: {type(exc).__name__}: {exc}"
+    current = now_epoch()
+    if mtime > current:
+        return None, f"future mtime for {path}: mtime={mtime} now={current} future_by_seconds={mtime - current}"
+    return max(0, current - mtime), f"{path} mtime={mtime}"
+
+
+def fleet_sentinel_age(path: Path) -> tuple[int | None, str]:
+    problem = critical_file_problem(path)
+    if problem is not None:
+        return None, problem
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return None, f"failed to read {path}: {type(exc).__name__}: {exc}"
+    try:
+        data = json.loads(text)
+    except Exception as exc:
+        return None, f"invalid JSON in {path}: {type(exc).__name__}: {exc}"
+    if not isinstance(data, dict):
+        return None, f"invalid JSON object in {path}: {type(data).__name__}"
+    if data.get("kind") != "bot-errors-sentinel-heartbeat":
+        return None, f"unexpected fleet sentinel heartbeat kind={data.get('kind')!r} in {path}"
+    checked_at = parse_iso_epoch(data.get("checkedAt"))
+    if checked_at is None:
+        return None, f"missing parseable checkedAt in {path}"
+    current = now_epoch()
+    if checked_at > current:
+        return None, (
+            f"future checkedAt in {path}: checkedAt={data.get('checkedAt')} "
+            f"epoch={checked_at} now={current} future_by_seconds={checked_at - current}"
+        )
+    return max(0, current - checked_at), (
+        f"{path} checkedAt={data.get('checkedAt')} healthy={data.get('healthy')} "
+        f"fleetAction={data.get('fleetAction')} hostCount={data.get('hostCount')}"
+    )
 
 
 def env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
-    return int(float(raw))
+    try:
+        return int(float(raw))
+    except (OverflowError, ValueError):
+        return default
 
 
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
-    if not path.exists():
-        return 0, 0
-    files = [item for item in path.glob(pattern) if item.is_file()]
-    if not files:
-        return 0, 0
-    oldest = max(0, now_epoch() - min(int(item.stat().st_mtime) for item in files))
+    try:
+        if not path.exists():
+            return 0, 0
+        files = [item for item in path.glob(pattern) if item.is_file()]
+        if not files:
+            return 0, 0
+        oldest = max(0, now_epoch() - min(int(item.stat().st_mtime) for item in files))
+    except OSError as exc:
+        raise QueueDirectoryError(f"path={path} pattern={pattern} error={type(exc).__name__}: {exc}") from exc
     return len(files), oldest
 
 
@@ -349,7 +445,10 @@ def queue_backlog_problem(
     total_count = 0
     oldest_seconds = 0
     for path in paths:
-        count, oldest = directory_stats(path, pattern)
+        try:
+            count, oldest = directory_stats(path, pattern)
+        except QueueDirectoryError as exc:
+            return f"{label} backlog scan failed: {exc}"
         total_count += count
         oldest_seconds = max(oldest_seconds, oldest)
     over_count = max_count > 0 and total_count >= max_count
@@ -492,7 +591,7 @@ def expected_local_instances() -> list[dict[str, Any]]:
             continue
         item: dict[str, Any] = {"name": name, "service": service}
         health_port = instance.get("healthPort")
-        if isinstance(health_port, int):
+        if isinstance(health_port, int) and not isinstance(health_port, bool):
             item["healthPort"] = health_port
         elif isinstance(health_port, str) and health_port.strip().isdigit():
             item["healthPort"] = int(health_port.strip())
@@ -530,9 +629,10 @@ def dry_service_states() -> dict[str, str]:
 def service_check_timeout() -> float:
     raw = os.environ.get("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "5")
     try:
-        return max(0.1, float(raw))
+        value = float(raw)
     except ValueError:
         return 5
+    return max(0.1, value) if math.isfinite(value) else 5
 
 
 def systemd_service_status(service: str) -> str:
@@ -601,9 +701,10 @@ def local_service_problems() -> dict[str, str]:
 def local_health_timeout() -> float:
     raw = os.environ.get("BOT_ERRORS_LOCAL_HEALTH_TIMEOUT_SECONDS", "3")
     try:
-        return max(0.1, float(raw))
+        value = float(raw)
     except ValueError:
         return 3
+    return max(0.1, value) if math.isfinite(value) else 3
 
 
 def dry_local_health_responses() -> dict[str, Any]:
@@ -617,6 +718,13 @@ def dry_local_health_responses() -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def dry_local_health_status(value: Any) -> tuple[int, str | None]:
+    try:
+        return int(value), None
+    except (TypeError, ValueError, OverflowError):
+        return 0, f"invalid dry local health status={value!r}"
+
+
 def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
     url = f"http://127.0.0.1:{port}/health"
     dry = dry_local_health_responses()
@@ -625,13 +733,16 @@ def local_health_http_response(name: str, port: int) -> tuple[int, str, str]:
         entry = dry.get(str(port))
     if entry is not None:
         if isinstance(entry, dict):
-            status = int(entry.get("status", 200))
+            status, status_error = dry_local_health_status(entry.get("status", 200))
+            if status_error is not None:
+                return status, status_error, url
             body = entry.get("body", entry.get("json", ""))
             if not isinstance(body, str):
                 body = json.dumps(body)
             return status, body, url
         if isinstance(entry, str):
-            return int(os.environ.get("BOT_ERRORS_DRY_LOCAL_HEALTH_STATUS", "200")), entry, url
+            status, status_error = dry_local_health_status(os.environ.get("BOT_ERRORS_DRY_LOCAL_HEALTH_STATUS", "200"))
+            return status, status_error or entry, url
     req = Request(url, method="GET")
     try:
         with urlopen(req, timeout=local_health_timeout()) as response:
@@ -661,7 +772,7 @@ def local_instance_health_problems() -> dict[str, str]:
     problems: dict[str, str] = {}
     for item in expected_local_instances():
         port = item.get("healthPort")
-        if not isinstance(port, int):
+        if isinstance(port, bool) or not isinstance(port, int):
             continue
         name = str(item["name"])
         status, body, url = local_health_http_response(name, port)
@@ -789,22 +900,43 @@ def daily_health_events() -> list[tuple[Path, int, dict[str, Any] | None]]:
         directory = root / dirname
         if not directory.exists():
             continue
-        for path in directory.glob("*.json*"):
+        try:
+            paths = list(directory.glob("*.json*"))
+        except OSError as exc:
+            raise DailyHealthEventError(
+                f"directory={directory} pattern=*.json* error={type(exc).__name__}: {exc}"
+            ) from exc
+        for path in paths:
             data = load_json(path)
             if "daily-health" not in path.name and (not data or data.get("source") != "daily-health"):
                 continue
             created = parse_iso_epoch(data.get("createdAt")) if data else None
-            events.append((path, created if created is not None else int(path.stat().st_mtime), data))
+            if created is None:
+                try:
+                    created = int(path.stat().st_mtime)
+                except OSError as exc:
+                    raise DailyHealthEventError(f"path={path} error={type(exc).__name__}: {exc}") from exc
+            events.append((path, created, data))
     return events
 
 
 def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
     dry_age = os.environ.get("BOT_ERRORS_DRY_DAILY_HEALTH_AGE_SECONDS")
     if dry_age is not None and host is None:
-        return int(dry_age), "dry daily-health age"
+        try:
+            age = int(dry_age)
+        except (TypeError, ValueError, OverflowError):
+            return None, f"invalid dry daily-health age: value={dry_age!r}"
+        if age < 0:
+            return None, f"invalid dry daily-health age: value={dry_age!r}"
+        return age, "dry daily-health age"
     newest: int | None = None
     newest_path = ""
-    for path, mtime, data in daily_health_events():
+    try:
+        events = daily_health_events()
+    except DailyHealthEventError as exc:
+        return None, f"failed to scan daily-health events under {state_root()}: {exc}"
+    for path, mtime, data in events:
         if host is not None:
             event_host = daily_health_event_host(path, data)
             if event_host != host:
@@ -815,7 +947,13 @@ def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
     if newest is None:
         scope = f" for {host}" if host else ""
         return None, f"no daily-health event{scope} under {state_root()}"
-    return max(0, now_epoch() - newest), f"{newest_path} mtime={newest}"
+    current = now_epoch()
+    if newest > current:
+        return None, (
+            f"future daily-health event time: path={newest_path} "
+            f"timestamp={newest} now={current} future_by_seconds={newest - current}"
+        )
+    return max(0, current - newest), f"{newest_path} mtime={newest}"
 
 
 def configured_checks() -> set[str]:
@@ -839,6 +977,8 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append("local_service:")
     if "local_instance_health" in checks:
         prefixes.append("local_health:")
+    if "fleet_sentinel" in checks:
+        prefixes.append("fleet_sentinel")
     return prefixes
 
 
@@ -859,7 +999,7 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
             phase = str(state.get("phase") or "")
             if phase.startswith("q_unavailable_"):
                 last_unavailable = state.get("last_q_unavailable_at")
-                unavailable_at = int(last_unavailable) if isinstance(last_unavailable, (int, float)) else None
+                unavailable_at = finite_epoch(last_unavailable)
                 unavailable_age = max(0, now_epoch() - unavailable_at) if unavailable_at is not None else "unknown"
                 reason = str(state.get("last_q_unavailable_reason") or phase.removeprefix("q_unavailable_") or "unknown")
                 problems["q_loop:supervisor"] = (
@@ -875,6 +1015,13 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
         age, detail = file_age(state_root() / "collector-state.json")
         if age is None or age > args.max_collector_age:
             problems["collector"] = f"collector heartbeat stale: age_seconds={age if age is not None else 'missing'} max={args.max_collector_age} detail={detail}"
+    if "fleet_sentinel" in checks:
+        age, detail = fleet_sentinel_age(fleet_sentinel_heartbeat_path())
+        if age is None or age > args.max_fleet_sentinel_age:
+            problems["fleet_sentinel"] = (
+                f"fleet sentinel heartbeat stale: age_seconds={age if age is not None else 'missing'} "
+                f"max={args.max_fleet_sentinel_age} detail={detail}"
+            )
     if "daily_health" in checks:
         hosts = daily_health_hosts()
         if hosts:
@@ -901,11 +1048,30 @@ def incident_epoch(incident: dict[str, Any], key: str, fallback: int) -> int:
     return parsed if parsed is not None else fallback
 
 
+def int_or_zero(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def incident_age_seconds(incident: dict[str, Any], current: int) -> int:
     first_seen = incident_epoch(incident, "firstSeenAt", current)
     wall_age = max(0, current - first_seen)
-    previous_age = int(incident.get("ageSeconds") or 0)
+    previous_age = int_or_zero(incident.get("ageSeconds"))
     return max(previous_age, wall_age)
+
+
+def replacement_incident(current: int) -> dict[str, Any]:
+    return {
+        "firstSeenAt": now_iso(current),
+        "lastSeenAt": now_iso(current),
+        "lastNotifiedAt": now_iso(current),
+        "lastEvidence": "malformed incident record",
+        "suppressed": 0,
+    }
 
 
 def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path]:
@@ -915,14 +1081,16 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
     current = now_epoch()
     for key, evidence in sorted(problems.items()):
         redacted_evidence = redact_watchdog_text(evidence)
+        if key in open_incidents and not isinstance(open_incidents[key], dict):
+            open_incidents.pop(key, None)
         if key in open_incidents:
             incident = open_incidents[key]
-            incident["suppressed"] = int(incident.get("suppressed", 0)) + 1
+            incident["suppressed"] = int_or_zero(incident.get("suppressed")) + 1
             incident["lastSeenAt"] = now_iso(current)
             incident["lastEvidence"] = redacted_evidence
             incident.pop("recoveryObservations", None)
             incident.pop("lastRecoveryObservedAt", None)
-            suppressed = int(incident.get("suppressed", 0))
+            suppressed = int_or_zero(incident.get("suppressed"))
             first_seen = incident_epoch(incident, "firstSeenAt", current)
             last_notified = incident_epoch(incident, "lastNotifiedAt", first_seen)
             age_seconds = incident_age_seconds(incident, current)
@@ -990,7 +1158,10 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
         if not key_in_active_scope(key, active_prefixes):
             continue
         incident = open_incidents[key]
-        recovery_observations = int(incident.get("recoveryObservations") or 0) + 1
+        if not isinstance(incident, dict):
+            incident = replacement_incident(current)
+            open_incidents[key] = incident
+        recovery_observations = int_or_zero(incident.get("recoveryObservations")) + 1
         incident["recoveryObservations"] = recovery_observations
         incident["lastRecoveryObservedAt"] = now_iso(current)
         required_observations = watchdog_recovery_confirmations()
@@ -1037,14 +1208,15 @@ def run_once(args: argparse.Namespace) -> int:
     return 0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="BOT ERRORS independent heartbeat watchdog")
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--max-q-loop-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_Q_LOOP_AGE", "600")))
-    parser.add_argument("--max-dispatcher-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_DISPATCHER_AGE", "300")))
-    parser.add_argument("--max-collector-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_COLLECTOR_AGE", "180")))
-    parser.add_argument("--max-daily-health-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_DAILY_HEALTH_AGE", str(25 * 60 * 60))))
-    return parser.parse_args()
+    parser.add_argument("--max-q-loop-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_Q_LOOP_AGE", 600))
+    parser.add_argument("--max-dispatcher-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_DISPATCHER_AGE", 300))
+    parser.add_argument("--max-collector-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_COLLECTOR_AGE", 180))
+    parser.add_argument("--max-fleet-sentinel-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_FLEET_SENTINEL_AGE", 2700))
+    parser.add_argument("--max-daily-health-age", type=int, default=positive_env_int_or_default("BOT_ERRORS_MAX_DAILY_HEALTH_AGE", 25 * 60 * 60))
+    return parser.parse_args(argv)
 
 
 def main() -> int:
