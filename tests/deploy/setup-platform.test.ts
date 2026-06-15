@@ -9,13 +9,79 @@
  * - Darwin key-check uses macOS Keychain conventions matching src/lib/keyring.ts
  * - the key check covers the fallback-provider services on both platforms
  */
-import { describe, it, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { afterEach, describe, it, expect } from 'vitest';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const setupSource = fs.readFileSync(path.join(repoRoot, 'deploy', 'setup.sh'), 'utf8');
+const botErrorsSystemdUnits = [
+  'bot-errors-dispatcher.service',
+  'bot-errors-q-loop.service',
+  'bot-errors-collector.service',
+  'bot-errors-deadman.service',
+  'bot-errors-deadman.timer',
+  'bot-errors-health-check.service',
+  'bot-errors-health-check.timer',
+  'bot-errors-heartbeat-watchdog.service',
+  'bot-errors-heartbeat-watchdog.timer',
+];
+const tempRoots: string[] = [];
+
+function makeTempRoot(prefix: string): string {
+  const root = fs.mkdtempSync(path.join(tmpdir(), prefix));
+  tempRoots.push(root);
+  return root;
+}
+
+function writeExecutable(dir: string, name: string, body: string): void {
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, body, 'utf8');
+  fs.chmodSync(file, 0o755);
+}
+
+function writeLinuxSetupShims(dir: string): void {
+  writeExecutable(dir, 'uname', '#!/usr/bin/env bash\nprintf "Linux\\n"\n');
+  writeExecutable(dir, 'node', [
+    '#!/usr/bin/env bash',
+    'if [[ "${1:-}" == "-v" ]]; then printf "v24.15.0\\n"; exit 0; fi',
+    'if [[ "${1:-}" == "-e" ]]; then printf "26"; exit 0; fi',
+    'if [[ "${1:-}" == "--experimental-strip-types" ]]; then exit 0; fi',
+    'printf "unexpected node shim invocation: %s\\n" "$*" >&2',
+    'exit 1',
+    '',
+  ].join('\n'));
+  writeExecutable(dir, 'npm', '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$HOME/npm.log"\nexit 0\n');
+  writeExecutable(dir, 'secret-tool', '#!/usr/bin/env bash\nexit 1\n');
+  writeExecutable(dir, 'systemctl', [
+    '#!/usr/bin/env bash',
+    'printf "%s\\n" "$*" >> "$HOME/systemctl.log"',
+    'if [[ "$*" == "--user list-units" ]]; then exit 0; fi',
+    'if [[ "$*" == "--user daemon-reload" ]]; then exit "${SYSTEMCTL_DAEMON_RELOAD_EXIT:-0}"; fi',
+    'exit 0',
+    '',
+  ].join('\n'));
+}
+
+function runLinuxSetupReplay(home: string, shimDir: string, extraEnv: NodeJS.ProcessEnv = {}) {
+  return spawnSync('bash', ['deploy/setup.sh'], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      ...extraEnv,
+      HOME: home,
+      PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+      USER: 'setup-test',
+    },
+    encoding: 'utf8',
+  });
+}
+
+afterEach(() => {
+  for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
 
 /**
  * Slice the script from a start marker to an end marker (inclusive of start line,
@@ -111,6 +177,153 @@ describe('deploy/setup.sh platform portability', () => {
     expect(setupSource).toContain('ln -sf "$REPO_ROOT/deploy/whatsoup" "$BIN_DIR/whatsoup"');
     expect(setupSource).toContain('ln -sf "$REPO_ROOT/deploy/whatsoup-auth" "$BIN_DIR/whatsoup-auth"');
     expect(setupSource).toContain('ln -sf "$REPO_ROOT/deploy/whatsoup-fleet" "$BIN_DIR/whatsoup-fleet"');
+  });
+
+  it('Linux setup installs BOT ERRORS service and timer units, not just the env template', () => {
+    const linuxUnitBlock = sliceBetween(
+      setupSource,
+      '# --- linux (systemd) unit install ---',
+      'fi\nmkdir -p "$HOME/.config/whatsoup"',
+    );
+    expect(setupSource).toContain('BOT_ERRORS_SYSTEMD_UNITS=(');
+    for (const unit of botErrorsSystemdUnits) {
+      expect(setupSource, `BOT_ERRORS_SYSTEMD_UNITS missing ${unit}`).toContain(`"${unit}"`);
+    }
+    expect(linuxUnitBlock).toContain('for unit in "${BOT_ERRORS_SYSTEMD_UNITS[@]}"');
+    expect(linuxUnitBlock).toContain('cp "$REPO_ROOT/deploy/$unit" "$SYSTEMD_DIR/$unit"');
+    expect(linuxUnitBlock).toContain('BOT ERRORS service/timer units installed');
+  });
+
+  it('Linux setup fails closed when daemon-reload cannot see the installed units', () => {
+    const linuxUnitBlock = sliceBetween(
+      setupSource,
+      '# --- linux (systemd) unit install ---',
+      'fi\nmkdir -p "$HOME/.config/whatsoup"',
+    );
+    expect(linuxUnitBlock).toContain('if ! systemctl --user daemon-reload; then');
+    expect(linuxUnitBlock).toContain('systemctl --user daemon-reload failed after installing units');
+    expect(linuxUnitBlock).toContain('exit 1');
+    expect(linuxUnitBlock).not.toMatch(/daemon-reload[^\n]*\|\|\s*true/);
+  });
+
+  it('setup provisions the full BOT ERRORS routing env contract', () => {
+    const routingBlock = sliceBetween(
+      setupSource,
+      'cp "$REPO_ROOT/deploy/bot-errors.env.example"',
+      '# ── Step 5: Install hardened npm defaults',
+    );
+    for (const key of [
+      'BOT_ERRORS_JID',
+      'BOT_ERRORS_EXPECTED_JID',
+      'BOT_ERRORS_SOCKET_PATH',
+      'BOT_ERRORS_SOCKET',
+      'BOT_ERRORS_DB',
+      'BOT_ERRORS_HEALTH_PROFILE',
+    ]) {
+      expect(routingBlock, `setup routing block missing ${key}`).toContain(`${key}=`);
+    }
+  });
+
+  it('Linux setup replay copies BOT ERRORS units and writes private routing env', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    writeLinuxSetupShims(shimDir);
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_JID: '120363555555550001@g.us',
+      BOT_ERRORS_SOCKET_PATH: path.join(home, 'runtime', 'whatsoup.sock'),
+      BOT_ERRORS_DB: path.join(home, 'state', 'bot.db'),
+      BOT_ERRORS_HEALTH_PROFILE: path.join(home, 'profiles', 'testhost.json'),
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const systemdDir = path.join(home, '.config', 'systemd', 'user');
+    for (const unit of botErrorsSystemdUnits) {
+      expect(
+        fs.existsSync(path.join(systemdDir, unit)),
+        `setup replay did not copy ${unit}`,
+      ).toBe(true);
+    }
+    const envFile = fs.readFileSync(path.join(home, '.config', 'whatsoup', 'bot-errors.env'), 'utf8');
+    expect(envFile).toContain('BOT_ERRORS_JID=120363555555550001@g.us');
+    expect(envFile).toContain('BOT_ERRORS_EXPECTED_JID=120363555555550001@g.us');
+    expect(envFile).toContain(`BOT_ERRORS_SOCKET_PATH=${path.join(home, 'runtime', 'whatsoup.sock')}`);
+    expect(envFile).toContain(`BOT_ERRORS_SOCKET=${path.join(home, 'runtime', 'whatsoup.sock')}`);
+    expect(envFile).toContain(`BOT_ERRORS_DB=${path.join(home, 'state', 'bot.db')}`);
+    expect(envFile).toContain(`BOT_ERRORS_HEALTH_PROFILE=${path.join(home, 'profiles', 'testhost.json')}`);
+    expect(fs.readFileSync(path.join(home, 'systemctl.log'), 'utf8')).toContain('--user daemon-reload');
+    expect(result.stdout).toContain('BOT ERRORS service/timer units installed');
+    expect(result.stdout).toContain('systemctl --user enable --now bot-errors-dispatcher.service bot-errors-q-loop.service bot-errors-collector.service');
+  });
+
+  it('Linux setup replay mirrors BOT_ERRORS_SOCKET when BOT_ERRORS_SOCKET_PATH is absent', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const socket = path.join(home, 'alias-only.sock');
+    writeLinuxSetupShims(shimDir);
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_SOCKET: socket,
+      BOT_ERRORS_SOCKET_PATH: '',
+    } as NodeJS.ProcessEnv);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const envFile = fs.readFileSync(path.join(home, '.config', 'whatsoup', 'bot-errors.env'), 'utf8');
+    expect(envFile).toContain(`BOT_ERRORS_SOCKET_PATH=${socket}`);
+    expect(envFile).toContain(`BOT_ERRORS_SOCKET=${socket}`);
+  });
+
+  it('Linux setup replay backfills missing BOT ERRORS keys in an existing private env file', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const existingSocket = path.join(home, 'existing.sock');
+    const maliciousTouch = path.join(home, 'sourced-env-file');
+    const envDir = path.join(home, '.config', 'whatsoup');
+    const envPath = path.join(envDir, 'bot-errors.env');
+    writeLinuxSetupShims(shimDir);
+    fs.mkdirSync(envDir, { recursive: true });
+    fs.writeFileSync(envPath, [
+      'BOT_ERRORS_JID=120363555555555555@g.us',
+      `BOT_ERRORS_SOCKET=${existingSocket}`,
+      `MALICIOUS_TOUCH=$(touch ${maliciousTouch})`,
+      '',
+    ].join('\n'), 'utf8');
+
+    const result = runLinuxSetupReplay(home, shimDir);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const envFile = fs.readFileSync(envPath, 'utf8');
+    expect(envFile.match(/^BOT_ERRORS_JID=/gm)).toHaveLength(1);
+    expect(envFile.match(/^BOT_ERRORS_SOCKET=/gm)).toHaveLength(1);
+    expect(envFile).toContain('BOT_ERRORS_JID=120363555555555555@g.us');
+    expect(envFile).toContain('BOT_ERRORS_EXPECTED_JID=120363555555555555@g.us');
+    expect(envFile).toContain(`BOT_ERRORS_SOCKET=${existingSocket}`);
+    expect(envFile).toContain(`BOT_ERRORS_SOCKET_PATH=${existingSocket}`);
+    expect(envFile).toContain(`BOT_ERRORS_DB=${path.join(home, '.local', 'share', 'whatsoup', 'instances', 'personal', 'bot.db')}`);
+    expect(envFile).toContain('BOT_ERRORS_HEALTH_PROFILE=');
+    expect(fs.existsSync(maliciousTouch)).toBe(false);
+    expect(result.stdout).toContain('Existing BOT ERRORS routing config preserved');
+  });
+
+  it('Linux setup replay stops before routing env creation when daemon-reload fails', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    writeLinuxSetupShims(shimDir);
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      SYSTEMCTL_DAEMON_RELOAD_EXIT: '42',
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('systemctl --user daemon-reload failed after installing units');
+    for (const unit of botErrorsSystemdUnits) {
+      expect(
+        fs.existsSync(path.join(home, '.config', 'systemd', 'user', unit)),
+        `setup replay should have copied ${unit} before daemon-reload failed`,
+      ).toBe(true);
+    }
+    expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'bot-errors.env'))).toBe(false);
+    expect(result.stdout).not.toContain('Setup complete. Next steps:');
   });
 });
 

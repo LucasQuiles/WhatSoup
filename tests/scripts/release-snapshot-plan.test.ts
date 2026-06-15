@@ -316,6 +316,7 @@ describe('release snapshot planning', () => {
     ], {
       cwd: process.cwd(),
       encoding: 'utf8',
+      maxBuffer: 10 * 1024 * 1024,
     });
 
     expect(proc.status, proc.stderr || proc.stdout).toBe(0);

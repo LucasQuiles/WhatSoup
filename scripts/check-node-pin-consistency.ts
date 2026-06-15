@@ -9,7 +9,9 @@ export type NodePinSource =
   | 'docker/Dockerfile'
   | 'deploy/whatsoup'
   | 'deploy/whatsoup-auth'
-  | 'deploy/whatsoup-fleet';
+  | 'deploy/whatsoup-fleet'
+  | 'scripts/run-with-pinned-node.sh'
+  | 'scripts/run-with-pinned-npm.sh';
 
 export interface NodePinReading {
   source: NodePinSource;
@@ -48,6 +50,8 @@ const WRAPPER_SOURCES: { source: NodePinSource; relPath: string }[] = [
   { source: 'deploy/whatsoup', relPath: 'deploy/whatsoup' },
   { source: 'deploy/whatsoup-auth', relPath: 'deploy/whatsoup-auth' },
   { source: 'deploy/whatsoup-fleet', relPath: 'deploy/whatsoup-fleet' },
+  { source: 'scripts/run-with-pinned-node.sh', relPath: 'scripts/run-with-pinned-node.sh' },
+  { source: 'scripts/run-with-pinned-npm.sh', relPath: 'scripts/run-with-pinned-npm.sh' },
 ];
 
 function readNvmrc(cwd: string): NodePinReading {
