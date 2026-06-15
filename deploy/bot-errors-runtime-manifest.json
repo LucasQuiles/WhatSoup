@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-13T09:25:22Z",
+  "generatedAt": "2026-06-14T18:17:51Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
@@ -153,12 +153,13 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "d62148b8c0e16e943b01c62736dc51751946fa447510c4a32d1848109ffb5756",
+      "sha256": "1448da21ae9b598d4cafb342fc1c7aa042141ec3db7fee11c8ff1368cf94812f",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
         ".config/secrets/",
         "AUTHORIZATION_BEARER_RE",
+        "AUTHORIZATION_KEYED_RE",
         "WHATSAPP_SERVICE_UNIT_RE",
         "PEM_PRIVATE_KEY_RE"
       ]
