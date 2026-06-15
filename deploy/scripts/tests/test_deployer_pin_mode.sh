@@ -23,6 +23,17 @@ fi
 if bash "$D" pin "$tmp/manifest.json" "$tmp/ledger.json" not-a-sha > "$tmp/bad-head.log" 2>&1; then
   echo "PIN_TEST_FAIL accepted invalid head"; cat "$tmp/bad-head.log"; exit 1
 fi
+cat > "$tmp/partial-manifest.json" <<JSON
+{"schemaVersion":1,"files":[{"path":"deploy/scripts/lib/bot_errors_redaction.py","sha256":"1448da21ae9b598d4cafb342fc1c7aa042141ec3db7fee11c8ff1368cf94812f"}]}
+JSON
+echo '{"approved_f10":"not-a-list"}' > "$tmp/bad-ledger.json"
+if bash "$D" pin "$tmp/partial-manifest.json" "$tmp/bad-ledger.json" deadbeefdeadbeefdeadbeefdeadbeefdeadbeef > "$tmp/bad-ledger.log" 2>&1; then
+  echo "PIN_TEST_FAIL accepted malformed ledger"; cat "$tmp/bad-ledger.log"; exit 1
+fi
+partial_head=$(python3 -c "import json;print(json.load(open('$tmp/partial-manifest.json')).get('expected_head_sha'))")
+if [ "$partial_head" != "None" ]; then
+  echo "PIN_TEST_FAIL partial manifest was stamped before ledger validation"; cat "$tmp/bad-ledger.log"; exit 1
+fi
 if [ "$head" = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ] && [ "$led" = "True" ] && [ "$count" = 1 ]; then
   echo "PIN_TEST_PASS"
 else

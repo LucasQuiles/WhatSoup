@@ -277,28 +277,94 @@ case "$MODE" in
     # pin <manifest.json> <ledger.json> <head_sha>: stamp expected_head_sha + append F10 to the approved ledger.
     MAN="${2:?manifest}"; LEDGER="${3:?ledger}"; HEAD="${4:?head_sha}"
     [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: head_sha must be lowercase 40-char git sha"; exit 3; }
-    f10=$(python3 - "$MAN" <<'PY'
-import json,sys
+    python3 - "$MAN" "$LEDGER" "$HEAD" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
 F10_PATH = "deploy/scripts/lib/bot_errors_redaction.py"
-d=json.load(open(sys.argv[1]))
-files=d.get("files",[])
-print(next((f.get("sha256", "") for f in files if isinstance(f, dict) and f.get("path") == F10_PATH), ""))
+HEX = set("0123456789abcdef")
+
+
+def fatal(message):
+    print(f"FATAL: {message}", file=sys.stderr)
+    raise SystemExit(3)
+
+
+def load_object(path, label):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        fatal(f"cannot load {label}: {type(exc).__name__}: {exc}")
+    if not isinstance(data, dict):
+        fatal(f"{label} must be a JSON object")
+    return data
+
+
+def is_lower_hex(value, length):
+    return isinstance(value, str) and len(value) == length and all(ch in HEX for ch in value)
+
+
+def atomic_write_json(path, payload):
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    basename = os.path.basename(path)
+    fd, tmp = tempfile.mkstemp(prefix=f".{basename}.", suffix=".tmp", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(directory, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+man_p, led_p, head = sys.argv[1:4]
+if os.path.abspath(man_p) == os.path.abspath(led_p):
+    fatal("manifest and ledger paths must be distinct")
+manifest = load_object(man_p, "manifest")
+if manifest.get("schemaVersion") != 1:
+    fatal("manifest schemaVersion must be 1")
+files = manifest.get("files")
+if not isinstance(files, list):
+    fatal("manifest files must be a list")
+f10 = next((item.get("sha256", "") for item in files if isinstance(item, dict) and item.get("path") == F10_PATH), "")
+if not f10:
+    fatal("no F10 in manifest")
+if not is_lower_hex(f10, 64):
+    fatal("F10 sha must be lowercase sha256")
+ledger = load_object(led_p, "ledger")
+approved = ledger.get("approved_f10")
+if approved is None:
+    approved = []
+elif not isinstance(approved, list):
+    fatal("ledger approved_f10 must be a list")
+for index, value in enumerate(approved):
+    if not is_lower_hex(value, 64):
+        fatal(f"ledger approved_f10[{index}] must be lowercase sha256")
+if f10 not in approved:
+    approved.append(f10)
+ledger["approved_f10"] = approved
+manifest["expected_head_sha"] = head
+atomic_write_json(led_p, ledger)
+atomic_write_json(man_p, manifest)
+print(f"PIN_OK head={head} f10={f10[:12]}")
 PY
-)
-    [ -n "$f10" ] || { echo "FATAL: no F10 in manifest"; exit 3; }
-    [[ "$f10" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: F10 sha must be lowercase sha256"; exit 3; }
-    python3 - "$MAN" "$LEDGER" "$HEAD" "$f10" <<'PY'
-import json,sys
-man_p,led_p,head,f10=sys.argv[1:5]
-with open(man_p) as fh: m=json.load(fh)
-m["expected_head_sha"]=head
-with open(man_p,"w") as fh: json.dump(m,fh,indent=2)
-with open(led_p) as fh: l=json.load(fh)
-a=l.setdefault("approved_f10",[])
-if f10 not in a: a.append(f10)
-with open(led_p,"w") as fh: json.dump(l,fh,indent=2)
-PY
-    echo "PIN_OK head=$HEAD f10=${f10:0:12}"
     ;;
   *) echo "unknown mode $MODE"; exit 2;;
 esac
