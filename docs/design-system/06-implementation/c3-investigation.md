@@ -848,11 +848,9 @@ bootstrap lines untouched), `console/public/favicon.svg` (new asset),
 
 # Out of scope (owned elsewhere)
 
-- DD-10 sort-button min-height fix + bottom hit-extension proof (named on the narrowed
-  DD-10 row; can ride a C3 slice if capacity allows but is not claimed here).
-- DD-17 Inbox listbox arrow-nav; DD-18r remaining legs (Inbox viewport rows, drawer-flip
-  case, modal sizing SSOT closed, MessageBubble hover-card, side-panel law); DD-22
-  streaming; DD-23 popover fold; D7 focus-ring battery + honesty labels + CI cache.
+- DD-18r remaining legs (nav width pressure beyond label hiding and non-Fleet
+  side-panel law); DD-22 streaming; DD-23 popover fold; D7 focus-ring battery +
+  honesty labels + CI cache. DD-10 and DD-17 are closed in the current register.
 - Composer/forms migration (input.md adoption) — forms track.
 - The raw `c-btn` burn-down beyond the `.c-btn-primary` re-point (144 sites — P2 track).
 - Alias removal (C4 schedule), comment-header sweep (P4), docs prose (P4), server-side

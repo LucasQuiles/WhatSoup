@@ -178,10 +178,10 @@ are the shadow-baseline falls for that file.
 12 files in `components/primitives/`: Badge (StatusCell+ModeBadge), Button, ActionButton, Modal,
 Pill, Table, Toolbar, LogStream, Drawer, Tabs, Popover, index. Raw elements inside primitives are
 by design (canonical renderers). Primitive tier CSS (`styles/primitives.css`) is born clean of
-legacy color tokens; it still consumes half-step spacing at 55, 247, 294, 306, 522, 562 (DD-9).
-Known primitive-layer defects (register): DD-10 table sort buttons ~16px (<24px floor),
-DD-27 focus-trap single-Tab escape, DD-23 Popover no collision flip, DD-22 LogStream no
-virtualization, DD-30 use-exit-presence dead branch.
+legacy color tokens; it still consumes half-step spacing at 55, 247, 294, 306, 552 (DD-9).
+Known primitive-layer defects (register): DD-23 Popover no collision flip, DD-22 LogStream no
+virtualization, and DD-42 raw-CSS focus suppression guard promotion. DD-10, DD-27, and DD-30
+are closed in the current register.
 
 ### 3.10 Non-UI files carrying design vocabulary
 
@@ -325,7 +325,8 @@ Blocking items (14 tracked; B12 now closed):
 10. ~~**B10 — UnlockScreen slice (M5)**~~ — **DONE** 2026-06-14: `TextInput` + `Button`, semantic wrappers, no legacy-token shadow findings, focused primitive-ownership test.
 11. ~~**B11 — MetricsTab Tokens/Sessions → Tabs (DD-15)**~~ — **DONE**: panel switcher moved to Tabs; keyboard manual activation and Sessions-only default pinned.
 12. ~~**B12 — M2 focus ring on ChatListItem rows**~~ — **DONE** with `.c-chat-item:focus-visible` and trusted browser proof.
-13. **B13 — DD-10 sort-button 24px floor fix** (register: blocks final acceptance).
+13. ~~**B13 — DD-10 sort-button 24px floor fix**~~ — **DONE**: sort buttons, sm interactive
+    pills, and removable-X are proven by `tests/browser/target-size.test.tsx`; DD-10 is closed.
 14. **B14 — DD-18r remaining responsive legs** (Inbox viewport rows, drawer-flip case, legacy
     modal sizing SSOT, nav width pressure, MessageBubble hover-card positioning, non-Fleet
     side-panel law) (register: blocks final acceptance).

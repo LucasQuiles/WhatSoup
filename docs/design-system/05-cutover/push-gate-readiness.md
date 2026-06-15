@@ -220,33 +220,28 @@ before the program may declare the cutover complete.
 
 | ID | What remains | Owner stage |
 |---|---|---|
-| DD-8 | per-screen essential-text corrections from the Option B decision package (column headers, Inbox meta lane, bubble timestamp, Nav badge, empty states) | C3 per-screen checklists |
-| DD-10 | computed-box ≥24px proof for every interactive primitive (the code fix for the removable-Pill X landed; the proof is D7's) | D7 |
-| DD-17 | arrow-key contract *tested and accepted* — the ChatList listbox commit landed; closure waits on the B4 evidence packet | B4 acceptance |
-| DD-18r | remaining responsive legs (modal sizing SSOT, nav width pressure, hover-card positioning, non-Fleet side-panel law, deterministic viewport tests); Inbox collapse and bubble-edge commits landed pending B4 acceptance | B3/B4 acceptance + D7 |
-| DD-21r | wizard/modal tablist keyboard contracts (ConfigStep, ModelAuthStep, GroupDetailModal) | B3 wave 4 / C3 |
+| DD-8 | per-screen ghost-tier classification / visual pass for the remaining borderline surfaces after the Option B decision package | C3 per-screen checklists |
+| DD-18r | remaining responsive legs: nav width pressure beyond label hiding and side-panel law for non-Fleet surfaces | C3/D7 |
+| DD-35 | SOUP nameplate/brand slice: replace the legacy split wordmark so status-channel green no longer appears on selection/action/nameplate affordances | C4 |
 
 **Riding as documented debt (register "no"):** DD-5 (theme-toggle treatment,
-rides the C3 nav slice), DD-9 (half-step spacing aliases), DD-19 (modal exit motion + inert background), DD-22 (log
+rides the C3 nav slice), DD-9 (half-step spacing aliases), DD-22 (log
 virtualization awaits a streaming source), DD-23 (popover collision flip),
-DD-24 (collapse-orphaned contact actions), DD-25 (toast motion literals),
-DD-26 (type ramp has consumers with fallbacks but no CSS definitions — C3).
+DD-24 (collapse-orphaned contact actions), DD-26 (type ramp has consumers
+with fallbacks but no CSS definitions), DD-28/DD-29 (state-model spec homes),
+DD-32..34 (dialog/ruling/live-QA residues), DD-36..39 (icon/type/card/color-mix
+enforcement), DD-42 (raw-CSS focus suppression guard promotion), and DD-43
+(toolkit primitive gaps).
 
 **INCONCLUSIVE conformance rows and what flips them:**
 
-- *24px target floor* — flips on D7 computed-box evidence
-  (getBoundingClientRect plus elementFromPoint for pseudo-element hit areas).
 - *Responsive layout rules* — flips on D7 deterministic viewport tests
-  (390/768/1024/1280/1440 plus short-height) and the remaining DD-18r legs.
-- *Reduced-motion* — register closed DD-20 via the app-root MotionConfig;
-  the manifest row flips when D7 proves actual suppression (the packet's
-  stated division: jsdom proves the context value, D7 proves behavior).
-- *Toolbar deviation note* (roving arrow-keys) — assessed at D7 a11y QA.
-- *Tabs* — evidence (`b1-evidence.md`) already exists; clerical flip.
-- *Typography* — DD-4 closed (self-hosted woff2); clerical flip with fresh
-  citation.
-- *Brand boundary, glass chrome, ambient budget, enforcement report-only* —
-  these flip at C3/C4 slices and the enforcement promotion schedule, not D7.
+  plus the remaining DD-18r legs.
+- *Reduced-motion* — app/toast MotionConfig and jsdom checks are current;
+  the manifest row still needs a fresh completed browser reduced-motion proof.
+- *Brand boundary/nameplate/tick, glass chrome, ambient budget, 80ch measure,
+  enforcement report-only* — these flip at C3/C4 slices and the enforcement
+  promotion schedule.
 
 **Remaining program stages:** B3 wave 4 (AddLineWizard — BLOCKED on the named
 Stepper primitive/spec decision); B4 acceptance (commits landed, evidence

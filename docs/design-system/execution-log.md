@@ -886,13 +886,15 @@ the closing phase stale needs a browser round-trip proof, not a blind delete).
 Fix lane dispatched for the D7 packet's FINDING 1: give `.soup-table-th__sort-btn` a
 min-height meeting the 24px floor and flip the target-size suite's numeric FINDING case to
 the floor assertion as the fix proof (the remediation direction the suite itself records).
-No commit yet; the DD-10 register row carries the remaining scope (sort-button fix +
-bottom hit-extension proof or accepted ruling).
 
 2026-06-14 update: the sort-button leg is no longer in flight. Current CSS uses the
 `.soup-table-th__sort-btn` hit-extension and `tests/browser/target-size.test.tsx` §8 now
-asserts the effective floor in Chromium. DD-10 remains open only for the sm-pill/removable-X
-bottom hit-extension proof or accepted ruling.
+asserts the effective floor in Chromium.
+
+2026-06-14 closure update: `118b41a0` closed DD-10. Sm interactive pills now compute to a real
+24px target instead of relying on the bottom-side pseudo-element path Chromium would not
+hit-test; removable-X top and bottom reach are proven in real Chromium. The target-size suite is
+40/40 and the register row moved to Closed.
 
 ---
 
