@@ -368,6 +368,10 @@ def load_state(config: SentinelConfig) -> dict:
     return state
 
 
+def default_host_record() -> dict:
+    return {"alertState": "closed", "consecutive": 0, "transitions": []}
+
+
 def save_state(config: SentinelConfig, state: dict) -> None:
     atomic_write_json(state_path(config), state)
 
@@ -1281,7 +1285,10 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
 
     results = []
     for spec in hosts:
-        record = host_state.setdefault(spec.host, {"alertState": "closed", "consecutive": 0, "transitions": []})
+        record = host_state.get(spec.host)
+        if not isinstance(record, dict):
+            record = default_host_record()
+            host_state[spec.host] = record
         heartbeat = heartbeat_inventory(spec, now, config.heartbeat_max_age_seconds, config.max_clock_skew_seconds)
         probe = normalize_probe(deps.pull_probe(spec))
         result = evaluate_host(spec, heartbeat, probe, record, now, config)

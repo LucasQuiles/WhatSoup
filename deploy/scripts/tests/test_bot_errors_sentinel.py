@@ -1136,6 +1136,23 @@ def test_transition_pruning_and_state_cleanup(tmp_path: Path):
     assert sorted(state["hosts"]) == ["host-a"]
 
 
+def test_malformed_host_state_record_is_reinitialized(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": {"host-a": ["corrupt"]}},
+    )
+
+    result = _mod.run_once(config, _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+
+    assert result["hosts"][0]["class"] == "healthy"
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert isinstance(state["hosts"]["host-a"], dict)
+    assert state["hosts"]["host-a"]["lastClass"] == "healthy"
+
+
 def test_reachability_oracle_errors_fail_safe_without_suppression(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=100.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
