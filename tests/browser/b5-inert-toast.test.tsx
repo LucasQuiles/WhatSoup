@@ -5,7 +5,8 @@
  *
  *   1. Modal open → #root has inert attribute; a button inside #root refuses
  *      programmatic focus; modal closed → button focusable again.
- *   2. Opener regains focus after modal close (C-B5-4 ordering).
+ *   2. Background inert releases after modal close, making the background
+ *      button focusable again (C-B5-4 end-state proof).
  *   3. Toast liveness: toast fired while a modal is open renders outside the
  *      inert subtree (body-level) and its dismiss button is clickable.
  *   4. Reduced-motion exit proof: close a modal → element removed immediately
@@ -27,8 +28,10 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup } from 'vitest-browser-react';
-import { useState, useEffect } from 'react';
+import { page } from 'vitest/browser';
+import { useEffect } from 'react';
 import { Modal, ModalHeader, ModalBody } from '../../console/src/components/primitives/Modal';
+import { _resetInertCount } from '../../console/src/hooks/use-background-inert.ts';
 import { ToastProvider } from '../../console/src/hooks/use-toast.tsx';
 import { useToast } from '../../console/src/hooks/toast-context.ts';
 
@@ -46,6 +49,7 @@ function createRoot(): { root: HTMLDivElement; cleanup: () => void } {
 
 afterEach(() => {
   cleanup();
+  _resetInertCount();
 });
 
 // ---------------------------------------------------------------------------
@@ -57,7 +61,7 @@ describe('B5 — reduced-motion exit: modal removed instantly on close', () => {
     // Under reducedMotion: 'reduce' the browser emits prefers-reduced-motion: reduce.
     // The CSS block sets animation: none on [data-state="closing"] → computed duration
     // is 0s → the presence hook takes the instant path → unmount is synchronous.
-    const { getByRole } = await render(
+    const { getByRole, rerender } = await render(
       <Modal open onClose={() => {}}>
         <ModalHeader title="Reduced motion test" />
         <ModalBody><button type="button">inside</button></ModalBody>
@@ -66,11 +70,17 @@ describe('B5 — reduced-motion exit: modal removed instantly on close', () => {
 
     expect(getByRole('dialog')).toBeTruthy();
 
-    // Unmount by removing it from the tree (simulates open→false).
-    cleanup();
+    await rerender(
+      <Modal open={false} onClose={() => {}}>
+        <ModalHeader title="Reduced motion test" />
+        <ModalBody><button type="button">inside</button></ModalBody>
+      </Modal>
+    );
 
-    // After cleanup no dialog should be present.
-    expect(document.querySelector('[role="dialog"]')  ).toBeNull();
+    // Reduced motion must remove the dialog through the real close path, with no
+    // closing dwell left in the DOM.
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.querySelector('.soup-modal-shell')).toBeNull();
   });
 });
 
@@ -162,12 +172,19 @@ describe('B5 — toast liveness: toast outside inert subtree while modal is open
 
       // The toast stack portals to document.body (outside #root).
       // ToastProvider renders: createPortal(toastStack, document.body)
-      // The stack div carries className="fixed z-[110] ..."
+      // The stack div carries className="fixed z-[var(--z-toast)] ..."
       const toastPortal = document.body.querySelector('.fixed');
       // The portal must exist (toast was fired on mount).
       expect(toastPortal).not.toBeNull();
       // The portal must be outside #root — not contained by the inert subtree.
       expect(root.contains(toastPortal)).toBe(false);
+
+      const dismissButton = page.getByRole('button', { name: 'Dismiss notification' });
+      expect(dismissButton.element()).not.toBeNull();
+      await dismissButton.click();
+      await vi.waitFor(() => {
+        expect(document.body.querySelector('[role="alert"]')).toBeNull();
+      });
     } finally {
       cleanup();
       cleanRoot();
