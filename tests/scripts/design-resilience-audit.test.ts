@@ -77,6 +77,7 @@ describe('check-design-resilience.mjs', () => {
   it('reports text, scroll, geometry, hover, viewport-font, and layer risks in report-only mode', () => {
     const root = makeFixture(`
 export function Fixture() {
+  const narrow = window.innerWidth < 768
   return (
     <section>
       <div className="truncate text-t1">long id</div>
@@ -99,11 +100,56 @@ export function Fixture() {
       'soup/layer-owner-required': 1,
       'soup/no-hover-only-content': 1,
       'soup/no-layout-shift-interaction': 1,
+      'soup/no-raw-viewport-js': 1,
       'soup/no-unsafe-truncation': 1,
       'soup/no-vw-font-size': 1,
       'soup/scroll-owner-required': 1,
     });
-    expect(output.finding_count).toBe(6);
+    expect(output.finding_count).toBe(7);
+  });
+
+  it('keeps raw viewport JS report-only until a sanctioned owner exists', () => {
+    const root = makeFixture(`
+export function Fixture() {
+  const desktop = window.matchMedia('(min-width: 1024px)').matches
+  return <div>{desktop ? 'wide' : 'narrow'}</div>
+}
+`);
+    const result = runScript(root, promotedRuleArgs());
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(0);
+    expect(output.verdict).toBe('PASS');
+    expect(output.mode).toBe('fail-on-rule');
+    expect(output.failed_rules).toEqual([]);
+    expect(output.by_rule).toEqual({ 'soup/no-raw-viewport-js': 1 });
+  });
+
+  it('allows raw viewport reads only in sanctioned viewport-owner hooks', () => {
+    const root = makeFixture(`
+export function useViewportPlacement() {
+  return {
+    rightEdge: window.innerWidth,
+    reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+  }
+}
+`, 'console/src/hooks/useViewportPlacement.ts');
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.finding_count).toBe(0);
+  });
+
+  it('pins the current real-source raw viewport JS debt to MessageBubble only', () => {
+    const result = runScript(process.cwd());
+    const output = parsedOutput(result);
+    const viewportFindings = output.findings.filter((f) => f.rule === 'soup/no-raw-viewport-js');
+
+    expect(result.status).toBe(0);
+    expect(output.by_rule['soup/no-raw-viewport-js']).toBe(1);
+    expect(viewportFindings.map(({ rule, file, line }) => ({ rule, file, line }))).toEqual([
+      { rule: 'soup/no-raw-viewport-js', file: 'console/src/components/MessageBubble.tsx', line: 135 },
+    ]);
   });
 
   it('fails when a promoted layer-owner rule has findings', () => {

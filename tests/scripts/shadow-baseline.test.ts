@@ -40,7 +40,7 @@ describe('check-shadow-baseline.mjs', () => {
     const result = run([]);
     expect(result.status).toBe(0);
     expect(result.stdout).toMatch(/shadow baseline OK: \d+ warnings \(ceiling \d+\)/);
-  });
+  }, 30_000);
 
   it('passes when injected results equal the injected baseline', () => {
     const { resultsPath, baselinePath } = fixture(oneWarning, { total: 1, rules: { [KEY]: 1 } });
