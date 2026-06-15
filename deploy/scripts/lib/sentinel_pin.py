@@ -10,21 +10,32 @@ from dataclasses import dataclass
 F10_PATH = "deploy/scripts/lib/bot_errors_redaction.py"
 
 
+class PinLoadError(Exception):
+    """Raised when a pin manifest is missing or corrupt. Fail closed on the trust-critical
+    path: the caller must treat a pin that cannot be loaded as untrusted, not crash."""
+    pass
+
+
 @dataclass(frozen=True)
 class Pin:
     head_sha: str | None
-    files: dict
+    files: dict[str, str]
     f10_sha: str | None
 
 
 def load_pin(manifest_path) -> Pin:
-    data = json.loads(open(manifest_path).read())
+    try:
+        with open(manifest_path) as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        raise PinLoadError(f"cannot load pin manifest {manifest_path}: {e}") from e
     files = {f["path"]: f["sha256"] for f in data.get("files", [])}
     return Pin(head_sha=data.get("expected_head_sha"), files=files, f10_sha=files.get(F10_PATH))
 
 
 def load_approved_f10(ledger_path) -> set:
-    return set(json.loads(open(ledger_path).read()).get("approved_f10", []))
+    with open(ledger_path) as fh:
+        return set(json.load(fh).get("approved_f10", []))
 
 
 def verify_pin_trust(pin: Pin, approved_f10: set, commit_exists) -> tuple[bool, str]:
@@ -54,7 +65,8 @@ def verify_bundle(bundle_dir, pin: Pin) -> tuple[bool, list]:
     for path, want in pin.files.items():
         fp = os.path.join(bundle_dir, path)
         if not os.path.isfile(fp):
-            mismatches.append((path, "missing")); continue
+            mismatches.append((path, "missing"))
+            continue
         if _sha256_file(fp) != want:
             mismatches.append((path, "sha"))
     return (not mismatches), mismatches

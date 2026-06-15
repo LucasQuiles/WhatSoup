@@ -1,6 +1,7 @@
 """TDD tests for sentinel_pin.py — Fleet Runtime Sentinel Plan 1 (Pin Foundation)."""
 from __future__ import annotations
 import json, pathlib, sys
+import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
 import sentinel_pin as sp
 
@@ -25,6 +26,17 @@ def test_load_pin_extracts_files_head_and_f10(tmp_path):
 def test_load_pin_head_absent_is_none(tmp_path):
     pin = sp.load_pin(_manifest(tmp_path, [{"path": "deploy/scripts/lib/bot_errors_redaction.py", "sha256": "1448da21"+"0"*56}]))
     assert pin.head_sha is None
+
+
+def test_load_pin_missing_file_raises_pinloaderror(tmp_path):
+    with pytest.raises(sp.PinLoadError):
+        sp.load_pin(tmp_path / "does-not-exist.json")
+
+
+def test_load_pin_malformed_json_raises_pinloaderror(tmp_path):
+    p = tmp_path / "bad.json"; p.write_text("{not json")
+    with pytest.raises(sp.PinLoadError):
+        sp.load_pin(p)
 
 
 # ---------------------------------------------------------------------------
