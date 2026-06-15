@@ -21,7 +21,7 @@ function PipelineNode({
 }) {
   const modeKey = color === 'pas' ? 'pas' : color === 'cht' ? 'cht' : 'agt'
   const pillStyle = {
-    padding: onClick ? 'var(--sp-0h) var(--sp-3)' : '5px var(--sp-3)',
+    padding: onClick ? 'var(--sp-0h) var(--sp-3)' : 'var(--pipeline-node-pad-y) var(--sp-3)',
     borderRadius: 'var(--radius-sm)',
     background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
     color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',

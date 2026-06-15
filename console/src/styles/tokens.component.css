@@ -25,6 +25,7 @@
   --inbox-pane-contact: 248px; /* inbox contact pane  (tokens-v3 §4/§6.12; renamed from --panel-contact 256px) */
   --panel-actions: 260px;    /* line detail actions panel */
   --panel-history: 288px;    /* line detail history chat list */
+  --pipeline-node-pad-y: 5px; /* pipeline node static vertical padding */
   --dropdown-min-w: 200px;   /* dropdown minimum width */
   /* ═══ Popover tokens (select.md § Anatomy — Popover primitive, B2) ═══ */
   --popover-min-w: 200px;    /* popover panel minimum width (demotes --dropdown-min-w) */

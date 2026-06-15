@@ -286,6 +286,7 @@ promoted from v2 + the legacy census:
 | `--modal-w-sm` / `--modal-w-md` / `--modal-w-lg` | 480px / 560px / 720px | Modal (lg carries the legacy wizard width) |
 | `--panel-side-w` | 320px | Fleet dashboard side column |
 | `--inbox-pane-chats` / `--inbox-pane-contact` | 264px / 248px | Inbox |
+| `--pipeline-node-pad-y` | 5px | PipelineNode |
 | `--message-bubble-max-w` | 65% | MessageBubble |
 | `--heartbeat-bar-w` | 3px | HeartbeatStrip |
 | `--toast-w-min` / `--toast-w-max` | 280px / 380px | Toast |
@@ -459,6 +460,7 @@ Disposition vocabulary: **formalized** (concept survives; legacy name aliased to
 | `--sparkline-h`, `--heatmap-cell`, `--heatmap-h`, `--chart-min-h` | component | chart-family tokens, co-located with chart components |
 | `--contact-search-max-h`, `--config-key-col`, `--badge-unread` | component | owning components (ContactPicker, ConfigTab, Badge) |
 | `--panel-chat-list`, `--panel-contact`, `--panel-actions`, `--panel-history`, `--panel-access-col` (5) | component | Inbox/LineDetail pane tokens; chat-list and contact panes take v2 values 264/248 |
+| `--pipeline-node-pad-y` | component | PipelineNode static vertical padding, retained as local compact-pill geometry |
 | `--message-bubble-max-w` | component | MessageBubble max inline size, retained as local chat-bubble geometry |
 | `--heartbeat-bar-w` | component | HeartbeatStrip bar width, retained as local telemetry geometry |
 | `--log-col-time/-level/-source` (3) | component | LogStream tokens (values → 72/24/96 per v2) |

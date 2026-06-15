@@ -112,7 +112,7 @@ are the shadow-baseline falls for that file.
 | HistoryTab.tsx | TextArea, Button (×2), ActionButton | focus suppression closed: composer routes through `TextArea` with zero `outline-none`; load-older, jump-to-newest, and send controls route through button primitives; LT×9; legacy var 188; sp-half 206 | controls 4/4 = 100% | yes (tokens) |
 | AccessTab.tsx | none | raw `<button>`×4: 90, 97, 107, 117; LT×10: 42-160; sp-half 56, 78 | 0/4 = 0% | yes |
 | ModeTab.tsx | none | raw `<button>`×3: 27, 51, 58; LT×4; legacy vars 74, 103 | 0/3 = 0% | yes |
-| PipelineTab.tsx | none | raw `<button>` 35; LT×8: 43-172; legacy vars 24, 25; sp-half 22 (the DUP-08 ternary evasion site) | 0/1 = 0% | yes |
+| PipelineTab.tsx | none | raw `<button>` 35; LT×8: 43-172; legacy vars 24, 25; sp-half 22; former DUP-08 conditional hardcoded-px branch now tokenized | 0/1 = 0% | yes |
 | GroupsTab.tsx | none | raw `<button>` 47 (c-btn-primary 50); LT×1: 44 | 0/1 | yes |
 | GroupCard.tsx | none | raw `<button>` 23 (whole-card click target); LT×1: 30; utility-smell fall ×1 | 0/1 | yes |
 | ScheduledTab.tsx | none | raw `<button>` 108 (c-btn-primary 111); LT×1: 105 | 0/1 | yes |

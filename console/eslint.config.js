@@ -176,6 +176,10 @@ const designSystemRestrictions = [
           message: '⛔ Compound padding with hardcoded px. FIX: replace each px value with var(--sp-*). Scale: 4px→var(--sp-1) 8px→var(--sp-2) 12px→var(--sp-3) 16px→var(--sp-4) 20px→var(--sp-5) 24px→var(--sp-6).',
         },
         {
+          selector: 'Property[key.name=/^(padding|margin|gap|width|height|minWidth|minHeight|maxWidth|maxHeight|top|bottom|left|right)$/][value.type="ConditionalExpression"] Literal[value=/[1-9]\\d*px/]',
+          message: '⛔ Conditional style branch with hardcoded px. FIX: replace each static branch with tokenized values such as var(--sp-*) or component tokens; measured runtime px values are allowed.',
+        },
+        {
           selector: 'Property[key.name=/^margin/][value.value=/^\\d+px$/]',
           message: '⛔ Hardcoded margin px. FIX: replace with var(--sp-*). Scale: 3px→var(--sp-0h) 4px→var(--sp-1) 6px→var(--sp-1h) 8px→var(--sp-2) 12px→var(--sp-3) 16px→var(--sp-4) 20px→var(--sp-5).',
         },

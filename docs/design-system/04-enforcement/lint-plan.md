@@ -316,13 +316,13 @@ cannot express the check).
 - **Purpose:** no hardcoded spacing/sizing/radius/shadow/z-index/opacity/filter/type-size values. The 106
   existing selectors already cover the `Literal`/`style`-attribute shapes
   (`console/eslint.config.js:157-191` spacing/sizing, `:95-106` radius, `:459-466` shadow,
-  `:481-488` z-index, `:544-551` opacity, `:227-229` arbitrary px utilities). Three proven evasion
-  shapes remain (DUP-08): ternaries (`console/src/components/line-detail/PipelineTab.tsx:22`,
-  `'5px var(--sp-3)'` inside a ConditionalExpression), and identifier-passed numerics
-  (`console/src/components/ChartPanel.tsx:27` heights 240/140 applied at `:57,:62,:81,:91`).
-  The former template-literal utility/class and hardcoded px-formula residues are closed:
-  `HeartbeatStrip.tsx` is tokenized, `Skeleton.tsx` uses tokenized widths, and selector coverage
-  pins re-entry. The recharts non-`style` prop hole remains: `wrapperStyle`/`contentStyle` (4
+  `:481-488` z-index, `:544-551` opacity, `:227-229` arbitrary px utilities). One proven evasion
+  shape remains (DUP-08): identifier-passed numerics (`console/src/components/ChartPanel.tsx:27`
+  heights 240/140 applied at `:57,:62,:81,:91`). The former template-literal utility/class,
+  hardcoded px-formula, and conditional hardcoded-px residues are closed: `HeartbeatStrip.tsx` is
+  tokenized, `Skeleton.tsx` uses tokenized widths, `PipelineTab.tsx` uses tokenized padding, and
+  selector coverage pins re-entry. The recharts non-`style` prop hole remains:
+  `wrapperStyle`/`contentStyle` (4
   Legend copies, DUP-09).
 - **CSS-side coverage:** `check-design-burndown.mjs` owns CSS-only gaps that ESLint cannot see,
   including `raw-font-size-css` (zero ceiling) for non-token `font-size:` literals and `font:`
@@ -332,11 +332,11 @@ cannot express the check).
   CSS layout/spacing/radius lengths outside token files, ignoring `var()` fallbacks so resilient
   token fallbacks do not dominate the debt signal.
 - **Mechanism:** keep the selector wall; `TemplateLiteral` quasis now catch arbitrary utility values
-  with non-`var()` payloads and hardcoded dimensional px formulas. Add a custom rule for the
-  remaining closures: (a) visit `ConditionalExpression` string branches under style-value positions;
-  (b) track numeric-literal constants flowing into style props within the same file (one-hop
-  identifier resolution — no cross-file dataflow, by design); (c) extend the style-prop attribute
-  set to `/^(style|wrapperStyle|contentStyle)$/`.
+  with non-`var()` payloads and hardcoded dimensional px formulas, and `ConditionalExpression`
+  branches now catch static hardcoded px values in dimensional style positions. Add a custom rule for
+  the remaining closures: (a) track numeric-literal constants flowing into style props within the
+  same file (one-hop identifier resolution — no cross-file dataflow, by design); (b) extend the
+  style-prop attribute set to `/^(style|wrapperStyle|contentStyle)$/`.
 - **Scope:** all TSX. Exemptions stay where they are today via documented waivers (recharts
   `CHART_MARGIN`, QR `margin: 2`).
 - **Violation / valid:** `const height = expanded ? 240 : 140; … style={{ height }}` →

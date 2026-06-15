@@ -747,6 +747,13 @@ describe('soup/no-utility-smell', () => {
     expect(hasWarning(messages, 'Template literal hardcoded px formula')).toBe(true)
   })
 
+  it('fires on conditional style branches with hardcoded px values', async () => {
+    const messages = await lintWarnings(
+      'const compact = false; const x = <div style={{ padding: compact ? "var(--sp-1) var(--sp-3)" : "5px var(--sp-3)" }} />'
+    )
+    expect(hasWarning(messages, 'Conditional style branch with hardcoded px')).toBe(true)
+  })
+
   it('is silent on w-[var(--x)] — var() payload is compliant', async () => {
     const messages = await lintWarnings(
       'const x = <div className="w-[var(--sidebar-w)] flex-shrink-0" />'
@@ -780,6 +787,13 @@ describe('soup/no-utility-smell', () => {
       'const total = measureRows(); const x = <div style={{ height: `${total}px` }} />'
     )
     expect(hasWarning(messages, 'Template literal hardcoded px formula')).toBe(false)
+  })
+
+  it('is silent on tokenized conditional style branches', async () => {
+    const messages = await lintWarnings(
+      'const compact = false; const x = <div style={{ padding: compact ? "var(--sp-1) var(--sp-3)" : "var(--pipeline-node-pad-y) var(--sp-3)" }} />'
+    )
+    expect(hasWarning(messages, 'Conditional style branch with hardcoded px')).toBe(false)
   })
 
   it('is silent on standard Tailwind utilities without arbitrary values', async () => {
