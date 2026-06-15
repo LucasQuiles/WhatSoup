@@ -17,7 +17,7 @@ scrim (fixed, --scrim)
       split variant for note + actions
 ```
 
-Width prop: sm `min(480px, calc(100% - 32px))` · md 560px · lg 720px (wizard). Max-height 85vh,
+Width prop: sm `min(480px, calc(100% - 32px))` · md 560px · lg 720px (wizard). Max-height 85dvh,
 body scrolls. Modals are reserved for **interrupting decisions** — confirmation, auth/QR, the
 wizard; browsing detail belongs to drawer/page (interaction-patterns §7).
 

@@ -72,6 +72,17 @@ describe('design token component classes', () => {
     expect(css).toContain('.c-section {\n  background: var(--color-d2);\n  border: var(--bw) solid var(--b1);')
   })
 
+  it('keeps modal viewport-height tokens on dynamic viewport units', () => {
+    const componentTokens = read('console/src/styles/tokens.component.css')
+    const staticViewportHeightTokens = componentTokens
+      .split('\n')
+      .filter(line => /^\s*--.*(?:h|height).*:\s*[^;]*\b\d+(?:\.\d+)?vh\b/.test(line))
+
+    expect(componentTokens).toContain('--modal-max-h: 85dvh;')
+    expect(componentTokens).not.toContain('--modal-max-h: 85vh;')
+    expect(staticViewportHeightTokens).toEqual([])
+  })
+
   it('keeps shared control focus rings on the dedicated focus token', () => {
     const css = readCompositeCss()
     const modeOrStatusFocusColor = /--(?:color-[ms]-|[ms]-[a-z]+-(?:wash|soft|border|ring)|mode-|status-)/

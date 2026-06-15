@@ -471,7 +471,7 @@ Disposition vocabulary: **formalized** (concept survives; legacy name aliased to
 | `--media-thumb-h/-w` | component | MediaMessage tokens |
 | `--sk-col-*` (7) | rejected-superseded | Fleet table columns are content-sized with priority collapse (drawer.md/table.md), not fixed widths |
 | `--panel-confirm/-shortcuts/-wizard/-composer/-config-edit` (5) | rejected-superseded | → `--modal-w-sm/-md/-lg` (3 widths, not 5) |
-| `--panel-max-inline/-wide`, `--modal-min-h`, `--modal-max-h/-sm/-lg` (6) | rejected-superseded | one modal sizing law: `min(Wpx, calc(100% - 32px))`, max-height 85vh (modal.md) |
+| `--panel-max-inline/-wide`, `--modal-min-h`, `--modal-max-h/-sm/-lg` (6) | rejected-superseded | one modal sizing law: `min(Wpx, calc(100% - 32px))`, max-height 85dvh (modal.md) |
 | `--tooltip-min-w`, `--tooltip-val-max` | component | Tooltip tokens (carried as-is) |
 | `--toast-max-w` | formalized | `--toast-w-max` (value → 380px) |
 | `--sep-h` | rejected-superseded | toolbar separator is 16px (component literal) |

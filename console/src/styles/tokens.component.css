@@ -60,7 +60,7 @@
   --modal-w-sm: 480px;        /* modal width — sm size (tokens-v3 §6.12, DD-18r SSOT leg) */
   --modal-w-md: 560px;        /* modal width — md size (tokens-v3 §6.12, DD-18r SSOT leg) */
   --modal-w-lg: 720px;        /* modal width — lg/wizard size (tokens-v3 §6.12, DD-18r SSOT leg) */
-  --modal-max-h: 85vh;       /* modal maximum height */
+  --modal-max-h: 85dvh;      /* modal maximum height; dynamic viewport keeps footers reachable under mobile chrome */
   /* ═══ Z-index scale ═══ */
   --z-float: 10;             /* floating buttons, scroll indicators */
   --z-overlay: 100;          /* modal overlays, dialogs */
