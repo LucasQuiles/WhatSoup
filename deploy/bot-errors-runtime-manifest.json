@@ -166,10 +166,12 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "38b7066e562d073bded838b069bf1b1e8466878576173d1ee128c13d47000d2e",
+      "sha256": "75edc59aecb6477c9ca98ef7a6bcb1382e4db275e4fac74242979469a6546db1",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
+        "policy_for_target",
+        "guiSessionExpected",
         "distill_boot_id",
         "detect_reboot",
         "classify_with_reboot",

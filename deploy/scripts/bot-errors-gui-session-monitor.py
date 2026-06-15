@@ -284,13 +284,56 @@ def default_failure_threshold() -> int:
 # are NOT GUI-session targets.
 GUI_LABEL_PREFIX = "com.whatsoup."
 
+# Per-host (or per-instance) session policy declared in the SSOT under the
+# ``guiSessionExpected`` key. This is a NON-PII enum — host aliases + a policy
+# value only; no OS usernames are stored in committed SSOT (those stay
+# live-resolved, see resolve_expected_user).
+POLICY_ALWAYS_AQUA = "always_aqua"      # GUI LaunchAgent must have an Aqua session -> monitor
+POLICY_HEADLESS_OK = "headless_ok"      # headless/on_demand, no Aqua session -> exclude
+POLICY_NOT_APPLICABLE = "not_applicable"  # systemd / no-bot / blocked -> exclude
+KNOWN_GUI_SESSION_POLICIES = frozenset(
+    {POLICY_ALWAYS_AQUA, POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE}
+)
+# Declared policies that explicitly EXCLUDE a target from GUI-session monitoring.
+_EXCLUDING_POLICIES = (POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE)
+
+
+def policy_for_target(host_entry: dict, instance: dict):
+    """Resolve the declared ``guiSessionExpected`` policy for a host/instance.
+
+    Instance-level policy overrides host-level. Returns one of the
+    KNOWN_GUI_SESSION_POLICIES, or ``None`` when no valid policy is declared
+    (missing or an unrecognized value). A ``None`` result hands the decision to
+    the fail-closed default in ``gui_targets_from_fleet``.
+    """
+    for source in (instance, host_entry):
+        if not isinstance(source, dict):
+            continue
+        value = _norm(source.get("guiSessionExpected"))
+        if value in KNOWN_GUI_SESSION_POLICIES:
+            return value
+    return None
+
 
 def gui_targets_from_fleet(fleet: dict) -> list[dict]:
-    """Enumerate GUI-LaunchAgent monitor targets from the expected-fleet SSOT.
+    """Enumerate GUI-session monitor targets from the expected-fleet SSOT.
 
-    A target is produced per (host, always_on instance) whose service label is
-    a ``com.whatsoup.*`` LaunchAgent. Consumes the SSOT — never a hardcoded
-    host list. Returns dicts with: host, instance, label.
+    Selection is driven by the declared ``guiSessionExpected`` policy so that
+    headless / no-bot / systemd hosts are EXPLICITLY excluded by policy (an
+    auditable decision in the SSOT) rather than implicitly by service-label
+    shape:
+
+      - policy ``always_aqua``   -> monitored
+      - policy ``headless_ok``   -> excluded
+      - policy ``not_applicable``-> excluded
+      - policy missing/unknown   -> FAIL-CLOSED default: a plausible GUI
+        LaunchAgent (``always_on`` + ``com.whatsoup.*`` label) is STILL
+        monitored so a profile that forgot the policy is never silently dropped;
+        non-LaunchAgent entries (systemd units, on_demand/blocked) remain
+        excluded.
+
+    Consumes the SSOT — never a hardcoded host list. Returns dicts with: host,
+    instance, label.
     """
     targets: list[dict] = []
     hosts = fleet.get("hosts")
@@ -308,6 +351,20 @@ def gui_targets_from_fleet(fleet: dict) -> list[dict]:
         for instance in instances:
             if not isinstance(instance, dict):
                 continue
+            policy = policy_for_target(host_entry, instance)
+            if policy in _EXCLUDING_POLICIES:
+                # Explicit declared exclusion wins over any label shape.
+                continue
+            if policy == POLICY_ALWAYS_AQUA:
+                # Declared GUI agent: trust the policy, still require a usable
+                # label to probe.
+                label = _norm(instance.get("service"))
+                name = _norm(instance.get("name")) or label
+                if label:
+                    targets.append({"host": host, "instance": name, "label": label})
+                continue
+            # policy is None (missing/unknown): FAIL-CLOSED default — only a
+            # plausible always_on GUI LaunchAgent is monitored.
             if _norm(instance.get("expected")) != "always_on":
                 continue
             label = _norm(instance.get("service"))

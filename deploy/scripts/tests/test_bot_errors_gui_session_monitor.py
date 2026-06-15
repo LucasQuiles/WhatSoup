@@ -876,3 +876,152 @@ def test_run_target_reboot_regression_resets_to_clean_on_recovery(mod):
     )
     assert outcome.state == "ok"
     assert outcome.new_state["consecutive_failures"] == 0
+
+
+# ===========================================================================
+# SLICE 3: per-host session-policy matrix (guiSessionExpected enum, non-PII)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Test 18: policy_for_target — resolve guiSessionExpected (host + instance)
+# ---------------------------------------------------------------------------
+
+
+def _host(host, role="bot-host", policy=None, instances=None):
+    entry = {"host": host, "role": role, "instances": instances or []}
+    if policy is not None:
+        entry["guiSessionExpected"] = policy
+    return entry
+
+
+def _inst(name, *, expected="always_on", service=None, policy=None):
+    item = {"name": name, "expected": expected,
+            "service": service or f"com.whatsoup.{name}"}
+    if policy is not None:
+        item["guiSessionExpected"] = policy
+    return item
+
+
+def test_policy_for_target_reads_host_level_always_aqua(mod):
+    host = _host("botbox", policy="always_aqua", instances=[_inst("x-bot")])
+    assert mod.policy_for_target(host, host["instances"][0]) == "always_aqua"
+
+
+def test_policy_for_target_reads_host_level_headless_ok(mod):
+    host = _host("relay", role="relay-only", policy="headless_ok",
+                 instances=[_inst("agent", expected="on_demand")])
+    assert mod.policy_for_target(host, host["instances"][0]) == "headless_ok"
+
+
+def test_policy_for_target_reads_host_level_not_applicable(mod):
+    host = _host("central", role="central", policy="not_applicable",
+                 instances=[_inst("primary", service="whatsoup-primary.service")])
+    assert mod.policy_for_target(host, host["instances"][0]) == "not_applicable"
+
+
+def test_policy_for_target_instance_overrides_host(mod):
+    host = _host("mixed", policy="always_aqua",
+                 instances=[_inst("special", policy="headless_ok")])
+    assert mod.policy_for_target(host, host["instances"][0]) == "headless_ok"
+
+
+def test_policy_for_target_unknown_value_treated_as_missing(mod):
+    # A garbage enum value must not be trusted; behaves as "no declared policy".
+    host = _host("botbox", policy="banana", instances=[_inst("x-bot")])
+    assert mod.policy_for_target(host, host["instances"][0]) is None
+
+
+def test_policy_for_target_missing_returns_none(mod):
+    host = _host("botbox", instances=[_inst("x-bot")])
+    assert mod.policy_for_target(host, host["instances"][0]) is None
+
+
+# ---------------------------------------------------------------------------
+# Test 19: gui_targets_from_fleet selects/excludes by declared policy
+# ---------------------------------------------------------------------------
+
+
+_POLICY_FLEET = {
+    "schemaVersion": 1,
+    "hosts": [
+        _host("botbox-a", role="bot-host", policy="always_aqua",
+              instances=[_inst("x-bot")]),
+        _host("relay-box", role="relay-only", policy="headless_ok",
+              instances=[_inst("agent", expected="on_demand",
+                               service="com.whatsoup.agent")]),
+        _host("central-box", role="central", policy="not_applicable",
+              instances=[_inst("primary", service="whatsoup-primary.service")]),
+        _host("nobot-box", role="no-bot", policy="not_applicable", instances=[]),
+    ],
+}
+
+
+def test_policy_always_aqua_is_monitored(mod):
+    targets = mod.gui_targets_from_fleet(_POLICY_FLEET)
+    assert sorted(t["host"] for t in targets) == ["botbox-a"]
+
+
+def test_policy_headless_ok_is_excluded(mod):
+    targets = mod.gui_targets_from_fleet(_POLICY_FLEET)
+    assert "relay-box" not in {t["host"] for t in targets}
+
+
+def test_policy_not_applicable_is_excluded(mod):
+    targets = mod.gui_targets_from_fleet(_POLICY_FLEET)
+    hosts = {t["host"] for t in targets}
+    assert "central-box" not in hosts
+    assert "nobot-box" not in hosts
+
+
+def test_policy_headless_ok_overrides_launchagent_label(mod):
+    # Even with a com.whatsoup.* LaunchAgent label, headless_ok policy excludes it
+    # (explicit declared exclusion, not implicit by label shape).
+    fleet = {"hosts": [
+        _host("relay-box", role="relay-only", policy="headless_ok",
+              instances=[_inst("agent", expected="always_on",
+                               service="com.whatsoup.agent")]),
+    ]}
+    assert mod.gui_targets_from_fleet(fleet) == []
+
+
+def test_policy_not_applicable_overrides_launchagent_label(mod):
+    fleet = {"hosts": [
+        _host("weird", role="bot-host", policy="not_applicable",
+              instances=[_inst("x-bot", service="com.whatsoup.x-bot")]),
+    ]}
+    assert mod.gui_targets_from_fleet(fleet) == []
+
+
+# ---------------------------------------------------------------------------
+# Test 20: FAIL-CLOSED default — bot host with unknown/missing policy is
+# STILL monitored, never silently dropped.
+# ---------------------------------------------------------------------------
+
+
+def test_bot_host_missing_policy_is_still_monitored(mod):
+    fleet = {"hosts": [
+        _host("botbox", role="bot-host", policy=None,
+              instances=[_inst("x-bot", service="com.whatsoup.x-bot")]),
+    ]}
+    targets = mod.gui_targets_from_fleet(fleet)
+    assert [t["host"] for t in targets] == ["botbox"]
+
+
+def test_bot_host_garbage_policy_is_still_monitored(mod):
+    fleet = {"hosts": [
+        _host("botbox", role="bot-host", policy="not-a-real-policy",
+              instances=[_inst("x-bot", service="com.whatsoup.x-bot")]),
+    ]}
+    targets = mod.gui_targets_from_fleet(fleet)
+    assert [t["host"] for t in targets] == ["botbox"]
+
+
+def test_missing_policy_non_launchagent_still_excluded(mod):
+    # No policy + non-com.whatsoup label (systemd unit) => still excluded; the
+    # fail-closed default only catches plausible GUI LaunchAgents.
+    fleet = {"hosts": [
+        _host("central", role="central", policy=None,
+              instances=[_inst("primary", service="whatsoup-primary.service")]),
+    ]}
+    assert mod.gui_targets_from_fleet(fleet) == []
