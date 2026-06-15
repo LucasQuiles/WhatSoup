@@ -21,6 +21,7 @@ done
 repo="$tmp/root"
 mkdir -p "$repo/deploy/scripts"
 touch "$repo/deploy/scripts/bot-errors-sentinel.py"
+touch "$repo/deploy/scripts/bot-errors-heartbeat-watchdog.py"
 hosts="$tmp/hosts&fleet.json"
 cat > "$hosts" <<'JSON'
 {"schemaVersion":1,"hosts":[{"host":"host-a"}]}
@@ -36,6 +37,8 @@ common_env=(
   BOT_ERRORS_PYTHON="/usr/bin/python3"
   BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN=1
   BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS=1800
+  BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_INTERVAL_SECONDS=300
+  BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_MAX_AGE_SECONDS=2700
   BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS=2700
   BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES=2
   BOT_ERRORS_FLEET_SENTINEL_CONNECTIVITY_HYSTERESIS_CYCLES=3
@@ -56,8 +59,11 @@ PATH="$fakebin:$PATH" env "${common_env[@]}" \
   bash "$S" > "$tmp/launchd.out" 2> "$tmp/launchd.err"
 
 plist="$tmp/LaunchAgents/com.bot-errors.sentinel.plist"
+watchdog_plist="$tmp/LaunchAgents/com.bot-errors.sentinel.watchdog.plist"
 [[ -f "$plist" ]] || { echo "SENTINEL_INSTALLER_FAIL missing launchd plist"; cat "$tmp/launchd.err"; exit 1; }
+[[ -f "$watchdog_plist" ]] || { echo "SENTINEL_INSTALLER_FAIL missing launchd watchdog plist"; cat "$tmp/launchd.err"; exit 1; }
 grep -q '<key>StartInterval</key><integer>1800</integer>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd interval"; cat "$plist"; exit 1; }
+grep -q '<key>SuccessfulExit</key><false/>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd restart-on-failure"; cat "$plist"; exit 1; }
 grep -q '<string>--hosts</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd hosts arg missing"; cat "$plist"; exit 1; }
 grep -q '<string>--state-dir</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd state arg missing"; cat "$plist"; exit 1; }
 grep -q "$repo/deploy/scripts/bot-errors-sentinel.py" "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd script path"; cat "$plist"; exit 1; }
@@ -73,6 +79,10 @@ grep -q 'BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS' "$plist" || { 
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd whatsapp cap env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd tier2 token ttl env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_Q_HOST' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd q host env"; cat "$plist"; exit 1; }
+grep -q '<string>--max-fleet-sentinel-age</string>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog max-age arg"; cat "$watchdog_plist"; exit 1; }
+grep -q '<key>StartInterval</key><integer>300</integer>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog interval"; cat "$watchdog_plist"; exit 1; }
+grep -q '<key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>fleet_sentinel</string>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog checks env"; cat "$watchdog_plist"; exit 1; }
+grep -q '<key>BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT</key>' "$watchdog_plist" || { echo "SENTINEL_INSTALLER_FAIL launchd watchdog heartbeat env"; cat "$watchdog_plist"; exit 1; }
 grep -q 'dry_run=1' "$tmp/launchd.out" || { echo "SENTINEL_INSTALLER_FAIL launchd dry-run output"; cat "$tmp/launchd.out"; exit 1; }
 [[ ! -s "$tmp/launchd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL launchd invoked activation"; cat "$tmp/launchd.err"; exit 1; }
 
@@ -83,8 +93,11 @@ PATH="$fakebin:$PATH" env "${common_env[@]}" \
 
 service="$tmp/systemd/bot-errors-sentinel.service"
 timer="$tmp/systemd/bot-errors-sentinel.timer"
-[[ -f "$service" && -f "$timer" ]] || { echo "SENTINEL_INSTALLER_FAIL missing systemd files"; cat "$tmp/systemd.err"; exit 1; }
+watchdog_service="$tmp/systemd/bot-errors-sentinel-watchdog.service"
+watchdog_timer="$tmp/systemd/bot-errors-sentinel-watchdog.timer"
+[[ -f "$service" && -f "$timer" && -f "$watchdog_service" && -f "$watchdog_timer" ]] || { echo "SENTINEL_INSTALLER_FAIL missing systemd files"; cat "$tmp/systemd.err"; exit 1; }
 grep -q '^ExecStart=/usr/bin/python3 .*bot-errors-sentinel.py --hosts ' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd exec"; cat "$service"; exit 1; }
+grep -q '^Restart=on-failure$' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd restart-on-failure"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_HOSTS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd hosts env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_ORACLE=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd oracle env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_DIR=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd action outbox env"; cat "$service"; exit 1; }
@@ -98,6 +111,11 @@ grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS=' "$ser
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_Q_HOST=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd q host env"; cat "$service"; exit 1; }
 grep -q '^OnUnitActiveSec=1800s$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd interval"; cat "$timer"; exit 1; }
 grep -q '^Persistent=true$' "$timer" || { echo "SENTINEL_INSTALLER_FAIL systemd persistent"; cat "$timer"; exit 1; }
+grep -q '^ExecStart=/usr/bin/python3 .*bot-errors-heartbeat-watchdog.py --once --max-fleet-sentinel-age ' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog exec"; cat "$watchdog_service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_WATCHDOG_CHECKS=fleet_sentinel"$' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog checks env"; cat "$watchdog_service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT=' "$watchdog_service" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog heartbeat env"; cat "$watchdog_service"; exit 1; }
+grep -q '^OnUnitActiveSec=300s$' "$watchdog_timer" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog interval"; cat "$watchdog_timer"; exit 1; }
+grep -q '^Persistent=true$' "$watchdog_timer" || { echo "SENTINEL_INSTALLER_FAIL systemd watchdog persistent"; cat "$watchdog_timer"; exit 1; }
 grep -q 'dry_run=1' "$tmp/systemd.out" || { echo "SENTINEL_INSTALLER_FAIL systemd dry-run output"; cat "$tmp/systemd.out"; exit 1; }
 [[ ! -s "$tmp/systemd.err" ]] || { echo "SENTINEL_INSTALLER_FAIL systemd invoked activation"; cat "$tmp/systemd.err"; exit 1; }
 

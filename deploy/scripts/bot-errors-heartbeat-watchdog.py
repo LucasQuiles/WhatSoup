@@ -99,6 +99,13 @@ def watchdog_state_path() -> Path:
     return state_root() / "heartbeat-watchdog-state.json"
 
 
+def fleet_sentinel_heartbeat_path() -> Path:
+    raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return state_root() / "fleet-sentinel" / "sentinel-heartbeat.json"
+
+
 def ensure_private_dir(path: Path) -> None:
     try:
         path.lstat()
@@ -320,6 +327,31 @@ def file_age(path: Path) -> tuple[int | None, str]:
     if problem is not None:
         return None, problem
     return max(0, now_epoch() - int(path.stat().st_mtime)), f"{path} mtime={int(path.stat().st_mtime)}"
+
+
+def fleet_sentinel_age(path: Path) -> tuple[int | None, str]:
+    problem = critical_file_problem(path)
+    if problem is not None:
+        return None, problem
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return None, f"failed to read {path}: {type(exc).__name__}: {exc}"
+    try:
+        data = json.loads(text)
+    except Exception as exc:
+        return None, f"invalid JSON in {path}: {type(exc).__name__}: {exc}"
+    if not isinstance(data, dict):
+        return None, f"invalid JSON object in {path}: {type(data).__name__}"
+    if data.get("kind") != "bot-errors-sentinel-heartbeat":
+        return None, f"unexpected fleet sentinel heartbeat kind={data.get('kind')!r} in {path}"
+    checked_at = parse_iso_epoch(data.get("checkedAt"))
+    if checked_at is None:
+        return None, f"missing parseable checkedAt in {path}"
+    return max(0, now_epoch() - checked_at), (
+        f"{path} checkedAt={data.get('checkedAt')} healthy={data.get('healthy')} "
+        f"fleetAction={data.get('fleetAction')} hostCount={data.get('hostCount')}"
+    )
 
 
 def env_int(name: str, default: int) -> int:
@@ -839,6 +871,8 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append("local_service:")
     if "local_instance_health" in checks:
         prefixes.append("local_health:")
+    if "fleet_sentinel" in checks:
+        prefixes.append("fleet_sentinel")
     return prefixes
 
 
@@ -875,6 +909,13 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None) -
         age, detail = file_age(state_root() / "collector-state.json")
         if age is None or age > args.max_collector_age:
             problems["collector"] = f"collector heartbeat stale: age_seconds={age if age is not None else 'missing'} max={args.max_collector_age} detail={detail}"
+    if "fleet_sentinel" in checks:
+        age, detail = fleet_sentinel_age(fleet_sentinel_heartbeat_path())
+        if age is None or age > args.max_fleet_sentinel_age:
+            problems["fleet_sentinel"] = (
+                f"fleet sentinel heartbeat stale: age_seconds={age if age is not None else 'missing'} "
+                f"max={args.max_fleet_sentinel_age} detail={detail}"
+            )
     if "daily_health" in checks:
         hosts = daily_health_hosts()
         if hosts:
@@ -1043,6 +1084,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-q-loop-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_Q_LOOP_AGE", "600")))
     parser.add_argument("--max-dispatcher-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_DISPATCHER_AGE", "300")))
     parser.add_argument("--max-collector-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_COLLECTOR_AGE", "180")))
+    parser.add_argument("--max-fleet-sentinel-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_FLEET_SENTINEL_AGE", "2700")))
     parser.add_argument("--max-daily-health-age", type=int, default=int(os.environ.get("BOT_ERRORS_MAX_DAILY_HEALTH_AGE", str(25 * 60 * 60))))
     return parser.parse_args()
 

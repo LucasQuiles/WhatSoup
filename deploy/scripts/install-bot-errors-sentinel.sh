@@ -8,6 +8,8 @@ set -euo pipefail
 
 LABEL=${BOT_ERRORS_FLEET_SENTINEL_LABEL:-com.bot-errors.sentinel}
 UNIT=${BOT_ERRORS_FLEET_SENTINEL_UNIT:-bot-errors-sentinel}
+WATCHDOG_LABEL=${BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_LABEL:-$LABEL.watchdog}
+WATCHDOG_UNIT=${BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_UNIT:-$UNIT-watchdog}
 REPO_ROOT=${BOT_ERRORS_REPO_ROOT:-$HOME/LAB/WhatSoup}
 PYTHON=${BOT_ERRORS_PYTHON:-/usr/bin/python3}
 STATE_DIR=${BOT_ERRORS_STATE_DIR:-$HOME/.local/state/bot-errors}
@@ -16,11 +18,14 @@ HOSTS_PATH=${BOT_ERRORS_FLEET_SENTINEL_HOSTS:-$SENTINEL_STATE_DIR/hosts.json}
 ORACLE_PATH=${BOT_ERRORS_FLEET_SENTINEL_ORACLE:-}
 ACTION_OUTBOX_DIR=${BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_DIR:-$SENTINEL_STATE_DIR/actions}
 INTERVAL_SECONDS=${BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS:-1800}
+WATCHDOG_INTERVAL_SECONDS=${BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_INTERVAL_SECONDS:-300}
+WATCHDOG_MAX_AGE_SECONDS=${BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_MAX_AGE_SECONDS:-2700}
 PLATFORM=${BOT_ERRORS_FLEET_SENTINEL_PLATFORM:-auto}
 DRY_RUN=${BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN:-0}
 LAUNCH_AGENTS=${BOT_ERRORS_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 SYSTEMD_USER_DIR=${BOT_ERRORS_SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}
 SENTINEL_SCRIPT="$REPO_ROOT/deploy/scripts/bot-errors-sentinel.py"
+WATCHDOG_SCRIPT="$REPO_ROOT/deploy/scripts/bot-errors-heartbeat-watchdog.py"
 
 fail_config() {
   echo "NOT READY: $*" >&2
@@ -40,9 +45,16 @@ require_file() {
   [[ -f "$path" ]] || fail_config "missing required $label: $path"
 }
 
+require_min_interval() {
+  local value="$1" name="$2" min="$3"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail_config "$name must be numeric"
+  (( value >= min )) || fail_config "$name must be at least $min"
+}
+
 require_interval() {
-  [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || fail_config "BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS must be numeric"
-  (( INTERVAL_SECONDS >= 300 )) || fail_config "BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS must be at least 300"
+  require_min_interval "$INTERVAL_SECONDS" "BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS" 300
+  require_min_interval "$WATCHDOG_INTERVAL_SECONDS" "BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_INTERVAL_SECONDS" 60
+  require_min_interval "$WATCHDOG_MAX_AGE_SECONDS" "BOT_ERRORS_FLEET_SENTINEL_WATCHDOG_MAX_AGE_SECONDS" 60
 }
 
 resolve_platform() {
@@ -59,16 +71,20 @@ resolve_platform() {
 
 write_launchd() {
   local plist="$LAUNCH_AGENTS/$LABEL.plist"
-  local label_xml repo_xml py_xml script_xml state_xml sentinel_xml hosts_xml oracle_xml action_outbox_xml heartbeat_xml hysteresis_xml connectivity_hysteresis_xml flap_window_xml flap_threshold_xml max_tier1_xml correlated_xml clock_skew_xml action_cooldown_xml whatsapp_cap_xml tier2_token_ttl_xml q_host_xml stdout_xml stderr_xml
+  local watchdog_plist="$LAUNCH_AGENTS/$WATCHDOG_LABEL.plist"
+  local label_xml watchdog_label_xml repo_xml py_xml script_xml watchdog_script_xml state_xml sentinel_xml hosts_xml oracle_xml action_outbox_xml sentinel_heartbeat_xml heartbeat_xml hysteresis_xml connectivity_hysteresis_xml flap_window_xml flap_threshold_xml max_tier1_xml correlated_xml clock_skew_xml action_cooldown_xml whatsapp_cap_xml tier2_token_ttl_xml q_host_xml watchdog_max_age_xml stdout_xml stderr_xml watchdog_stdout_xml watchdog_stderr_xml
   label_xml=$(xml_escape "$LABEL")
+  watchdog_label_xml=$(xml_escape "$WATCHDOG_LABEL")
   repo_xml=$(xml_escape "$REPO_ROOT")
   py_xml=$(xml_escape "$PYTHON")
   script_xml=$(xml_escape "$SENTINEL_SCRIPT")
+  watchdog_script_xml=$(xml_escape "$WATCHDOG_SCRIPT")
   state_xml=$(xml_escape "$STATE_DIR")
   sentinel_xml=$(xml_escape "$SENTINEL_STATE_DIR")
   hosts_xml=$(xml_escape "$HOSTS_PATH")
   oracle_xml=$(xml_escape "$ORACLE_PATH")
   action_outbox_xml=$(xml_escape "$ACTION_OUTBOX_DIR")
+  sentinel_heartbeat_xml=$(xml_escape "$SENTINEL_STATE_DIR/sentinel-heartbeat.json")
   heartbeat_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS:-2700}")
   hysteresis_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES:-2}")
   connectivity_hysteresis_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_CONNECTIVITY_HYSTERESIS_CYCLES:-3}")
@@ -81,8 +97,11 @@ write_launchd() {
   whatsapp_cap_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY:-8}")
   tier2_token_ttl_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS:-1800}")
   q_host_xml=$(xml_escape "${BOT_ERRORS_FLEET_SENTINEL_Q_HOST:-q-agent-host}")
+  watchdog_max_age_xml=$(xml_escape "$WATCHDOG_MAX_AGE_SECONDS")
   stdout_xml=$(xml_escape "$STATE_DIR/logs/sentinel.out.log")
   stderr_xml=$(xml_escape "$STATE_DIR/logs/sentinel.err.log")
+  watchdog_stdout_xml=$(xml_escape "$STATE_DIR/logs/sentinel-watchdog.out.log")
+  watchdog_stderr_xml=$(xml_escape "$STATE_DIR/logs/sentinel-watchdog.err.log")
 
   mkdir -p "$LAUNCH_AGENTS" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR"
   chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR" 2>/dev/null || true
@@ -123,38 +142,79 @@ write_launchd() {
   </dict>
   <key>WorkingDirectory</key><string>$repo_xml</string>
   <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
   <key>StartInterval</key><integer>$INTERVAL_SECONDS</integer>
   <key>StandardOutPath</key><string>$stdout_xml</string>
   <key>StandardErrorPath</key><string>$stderr_xml</string>
 </dict>
 </plist>
 PLIST
-  chmod 644 "$plist"
+  cat > "$watchdog_plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$watchdog_label_xml</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$py_xml</string>
+    <string>$watchdog_script_xml</string>
+    <string>--once</string>
+    <string>--max-fleet-sentinel-age</string>
+    <string>$watchdog_max_age_xml</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BOT_ERRORS_STATE_DIR</key><string>$state_xml</string>
+    <key>BOT_ERRORS_WATCHDOG_CHECKS</key><string>fleet_sentinel</string>
+    <key>BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT</key><string>$sentinel_heartbeat_xml</string>
+    <key>BOT_ERRORS_MAX_FLEET_SENTINEL_AGE</key><string>$watchdog_max_age_xml</string>
+  </dict>
+  <key>WorkingDirectory</key><string>$repo_xml</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>$WATCHDOG_INTERVAL_SECONDS</integer>
+  <key>StandardOutPath</key><string>$watchdog_stdout_xml</string>
+  <key>StandardErrorPath</key><string>$watchdog_stderr_xml</string>
+</dict>
+</plist>
+PLIST
+  chmod 644 "$plist" "$watchdog_plist"
   if [[ "$DRY_RUN" != "1" ]]; then
     command -v plutil >/dev/null 2>&1 || fail_config "plutil unavailable"
     command -v launchctl >/dev/null 2>&1 || fail_config "launchctl unavailable"
     plutil -lint "$plist" >/dev/null
+    plutil -lint "$watchdog_plist" >/dev/null
     local uid_value
     uid_value=$(id -u)
     launchctl bootout "gui/$uid_value" "$plist" >/dev/null 2>&1 || true
+    launchctl bootout "gui/$uid_value" "$watchdog_plist" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/$uid_value" "$plist"
+    launchctl bootstrap "gui/$uid_value" "$watchdog_plist"
     launchctl enable "gui/$uid_value/$LABEL" >/dev/null 2>&1 || true
+    launchctl enable "gui/$uid_value/$WATCHDOG_LABEL" >/dev/null 2>&1 || true
   fi
-  echo "installed $LABEL platform=launchd dry_run=$DRY_RUN interval=${INTERVAL_SECONDS}s path=$plist"
+  echo "installed $LABEL $WATCHDOG_LABEL platform=launchd dry_run=$DRY_RUN interval=${INTERVAL_SECONDS}s watchdog_interval=${WATCHDOG_INTERVAL_SECONDS}s path=$plist watchdog_path=$watchdog_plist"
 }
 
 write_systemd() {
   local service="$SYSTEMD_USER_DIR/$UNIT.service"
   local timer="$SYSTEMD_USER_DIR/$UNIT.timer"
-  local repo_q py_q script_q state_q sentinel_q hosts_q oracle_q action_outbox_q heartbeat_q hysteresis_q connectivity_hysteresis_q flap_window_q flap_threshold_q max_tier1_q correlated_q clock_skew_q action_cooldown_q whatsapp_cap_q tier2_token_ttl_q q_host_q
+  local watchdog_service="$SYSTEMD_USER_DIR/$WATCHDOG_UNIT.service"
+  local watchdog_timer="$SYSTEMD_USER_DIR/$WATCHDOG_UNIT.timer"
+  local repo_q py_q script_q watchdog_script_q state_q sentinel_q hosts_q oracle_q action_outbox_q sentinel_heartbeat_q heartbeat_q hysteresis_q connectivity_hysteresis_q flap_window_q flap_threshold_q max_tier1_q correlated_q clock_skew_q action_cooldown_q whatsapp_cap_q tier2_token_ttl_q q_host_q watchdog_max_age_q
   repo_q=$(systemd_quote "$REPO_ROOT")
   py_q=$(systemd_quote "$PYTHON")
   script_q=$(systemd_quote "$SENTINEL_SCRIPT")
+  watchdog_script_q=$(systemd_quote "$WATCHDOG_SCRIPT")
   state_q=$(systemd_quote "$STATE_DIR")
   sentinel_q=$(systemd_quote "$SENTINEL_STATE_DIR")
   hosts_q=$(systemd_quote "$HOSTS_PATH")
   oracle_q=$(systemd_quote "$ORACLE_PATH")
   action_outbox_q=$(systemd_quote "$ACTION_OUTBOX_DIR")
+  sentinel_heartbeat_q=$(systemd_quote "$SENTINEL_STATE_DIR/sentinel-heartbeat.json")
   heartbeat_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS:-2700}")
   hysteresis_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES:-2}")
   connectivity_hysteresis_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_CONNECTIVITY_HYSTERESIS_CYCLES:-3}")
@@ -167,6 +227,7 @@ write_systemd() {
   whatsapp_cap_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY:-8}")
   tier2_token_ttl_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS:-1800}")
   q_host_q=$(systemd_quote "${BOT_ERRORS_FLEET_SENTINEL_Q_HOST:-q-agent-host}")
+  watchdog_max_age_q=$(systemd_quote "$WATCHDOG_MAX_AGE_SECONDS")
 
   mkdir -p "$SYSTEMD_USER_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR"
   chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR" 2>/dev/null || true
@@ -196,6 +257,8 @@ Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY=$whatsapp_c
 Environment="BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS=$tier2_token_ttl_q"
 Environment="BOT_ERRORS_FLEET_SENTINEL_Q_HOST=$q_host_q"
 ExecStart=$py_q $script_q --hosts $hosts_q --state-dir $sentinel_q
+Restart=on-failure
+RestartSec=60
 SyslogIdentifier=bot-errors-sentinel
 SERVICE
 
@@ -213,18 +276,50 @@ Unit=$UNIT.service
 [Install]
 WantedBy=timers.target
 TIMER
-  chmod 644 "$service" "$timer"
+  cat > "$watchdog_service" <<SERVICE
+[Unit]
+Description=BOT ERRORS Fleet Sentinel central heartbeat watchdog
+
+[Service]
+Type=oneshot
+WorkingDirectory=$REPO_ROOT
+EnvironmentFile=-%h/.config/whatsoup/bot-errors.env
+Environment="BOT_ERRORS_STATE_DIR=$state_q"
+Environment="BOT_ERRORS_WATCHDOG_CHECKS=fleet_sentinel"
+Environment="BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT=$sentinel_heartbeat_q"
+Environment="BOT_ERRORS_MAX_FLEET_SENTINEL_AGE=$watchdog_max_age_q"
+ExecStart=$py_q $watchdog_script_q --once --max-fleet-sentinel-age $watchdog_max_age_q
+SyslogIdentifier=bot-errors-sentinel-watchdog
+SERVICE
+
+  cat > "$watchdog_timer" <<TIMER
+[Unit]
+Description=Run BOT ERRORS Fleet Sentinel central heartbeat watchdog
+
+[Timer]
+OnActiveSec=1m
+OnUnitActiveSec=${WATCHDOG_INTERVAL_SECONDS}s
+AccuracySec=1m
+Persistent=true
+Unit=$WATCHDOG_UNIT.service
+
+[Install]
+WantedBy=timers.target
+TIMER
+  chmod 644 "$service" "$timer" "$watchdog_service" "$watchdog_timer"
   if [[ "$DRY_RUN" != "1" ]]; then
     command -v systemctl >/dev/null 2>&1 || fail_config "systemctl unavailable"
     systemctl --user daemon-reload
     systemctl --user enable --now "$UNIT.timer"
+    systemctl --user enable --now "$WATCHDOG_UNIT.timer"
   fi
-  echo "installed $UNIT platform=systemd dry_run=$DRY_RUN interval=${INTERVAL_SECONDS}s path=$timer"
+  echo "installed $UNIT $WATCHDOG_UNIT platform=systemd dry_run=$DRY_RUN interval=${INTERVAL_SECONDS}s watchdog_interval=${WATCHDOG_INTERVAL_SECONDS}s path=$timer watchdog_path=$watchdog_timer"
 }
 
 main() {
   require_interval
   require_file "$SENTINEL_SCRIPT" "BOT ERRORS sentinel file"
+  require_file "$WATCHDOG_SCRIPT" "BOT ERRORS heartbeat watchdog file"
   require_file "$HOSTS_PATH" "BOT ERRORS sentinel hosts file"
   local platform
   platform=$(resolve_platform)

@@ -74,10 +74,12 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "166800cab559e33483c24fb976a8adeecbf58c1a8aea023acc27a596744f8f21",
+      "sha256": "2ce9ac42e3a7087b0ec8474fa39a99fd5d9674e394d4e7c0a7afc7f6f8647ea5",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
+        "BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT",
         "critical_file_problem",
+        "fleet_sentinel_age",
         "q_loop:supervisor",
         "refusing to trust critical file",
         "redact_watchdog_text"
