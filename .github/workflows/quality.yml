@@ -173,6 +173,14 @@ jobs:
         continue-on-error: true
         run: npm run guard:repo:scan-history -- 100
 
+      # Console deps must be installed before the root test suite: the design
+      # lint gate (tests/console/design-lints.test.ts) builds an ESLint instance
+      # from console/eslint.config.shadow.mjs, which resolves its plugins from
+      # console/node_modules. Installing after the suite left it absent → the
+      # config load threw and the whole 115-case gate failed.
+      - name: Install console dependencies
+        run: npm --prefix console ci
+
       - name: Test suite
         run: npm test -- --pool=forks
 
@@ -181,9 +189,6 @@ jobs:
 
       - name: Failure-scenario drills
         run: npm run test:drills
-
-      - name: Install console dependencies
-        run: npm --prefix console ci
 
       - name: Console lint
         run: npm --prefix console run lint
