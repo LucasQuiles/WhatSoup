@@ -374,7 +374,10 @@ def env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
-    return int(float(raw))
+    try:
+        return int(float(raw))
+    except ValueError:
+        return default
 
 
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:

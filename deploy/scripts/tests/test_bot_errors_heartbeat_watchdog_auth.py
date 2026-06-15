@@ -245,6 +245,28 @@ def test_parse_args_falls_back_for_bad_max_age_env(monkeypatch):
     assert args.max_daily_health_age == 25 * 60 * 60
 
 
+def test_queue_backlog_threshold_env_falls_back_for_bad_values(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    _private_state(monkeypatch, mod, tmp_path)
+    for name in (
+        "BOT_ERRORS_OUTBOX_CRITICAL_COUNT",
+        "BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_COUNT",
+        "BOT_ERRORS_OUTBOX_CRITICAL_OLDEST_SECONDS",
+        "BOT_ERRORS_WATCHDOG_OUTBOX_CRITICAL_OLDEST_SECONDS",
+        "BOT_ERRORS_PROCESSING_CRITICAL_COUNT",
+        "BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_COUNT",
+        "BOT_ERRORS_PROCESSING_CRITICAL_OLDEST_SECONDS",
+        "BOT_ERRORS_WATCHDOG_PROCESSING_CRITICAL_OLDEST_SECONDS",
+        "BOT_ERRORS_WRITEFAIL_CRITICAL_COUNT",
+        "BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_COUNT",
+        "BOT_ERRORS_WRITEFAIL_CRITICAL_OLDEST_SECONDS",
+        "BOT_ERRORS_WATCHDOG_WRITEFAIL_CRITICAL_OLDEST_SECONDS",
+    ):
+        monkeypatch.setenv(name, "bad")
+
+    assert mod.queue_backlog_problems() == {}
+
+
 def test_local_instance_health_flags_terminal_auth_class_as_physical_intervention(
     tmp_path: Path,
     monkeypatch,
