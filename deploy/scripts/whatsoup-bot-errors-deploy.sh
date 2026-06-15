@@ -8,8 +8,9 @@
 #   pin:      whatsoup-bot-errors-deploy.sh pin      <manifest.json> <ledger.json> <head_sha>
 #
 # Fail-closed: any sha mismatch or smoke failure exits non-zero. Backup is taken BEFORE
-# any write so rollback is always possible. Does NOT touch git, restart services, or
-# write outside <root>. Restart of com.bot-errors.* units is a separate, explicit step.
+# any write so rollback is always possible. Does NOT touch git or restart services.
+# Writes are confined to <root> plus a sibling rollback-backup directory. Restart of
+# com.bot-errors.* units is a separate, explicit step.
 set -euo pipefail
 
 MODE="${1:?usage: deploy|verify|rollback ...}"
@@ -77,7 +78,10 @@ case "$MODE" in
   deploy)
     STAGING="${3:?missing <staging-dir>}"
     STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-    BKDIR="$ROOT/.bot-errors-deploy-backup-$STAMP"
+    ROOT_PARENT="$(cd "$(dirname "$ROOT")" && pwd -P)" || { echo "FATAL: root parent unavailable"; exit 3; }
+    ROOT_BASE="$(basename "$ROOT")"
+    SAFE_ROOT_BASE="${ROOT_BASE//[^A-Za-z0-9._-]/_}"
+    BKDIR="$ROOT_PARENT/.bot-errors-deploy-backup-${SAFE_ROOT_BASE}-$STAMP-$$"
     echo "ROOT=$ROOT"; echo "STAGING=$STAGING"; echo "BACKUP=$BKDIR"
     # 0) sanity: staging is complete + matches expected shas (don't deploy a bad packet)
     echo "== staging integrity =="; do_verify "$STAGING" || { echo "FATAL: staging incomplete/mismatched"; exit 3; }
