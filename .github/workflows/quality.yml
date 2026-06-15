@@ -22,6 +22,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Free runner disk before the heavy steps. The full-history checkout +
+      # npm ci (root + console) + Vite build + Playwright chromium overflow the
+      # default ubuntu-latest free space (ENOSPC). Removing unused preinstalled
+      # toolchains (none used by this JS/Python pipeline) reclaims ~20+ GB.
+      # Runs before Setup Node so it can never touch the node toolcache.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h /
+
       # Local dev uses .nvmrc (single version for fast iteration);
       # CI runs a matrix to validate the engines range declared in package.json.
       - name: Setup Node ${{ matrix.node }}

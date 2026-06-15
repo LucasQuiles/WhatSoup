@@ -134,9 +134,21 @@ describe('ActiveHoursHeatmap — 30d with byDate', () => {
     );
 
     expect(container.textContent).toContain('Active Hours (3 days)');
-    const cells = container.querySelectorAll('div[title]');
+    // Count grid cells by their cell-specific class. The date-header labels also
+    // carry a `title` (truncation-resilience disclosure, commit ebe3a7c7), so a
+    // bare `div[title]` query over-counts; the cells are the heatmap-cell divs.
+    const cells = container.querySelectorAll('div.rounded-sm.h-\\[var\\(--heatmap-cell\\)\\]');
     // 3 dates x 24 hours = 72 cells
     expect(cells.length).toBe(72);
+
+    // Regression guard: the labeled date headers must expose their full date via
+    // `title` so a truncated label stays disclosed (no-unsafe-truncation guard).
+    // With 3 dates labelEvery=1, so all 3 header labels carry a title.
+    const headerTitles = Array.from(
+      container.querySelectorAll('div.truncate[title]'),
+    ).map((el) => el.getAttribute('title'));
+    expect(headerTitles).toHaveLength(3);
+    expect(headerTitles.every((t) => t && t.length > 0)).toBe(true);
 
     // Hour title incorporates locale-formatted date — match by suffix
     const hot = Array.from(cells).find((el) =>

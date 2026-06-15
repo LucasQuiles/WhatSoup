@@ -85,6 +85,20 @@ function deferred<T = void>() {
   return { promise, resolve, reject }
 }
 
+/**
+ * A filter pill's accessible name is its LABEL only — the C2.2 Pill primitive
+ * renders the count in an aria-hidden badge exposed via aria-describedby, keeping
+ * the count out of the accessible name (stable for muscle memory and tests).
+ * Query by label; read the count from the described-by badge.
+ */
+function filterPill(label: string): HTMLElement {
+  return screen.getByRole('button', { name: label })
+}
+function filterPillCount(label: string): string | null {
+  const id = filterPill(label).getAttribute('aria-describedby')
+  return id ? document.getElementById(id)?.textContent ?? null : null
+}
+
 describe('ActivityFeed filters and snapshots', () => {
   it('shows per-filter counts and filters by feed detail type', () => {
     renderFeed([
@@ -125,32 +139,34 @@ describe('ActivityFeed filters and snapshots', () => {
       }),
     ])
 
-    expect(screen.getByRole('button', { name: /^all\s*6$/ })).toBeDefined()
-    expect(screen.getByRole('button', { name: /^msgs\s*1$/ })).toBeDefined()
-    expect(screen.getByRole('button', { name: /^conn\s*1$/ })).toBeDefined()
-    expect(screen.getByRole('button', { name: /^errors\s*3$/ })).toBeDefined()
-    expect(screen.getByRole('button', { name: /^health\s*1$/ })).toBeDefined()
-    expect(screen.getByRole('button', { name: /^sessions\s*1$/ })).toBeDefined()
+    // Each filter pill is present (queried by label) and exposes its per-filter
+    // count through the aria-describedby badge.
+    expect(filterPillCount('all')).toBe('6')
+    expect(filterPillCount('msgs')).toBe('1')
+    expect(filterPillCount('conn')).toBe('1')
+    expect(filterPillCount('errors')).toBe('3')
+    expect(filterPillCount('health')).toBe('1')
+    expect(filterPillCount('sessions')).toBe('1')
 
-    fireEvent.click(screen.getByRole('button', { name: /^msgs\s*1$/ }))
+    fireEvent.click(filterPill('msgs'))
     expect(screen.getByText('hello')).toBeDefined()
     expect(screen.queryByText('tool exploded')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /^conn\s*1$/ }))
+    fireEvent.click(filterPill('conn'))
     expect(screen.getByText('connection lost')).toBeDefined()
     expect(screen.queryByText('Alex')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /^errors\s*3$/ }))
+    fireEvent.click(filterPill('errors'))
     expect(screen.getByText('connection lost')).toBeDefined()
     expect(screen.getByText('tool exploded')).toBeDefined()
     expect(screen.getByText('logged out')).toBeDefined()
     expect(screen.queryByText('resume')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /^health\s*1$/ }))
+    fireEvent.click(filterPill('health'))
     expect(screen.getByText('logged out')).toBeDefined()
     expect(screen.queryByText('connection lost')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /^sessions\s*1$/ }))
+    fireEvent.click(filterPill('sessions'))
     expect(screen.getByText('resume')).toBeDefined()
     expect(screen.queryByText('connection lost')).toBeNull()
   })

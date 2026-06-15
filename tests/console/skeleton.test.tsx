@@ -55,9 +55,12 @@ describe('TableSkeleton', () => {
 
   it('varies placeholder line lengths so the table state scans as loading data', () => {
     const { container } = render(<TableSkeleton />)
+    // Line placeholders carry token-based widths (calc(var(--config-key-col) …),
+    // migrated off raw px). Collect inline widths regardless of unit and assert
+    // they vary, so the table reads as loading rows of differing length.
     const lineWidths = shimmerPlaceholders(container)
       .map(placeholder => placeholder.style.width)
-      .filter(width => width.endsWith('px'))
+      .filter(Boolean)
 
     expect(lineWidths.length).toBeGreaterThan(0)
     expect(new Set(lineWidths).size).toBeGreaterThan(1)
