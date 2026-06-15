@@ -304,6 +304,7 @@ describe('Inbox — search row uses shared SearchInput (B4 adoption)', () => {
 
     const search = screen.getByLabelText('Search messages in this conversation') as HTMLInputElement
     expect(search.classList.contains('c-input-search')).toBe(true)
+    expect(search.getAttribute('data-search-shortcut-target')).toBe('true')
   })
 
   it('no raw c-input without SearchInput wrapper renders in the document', () => {

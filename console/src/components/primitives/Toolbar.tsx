@@ -131,6 +131,8 @@ export interface ToolbarSearchProps {
   placeholder?: string;
   /** Additional class names. */
   className?: string;
+  /** Marks this input as the global search shortcut target. */
+  shortcutTarget?: boolean;
 }
 
 export const ToolbarSearch: FC<ToolbarSearchProps> = ({
@@ -139,6 +141,7 @@ export const ToolbarSearch: FC<ToolbarSearchProps> = ({
   onChange,
   placeholder = 'Search…',
   className,
+  shortcutTarget = false,
 }) => {
   const inputClass = ['soup-toolbar-search', className].filter(Boolean).join(' ');
   return (
@@ -151,6 +154,7 @@ export const ToolbarSearch: FC<ToolbarSearchProps> = ({
         onChange={onChange}
         placeholder={placeholder}
         aria-label={label}
+        data-search-shortcut-target={shortcutTarget ? 'true' : undefined}
       />
     </label>
   );

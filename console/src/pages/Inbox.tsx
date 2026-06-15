@@ -273,7 +273,7 @@ export default function Inbox() {
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
                 placeholder="Search this conversation..."
-                aria-label="Search messages in this conversation"
+                aria-label="Search messages in this conversation" shortcutTarget
                 endAdornment={
                   isSearchBusy ? (
                     <Loader2

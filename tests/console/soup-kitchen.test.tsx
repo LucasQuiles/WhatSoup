@@ -789,7 +789,9 @@ describe('SoupKitchen filter behavior', () => {
   it('search input filters by name case-insensitively', () => {
     renderPage({ lines });
     // C2.3: placeholder is still "Search lines..." (ToolbarSearch preserves it)
-    fireEvent.change(screen.getByPlaceholderText('Search lines...'), { target: { value: 'ALPHA' } });
+    const search = screen.getByPlaceholderText('Search lines...');
+    expect(search.getAttribute('data-search-shortcut-target')).toBe('true');
+    fireEvent.change(search, { target: { value: 'ALPHA' } });
     expect(visibleTableLineNames(lines)).toEqual(['alpha']);
   });
 

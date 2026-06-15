@@ -766,7 +766,7 @@ const SoupKitchen: FC = () => {
               label="Search lines"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search lines..."
+              placeholder="Search lines..." shortcutTarget
             />
 
             <Button

@@ -268,6 +268,16 @@ describe('ToolbarSearch — accessible input', () => {
     // The label element wraps the input; the label text is in a visually-hidden span.
     expect(screen.getByText('Search lines')).toBeDefined();
   });
+
+  it('marks the search shortcut target when opted in', () => {
+    render(
+      <Toolbar aria-label="test">
+        <ToolbarSearch label="Search lines" value="" onChange={() => {}} shortcutTarget />
+      </Toolbar>,
+    );
+
+    expect(screen.getByRole('searchbox').getAttribute('data-search-shortcut-target')).toBe('true');
+  });
 });
 
 // ---------------------------------------------------------------------------

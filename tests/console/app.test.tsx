@@ -52,7 +52,16 @@ vi.mock('../../console/src/hooks/use-websocket', () => ({
 
 // Stub heavy lazy pages — prevents real chunk loading in jsdom
 vi.mock('../../console/src/pages/SoupKitchen', () => ({
-  default: () => createElement('div', { 'data-testid': 'page-soup-kitchen' }, 'SoupKitchen'),
+  default: () => createElement(
+    'div',
+    { 'data-testid': 'page-soup-kitchen' },
+    'SoupKitchen',
+    createElement('input', {
+      'aria-label': 'Stub global search',
+      'data-search-shortcut-target': 'true',
+      defaultValue: 'needle',
+    }),
+  ),
 }));
 vi.mock('../../console/src/pages/LineDetail', () => ({
   default: () => createElement('div', { 'data-testid': 'page-line-detail' }, 'LineDetail'),
@@ -258,6 +267,16 @@ describe('App — KeyboardShortcutsHelp modal', () => {
       const dialog = screen.getByRole('dialog');
       expect(dialog.getAttribute('aria-modal')).toBe('true');
     });
+  });
+
+  it('pressing Cmd+K focuses the mounted search shortcut target', async () => {
+    await act(async () => { renderApp('/'); });
+    const search = await screen.findByLabelText('Stub global search');
+
+    expect(document.activeElement).not.toBe(search);
+    await act(async () => { fireEvent.keyDown(document, { key: 'k', metaKey: true }); });
+
+    expect(document.activeElement).toBe(search);
   });
 
   it('clicking the backdrop closes the dialog (onClose prop)', async () => {

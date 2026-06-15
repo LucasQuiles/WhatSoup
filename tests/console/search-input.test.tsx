@@ -17,6 +17,7 @@ describe('SearchInput', () => {
         placeholder="Search"
         onChange={handleChange}
         endAdornment={<button type="button">Clear</button>}
+        shortcutTarget
       />,
     )
 
@@ -24,6 +25,7 @@ describe('SearchInput', () => {
     expect(input.getAttribute('type')).toBe('text')
     expect(input.className).toContain('c-input-search')
     expect(input.getAttribute('placeholder')).toBe('Search')
+    expect(input.getAttribute('data-search-shortcut-target')).toBe('true')
     expect(screen.getByRole('button', { name: 'Clear' })).toBeTruthy()
 
     await user.type(input, 'abc')

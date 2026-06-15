@@ -51,9 +51,14 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
   // Keyboard shortcuts help modal
   const [showShortcuts, setShowShortcuts] = useState(false)
   const toggleShortcuts = useCallback(() => setShowShortcuts(p => !p), [])
+  const focusSearch = useCallback(() => {
+    const target = document.querySelector<HTMLInputElement>('[data-search-shortcut-target="true"]:not(:disabled)')
+    target?.focus()
+    target?.select()
+  }, [])
 
   // Global keyboard shortcuts (Cmd+K search, 1/2/3 page nav, ? help)
-  useKeyboardShortcuts({ onHelp: toggleShortcuts })
+  useKeyboardShortcuts({ onHelp: toggleShortcuts, onSearch: focusSearch })
 
   return (
     <MotionConfig reducedMotion="user">
