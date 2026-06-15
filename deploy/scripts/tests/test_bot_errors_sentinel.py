@@ -357,6 +357,24 @@ def test_fresh_older_heartbeat_is_not_clock_skew(tmp_path: Path):
     assert host["heartbeat"]["clockSkewSeconds"] == 0
 
 
+def test_future_heartbeat_mtime_beyond_skew_budget_escalates(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-future-hb.json", healthy=True, mtime=1400.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-future", "heartbeatPath": str(hb)}])
+
+    result = _mod.run_once(
+        _config(tmp_path, hosts, max_clock_skew_seconds=300),
+        _deps(1000.0, {"host-future": {"reachable": True, "healthy": True, "class": "healthy"}}),
+    )
+
+    host = result["hosts"][0]
+    assert host["class"] == "clock_skew"
+    assert host["twoSignals"] is True
+    assert host["action"] == "escalate"
+    assert host["heartbeat"]["status"] == "clock_skew"
+    assert host["heartbeat"]["futureBySeconds"] == 400
+    assert host["heartbeat"]["maxClockSkewSeconds"] == 300
+
+
 def test_safe_runtime_drift_becomes_tier1_heal_candidate(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-d-hb.json", healthy=False, klass="drift", mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-d", "heartbeatPath": str(hb)}])

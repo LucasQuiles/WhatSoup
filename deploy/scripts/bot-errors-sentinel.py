@@ -411,14 +411,21 @@ def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int, max_cl
     payload = optional_json_object(path)
     if payload is None:
         return {"configured": True, "signal": "stale", "status": "invalid_json", "path": str(path)}
-    age = max(0, int(now - stat.st_mtime))
+    raw_age = int(now - stat.st_mtime)
+    future_by_seconds = abs(raw_age) if raw_age < 0 else 0
+    age = max(0, raw_age)
     fresh = age <= max_age_seconds
     healthy = payload.get("healthy") is True
     status = "fresh" if fresh else "stale"
     heartbeat_class = str(payload.get("class") or "unknown")
     checked_at_epoch = parse_iso_epoch(payload.get("checkedAt"))
     clock_skew_seconds = int(checked_at_epoch - stat.st_mtime) if checked_at_epoch is not None else None
-    if clock_skew_seconds is not None and abs(clock_skew_seconds) > max_clock_skew_seconds:
+    if future_by_seconds > max_clock_skew_seconds:
+        status = "clock_skew"
+        signal = "unhealthy"
+        healthy = False
+        heartbeat_class = "clock_skew"
+    elif clock_skew_seconds is not None and abs(clock_skew_seconds) > max_clock_skew_seconds:
         status = "clock_skew"
         signal = "unhealthy"
         healthy = False
@@ -443,6 +450,9 @@ def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int, max_cl
     }
     if clock_skew_seconds is not None:
         result["clockSkewSeconds"] = clock_skew_seconds
+        result["maxClockSkewSeconds"] = max_clock_skew_seconds
+    if future_by_seconds:
+        result["futureBySeconds"] = future_by_seconds
         result["maxClockSkewSeconds"] = max_clock_skew_seconds
     return result
 
@@ -759,6 +769,7 @@ def compact_signal(payload: dict) -> dict:
         "ageSeconds",
         "maxAgeSeconds",
         "clockSkewSeconds",
+        "futureBySeconds",
         "maxClockSkewSeconds",
         "verifyRc",
         "headSha",
