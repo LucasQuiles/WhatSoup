@@ -10,10 +10,21 @@
 // safeStringEqual MUST return false on every malformed-input path — never
 // throw.
 
-import { describe, it, expect } from 'vitest';
-import { safeStringEqual } from '../../src/fleet/safe-compare.ts';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { safeStringEqual as fleetSafeStringEqual } from '../../src/fleet/safe-compare.ts';
+import { safeStringEqual as libSafeStringEqual } from '../../src/lib/safe-compare.ts';
+
+const safeStringEqual = libSafeStringEqual;
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('safeStringEqual', () => {
+  it('keeps the fleet compatibility export pointed at the lib SSOT', () => {
+    expect(fleetSafeStringEqual).toBe(libSafeStringEqual);
+  });
+
   it('returns true for byte-identical ASCII strings', () => {
     expect(safeStringEqual('hello', 'hello')).toBe(true);
   });
@@ -31,6 +42,12 @@ describe('safeStringEqual', () => {
     expect(safeStringEqual('日本語', '日本語')).toBe(true);
   });
 
+  it('accepts well-formed surrogate pairs before byte comparison', () => {
+    const smile = '\uD83D\uDE00';
+    expect(safeStringEqual(`token-${smile}`, `token-${smile}`)).toBe(true);
+    expect(safeStringEqual(smile, '\uD83D\uDE01')).toBe(false);
+  });
+
   it("returns false (does not throw) for equal-char-length but unequal-byte-length multibyte vs ASCII", () => {
     // Pre-fix repro: 'é' is 2 bytes UTF-8, 'a' is 1 byte. Both strings have
     // .length === 10 but byteLength 20 vs 10. timingSafeEqual would throw
@@ -42,6 +59,8 @@ describe('safeStringEqual', () => {
   it('returns false for lone-surrogate inputs without throwing', () => {
     expect(() => safeStringEqual('\uD800', 'a')).not.toThrow();
     expect(safeStringEqual('\uD800', 'a')).toBe(false);
+    expect(safeStringEqual('\uD800a', 'aa')).toBe(false);
+    expect(safeStringEqual('\uDC00', 'a')).toBe(false);
     expect(safeStringEqual('\uD800', '\uD800')).toBe(false);
     expect(safeStringEqual('\uD800', '\uFFFD')).toBe(false);
     expect(() => safeStringEqual('\uD800', '\uD800')).not.toThrow();
@@ -60,5 +79,14 @@ describe('safeStringEqual', () => {
     // Both empty: nothing to compare; reject so callers can't accept a missing
     // credential by passing '' on both sides.
     expect(safeStringEqual('', '')).toBe(false);
+  });
+
+  it('returns false if platform buffer conversion throws', () => {
+    const bufferFrom = vi.spyOn(Buffer, 'from').mockImplementation(() => {
+      throw new Error('buffer conversion unavailable');
+    });
+
+    expect(safeStringEqual('hello', 'hello')).toBe(false);
+    expect(bufferFrom).toHaveBeenCalled();
   });
 });
