@@ -177,15 +177,15 @@ Every item re-verifies at push time; snapshot status is advisory.
 
 1. **`verify:push:branch` green at push time.** Status at this readiness
    snapshot: **GREEN** — a full run on 2026-06-12 against HEAD `bf3a9a41`
-   exited 0: all eight blocking design-regression checks (1, 2, 6, 8, 10, 13,
-   14, 16) PASS, theme parity 101 tokens in both scopes, shadow ratchet at
-   baseline total 511 with three buckets flagged tightenable, guard chain and
-   scripts test subset (116 tests) green. Caveats: the run executed on a tree
-   carrying the in-flight lane's uncommitted files, and the script's test leg is
-   the scripts subset — the full console suite runs under the per-slice battery
-   and `verify:release` (last full-suite figure on record: 2,073 passing at
-   B2/B3-wave-1 acceptance, with later slices adding tests). Re-run on the
-   clean, current tree at push time.
+   exited 0 under the then-live gate. Current design-enforcement refresh
+   (2026-06-14): `verify:console-design` exited 0 with design-regression 20
+   checks; all twelve blocking design-regression checks (1, 2, 6, 8, 10, 12,
+   13, 14, 15, 16, 17, 19) PASS; theme parity 122 tokens;
+   lint-shadow-baseline.json total 352; burndown 661 total / 596 blocking; and
+   `test:design-guards` 14 files / 155 tests. Caveats: the historical snapshot
+   run executed on a tree carrying the in-flight lane's uncommitted files, and
+   the push gate still requires a clean, current `verify:push:branch` run on the
+   candidate commit. Re-run on the clean, current tree at push time.
 2. **Commit-author email resolved at squash.** Per `program-directives.md` §2
    and the D1.3/D1.4 disposition, author identity is controlled at the squash
    step using the merge tool's author-email control. The address itself stays

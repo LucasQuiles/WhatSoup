@@ -15,6 +15,7 @@ export type DocDriftKind =
   | 'theme-parity-token-count'
   | 'shadow-baseline-total'
   | 'design-regression-check-count'
+  | 'design-regression-blocking-check-count'
   | 'design-regression-blocking-check'
   | 'design-burndown-total'
   | 'design-burndown-blocking-count'
@@ -82,6 +83,7 @@ const defaultDocPaths = [
   'docs/tools.md',
   'docs/configuration.md',
   'docs/design-system/04-enforcement/lint-plan.md',
+  'docs/design-system/05-cutover/push-gate-readiness.md',
   'docs/design-system/06-implementation/qa-hardening.md',
   'docs/design-system/06-implementation/conformance-manifest.md',
 ];
@@ -126,6 +128,8 @@ const themeParityTokenCountPattern =
   /\b(?:theme parity|check-theme-parity\.mjs)\b[^\n]*?\b(\d+)\s*(?:tokens?\b)?/i;
 const designRegressionCheckCountPattern =
   /\bdesign-regression\b[^\n]*?\b(\d+)\s+checks?\b/i;
+const designRegressionNamedBlockingSetPattern =
+  /\ball\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+blocking\s+design-regression\s+checks?\s*\(([^)]*)\)/i;
 const designRegressionBlockingSetPattern =
   /\bdesign-regression\b[^\n]*?\bblocking set\s+`([^`]+)`/i;
 const designRegressionExitOnFailPattern =
@@ -345,6 +349,36 @@ function integerSetFromText(text: string, label: string): number[] {
     throw new Error(`ERROR(schema:${label}): no numeric checks found`);
   }
   return [...new Set(values)].sort((left, right) => left - right);
+}
+
+function integerFromWordOrDigits(text: string, label: string): number {
+  const digitValue = Number(text);
+  if (Number.isInteger(digitValue)) return digitValue;
+  const wordValues: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+    eleven: 11,
+    twelve: 12,
+    thirteen: 13,
+    fourteen: 14,
+    fifteen: 15,
+    sixteen: 16,
+    seventeen: 17,
+    eighteen: 18,
+    nineteen: 19,
+    twenty: 20,
+  };
+  const wordValue = wordValues[text.toLowerCase()];
+  if (wordValue) return wordValue;
+  throw new Error(`ERROR(schema:${label}): unsupported numeric word "${text}"`);
 }
 
 export function findDesignRegressionBlockingChecks(cwd: string = process.cwd()): number[] {
@@ -771,6 +805,51 @@ function isCurrentDesignEnforcementClaim(filePath: string, lineText: string): bo
     || currentDesignEnforcementContextPattern.test(lineText);
 }
 
+function wrappedDesignClaim(lines: string[], index: number): string {
+  const lineText = lines[index] ?? '';
+  if (!/\b(?:design-regression|EXIT_ON_FAIL)\b/i.test(lineText)) return lineText;
+  return [lineText, lines[index + 1] ?? '', lines[index + 2] ?? '']
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function addDesignRegressionBlockingSetIssues(
+  issues: DocDriftIssue[],
+  filePath: string,
+  line: number,
+  claimed: number[],
+  actual: number[],
+  lineText: string,
+): void {
+  const claimedSet = new Set(claimed);
+  const actualSet = new Set(actual);
+  for (const actualCheck of actual) {
+    if (claimedSet.has(actualCheck)) continue;
+    issues.push({
+      filePath,
+      line,
+      kind: 'design-regression-blocking-check',
+      claimed: 0,
+      actual: actualCheck,
+      text: lineText,
+      expected: 'design-regression blocking check from console/scripts/design-regression.sh EXIT_ON_FAIL',
+    });
+  }
+  for (const claimedCheck of claimed) {
+    if (actualSet.has(claimedCheck)) continue;
+    issues.push({
+      filePath,
+      line,
+      kind: 'design-regression-blocking-check',
+      claimed: claimedCheck,
+      actual: 0,
+      text: lineText,
+      expected: 'no undocumented design-regression blocking check',
+    });
+  }
+}
+
 function checkDesignEnforcementClaims(
   filePath: string,
   lines: string[],
@@ -784,11 +863,12 @@ function checkDesignEnforcementClaims(
 ): DocDriftIssue[] {
   const issues: DocDriftIssue[] = [];
 
-  lines.forEach((lineText, index) => {
-    if (!isCurrentDesignEnforcementClaim(filePath, lineText)) return;
+  lines.forEach((_, index) => {
+    const claimText = wrappedDesignClaim(lines, index);
+    if (!isCurrentDesignEnforcementClaim(filePath, claimText)) return;
 
     const line = index + 1;
-    const brandRegressionMatch = lineText.match(brandRegressionLintCountPattern);
+    const brandRegressionMatch = claimText.match(brandRegressionLintCountPattern);
     if (brandRegressionMatch) {
       addTypedCountIssue(
         issues,
@@ -797,12 +877,12 @@ function checkDesignEnforcementClaims(
         line,
         Number(brandRegressionMatch[1]),
         shadowBaseline.byRule['soup/no-brand-regression'] ?? 0,
-        lineText,
+        claimText,
         'soup/no-brand-regression count from console/lint-shadow-baseline.json',
       );
     }
 
-    const soupKitchenMatch = lineText.match(soupKitchenLabelCountPattern);
+    const soupKitchenMatch = claimText.match(soupKitchenLabelCountPattern);
     if (soupKitchenMatch) {
       addTypedCountIssue(
         issues,
@@ -811,12 +891,12 @@ function checkDesignEnforcementClaims(
         line,
         Number(soupKitchenMatch[1]),
         soupKitchenLabelCount,
-        lineText,
+        claimText,
         'Soup Kitchen label count from console/src and docs/console-guide.md',
       );
     }
 
-    const themeParityMatch = lineText.match(themeParityTokenCountPattern);
+    const themeParityMatch = claimText.match(themeParityTokenCountPattern);
     if (themeParityMatch) {
       addTypedCountIssue(
         issues,
@@ -825,12 +905,12 @@ function checkDesignEnforcementClaims(
         line,
         Number(themeParityMatch[1]),
         themeParityTokenCount,
-        lineText,
+        claimText,
         'theme parity token count from console/src/styles/tokens.semantic.css',
       );
     }
 
-    const shadowBaselineMatch = lineText.match(shadowBaselineTotalPattern);
+    const shadowBaselineMatch = claimText.match(shadowBaselineTotalPattern);
     if (shadowBaselineMatch) {
       addTypedCountIssue(
         issues,
@@ -839,12 +919,12 @@ function checkDesignEnforcementClaims(
         line,
         Number(shadowBaselineMatch[1]),
         shadowBaseline.total,
-        lineText,
+        claimText,
         'shadow lint total from console/lint-shadow-baseline.json',
       );
     }
 
-    const designRegressionMatch = lineText.match(designRegressionCheckCountPattern);
+    const designRegressionMatch = claimText.match(designRegressionCheckCountPattern);
     if (designRegressionMatch) {
       addTypedCountIssue(
         issues,
@@ -853,13 +933,43 @@ function checkDesignEnforcementClaims(
         line,
         Number(designRegressionMatch[1]),
         designRegressionCheckCount,
-        lineText,
+        claimText,
         'design-regression check count from console/scripts/design-regression.sh',
       );
     }
 
-    const designRegressionBlockingSetMatch = lineText.match(designRegressionBlockingSetPattern);
-    const designRegressionExitOnFailMatch = lineText.match(designRegressionExitOnFailPattern);
+    const namedBlockingSetMatch = claimText.match(designRegressionNamedBlockingSetPattern);
+    if (namedBlockingSetMatch) {
+      const claimedCount = integerFromWordOrDigits(
+        namedBlockingSetMatch[1] ?? '',
+        `${filePath}:${line} design-regression blocking check count`,
+      );
+      addTypedCountIssue(
+        issues,
+        'design-regression-blocking-check-count',
+        filePath,
+        line,
+        claimedCount,
+        designRegressionBlockingChecks.length,
+        claimText,
+        'design-regression blocking check count from console/scripts/design-regression.sh EXIT_ON_FAIL',
+      );
+      const claimed = integerSetFromText(
+        namedBlockingSetMatch[2] ?? '',
+        `${filePath}:${line} design-regression named blocking set`,
+      );
+      addDesignRegressionBlockingSetIssues(
+        issues,
+        filePath,
+        line,
+        claimed,
+        designRegressionBlockingChecks,
+        claimText,
+      );
+    }
+
+    const designRegressionBlockingSetMatch = claimText.match(designRegressionBlockingSetPattern);
+    const designRegressionExitOnFailMatch = claimText.match(designRegressionExitOnFailPattern);
     const designRegressionBlockingSetText =
       designRegressionBlockingSetMatch?.[1] ?? designRegressionExitOnFailMatch?.[1];
     if (designRegressionBlockingSetText) {
@@ -867,35 +977,17 @@ function checkDesignEnforcementClaims(
         designRegressionBlockingSetText,
         `${filePath}:${line} design-regression blocking set`,
       );
-      const claimedSet = new Set(claimed);
-      const actualSet = new Set(designRegressionBlockingChecks);
-      for (const actual of designRegressionBlockingChecks) {
-        if (claimedSet.has(actual)) continue;
-        issues.push({
-          filePath,
-          line,
-          kind: 'design-regression-blocking-check',
-          claimed: 0,
-          actual,
-          text: lineText,
-          expected: 'design-regression blocking check from console/scripts/design-regression.sh EXIT_ON_FAIL',
-        });
-      }
-      for (const claimedCheck of claimed) {
-        if (actualSet.has(claimedCheck)) continue;
-        issues.push({
-          filePath,
-          line,
-          kind: 'design-regression-blocking-check',
-          claimed: claimedCheck,
-          actual: 0,
-          text: lineText,
-          expected: 'no undocumented design-regression blocking check',
-        });
-      }
+      addDesignRegressionBlockingSetIssues(
+        issues,
+        filePath,
+        line,
+        claimed,
+        designRegressionBlockingChecks,
+        claimText,
+      );
     }
 
-    const designBurndownMatch = lineText.match(designBurndownSummaryPattern);
+    const designBurndownMatch = claimText.match(designBurndownSummaryPattern);
     if (designBurndownMatch) {
       addTypedCountIssue(
         issues,
@@ -904,7 +996,7 @@ function checkDesignEnforcementClaims(
         line,
         Number(designBurndownMatch[1]),
         designBurndownSummary.total,
-        lineText,
+        claimText,
         'design burndown total from console/design-burndown-queue.json',
       );
       addTypedCountIssue(
@@ -914,12 +1006,12 @@ function checkDesignEnforcementClaims(
         line,
         Number(designBurndownMatch[2]),
         designBurndownSummary.blocking,
-        lineText,
+        claimText,
         'design burndown blocking count from console/design-burndown-queue.json',
       );
     }
 
-    const designGuardTestMatch = lineText.match(designGuardTestInventoryPattern);
+    const designGuardTestMatch = claimText.match(designGuardTestInventoryPattern);
     if (designGuardTestMatch) {
       addTypedCountIssue(
         issues,
@@ -928,7 +1020,7 @@ function checkDesignEnforcementClaims(
         line,
         Number(designGuardTestMatch[1]),
         designGuardTestInventory.fileCount,
-        lineText,
+        claimText,
         'test:design-guards file count from package.json',
       );
       addTypedCountIssue(
@@ -938,7 +1030,7 @@ function checkDesignEnforcementClaims(
         line,
         Number(designGuardTestMatch[2]),
         designGuardTestInventory.testCount,
-        lineText,
+        claimText,
         'test:design-guards test count from Vitest list',
       );
     }

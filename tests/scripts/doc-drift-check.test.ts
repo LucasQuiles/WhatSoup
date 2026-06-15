@@ -371,6 +371,50 @@ describe('doc drift check', () => {
     ]);
   });
 
+  it('flags stale named blocking design-regression check counts and wrapped sets', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+    const staleDoc = path.join(dir, 'current-design.md');
+    const firstCheck = currentDesignRegressionBlockingChecks[0] ?? 1;
+    const extraCheck = Math.max(currentDesignRegressionCheckCount, ...currentDesignRegressionBlockingChecks) + 1;
+    const firstLine = `The current design-enforcement run has all one blocking design-regression checks (${firstCheck},`;
+    const secondLine = `${extraCheck}) PASS.`;
+    const text = `${firstLine} ${secondLine}`;
+    writeFileSync(staleDoc, `${firstLine}\n${secondLine}\n`, 'utf8');
+
+    const issues = findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] });
+
+    expect(issues).toContainEqual({
+      actual: currentDesignRegressionBlockingChecks.length,
+      claimed: 1,
+      filePath: staleDoc,
+      kind: 'design-regression-blocking-check-count',
+      line: 1,
+      text,
+      expected: 'design-regression blocking check count from console/scripts/design-regression.sh EXIT_ON_FAIL',
+    });
+    for (const missingCheck of currentDesignRegressionBlockingChecks.filter((check) => check !== firstCheck)) {
+      expect(issues).toContainEqual({
+        actual: missingCheck,
+        claimed: 0,
+        filePath: staleDoc,
+        kind: 'design-regression-blocking-check',
+        line: 1,
+        text,
+        expected: 'design-regression blocking check from console/scripts/design-regression.sh EXIT_ON_FAIL',
+      });
+    }
+    expect(issues).toContainEqual({
+      actual: 0,
+      claimed: extraCheck,
+      filePath: staleDoc,
+      kind: 'design-regression-blocking-check',
+      line: 1,
+      text,
+      expected: 'no undocumented design-regression blocking check',
+    });
+    expect(issues).toHaveLength(currentDesignRegressionBlockingChecks.length + 1);
+  });
+
   it('flags stale documented EXIT_ON_FAIL design-regression blocking sets', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
     const staleDoc = path.join(dir, 'lint-plan.md');
