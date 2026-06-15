@@ -286,6 +286,25 @@ const noRawTable = makeStub('[stub] soup/no-raw-table — stale duplicate stub.'
     expect(failureKeys).toContain('IMPLEMENTED_RULE_STILL_STUB:no-raw-table');
   });
 
+  it('fails closed (EMPTY_RULE_SET) when the rule sources parse to zero rules', () => {
+    // Plugin/selectors/shadow present but emptied of rule definitions — the parse-broken
+    // / renamed-SSOT case. Before the guard this fell through to a vacuous PASS (no rules
+    // to iterate → no failures), silently certifying "fixture coverage" over nothing.
+    const paths = makeFixture({
+      plugin: 'export default { rules: {} }\n',
+      selectors: 'export const structuralSelectors = []\n',
+      shadowConfig: 'const shadowSyntaxRules = []\n',
+    });
+    const result = runScript(paths);
+    const output = parsedOutput(result);
+    const failureKeys = output.failures.map((failure) => `${failure.code}:${failure.rule}`);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.implemented_rules).toEqual([]);
+    expect(failureKeys).toContain('EMPTY_RULE_SET:(scan)');
+  });
+
   it('passes the live repository design-lint fixture contract', () => {
     const result = spawnSync('node', [SCRIPT], {
       encoding: 'utf8',

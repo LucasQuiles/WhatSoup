@@ -162,6 +162,19 @@ function buildReport(paths, files) {
     if (!hasLintPlanRow(files.lintPlan, rule)) failures.push({ code: 'MISSING_STUB_LINT_PLAN_ROW', rule });
   }
 
+  // Fail-closed on an empty scan. If the plugin/selector/shadow sources parsed zero
+  // rules of any kind, the SSOT files were emptied/renamed/parse-broken — the per-rule
+  // loops above ran zero times and the report would otherwise vacuously PASS with no
+  // coverage checked. (A genuinely empty rule set cannot occur in this repo; the live
+  // contract asserts >=10 implemented + >=4 stub.)
+  if (
+    implementedRules.length === 0 &&
+    stubRules.length === 0 &&
+    pluginRegisteredRules.length === 0
+  ) {
+    failures.push({ code: 'EMPTY_RULE_SET', rule: '(scan)' });
+  }
+
   return {
     error_probe_rules: errorProbeRules,
     failures,
