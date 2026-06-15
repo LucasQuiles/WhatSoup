@@ -322,6 +322,21 @@ def test_q_loop_non_finite_updated_at_is_reported_not_crashed(tmp_path: Path, mo
     )
 
 
+def test_q_loop_boolean_updated_at_is_reported_not_numeric(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    target = state / "q-loop" / "state.json"
+    monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE", str(target))
+    mod.atomic_write_json(target, {"updated_at": True})
+
+    problems = mod.collect_problems(_watchdog_args(), {"q_loop"})
+
+    assert problems["q_loop"] == (
+        "q-loop heartbeat stale: age_seconds=missing max=600 "
+        f"detail=missing numeric updated_at in {target}"
+    )
+
+
 def test_q_loop_supervisor_non_finite_unavailable_at_is_unknown_not_crashed(
     tmp_path: Path,
     monkeypatch,
@@ -336,6 +351,30 @@ def test_q_loop_supervisor_non_finite_unavailable_at_is_unknown_not_crashed(
             "updated_at": 1000,
             "phase": "q_unavailable_socket_timeout",
             "last_q_unavailable_at": float("inf"),
+            "last_q_unavailable_reason": "socket_timeout",
+        },
+    )
+
+    problems = mod.collect_problems(_watchdog_args(), {"q_loop"})
+
+    assert problems["q_loop:supervisor"] == (
+        "q-loop supervisor unavailable: phase=q_unavailable_socket_timeout "
+        "reason=socket_timeout age_seconds=unknown last_q_unavailable_at=unknown "
+        f"detail={target} updated_at=1000"
+    )
+
+
+def test_q_loop_supervisor_boolean_unavailable_at_is_unknown(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    target = state / "q-loop" / "state.json"
+    monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE", str(target))
+    mod.atomic_write_json(
+        target,
+        {
+            "updated_at": 1000,
+            "phase": "q_unavailable_socket_timeout",
+            "last_q_unavailable_at": True,
             "last_q_unavailable_reason": "socket_timeout",
         },
     )

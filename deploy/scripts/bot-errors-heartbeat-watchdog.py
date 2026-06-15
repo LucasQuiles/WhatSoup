@@ -83,7 +83,7 @@ def now_iso(ts: int | None = None) -> str:
 
 
 def finite_epoch(value: Any) -> int | None:
-    if not isinstance(value, (int, float)) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return int(value)
 
@@ -340,7 +340,7 @@ def json_updated_age(path: Path, key: str = "updated_at") -> tuple[int | None, s
     if not isinstance(data, dict):
         return None, f"invalid JSON object in {path}: {type(data).__name__}"
     value = data.get(key)
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None, f"missing numeric {key} in {path}"
     updated = finite_epoch(value)
     if updated is None:
