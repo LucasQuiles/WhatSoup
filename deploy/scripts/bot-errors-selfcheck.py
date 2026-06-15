@@ -384,7 +384,7 @@ def freshness_expectations() -> list[dict]:
         name = str(item.get("name") or "").strip()
         path = str(item.get("path") or "").strip()
         max_age = item.get("maxAgeSeconds")
-        if not name or not path or not isinstance(max_age, int) or max_age < 0:
+        if not name or not path or type(max_age) is not int or max_age < 0:
             raise SelfcheckError(f"freshness[{index}] requires name, path, maxAgeSeconds")
         expectations.append({"name": name, "path": path, "maxAgeSeconds": max_age})
     return expectations

@@ -1013,6 +1013,15 @@ def test_invalid_freshness_entry_fails_closed(monkeypatch):
         _mod.freshness_expectations()
 
 
+def test_boolean_freshness_max_age_fails_closed(monkeypatch):
+    monkeypatch.setenv(
+        "BOT_ERRORS_SELFCHECK_FRESHNESS_JSON",
+        json.dumps([{"name": "daily-health", "path": "/tmp/last-run", "maxAgeSeconds": True}]),
+    )
+    with pytest.raises(_mod.SelfcheckError, match="requires name"):
+        _mod.freshness_expectations()
+
+
 def test_non_object_freshness_entry_fails_closed(monkeypatch):
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_FRESHNESS_JSON", json.dumps(["bad"]))
     with pytest.raises(_mod.SelfcheckError, match="must be an object"):
