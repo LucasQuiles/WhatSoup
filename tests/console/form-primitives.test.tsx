@@ -147,7 +147,7 @@ describe('TextInput', () => {
     expectBorderColor(input, 'var(--status-crit-fg)')
 
     rerender(<TextInput aria-label="Status" value="" onChange={() => {}} confirmed />)
-    expectBorderColor(input, 'var(--wizard-accent)')
+    expectBorderColor(input, 'var(--accent)')
 
     rerender(<TextInput aria-label="Status" value="" onChange={() => {}} error confirmed />)
     expectBorderColor(input, 'var(--status-crit-fg)')
@@ -200,7 +200,7 @@ describe('NumberInput', () => {
     expectBorderColor(input, 'var(--status-crit-fg)')
 
     rerender(<NumberInput aria-label="Amount" value={1} onChange={() => {}} confirmed />)
-    expectBorderColor(input, 'var(--wizard-accent)')
+    expectBorderColor(input, 'var(--accent)')
   })
 })
 
@@ -255,7 +255,7 @@ describe('SelectInput', () => {
         <option value="">Choose</option>
       </SelectInput>,
     )
-    expectBorderColor(select, 'var(--wizard-accent)')
+    expectBorderColor(select, 'var(--accent)')
   })
 })
 
@@ -282,7 +282,7 @@ describe('FileInput', () => {
     expect(input.classList.contains('c-file-input')).toBe(true)
     expect(input.classList.contains('text-data')).toBe(true)
     expect(input.classList.contains('file-extra')).toBe(true)
-    expectBorderColor(input, 'var(--wizard-accent)')
+    expectBorderColor(input, 'var(--accent)')
   })
 })
 
@@ -338,7 +338,7 @@ describe('TextArea', () => {
     const textarea = screen.getByLabelText('JSON') as HTMLTextAreaElement
     expect(textarea.readOnly).toBe(true)
     expect(textarea.getAttribute('style')).toContain('min-height: calc(var(--sp-10) + var(--sp-5))')
-    expect(textarea.getAttribute('style')).toContain('filter: brightness(0.7)')
+    expect(textarea.getAttribute('style')).toContain('opacity: var(--opacity-muted)')
   })
 
   it('defaults minHeight and uses error and confirmed border styling', () => {
@@ -349,7 +349,7 @@ describe('TextArea', () => {
     expectBorderColor(textarea, 'var(--status-crit-fg)')
 
     rerender(<TextArea aria-label="Body" value="" onChange={() => {}} confirmed />)
-    expectBorderColor(textarea, 'var(--wizard-accent)')
+    expectBorderColor(textarea, 'var(--accent)')
   })
 
   it('supports bounded non-resizable sans textareas without a style escape hatch', () => {
@@ -406,7 +406,7 @@ describe('RadioField', () => {
     expect(labelText.classList.contains('label-extra')).toBe(true)
     // P1-4: label ink must come from CSS class, not inline style
     expect(labelText.classList.contains('c-checkbox-label')).toBe(true)
-    expect(labelText.getAttribute('style')).not.toContain('color')
+    expect(labelText.getAttribute('style') ?? '').not.toContain('color')
   })
 
   it('emits the selected value through user interaction', async () => {
@@ -505,7 +505,7 @@ describe('CheckboxField', () => {
     expect(screen.getByTestId('suffix').textContent).toBe('offline')
     // P1-4: label ink must come from CSS class, not inline style
     expect(labelText.classList.contains('c-checkbox-label')).toBe(true)
-    expect(labelText.getAttribute('style')).not.toContain('color')
+    expect(labelText.getAttribute('style') ?? '').not.toContain('color')
   })
 
   it('changes checked state through user interaction', async () => {
