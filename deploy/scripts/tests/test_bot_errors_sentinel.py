@@ -14,11 +14,11 @@ import sys
 import pytest
 
 
-_SCRIPT = Path(__file__).resolve().parents[1] / "fleet-sentinel.py"
+_SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-sentinel.py"
 
 
 def _load_module():
-    spec = importlib.util.spec_from_file_location("fleet_sentinel", _SCRIPT)
+    spec = importlib.util.spec_from_file_location("bot_errors_sentinel", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
