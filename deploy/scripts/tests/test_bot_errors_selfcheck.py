@@ -606,6 +606,26 @@ def test_freshness_ok_is_recorded_without_blocking(tmp_path: Path, monkeypatch):
     assert calls == []
 
 
+def test_future_freshness_mtime_is_stale_run(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path)
+    stamp = tmp_path / "last-run.json"
+    stamp.write_text("ok", encoding="utf-8")
+    os.utime(stamp, (1120.0, 1120.0))
+    monkeypatch.setenv(
+        "BOT_ERRORS_SELFCHECK_FRESHNESS_JSON",
+        json.dumps([{"name": "daily-health", "path": str(stamp), "maxAgeSeconds": 60}]),
+    )
+
+    status = _mod.run_selfcheck(config, deps)
+
+    assert status["class"] == "stale_run"
+    assert status["action"] == "escalate"
+    assert status["freshness"][0]["status"] == "future_mtime"
+    assert status["freshness"][0]["futureBySeconds"] == 120
+    assert "future_mtime" in status["problems"][0]
+    assert calls == []
+
+
 def test_missing_freshness_path_is_stale_run(tmp_path: Path, monkeypatch):
     config, deps, calls, _head = _fixture(tmp_path)
     missing = tmp_path / "missing.json"

@@ -382,7 +382,7 @@ def freshness_inventory(now: float) -> tuple[list[dict], list[str]]:
         path = Path(str(item["path"])).expanduser()
         max_age = int(item["maxAgeSeconds"])
         try:
-            age = max(0, int(now - path.stat().st_mtime))
+            raw_age = int(now - path.stat().st_mtime)
         except FileNotFoundError:
             statuses.append({"name": item["name"], "path": str(path), "status": "missing", "maxAgeSeconds": max_age})
             problems.append(f"freshness {item['name']} missing path={path}")
@@ -391,6 +391,20 @@ def freshness_inventory(now: float) -> tuple[list[dict], list[str]]:
             statuses.append({"name": item["name"], "path": str(path), "status": f"stat_error:{type(exc).__name__}", "maxAgeSeconds": max_age})
             problems.append(f"freshness {item['name']} stat_error={type(exc).__name__} path={path}")
             continue
+        if raw_age < 0:
+            future_by_seconds = abs(raw_age)
+            statuses.append(
+                {
+                    "name": item["name"],
+                    "path": str(path),
+                    "status": "future_mtime",
+                    "futureBySeconds": future_by_seconds,
+                    "maxAgeSeconds": max_age,
+                }
+            )
+            problems.append(f"freshness {item['name']} future_mtime seconds={future_by_seconds} path={path}")
+            continue
+        age = raw_age
         fresh = age <= max_age
         statuses.append({"name": item["name"], "path": str(path), "ageSeconds": age, "maxAgeSeconds": max_age, "ok": str(fresh).lower()})
         if not fresh:
