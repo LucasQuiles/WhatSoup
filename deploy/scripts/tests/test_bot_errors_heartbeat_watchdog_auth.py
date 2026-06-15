@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -225,6 +226,82 @@ def test_dispatcher_heartbeat_stat_error_after_private_check_is_reported_not_cra
     assert problems["dispatcher"] == (
         "dispatcher heartbeat stale: age_seconds=missing max=300 "
         f"detail=failed to stat {target}: PermissionError: denied"
+    )
+
+
+def test_q_loop_future_updated_at_is_reported_not_fresh(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    target = state / "q-loop" / "state.json"
+    monkeypatch.setenv("BOT_ERRORS_Q_LOOP_STATE", str(target))
+    mod.atomic_write_json(target, {"updated_at": 1100})
+
+    problems = mod.collect_problems(_watchdog_args(), {"q_loop"})
+
+    assert problems["q_loop"] == (
+        "q-loop heartbeat stale: age_seconds=missing max=600 "
+        f"detail=future updated_at in {target}: value=1100 now=1000 future_by_seconds=100"
+    )
+
+
+def test_dispatcher_future_mtime_is_reported_not_fresh(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    target = state / "dispatcher-state.json"
+    mod.atomic_write_json(target, {"updated_at": 1000})
+    os.utime(target, (1100, 1100))
+
+    problems = mod.collect_problems(_watchdog_args(), {"dispatcher"})
+
+    assert problems["dispatcher"] == (
+        "dispatcher heartbeat stale: age_seconds=missing max=300 "
+        f"detail=future mtime for {target}: mtime=1100 now=1000 future_by_seconds=100"
+    )
+
+
+def test_fleet_sentinel_future_checked_at_is_reported_not_fresh(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    heartbeat = state / "fleet-sentinel" / "sentinel-heartbeat.json"
+    mod.atomic_write_json(
+        heartbeat,
+        {
+            "schemaVersion": 1,
+            "kind": "bot-errors-sentinel-heartbeat",
+            "checkedAt": "1970-01-01T00:18:20Z",
+            "healthy": True,
+            "fleetAction": "none",
+            "hostCount": 9,
+        },
+    )
+
+    problems = mod.collect_problems(_watchdog_args(), {"fleet_sentinel"})
+
+    assert problems["fleet_sentinel"] == (
+        "fleet sentinel heartbeat stale: age_seconds=missing max=60 "
+        f"detail=future checkedAt in {heartbeat}: checkedAt=1970-01-01T00:18:20Z "
+        "epoch=1100 now=1000 future_by_seconds=100"
+    )
+
+
+def test_daily_health_future_event_time_is_reported_not_fresh(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    sent = state / "sent"
+    sent.mkdir()
+    target = sent / "bot-errors-health.daily-health.event.json"
+    target.write_text(
+        json.dumps({"source": "daily-health", "createdAt": "1970-01-01T00:18:20Z"}) + "\n",
+        encoding="utf-8",
+    )
+    target.chmod(0o600)
+
+    problems = mod.collect_problems(_watchdog_args(), {"daily_health"})
+
+    assert problems["daily_health"] == (
+        "daily-health cadence stale: age_seconds=missing max=90000 "
+        f"detail=future daily-health event time: path={target} "
+        "timestamp=1100 now=1000 future_by_seconds=100"
     )
 
 

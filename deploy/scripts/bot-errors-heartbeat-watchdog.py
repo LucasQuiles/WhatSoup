@@ -337,6 +337,8 @@ def json_updated_age(path: Path, key: str = "updated_at") -> tuple[int | None, s
     if not isinstance(value, (int, float)):
         return None, f"missing numeric {key} in {path}"
     updated = int(value)
+    if updated > current:
+        return None, f"future {key} in {path}: value={updated} now={current} future_by_seconds={updated - current}"
     return max(0, current - updated), f"{path} {key}={updated}"
 
 
@@ -348,7 +350,10 @@ def file_age(path: Path) -> tuple[int | None, str]:
         mtime = int(path.stat().st_mtime)
     except OSError as exc:
         return None, f"failed to stat {path}: {type(exc).__name__}: {exc}"
-    return max(0, now_epoch() - mtime), f"{path} mtime={mtime}"
+    current = now_epoch()
+    if mtime > current:
+        return None, f"future mtime for {path}: mtime={mtime} now={current} future_by_seconds={mtime - current}"
+    return max(0, current - mtime), f"{path} mtime={mtime}"
 
 
 def fleet_sentinel_age(path: Path) -> tuple[int | None, str]:
@@ -370,7 +375,13 @@ def fleet_sentinel_age(path: Path) -> tuple[int | None, str]:
     checked_at = parse_iso_epoch(data.get("checkedAt"))
     if checked_at is None:
         return None, f"missing parseable checkedAt in {path}"
-    return max(0, now_epoch() - checked_at), (
+    current = now_epoch()
+    if checked_at > current:
+        return None, (
+            f"future checkedAt in {path}: checkedAt={data.get('checkedAt')} "
+            f"epoch={checked_at} now={current} future_by_seconds={checked_at - current}"
+        )
+    return max(0, current - checked_at), (
         f"{path} checkedAt={data.get('checkedAt')} healthy={data.get('healthy')} "
         f"fleetAction={data.get('fleetAction')} hostCount={data.get('hostCount')}"
     )
@@ -895,7 +906,13 @@ def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
     if newest is None:
         scope = f" for {host}" if host else ""
         return None, f"no daily-health event{scope} under {state_root()}"
-    return max(0, now_epoch() - newest), f"{newest_path} mtime={newest}"
+    current = now_epoch()
+    if newest > current:
+        return None, (
+            f"future daily-health event time: path={newest_path} "
+            f"timestamp={newest} now={current} future_by_seconds={newest - current}"
+        )
+    return max(0, current - newest), f"{newest_path} mtime={newest}"
 
 
 def configured_checks() -> set[str]:
