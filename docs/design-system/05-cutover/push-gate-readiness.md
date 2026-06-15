@@ -235,24 +235,25 @@ enforcement), DD-42 (raw-CSS focus suppression guard promotion), and DD-43
 
 **INCONCLUSIVE conformance rows and what flips them:**
 
-- *Responsive layout rules* — flips on D7 deterministic viewport tests
-  plus the remaining DD-18r legs.
-- *Reduced-motion* — app/toast MotionConfig and jsdom checks are current;
-  the manifest row still needs a fresh completed browser reduced-motion proof.
+- *Responsive layout rules* — the D7 deterministic viewport matrix now covers
+  Fleet/LineDetail/Ops, Inbox contact-pane collapse, and the 900px drawer flip;
+  the row flips when the remaining DD-18r legs close (nav width pressure beyond
+  label hiding, plus side-panel law for non-Fleet surfaces).
+- *Reduced-motion* — flipped PASS after the fresh browser reduced-motion proof:
+  modal close now goes through `open={false}` in Chromium's reduce context and
+  proves no closing dwell remains.
 - *Brand boundary/nameplate/tick, glass chrome, ambient budget, 80ch measure,
   enforcement report-only* — these flip at C3/C4 slices and the enforcement
   promotion schedule.
 
-**Remaining program stages:** B3 wave 4 (AddLineWizard — BLOCKED on the named
-Stepper primitive/spec decision); B4 acceptance (commits landed, evidence
-packet and register closures pending; the lane was live at snapshot time); B5
-motion polish (packet Ready with Constraints; DD-19/DD-25); D6/D7 acceptance
-packets and the D7 computed-box + viewport batteries; C3 screen polish (DD-8
-list, DD-26 ramp, glass nav treatment, prose primitive); C4 branding flip
-(nameplate, title, favicon — the current favicon is an unrelated purple/blue
-bolt and the SOUP asset still needs to be designed, per the C4 refresh survey —
-plus the SoupKitchen-to-Fleet rename and its test-assertion set); Stage E
-closeout (manifest completion rule: no PENDING/INCONCLUSIVE rows without an
+**Remaining program work:** C3 screen polish and enforcement follow-through
+(DD-8 ghost-tier classification, DD-18r's nav-width and non-Fleet side-panel
+legs, DD-26 type ramp, glass nav treatment, prose primitive, and report-only
+guard promotions); C4 branding flip (nameplate, title, favicon/manifest — the
+current favicon is an unrelated purple/blue bolt and the SOUP asset still needs
+to be designed, per the C4 refresh survey — plus the SoupKitchen-to-Fleet rename
+and its test-assertion set); Stage E closeout (manifest completion rule: no
+PENDING/INCONCLUSIVE rows without an
 accepted-debt exit, and blocking rows cannot take that exit).
 
 **Interim push vs push-after-Stage-E — recommendation:** **interim push now**

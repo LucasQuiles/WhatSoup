@@ -143,16 +143,16 @@ primitive), plus a browser-suite or live proof of the visible ring.
   provenance — comment text only, zero consumers; acceptable, noted so a later grep
   doesn't misread it as live usage.
 - Register staleness observed while assembling this packet (for the integrator, not
-  B4 claims): DD-18r's REMAINING list still says the Inbox viewport-matrix rows are
-  "unblocked but unwritten" and lists the drawer-flip case as undelivered — both
-  landed post-B4 in `4fbad4ef` (browser 93/93). Proposed text refresh below.
+  B4 claims) has since been resolved: DD-18r no longer treats the Inbox
+  viewport-matrix rows or the drawer-flip case as open; both landed post-B4 in
+  `4fbad4ef` (browser 93/93).
 
-## Debt register delta (PROPOSED — register edits belong to the integrator)
+## Debt register delta (current state; proposed notes remain explicit)
 
-| ID | Proposed change |
+| ID | Disposition |
 |---|---|
 | DD-17 | **PARTIALLY CLOSED — do not move to the Closed table.** Traversal leg closed: roving tabindex + arrow/Home/End/Enter/Space contract implemented (`bb9ba869`) and tested (20-case suite + 3 prop-contract item cases) — the row's literal expiration condition is met. Ring leg OPEN (adoption-audit M2, independently re-verified here): rows have no design-system `:focus-visible` treatment. Propose rewriting the row in place: title → "Inbox chat list focus-visible ring missing (roving landed)", sev stays P2, owner → C3 Inbox screen pass or a small B4 follow-up commit (adoption-audit burndown item B12), expiration → "row focus ring proven visible (browser suite or live frame) on the §1.9 recipe", blocks final acceptance: YES (unchanged — it is the a11y-visibility half of the original defect) |
-| DD-18r | Narrow further: (a) Inbox three-pane collapse leg CLOSED — `68a7beda`, live rows 1–2, CI computed proof `4fbad4ef`; (b) MessageBubble hover-card positioning leg CLOSED at the code+jsdom level — `d5627923` (focus path, Escape, measured flip, `data-placement`), with the live/computed geometry glance carried as D7/C3 residue, not as an open implementation leg; (c) refresh the stale REMAINING text — Inbox viewport-matrix rows and the drawer-flip case were DELIVERED by `4fbad4ef`. Remaining legs after refresh: legacy modal sizing SSOT, nav width pressure, side-panel law for non-Fleet surfaces (incl. sub-collapse Inbox behavior), edge-card geometry glance |
+| DD-18r | Implemented/current register state: (a) Inbox three-pane collapse leg CLOSED — `68a7beda`, live rows 1–2, CI computed proof `4fbad4ef`; (b) MessageBubble hover-card positioning leg CLOSED at the code+jsdom level — `d5627923` (focus path, Escape, measured flip, `data-placement`), with the live/computed geometry glance carried as D7/C3 residue, not as an open implementation leg; (c) Inbox viewport-matrix rows and the drawer-flip case were DELIVERED by `4fbad4ef`. Remaining legs: nav width pressure beyond label hiding and side-panel law for non-Fleet surfaces |
 | DD-24 | **Stands as filed** (no change) — condition re-confirmed on the tree this packet; expiry and non-blocking status as written |
 
 ## Verdict: **PASS WITH DEFERRED DEBT.**
