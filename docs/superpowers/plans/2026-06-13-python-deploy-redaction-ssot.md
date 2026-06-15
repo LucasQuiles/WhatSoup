@@ -8,17 +8,51 @@
 
 **Tech Stack:** Python 3 standard library, pytest, existing BOT ERRORS runtime manifest validation, existing TypeScript health-check manifest tests.
 
-**Status:** pending; approval required before implementation because this changes deploy-script import shape.
+**Status:** landed via PR #830 (`97e60757`). This plan is retained as the Python deploy redaction SSOT design/proof record.
 
 ---
+
+## Decision Record
+
+**Decision needed:** choose the canonical source for BOT ERRORS Python deploy-script redaction patterns.
+
+**Recommended option:** ship a manifest-tracked Python module at `deploy/scripts/lib/bot_errors_redaction.py` and require every BOT ERRORS Python deploy script to call it through the existing script-level wrapper names.
+
+**Why this option:** the current drift is behavior, not only data. The redactors use Python `re.Pattern` flags, replacement functions, phone/JID context handling, and different credential-path marker strings. A JSON-only `deploy/secret-patterns.json` would centralize pattern text but still leave replacement semantics and ordering duplicated in every script. A Python module centralizes both matching and replacement while staying testable with the existing deploy pytest suite and runtime-manifest hash guard.
+
+**Rejected for this slice:** a standalone `deploy/secret-patterns.json` as the only source of truth. It can become a later vocabulary export if TypeScript source-diff hygiene and Python runtime redaction need a shared inventory, but it is too weak as the first runtime SSOT because it cannot express the full redaction pipeline.
+
+**Fallback if shared imports fail on real hosts:** revert the shared-module migration and replace it with an explicit N-copy equivalence guard that imports each standalone script and proves identical redaction outputs across a fixed fixture matrix. Do not keep an unguarded N-copy pattern set.
+
+**TypeScript vocabulary decision:** keep `scripts/repo-hygiene-guard.ts` separate in this slice. It scans source diffs for committed secrets; the Python module redacts runtime diagnostic text before writing alerts, breadcrumbs, and state. The two surfaces may share fixture vocabulary later, but forcing one implementation now would mix two different threat models.
+
+**Approval boundary:** implementation is approved only after an owner accepts a manifest-tracked `deploy/scripts/lib/` import shape for the deployed BOT ERRORS scripts. Without that approval, execute only the parity-test expansion and/or the N-copy equivalence guard.
 
 ## Current Evidence
 
 - `deploy/scripts/bot-errors-health-check.py` has a `CREDENTIAL_PATH_RE` clone that omits the `.config/secrets/` branch covered by collector, heartbeat-watchdog, runner, emit, and q-loop variants.
 - `deploy/scripts/tests/test_bot_errors_redaction_regex.py` does not load `bot-errors-health-check.py`, so the health-check gap is not enforced by the current Python parity test.
+- `deploy/scripts/tests/test_bot_errors_redaction_regex.py` also omits `bot-errors-dispatcher.py`, so dispatcher can drift from the deploy-script redaction contract without this Python parity test catching it.
 - The deploy scripts are manifest-managed by `deploy/bot-errors-runtime-manifest.json`; `tests/scripts/bot-errors-health-check.test.ts` validates the committed manifest hashes and `mustContain` markers.
-- There is no in-repo `deploy/secret-patterns.json` or shared Python redaction module on current `origin/main` `558730b04ddbf84b22832c23f7ce5657dcb5f3c7`.
-- Recent hardening already closed the emit atomic-write parent preflight; this plan is only for D5/R8 redaction SSOT and the Python deploy import/manifest strategy.
+- `origin/main` includes `deploy/scripts/lib/bot_errors_redaction.py` plus manifest coverage as of `97e60757`.
+- Recent hardening already closed the emit atomic-write parent preflight, private-dir `bot-errors-q-loop.py` exception alignment, `guard-core.readText`, and console `asRecordOrEmpty`; this plan is only for D5/R8 redaction SSOT and the Python deploy import/manifest strategy.
+
+## Local Compose Outcome
+
+- Shared module: `deploy/scripts/lib/bot_errors_redaction.py`.
+- Manifest coverage: `deploy/bot-errors-runtime-manifest.json` and `scripts/check-bot-errors-runtime-manifest.ts` include the shared helper files.
+- Consumers migrated: collector, dispatcher, emit, health-check, heartbeat-watchdog, q-loop, and runner.
+- Tests added: `deploy/scripts/tests/test_bot_errors_redaction_regex.py` covers all consumers and `.config/secrets/` paths; `deploy/scripts/tests/test_bot_errors_redaction_ssot.py` rejects local regex-clone reintroduction.
+- Boundary preserved: TypeScript `scripts/repo-hygiene-guard.ts` remains a source-diff hygiene scanner with a distinct threat model.
+
+## Implementation Reconciliation
+
+The task snippets below were the red-first implementation plan. PR #830 implemented the slice with a slightly narrower public helper API than the initial draft:
+
+- Authoritative helper API: `deploy/scripts/lib/bot_errors_redaction.py` exports `redact_bot_errors_text(value, *, credential_path_marker, ...)` and `redact_json_value(value, redact_text)`.
+- Script wrappers remain the compatibility boundary: collector, dispatcher, emit, health-check, heartbeat-watchdog, q-loop, and runner expose their existing wrapper names and pass each script's historical credential-path marker to the shared helper.
+- Do not paste the older Task 2/Task 3 snippets over the current branch. In particular, the draft helper name `redact_text` was superseded by `redact_bot_errors_text`, and JSON redaction now accepts the caller's wrapper function to preserve per-script marker semantics.
+- Current proof from the landed compose: `python3.12 -m pytest deploy/scripts/tests/test_bot_errors_redaction_regex.py deploy/scripts/tests/test_bot_errors_redaction_ssot.py -q` passed 86 tests, and `npm test -- --pool=forks tests/scripts/check-bot-errors-runtime-manifest.test.ts tests/scripts/bot-errors-health-check.test.ts` passed 117 tests.
 
 ## File Structure
 
@@ -577,7 +611,7 @@ Expected: all targeted TypeScript tests pass.
 Run:
 
 ```bash
-"$HOME/.claude/plugins/test-integrity/scripts/test-integrity" run deploy/scripts/tests/test_bot_errors_redaction_regex.py deploy/scripts/tests/test_bot_errors_redaction_ssot.py tests/scripts/bot-errors-health-check.test.ts
+"$HOME/.claude/plugins/test-integrity/scripts/test-integrity" scan --ci deploy/scripts/tests/test_bot_errors_redaction_regex.py deploy/scripts/tests/test_bot_errors_redaction_ssot.py tests/scripts/bot-errors-health-check.test.ts
 ```
 
 Expected: no suspicious or low-integrity findings.
@@ -646,7 +680,7 @@ cat > /tmp/whatsoup-bot-errors-redaction-ssot-pr.md <<'PR_BODY'
 ## Verification
 - python3 -m pytest deploy/scripts/tests/ -q
 - npm test -- --pool=forks --fileParallelism=false tests/scripts/bot-errors-health-check.test.ts tests/scripts/bot-errors-dispatcher.test.ts tests/scripts/bot-errors-collector.test.ts tests/scripts/bot-errors-runner.test.ts
-- "$HOME/.claude/plugins/test-integrity/scripts/test-integrity" run deploy/scripts/tests/test_bot_errors_redaction_regex.py deploy/scripts/tests/test_bot_errors_redaction_ssot.py tests/scripts/bot-errors-health-check.test.ts
+- "$HOME/.claude/plugins/test-integrity/scripts/test-integrity" scan --ci deploy/scripts/tests/test_bot_errors_redaction_regex.py deploy/scripts/tests/test_bot_errors_redaction_ssot.py tests/scripts/bot-errors-health-check.test.ts
 - npm run verify:push:branch
 PR_BODY
 

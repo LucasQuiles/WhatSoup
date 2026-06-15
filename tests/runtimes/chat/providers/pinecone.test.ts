@@ -958,10 +958,23 @@ describe('entity mode', () => {
     expect(details).toMatchObject({
       results: [],
       status: 'failed',
-      retried: true,
       error: 'entity index still down',
     });
+    expect(details).not.toHaveProperty('retried');
     expect(details.durationMs).toEqual(expect.any(Number));
+  });
+
+  it('searchEntitiesDetailed marks retry recovery without losing entity results', async () => {
+    mockSearchRecords.mockRejectedValueOnce(new Error('transient entity index error'));
+    mockSearchRecords.mockResolvedValueOnce({
+      result: { hits: [makeEntityHit('entity-retry-hit', 0.82)] },
+    });
+
+    const details = await memory.searchEntitiesDetailed('query');
+
+    expect(details.status).toBe('ok');
+    expect(details).not.toHaveProperty('retried');
+    expect(details.results.map((r) => r.id)).toEqual(['entity-retry-hit']);
   });
 
   // ── fromPineconeHitEntity — field mapping ──────────────────────────────────

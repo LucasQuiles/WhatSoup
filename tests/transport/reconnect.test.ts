@@ -5,9 +5,15 @@ import { join } from 'node:path';
 
 const emitAlertMock = vi.hoisted(() => vi.fn(() => true));
 const clearAlertSourceMock = vi.hoisted(() => vi.fn(() => true));
-const { testDataRoot } = vi.hoisted(() => ({
-  testDataRoot: `/tmp/wa-test-data-reconnect-${process.pid}`,
-}));
+const { testAuthDir, testDataRoot, testRoot, testStateRoot } = vi.hoisted(() => {
+  const testRoot = `/tmp/wa-test-reconnect-${process.pid}`;
+  return {
+    testAuthDir: `${testRoot}/auth`,
+    testDataRoot: `${testRoot}/data`,
+    testRoot,
+    testStateRoot: `${testRoot}/state`,
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Module mocks — must be hoisted before imports
@@ -51,8 +57,8 @@ vi.mock('@whiskeysockets/baileys', () => ({
 vi.mock('../../src/config.ts', () => ({
   config: {
     adminPhones: new Set(['15550100001']),
-    authDir: '/tmp/wa-test-auth',
-    stateRoot: '/tmp/wa-test-state',
+    authDir: testAuthDir,
+    stateRoot: testStateRoot,
     dataRoot: testDataRoot,
     dbPath: ':memory:',
     mediaDir: '/tmp',
@@ -162,21 +168,21 @@ async function flushAsyncReconnect(): Promise<void> {
 }
 
 function writeValidTestAuth(id = '15551230004:1@s.whatsapp.net'): void {
-  mkdirSync('/tmp/wa-test-auth', { recursive: true, mode: 0o700 });
-  chmodSync('/tmp/wa-test-auth', 0o700);
-  writeFileSync(join('/tmp/wa-test-auth', 'creds.json'), JSON.stringify({
+  mkdirSync(testAuthDir, { recursive: true, mode: 0o700 });
+  chmodSync(testAuthDir, 0o700);
+  writeFileSync(join(testAuthDir, 'creds.json'), JSON.stringify({
     me: { id, lid: '81536414179557:2@lid' },
     registrationId: 1,
   }));
-  writeFileSync(join('/tmp/wa-test-auth', 'app-state-sync-key-test.json'), JSON.stringify({ keyData: 'secret' }));
+  writeFileSync(join(testAuthDir, 'app-state-sync-key-test.json'), JSON.stringify({ keyData: 'secret' }));
 }
 
 function readTestCreds(): any {
-  return JSON.parse(readFileSync(join('/tmp/wa-test-auth', 'creds.json'), 'utf8'));
+  return JSON.parse(readFileSync(join(testAuthDir, 'creds.json'), 'utf8'));
 }
 
 function readLatestAuthBond(): any {
-  return JSON.parse(readFileSync(join('/tmp/wa-test-state', 'auth-bond-backups', 'WhatSoup', 'latest.json'), 'utf8'));
+  return JSON.parse(readFileSync(join(testStateRoot, 'auth-bond-backups', 'WhatSoup', 'latest.json'), 'utf8'));
 }
 
 // ---------------------------------------------------------------------------
@@ -186,18 +192,17 @@ function readLatestAuthBond(): any {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
+  rmSync(testRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
 });
 
 afterEach(async () => {
   vi.useRealTimers();
   try {
-    chmodSync('/tmp/wa-test-auth', 0o700);
+    chmodSync(testAuthDir, 0o700);
   } catch {
     // best-effort cleanup
   }
-  rmSync('/tmp/wa-test-auth', { recursive: true, force: true });
-  rmSync('/tmp/wa-test-state', { recursive: true, force: true });
-  rmSync(testDataRoot, { recursive: true, force: true });
+  rmSync(testRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 });
 });
 
 // ---------------------------------------------------------------------------
@@ -982,7 +987,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     emit(openEvent());
     const initialLatest = readLatestAuthBond();
 
-    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-test.json'), JSON.stringify({ keyData: 'rotated' }));
+    writeFileSync(join(testAuthDir, 'sender-key-test.json'), JSON.stringify({ keyData: 'rotated' }));
     await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
 
     let lifecycle = manager.getConnectionState().credentialLifecycle;
@@ -1001,7 +1006,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(lifecycle.recentEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({
         event: 'auth_snapshot_captured',
-        note: expect.stringContaining('/tmp/wa-test-state/auth-bond-backups/WhatSoup/history/'),
+        note: expect.stringContaining(join(testStateRoot, 'auth-bond-backups', 'WhatSoup', 'history')),
       }),
     ]));
 
@@ -1018,9 +1023,9 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     await manager.connect();
     emit(openEvent());
 
-    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-a.json'), JSON.stringify({ keyData: 'a' }));
+    writeFileSync(join(testAuthDir, 'sender-key-a.json'), JSON.stringify({ keyData: 'a' }));
     await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
-    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-b.json'), JSON.stringify({ keyData: 'b' }));
+    writeFileSync(join(testAuthDir, 'sender-key-b.json'), JSON.stringify({ keyData: 'b' }));
     await emit({ 'messages.update': [] });
 
     let scheduled = manager.getConnectionState().credentialLifecycle.recentEvents
@@ -1031,7 +1036,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     const firstSettled = readLatestAuthBond();
     expect(firstSettled.reason).toBe('baileys-key-material-settled');
 
-    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-c.json'), JSON.stringify({ keyData: 'c' }));
+    writeFileSync(join(testAuthDir, 'sender-key-c.json'), JSON.stringify({ keyData: 'c' }));
     await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
     await vi.advanceTimersByTimeAsync(60_000);
 
@@ -1061,7 +1066,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     emit(openEvent());
     const initialLatest = readLatestAuthBond();
 
-    writeFileSync(join('/tmp/wa-test-auth', 'sender-key-after-logout.json'), JSON.stringify({ keyData: 'do-not-capture' }));
+    writeFileSync(join(testAuthDir, 'sender-key-after-logout.json'), JSON.stringify({ keyData: 'do-not-capture' }));
     await emit({ 'messages.upsert': { type: 'notify', messages: [] } });
     emit(closeEvent(401));
 
@@ -1130,7 +1135,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(lifecycle.currentAuthBond).toMatchObject({
       status: 'missing',
       creds: {
-        path: '/tmp/wa-test-auth/creds.json',
+        path: join(testAuthDir, 'creds.json'),
         hash: null,
         identityHash: null,
       },
@@ -1203,8 +1208,8 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     });
     expect(persisted.diagnostics.stateFileFingerprint).toMatch(/^[0-9a-f]{20}$/);
     expect(persistedText).not.toContain('15551230004');
-    expect(persistedText).not.toContain('/tmp/wa-test-auth');
-    expect(persistedText).not.toContain('/tmp/wa-test-state');
+    expect(persistedText).not.toContain(testAuthDir);
+    expect(persistedText).not.toContain(testStateRoot);
     expect(persistedText).not.toContain(testDataRoot);
 
     await manager.shutdown();
@@ -1439,7 +1444,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
   it('creds.update writes creds.json atomically before auth-bond capture', async () => {
     writeValidTestAuth('18455940000:1@s.whatsapp.net');
     const truncatingSaveCreds = vi.fn(async () => {
-      writeFileSync(join('/tmp/wa-test-auth', 'creds.json'), '');
+      writeFileSync(join(testAuthDir, 'creds.json'), '');
     });
     const nextCreds = {
       me: { id: '15551230004:1@s.whatsapp.net', lid: '81536414179557:2@lid' },
@@ -1457,7 +1462,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     await emit({ 'creds.update': {} });
 
     expect(truncatingSaveCreds).not.toHaveBeenCalled();
-    expect(statSync(join('/tmp/wa-test-auth', 'creds.json')).size).toBeGreaterThan(0);
+    expect(statSync(join(testAuthDir, 'creds.json')).size).toBeGreaterThan(0);
     expect(readTestCreds()).toMatchObject({
       me: { id: '15551230004:1@s.whatsapp.net' },
       registrationId: 42,
@@ -1483,7 +1488,7 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     emit(openEvent());
     emitAlertMock.mockClear();
 
-    writeFileSync(join('/tmp/wa-test-auth', 'creds.json'), '');
+    writeFileSync(join(testAuthDir, 'creds.json'), '');
     (manager as any).captureAuthBondSnapshot('creds-update');
 
     expect(emitAlertMock).not.toHaveBeenCalledWith(
@@ -1509,8 +1514,8 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
 
   it('creds.update preserves previous creds when the protected writer refuses an unsafe target', async () => {
     writeValidTestAuth('15551230009:1@s.whatsapp.net');
-    const credsPath = join('/tmp/wa-test-auth', 'creds.json');
-    const outside = join('/tmp/wa-test-auth', 'outside-creds.json');
+    const credsPath = join(testAuthDir, 'creds.json');
+    const outside = join(testAuthDir, 'outside-creds.json');
     const previousCreds = readFileSync(credsPath, 'utf-8');
     writeFileSync(outside, previousCreds, { mode: 0o600 });
     rmSync(credsPath, { force: true });

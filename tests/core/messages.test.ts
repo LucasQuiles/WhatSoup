@@ -79,6 +79,16 @@ describe('messages', () => {
     expect(stored.timestamp).toBe(BASE_TS);
   });
 
+  it('normalizes millisecond timestamps before writing messages', () => {
+    const msg = makeMsg({ content: 'millisecond timestamp', timestamp: 1_777_824_570_676 });
+    storeMessageIfNew(db, msg);
+
+    const row = db.raw
+      .prepare('SELECT timestamp FROM messages WHERE message_id = ?')
+      .get(msg.messageId) as { timestamp: number };
+    expect(row.timestamp).toBe(1_777_824_570);
+  });
+
   it('INSERT OR IGNORE: duplicate message_id is ignored', () => {
     const id = `msg-${randomBytes(4).toString('hex')}`;
     const inserted1 = storeMessageIfNew(db, makeMsg({ messageId: id, content: 'original' }));
@@ -238,7 +248,11 @@ describe('messages', () => {
     // so the chunking path (CHUNK_SIZE=500) must be exercised.
     const COUNT = 1500;
     for (let i = 0; i < COUNT; i++) {
-      storeMessageIfNew(db, makeMsg({ timestamp: BASE_TS + i, isFromMe: false }));
+      storeMessageIfNew(db, makeMsg({
+        messageId: `bulk-param-limit-${i}`,
+        timestamp: BASE_TS + i,
+        isFromMe: false,
+      }));
     }
     const all = getUnprocessedMessages(db, COUNT + 10);
     expect(all.length).toBe(COUNT);

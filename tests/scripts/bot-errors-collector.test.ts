@@ -124,6 +124,19 @@ function writePrivateJson(path: string, value: unknown) {
   chmodSync(path, 0o600);
 }
 
+function collectorEnv(overrides: Record<string, string>) {
+  const env = { ...process.env };
+  for (const key of [
+    'BOT_ERRORS_OUTBOX_DIR',
+    'BOT_ERRORS_WRITEFAIL_DIR',
+    'BOT_ERRORS_REMOTE_HOST_TARGETS',
+    'BOT_ERRORS_TAILSCALE_STATUS_TIMEOUT_SECONDS',
+  ]) {
+    delete env[key];
+  }
+  return { ...env, ...overrides };
+}
+
 function runAtomicWrite(targetPath: string) {
   return spawnSync('python3', ['-c', `
 import importlib.util
@@ -154,14 +167,13 @@ function runCollector(fakeSsh: string, mode: 'fail' | 'success') {
     ],
     {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
+      env: collectorEnv({
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
         BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
         FAKE_SSH_MODE: mode,
         BOT_ERRORS_COLLECTOR_RECOVERY_SUCCESSES: '1',
-      },
+      }),
       encoding: 'utf8',
     },
   );
@@ -183,13 +195,12 @@ function runCollectorWithRemote(fakeSsh: string, remoteRoot: string, env: Record
     ],
     {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
+      env: collectorEnv({
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
         BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
         ...env,
-      },
+      }),
       encoding: 'utf8',
     },
   );
@@ -299,12 +310,11 @@ describe('bot-errors-collector', () => {
       ],
       {
         cwd: process.cwd(),
-        env: {
-          ...process.env,
+        env: collectorEnv({
           BOT_ERRORS_STATE_DIR: tmpRoot,
           BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
           BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
-        },
+        }),
         encoding: 'utf8',
       },
     );
@@ -368,12 +378,15 @@ describe('bot-errors-collector', () => {
       ],
       {
         cwd: process.cwd(),
-        env: {
-          ...process.env,
+        env: collectorEnv({
           BOT_ERRORS_STATE_DIR: tmpRoot,
           BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
           BOT_ERRORS_TAILSCALE_STATUS_COMMAND: fakeTailscale,
-        },
+          // Full-suite load can starve the shell fake long enough to exceed
+          // the production 2s lookup default, which makes this test count the
+          // skipped writefail probe as a second isolated failure.
+          BOT_ERRORS_TAILSCALE_STATUS_TIMEOUT_SECONDS: '30',
+        }),
         encoding: 'utf8',
       },
     );
@@ -457,13 +470,12 @@ describe('bot-errors-collector', () => {
       '900',
     ], {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
+      env: collectorEnv({
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
         BOT_ERRORS_TAILSCALE_STATUS_COMMAND: '',
         FAKE_SSH_MODE: 'success',
-      },
+      }),
       encoding: 'utf8',
     });
 
@@ -618,12 +630,11 @@ describe('bot-errors-collector', () => {
       ],
       {
         cwd: process.cwd(),
-        env: {
-          ...process.env,
+        env: collectorEnv({
           BOT_ERRORS_STATE_DIR: tmpRoot,
           BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
           FAKE_FAIL_WRITEFAIL_ACK: '1',
-        },
+        }),
         encoding: 'utf8',
       },
     );
@@ -748,11 +759,7 @@ print(Path(found).name if found else "NONE")
     expect(collector.status).toBe(0);
     const dispatcher = spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        BOT_ERRORS_STATE_DIR: tmpRoot,
-        BOT_ERRORS_DRY_SEND_CAPTURE: capturePath,
-      },
+      env: collectorEnv({ BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath }),
       encoding: 'utf8',
     });
 
@@ -773,7 +780,7 @@ print(Path(found).name if found else "NONE")
     expect(runCollectorWithRemote(fakeSsh, remoteRoot).status).toBe(0);
     expect(spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
       cwd: process.cwd(),
-      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath },
+      env: collectorEnv({ BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath }),
       encoding: 'utf8',
     }).status).toBe(0);
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
@@ -784,7 +791,7 @@ print(Path(found).name if found else "NONE")
     expect(JSON.parse(secondCollector.stdout)).toMatchObject({ writefailDuplicates: 1 });
     expect(spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
       cwd: process.cwd(),
-      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath },
+      env: collectorEnv({ BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath }),
       encoding: 'utf8',
     }).status).toBe(0);
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
@@ -808,7 +815,7 @@ print(Path(found).name if found else "NONE")
     expect(String(ackMeta[0]?.evidence)).toContain('terminal_ack_dirs_are_not_used_for_this_meta_alert=true');
     expect(spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
       cwd: process.cwd(),
-      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath },
+      env: collectorEnv({ BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath }),
       encoding: 'utf8',
     }).status).toBe(0);
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(2);
@@ -828,11 +835,10 @@ print(Path(found).name if found else "NONE")
       ],
       {
         cwd: process.cwd(),
-        env: {
-          ...process.env,
+        env: collectorEnv({
           BOT_ERRORS_STATE_DIR: tmpRoot,
           BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
-        },
+        }),
         encoding: 'utf8',
       },
     );
@@ -844,7 +850,7 @@ print(Path(found).name if found else "NONE")
     expect(state.writefailAckFailures).toEqual({});
     expect(spawnSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
       cwd: process.cwd(),
-      env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath },
+      env: collectorEnv({ BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath }),
       encoding: 'utf8',
     }).status).toBe(0);
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(2);
@@ -915,12 +921,11 @@ print(Path(found).name if found else "NONE")
       ],
       {
         cwd: process.cwd(),
-        env: {
-          ...process.env,
+        env: collectorEnv({
           HOME: remoteHome,
           BOT_ERRORS_STATE_DIR: tmpRoot,
           BOT_ERRORS_RELAY_SSH_COMMAND: fakeSsh,
-        },
+        }),
         encoding: 'utf8',
       },
     );
@@ -1041,11 +1046,10 @@ exec(collector.REMOTE_WRITEFAIL_ACK_SCRIPT, {"__name__": "__main__"})
 
     const result = spawnSync('python3', ['-'], {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
+      env: collectorEnv({
         HOME: join(tmpRoot, 'remote-home'),
         TMPDIR: join(tmpRoot, 'remote-tmp'),
-      },
+      }),
       input: `
 import importlib.util
 import sys

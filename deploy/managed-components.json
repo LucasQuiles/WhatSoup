@@ -183,6 +183,19 @@
         "probe": "launchctl print gui/$(id -u)/com.whatsoup.reply-guarantee"
       },
       {
+        "name": "release-drift-check",
+        "label_pattern": "com.whatsoup.release-drift-check",
+        "template": "deploy/com.whatsoup.release-drift-check.plist",
+        "render_script": "deploy/scripts/render-release-drift-launchd.sh",
+        "install_path": "~/Library/LaunchAgents/com.whatsoup.release-drift-check.plist",
+        "schedule": "StartInterval 300s",
+        "run_at_load": false,
+        "keep_alive": false,
+        "purpose": "Runs the manifest-backed release drift checker against the active bot plist WorkingDirectory and queues BOT ERRORS only when a release diverges from reviewed source.",
+        "node_pin_required": true,
+        "probe": "launchctl print gui/$(id -u)/com.whatsoup.release-drift-check"
+      },
+      {
         "name": "ms365-token-backup",
         "label_pattern": "com.whatsoup.ms365-token-backup",
         "template": "deploy/templates/com.whatsoup.ms365-token-backup.plist",

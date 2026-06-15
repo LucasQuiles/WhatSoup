@@ -119,24 +119,6 @@ function connectionTone(event: FeedEvent, d: ConnectionDetail): BadgeTone {
   return "neutral";
 }
 
-function headlineTone(event: FeedEvent, d: FeedDetail): BadgeTone {
-  if (d.type === "health") return healthTone(d);
-  if (event.isError) return "crit";
-  switch (d.type) {
-    case "connection":
-      return connectionTone(event, d);
-    case "message":
-      return d.direction === "inbound" ? "recv" : "sent";
-    case "tool_error":
-      return "crit";
-    case "tool_use":
-    case "session":
-      return "agent";
-    default:
-      return "neutral";
-  }
-}
-
 function joinParts(parts: Array<string | undefined>): string | undefined {
   const filtered = parts.filter(Boolean) as string[];
   return filtered.length > 0 ? filtered.join(" · ") : undefined;
@@ -241,8 +223,8 @@ function sessionPresentation(event: FeedEvent, d: SessionDetail): CardPresentati
   };
 }
 
-function healthPresentation(event: FeedEvent, d: HealthDetail): CardPresentation {
-  const tone = headlineTone(event, d);
+function healthPresentation(d: HealthDetail): CardPresentation {
+  const tone = healthTone(d);
   return {
     badge: "health",
     badgeTone: tone,
@@ -288,7 +270,7 @@ function renderCard(event: FeedEvent): CardPresentation {
     case "session":
       return sessionPresentation(event, d);
     case "health":
-      return healthPresentation(event, d);
+      return healthPresentation(d);
     case "import":
       return importPresentation(d);
     default:

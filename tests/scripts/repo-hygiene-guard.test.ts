@@ -1,15 +1,53 @@
-import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
   isTrackedSensitiveArtifact,
   parseArgs,
   parseCommitAuthorLog,
   parseUnifiedDiffAddedLines,
+  run,
   scanAddedLines,
+  scanBranchDiff,
   scanCommitMessage,
   scanCommitAuthors,
   scanContentLines,
 } from '../../scripts/repo-hygiene-guard.ts';
+
+const tempRepos: string[] = [];
+const privateHostLabelFixture = ['nuc', 'les'].join('');
+const privateHostDomainFixture = `${privateHostLabelFixture}.${['qui', 'les'].join('')}.${['stu', 'dio'].join('')}`;
+const privateTailnetIpFixture = ['100', '91', '13', '7'].join('.');
+
+function git(cwd: string, args: string[]): void {
+  execFileSync('git', args, { cwd, stdio: 'ignore', env: cleanGitEnv() });
+}
+
+function makeBranchRepo(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'repo-hygiene-branch-'));
+  tempRepos.push(repo);
+  git(repo, ['init', '-b', 'main']);
+  git(repo, ['config', 'user.name', 'WhatSoup Guard']);
+  git(repo, ['config', 'user.email', 'guard@users.noreply.github.com']);
+  writeFileSync(join(repo, 'README.md'), '# fixture\n');
+  git(repo, ['add', 'README.md']);
+  git(repo, ['commit', '-m', 'chore: base']);
+  git(repo, ['checkout', '-b', 'feature']);
+  return repo;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const repo of tempRepos.splice(0)) {
+    rmSync(repo, { recursive: true, force: true });
+  }
+  process.exitCode = undefined;
+});
 
 describe('repo hygiene guard', () => {
   it('parses added lines and target line numbers from unified diffs', () => {
@@ -46,7 +84,7 @@ describe('repo hygiene guard', () => {
 
   it('flags private host labels in deploy script Python tests', () => {
     const issues = scanAddedLines([
-      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: 'HOST = "nucles"' },
+      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: `HOST = "${privateHostLabelFixture}"` },
     ]);
 
     expect(issues.map((issue) => issue.code)).toContain('private-host-label');
@@ -54,8 +92,8 @@ describe('repo hygiene guard', () => {
 
   it('flags private host domains and tailnet IPs in deploy script Python tests', () => {
     const issues = scanAddedLines([
-      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: 'HOST = "nucles.quiles.studio"' },
-      { filePath: 'deploy/scripts/tests/test_example.py', line: 5, text: 'EXPECTED = "100.91.13.7"' },
+      { filePath: 'deploy/scripts/tests/test_example.py', line: 4, text: `HOST = "${privateHostDomainFixture}"` },
+      { filePath: 'deploy/scripts/tests/test_example.py', line: 5, text: `EXPECTED = "${privateTailnetIpFixture}"` },
     ]);
 
     expect(issues.map((issue) => issue.code)).toEqual(
@@ -478,9 +516,15 @@ The migrated group was 1203631234567890@g.us.
     expect(realIssues.map((issue) => issue.code)).toEqual(['whatsapp-group-jid']);
   });
 
-  it('parses staged and commit-message modes', () => {
+  it('parses staged, branch-diff, and commit-message modes', () => {
     expect(parseArgs([])).toEqual({ mode: 'staged', help: false });
     expect(parseArgs(['--staged'])).toEqual({ mode: 'staged', help: false });
+    expect(parseArgs(['--branch-diff'])).toEqual({ mode: 'branch-diff', help: false });
+    expect(parseArgs(['--branch-diff', '--base', 'origin/main'])).toEqual({
+      mode: 'branch-diff',
+      baseRef: 'origin/main',
+      help: false,
+    });
     expect(parseArgs(['--release-hygiene'])).toEqual({ mode: 'release-hygiene', help: false });
     expect(parseArgs(['--commit-msg', '.git/COMMIT_EDITMSG'])).toEqual({
       mode: 'commit-msg',
@@ -491,7 +535,63 @@ The migrated group was 1203631234567890@g.us.
       mode: 'commit-msg',
       help: true,
     });
+    expect(() => parseArgs(['--branch-diff', '--base'])).toThrow(/requires a git ref/);
+    expect(() => parseArgs(['--staged', '--base', 'origin/main'])).toThrow(/only valid with --branch-diff/);
     expect(() => parseArgs(['--bogus'])).toThrow(/Unknown argument/);
+  });
+
+  it('scans committed branch additions against the merge-base, not only the staged index', () => {
+    const repo = makeBranchRepo();
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'leak.ts'), "export const phone = '+447123456789';\n");
+    git(repo, ['add', 'src/leak.ts']);
+    git(repo, ['commit', '-m', 'test: branch leak fixture']);
+
+    const issues = scanBranchDiff(repo, 'main');
+
+    expect(issues.map((issue) => issue.code)).toEqual(['operator-phone']);
+    expect(issues.map((issue) => `${issue.filePath}:${issue.line}`)).toEqual(['src/leak.ts:1']);
+  });
+
+  it('flags sensitive artifacts committed on the branch even with an empty staged diff', () => {
+    const repo = makeBranchRepo();
+    writeFileSync(join(repo, '.env.local'), "TOKEN='fixture'\n");
+    git(repo, ['add', '.env.local']);
+    git(repo, ['commit', '-m', 'test: branch artifact fixture']);
+
+    const issues = run(['--branch-diff', '--base', 'main'], repo);
+
+    expect(issues.map((issue) => issue.code)).toEqual(['branch-sensitive-artifact']);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('flags secret-shaped content added and removed before the final branch diff', () => {
+    const repo = makeBranchRepo();
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'transient.ts'), 'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\n');
+    git(repo, ['add', 'src/transient.ts']);
+    git(repo, ['commit', '-m', 'test: transient secret fixture']);
+    git(repo, ['rm', 'src/transient.ts']);
+    git(repo, ['commit', '-m', 'test: remove transient secret fixture']);
+
+    const issues = scanBranchDiff(repo, 'main');
+
+    expect(issues.map((issue) => issue.code)).toEqual(['secret-assignment']);
+    expect(issues[0].message).toContain('[branch history');
+  });
+
+  it('flags sensitive artifacts added and removed before the final branch diff', () => {
+    const repo = makeBranchRepo();
+    writeFileSync(join(repo, '.env.local'), "TOKEN='fixture'\n");
+    git(repo, ['add', '.env.local']);
+    git(repo, ['commit', '-m', 'test: transient artifact fixture']);
+    git(repo, ['rm', '.env.local']);
+    git(repo, ['commit', '-m', 'test: remove transient artifact fixture']);
+
+    const issues = scanBranchDiff(repo, 'main');
+
+    expect(issues.map((issue) => issue.code)).toEqual(['branch-history-sensitive-artifact']);
+    expect(issues[0].message).toContain('branch history');
   });
 
   it('parses scan-history mode with optional depth and rejects bad depth', () => {

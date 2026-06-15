@@ -56,10 +56,13 @@ Weekly maintenance review:
 1. Run `npm run guard:work-index`.
 2. Run an artifact-sweep dry run and review the matched, report-only,
    low-confidence, and unmatched counts. Do not run `--apply` without explicit
-   operator approval.
+   operator approval, a narrow allowlist, and replacement/backup evidence; a
+   broad dry-run match on canonical `docs/` artifacts is not enough to archive
+   or delete them.
 3. Review open PRs, draft PRs, branches, worktrees, and stashes for stale or
    superseded work. Use `git range-diff` or `git cherry -v` before deleting any
-   branch claimed to be superseded.
+   branch claimed to be superseded, and never remove a worktree that has staged,
+   unstaged, or untracked files.
 4. Check whether `docs/current-program.md` still describes the generated work
    index accurately. If not, update it or add a staleness note.
 

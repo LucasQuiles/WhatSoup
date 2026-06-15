@@ -1,4 +1,4 @@
-import { writeFileSync, unlinkSync, openSync, closeSync, readFileSync, constants, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.ts';
@@ -54,6 +54,7 @@ import { TriggerPoller } from './core/substrate/poller.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { shutdownExitCode } from './main-shutdown-policy.ts';
+import { acquireProcessLock, isProcessLockError, releaseProcessLock, type ProcessLockHandle } from './lib/process-lock.ts';
 
 function resolveTilde(p: string): string {
   if (p === '~') return homedir();
@@ -64,57 +65,35 @@ const log = createChildLogger('main');
 const startedAt = Date.now();
 let shutdownInProgress = false;
 let memoryConsolidationScheduler: MemoryConsolidationScheduler | null = null;
+let lockHandle: ProcessLockHandle | null = null;
 
 // --- Lock file ---
 
 function acquireLock(): void {
-  let fd: number;
   try {
-    fd = openSync(config.lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    lockHandle = acquireProcessLock(config.lockPath);
+    log.info({ path: config.lockPath }, 'lock acquired');
   } catch (err: unknown) {
-    const nodeErr = err as NodeJS.ErrnoException;
-    if (nodeErr.code !== 'EEXIST') throw err;
-
-    // Lock file exists — check if its owner is still alive
-    let existingPid: number | undefined;
-    try {
-      const raw = readFileSync(config.lockPath, 'utf8');
-      const parsed = JSON.parse(raw) as { pid: number; startedAt: string };
-      existingPid = parsed.pid;
-    } catch {
-      // Corrupt lock file — remove and retry
-      log.warn({ path: config.lockPath }, 'corrupt lock file, removing and retrying');
-      unlinkSync(config.lockPath);
-      return acquireLock();
+    if (!isProcessLockError(err)) throw err;
+    if (err.reason === 'active') {
+      log.fatal({ pid: err.existingPid, path: err.lockPath }, 'another instance is already running');
+    } else {
+      log.fatal(
+        { pid: err.existingPid, path: err.lockPath, reason: err.reason },
+        'lock file requires manual removal before startup',
+      );
     }
-
-    try {
-      process.kill(existingPid, 0);
-      // Signal 0 succeeded — process is alive
-      log.fatal({ pid: existingPid, path: config.lockPath }, 'another instance is already running');
-      process.exit(1);
-    } catch (killErr: unknown) {
-      const killNodeErr = killErr as NodeJS.ErrnoException;
-      if (killNodeErr.code === 'ESRCH') {
-        // Process does not exist — stale lock
-        log.warn({ pid: existingPid, path: config.lockPath }, 'stale lock file detected, removing and retrying');
-        unlinkSync(config.lockPath);
-        return acquireLock();
-      }
-      // EPERM: process exists but we can't signal it — treat as alive
-      log.fatal({ pid: existingPid, path: config.lockPath }, 'another instance is already running');
-      process.exit(1);
-    }
+    process.exit(1);
   }
-
-  // Write PID and timestamp into the newly created exclusive file
-  writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
-  closeSync(fd);
-  log.info({ path: config.lockPath }, 'lock acquired');
 }
 
 function releaseLock(): void {
-  try { unlinkSync(config.lockPath); } catch { /* already gone */ }
+  if (!lockHandle) return;
+  const released = releaseProcessLock(lockHandle);
+  if (!released) {
+    log.warn({ path: lockHandle.path }, 'lock release skipped because lock file is missing or owned by another process');
+  }
+  lockHandle = null;
 }
 
 // --- Bootstrap ---

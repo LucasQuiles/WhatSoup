@@ -2,9 +2,20 @@
 //  Shared timestamp utilities for the fleet layer.
 // ---------------------------------------------------------------------------
 
+const UNIX_MILLISECONDS_THRESHOLD = 100_000_000_000;
+
+/** Normalize a Unix timestamp-like value to epoch seconds. */
+export function normalizeUnixTimestampSeconds(value: unknown, fallback = nowUnixSec()): number {
+  if (value == null || value === '') return fallback;
+  const numeric = typeof value === 'bigint' ? Number(value) : Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  const whole = Math.floor(numeric);
+  return whole >= UNIX_MILLISECONDS_THRESHOLD ? Math.floor(whole / 1000) : whole;
+}
+
 /** Convert Unix timestamp (seconds or milliseconds) to ISO string. */
 export function toIsoFromUnix(ts: number): string {
-  return new Date(ts > 1e12 ? ts : ts * 1000).toISOString();
+  return new Date(normalizeUnixTimestampSeconds(ts, ts) * 1000).toISOString();
 }
 
 /** Current time as Unix seconds. */

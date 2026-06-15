@@ -66,7 +66,146 @@ stream each script over ssh to the host's running location, then hash-verify on 
 - macOS hosts (mini1/4/7/8/9/10/11, mwlab, maclab): running copies at
   `~/LAB/WhatSoup/deploy/scripts/` (health job + bots read from this tree).
 - Linux hub (nucles): the collector/dispatcher/heartbeat copies under the hub's deploy path;
-  restart collector + dispatcher after deploy.
+  restart collector, dispatcher, and q-loop after deploying long-running code.
 
-Deploy + restart are **publish-boundary** actions: they are not performed by the
-corrections worktree run. See the run's `PUBLISH-REQUESTS.md`.
+Current close-out baseline: the 2026-06-13 C2/C3/C4 fleet pass streamed the
+manifest-tracked bot-errors runtime payload from
+`/private/tmp/whatsoup-c2c4-runtime-20260613T074101Z`, built from
+`289c5f7b77c86e64d2ee5ef820aabd7e21492a78`. At deploy time,
+`origin/main=2197bfdc`; the intervening diff did not touch bot-errors runtime,
+hook, profile, or manifest inputs.
+
+The deploy contract is:
+
+1. Take a per-host backup before mutation.
+2. Copy the manifest-tracked bot-errors scripts, `deploy/bot-errors-runtime-manifest.json`,
+   `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree.
+3. Write a host-local runtime manifest at
+   `~/.config/whatsoup/bot-errors-runtime-manifest.json` and point services at it with
+   `BOT_ERRORS_RUNTIME_MANIFEST`.
+4. On Git-backed hosts, stamp `expected_head_sha` with the host checkout's actual HEAD so
+   daily health detects real runtime skew without false mismatches from dirty host trees.
+   Non-Git runtime trees may report `git_head_sha: not_a_git_repository`.
+5. Activate the drift hook with `core.hooksPath=.husky` where the Git config and hooks
+   directory are writable.
+6. Restart long-running hub services after copying code. Timer-invoked health, deadman,
+   and heartbeat jobs load the new code on their next fire.
+7. Verify every active runtime path against the manifest, then check outbox/writefail
+   queues and service restart counters.
+
+Current stability evidence, refreshed read-only on 2026-06-13 14:03 ET:
+
+- All probed active runtime paths matched `8/8` host-local runtime manifest hashes.
+- `outbox` and `writefail` were empty on every probed host.
+- The hub collector, dispatcher, q-loop, and health timer were active; `processing`,
+  `dead-letter`, and `quarantine` were empty.
+- Dev and relay hosts had the expected health or dispatcher launchd jobs loaded.
+- Non-Git runtime trees still report `git_head_sha: not_a_git_repository`; that is
+  expected for stream-synced non-Git trees with a source SHA in the host-local manifest.
+- An isolated daily CLI simulation can prove runtime-skew event classification without
+  touching live queues: match should write a temp-outbox `info` event, and a synthetic
+  mismatch should write a temp-outbox `critical` event containing
+  `git_head_sha_mismatch`.
+
+## Manual daily-health validation
+
+Do not wait for the randomized systemd timer when validating a deploy or close-out fix.
+Trigger the same oneshot service the timer uses, then prove the dispatcher drained the
+events:
+
+```bash
+ssh <hub-host> 'systemctl --user start bot-errors-health-check.service'
+ssh <hub-host> 'journalctl --user -u bot-errors-health-check.service -u bot-errors-dispatcher.service --since "10 minutes ago" --no-pager'
+```
+
+The expected successful shape is:
+
+- `bot-errors-health-check.service` exits `status=0/SUCCESS`.
+- The health check emits the daily-health summary, per-instance `daily-health-fail`
+  events, and any reachable-source clear events into the production outbox.
+- The dispatcher logs the same event count with `failed=0`; the hub queue directories
+  `outbox`, `processing`, `dead-letter`, `writefail`, and `quarantine` are empty after
+  the drain.
+- Sent and suppressed archives use lifecycle suffixes such as `.json.<epoch>.sent` and
+  `.json.<epoch>.suppressed`; count files with `find`, not `*.json` globs.
+- A stamped Git-backed runtime manifest should produce a `git_head_sha: ... expected=...
+  match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
+  not enforcing.
+
+## No-post runtime-skew simulation
+
+Use this when validating #809/C4a without posting to the production outbox. It exercises
+the same `--daily` CLI path that writes daily-health events, but isolates `HOME`,
+`BOT_ERRORS_STATE_DIR`, and `BOT_ERRORS_OUTBOX_DIR` under a temp directory.
+
+```bash
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-c4a-no-post.XXXXXX")
+head=$(git rev-parse HEAD)
+profile='{"_explicitProfile":true,"role":"simulation","expectDispatcher":false,"expectQLoop":false,"expectPersonalSocket":false,"expectPersonalTools":false,"expectConfigInventory":false,"expectPluginInventory":false,"expectRuntimeManifest":true,"expectAlertTarget":false,"expectRustDesk":false,"expectFleetApi":false,"expectSourceUpdateAccess":false,"expectProviderProbe":false,"treeProvenanceFetch":false,"instances":[],"requiredCredentialFiles":[]}'
+
+run_runtime_skew_case() {
+  case_name="$1"
+  expected_sha="$2"
+  state="$tmp/$case_name/state"
+  mkdir -p "$tmp/home" "$tmp/tmp" "$state/outbox"
+  manifest='{"schemaVersion":1,"expected_head_sha":"'"$expected_sha"'","files":[]}'
+
+  env -i \
+    PATH="${PATH:-/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin}" \
+    HOME="$tmp/home" \
+    TMPDIR="$tmp/tmp" \
+    BOT_ERRORS_STATE_DIR="$state" \
+    BOT_ERRORS_OUTBOX_DIR="$state/outbox" \
+    BOT_ERRORS_RUNTIME_MANIFEST_JSON="$manifest" \
+    BOT_ERRORS_HEALTH_PROFILE_JSON="$profile" \
+    BOT_ERRORS_DRY_SERVICE_STATUS=inactive \
+    BOT_ERRORS_DRY_CLOCK_STATUS=synced \
+    BOT_ERRORS_DRY_CLOCK_OFFSET_MS=0 \
+    BOT_ERRORS_DRY_DISK_FREE_BYTES=10737418240 \
+    BOT_ERRORS_DRY_DISK_TOTAL_BYTES=107374182400 \
+    python3 deploy/scripts/bot-errors-health-check.py --daily
+}
+
+run_runtime_skew_case match "$head"
+run_runtime_skew_case mismatch "0000000000000000000000000000000000000000"
+rg -n 'git_head_sha|git_head_sha_mismatch|"severity"|"summary"|outboxPolicy' "$tmp"
+```
+
+The expected successful shape is: the match case writes one temp event with severity
+`info` and `git_head_sha ... match`; the mismatch case writes one temp event with
+severity `critical` and `FAIL git_head_sha ... git_head_sha_mismatch`; both events report
+`outboxPolicy` as `explicit-outbox`. This proves runtime-skew event classification only.
+Use the deploy contract and host manifest verification above to prove file-hash parity.
+
+## Manual drift-hook simulation
+
+If a host's Git config cannot activate `.husky/pre-commit`, prove the copied hook behavior
+with a temporary index instead of waiting for a real commit. This exercises the staged-file
+trigger and leaves the real index/worktree untouched:
+
+```bash
+ssh <mac-host> 'cd ~/LAB/WhatSoup &&
+  before=$(git status --short --branch | shasum | awk "{print \$1}") &&
+  tmp=$(mktemp /tmp/whatsoup-precommit-index.XXXXXX) &&
+  trap '"'"'rm -f "$tmp"'"'"' EXIT &&
+  GIT_INDEX_FILE="$tmp" git read-tree HEAD &&
+  blob=$(git rev-parse HEAD:package.json) &&
+  GIT_INDEX_FILE="$tmp" git update-index --cacheinfo 100755,"$blob",package.json &&
+  GIT_INDEX_FILE="$tmp" .husky/pre-commit &&
+  after=$(git status --short --branch | shasum | awk "{print \$1}") &&
+  test "$before" = "$after"'
+```
+
+The expected successful shape is: `guard:repo:staged` passes, the architectural-drift
+block runs, drift failures are printed as warn-only recommendations, the hook exits 0,
+and the real status hash is unchanged. This is behavior evidence only; it does not replace
+`core.hooksPath=.husky` on writable Git-backed hosts.
+
+Known residuals after the close-out pass:
+
+- One Git-backed macOS host has current runtime files and manifests, but hook activation
+  is blocked by root-owned `.git/config` and `.git/hooks/pre-commit`.
+- Non-Git mini runtime trees are not hook-capable; they can still run the copied runtime
+  payload and host-local manifest.
+- Stream-sync proves runtime payload currency. It does not imply that every dirty host
+  checkout was advanced to the latest `origin/main`.

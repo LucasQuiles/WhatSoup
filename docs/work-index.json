@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-06-13T06:21:26Z",
+  "generated_at": "2026-06-14T05:17:18Z",
   "repo": "WhatSoup",
-  "git_head": "5b3fc8a67a5546cf78e541375a269002cd6e92c1",
+  "git_head": "9e5090ddddb785715bbb40519ce4a98089a9ee8c",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 185,
+  "total": 188,
   "schema_version": 5,
   "rows": [
     {
@@ -29,6 +29,30 @@
       "supersedes_hint": null,
       "last_modified": "2026-04-23",
       "size_bytes": 1949
+    },
+    {
+      "path": "docs/sdlc/closed/bot-errors-reliability-20260531/implementation-plan.md",
+      "kind": "doc",
+      "topic_raw": "bot-errors-reliability-20260531",
+      "topic": "bot-errors-reliability",
+      "status": "closed",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/sdlc/closed/bot-errors-reliability-20260531",
+      "supersedes_hint": null,
+      "last_modified": "2026-06-14",
+      "size_bytes": 4474
+    },
+    {
+      "path": "docs/sdlc/closed/bot-errors-reliability-20260531/state.md",
+      "kind": "state",
+      "topic_raw": "bot-errors-reliability-20260531",
+      "topic": "bot-errors-reliability",
+      "status": "closed",
+      "status_source": "state-md-status",
+      "canonical_parent": "docs/sdlc/closed/bot-errors-reliability-20260531",
+      "supersedes_hint": null,
+      "last_modified": "2026-06-14",
+      "size_bytes": 5202
     },
     {
       "path": "docs/sdlc/closed/control-plane-20260401/state.md",
@@ -1759,30 +1783,6 @@
       "size_bytes": 3796
     },
     {
-      "path": "docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md",
-      "kind": "doc",
-      "topic_raw": "bot-errors-reliability-20260531",
-      "topic": "bot-errors-reliability",
-      "status": "active",
-      "status_source": "state-md-status",
-      "canonical_parent": "docs/sdlc/in-progress/bot-errors-reliability-20260531",
-      "supersedes_hint": null,
-      "last_modified": "2026-06-12",
-      "size_bytes": 4465
-    },
-    {
-      "path": "docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md",
-      "kind": "state",
-      "topic_raw": "bot-errors-reliability-20260531",
-      "topic": "bot-errors-reliability",
-      "status": "active",
-      "status_source": "state-md-status",
-      "canonical_parent": "docs/sdlc/in-progress/bot-errors-reliability-20260531",
-      "supersedes_hint": null,
-      "last_modified": "2026-06-12",
-      "size_bytes": 4069
-    },
-    {
       "path": "docs/superpowers/handoffs/2026-04-07-fleet-charts-guidelines.md",
       "kind": "handoff",
       "topic_raw": "2026-04-07-fleet-charts-guidelines",
@@ -2023,6 +2023,18 @@
       "size_bytes": 43457
     },
     {
+      "path": "docs/superpowers/plans/2026-06-13-d20-provider-keychain-unlock-policy.md",
+      "kind": "plan",
+      "topic_raw": "2026-06-13-d20-provider-keychain-unlock-policy",
+      "topic": "d20-provider-keychain-unlock-policy",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-06-13",
+      "size_bytes": 22499
+    },
+    {
       "path": "docs/superpowers/plans/2026-06-13-outstanding-burndown.md",
       "kind": "plan",
       "topic_raw": "2026-06-13-outstanding-burndown",
@@ -2032,19 +2044,43 @@
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-06-13",
-      "size_bytes": 27249
+      "size_bytes": 49682
+    },
+    {
+      "path": "docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md",
+      "kind": "plan",
+      "topic_raw": "2026-06-13-provider-errpreview-sanitization",
+      "topic": "provider-errpreview-sanitization",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-06-13",
+      "size_bytes": 14533
     },
     {
       "path": "docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md",
       "kind": "plan",
       "topic_raw": "2026-06-13-python-deploy-redaction-ssot",
       "topic": "python-deploy-redaction-ssot",
-      "status": "pending",
+      "status": "unknown",
       "status_source": "body-marker",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
       "last_modified": "2026-06-13",
-      "size_bytes": 25352
+      "size_bytes": 29726
+    },
+    {
+      "path": "docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md",
+      "kind": "plan",
+      "topic_raw": "2026-06-13-verification-reliability-residuals",
+      "topic": "verification-reliability-residuals",
+      "status": "unknown",
+      "status_source": "body-marker",
+      "canonical_parent": "docs/superpowers/plans",
+      "supersedes_hint": null,
+      "last_modified": "2026-06-13",
+      "size_bytes": 19626
     },
     {
       "path": "docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md",

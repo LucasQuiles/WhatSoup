@@ -51,6 +51,15 @@ jobs:
       - name: Repo hygiene staged smoke
         run: npm run guard:repo:staged
 
+      - name: Repo hygiene branch diff
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+            npm run guard:repo:branch-diff -- --base "origin/$GITHUB_BASE_REF"
+          else
+            npm run guard:repo:branch-diff
+          fi
+
       - name: Repo hygiene commit-author guard
         run: |
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
@@ -120,6 +129,9 @@ jobs:
 
       - name: Source runtime drift guard
         run: npm run guard:source-runtime-drift
+
+      - name: BOT ERRORS runtime manifest guard
+        run: npm run guard:bot-errors-runtime-manifest
 
       - name: Simulation matrix guard
         run: npm run guard:bot-errors-simulation-matrix

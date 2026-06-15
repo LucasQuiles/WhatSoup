@@ -1,186 +1,181 @@
 /**
+ * Ops page — fleet summary, log filtering, instance actions, and design-token wiring.
  * @vitest-environment jsdom
  *
- * Ops page — mount and behavior tests.
+ * Asserts on DOM text, aria state, and className — not internals. framer-motion is
+ * stubbed so motion.div renders without animation machinery.
  *
- * Page harness idiom mirrors tests/console/inbox-page.test.tsx:
- *   - All hooks and API calls mocked at their module boundary
- *   - Asserts on DOM text, aria state, and className — not internals
- *   - framer-motion stubbed so motion.div renders without animation machinery
- *
- * Covers:
- *   - Page mounts; "Fleet Status" and "Logs" headings are present
- *   - LogStream primitive is adopted (rendered in the page)
- *   - Log-level filter pills rendered; clicking a level filters the log entries
- *   - statusWashClass call-site: online line has no wash class; degraded gets warn wash;
- *     unreachable / logged_out get crit wash (status-first color program pillar)
- *   - logLevelTone: error → crit tone, warn → warn tone, others → neutral tone
- *   - Empty state when no lines are discovered
- *   - Loading state when lines data is still fetching
- *   - Delete confirm flow: clicking Delete opens ConfirmDialog, confirming calls api.deleteLine
+ * The Ops page is a pending Card-migration consumer: instance cards use the c-card
+ * recipe and statusWashClass design tokens. These suites cover both the behavioral
+ * contract (fleet states, log filtering, instance actions) and the design-class
+ * contract (status-first washes, neutral traffic ink, statusWashClass unit cases).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, act, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ReactNode } from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context'
+import { statusWashClass } from '../../console/src/lib/status-severity'
+import type { FeedEvent, LineInstance, LogEntry } from '../../console/src/types'
 
-// ---------------------------------------------------------------------------
-// Module-level mocks — declared before component import
-// ---------------------------------------------------------------------------
+const useLinesMock = vi.hoisted(() => vi.fn())
+const useFeedMock = vi.hoisted(() => vi.fn())
+const useLogsMock = vi.hoisted(() => vi.fn())
+const restartMock = vi.hoisted(() => vi.fn())
+const deleteLineMock = vi.hoisted(() => vi.fn())
+const invalidateQueriesMock = vi.hoisted(() => vi.fn())
 
-// framer-motion: render motion.div as a plain div
 vi.mock('framer-motion', async () => {
   const React = await import('react')
   return {
     motion: {
-      div: ({
-        children,
-        className,
-        initial: _i,
-        animate: _a,
-        transition: _t,
-        ...rest
-      }: Record<string, unknown> & { children?: ReactNode; className?: string }) =>
-        React.createElement('div', { className, ...rest }, children),
+      div: ({ children, ...props }: { children?: ReactNode } & Record<string, unknown>) =>
+        React.createElement('div', props, children),
     },
-    AnimatePresence: ({ children }: { children?: ReactNode }) => children,
   }
 })
 
-const mockUseLines = vi.hoisted(() => vi.fn())
-const mockUseLogs = vi.hoisted(() => vi.fn())
-const mockUseFeed = vi.hoisted(() => vi.fn())
+vi.mock('@tanstack/react-query', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@tanstack/react-query')>()
+  return {
+    ...actual,
+    useQueryClient: () => ({ invalidateQueries: invalidateQueriesMock }),
+  }
+})
 
-vi.mock('../../console/src/hooks/use-fleet', () => ({
-  useLines: mockUseLines,
-  useLogs: mockUseLogs,
-  useFeed: mockUseFeed,
-}))
-
-const mockApi = vi.hoisted(() => ({
-  deleteLine: vi.fn(),
-  restart: vi.fn(),
-  stopInstance: vi.fn(),
-}))
+vi.mock('../../console/src/hooks/use-fleet', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../console/src/hooks/use-fleet')>()
+  return {
+    ...actual,
+    useLines: useLinesMock,
+    useFeed: useFeedMock,
+    useLogs: useLogsMock,
+  }
+})
 
 vi.mock('../../console/src/lib/api', () => ({
-  api: mockApi,
-}))
-
-const mockToast = vi.hoisted(() => ({
-  toast: vi.fn(),
-  success: vi.fn(),
-  error: vi.fn(),
-  info: vi.fn(),
-  dismiss: vi.fn(),
-  clear: vi.fn(),
-}))
-
-vi.mock('../../console/src/hooks/toast-context', () => ({
-  useToast: () => mockToast,
-  ToastContext: {
-    Provider: ({ children }: { children?: ReactNode }) => children,
+  api: {
+    restart: restartMock,
+    deleteLine: deleteLineMock,
   },
 }))
 
-// ---------------------------------------------------------------------------
-// Dynamic imports (after vi.mock declarations)
-// ---------------------------------------------------------------------------
+vi.mock('../../console/src/components/RelinkModal', () => ({
+  default: ({
+    lineName,
+    open,
+    onClose,
+    onLinked,
+  }: {
+    lineName: string
+    open: boolean
+    onClose: () => void
+    onLinked: () => void
+  }) => open ? (
+    <div role="dialog" aria-label={`Relink ${lineName}`}>
+      <span>Relink modal for {lineName}</span>
+      <button type="button" onClick={onLinked}>finish relink</button>
+      <button type="button" onClick={onClose}>close relink</button>
+    </div>
+  ) : null,
+}))
 
 import Ops from '../../console/src/pages/Ops'
-import { statusWashClass } from '../../console/src/lib/status-severity'
-import type { LineInstance, LogEntry, FeedEvent } from '../../console/src/types'
-
-// ---------------------------------------------------------------------------
-// Fixtures and helpers
-// ---------------------------------------------------------------------------
 
 function makeLine(overrides: Partial<LineInstance> = {}): LineInstance {
   return {
-    name: 'test-line',
-    phone: '+15550001234',
+    name: 'alpha',
+    phone: '+15550001111',
     mode: 'passive',
     status: 'online',
     accessMode: 'open',
-    healthPort: 9100,
-    uptime: '2h',
-    messagesTotal: 50,
-    health: null,
-    heartbeat: [],
-    lastActive: new Date().toISOString(),
+    healthPort: 9101,
+    uptime: '1h',
+    messagesTotal: 12,
+    health: {
+      status: 'ok',
+      uptime_seconds: 60,
+      messages_total: 12,
+      connection: { state: 'connected' },
+      sqlite: { messages_total: 12, schema_version: 1 },
+    },
+    heartbeat: ['up', 'up', 'slow'],
+    lastActive: '2026-06-15T01:00:00.000Z',
     error: null,
+    linkedStatus: 'linked',
+    messagesToday: 3,
     ...overrides,
   }
 }
 
 function makeLog(overrides: Partial<LogEntry> = {}): LogEntry {
   return {
-    timestamp: '2026-06-11T12:00:00Z',
+    timestamp: '2026-06-15T01:02:03.000Z',
     level: 'info',
-    msg: 'test log message',
-    source: 'test',
+    source: 'runtime',
+    msg: 'started',
     ...overrides,
   }
 }
 
-function makeFeed(overrides: Partial<FeedEvent> = {}): FeedEvent {
+function makeToast(): ToastContextValue {
   return {
-    time: '2026-06-11T12:00:00Z',
-    mode: 'passive',
-    text: 'test event',
-    ...overrides,
+    toast: vi.fn(() => 1),
+    success: vi.fn(() => 1),
+    error: vi.fn(() => 1),
+    info: vi.fn(() => 1),
+    dismiss: vi.fn(),
+    clear: vi.fn(),
   }
 }
 
-function makeClient() {
-  return new QueryClient({ defaultOptions: { queries: { retry: false } } })
-}
-
-interface RenderOpts {
+interface RenderOptions {
   lines?: LineInstance[]
-  logs?: LogEntry[]
   feed?: FeedEvent[]
-  linesLoading?: boolean
+  logsByLine?: Record<string, LogEntry[]>
+  loading?: boolean
   linesError?: unknown
-  logsError?: unknown
   feedError?: unknown
+  logsError?: unknown
   linesRefetch?: ReturnType<typeof vi.fn>
-  logsRefetch?: ReturnType<typeof vi.fn>
   feedRefetch?: ReturnType<typeof vi.fn>
+  logsRefetch?: ReturnType<typeof vi.fn>
 }
 
-function renderOps(opts: RenderOpts = {}) {
-  const {
-    lines = [],
-    logs = [],
-    feed = [],
-    linesLoading = false,
-    linesError = null,
-    logsError = null,
-    feedError = null,
-    linesRefetch = vi.fn(),
-    logsRefetch = vi.fn(),
-    feedRefetch = vi.fn(),
-  } = opts
+function renderOps(opts: RenderOptions = {}) {
+  const logsByLine = opts.logsByLine ?? {}
+  const toast = makeToast()
+  const linesRefetch = opts.linesRefetch ?? vi.fn()
+  const feedRefetch = opts.feedRefetch ?? vi.fn()
+  const logsRefetch = opts.logsRefetch ?? vi.fn()
 
-  mockUseLines.mockReturnValue({ data: lines, isLoading: linesLoading, error: linesError, refetch: linesRefetch })
-  mockUseLogs.mockReturnValue({ data: logs, error: logsError, refetch: logsRefetch })
-  mockUseFeed.mockReturnValue({ data: feed, error: feedError, refetch: feedRefetch })
+  useLinesMock.mockReturnValue({
+    data: opts.lines ?? [],
+    isLoading: opts.loading ?? false,
+    error: opts.linesError ?? null,
+    refetch: linesRefetch,
+  })
+  useFeedMock.mockReturnValue({
+    data: opts.feed ?? [],
+    error: opts.feedError ?? null,
+    refetch: feedRefetch,
+  })
+  useLogsMock.mockImplementation((lineName: string) => ({
+    data: logsByLine[lineName] ?? [],
+    error: opts.logsError ?? null,
+    refetch: logsRefetch,
+  }))
 
-  const qc = makeClient()
-  return render(
-    <QueryClientProvider client={qc}>
+  const result = render(
+    <ToastContext.Provider value={toast}>
       <Ops />
-    </QueryClientProvider>,
+    </ToastContext.Provider>,
   )
-}
 
-// ---------------------------------------------------------------------------
-// Lifecycle
-// ---------------------------------------------------------------------------
+  return { ...result, toast, linesRefetch, feedRefetch, logsRefetch }
+}
 
 beforeEach(() => {
-  if (typeof window !== 'undefined' && !window.matchMedia) {
+  if (!window.matchMedia) {
     Object.defineProperty(window, 'matchMedia', {
       writable: true,
       value: (query: string) => ({
@@ -201,10 +196,6 @@ afterEach(() => {
   cleanup()
   vi.clearAllMocks()
 })
-
-// ---------------------------------------------------------------------------
-// 1. Page-level mount (rendering contract)
-// ---------------------------------------------------------------------------
 
 describe('Ops page — mount', () => {
   it('renders the "Fleet Status" section heading', () => {
@@ -231,69 +222,136 @@ describe('Ops page — mount', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// 2. LogStream primitive adoption
-// ---------------------------------------------------------------------------
+describe('Ops page fleet states', () => {
+  it('renders loading and empty states from the lines query', () => {
+    const { rerender } = renderOps({ loading: true })
 
-describe('Ops page — LogStream primitive adoption', () => {
-  it('LogStream empty message appears when no logs and no line selected', () => {
-    renderOps({ lines: [], logs: [] })
+    expect(screen.getByText('Loading fleet status...')).toBeDefined()
 
-    // LogStream renders its emptyMessage when entries is empty
+    useLinesMock.mockReturnValue({ data: [], isLoading: false, error: null, refetch: vi.fn() })
+    useFeedMock.mockReturnValue({ data: [], error: null, refetch: vi.fn() })
+    useLogsMock.mockReturnValue({ data: [], error: null, refetch: vi.fn() })
+
+    rerender(
+      <ToastContext.Provider value={makeToast()}>
+        <Ops />
+      </ToastContext.Provider>,
+    )
+
+    expect(screen.getByText('No instances discovered. Create one from the Soup Kitchen.')).toBeDefined()
+    expect(screen.getAllByText('0 entries')).toHaveLength(2)
     expect(screen.getByText('Select an instance to view logs.')).toBeDefined()
   })
 
-  it('renders log entry messages via LogStream', () => {
-    const line = makeLine({ name: 'alpha' })
-    const logs = [
-      makeLog({ msg: 'startup complete', level: 'info' }),
-      makeLog({ msg: 'warn signal detected', level: 'warn' }),
+  it('summarizes health, alerts, and mode-specific runtime counters', () => {
+    const lines = [
+      makeLine({ name: 'alpha', mode: 'passive', unread: 2, messagesToday: 5 }),
+      makeLine({
+        name: 'beta',
+        phone: '+15550002222',
+        mode: 'chat',
+        status: 'degraded',
+        queueDepth: 4,
+        enrichmentUnprocessed: 1,
+        messagesToday: 8,
+      }),
+      makeLine({
+        name: 'gamma',
+        phone: '+15550003333',
+        mode: 'agent',
+        status: 'unreachable',
+        activeSessions: 1,
+        messagesToday: 0,
+      }),
     ]
-    renderOps({ lines: [line], logs })
+    const feed: FeedEvent[] = [
+      { time: '2026-06-15T01:00:00.000Z', mode: 'agent', text: 'beta degraded', isError: true },
+      { time: '2026-06-15T01:01:00.000Z', mode: 'chat', text: 'gamma unreachable', isError: true },
+    ]
 
-    expect(screen.getByText('startup complete')).toBeDefined()
-    expect(screen.getByText('warn signal detected')).toBeDefined()
+    renderOps({ lines, feed })
+
+    expect(screen.getByText('2 alerts')).toBeDefined()
+    expect(screen.getByText('3 instances')).toBeDefined()
+    expect(screen.getByText('1 online')).toBeDefined()
+    expect(screen.getByText('2 unhealthy')).toBeDefined()
+    expect(screen.getByText('5 msgs')).toBeDefined()
+    expect(screen.getByText('2 unread')).toBeDefined()
+    expect(screen.getByText('q:4')).toBeDefined()
+    expect(screen.getByText('enrich:1')).toBeDefined()
+    expect(screen.getByText('1 session')).toBeDefined()
   })
 
-  it('filtered log count shown in the status bar reflects current filter', () => {
-    const line = makeLine({ name: 'alpha' })
-    const logs = [
-      makeLog({ msg: 'info msg', level: 'info' }),
-      makeLog({ msg: 'error msg', level: 'error' }),
+  it('renders N instance cards when N lines are provided and counts them in the summary bar', () => {
+    const lines = [
+      makeLine({ name: 'alpha', status: 'online' }),
+      makeLine({ name: 'bravo', phone: '+15550002222', status: 'online' }),
     ]
-    renderOps({ lines: [line], logs })
+    renderOps({ lines })
 
-    // Initial state: "all" filter — 2 entries
-    expect(screen.getAllByText('2 entries').length).toBeGreaterThanOrEqual(1)
+    // Instance names appear in the card and status bar; getAllByText confirms presence
+    expect(screen.getAllByText('alpha').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('bravo').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('2 instances')).toBeDefined()
+    expect(screen.getByText('2 online')).toBeDefined()
   })
 })
 
-// ---------------------------------------------------------------------------
-// 3. Log-level filter behavior (level filter pills wired)
-// ---------------------------------------------------------------------------
+describe('Ops page log stream', () => {
+  it('LogStream empty message appears when no logs and no line selected', () => {
+    renderOps({ lines: [], logsByLine: {} })
 
-describe('Ops page — log-level filter wiring', () => {
-  it('clicking the "error" filter pill shows only error-level log entries', () => {
-    const line = makeLine({ name: 'alpha' })
-    const logs = [
-      makeLog({ msg: 'info-only message', level: 'info' }),
-      makeLog({ msg: 'error-only message', level: 'error' }),
+    expect(screen.getByText('Select an instance to view logs.')).toBeDefined()
+  })
+
+  it('uses the first line by default, switches lines, and filters logs by level', () => {
+    const lines = [
+      makeLine({ name: 'alpha' }),
+      makeLine({ name: 'beta', phone: '+15550002222', status: 'degraded', mode: 'agent' }),
     ]
-    renderOps({ lines: [line], logs })
 
-    fireEvent.click(screen.getByRole('button', { name: /^error$/i }))
+    renderOps({
+      lines,
+      logsByLine: {
+        alpha: [
+          makeLog({ level: 'info', msg: 'alpha started' }),
+          makeLog({ level: 'error', msg: 'alpha failed', source: 'provider' }),
+        ],
+        beta: [
+          makeLog({ level: 'warn', msg: 'beta degraded', source: 'health' }),
+        ],
+      },
+    })
 
-    expect(screen.getByText('error-only message')).toBeDefined()
-    expect(screen.queryByText('info-only message')).toBeNull()
+    expect(useLogsMock).toHaveBeenLastCalledWith('alpha')
+    expect(screen.getByText('alpha started')).toBeDefined()
+    expect(screen.getByText('alpha failed')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'error' }))
+    expect(screen.queryByText('alpha started')).toBeNull()
+    expect(screen.getByText('alpha failed')).toBeDefined()
+    expect(screen.getAllByText('1 entries')).toHaveLength(2)
+
+    fireEvent.click(screen.getByText('beta').closest('.c-card') as HTMLElement)
+    expect(useLogsMock).toHaveBeenLastCalledWith('beta')
+    expect(screen.getByText('No error logs for beta.')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'warn' }))
+    expect(screen.getByText('beta degraded')).toBeDefined()
+    expect(screen.getByText('health')).toBeDefined()
   })
 
   it('switching back to "all" shows all log entries again', () => {
     const line = makeLine({ name: 'alpha' })
-    const logs = [
-      makeLog({ msg: 'info-only message', level: 'info' }),
-      makeLog({ msg: 'error-only message', level: 'error' }),
-    ]
-    renderOps({ lines: [line], logs })
+    renderOps({
+      lines: [line],
+      logsByLine: {
+        alpha: [
+          makeLog({ level: 'info', msg: 'info-only message' }),
+          makeLog({ level: 'error', msg: 'error-only message' }),
+        ],
+      },
+    })
 
     fireEvent.click(screen.getByRole('button', { name: /^error$/i }))
     fireEvent.click(screen.getByRole('button', { name: /^all$/i }))
@@ -303,11 +361,7 @@ describe('Ops page — log-level filter wiring', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// 4. statusWashClass call-site — status-first color (program pillar)
-// ---------------------------------------------------------------------------
-
-describe('Ops page — statusWashClass applied to instance cards', () => {
+describe('Ops page — statusWashClass applied to instance cards (status-first color)', () => {
   it('renders agent session counts as neutral traffic ink', () => {
     const line = makeLine({ name: 'agent-line', mode: 'agent', activeSessions: 2 })
     renderOps({ lines: [line] })
@@ -321,7 +375,6 @@ describe('Ops page — statusWashClass applied to instance cards', () => {
     const line = makeLine({ name: 'alpha', status: 'online' })
     const { container } = renderOps({ lines: [line] })
 
-    // The card div should not carry bg-[var(--s-warn-wash)] or bg-[var(--s-crit-wash)]
     const cards = container.querySelectorAll('[class*="c-card c-hover"]')
     expect(cards.length).toBeGreaterThanOrEqual(1)
     const card = cards[0] as HTMLElement
@@ -330,12 +383,11 @@ describe('Ops page — statusWashClass applied to instance cards', () => {
   })
 
   it('degraded line card carries the warn wash class', () => {
-    const line = makeLine({ name: 'bravo', status: 'degraded' })
+    const line = makeLine({ name: 'bravo', phone: '+15550002222', status: 'degraded' })
     const { container } = renderOps({ lines: [line] })
 
     // statusWashClass('degraded') === 'bg-[var(--s-warn-wash)]'
-    const warnWash = statusWashClass('degraded')
-    expect(warnWash).toBe('bg-[var(--s-warn-wash)]')
+    expect(statusWashClass('degraded')).toBe('bg-[var(--s-warn-wash)]')
 
     const cards = container.querySelectorAll('[class*="c-card c-hover"]')
     expect(cards.length).toBeGreaterThanOrEqual(1)
@@ -344,11 +396,10 @@ describe('Ops page — statusWashClass applied to instance cards', () => {
   })
 
   it('unreachable line card carries the crit wash class', () => {
-    const line = makeLine({ name: 'charlie', status: 'unreachable', linkedStatus: 'linked' })
+    const line = makeLine({ name: 'charlie', phone: '+15550003333', status: 'unreachable', linkedStatus: 'linked' })
     const { container } = renderOps({ lines: [line] })
 
-    const critWash = statusWashClass('unreachable')
-    expect(critWash).toBe('bg-[var(--s-crit-wash)]')
+    expect(statusWashClass('unreachable')).toBe('bg-[var(--s-crit-wash)]')
 
     const cards = container.querySelectorAll('[class*="c-card c-hover"]')
     expect(cards.length).toBeGreaterThanOrEqual(1)
@@ -357,11 +408,10 @@ describe('Ops page — statusWashClass applied to instance cards', () => {
   })
 
   it('logged_out line card carries the crit wash class', () => {
-    const line = makeLine({ name: 'delta', status: 'logged_out', linkedStatus: 'unlinked' })
+    const line = makeLine({ name: 'delta', phone: '+15550004444', status: 'logged_out', linkedStatus: 'unlinked' })
     const { container } = renderOps({ lines: [line] })
 
-    const critWash = statusWashClass('logged_out')
-    expect(critWash).toBe('bg-[var(--s-crit-wash)]')
+    expect(statusWashClass('logged_out')).toBe('bg-[var(--s-crit-wash)]')
 
     const cards = container.querySelectorAll('[class*="c-card c-hover"]')
     expect(cards.length).toBeGreaterThanOrEqual(1)
@@ -370,11 +420,7 @@ describe('Ops page — statusWashClass applied to instance cards', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// 5. logLevelTone — Pill tone mapping
-// ---------------------------------------------------------------------------
-
-describe('statusWashClass — direct unit cases (status-severity.ts:25)', () => {
+describe('statusWashClass — direct unit cases (status-severity.ts)', () => {
   it('online status returns empty string (no wash)', () => {
     expect(statusWashClass('online')).toBe('')
   })
@@ -400,46 +446,7 @@ describe('statusWashClass — direct unit cases (status-severity.ts:25)', () => 
   })
 })
 
-// ---------------------------------------------------------------------------
-// 6. Empty and loading states
-// ---------------------------------------------------------------------------
-
-describe('Ops page — empty and loading states', () => {
-  it('shows "No instances discovered" when lines array is empty (not loading)', () => {
-    renderOps({ lines: [], linesLoading: false })
-
-    expect(screen.getByText('No instances discovered. Create one from the Soup Kitchen.')).toBeDefined()
-  })
-
-  it('shows "Loading fleet status..." when lines are still loading', () => {
-    renderOps({ lines: [], linesLoading: true })
-
-    expect(screen.getByText('Loading fleet status...')).toBeDefined()
-  })
-
-  it('renders N instance cards when N lines are provided', () => {
-    const lines = [
-      makeLine({ name: 'alpha', status: 'online' }),
-      makeLine({ name: 'bravo', status: 'degraded' }),
-    ]
-    renderOps({ lines })
-
-    // Instance names appear in the card and status bar; getAllByText confirms presence
-    expect(screen.getAllByText('alpha').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText('bravo').length).toBeGreaterThanOrEqual(1)
-  })
-
-  it('summary bar shows instance count', () => {
-    const lines = [
-      makeLine({ name: 'alpha', status: 'online' }),
-      makeLine({ name: 'bravo', status: 'online' }),
-    ]
-    renderOps({ lines })
-
-    expect(screen.getByText('2 instances')).toBeDefined()
-    expect(screen.getByText('2 online')).toBeDefined()
-  })
-
+describe('Ops page — retryable error states', () => {
   it('renders a retryable fleet-status error when the lines query fails', () => {
     const linesRefetch = vi.fn()
 
@@ -492,80 +499,108 @@ describe('Ops page — empty and loading states', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// 7. Delete confirm flow
-// ---------------------------------------------------------------------------
+describe('Ops page instance actions', () => {
+  it('requests restart for unhealthy linked instances and reports success or failure', async () => {
+    restartMock.mockResolvedValueOnce({ status: 'ok', instance: 'beta' })
+    const { toast } = renderOps({
+      lines: [makeLine({ name: 'beta', status: 'degraded', mode: 'agent', linkedStatus: 'linked' })],
+    })
 
-describe('Ops page — delete confirm flow', () => {
-  it('clicking the Delete button on an unhealthy line opens the ConfirmDialog', async () => {
-    const line = makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })
-    renderOps({ lines: [line] })
+    fireEvent.click(screen.getByRole('button', { name: /Restart/ }))
 
-    const deleteBtn = screen.getByRole('button', { name: 'Delete' })
-    await act(async () => { fireEvent.click(deleteBtn) })
+    expect(toast.info).toHaveBeenCalledWith('Restarting beta...')
+    await waitFor(() => expect(restartMock).toHaveBeenCalledWith('beta'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('beta restart requested'))
 
-    // ConfirmDialog title text includes the line name (rendered as a span, not heading)
-    expect(screen.getByText(/Delete alpha\?/)).toBeDefined()
+    restartMock.mockRejectedValueOnce(new Error('systemd timeout'))
+    fireEvent.click(screen.getByRole('button', { name: /Restart/ }))
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed: systemd timeout'))
   })
 
-  it('confirming delete calls api.deleteLine with the line name', async () => {
-    mockApi.deleteLine.mockResolvedValue(undefined)
-    const line = makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })
-    renderOps({ lines: [line] })
+  it('restart failure reports non-Error rejection text to the operator', async () => {
+    restartMock.mockRejectedValueOnce('supervisor refused restart')
+    const { toast } = renderOps({
+      lines: [makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })],
+    })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    fireEvent.click(screen.getByRole('button', { name: /Restart/ }))
 
-    const confirmBtn = await screen.findByRole('button', { name: /Delete permanently/i })
-    await act(async () => { fireEvent.click(confirmBtn) })
-
-    await waitFor(() => expect(mockApi.deleteLine).toHaveBeenCalledWith('alpha'))
+    expect(restartMock).toHaveBeenCalledWith('alpha')
+    expect(toast.info).toHaveBeenCalledWith('Restarting alpha...')
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed: supervisor refused restart')
+    })
   })
 
-  it('cancelling the ConfirmDialog does not call api.deleteLine', async () => {
-    const line = makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })
-    renderOps({ lines: [line] })
+  it('opens the relink modal for unhealthy unlinked instances and invalidates lines after relink', async () => {
+    const { toast } = renderOps({
+      lines: [makeLine({ name: 'beta', status: 'logged_out', linkedStatus: 'unlinked' })],
+    })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    fireEvent.click(screen.getByRole('button', { name: /Re-link/ }))
 
-    const cancelBtn = await screen.findByRole('button', { name: /Cancel/i })
-    await act(async () => { fireEvent.click(cancelBtn) })
+    expect(await screen.findByRole('dialog', { name: 'Relink beta' })).toBeDefined()
 
-    expect(mockApi.deleteLine).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'finish relink' }))
+
+    await waitFor(() => {
+      expect(invalidateQueriesMock).toHaveBeenCalledWith({ queryKey: ['lines'] })
+      expect(toast.success).toHaveBeenCalledWith('Instance re-linked!')
+    })
+    expect(screen.queryByRole('dialog', { name: 'Relink beta' })).toBeNull()
+  })
+
+  it('confirms deletion, clears the dialog, and reports success or API errors', async () => {
+    deleteLineMock.mockResolvedValueOnce({ deleted: 'beta' })
+    const { toast } = renderOps({
+      lines: [makeLine({ name: 'beta', status: 'degraded', linkedStatus: 'linked' })],
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Delete/ }))
+    expect(screen.getByRole('dialog')).toBeDefined()
+    expect(screen.getByText('Delete beta?')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
+
+    await waitFor(() => expect(deleteLineMock).toHaveBeenCalledWith('beta'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('beta deleted'))
+    expect(invalidateQueriesMock).toHaveBeenCalledWith({ queryKey: ['lines'] })
+    expect(screen.queryByText('Delete beta?')).toBeNull()
+
+    deleteLineMock.mockRejectedValueOnce(new Error('permission denied'))
+    fireEvent.click(screen.getByRole('button', { name: /Delete/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Delete failed: permission denied'))
+    expect(screen.queryByText('Delete beta?')).toBeNull()
+  })
+
+  it('cancelling the ConfirmDialog does not call api.deleteLine', () => {
+    renderOps({
+      lines: [makeLine({ name: 'beta', status: 'unreachable', linkedStatus: 'linked' })],
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Delete/ }))
+
+    const dialog = screen.getByRole('dialog')
+    const cancelBtn = within(dialog).getByRole('button', { name: /Cancel/i })
+    fireEvent.click(cancelBtn)
+
+    expect(deleteLineMock).not.toHaveBeenCalled()
   })
 
   it('delete failure reports non-Error rejection text to the operator', async () => {
-    mockApi.deleteLine.mockRejectedValue('database unavailable')
-    const line = makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })
-    renderOps({ lines: [line] })
-
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
-    const confirmBtn = await screen.findByRole('button', { name: /Delete permanently/i })
-    await act(async () => { fireEvent.click(confirmBtn) })
-
-    await waitFor(() => {
-      expect(mockToast.error).toHaveBeenCalledWith('Delete failed: database unavailable')
-    })
-  })
-})
-
-// ---------------------------------------------------------------------------
-// 8. Restart action failure reporting
-// ---------------------------------------------------------------------------
-
-describe('Ops page — restart action flow', () => {
-  it('restart failure reports non-Error rejection text to the operator', async () => {
-    mockApi.restart.mockRejectedValue('supervisor refused restart')
-    const line = makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })
-    renderOps({ lines: [line] })
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Restart' }))
+    deleteLineMock.mockRejectedValueOnce('database unavailable')
+    const { toast } = renderOps({
+      lines: [makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })],
     })
 
-    expect(mockApi.restart).toHaveBeenCalledWith('alpha')
-    expect(mockToast.info).toHaveBeenCalledWith('Restarting alpha...')
+    fireEvent.click(screen.getByRole('button', { name: /Delete/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
+
     await waitFor(() => {
-      expect(mockToast.error).toHaveBeenCalledWith('Failed: supervisor refused restart')
+      expect(toast.error).toHaveBeenCalledWith('Delete failed: database unavailable')
     })
   })
 })

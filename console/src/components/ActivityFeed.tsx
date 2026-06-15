@@ -42,7 +42,6 @@ function matchesFilter(event: FeedEvent, filter: FeedFilter): boolean {
     case "errors": return eventCountsAsError(event);
     case "health": return t === "health";
     case "sessions": return t === "session";
-    default: return true;
   }
 }
 

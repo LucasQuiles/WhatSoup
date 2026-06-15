@@ -1,9 +1,10 @@
-import { getProviderBinary } from '../session.ts';
+import { buildChildEnv, getProviderBinary, opencodeUsesConfigModel } from '../session.ts';
 import { classifyProviderFailure } from '../failure-taxonomy.ts';
 import {
+  probeBinaryCommand,
   probeBinaryAuthStatus,
-  probeModelCatalog,
   type BinaryAuthStatusResult,
+  type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
 import { resolveApiKey, type ResolveApiKeyOptions } from './api-key-resolver.ts';
 import type {
@@ -13,13 +14,20 @@ import type {
 } from './primary-model-usability.ts';
 
 export interface PrimaryModelProbeAdapterDeps {
+  cwd?: string;
+  buildChildEnv?: typeof buildChildEnv;
   getProviderBinary?: (provider: string) => string | null;
   probeBinaryAuthStatus?: (
     binary: string,
     args: string[],
     env: NodeJS.ProcessEnv,
   ) => Promise<BinaryAuthStatusResult>;
-  probeModelCatalog?: typeof probeModelCatalog;
+  probeBinaryCommand?: (
+    binary: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    options?: BinaryCommandProbeOptions,
+  ) => Promise<BinaryAuthStatusResult>;
   resolveApiKey?: (opts: ResolveApiKeyOptions) => string;
   fetch?: typeof fetch;
 }
@@ -31,15 +39,16 @@ interface ModelsListResponse {
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 const API_PROBE_TIMEOUT_MS = 5_000;
+const CLI_MODEL_PROBE_TIMEOUT_MS = 15_000;
 const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
+const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 
 export function createPrimaryModelProbeAdapters(
   providerConfig?: Record<string, unknown>,
   deps: PrimaryModelProbeAdapterDeps = {},
 ): PrimaryModelProbeAdapters {
   return {
-    probeBinaryModel: (target) => probeCliModel(target.provider, target.model, deps),
-    probeModelCatalog: deps.probeModelCatalog ?? probeModelCatalog,
+    probeBinaryModel: (target) => probeCliModel(target.provider, target.model, providerConfig, deps),
     probeApiModelAccess: (target) => probeApiModelAccess(target.provider, target.model, providerConfig, deps),
   };
 }
@@ -47,6 +56,7 @@ export function createPrimaryModelProbeAdapters(
 async function probeCliModel(
   provider: string,
   model: string,
+  providerConfig: Record<string, unknown> | undefined,
   deps: PrimaryModelProbeAdapterDeps,
 ): Promise<BinaryModelProbeResult> {
   const resolveBinary = deps.getProviderBinary ?? getProviderBinary;
@@ -58,14 +68,54 @@ async function probeCliModel(
   }
   if (!binary) return { status: 'provider_unavailable' };
 
-  const probe = deps.probeBinaryAuthStatus ?? probeBinaryAuthStatus;
-  const result = await probe(binary, ['-p', CLAUDE_MODEL_PROBE_PROMPT, '--model', model], {
+  const probe = deps.probeBinaryCommand
+    ?? ((cmd: string, args: string[], env: NodeJS.ProcessEnv, options?: BinaryCommandProbeOptions) => {
+      if (deps.probeBinaryAuthStatus) return deps.probeBinaryAuthStatus(cmd, args, env);
+      return probeBinaryCommand(cmd, args, env, options);
+    });
+  const result = await probe(
+    binary,
+    modelProbeCommand(provider, model, providerConfig),
+    modelProbeEnv(provider, model, providerConfig, deps),
+    { ...(deps.cwd ? { cwd: deps.cwd } : {}), timeoutMs: CLI_MODEL_PROBE_TIMEOUT_MS },
+  );
+  return mapCliProbeResult(result);
+}
+
+function modelProbeCommand(
+  provider: string,
+  model: string,
+  providerConfig: Record<string, unknown> | undefined,
+): string[] {
+  if (provider === 'opencode-cli') {
+    return [
+      'run',
+      '--format',
+      'json',
+      '--pure',
+      ...(opencodeUsesConfigModel(providerConfig) ? [] : ['-m', model]),
+      OPENCODE_MODEL_PROBE_PROMPT,
+    ];
+  }
+  return ['-p', CLAUDE_MODEL_PROBE_PROMPT, '--model', model];
+}
+
+function modelProbeEnv(
+  provider: string,
+  model: string,
+  providerConfig: Record<string, unknown> | undefined,
+  deps: PrimaryModelProbeAdapterDeps,
+): NodeJS.ProcessEnv {
+  if (provider === 'opencode-cli') {
+    const buildEnv = deps.buildChildEnv ?? buildChildEnv;
+    return buildEnv('opencode-cli', undefined, model, providerConfig);
+  }
+  return {
     HOME: process.env.HOME,
     PATH: process.env.PATH,
     USER: process.env.USER,
     NO_COLOR: '1',
-  });
-  return mapCliProbeResult(result);
+  };
 }
 
 function mapCliProbeResult(result: BinaryAuthStatusResult): BinaryModelProbeResult {

@@ -3,11 +3,16 @@ import { describe, expect, it } from 'vitest';
 import { WhatSoupError } from '../../../src/errors.ts';
 import {
   classifyAgentFailure,
+  classifyProviderFailure,
   isFallbackEligibleForFailureClass,
   isExpectedProviderShutdown,
   isPromptTooLongMessage,
+  isProviderAuthRequiredMessage,
+  isProviderModelUnavailableMessage,
+  isProviderPolicyBlockMessage,
   isRateLimitResultMessage,
   isUsageLimitMessage,
+  providerFailureArmsFallback,
 } from '../../../src/runtimes/agent/failure-taxonomy.ts';
 
 function statusError(status: number): Error & { status: number } {
@@ -22,6 +27,12 @@ function errnoError(code: string): NodeJS.ErrnoException {
   return err;
 }
 
+function errorWithCause(cause: unknown): Error & { cause: unknown } {
+  const err = new Error('outer failure') as Error & { cause: unknown };
+  err.cause = cause;
+  return err;
+}
+
 const baseInput = {
   instanceName: 'yl-bot',
   provider: 'claude-cli',
@@ -31,6 +42,12 @@ const baseInput = {
 describe('agent failure taxonomy detectors', () => {
   it('keeps usage-limit and context-overflow messages distinct', () => {
     expect(isUsageLimitMessage("You're out of extra usage. Claude will be available at 8pm.")).toBe(true);
+    expect(isUsageLimitMessage('Quota exceeded; Claude resets at 9pm.')).toBe(true);
+    expect(isUsageLimitMessage('Provider returned insufficient_quota for this API request.')).toBe(true);
+    expect(isUsageLimitMessage('Billing quota exceeded for the provider account.')).toBe(true);
+    expect(isUsageLimitMessage('Provider credit balance exhausted.')).toBe(true);
+    expect(isUsageLimitMessage('API account balance is too low to continue.')).toBe(true);
+    expect(isUsageLimitMessage('Claude resets at 9pm after maintenance.')).toBe(false);
     expect(isUsageLimitMessage('Prompt is too long: maximum context length exceeded.')).toBe(false);
     expect(isPromptTooLongMessage('Prompt is too long: maximum context length exceeded.')).toBe(true);
   });
@@ -44,6 +61,37 @@ describe('agent failure taxonomy detectors', () => {
     expect(isRateLimitResultMessage('HTTP 429 from provider')).toBe(true);
     expect(isRateLimitResultMessage('Please document rate limit handling and retry policy.')).toBe(false);
   });
+
+  it('covers provider detector synonyms used by runtime classification', () => {
+    expect(isPromptTooLongMessage('Provider rejected the request: token budget limit exceeded.')).toBe(true);
+    expect(isProviderAuthRequiredMessage('OAuth token expired; reconnect the provider account.')).toBe(true);
+    expect(isProviderPolicyBlockMessage('The request was blocked by policy.')).toBe(true);
+    expect(isProviderModelUnavailableMessage('Issue with the selected model: it may not exist or you may not have access.')).toBe(true);
+    expect(isProviderModelUnavailableMessage('Unknown model from provider registry.')).toBe(true);
+  });
+
+  it.each([
+    ['', null],
+    ['Prompt is too long: context_length_exceeded', 'context-overflow'],
+    ['Quota exceeded; Claude resets at 9pm.', 'usage-limit'],
+    ['Authentication required before provider call.', 'auth-required'],
+    ['HTTP 429 from provider', 'rate-limit'],
+    ['Request blocked by policy.', 'policy-block'],
+    ['Unknown model from provider registry.', 'model-unavailable'],
+    ['ordinary provider discussion', null],
+  ] as const)('classifyProviderFailure maps %j to %j', (message, expected) => {
+    expect(classifyProviderFailure(message)).toBe(expected);
+  });
+
+  it('arms fallback only for provider failures that can be recovered by backup providers', () => {
+    for (const kind of ['usage-limit', 'rate-limit', 'auth-required', 'model-unavailable'] as const) {
+      expect(providerFailureArmsFallback(kind)).toBe(true);
+    }
+
+    for (const kind of ['context-overflow', 'policy-block'] as const) {
+      expect(providerFailureArmsFallback(kind)).toBe(false);
+    }
+  });
 });
 
 describe('classifyAgentFailure', () => {
@@ -52,6 +100,12 @@ describe('classifyAgentFailure', () => {
       label: 'session usage limit',
       source: 'provider_result' as const,
       message: "You've reached your usage limit. Try again later.",
+      expected: 'provider_usage_limit' as const,
+    },
+    {
+      label: 'provider credit balance exhausted',
+      source: 'provider_result' as const,
+      message: 'Provider error: insufficient credits. Please add credits to continue.',
       expected: 'provider_usage_limit' as const,
     },
     {
@@ -150,6 +204,201 @@ describe('classifyAgentFailure', () => {
     expect(result.incidentId).toMatch(/^[a-f0-9]{24}$/);
     expect(result.summary).toContain(fixture.expected);
     expect(result.qAlertRequired).toBe(true);
+  });
+
+  it.each([
+    {
+      label: 'generic HTTP 429',
+      source: 'provider_error' as const,
+      error: statusError(429),
+      expected: 'provider_rate_limit' as const,
+    },
+    {
+      label: 'generic HTTP 502',
+      source: 'provider_error' as const,
+      error: statusError(502),
+      expected: 'provider_server_error' as const,
+    },
+    {
+      label: 'generic HTTP 401',
+      source: 'provider_error' as const,
+      error: statusError(401),
+      expected: 'provider_auth_required' as const,
+    },
+    {
+      label: 'auth required text',
+      source: 'provider_result' as const,
+      message: 'Authentication required before provider call.',
+      expected: 'provider_auth_required' as const,
+    },
+    {
+      label: 'auth failed text',
+      source: 'provider_error' as const,
+      message: 'Auth failed while loading the provider.',
+      expected: 'config_or_capability_missing' as const,
+    },
+    {
+      label: 'watchdog text on provider error',
+      source: 'provider_error' as const,
+      message: 'Watchdog observed no output before timeout.',
+      expected: 'provider_silent_hang' as const,
+    },
+    {
+      label: 'parse error text on provider error',
+      source: 'provider_error' as const,
+      message: 'Partial output ended with parse_error.',
+      expected: 'provider_stream_corrupt' as const,
+    },
+    {
+      label: 'provider errno fallback',
+      source: 'provider_error' as const,
+      error: errnoError('ENOTFOUND'),
+      expected: 'provider_network_error' as const,
+    },
+    {
+      label: 'MCP errno fallback',
+      source: 'mcp_transport' as const,
+      error: errnoError('ETIMEDOUT'),
+      expected: 'mcp_transport_failure' as const,
+    },
+    {
+      label: 'MCP source fallback',
+      source: 'mcp_transport' as const,
+      message: 'Transport closed unexpectedly.',
+      expected: 'mcp_transport_failure' as const,
+    },
+    {
+      label: 'tool source fallback',
+      source: 'tool_result' as const,
+      expected: 'tool_handler_exception' as const,
+    },
+    {
+      label: 'config source fallback',
+      source: 'config' as const,
+      expected: 'config_or_capability_missing' as const,
+    },
+  ])('maps $label to $expected', (fixture) => {
+    const result = classifyAgentFailure({
+      ...baseInput,
+      ...fixture,
+    });
+
+    expect(result.failureClass).toBe(fixture.expected);
+    expect(result.summary).toContain(fixture.expected);
+    expect(result.qAlertRequired).toBe(true);
+  });
+
+  it('classifies low-level WhatSoupError codes without relying on provider text', () => {
+    const badRequest = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_error',
+      error: new WhatSoupError('request shape rejected', 'LLM_BAD_REQUEST'),
+    });
+    const unavailable = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_error',
+      error: new WhatSoupError('provider unavailable', 'LLM_UNAVAILABLE'),
+    });
+    const unknownCodeWithRateText = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_error',
+      error: new WhatSoupError('provider hit rate limit', 'INTERNAL_ERROR'),
+    });
+
+    expect(badRequest.failureClass).toBe('config_or_capability_missing');
+    expect(unavailable.failureClass).toBe('provider_server_error');
+    expect(unknownCodeWithRateText.failureClass).toBe('provider_rate_limit');
+  });
+
+  it('recurses through generic Error causes for status and errno extraction', () => {
+    const statusResult = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_error',
+      error: errorWithCause(statusError(503)),
+    });
+    const errnoResult = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_error',
+      error: errorWithCause(errnoError('ECONNRESET')),
+    });
+
+    expect(statusResult.failureClass).toBe('provider_server_error');
+    expect(errnoResult.failureClass).toBe('provider_network_error');
+  });
+
+  it('normalizes summaries while preserving nullable routing fields', () => {
+    const result = classifyAgentFailure({
+      ...baseInput,
+      chatJid: null,
+      mapKey: null,
+      sessionId: null,
+      source: 'tool_result',
+      toolName: 'Bash',
+      message: '  TypeError:\n  cannot\tread    properties  ',
+    });
+
+    expect(result.summary).toBe('tool_handler_exception from claude-cli/Bash: TypeError: cannot read properties');
+    expect({
+      chatJid: result.chatJid,
+      mapKey: result.mapKey,
+      sessionId: result.sessionId,
+      toolName: result.toolName,
+    }).toEqual({
+      chatJid: null,
+      mapKey: null,
+      sessionId: null,
+      toolName: 'Bash',
+    });
+  });
+
+  it('summarizes provider exits when no message is available', () => {
+    const result = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_process_exit',
+      exitCode: 7,
+      signal: null,
+    });
+
+    expect(result.failureClass).toBe('provider_cli_crash');
+    expect(result.summary).toContain('provider exited with code=7 signal=none');
+  });
+
+  it('keeps malformed clean-exit metadata alertable without crash classification', () => {
+    const result = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_process_exit',
+      exitCode: 0,
+      signal: '',
+    });
+
+    expect(result.failureClass).toBe('provider_unknown');
+    expect(result.qAlertRequired).toBe(true);
+    expect(result.summary).toContain('provider exited with code=0 signal=');
+  });
+
+  it('handles non-Error values and unknown provider failures explicitly', () => {
+    const nonError = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_error',
+      error: { status: '503', code: 123 },
+    });
+    const unknown = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_error',
+    });
+    const emptyError = classifyAgentFailure({
+      ...baseInput,
+      source: 'provider_error',
+      error: '',
+    });
+
+    expect(nonError.failureClass).toBe('provider_unknown');
+    expect(nonError.summary).toContain('[object Object]');
+    expect(nonError.severity).toBe('warning');
+    expect(unknown.failureClass).toBe('provider_unknown');
+    expect(unknown.summary).toContain('unknown agent failure');
+    expect(unknown.severity).toBe('warning');
+    expect(emptyError.summary).toBe('provider_unknown from claude-cli: unknown');
   });
 
   it('does not require a Q page for clean provider process exits', () => {

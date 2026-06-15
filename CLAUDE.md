@@ -1,6 +1,6 @@
 # WhatSoup
 
-Consolidated WhatsApp platform — one process, one Baileys connection, one database, with the canonical MCP tool surface documented in `docs/tools.md`.
+Consolidated WhatsApp platform — one process, one Baileys connection, one database, and the canonical MCP tool registry documented in `docs/tools.md`.
 
 ## Quick Reference
 
@@ -72,7 +72,7 @@ If anything turns up, read the matched line in context — if your PR closes the
 ## Documentation
 
 - `docs/configuration.md` — environment variables, instance.json schema, XDG paths, **per-instance plugin scoping**
-- `docs/tools.md` — complete MCP tool API reference, including conditional registration details and the inline runtime registration
+- `docs/tools.md` — complete MCP tool API reference generated from the registry, including conditional and inline runtime registrations
 - `docs/runbook.md` — operational runbook (service management, troubleshooting, recovery)
 - `docs/runbooks/agent-decision-polls.md` — portable contract for `AskUserQuestion` poll bridging and MCP `send_poll` usage
 - `docs/durability.md` — durability engine design, state machines, recovery algorithms

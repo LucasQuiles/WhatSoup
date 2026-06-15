@@ -472,11 +472,12 @@ explicit for readability.
 
 #### Primary model usability probe
 
-Agent runtimes launch a non-blocking startup probe for the configured primary conversation model. The result is surfaced in the `/health` `instance.primaryModelUsability` block with `status`, `provider`, `model`, optional `reason` / `suggestion`, `checkedAt`, and `probeInFlight`. A configured primary that returns `model-unavailable`, `credential-unavailable`, `provider-unavailable`, `timeout`, or an inconclusive `unknown` probe emits the `primary_model_unusable` operator alert. The alert evidence includes only safe metadata (provider, model, status, reason/suggestion) and never includes raw provider output or credential values.
+Agent runtimes launch a non-blocking startup probe for the configured primary conversation model. CLI model probes have a 15-second deadline so cold Claude/OpenCode startup does not create false degraded health. The result is surfaced in the `/health` `instance.primaryModelUsability` block with `status`, `provider`, `model`, optional `reason` / `suggestion`, `checkedAt`, and `probeInFlight`. A configured primary that returns `model-unavailable`, `credential-unavailable`, `provider-unavailable`, `timeout`, or an inconclusive `unknown` probe emits the `primary_model_unusable` operator alert. The alert evidence includes only safe metadata (provider, model, status, reason/suggestion) and never includes raw provider output or credential values.
 
-Probe mechanism is provider-specific and intentionally separate from fallback activation: `claude-cli` performs a cheap model-addressed CLI probe, `openai-api` and `anthropic-api` query the authenticated models endpoint using `providerConfig.apiKeyService` when set, and `opencode-cli` reuses the model-catalog probe. This probe makes the startup surface explicit about account/model access.
+Probe mechanism is provider-specific and intentionally separate from fallback activation: `claude-cli` performs a cheap model-addressed CLI probe, `opencode-cli` performs a minimal model-addressed `opencode run` probe from the agent cwd using the same model routing and credential env as normal turns, and `openai-api` / `anthropic-api` query the authenticated models endpoint using `providerConfig.apiKeyService` when set. This probe makes the startup surface explicit about account/model access.
 
 Agent `/health` also exposes a top-level `turn_capability` block derived from runtime state: `model_usable`, `model_usability_status`, `last_successful_turn_at`, `last_turn_error_class`, and `last_turn_error_at`. `model_usable` is `true` after a successful primary model probe, `false` after a configured primary model usability failure that requires operator attention, and `null` when no definitive probe result exists yet. A failed user turn records only the failure class (for example `model-unavailable` or `unknown-terminal`) and a timestamp; raw provider stderr/stdout is not surfaced. Top-level `/health.status` becomes `degraded` when the agent runtime reports degraded health, when `model_usable` is `false`, or when a user turn has a recorded error with no later successful user turn. A later successful user turn clears `last_turn_error_class` and `last_turn_error_at`.
+
 #### Cross-field validation rules
 
 Beyond the per-field shapes above, the shared validator
@@ -961,6 +962,7 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 26 | Rebuilds pre-existing `outbound_sends` tables so the caller CHECK constraint allows Reply Guarantee Protocol fallback audit rows (`rgp`) |
 | 27 | Message query performance indexes on timestamp/from-me, timestamp/content-type, and token counters when token columns exist (`runMigration27`) |
 | 28 | `pending_polls` table — persists `AskUserQuestion`/`send_poll` state across runtime restarts. Columns: `map_key` (PK), `chat_jid`, `tool_id`, `source`, `resolution`, `payload` (JSON), `created_at`, `closes_at`, `hard_closes_at`. Indexes on `chat_jid` and `closes_at`. Rehydration runs at `AgentRuntime.start()`; rows with `hard_closes_at <= now` are dropped after a one-line "decision expired during downtime" notice. (`runMigration28`) |
+| 29 | Normalizes any existing millisecond-scale `messages.timestamp` rows down to Unix epoch seconds so message ordering, retention, enrichment windows, and fleet displays use one timestamp unit (`runMigration29`) |
 
 ---
 

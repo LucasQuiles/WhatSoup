@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-06-13T04:02:06Z",
+  "generatedAt": "2026-06-14T18:17:51Z",
   "scope": "bot-errors-runtime-scripts",
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "8a278e507ebffdd4837f3bbdc459f61bd23233ce6c57ef86fe17c79ce6f61116",
+      "sha256": "955cb984f9c5fbecaef893d9c94b1f309f0b306cfc5974fcdef9ba4bf3db8010",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -18,7 +18,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "034b913afabad673d38486dfc5335b47d35f411e69ed7a14a8616c3ba17abae5",
+      "sha256": "8f12a71bd68ea239ccf27f973b4d45bc66042f35d8ecee19a75cb08e81af7f9d",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -51,7 +51,6 @@
         "source_update: shadow",
         "git_remote_auth_failed",
         "SOURCE_UPDATE_BLOCKED",
-        "AUTHORIZATION_SECRET_RE",
         "detect_opencode_mode",
         "provider_compatibility_degraded",
         "provider_compatibility_unsupported",
@@ -68,12 +67,14 @@
         "git_head_sha_mismatch",
         "expected_head_sha",
         "daily_summary_severity",
-        "_DAILY_INFRA_FAIL_PREFIXES"
+        "_DAILY_INFRA_FAIL_PREFIXES",
+        "redact_bot_errors_text",
+        "redact_event_text"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "6643a3cdad9482e2fe3824cd5a47f2504288bd27c24e6dc8fef624f6319058e2",
+      "sha256": "166800cab559e33483c24fb976a8adeecbf58c1a8aea023acc27a596744f8f21",
       "mustContain": [
         "BOT_ERRORS_Q_LOOP_STATE_DIR",
         "critical_file_problem",
@@ -84,7 +85,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "25be556e8875a3cfaf8c3f31dd8760f8db894c67314271e90385558ea68faf80",
+      "sha256": "de61c690343d334b508d2852bb5dca4558f2f26796bf355af3d582a1c6bba50a",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -108,7 +109,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "628448c64067db2f4248a8245274dd0efdb44112904bde1ffbd6e345eca3e0bc",
+      "sha256": "6cf38d47a856a14e63577f5b6904758ffa025b9ca5782c8f72d62612dd0a9e86",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -127,7 +128,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "3cabdee9d053d57064af80de70e9d11faa8d74b134e6d197efc12006f2406e22",
+      "sha256": "bb97461ae638d2fe395ca71cacc79dc804ca1e4c2b4e19540135978f1fef41ad",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
@@ -136,11 +137,31 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "a50d737c39a2d9620aed672e8222b71e8999f90055f85f90270898e37d82558c",
+      "sha256": "f189971ec512b39901c1dbbe2c14de7b1c0fa663008f33fb05d3fc794347b030",
       "mustContain": [
         "O_NOFOLLOW",
         "refusing to use private directory through symlink",
         "outbox_write_failure"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/__init__.py",
+      "sha256": "438146338f7ceac8c0ecda8d7c6a7fb13fe88a0749bad1accf39ad92e4370da0",
+      "mustContain": [
+        "Shared helpers for manifest-tracked BOT ERRORS deploy scripts"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/bot_errors_redaction.py",
+      "sha256": "1448da21ae9b598d4cafb342fc1c7aa042141ec3db7fee11c8ff1368cf94812f",
+      "mustContain": [
+        "redact_bot_errors_text",
+        "CREDENTIAL_PATH_RE",
+        ".config/secrets/",
+        "AUTHORIZATION_BEARER_RE",
+        "AUTHORIZATION_KEYED_RE",
+        "WHATSAPP_SERVICE_UNIT_RE",
+        "PEM_PRIVATE_KEY_RE"
       ]
     }
   ]

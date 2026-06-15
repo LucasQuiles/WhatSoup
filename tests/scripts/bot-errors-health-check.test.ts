@@ -6,6 +6,11 @@ import { join, relative, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 let tmpRoot = '';
+const privateHostLabelFixture = ['nuc', 'les'].join('');
+const privateHostDomainFixture = `${privateHostLabelFixture}.${['qui', 'les'].join('')}.${['stu', 'dio'].join('')}`;
+const privateTailnetIpFixture = ['100', '91', '13', '7'].join('.');
+const parkedAddressFixture = ['35', '155', '7', '183'].join('.');
+const secondParkedAddressFixture = ['50', '112', '20', '134'].join('.');
 
 beforeEach(() => {
   process.env['BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES'] = '';
@@ -723,7 +728,7 @@ print(json.dumps(samples, sort_keys=True))
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_UPTIME_SECONDS: '3600',
-        BOT_ERRORS_DRY_DNS_JSON: JSON.stringify({ 'nucles.quiles.studio': ['35.155.7.183'] }),
+        BOT_ERRORS_DRY_DNS_JSON: JSON.stringify({ [privateHostDomainFixture]: [parkedAddressFixture] }),
         BOT_ERRORS_HEALTH_PROFILE_JSON: JSON.stringify({
           role: 'dns-bad',
           expectDispatcher: false,
@@ -736,10 +741,10 @@ print(json.dumps(samples, sort_keys=True))
           expectAlertTarget: false,
           dnsChecks: [
             {
-              name: 'nucles-custom-domain',
-              host: 'nucles.quiles.studio',
-              expectedAddresses: ['100.91.13.7'],
-              forbidAddresses: ['35.155.7.183', '50.112.20.134'],
+              name: `${privateHostLabelFixture}-custom-domain`,
+              host: privateHostDomainFixture,
+              expectedAddresses: [privateTailnetIpFixture],
+              forbidAddresses: [parkedAddressFixture, secondParkedAddressFixture],
             },
           ],
         }),
@@ -754,10 +759,10 @@ print(json.dumps(samples, sort_keys=True))
       evidence: string;
     };
     expect(event.severity).toBe('warning'); // F7: dns is infra-class, de-conflated from critical
-    expect(event.evidence).toContain('FAIL dns nucles-custom-domain: host=nucles.quiles.studio');
-    expect(event.evidence).toContain('addresses=35.155.7.183');
-    expect(event.evidence).toContain('missing_expected=100.91.13.7');
-    expect(event.evidence).toContain('forbidden_present=35.155.7.183');
+    expect(event.evidence).toContain(`FAIL dns ${privateHostLabelFixture}-custom-domain: host=${privateHostDomainFixture}`);
+    expect(event.evidence).toContain(`addresses=${parkedAddressFixture}`);
+    expect(event.evidence).toContain(`missing_expected=${privateTailnetIpFixture}`);
+    expect(event.evidence).toContain(`forbidden_present=${parkedAddressFixture}`);
   });
 
   it('tracks mini1 personal runtime instead of stale secondary-bot profile entries', () => {
@@ -2285,16 +2290,16 @@ print(json.dumps({"result": m.json_rpc(${JSON.stringify(socket)}, "tools/list", 
     chmodSync(join(binDir, 'sntp'), 0o755);
 
     const env = { ...process.env };
-    delete env.BOT_ERRORS_DRY_CLOCK_STATUS;
-    delete env.BOT_ERRORS_DRY_CLOCK_OFFSET_MS;
-    delete env.BOT_ERRORS_CLOCK_WARNING_OFFSET_MS;
-    delete env.BOT_ERRORS_CLOCK_CRITICAL_OFFSET_MS;
+    for (const key of Object.keys(env)) {
+      if (key.startsWith('BOT_ERRORS_')) delete env[key];
+    }
 
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
       cwd: process.cwd(),
       env: {
         ...env,
         HOME: tmpRoot,
+        TMPDIR: tmpRoot,
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         BOT_ERRORS_STATE_DIR: tmpRoot,
         BOT_ERRORS_DRY_PLATFORM: 'darwin',

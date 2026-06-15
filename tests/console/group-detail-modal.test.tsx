@@ -1,216 +1,298 @@
 /**
- * GroupDetailModal — dedicated rendering suite (C-B3W3-6).
+ * GroupDetailModal - query states, info edits, participant actions, settings, and close affordances.
  *
- * This is the repo's first dedicated coverage for GroupDetailModal.
- * The groups-tab.test.tsx suite mocks the modal entirely; this file renders
- * the real component against a mocked API.
- *
- * Scope covers (packet §8):
- *   - Closed state renders nothing
- *   - aria-labelledby resolution (id group-detail-dialog-title preserved via labelledById)
+ * Superset suite: combines main's functional coverage with the soup-v3 design
+ * branch's accessibility/token-class assertions (C-B3W3 / DD-44):
+ *   - aria-labelledby resolves to explicit id group-detail-dialog-title
  *   - backdrop pointerdown does NOT dismiss (dismissable=false, fresh pin)
- *   - Escape closes via the stack (single-fire)
- *   - Escape with Leave confirm open: first Escape closes only confirm, second closes modal
- *   - X close button
- *   - Tablist: label, roving tabindex, ArrowRight focuses without selecting,
- *     Enter selects, panel conditional mounting with correct aria wiring
- *   - Seg pins: aria-pressed exactly-one per pair, group labels, disabled during saving
- *   - Admin gating: isAdmin=false hides admin controls
- *   - Tab resets to info when group changes
- *   - Focus restore to opener
- *
- * Fixture strategy:
- *   - Synthetic JIDs (1555-prefix users; short group IDs — avoids hygiene guard)
- *   - QueryClientProvider + ToastProvider wrappers
- *   - api mock: getGroupDetail resolves to a full GroupDetail fixture
- *   - Settings mutator mocks (updateGroupSettings, updateGroupParticipants etc.)
+ *   - nested Leave-confirm Escape ordering (confirm first, then modal)
+ *   - tablist roving tabindex (ArrowRight focuses without selecting, Enter selects)
+ *   - tabpanel aria-labelledby wiring
+ *   - settings seg pairs: aria-label, exactly-one aria-pressed, disabled-while-saving
+ *   - subject/description/select token classes (c-input, c-select, font-mono)
+ *   - tab reset to Info on group change
  *
  * @vitest-environment jsdom
  */
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ReactNode } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { ToastContext, type ToastContextValue } from '../../console/src/hooks/toast-context.js'
+import type { ContactResult, GroupDetail, GroupInfo } from '../../console/src/types.js'
 
-// ---------------------------------------------------------------------------
-// API mock — hoisted before component import
-// ---------------------------------------------------------------------------
+// ---- Mocks ----
 
-const mockGetGroupDetail = vi.fn()
-const mockUpdateGroupSettings = vi.fn()
-const mockUpdateGroupParticipants = vi.fn()
-const mockUpdateGroupSubject = vi.fn()
-const mockUpdateGroupDescription = vi.fn()
-const mockUpdateGroupMemberAddMode = vi.fn()
-const mockUpdateGroupJoinApproval = vi.fn()
-const mockUpdateGroupEphemeral = vi.fn()
-const mockGetGroupInviteLink = vi.fn()
-const mockRevokeGroupInvite = vi.fn()
-const mockLeaveGroup = vi.fn()
+const getGroupDetailMock = vi.fn()
+const getGroupInviteLinkMock = vi.fn()
+const leaveGroupMock = vi.fn()
+const revokeGroupInviteMock = vi.fn()
+const updateGroupDescriptionMock = vi.fn()
+const updateGroupEphemeralMock = vi.fn()
+const updateGroupJoinApprovalMock = vi.fn()
+const updateGroupMemberAddModeMock = vi.fn()
+const updateGroupParticipantsMock = vi.fn()
+const updateGroupSettingsMock = vi.fn()
+const updateGroupSubjectMock = vi.fn()
 
-vi.mock('../../console/src/lib/api', () => ({
+vi.mock('../../console/src/lib/api.js', () => ({
   api: {
-    getGroupDetail: (...args: unknown[]) => mockGetGroupDetail(...args),
-    updateGroupSettings: (...args: unknown[]) => mockUpdateGroupSettings(...args),
-    updateGroupParticipants: (...args: unknown[]) => mockUpdateGroupParticipants(...args),
-    updateGroupSubject: (...args: unknown[]) => mockUpdateGroupSubject(...args),
-    updateGroupDescription: (...args: unknown[]) => mockUpdateGroupDescription(...args),
-    updateGroupMemberAddMode: (...args: unknown[]) => mockUpdateGroupMemberAddMode(...args),
-    updateGroupJoinApproval: (...args: unknown[]) => mockUpdateGroupJoinApproval(...args),
-    updateGroupEphemeral: (...args: unknown[]) => mockUpdateGroupEphemeral(...args),
-    getGroupInviteLink: (...args: unknown[]) => mockGetGroupInviteLink(...args),
-    revokeGroupInvite: (...args: unknown[]) => mockRevokeGroupInvite(...args),
-    leaveGroup: (...args: unknown[]) => mockLeaveGroup(...args),
+    getGroupDetail: (...args: unknown[]) => getGroupDetailMock(...args),
+    getGroupInviteLink: (...args: unknown[]) => getGroupInviteLinkMock(...args),
+    leaveGroup: (...args: unknown[]) => leaveGroupMock(...args),
+    revokeGroupInvite: (...args: unknown[]) => revokeGroupInviteMock(...args),
+    updateGroupDescription: (...args: unknown[]) => updateGroupDescriptionMock(...args),
+    updateGroupEphemeral: (...args: unknown[]) => updateGroupEphemeralMock(...args),
+    updateGroupJoinApproval: (...args: unknown[]) => updateGroupJoinApprovalMock(...args),
+    updateGroupMemberAddMode: (...args: unknown[]) => updateGroupMemberAddModeMock(...args),
+    updateGroupParticipants: (...args: unknown[]) => updateGroupParticipantsMock(...args),
+    updateGroupSettings: (...args: unknown[]) => updateGroupSettingsMock(...args),
+    updateGroupSubject: (...args: unknown[]) => updateGroupSubjectMock(...args),
   },
 }))
 
-// ---------------------------------------------------------------------------
-// Import component AFTER mocks
-// ---------------------------------------------------------------------------
-
-import { GroupDetailModal } from '../../console/src/components/line-detail/GroupDetailModal'
-import type { GroupInfo, GroupDetail } from '../../console/src/types'
-
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-// Synthetic JIDs — 1555-prefix users, non-real-looking group IDs
-const MY_JID = '1555000001@s.whatsapp.net'
-const ADMIN_JID = '1555000002@s.whatsapp.net'
-const MEMBER_JID = '1555000003@s.whatsapp.net'
-const GROUP_ID = '1555100001@g.us'
-const LINE = 'primary-line'
-
-const baseGroup: GroupInfo = {
-  id: GROUP_ID,
-  subject: 'Team Alpha',
-  participants: [
-    { id: MY_JID, admin: 'admin' },
-    { id: MEMBER_JID },
-  ],
+const addedContact: ContactResult = {
+  jid: '1555000444@s.whatsapp.net',
+  name: 'New Member',
+  notify: 'New Member',
+  number: '1555000444',
 }
 
-const baseDetail: GroupDetail = {
-  ...baseGroup,
-  desc: 'Alpha squad description',
-  announce: false,
-  locked: false,
-  memberAddMode: 'all_member_add',
-  joinApprovalMode: 'off',
-  ephemeralDuration: 0,
-  pendingRequests: [],
+vi.mock('../../console/src/components/shared/ContactSearchPicker.js', () => ({
+  ContactSearchPicker: ({
+    selected,
+    onAdd,
+    onRemove,
+    placeholder,
+  }: {
+    selected: ContactResult[]
+    onAdd: (contact: ContactResult) => void
+    onRemove: (jid: string) => void
+    placeholder?: string
+  }) => (
+    <div data-testid="contact-picker">
+      <span>{placeholder}</span>
+      {selected.map(contact => (
+        <button key={contact.jid} type="button" onClick={() => onRemove(contact.jid)}>
+          remove {contact.name ?? contact.jid}
+        </button>
+      ))}
+      <button type="button" onClick={() => onAdd(addedContact)}>
+        add mocked contact
+      </button>
+    </div>
+  ),
+}))
+
+// Import after mocks so the component picks up the mocked API and child component.
+import { GroupDetailModal } from '../../console/src/components/line-detail/GroupDetailModal.js'
+
+// ---- Helpers ----
+
+interface ToastSpies extends ToastContextValue {
+  success: Mock<ToastContextValue['success']>
+  error: Mock<ToastContextValue['error']>
+  info: Mock<ToastContextValue['info']>
+  toast: Mock<ToastContextValue['toast']>
+  dismiss: Mock<ToastContextValue['dismiss']>
+  clear: Mock<ToastContextValue['clear']>
 }
 
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
+const groupId = '1555000001@g.us'
+const lineName = 'line-a'
+const currentUserJid = '1555000111@s.whatsapp.net'
+const ownerJid = '1555000000@s.whatsapp.net'
+const memberJid = '1555000222@s.whatsapp.net'
+const pendingJid = '1555000333@s.whatsapp.net'
+
+function makeGroup(overrides: Partial<GroupInfo> = {}): GroupInfo {
+  return {
+    id: groupId,
+    subject: 'Team Atlas',
+    desc: 'Launch coordination',
+    creation: 1704067200,
+    participants: [
+      { id: currentUserJid, admin: 'admin' },
+      { id: ownerJid, admin: 'superadmin' },
+      { id: memberJid },
+    ],
+    ...overrides,
+  }
+}
+
+function makeDetail(overrides: Partial<GroupDetail> = {}): GroupDetail {
+  return {
+    ...makeGroup(),
+    inviteLink: 'https://chat.whatsapp.com/example-invite',
+    announce: false,
+    locked: false,
+    ephemeralDuration: 0,
+    memberAddMode: 'all_member_add',
+    joinApprovalMode: 'off',
+    pendingRequests: [{ jid: pendingJid }],
+    ...overrides,
+  }
+}
+
+function makeToast(): ToastSpies {
+  return {
+    success: vi.fn<ToastContextValue['success']>(),
+    error: vi.fn<ToastContextValue['error']>(),
+    info: vi.fn<ToastContextValue['info']>(),
+    toast: vi.fn<ToastContextValue['toast']>(),
+    dismiss: vi.fn<ToastContextValue['dismiss']>(),
+    clear: vi.fn<ToastContextValue['clear']>(),
+  }
+}
 
 function makeClient(): QueryClient {
   return new QueryClient({
-    defaultOptions: {
-      queries: { retry: false, gcTime: 0, staleTime: 0, refetchOnWindowFocus: false },
-    },
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
 }
 
-// Minimal toast provider mock so useToast() doesn't throw
-vi.mock('../../console/src/hooks/toast-context', () => ({
-  ToastContext: { Provider: ({ children }: { children: ReactNode }) => children },
-  useToast: () => ({
-    success: vi.fn(),
-    error: vi.fn(),
-    info: vi.fn(),
-  }),
-}))
-
-function Wrapper({ children, client }: { children: ReactNode; client: QueryClient }) {
+function Wrap({
+  client,
+  toast,
+  children,
+}: {
+  client: QueryClient
+  toast: ToastSpies
+  children: ReactNode
+}) {
   return (
     <QueryClientProvider client={client}>
-      {children}
+      <ToastContext.Provider value={toast}>{children}</ToastContext.Provider>
     </QueryClientProvider>
   )
 }
 
-interface RenderProps {
-  open?: boolean
+function renderModal({
+  client = makeClient(),
+  detail = makeDetail(),
+  group = makeGroup(),
+  myJid = currentUserJid,
+  onClose = vi.fn(),
+  toast = makeToast(),
+}: {
+  client?: QueryClient
+  detail?: GroupDetail
   group?: GroupInfo | null
   myJid?: string
-  onClose?: () => void
-  client?: QueryClient
+  onClose?: Mock
+  toast?: ToastSpies
+} = {}) {
+  getGroupDetailMock.mockResolvedValue(detail)
+  const rendered = render(
+    <Wrap client={client} toast={toast}>
+      <GroupDetailModal open group={group} lineName={lineName} myJid={myJid} onClose={onClose} />
+    </Wrap>,
+  )
+  return { ...rendered, client, onClose, toast }
 }
 
-function renderModal({
-  open = true,
-  group = baseGroup,
-  myJid = MY_JID,
-  onClose = vi.fn(),
-  client = makeClient(),
-}: RenderProps = {}) {
-  const rendered = render(
-    <Wrapper client={client}>
-      <GroupDetailModal
-        open={open}
-        group={group}
-        lineName={LINE}
-        myJid={myJid}
-        onClose={onClose}
-      />
-    </Wrapper>,
-  )
-  return { ...rendered, onClose, client }
+function confirmDialog(title: string): HTMLElement {
+  return screen.getByText(title).closest('[role="dialog"]') as HTMLElement
+}
+
+async function waitForDetail() {
+  await waitFor(() => {
+    expect(getGroupDetailMock).toHaveBeenCalledWith(lineName, groupId)
+  })
+  expect(await screen.findByDisplayValue('Team Atlas')).toBeDefined()
 }
 
 beforeEach(() => {
-  mockGetGroupDetail.mockResolvedValue(baseDetail)
-  mockUpdateGroupSettings.mockResolvedValue({ ok: true })
-  mockUpdateGroupParticipants.mockResolvedValue({ ok: true })
-  mockUpdateGroupSubject.mockResolvedValue({ ok: true })
-  mockUpdateGroupDescription.mockResolvedValue({ ok: true })
-  mockUpdateGroupMemberAddMode.mockResolvedValue({ ok: true })
-  mockUpdateGroupJoinApproval.mockResolvedValue({ ok: true })
-  mockUpdateGroupEphemeral.mockResolvedValue({ ok: true })
-  mockGetGroupInviteLink.mockResolvedValue({ inviteLink: 'https://chat.whatsapp.com/abc123' })
-  mockRevokeGroupInvite.mockResolvedValue({ ok: true })
-  mockLeaveGroup.mockResolvedValue({ ok: true })
+  getGroupDetailMock.mockResolvedValue(makeDetail())
+  getGroupInviteLinkMock.mockResolvedValue({
+    jid: groupId,
+    inviteCode: 'new-code',
+    inviteLink: 'https://chat.whatsapp.com/new-link',
+  })
+  leaveGroupMock.mockResolvedValue({ success: true })
+  revokeGroupInviteMock.mockResolvedValue({ inviteCode: 'rotated' })
+  updateGroupDescriptionMock.mockResolvedValue({ success: true })
+  updateGroupEphemeralMock.mockResolvedValue({ success: true })
+  updateGroupJoinApprovalMock.mockResolvedValue({ success: true })
+  updateGroupMemberAddModeMock.mockResolvedValue({ success: true })
+  updateGroupParticipantsMock.mockResolvedValue({ success: true })
+  updateGroupSettingsMock.mockResolvedValue({ success: true })
+  updateGroupSubjectMock.mockResolvedValue({ success: true })
+
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+  })
 })
 
 afterEach(() => {
   cleanup()
-  vi.restoreAllMocks()
+  getGroupDetailMock.mockReset()
+  getGroupInviteLinkMock.mockReset()
+  leaveGroupMock.mockReset()
+  revokeGroupInviteMock.mockReset()
+  updateGroupDescriptionMock.mockReset()
+  updateGroupEphemeralMock.mockReset()
+  updateGroupJoinApprovalMock.mockReset()
+  updateGroupMemberAddModeMock.mockReset()
+  updateGroupParticipantsMock.mockReset()
+  updateGroupSettingsMock.mockReset()
+  updateGroupSubjectMock.mockReset()
 })
 
-// ---------------------------------------------------------------------------
-// describe: closed state
-// ---------------------------------------------------------------------------
+describe('GroupDetailModal query and shell states', () => {
+  it('renders nothing and does not query when the modal is closed or group is missing', () => {
+    const toast = makeToast()
+    const onClose = vi.fn()
 
-describe('GroupDetailModal — closed state', () => {
-  it('renders nothing when open is false', () => {
-    renderModal({ open: false })
-    expect(screen.queryByRole('dialog')).toBeNull()
+    const { rerender, container } = render(
+      <Wrap client={makeClient()} toast={toast}>
+        <GroupDetailModal open={false} group={makeGroup()} lineName={lineName} myJid={currentUserJid} onClose={onClose} />
+      </Wrap>,
+    )
+
+    expect(container.firstChild).toBeNull()
+    expect(getGroupDetailMock).not.toHaveBeenCalled()
+
+    rerender(
+      <Wrap client={makeClient()} toast={toast}>
+        <GroupDetailModal open group={null} lineName={lineName} myJid={currentUserJid} onClose={onClose} />
+      </Wrap>,
+    )
+
+    expect(container.firstChild).toBeNull()
+    expect(getGroupDetailMock).not.toHaveBeenCalled()
   })
 
-  it('renders nothing when group is null', () => {
-    renderModal({ group: null })
-    expect(screen.queryByRole('dialog')).toBeNull()
-  })
-})
+  it('shows a failed query state with retry support', async () => {
+    getGroupDetailMock
+      .mockRejectedValueOnce(new Error('socket down'))
+      .mockResolvedValueOnce(makeDetail())
 
-// ---------------------------------------------------------------------------
-// describe: open state — shell and aria wiring
-// ---------------------------------------------------------------------------
-
-describe('GroupDetailModal — open state', () => {
-  it('renders a dialog when open and group are both provided', async () => {
     renderModal()
-    await waitFor(() => expect(screen.getByRole('dialog')).toBeDefined())
+
+    expect(await screen.findByText('Failed to load group')).toBeDefined()
+    expect(screen.getByText('socket down')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByDisplayValue('Team Atlas')).toBeDefined()
+    expect(getGroupDetailMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('loads details, marks the current user, and closes on Escape', async () => {
+    const { onClose } = renderModal()
+
+    await waitForDetail()
+    expect(screen.getByRole('dialog', { name: 'Team Atlas' })).toBeDefined()
+    expect(screen.getByText('3 participants')).toBeDefined()
+    expect(screen.getByText('Launch coordination')).toBeDefined()
+    expect(screen.getByText(groupId)).toBeDefined()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Participants' }))
+
+    expect(screen.getByText('(you)')).toBeDefined()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 
   it('aria-labelledby resolves to the element with id group-detail-dialog-title', async () => {
@@ -221,113 +303,349 @@ describe('GroupDetailModal — open state', () => {
     const titleEl = document.getElementById(labelledById!)
     expect(titleEl).not.toBeNull()
     // The subject text is the label
-    expect(titleEl!.textContent).toBe('Team Alpha')
+    expect(titleEl!.textContent).toBe('Team Atlas')
     // The id is explicitly group-detail-dialog-title (preserved via labelledById prop, C-B3W3-4)
     expect(labelledById).toBe('group-detail-dialog-title')
   })
 
-  it('shows the group subject in the header', async () => {
-    renderModal()
-    await screen.findByRole('dialog')
-    expect(screen.getByText('Team Alpha')).toBeDefined()
-  })
-
-  it('shows participant count in the header', async () => {
-    renderModal()
-    await screen.findByRole('dialog')
-    expect(screen.getByText(/2 participant/)).toBeDefined()
-  })
-
-  it('labels the editable subject input and preserves save-on-blur behavior', async () => {
-    renderModal()
-    await screen.findByRole('dialog')
-    await waitFor(() => expect(mockGetGroupDetail).toHaveBeenCalled())
-
-    const subject = screen.getByLabelText('Subject') as HTMLInputElement
-    expect(subject.className).toContain('c-input')
-    expect(subject.className).toContain('font-mono')
-
-    fireEvent.change(subject, { target: { value: 'Team Alpha Prime' } })
-    fireEvent.blur(subject)
-
-    await waitFor(() => {
-      expect(mockUpdateGroupSubject).toHaveBeenCalledWith(LINE, GROUP_ID, 'Team Alpha Prime')
-    })
-  })
-
-  it('labels the editable description textarea and preserves save-on-blur behavior', async () => {
-    renderModal()
-    await screen.findByRole('dialog')
-    await waitFor(() => expect(mockGetGroupDetail).toHaveBeenCalled())
-
-    const description = screen.getByLabelText('Description') as HTMLTextAreaElement
-    expect(description.className).toContain('c-input')
-    expect(description.className).toContain('font-mono')
-
-    fireEvent.change(description, { target: { value: 'Updated alpha squad description' } })
-    fireEvent.blur(description)
-
-    await waitFor(() => {
-      expect(mockUpdateGroupDescription).toHaveBeenCalledWith(
-        LINE,
-        GROUP_ID,
-        'Updated alpha squad description',
-      )
-    })
-  })
-})
-
-// ---------------------------------------------------------------------------
-// describe: dismissal behaviour (C-B3W3-1)
-// ---------------------------------------------------------------------------
-
-describe('GroupDetailModal — dismissal', () => {
   it('does NOT close on backdrop pointerdown (dismissable=false, fresh pin)', async () => {
-    const onClose = vi.fn()
-    renderModal({ onClose })
+    const { onClose } = renderModal()
     const dialog = await screen.findByRole('dialog')
     const backdrop = dialog.parentElement!
     fireEvent.pointerDown(backdrop)
     expect(onClose).not.toHaveBeenCalled()
   })
 
-  it('calls onClose when Escape is pressed (stack-aware)', async () => {
-    const onClose = vi.fn()
-    renderModal({ onClose })
+  it('calls onClose when the X (Close dialog) button is clicked', async () => {
+    const { onClose } = renderModal()
     await screen.findByRole('dialog')
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(onClose).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Close dialog' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('GroupDetailModal info actions', () => {
+  it('skips unchanged saves and restores fields after save failures', async () => {
+    const { toast } = renderModal()
+    await waitForDetail()
+
+    fireEvent.blur(screen.getByDisplayValue('Team Atlas'))
+    fireEvent.blur(screen.getByDisplayValue('Launch coordination'))
+
+    expect(updateGroupSubjectMock).not.toHaveBeenCalled()
+    expect(updateGroupDescriptionMock).not.toHaveBeenCalled()
+
+    updateGroupSubjectMock.mockRejectedValueOnce(new Error('subject denied'))
+    fireEvent.change(screen.getByDisplayValue('Team Atlas'), { target: { value: 'Denied Subject' } })
+    fireEvent.blur(screen.getByDisplayValue('Denied Subject'))
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed: subject denied')
+    })
+    expect(screen.getByDisplayValue('Team Atlas')).toBeDefined()
+
+    updateGroupDescriptionMock.mockRejectedValueOnce(new Error('description denied'))
+    fireEvent.change(screen.getByDisplayValue('Launch coordination'), { target: { value: 'Denied description' } })
+    fireEvent.blur(screen.getByDisplayValue('Denied description'))
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed: description denied')
+    })
+    expect(screen.getByDisplayValue('Launch coordination')).toBeDefined()
   })
 
-  it('calls onClose when the X (Close dialog) button is clicked', async () => {
-    const onClose = vi.fn()
-    renderModal({ onClose })
-    await screen.findByRole('dialog')
-    const closeBtn = screen.getByRole('button', { name: 'Close dialog' })
-    fireEvent.click(closeBtn)
-    expect(onClose).toHaveBeenCalledOnce()
+  it('saves subject and empty description edits through the group API', async () => {
+    const { toast } = renderModal()
+    await waitForDetail()
+
+    fireEvent.change(screen.getByDisplayValue('Team Atlas'), { target: { value: 'Team Atlas Prime' } })
+    fireEvent.blur(screen.getByDisplayValue('Team Atlas Prime'))
+
+    await waitFor(() => {
+      expect(updateGroupSubjectMock).toHaveBeenCalledWith(lineName, groupId, 'Team Atlas Prime')
+    })
+    expect(toast.success).toHaveBeenCalledWith('Group subject updated')
+
+    fireEvent.change(screen.getByDisplayValue('Launch coordination'), { target: { value: '' } })
+    fireEvent.blur(screen.getByPlaceholderText('Group description...'))
+
+    await waitFor(() => {
+      expect(updateGroupDescriptionMock).toHaveBeenCalledWith(lineName, groupId, undefined)
+    })
+    expect(toast.success).toHaveBeenCalledWith('Description updated')
+  })
+
+  it('labels the editable subject and description fields with form-control token classes', async () => {
+    renderModal()
+    await waitForDetail()
+
+    const subject = screen.getByLabelText('Subject') as HTMLInputElement
+    expect(subject.className).toContain('c-input')
+    expect(subject.className).toContain('font-mono')
+
+    const description = screen.getByLabelText('Description') as HTMLTextAreaElement
+    expect(description.className).toContain('c-input')
+    expect(description.className).toContain('font-mono')
+  })
+
+  it('copies and revokes an existing invite link', async () => {
+    const { toast } = renderModal()
+    await waitForDetail()
+
+    fireEvent.click(screen.getByRole('button', { name: /Copy/ }))
+
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith('https://chat.whatsapp.com/example-invite')
+    })
+    expect(toast.success).toHaveBeenCalledWith('Invite link copied')
+
+    fireEvent.click(screen.getByRole('button', { name: /Revoke/ }))
+    fireEvent.click(within(confirmDialog('Revoke invite link?')).getByRole('button', { name: 'Revoke' }))
+
+    await waitFor(() => {
+      expect(revokeGroupInviteMock).toHaveBeenCalledWith(lineName, groupId)
+    })
+    expect(toast.success).toHaveBeenCalledWith('Invite link revoked')
+  })
+
+  it('reports invite revocation failures', async () => {
+    const { toast } = renderModal()
+    await waitForDetail()
+
+    revokeGroupInviteMock.mockRejectedValueOnce(new Error('revoke denied'))
+    fireEvent.click(screen.getByRole('button', { name: /Revoke/ }))
+    fireEvent.click(within(confirmDialog('Revoke invite link?')).getByRole('button', { name: 'Revoke' }))
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Revoke failed: revoke denied')
+    })
+  })
+
+  it('fetches a missing invite link', async () => {
+    const { toast } = renderModal({ detail: makeDetail({ inviteLink: undefined }) })
+    await waitForDetail()
+
+    fireEvent.click(screen.getByRole('button', { name: /Fetch invite link/ }))
+
+    await waitFor(() => {
+      expect(getGroupInviteLinkMock).toHaveBeenCalledWith(lineName, groupId)
+    })
+    expect(await screen.findByText('https://chat.whatsapp.com/new-link')).toBeDefined()
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('reports invite-link fetch failures', async () => {
+    const { toast } = renderModal({ detail: makeDetail({ inviteLink: undefined }) })
+    await waitForDetail()
+
+    getGroupInviteLinkMock.mockRejectedValueOnce(new Error('invite unavailable'))
+    fireEvent.click(screen.getByRole('button', { name: /Fetch invite link/ }))
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed: invite unavailable')
+    })
+  })
+})
+
+describe('GroupDetailModal participant actions', () => {
+  it('adds selected contacts, approves requests, promotes members, and removes participants', async () => {
+    const { toast } = renderModal()
+    await waitForDetail()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Participants' }))
+    fireEvent.click(screen.getByRole('button', { name: 'add mocked contact' }))
+    fireEvent.click(screen.getByRole('button', { name: /Add 1/ }))
+
+    await waitFor(() => {
+      expect(updateGroupParticipantsMock).toHaveBeenCalledWith(lineName, groupId, [addedContact.jid], 'add')
+    })
+    expect(toast.success).toHaveBeenCalledWith('Added 1 participant')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    await waitFor(() => {
+      expect(updateGroupParticipantsMock).toHaveBeenCalledWith(lineName, groupId, [pendingJid], 'add')
+    })
+
+    fireEvent.click(screen.getByTitle('Promote to admin'))
+    await waitFor(() => {
+      expect(updateGroupParticipantsMock).toHaveBeenCalledWith(lineName, groupId, [memberJid], 'promote')
+    })
+
+    const memberRow = screen.getByText(memberJid).closest('div') as HTMLElement
+    fireEvent.click(within(memberRow).getByTitle('Remove participant'))
+    fireEvent.click(within(confirmDialog(`Remove ${memberJid}?`)).getByRole('button', { name: 'Remove' }))
+
+    await waitFor(() => {
+      expect(updateGroupParticipantsMock).toHaveBeenCalledWith(lineName, groupId, [memberJid], 'remove')
+    })
+  })
+
+  it('rejects requests and demotes admins through participant mutations', async () => {
+    const { toast } = renderModal()
+    await waitForDetail()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Participants' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reject' }))
+
+    await waitFor(() => {
+      expect(updateGroupParticipantsMock).toHaveBeenCalledWith(lineName, groupId, [pendingJid], 'remove')
+    })
+    expect(toast.success).toHaveBeenCalledWith(`Rejected ${pendingJid}`)
+
+    fireEvent.click(screen.getAllByTitle('Demote')[0])
+    await waitFor(() => {
+      expect(updateGroupParticipantsMock).toHaveBeenCalledWith(lineName, groupId, [ownerJid], 'demote')
+    })
+  })
+
+  it('filters participant rows and surfaces participant action errors', async () => {
+    const { toast } = renderModal()
+    await waitForDetail()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Participants' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search 3 participants' }), {
+      target: { value: ownerJid },
+    })
+
+    expect(screen.getByText(ownerJid)).toBeDefined()
+    expect(screen.queryByText(memberJid)).toBeNull()
+
+    updateGroupParticipantsMock.mockRejectedValueOnce(new Error('promotion denied'))
+    fireEvent.click(screen.getByTitle('Demote'))
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed: promotion denied')
+    })
+  })
+})
+
+describe('GroupDetailModal settings actions', () => {
+  it('updates group settings and leaves the group with query invalidation', async () => {
+    const client = makeClient()
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries')
+    const { onClose, toast } = renderModal({ client })
+    await waitForDetail()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Admins only' })[0])
+
+    await waitFor(() => {
+      expect(updateGroupSettingsMock).toHaveBeenCalledWith(lineName, groupId, 'announcement')
+    })
+    expect(toast.success).toHaveBeenCalledWith('Setting updated')
+
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: '86400' } })
+    await waitFor(() => {
+      expect(updateGroupEphemeralMock).toHaveBeenCalledWith(lineName, groupId, 86400)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'On' }))
+    await waitFor(() => {
+      expect(updateGroupJoinApprovalMock).toHaveBeenCalledWith(lineName, groupId, 'on')
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Leave group' }))
+    fireEvent.click(within(confirmDialog('Leave group?')).getByRole('button', { name: 'Leave' }))
+
+    await waitFor(() => {
+      expect(leaveGroupMock).toHaveBeenCalledWith(lineName, groupId)
+    })
+    expect(toast.success).toHaveBeenCalledWith('Left group')
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['groups', lineName] })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('updates secondary settings and supports cancelling the leave confirmation', async () => {
+    renderModal()
+    await waitForDetail()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Admins only' })[1])
+
+    await waitFor(() => {
+      expect(updateGroupSettingsMock).toHaveBeenCalledWith(lineName, groupId, 'locked')
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Admins only' })[2])
+    await waitFor(() => {
+      expect(updateGroupMemberAddModeMock).toHaveBeenCalledWith(lineName, groupId, 'admin_add')
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Off' }))
+    await waitFor(() => {
+      expect(updateGroupJoinApprovalMock).toHaveBeenCalledWith(lineName, groupId, 'off')
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Leave group' }))
+    fireEvent.click(within(confirmDialog('Leave group?')).getByRole('button', { name: 'Cancel' }))
+
+    expect(leaveGroupMock).not.toHaveBeenCalled()
+  })
+
+  it('reports settings mutation failures', async () => {
+    const { toast } = renderModal()
+    await waitForDetail()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
+    updateGroupSettingsMock.mockRejectedValueOnce(new Error('settings denied'))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Admins only' })[0])
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed: settings denied')
+    })
+  })
+
+  it('renders non-admin details without privileged controls', async () => {
+    renderModal({
+      myJid: memberJid,
+      detail: makeDetail({
+        desc: undefined,
+        participants: [
+          { id: currentUserJid, admin: 'admin' },
+          { id: memberJid },
+        ],
+      }),
+      group: makeGroup({
+        desc: undefined,
+        participants: [
+          { id: currentUserJid, admin: 'admin' },
+          { id: memberJid },
+        ],
+      }),
+    })
+    await waitFor(() => {
+      expect(getGroupDetailMock).toHaveBeenCalledWith(lineName, groupId)
+    })
+    expect(await screen.findByText('Team Atlas')).toBeDefined()
+    expect(screen.getByText('No description')).toBeDefined()
+
+    expect(screen.queryByPlaceholderText('Group description...')).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Participants' }))
+    expect(screen.queryByText('Add participants')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
+    expect(screen.queryByRole('button', { name: 'Admins only' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Leave group' })).toBeDefined()
   })
 })
 
 // ---------------------------------------------------------------------------
-// describe: stacked-modal Escape ordering (Leave confirm)
+// Accessibility / token-class assertions folded in from the soup-v3 design
+// branch (C-B3W3 / DD-44). These cover behaviours main's functional suite
+// does not assert: stack-aware Escape ordering, tablist roving-tabindex,
+// tabpanel aria wiring, seg-pair aria-pressed/disabled, and form-control
+// token classes.
 // ---------------------------------------------------------------------------
 
-describe('GroupDetailModal — nested confirm Escape ordering', () => {
+describe('GroupDetailModal nested confirm Escape ordering', () => {
   it('Escape with Leave confirm open closes only the confirm, second Escape closes modal', async () => {
-    const onClose = vi.fn()
-    renderModal({ onClose })
-    await screen.findByRole('dialog')
+    const { onClose } = renderModal()
+    await waitForDetail()
 
-    // Navigate to Settings tab
-    const settingsTab = screen.getByRole('tab', { name: /Settings/i })
-    fireEvent.click(settingsTab)
-    // Activate via Enter (manual activation)
-    fireEvent.keyDown(settingsTab, { key: 'Enter' })
-
-    // Wait for settings panel to appear and find Leave button
-    await waitFor(() => expect(screen.getByRole('button', { name: /Leave group/i })).toBeDefined())
-    fireEvent.click(screen.getByRole('button', { name: /Leave group/i }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Leave group' }))
 
     // Leave confirm dialog should now be open
     await waitFor(() => expect(screen.getByText('Leave group?')).toBeDefined())
@@ -339,26 +657,16 @@ describe('GroupDetailModal — nested confirm Escape ordering', () => {
 
     // Second Escape — closes the modal
     fireEvent.keyDown(document, { key: 'Escape' })
-    expect(onClose).toHaveBeenCalledOnce()
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 })
 
-// ---------------------------------------------------------------------------
-// describe: tablist (Tabs primitive — C-B3W3-4)
-// ---------------------------------------------------------------------------
-
-describe('GroupDetailModal — tablist', () => {
-  it('renders a labelled tablist', async () => {
+describe('GroupDetailModal tablist (roving tabindex)', () => {
+  it('renders a labelled tablist with Info, Participants, and Settings tabs', async () => {
     renderModal()
-    await screen.findByRole('dialog')
+    await waitForDetail()
     const tablist = screen.getByRole('tablist')
-    expect(tablist).toBeDefined()
     expect(tablist.getAttribute('aria-label')).toBeTruthy()
-  })
-
-  it('renders Info, Participants, Settings tabs', async () => {
-    renderModal()
-    await screen.findByRole('dialog')
     expect(screen.getByRole('tab', { name: /Info/i })).toBeDefined()
     expect(screen.getByRole('tab', { name: /Participants/i })).toBeDefined()
     expect(screen.getByRole('tab', { name: /Settings/i })).toBeDefined()
@@ -366,46 +674,37 @@ describe('GroupDetailModal — tablist', () => {
 
   it('Info tab is selected by default (aria-selected=true)', async () => {
     renderModal()
-    await screen.findByRole('dialog')
-    const infoTab = screen.getByRole('tab', { name: /Info/i }) as HTMLElement
+    await waitForDetail()
+    const infoTab = screen.getByRole('tab', { name: /Info/i })
     expect(infoTab.getAttribute('aria-selected')).toBe('true')
   })
 
-  it('ArrowRight moves focus to next tab without selecting it (roving tabindex, MANUAL activation)', async () => {
+  it('ArrowRight moves focus to the next tab without selecting it (manual activation)', async () => {
     renderModal()
-    await screen.findByRole('dialog')
+    await waitForDetail()
     const infoTab = screen.getByRole('tab', { name: /Info/i })
     const participantsTab = screen.getByRole('tab', { name: /Participants/i })
-    // Focus Info tab first
     infoTab.focus()
-    // ArrowRight — moves focus to Participants without selecting
     fireEvent.keyDown(infoTab, { key: 'ArrowRight' })
-    // Info remains selected
+    // Info remains selected; focus moves to Participants under the roving model
     expect(infoTab.getAttribute('aria-selected')).toBe('true')
-    // Participants tab receives focus (tabIndex 0 on focused tab under roving model)
     expect(document.activeElement).toBe(participantsTab)
   })
 
-  it('Enter on focused tab selects it (manual activation)', async () => {
+  it('Enter on the focused tab selects it (manual activation)', async () => {
     renderModal()
-    await screen.findByRole('dialog')
-    const participantsTab = screen.getByRole('tab', { name: /Participants/i })
-    // Navigate to Participants via ArrowRight from Info
+    await waitForDetail()
     const infoTab = screen.getByRole('tab', { name: /Info/i })
+    const participantsTab = screen.getByRole('tab', { name: /Participants/i })
     infoTab.focus()
     fireEvent.keyDown(infoTab, { key: 'ArrowRight' })
-    // Now Enter selects the focused tab
     fireEvent.keyDown(participantsTab, { key: 'Enter' })
     expect(participantsTab.getAttribute('aria-selected')).toBe('true')
   })
 
   it('selected tabpanel has correct aria-labelledby wiring', async () => {
     renderModal()
-    await screen.findByRole('dialog')
-    // Wait for the detail to load so the tabpanel div is mounted
-    await waitFor(() => expect(mockGetGroupDetail).toHaveBeenCalled())
-    // The group subject appears in the Info panel once detail is loaded
-    await waitFor(() => expect(screen.getByText('Team Alpha')).toBeDefined())
+    await waitForDetail()
     const infoTab = screen.getByRole('tab', { name: /Info/i })
     const controlsId = infoTab.getAttribute('aria-controls')
     expect(controlsId).toBeTruthy()
@@ -413,26 +712,42 @@ describe('GroupDetailModal — tablist', () => {
     expect(panel).not.toBeNull()
     expect(panel!.getAttribute('aria-labelledby')).toBe(infoTab.id)
   })
+
+  it('resets to the Info tab when the group prop changes', async () => {
+    const { rerender, client, toast } = renderModal()
+    await waitForDetail()
+
+    const participantsTab = screen.getByRole('tab', { name: /Participants/i })
+    fireEvent.click(participantsTab)
+    fireEvent.keyDown(participantsTab, { key: 'Enter' })
+    await waitFor(() => expect(participantsTab.getAttribute('aria-selected')).toBe('true'))
+
+    const newGroup = makeGroup({ id: '1555000002@g.us', subject: 'Team Beta' })
+    getGroupDetailMock.mockResolvedValue(makeDetail({ id: newGroup.id, subject: 'Team Beta' }))
+
+    rerender(
+      <Wrap client={client} toast={toast}>
+        <GroupDetailModal open group={newGroup} lineName={lineName} myJid={currentUserJid} onClose={vi.fn()} />
+      </Wrap>,
+    )
+
+    await waitFor(() => {
+      const infoTab = screen.getByRole('tab', { name: /Info/i })
+      expect(infoTab.getAttribute('aria-selected')).toBe('true')
+    })
+  })
 })
 
-// ---------------------------------------------------------------------------
-// describe: settings seg pairs (C-B3W3-2)
-// ---------------------------------------------------------------------------
-
-describe('GroupDetailModal — settings seg pairs', () => {
+describe('GroupDetailModal settings seg pairs', () => {
   async function openSettingsAsAdmin() {
-    renderModal({ myJid: MY_JID })
-    await screen.findByRole('dialog')
-    // Wait for detail to load
-    await waitFor(() => expect(mockGetGroupDetail).toHaveBeenCalled())
-    // Switch to Settings tab
-    const settingsTab = screen.getByRole('tab', { name: /Settings/i })
-    fireEvent.click(settingsTab)
-    fireEvent.keyDown(settingsTab, { key: 'Enter' })
-    await waitFor(() => expect(screen.getByText('Messaging')).toBeDefined())
+    const ctx = renderModal({ myJid: currentUserJid })
+    await waitForDetail()
+    fireEvent.click(screen.getByRole('tab', { name: /Settings/i }))
+    await waitFor(() => expect(screen.getByRole('group', { name: 'Messaging' })).toBeDefined())
+    return ctx
   }
 
-  it('Messaging seg group has aria-label', async () => {
+  it('the Messaging seg group exposes an aria-label', async () => {
     await openSettingsAsAdmin()
     const group = screen.getByRole('group', { name: 'Messaging' })
     expect(group.getAttribute('aria-label')).toBe('Messaging')
@@ -440,33 +755,28 @@ describe('GroupDetailModal — settings seg pairs', () => {
 
   it('exactly one button per seg pair has aria-pressed=true', async () => {
     await openSettingsAsAdmin()
-    // Find the Messaging group
     const messagingGroup = screen.getByRole('group', { name: 'Messaging' })
     const btns = Array.from(messagingGroup.querySelectorAll('button'))
     const pressed = btns.filter(b => b.getAttribute('aria-pressed') === 'true')
     expect(pressed).toHaveLength(1)
   })
 
-  it('seg buttons are disabled while saving is in-flight (C-B3W3-2 double-fire protection)', async () => {
-    // Make updateGroupSettings return a never-resolving promise to hold saving state
-    mockUpdateGroupSettings.mockReturnValue(new Promise(() => {}))
+  it('seg buttons are disabled while a save is in-flight (double-fire protection)', async () => {
+    updateGroupSettingsMock.mockReturnValue(new Promise(() => {}))
     await openSettingsAsAdmin()
 
     const messagingGroup = screen.getByRole('group', { name: 'Messaging' })
     const btns = Array.from(messagingGroup.querySelectorAll('button')) as HTMLButtonElement[]
-
-    // Click the non-selected button to trigger saving
     const unpressed = btns.find(b => b.getAttribute('aria-pressed') === 'false')!
     fireEvent.click(unpressed)
 
-    // Now buttons should be disabled
     await waitFor(() => {
       const freshBtns = Array.from(messagingGroup.querySelectorAll('button')) as HTMLButtonElement[]
       expect(freshBtns.every(b => b.disabled)).toBe(true)
     })
   })
 
-  it('disappearing messages select uses form-control classes and preserves change behavior', async () => {
+  it('the disappearing-messages select uses form-control token classes', async () => {
     await openSettingsAsAdmin()
 
     const select = screen.getByRole('combobox', { name: 'Disappearing messages' }) as HTMLSelectElement
@@ -475,77 +785,8 @@ describe('GroupDetailModal — settings seg pairs', () => {
     expect(select.className).not.toContain('c-btn')
 
     fireEvent.change(select, { target: { value: '86400' } })
-
     await waitFor(() => {
-      expect(mockUpdateGroupEphemeral).toHaveBeenCalledWith(LINE, GROUP_ID, 86400)
-    })
-  })
-})
-
-// ---------------------------------------------------------------------------
-// describe: admin gating
-// ---------------------------------------------------------------------------
-
-describe('GroupDetailModal — admin gating', () => {
-  it('hides admin-only controls when isAdmin=false', async () => {
-    // myJid is a non-admin member
-    renderModal({ myJid: MEMBER_JID })
-    await screen.findByRole('dialog')
-    await waitFor(() => expect(mockGetGroupDetail).toHaveBeenCalled())
-
-    // Switch to Settings — Messaging/locked seg pairs should not appear for non-admins
-    const settingsTab = screen.getByRole('tab', { name: /Settings/i })
-    fireEvent.click(settingsTab)
-    fireEvent.keyDown(settingsTab, { key: 'Enter' })
-
-    // Give the tab panel time to mount
-    await waitFor(() => {
-      // Leave group button appears for all users
-      expect(screen.getByRole('button', { name: /Leave group/i })).toBeDefined()
-    })
-    // Admin-only segs are hidden
-    expect(screen.queryByRole('group', { name: 'Messaging' })).toBeNull()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// describe: tab reset on group change
-// ---------------------------------------------------------------------------
-
-describe('GroupDetailModal — tab reset', () => {
-  it('resets to Info tab when the group prop changes', async () => {
-    const { rerender, client } = renderModal()
-    await screen.findByRole('dialog')
-
-    // Switch to Participants
-    const participantsTab = screen.getByRole('tab', { name: /Participants/i })
-    fireEvent.click(participantsTab)
-    fireEvent.keyDown(participantsTab, { key: 'Enter' })
-    await waitFor(() => expect(participantsTab.getAttribute('aria-selected')).toBe('true'))
-
-    // Change the group prop — tab should reset to Info
-    const newGroup: GroupInfo = {
-      id: '1555100002@g.us',
-      subject: 'Team Beta',
-      participants: [{ id: MY_JID, admin: 'admin' }],
-    }
-    mockGetGroupDetail.mockResolvedValue({ ...baseDetail, id: newGroup.id, subject: 'Team Beta' })
-
-    rerender(
-      <Wrapper client={client}>
-        <GroupDetailModal
-          open={true}
-          group={newGroup}
-          lineName={LINE}
-          myJid={MY_JID}
-          onClose={vi.fn()}
-        />
-      </Wrapper>,
-    )
-
-    await waitFor(() => {
-      const infoTab = screen.getByRole('tab', { name: /Info/i })
-      expect(infoTab.getAttribute('aria-selected')).toBe('true')
+      expect(updateGroupEphemeralMock).toHaveBeenCalledWith(lineName, groupId, 86400)
     })
   })
 })

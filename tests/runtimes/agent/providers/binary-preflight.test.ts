@@ -13,7 +13,11 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { probeFallbackBinary, probeBinaryAuthStatus } from '../../../../src/runtimes/agent/providers/binary-preflight.ts';
+import {
+  probeFallbackBinary,
+  probeBinaryAuthStatus,
+  probeBinaryCommand,
+} from '../../../../src/runtimes/agent/providers/binary-preflight.ts';
 
 // ─── Fake child process builder ───────────────────────────────────────────────
 
@@ -287,6 +291,29 @@ describe('probeBinaryAuthStatus', () => {
     // SIGKILL it so a wedged probe can never accumulate zombie children.
     await vi.advanceTimersByTimeAsync(2_001);
     expect(killCalls).toContain('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('honors a caller-specific timeout for model-addressed probes', async () => {
+    vi.useFakeTimers();
+    const { spawnImpl, killCalls } = makeAuthSpawnImpl({ neverCloses: true });
+
+    const probePromise = probeBinaryCommand(
+      'claude',
+      ['-p', 'Reply with OK only.', '--model', 'primary-model'],
+      {},
+      { timeoutMs: 15_000 },
+      spawnImpl,
+    );
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(killCalls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await probePromise;
+    expect(result.status).toBe('failed');
+    expect(killCalls.length).toBe(1);
 
     vi.useRealTimers();
   });

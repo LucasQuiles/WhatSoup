@@ -16,6 +16,57 @@ describe('createPrimaryModelProbeAdapters', () => {
     ).resolves.toEqual({ status: 'model_unavailable' });
   });
 
+  it('probes OpenCode with a model-addressed run instead of catalog membership only', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({
+      status: 'failed' as const,
+      output: 'The model configured-primary does not exist or you do not have access to it.',
+    }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      cwd: '/agent-cwd',
+      buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'model_unavailable' });
+
+    expect(probeBinaryCommand).toHaveBeenCalledWith(
+      'opencode',
+      ['run', '--format', 'json', '--pure', '-m', 'configured-primary', 'Reply with OK only.'],
+      expect.any(Object),
+      { cwd: '/agent-cwd', timeoutMs: 15_000 },
+    );
+  });
+
+  it('probes OpenCode custom-endpoint models from cwd config without overriding -m', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({
+      status: 'ok' as const,
+      output: '{"type":"message","role":"assistant","content":"OK"}',
+    }));
+    const adapters = createPrimaryModelProbeAdapters(
+      { baseUrl: 'https://openai-compatible.example/v1', apiKeyService: 'tenant-openai' },
+      {
+        cwd: '/agent-cwd',
+        buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin', OPENAI_API_KEY: 'sk-test-secret' })),
+        getProviderBinary: vi.fn(() => 'opencode'),
+        probeBinaryCommand,
+      },
+    );
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'ok' });
+
+    expect(probeBinaryCommand).toHaveBeenCalledWith(
+      'opencode',
+      ['run', '--format', 'json', '--pure', 'Reply with OK only.'],
+      expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
+      { cwd: '/agent-cwd', timeoutMs: 15_000 },
+    );
+  });
+
   it('uses account-authenticated OpenAI model listings without leaking the key into the result', async () => {
     const fetchImpl = vi.fn(async () => new Response(
       JSON.stringify({ data: [{ id: 'api-live-model' }] }),

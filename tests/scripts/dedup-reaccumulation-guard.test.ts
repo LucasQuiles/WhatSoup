@@ -7,7 +7,7 @@
  *   - `function isRecord(` — SSOT: src/lib/type-guards.ts, console/src/lib/type-guards.ts
  *   - `function record(`   — SSOT: folded into asRecord in src/lib/type-guards.ts (#793)
  *   - `function recordValue(` — SSOT: same as above (#793)
- *   - `function safeEqual(` — SSOT: src/fleet/safe-compare.ts (exported as safeStringEqual)
+ *   - `function safeEqual(` — SSOT: src/lib/safe-compare.ts (exported as safeStringEqual)
  *
  * SSOT homes are unconditionally exempt.  All other files that carry a
  * definition today are tracked in the KNOWN_CLONES allowlist below.
@@ -45,8 +45,10 @@ const BANNED_PATTERNS = [
  */
 const SSOT_HOMES = new Set([
   'src/lib/type-guards.ts',
-  'src/fleet/safe-compare.ts',
+  'src/lib/safe-compare.ts',
   'console/src/lib/type-guards.ts',
+  // Fleet keeps this compatibility export for existing local imports.
+  'src/fleet/safe-compare.ts',
   // parser-utils exports its own isRecord wrapper that delegates to the SSOT
   // predicate; the no-duplicates test already enforces the delegation contract.
   'src/runtimes/agent/providers/parser-utils.ts',
@@ -135,7 +137,7 @@ describe('Dedup re-accumulation guard', () => {
     expect(
       violations,
       `New clone(s) detected:\n${violations.map((v) => `  • ${v}`).join('\n')}\n\n` +
-      `SSOT homes: src/lib/type-guards.ts, src/fleet/safe-compare.ts`,
+      `SSOT homes: src/lib/type-guards.ts, src/lib/safe-compare.ts`,
     ).toEqual([]);
   });
 
@@ -156,8 +158,11 @@ describe('Dedup re-accumulation guard', () => {
     const typeGuards = readFileSync(resolve(REPO_ROOT, 'src/lib/type-guards.ts'), 'utf8');
     expect(typeGuards).toMatch(/export function isRecord\(/); // test-integrity: source-string-ok
 
-    const safeCompare = readFileSync(resolve(REPO_ROOT, 'src/fleet/safe-compare.ts'), 'utf8');
+    const safeCompare = readFileSync(resolve(REPO_ROOT, 'src/lib/safe-compare.ts'), 'utf8');
     expect(safeCompare).toMatch(/export function safeStringEqual\(/);
+
+    const fleetSafeCompare = readFileSync(resolve(REPO_ROOT, 'src/fleet/safe-compare.ts'), 'utf8');
+    expect(fleetSafeCompare).toContain("from '../lib/safe-compare.ts'");
 
     const consoleTG = readFileSync(resolve(REPO_ROOT, 'console/src/lib/type-guards.ts'), 'utf8');
     expect(consoleTG).toMatch(/export function isRecord\(/); // test-integrity: source-string-ok

@@ -100,6 +100,11 @@ export interface BinaryAuthStatusResult {
   output: string;
 }
 
+export interface BinaryCommandProbeOptions {
+  cwd?: string;
+  timeoutMs?: number;
+}
+
 /** Grace period between the timeout kill (SIGTERM) and the SIGKILL escalation. */
 const KILL_ESCALATION_GRACE_MS = 2_000;
 
@@ -126,6 +131,16 @@ export async function probeBinaryAuthStatus(
   env: NodeJS.ProcessEnv,
   spawnImpl: typeof spawn = spawn,
 ): Promise<BinaryAuthStatusResult> {
+  return probeBinaryCommand(binary, args, env, {}, spawnImpl);
+}
+
+export async function probeBinaryCommand(
+  binary: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  options: BinaryCommandProbeOptions = {},
+  spawnImpl: typeof spawn = spawn,
+): Promise<BinaryAuthStatusResult> {
   return new Promise<BinaryAuthStatusResult>((resolve) => {
     let settled = false;
     let stdoutBuffer = '';
@@ -148,6 +163,7 @@ export async function probeBinaryAuthStatus(
       child = spawnImpl(binary, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         env,
+        ...(options.cwd ? { cwd: options.cwd } : {}),
         windowsHide: true,
       });
     } catch {
@@ -155,6 +171,7 @@ export async function probeBinaryAuthStatus(
       return;
     }
 
+    const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
     killTimer = setTimeout(() => {
       try { child.kill(); } catch { /* ignore kill errors */ }
       // Escalate if the child ignores the polite kill. The probe result is
@@ -164,7 +181,7 @@ export async function probeBinaryAuthStatus(
       }, KILL_ESCALATION_GRACE_MS);
       killEscalationTimer.unref?.();
       settle({ status: 'failed', output: combinedOutput() });
-    }, PROBE_TIMEOUT_MS);
+    }, timeoutMs);
     killTimer.unref?.();
 
     child.stdout?.on('data', (chunk: Buffer) => {

@@ -4,15 +4,15 @@
 
 Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`, `docs/superpowers/`, `docs/plans/`, `docs/cutover/`, `docs/research/`, `docs/specs/` (selected), `docs/work-index*`, `docs/current-program.md`, `docs/handoff-*.md`, `HANDOFF-*.md`, `docs/project-status-*.md`, `docs/audit-*.md`, `tmp/`.
 
-**Total classification rows:** 221
+**Total classification rows:** 224
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 0 |
-| PRIVATE-ARCHIVE | 221 |
+| PRIVATE-ARCHIVE | 224 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 221 |
+| Total | 224 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -179,13 +179,13 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B07-decision-trace.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/beads/B07-docs-durability.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/sdlc/completed/whatsoup-full-hardening-20260331/state.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/implementation-plan.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-collector.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-dispatcher.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-health-check.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-heartbeat-watchdog.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-runner.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
-| `docs/sdlc/in-progress/bot-errors-reliability-20260531/state.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/implementation-plan.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-collector.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-dispatcher.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-health-check.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-heartbeat-watchdog.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/quarantined-hub-tests/bot-errors-runner.test.ts.quarantined` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/sdlc/closed/bot-errors-reliability-20260531/state.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-08-whatsoup-protection-layer-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-09-fleet-topology-control-plane-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/specs/2026-05-09-settings-migration-framework-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
@@ -216,8 +216,11 @@ Internal publication roots covered by the guard: `docs/runbooks/`, `docs/sdlc/`,
 | `docs/superpowers/plans/2026-05-29-harness-maintenance.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-06-13-d20-provider-keychain-unlock-policy.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-06-13-outstanding-burndown.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-04-07-anti-echo-review-handoff.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/reviews/2026-05-31-bot-errors-tool-call-audit.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/2026-04-04-colony-orchestration-design.md` | PRIVATE-ARCHIVE | Internal planning or operational documentation; retained in the repository but excluded from public publication by default. |

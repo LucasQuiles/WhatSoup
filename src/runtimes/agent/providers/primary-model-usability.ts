@@ -1,8 +1,3 @@
-import {
-  probeModelCatalog as defaultProbeModelCatalog,
-  type ModelCatalogResult,
-} from './binary-preflight.ts';
-
 export type PrimaryModelUsabilityStatus =
   | 'usable'
   | 'model-unavailable'
@@ -43,7 +38,6 @@ export type ApiModelAccessProbeResult =
 
 export interface PrimaryModelProbeAdapters {
   probeBinaryModel?: (target: { provider: string; model: string }) => Promise<BinaryModelProbeResult>;
-  probeModelCatalog?: (binary: string, model: string) => Promise<ModelCatalogResult>;
   probeApiModelAccess?: (target: { provider: 'openai-api' | 'anthropic-api'; model: string }) => Promise<ApiModelAccessProbeResult>;
 }
 
@@ -51,8 +45,7 @@ export interface PrimaryModelProbeOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 5_000;
-const OPENCODE_BINARY = 'opencode';
+const DEFAULT_TIMEOUT_MS = 15_000;
 const TIMEOUT = Symbol('primary-model-probe-timeout');
 const PROBE_THROW = Symbol('primary-model-probe-throw');
 
@@ -68,7 +61,7 @@ export async function probePrimaryModelUsability(
   }
 
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  if (provider === 'claude-cli') {
+  if (provider === 'claude-cli' || provider === 'opencode-cli') {
     if (!adapters.probeBinaryModel) {
       return result(target, model, 'unknown', 'binary-model-probe-unavailable');
     }
@@ -76,15 +69,6 @@ export async function probePrimaryModelUsability(
     if (probe === TIMEOUT) return result(target, model, 'timeout');
     if (probe === PROBE_THROW) return result(target, model, 'unknown', 'probe-threw');
     return mapBinaryModelProbe(target, model, probe);
-  }
-
-  if (provider === 'opencode-cli') {
-    const probeModelCatalog = adapters.probeModelCatalog ?? defaultProbeModelCatalog;
-    const binary = normalizedModel(target.binary) ?? OPENCODE_BINARY;
-    const probe = await withTimeout(() => probeModelCatalog(binary, model), timeoutMs);
-    if (probe === TIMEOUT) return result(target, model, 'timeout');
-    if (probe === PROBE_THROW) return result(target, model, 'unknown', 'probe-threw');
-    return mapCatalogProbe(target, model, probe);
   }
 
   if (provider === 'openai-api' || provider === 'anthropic-api') {
@@ -118,24 +102,6 @@ function mapBinaryModelProbe(
       return result(target, model, 'timeout');
     case 'unknown':
       return result(target, model, 'unknown', probe.reason);
-  }
-}
-
-function mapCatalogProbe(
-  target: PrimaryModelProbeTarget,
-  model: string,
-  probe: ModelCatalogResult,
-): PrimaryModelUsabilityResult {
-  switch (probe.status) {
-    case 'found':
-      return result(target, model, 'usable');
-    case 'not_found':
-      return {
-        ...result(target, model, 'model-unavailable'),
-        suggestion: probe.suggestion,
-      };
-    case 'unknown':
-      return result(target, model, 'unknown', 'catalog-probe-unknown');
   }
 }
 
