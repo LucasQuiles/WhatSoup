@@ -650,7 +650,8 @@ The audit is report-only until the approved asset set lands. It checks:
 - gradients, filter/glow/blur effects, and mask-heavy illustration structure forbidden by
   `brand.md` §1.3;
 - canonical `/favicon.svg` link in `console/index.html`;
-- `/manifest.webmanifest` link plus checked-in manifest coverage for at least one maskable icon.
+- `/manifest.webmanifest` link plus checked-in manifest coverage for at least one maskable icon
+  (`purpose` parsed as whitespace-separated tokens; `src` must point to an existing public asset).
 
 The package script currently promotes only the already-zero canonical favicon-link rule with
 `--fail-on-rule soup/brand-favicon-link-required`. Peripheral legacy copy and orphan public SVGs

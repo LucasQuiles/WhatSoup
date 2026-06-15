@@ -127,6 +127,22 @@ function normalizeSvgReference(value) {
   return path;
 }
 
+function normalizePublicAssetReference(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().replace(/\\/g, '/').replace(/[?#].*$/, '');
+  if (!trimmed || /^(?:[a-z]+:)?\/\//i.test(trimmed) || /^(?:data|blob):/i.test(trimmed)) return null;
+  const publicIndex = trimmed.lastIndexOf('/public/');
+  let path = publicIndex >= 0 ? trimmed.slice(publicIndex + '/public/'.length) : trimmed;
+  path = path.replace(/^public\//, '').replace(/^\/+/, '');
+  while (path.startsWith('./')) path = path.slice(2);
+  if (!path || path.split('/').includes('..')) return null;
+  return path;
+}
+
+function purposeTokens(value) {
+  return typeof value === 'string' ? value.trim().split(/\s+/).filter(Boolean) : [];
+}
+
 function collectSvgReferences(text) {
   const cleaned = text
     .replace(/<!--[\s\S]*?-->/g, '')
@@ -278,8 +294,10 @@ function analyzeManifest(path) {
   }
 
   const icons = Array.isArray(manifest.icons) ? manifest.icons : [];
-  const hasMaskable = icons.some((icon) => typeof icon?.purpose === 'string' && icon.purpose.includes('maskable'));
-  if (!hasMaskable) {
+  const maskableIcons = icons
+    .map((icon, index) => ({ icon, index }))
+    .filter(({ icon }) => purposeTokens(icon?.purpose).includes('maskable'));
+  if (maskableIcons.length === 0) {
     addFinding(
       findings,
       'soup/brand-pwa-maskable-assets-missing',
@@ -287,6 +305,29 @@ function analyzeManifest(path) {
       'no maskable icon purpose',
       'SOUP PWA manifest must include at least one maskable icon.',
     );
+    return findings;
+  }
+
+  const publicDir = dirname(path);
+  for (const { icon, index } of maskableIcons) {
+    const src = normalizePublicAssetReference(icon?.src);
+    if (!src) {
+      addFinding(
+        findings,
+        'soup/brand-pwa-maskable-assets-missing',
+        path,
+        `icons[${index}].src missing or unsafe`,
+        'SOUP PWA maskable icons must point to checked-in public assets.',
+      );
+    } else if (!existsSync(resolve(publicDir, src))) {
+      addFinding(
+        findings,
+        'soup/brand-pwa-maskable-assets-missing',
+        path,
+        `icons[${index}].src=${src} missing`,
+        'SOUP PWA maskable icons must point to checked-in public assets.',
+      );
+    }
   }
   return findings;
 }

@@ -150,6 +150,30 @@ describe('check-brand-assets.mjs', () => {
     expect(output.by_rule['soup/brand-pwa-maskable-assets-missing']).toBe(2);
   });
 
+  it('treats manifest icon purpose as tokens, not substrings', () => {
+    const fixture = makeFixture({
+      manifest: JSON.stringify({ icons: [{ src: '/favicon.svg', sizes: '512x512', type: 'image/svg+xml', purpose: 'any unmaskable' }] }, null, 2),
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(0);
+    expect(output.verdict).toBe('PASS');
+    expect(output.by_rule['soup/brand-pwa-maskable-assets-missing']).toBe(1);
+  });
+
+  it('reports maskable manifest icon sources that are not checked in under public', () => {
+    const fixture = makeFixture({
+      manifest: JSON.stringify({ icons: [{ src: '/icons/missing.svg', sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }] }, null, 2),
+    });
+    const result = runScript(fixture);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(0);
+    expect(output.verdict).toBe('PASS');
+    expect(output.by_rule['soup/brand-pwa-maskable-assets-missing']).toBe(1);
+  });
+
   it('fails on a missing canonical favicon link when that zeroed rule is promoted', () => {
     const fixture = makeFixture({
       index: '<!doctype html><html><head><link rel="manifest" href="/manifest.webmanifest" /></head><body></body></html>\n',
