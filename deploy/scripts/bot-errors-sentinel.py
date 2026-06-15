@@ -566,14 +566,22 @@ def env_key_segment(value: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in value).strip("_").upper()
 
 
+def shlex_env_words(name: str, default: list[str]) -> list[str]:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return shlex.split(raw)
+    except ValueError as exc:
+        raise SentinelError(f"invalid {name}: {exc}") from exc
+
+
 def ssh_command() -> list[str]:
-    raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND", "")
-    return shlex.split(raw) if raw else ["ssh"]
+    return shlex_env_words("BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND", ["ssh"])
 
 
 def remote_exec_prefix(host: str) -> list[str]:
-    raw = os.environ.get(f"BOT_ERRORS_FLEET_SENTINEL_EXEC_{env_key_segment(host)}", "")
-    return shlex.split(raw) if raw else []
+    return shlex_env_words(f"BOT_ERRORS_FLEET_SENTINEL_EXEC_{env_key_segment(host)}", [])
 
 
 def ssh_probe_connect_timeout_seconds() -> int:
@@ -618,8 +626,12 @@ def ssh_runtime_probe(spec: HostSpec) -> dict:
     if spec.root is None:
         return {"reachable": True, "healthy": False, "class": "probe_config_error", "error": "sshHost requires root"}
     try:
+        command = ssh_probe_command(spec)
+    except SentinelError as exc:
+        return {"reachable": True, "healthy": False, "class": "probe_config_error", "error": str(exc)[:300]}
+    try:
         proc = subprocess.run(
-            ssh_probe_command(spec),
+            command,
             input=REMOTE_RUNTIME_PROBE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

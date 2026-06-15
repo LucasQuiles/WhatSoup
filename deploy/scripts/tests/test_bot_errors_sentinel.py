@@ -1192,6 +1192,22 @@ def test_ssh_runtime_probe_failure_modes(tmp_path: Path, monkeypatch):
         "error": "sshHost requires root",
     }
 
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND", "ssh 'unterminated")
+    bad_command = _mod.default_pull_probe(_mod.HostSpec(host="host-a", ssh_host="host-a.example", root=tmp_path))
+    assert bad_command["reachable"] is True
+    assert bad_command["healthy"] is False
+    assert bad_command["class"] == "probe_config_error"
+    assert "BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND" in bad_command["error"]
+    monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_SSH_COMMAND")
+
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_EXEC_HOST_A_EXAMPLE", "env 'unterminated")
+    bad_prefix = _mod.default_pull_probe(_mod.HostSpec(host="host-a", ssh_host="host-a.example", root=tmp_path))
+    assert bad_prefix["reachable"] is True
+    assert bad_prefix["healthy"] is False
+    assert bad_prefix["class"] == "probe_config_error"
+    assert "BOT_ERRORS_FLEET_SENTINEL_EXEC_HOST_A_EXAMPLE" in bad_prefix["error"]
+    monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_EXEC_HOST_A_EXAMPLE")
+
     def timeout(_cmd, **_kwargs):
         raise _mod.subprocess.TimeoutExpired(cmd="ssh", timeout=9)
 
