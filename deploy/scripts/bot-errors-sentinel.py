@@ -31,6 +31,7 @@ DEFAULT_MAX_TIER1_HEAL_CANDIDATES = 2
 DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD = 2
 DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5 * 60
 DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS = 6 * 60 * 60
+DEFAULT_MAX_CRITICAL_WHATSAPP_PER_DAY = 8
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
 ACTION_EVENT_ACTIONS = {
     "tier1_heal_candidate",
@@ -121,6 +122,7 @@ class SentinelConfig:
     correlated_drift_freeze_threshold: int = DEFAULT_CORRELATED_DRIFT_FREEZE_THRESHOLD
     max_clock_skew_seconds: int = DEFAULT_MAX_CLOCK_SKEW_SECONDS
     action_event_cooldown_seconds: int = DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS
+    max_critical_whatsapp_per_day: int = DEFAULT_MAX_CRITICAL_WHATSAPP_PER_DAY
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,11 @@ def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] 
         action_event_cooldown_seconds=positive_int_env(
             "BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS",
             DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS,
+            1,
+        ),
+        max_critical_whatsapp_per_day=positive_int_env(
+            "BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY",
+            DEFAULT_MAX_CRITICAL_WHATSAPP_PER_DAY,
             1,
         ),
     )
@@ -739,6 +746,103 @@ def request_id_for(now: float, scope: str, subject: str, action: str, klass: str
     return hashlib.sha256(material).hexdigest()[:16]
 
 
+def stable_request_id(*parts: object) -> str:
+    material = "\0".join(str(part) for part in parts).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
+def int_or_zero(value: object) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def critical_whatsapp_day(now: float) -> str:
+    return now_iso(now)[:10]
+
+
+def critical_whatsapp_record(state: dict, now: float) -> dict:
+    day = critical_whatsapp_day(now)
+    record = state.setdefault("criticalWhatsApp", {})
+    if record.get("day") != day:
+        record.clear()
+        record["day"] = day
+        record["allowedCount"] = 0
+        record["overflowCount"] = 0
+    return record
+
+
+def critical_whatsapp_digest_path(config: SentinelConfig, day: str) -> Path:
+    return action_outbox_dir(config) / f"{safe_slug(day)}-fleet-critical-whatsapp-daily-cap.json"
+
+
+def write_critical_whatsapp_digest(
+    config: SentinelConfig,
+    now: float,
+    controller_host: str,
+    record: dict,
+    daily_cap: int,
+) -> dict:
+    day = str(record.get("day") or critical_whatsapp_day(now))
+    request_id = stable_request_id("critical_whatsapp_daily_cap_digest", day)
+    path = critical_whatsapp_digest_path(config, day)
+    payload = {
+        "schemaVersion": 1,
+        "kind": "bot-errors-sentinel-action",
+        "scope": "fleet",
+        "requestId": request_id,
+        "createdAt": now_iso(now),
+        "controllerHost": controller_host,
+        "action": "critical_whatsapp_daily_cap_digest",
+        "tier": "tier3",
+        "lane": "human_digest_overflow",
+        "severity": "warning",
+        "criticalWhatsAppEligible": False,
+        "criticalWhatsAppAllowed": False,
+        "criticalWhatsAppDay": day,
+        "criticalWhatsAppDailyCap": daily_cap,
+        "criticalWhatsAppAllowedCount": int_or_zero(record.get("allowedCount")),
+        "criticalWhatsAppOverflowCount": int_or_zero(record.get("overflowCount")),
+    }
+    atomic_write_json(path, payload)
+    record["overflowDigestPath"] = str(path)
+    record["overflowDigestRequestId"] = request_id
+    record["overflowDigestUpdatedAt"] = now_iso(now)
+    return {"scope": "fleet", "action": "critical_whatsapp_daily_cap_digest", "requestId": request_id, "path": str(path)}
+
+
+def apply_critical_whatsapp_budget(
+    payload: dict,
+    state: dict,
+    config: SentinelConfig,
+    now: float,
+    controller_host: str,
+) -> Optional[dict]:
+    if payload.get("criticalWhatsAppEligible") is not True:
+        payload["criticalWhatsAppAllowed"] = False
+        return None
+    record = critical_whatsapp_record(state, now)
+    daily_cap = config.max_critical_whatsapp_per_day
+    allowed_count = int_or_zero(record.get("allowedCount"))
+    day = str(record.get("day") or critical_whatsapp_day(now))
+    payload["criticalWhatsAppDay"] = day
+    payload["criticalWhatsAppDailyCap"] = daily_cap
+    if allowed_count < daily_cap:
+        allowed_count += 1
+        record["allowedCount"] = allowed_count
+        payload["criticalWhatsAppAllowed"] = True
+        payload["criticalWhatsAppAllowedCount"] = allowed_count
+        return None
+    overflow_count = int_or_zero(record.get("overflowCount")) + 1
+    record["overflowCount"] = overflow_count
+    payload["criticalWhatsAppAllowed"] = False
+    payload["criticalWhatsAppSuppressedReason"] = "daily_cap"
+    payload["criticalWhatsAppAllowedCount"] = allowed_count
+    payload["criticalWhatsAppOverflowCount"] = overflow_count
+    return write_critical_whatsapp_digest(config, now, controller_host, record, daily_cap)
+
+
 def build_host_action_event(result: dict, now: float, controller_host: str, fleet_action: str, request_id: str) -> dict:
     action = str(result.get("action") or "unknown")
     tier, lane, severity, critical = action_event_route(action)
@@ -823,10 +927,13 @@ def emit_action_events(
         request_id = request_id_for(now, "host", subject, action, str(result.get("class") or "unknown"))
         path = action_event_path(config, now, "host", subject, action, request_id)
         payload = build_host_action_event(result, now, controller_host, fleet_action, request_id)
+        digest_ref = apply_critical_whatsapp_budget(payload, state, config, now, controller_host)
         atomic_write_json(path, payload)
         ref = {"scope": "host", "host": subject, "action": action, "requestId": request_id, "path": str(path)}
         result["actionEvent"] = ref
         emitted.append(ref)
+        if digest_ref is not None and digest_ref not in emitted:
+            emitted.append(digest_ref)
         record["lastActionEventKey"] = key
         record["lastActionEventAt"] = now
         record["lastActionEventPath"] = str(path)
@@ -839,9 +946,12 @@ def emit_action_events(
             request_id = request_id_for(now, "fleet", "all", fleet_action, fleet_action)
             path = action_event_path(config, now, "fleet", "all", fleet_action, request_id)
             payload = build_fleet_action_event(fleet_action, results, now, controller_host, oracle, request_id)
+            digest_ref = apply_critical_whatsapp_budget(payload, state, config, now, controller_host)
             atomic_write_json(path, payload)
             ref = {"scope": "fleet", "action": fleet_action, "requestId": request_id, "path": str(path)}
             emitted.append(ref)
+            if digest_ref is not None and digest_ref not in emitted:
+                emitted.append(digest_ref)
             fleet_record["lastActionEventKey"] = key
             fleet_record["lastActionEventAt"] = now
             fleet_record["lastActionEventPath"] = str(path)

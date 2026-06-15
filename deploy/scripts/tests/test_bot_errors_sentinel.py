@@ -68,6 +68,7 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
         correlated_drift_freeze_threshold=kwargs.get("correlated_drift_freeze_threshold", 2),
         max_clock_skew_seconds=kwargs.get("max_clock_skew_seconds", 300),
         action_event_cooldown_seconds=kwargs.get("action_event_cooldown_seconds", 3600),
+        max_critical_whatsapp_per_day=kwargs.get("max_critical_whatsapp_per_day", 8),
     )
 
 
@@ -404,11 +405,41 @@ def test_central_connectivity_suspect_requires_failed_oracle_to_suppress(tmp_pat
     assert fleet_event["fleetAction"] == "central_connectivity_suspect"
     assert fleet_event["tier"] == "tier3"
     assert fleet_event["criticalWhatsAppEligible"] is True
+    assert fleet_event["criticalWhatsAppAllowed"] is True
+    assert fleet_event["criticalWhatsAppDailyCap"] == 8
     assert fleet_event["problemHostCount"] == 3
 
     waiting = _mod.run_once(_config(tmp_path / "waiting", hosts, hysteresis_cycles=2), _deps(1000.0, probes, oracle_down))
     assert waiting["fleetAction"] == "central_connectivity_suspect"
     assert {host["action"] for host in waiting["hosts"]} == {"hysteresis_wait"}
+
+
+def test_critical_whatsapp_daily_cap_suppresses_overflow_and_updates_digest(tmp_path: Path):
+    hosts_payload = []
+    probes = {}
+    for name in ("host-a", "host-b", "host-c"):
+        hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        probes[name] = {"reachable": True, "healthy": False, "class": "permission_denied"}
+    hosts = _hosts_file(tmp_path, hosts_payload)
+    result = _mod.run_once(
+        _config(tmp_path, hosts, hysteresis_cycles=1, max_critical_whatsapp_per_day=2),
+        _deps(1000.0, probes),
+    )
+
+    host_events = [json.loads(Path(ref["path"]).read_text(encoding="utf-8")) for ref in result["actionEvents"] if ref["scope"] == "host"]
+    digest_refs = [ref for ref in result["actionEvents"] if ref["action"] == "critical_whatsapp_daily_cap_digest"]
+    assert [event["criticalWhatsAppAllowed"] for event in host_events] == [True, True, False]
+    assert host_events[2]["criticalWhatsAppSuppressedReason"] == "daily_cap"
+    assert len(digest_refs) == 1
+    digest = json.loads(Path(digest_refs[0]["path"]).read_text(encoding="utf-8"))
+    assert digest["lane"] == "human_digest_overflow"
+    assert digest["criticalWhatsAppAllowedCount"] == 2
+    assert digest["criticalWhatsAppOverflowCount"] == 1
+    state = json.loads(_mod.state_path(_config(tmp_path, hosts, hysteresis_cycles=1, max_critical_whatsapp_per_day=2)).read_text(encoding="utf-8"))
+    assert state["criticalWhatsApp"]["day"] == "1970-01-01"
+    assert state["criticalWhatsApp"]["allowedCount"] == 2
+    assert state["criticalWhatsApp"]["overflowCount"] == 1
 
 
 def test_probe_path_default_and_bad_heartbeat_json(tmp_path: Path):
@@ -561,6 +592,7 @@ def test_signal_classification_and_inventory_edges(tmp_path: Path, monkeypatch):
     assert _mod.parse_iso_epoch("not-a-date") is None
     assert _mod.parse_iso_epoch("1970-01-01T00:00:00") is None
     assert _mod.parse_iso_epoch("1970-01-01T00:00:00Z") == 0.0
+    assert _mod.int_or_zero("-5") == 0
     assert _mod.parse_probe_stdout("\n[]\n{\"class\":\"healthy\"}\n") == {"class": "healthy"}
     assert _mod.parse_probe_stdout("\n") is None
     assert (
@@ -644,6 +676,7 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ACTION_EVENT_COOLDOWN_SECONDS", "0")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_CRITICAL_WHATSAPP_PER_DAY", "0")
     config = _mod.default_config(tmp_path / "hosts.json", tmp_path / "state")
     assert config.heartbeat_max_age_seconds == _mod.DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     assert config.hysteresis_cycles == 1
@@ -653,6 +686,7 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
     assert config.correlated_drift_freeze_threshold == 1
     assert config.max_clock_skew_seconds == 1
     assert config.action_event_cooldown_seconds == 1
+    assert config.max_critical_whatsapp_per_day == 1
 
     healthy_hb = _heartbeat(tmp_path / "healthy.json", healthy=True, mtime=1000.0)
     healthy_probe = _write_json(tmp_path / "healthy-probe.json", {"reachable": True, "healthy": True, "class": "healthy"})
