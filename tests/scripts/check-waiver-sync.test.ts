@@ -53,7 +53,7 @@ function makeFixture(opts: {
   writeFileSync(
     join(srcDir, 'Fixture.tsx'),
     opts.source ??
-      `/* eslint-disable react-hooks/exhaustive-deps -- waiver:WVR-001 test fixture */\nexport const Fixture = 1;\n`,
+      `/* eslint-disable react-hooks/exhaustive-deps -- waiver:WVR-001 test fixture; expires 2099-12-31 */\nexport const Fixture = 1;\n`,
   );
   writeFileSync(
     join(consoleDir, 'eslint-waivers.yaml'),
