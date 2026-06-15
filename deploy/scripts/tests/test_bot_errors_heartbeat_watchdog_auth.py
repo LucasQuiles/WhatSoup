@@ -245,6 +245,21 @@ def test_parse_args_falls_back_for_bad_max_age_env(monkeypatch):
     assert args.max_daily_health_age == 25 * 60 * 60
 
 
+def test_watchdog_threshold_env_falls_back_for_bad_values(monkeypatch):
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", "bad")
+    monkeypatch.setenv("BOT_ERRORS_WATCHDOG_ESCALATE_SECONDS", "0")
+    monkeypatch.setenv("BOT_ERRORS_WATCHDOG_ESCALATE_SUPPRESSED", "-1")
+    monkeypatch.setenv("BOT_ERRORS_WATCHDOG_RECOVERY_CONFIRMATIONS", "")
+
+    mod.validate_thresholds()
+
+    assert mod.watchdog_renotify_seconds() == 6 * 60 * 60
+    assert mod.watchdog_escalate_seconds() == 24 * 60 * 60
+    assert mod.watchdog_escalate_suppressed() == 72
+    assert mod.watchdog_recovery_confirmations() == 2
+
+
 def test_queue_backlog_threshold_env_falls_back_for_bad_values(tmp_path: Path, monkeypatch):
     mod = _load_module()
     _private_state(monkeypatch, mod, tmp_path)
