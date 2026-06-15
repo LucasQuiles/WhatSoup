@@ -182,6 +182,19 @@ grep -q "unmanaged path" "$tmp/bad-absent.log" || {
   fail "unmanaged .was-absent path was not reported"
 }
 
+bad_ledger_symlink_backup="$tmp/bad-ledger-symlink-backup"
+mkdir -p "$bad_ledger_symlink_backup"
+: > "$tmp/outside-was-absent"
+ln -s "$tmp/outside-was-absent" "$bad_ledger_symlink_backup/.was-absent"
+if bash "$D" rollback "$clean_root" "$bad_ledger_symlink_backup" > "$tmp/bad-ledger-symlink.log" 2>&1; then
+  cat "$tmp/bad-ledger-symlink.log"
+  fail "rollback accepted symlinked .was-absent ledger"
+fi
+grep -q ".was-absent ledger is unsafe" "$tmp/bad-ledger-symlink.log" || {
+  cat "$tmp/bad-ledger-symlink.log"
+  fail "symlinked .was-absent ledger was not reported"
+}
+
 bad_symlink_backup="$tmp/bad-symlink-backup"
 mkdir -p "$bad_symlink_backup/deploy/scripts/lib"
 : > "$bad_symlink_backup/.was-absent"

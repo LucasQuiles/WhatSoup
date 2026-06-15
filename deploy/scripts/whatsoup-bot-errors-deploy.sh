@@ -145,6 +145,7 @@ require_backup_dir() {
   [ -n "$bkdir" ] || { echo "FATAL: backup dir missing"; return 3; }
   [ -d "$bkdir" ] || { echo "FATAL: backup dir not found: $bkdir"; return 3; }
   [ -f "$bkdir/.was-absent" ] || { echo "FATAL: backup missing .was-absent ledger: $bkdir"; return 3; }
+  [ ! -L "$bkdir/.was-absent" ] || { echo "FATAL: backup .was-absent ledger is unsafe: $bkdir"; return 3; }
   root_parent="$(cd "$(dirname "$root")" && pwd -P)" || { echo "FATAL: root parent unavailable"; return 3; }
   root_abs="$root_parent/$(basename "$root")"
   backup_abs="$(cd "$bkdir" && pwd -P)" || { echo "FATAL: backup dir unavailable: $bkdir"; return 3; }
