@@ -1053,8 +1053,9 @@ button.soup-pill[aria-disabled="true"] {
   min-height: var(--row-compressed, 28px);
 }
 
-/* Row base */
+/* Row base — position:relative anchors the disclosure button overlay (P1-9) */
 .soup-log__row {
+  position: relative;
   min-height: var(--row-default, 36px);
   border-bottom: var(--bw) solid var(--border-hairline);
   cursor: pointer;
@@ -1072,8 +1073,24 @@ button.soup-pill[aria-disabled="true"] {
   background: var(--row-hover);
 }
 
-/* Focus ring — inset so it stays inside the row */
-.soup-log__row:focus-visible {
+/* Disclosure button (P1-9 ARIA fix) — transparent overlay that covers the full
+   row so any click/keyboard activation reaches the widget role button that
+   carries aria-expanded. Reset all button chrome; inherit cursor from row. */
+.soup-log__row-toggle {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* Focus ring on disclosure button — inset so it stays inside the row */
+.soup-log__row-toggle:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }

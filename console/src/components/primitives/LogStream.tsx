@@ -22,7 +22,6 @@
  */
 import {
   type FC,
-  type KeyboardEvent,
   useState,
 } from 'react';
 import type { LogEntry } from '../../types';
@@ -103,13 +102,6 @@ const LogRow: FC<LogRowProps> = ({ entry }) => {
 
   const toggle = () => setExpanded((v) => !v);
 
-  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      toggle();
-    }
-  };
-
   const rowSeverityCls =
     entry.level === 'error'
       ? 'soup-log__row--error'
@@ -117,17 +109,31 @@ const LogRow: FC<LogRowProps> = ({ entry }) => {
         ? 'soup-log__row--warn'
         : '';
 
+  // ARIA fix (P1-9): aria-expanded is only valid on widget roles (ARIA 1.2).
+  // The listitem div keeps its list semantics; the disclosure control is a
+  // nested <button> that carries aria-expanded. This satisfies AT expectations
+  // for expandable rows while maintaining a valid accessibility tree.
   return (
     <div
       role="listitem"
-      tabIndex={0}
       className={['soup-log__row', rowSeverityCls, expanded ? 'is-open' : '']
         .filter(Boolean)
         .join(' ')}
-      aria-expanded={expanded}
-      onClick={toggle}
-      onKeyDown={handleKeyDown}
     >
+      {/*
+        Disclosure button — owns aria-expanded (button is a widget role).
+        Keyboard activation (Enter / Space) is native button behavior.
+        Covers the full row via CSS (position:absolute, inset:0) so click
+        area matches the visual row.
+      */}
+      <button
+        type="button"
+        className="soup-log__row-toggle"
+        aria-expanded={expanded}
+        aria-label={`Toggle details for log entry at ${entry.timestamp}`}
+        onClick={toggle}
+      />
+
       <div className="soup-log__grid">
         {/* Time lane — --type-data-sm, --text-2 (DD-8 Option B), monospaced */}
         <span className="soup-log__time">{entry.timestamp}</span>
