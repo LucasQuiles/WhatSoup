@@ -83,7 +83,8 @@ write_launchd() {
   stderr_xml=$(xml_escape "$STATE_DIR/logs/selfcheck.err.log")
 
   mkdir -p "$LAUNCH_AGENTS" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR"
-  chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" 2>/dev/null || true
+  chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" \
+    || fail_config "cannot secure BOT ERRORS selfcheck state directories"
   cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -149,7 +150,8 @@ write_systemd() {
   heal_min_free_q=$(systemd_quote "${BOT_ERRORS_SELFCHECK_HEAL_MIN_FREE_BYTES:-}")
 
   mkdir -p "$SYSTEMD_USER_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR"
-  chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" 2>/dev/null || true
+  chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" \
+    || fail_config "cannot secure BOT ERRORS selfcheck state directories"
   cat > "$service" <<SERVICE
 [Unit]
 Description=BOT ERRORS Fleet Sentinel host selfcheck

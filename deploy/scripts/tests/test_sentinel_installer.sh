@@ -143,6 +143,30 @@ grep -q 'bot-errors-expected-fleet.json' "$default_service" || { echo "SENTINEL_
 grep -q 'dry_run=1' "$tmp/default-hosts.out" || { echo "SENTINEL_INSTALLER_FAIL default-hosts dry-run output"; cat "$tmp/default-hosts.out"; exit 1; }
 [[ ! -s "$tmp/default-hosts.err" ]] || { echo "SENTINEL_INSTALLER_FAIL default-hosts invoked activation"; cat "$tmp/default-hosts.err"; exit 1; }
 
+chmodbin="$tmp/chmodbin"
+mkdir -p "$chmodbin"
+cat > "$chmodbin/chmod" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "700" ]; then
+  echo "chmod denied for secure state dirs" >&2
+  exit 99
+fi
+exec /bin/chmod "$@"
+SH
+chmod +x "$chmodbin/chmod"
+if PATH="$chmodbin:$PATH" env "${common_env[@]}" \
+  BOT_ERRORS_FLEET_SENTINEL_PLATFORM=systemd \
+  BOT_ERRORS_SYSTEMD_USER_DIR="$tmp/chmod-systemd" \
+  bash "$S" > "$tmp/chmod.out" 2> "$tmp/chmod.err"; then
+  echo "SENTINEL_INSTALLER_FAIL continued after chmod failure"
+  exit 1
+fi
+grep -q 'cannot secure BOT ERRORS sentinel state directories' "$tmp/chmod.err" || {
+  echo "SENTINEL_INSTALLER_FAIL chmod failure reason"
+  cat "$tmp/chmod.err"
+  exit 1
+}
+
 badroot="$tmp/bad-root"
 mkdir -p "$badroot/deploy/scripts"
 if env BOT_ERRORS_REPO_ROOT="$badroot" BOT_ERRORS_FLEET_SENTINEL_HOSTS="$hosts" BOT_ERRORS_FLEET_SENTINEL_PLATFORM=launchd BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN=1 bash "$S" > "$tmp/missing-script.out" 2> "$tmp/missing-script.err"; then

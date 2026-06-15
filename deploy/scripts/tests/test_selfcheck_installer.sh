@@ -77,6 +77,30 @@ grep -q '^Persistent=true$' "$timer" || { echo "SELFCHECK_INSTALLER_FAIL systemd
 grep -q 'dry_run=1' "$tmp/systemd.out" || { echo "SELFCHECK_INSTALLER_FAIL systemd dry-run output"; cat "$tmp/systemd.out"; exit 1; }
 [[ ! -s "$tmp/systemd.err" ]] || { echo "SELFCHECK_INSTALLER_FAIL systemd invoked activation"; cat "$tmp/systemd.err"; exit 1; }
 
+chmodbin="$tmp/chmodbin"
+mkdir -p "$chmodbin"
+cat > "$chmodbin/chmod" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "700" ]; then
+  echo "chmod denied for secure state dirs" >&2
+  exit 99
+fi
+exec /bin/chmod "$@"
+SH
+chmod +x "$chmodbin/chmod"
+if PATH="$chmodbin:$PATH" env "${common_env[@]}" \
+  BOT_ERRORS_SELFCHECK_PLATFORM=systemd \
+  BOT_ERRORS_SYSTEMD_USER_DIR="$tmp/chmod-systemd" \
+  bash "$S" > "$tmp/chmod.out" 2> "$tmp/chmod.err"; then
+  echo "SELFCHECK_INSTALLER_FAIL continued after chmod failure"
+  exit 1
+fi
+grep -q 'cannot secure BOT ERRORS selfcheck state directories' "$tmp/chmod.err" || {
+  echo "SELFCHECK_INSTALLER_FAIL chmod failure reason"
+  cat "$tmp/chmod.err"
+  exit 1
+}
+
 badroot="$tmp/bad-root"
 mkdir -p "$badroot/deploy/scripts"
 touch "$badroot/deploy/scripts/whatsoup-bot-errors-deploy.sh"

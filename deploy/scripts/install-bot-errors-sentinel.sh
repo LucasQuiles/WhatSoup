@@ -115,7 +115,8 @@ write_launchd() {
   watchdog_stderr_xml=$(xml_escape "$STATE_DIR/logs/sentinel-watchdog.err.log")
 
   mkdir -p "$LAUNCH_AGENTS" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR"
-  chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR" 2>/dev/null || true
+  chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR" \
+    || fail_config "cannot secure BOT ERRORS sentinel state directories"
   cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -241,7 +242,8 @@ write_systemd() {
   watchdog_max_age_q=$(systemd_quote "$WATCHDOG_MAX_AGE_SECONDS")
 
   mkdir -p "$SYSTEMD_USER_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR"
-  chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR" 2>/dev/null || true
+  chmod 700 "$STATE_DIR" "$STATE_DIR/logs" "$SENTINEL_STATE_DIR" "$ACTION_OUTBOX_DIR" \
+    || fail_config "cannot secure BOT ERRORS sentinel state directories"
   cat > "$service" <<SERVICE
 [Unit]
 Description=BOT ERRORS Fleet Sentinel central evaluator
