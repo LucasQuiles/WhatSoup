@@ -38,6 +38,7 @@ common_env=(
   BOT_ERRORS_FLEET_SENTINEL_INTERVAL_SECONDS=1800
   BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS=2700
   BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES=2
+  BOT_ERRORS_FLEET_SENTINEL_CONNECTIVITY_HYSTERESIS_CYCLES=3
   BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS=21600
   BOT_ERRORS_FLEET_SENTINEL_FLAP_THRESHOLD=4
   BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES=2
@@ -62,6 +63,7 @@ grep -q 'hosts&amp;fleet.json' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launc
 grep -q 'oracle&amp;gateway.json' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd oracle escaping"; cat "$plist"; exit 1; }
 grep -q 'actions&amp;fleet' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd action outbox escaping"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd threshold env"; cat "$plist"; exit 1; }
+grep -q 'BOT_ERRORS_FLEET_SENTINEL_CONNECTIVITY_HYSTERESIS_CYCLES' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd connectivity threshold env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd tier1 cap env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd correlated freeze env"; cat "$plist"; exit 1; }
 grep -q 'BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd clock skew env"; cat "$plist"; exit 1; }
@@ -82,6 +84,7 @@ grep -q '^ExecStart=/usr/bin/python3 .*bot-errors-sentinel.py --hosts ' "$servic
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_HOSTS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd hosts env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_ORACLE=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd oracle env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_DIR=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd action outbox env"; cat "$service"; exit 1; }
+grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_CONNECTIVITY_HYSTERESIS_CYCLES=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd connectivity threshold env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd tier1 cap env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_CORRELATED_DRIFT_FREEZE_THRESHOLD=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd correlated freeze env"; cat "$service"; exit 1; }
 grep -q '^Environment="BOT_ERRORS_FLEET_SENTINEL_MAX_CLOCK_SKEW_SECONDS=' "$service" || { echo "SENTINEL_INSTALLER_FAIL systemd clock skew env"; cat "$service"; exit 1; }

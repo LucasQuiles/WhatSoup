@@ -62,6 +62,7 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
         action_outbox_dir=kwargs.get("action_outbox_dir", tmp_path / "state" / "actions"),
         heartbeat_max_age_seconds=kwargs.get("heartbeat_max_age_seconds", 60),
         hysteresis_cycles=kwargs.get("hysteresis_cycles", 2),
+        connectivity_hysteresis_cycles=kwargs.get("connectivity_hysteresis_cycles", 3),
         flap_window_seconds=kwargs.get("flap_window_seconds", 300),
         flap_threshold=kwargs.get("flap_threshold", 4),
         max_tier1_heal_candidates=kwargs.get("max_tier1_heal_candidates", 2),
@@ -217,12 +218,31 @@ def test_healthy_host_writes_ack_and_resets_open_state(tmp_path: Path):
 def test_two_signal_unreachable_requires_hysteresis_then_escalates(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-h-hb.json", healthy=True, mtime=100.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-h", "heartbeatPath": str(hb)}])
-    config = _config(tmp_path, hosts, hysteresis_cycles=2)
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, connectivity_hysteresis_cycles=3)
     deps = _deps(1000.0, {"host-h": {"reachable": False, "healthy": False, "class": "unreachable"}})
 
     first = _mod.run_once(config, deps)["hosts"][0]
     assert first["class"] == "out_of_rotation"
     assert first["twoSignals"] is True
+    assert first["action"] == "hysteresis_wait"
+
+    second = _mod.run_once(config, deps)["hosts"][0]
+    assert second["consecutive"] == 2
+    assert second["action"] == "hysteresis_wait"
+
+    third = _mod.run_once(config, deps)["hosts"][0]
+    assert third["consecutive"] == 3
+    assert third["action"] == "escalate"
+    assert third["alertState"] == "open"
+
+
+def test_invariant_failures_still_use_two_cycle_hysteresis(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-i-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-i", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, hysteresis_cycles=2, connectivity_hysteresis_cycles=3)
+    deps = _deps(1000.0, {"host-i": {"reachable": True, "healthy": False, "class": "permission_denied"}})
+
+    first = _mod.run_once(config, deps)["hosts"][0]
     assert first["action"] == "hysteresis_wait"
 
     second = _mod.run_once(config, deps)["hosts"][0]
@@ -390,12 +410,12 @@ def test_central_connectivity_suspect_requires_failed_oracle_to_suppress(tmp_pat
         hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
         probes[name] = {"reachable": False, "healthy": False, "class": "unreachable"}
     hosts = _hosts_file(tmp_path, hosts_payload)
-    result = _mod.run_once(_config(tmp_path, hosts, hysteresis_cycles=1), _deps(1000.0, probes))
+    result = _mod.run_once(_config(tmp_path, hosts, hysteresis_cycles=1, connectivity_hysteresis_cycles=1), _deps(1000.0, probes))
     assert result["fleetAction"] == "mass_unreachable_confirmed"
     assert {host["action"] for host in result["hosts"]} == {"escalate"}
 
     oracle_down = {"configured": True, "reachable": False, "class": "gateway_unreachable"}
-    result = _mod.run_once(_config(tmp_path / "oracle-down", hosts, hysteresis_cycles=1), _deps(1000.0, probes, oracle_down))
+    result = _mod.run_once(_config(tmp_path / "oracle-down", hosts, hysteresis_cycles=1, connectivity_hysteresis_cycles=1), _deps(1000.0, probes, oracle_down))
     assert result["fleetAction"] == "central_connectivity_suspect"
     assert {host["action"] for host in result["hosts"]} == {"suppress_central_connectivity_suspect"}
     assert result["reachabilityOracle"] == oracle_down
@@ -409,7 +429,7 @@ def test_central_connectivity_suspect_requires_failed_oracle_to_suppress(tmp_pat
     assert fleet_event["criticalWhatsAppDailyCap"] == 8
     assert fleet_event["problemHostCount"] == 3
 
-    waiting = _mod.run_once(_config(tmp_path / "waiting", hosts, hysteresis_cycles=2), _deps(1000.0, probes, oracle_down))
+    waiting = _mod.run_once(_config(tmp_path / "waiting", hosts, hysteresis_cycles=1, connectivity_hysteresis_cycles=2), _deps(1000.0, probes, oracle_down))
     assert waiting["fleetAction"] == "central_connectivity_suspect"
     assert {host["action"] for host in waiting["hosts"]} == {"hysteresis_wait"}
 
@@ -670,6 +690,7 @@ def test_reachability_oracle_errors_fail_safe_without_suppression(tmp_path: Path
 def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, capsys):
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS", "bad")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES", "0")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_CONNECTIVITY_HYSTERESIS_CYCLES", "0")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ORACLE", str(tmp_path / "oracle.json"))
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_DIR", str(tmp_path / "actions"))
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES", "0")
@@ -680,6 +701,7 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
     config = _mod.default_config(tmp_path / "hosts.json", tmp_path / "state")
     assert config.heartbeat_max_age_seconds == _mod.DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     assert config.hysteresis_cycles == 1
+    assert config.connectivity_hysteresis_cycles == 1
     assert config.oracle_path == tmp_path / "oracle.json"
     assert config.action_outbox_dir == tmp_path / "actions"
     assert config.max_tier1_heal_candidates == 1

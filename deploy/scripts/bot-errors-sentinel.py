@@ -25,6 +25,7 @@ from typing import Callable, Optional
 
 DEFAULT_HEARTBEAT_MAX_AGE_SECONDS = 45 * 60
 DEFAULT_HYSTERESIS_CYCLES = 2
+DEFAULT_CONNECTIVITY_HYSTERESIS_CYCLES = 3
 DEFAULT_FLAP_WINDOW_SECONDS = 6 * 60 * 60
 DEFAULT_FLAP_THRESHOLD = 4
 DEFAULT_MAX_TIER1_HEAL_CANDIDATES = 2
@@ -116,6 +117,7 @@ class SentinelConfig:
     action_outbox_dir: Optional[Path] = None
     heartbeat_max_age_seconds: int = DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     hysteresis_cycles: int = DEFAULT_HYSTERESIS_CYCLES
+    connectivity_hysteresis_cycles: int = DEFAULT_CONNECTIVITY_HYSTERESIS_CYCLES
     flap_window_seconds: int = DEFAULT_FLAP_WINDOW_SECONDS
     flap_threshold: int = DEFAULT_FLAP_THRESHOLD
     max_tier1_heal_candidates: int = DEFAULT_MAX_TIER1_HEAL_CANDIDATES
@@ -183,6 +185,11 @@ def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] 
         action_outbox_dir=Path(action_outbox_raw).expanduser() if action_outbox_raw else resolved_state_dir / "actions",
         heartbeat_max_age_seconds=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS", DEFAULT_HEARTBEAT_MAX_AGE_SECONDS),
         hysteresis_cycles=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES", DEFAULT_HYSTERESIS_CYCLES, 1),
+        connectivity_hysteresis_cycles=positive_int_env(
+            "BOT_ERRORS_FLEET_SENTINEL_CONNECTIVITY_HYSTERESIS_CYCLES",
+            DEFAULT_CONNECTIVITY_HYSTERESIS_CYCLES,
+            1,
+        ),
         flap_window_seconds=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS", DEFAULT_FLAP_WINDOW_SECONDS),
         flap_threshold=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_FLAP_THRESHOLD", DEFAULT_FLAP_THRESHOLD, 1),
         max_tier1_heal_candidates=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_MAX_TIER1_HEAL_CANDIDATES", DEFAULT_MAX_TIER1_HEAL_CANDIDATES, 1),
@@ -593,7 +600,8 @@ def decide_action(observed_class: str, two_signals: bool, consecutive: int, flap
         return "escalate"
     if not two_signals:
         return "monitor_only"
-    if consecutive < config.hysteresis_cycles:
+    required_cycles = config.connectivity_hysteresis_cycles if observed_class == "out_of_rotation" else config.hysteresis_cycles
+    if consecutive < required_cycles:
         return "hysteresis_wait"
     if flaps >= config.flap_threshold:
         return "escalate_flapping"
