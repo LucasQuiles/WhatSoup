@@ -45,6 +45,11 @@ require_file() {
   [[ -f "$path" ]] || fail_config "missing required $label: $path"
 }
 
+require_python() {
+  [[ "$PYTHON" = /* ]] || fail_config "BOT_ERRORS_PYTHON must be an absolute executable path: $PYTHON"
+  [[ -x "$PYTHON" && ! -d "$PYTHON" ]] || fail_config "BOT_ERRORS_PYTHON must be an absolute executable path: $PYTHON"
+}
+
 require_min_interval() {
   local value="$1" name="$2" min="$3"
   [[ "$value" =~ ^[0-9]+$ ]] || fail_config "$name must be numeric"
@@ -318,6 +323,7 @@ TIMER
 
 main() {
   require_interval
+  require_python
   require_file "$SENTINEL_SCRIPT" "BOT ERRORS sentinel file"
   require_file "$WATCHDOG_SCRIPT" "BOT ERRORS heartbeat watchdog file"
   require_file "$HOSTS_PATH" "BOT ERRORS sentinel hosts file"

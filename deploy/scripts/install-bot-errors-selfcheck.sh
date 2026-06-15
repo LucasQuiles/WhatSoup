@@ -38,6 +38,11 @@ require_file() {
   [[ -f "$path" ]] || fail_config "missing required BOT ERRORS selfcheck file: $path"
 }
 
+require_python() {
+  [[ "$PYTHON" = /* ]] || fail_config "BOT_ERRORS_PYTHON must be an absolute executable path: $PYTHON"
+  [[ -x "$PYTHON" && ! -d "$PYTHON" ]] || fail_config "BOT_ERRORS_PYTHON must be an absolute executable path: $PYTHON"
+}
+
 require_interval() {
   [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]] || fail_config "BOT_ERRORS_SELFCHECK_INTERVAL_SECONDS must be numeric"
   (( INTERVAL_SECONDS >= 300 )) || fail_config "BOT_ERRORS_SELFCHECK_INTERVAL_SECONDS must be at least 300"
@@ -188,6 +193,7 @@ TIMER
 
 main() {
   require_interval
+  require_python
   require_file "$SELFCHECK_SCRIPT"
   require_file "$DEPLOYER_SCRIPT"
   local platform

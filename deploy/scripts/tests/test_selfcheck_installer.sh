@@ -90,4 +90,26 @@ if env "${common_env[@]}" BOT_ERRORS_SELFCHECK_INTERVAL_SECONDS=299 BOT_ERRORS_S
 fi
 grep -q 'must be at least 300' "$tmp/interval.err" || { echo "SELFCHECK_INSTALLER_FAIL interval reason"; cat "$tmp/interval.err"; exit 1; }
 
+if env "${common_env[@]}" BOT_ERRORS_PYTHON=python3 BOT_ERRORS_SELFCHECK_PLATFORM=systemd bash "$S" > "$tmp/relative-python.out" 2> "$tmp/relative-python.err"; then
+  echo "SELFCHECK_INSTALLER_FAIL accepted relative python path"
+  exit 1
+fi
+grep -q 'BOT_ERRORS_PYTHON must be an absolute executable path' "$tmp/relative-python.err" || {
+  echo "SELFCHECK_INSTALLER_FAIL relative python reason"
+  cat "$tmp/relative-python.err"
+  exit 1
+}
+
+not_python="$tmp/not-python"
+: > "$not_python"
+if env "${common_env[@]}" BOT_ERRORS_PYTHON="$not_python" BOT_ERRORS_SELFCHECK_PLATFORM=systemd bash "$S" > "$tmp/nonexec-python.out" 2> "$tmp/nonexec-python.err"; then
+  echo "SELFCHECK_INSTALLER_FAIL accepted non-executable python path"
+  exit 1
+fi
+grep -q 'BOT_ERRORS_PYTHON must be an absolute executable path' "$tmp/nonexec-python.err" || {
+  echo "SELFCHECK_INSTALLER_FAIL non-executable python reason"
+  cat "$tmp/nonexec-python.err"
+  exit 1
+}
+
 echo "SELFCHECK_INSTALLER_PASS"
