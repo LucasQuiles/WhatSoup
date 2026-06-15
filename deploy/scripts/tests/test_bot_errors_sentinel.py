@@ -914,6 +914,34 @@ def test_non_finite_q_unavailable_event_time_does_not_dedupe_timeout(tmp_path: P
     assert state["qUnavailableEvent"]["lastActionEventAt"] == 1000.0
 
 
+def test_boolean_q_unavailable_event_time_does_not_dedupe_timeout(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, action_event_cooldown_seconds=3600)
+    key = "q_unavailable:host-q:request-1:action-hash-1"
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {},
+            "qRemediation": {
+                "requestId": "request-1",
+                "host": "host-q",
+                "actionHash": "action-hash-1",
+                "expiresAtEpoch": 900.0,
+            },
+            "qUnavailableEvent": {"lastActionEventKey": key, "lastActionEventAt": True},
+        },
+    )
+
+    result = _mod.run_once(config, _deps(1000.0, {"host-q": {"reachable": True, "healthy": True, "class": "healthy"}}))
+
+    assert result["actionEvents"][0]["action"] == "q_unavailable"
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "qRemediation" not in state
+    assert state["qUnavailableEvent"]["lastActionEventAt"] == 1000.0
+
+
 def test_malformed_q_unavailable_event_state_is_reinitialized(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])

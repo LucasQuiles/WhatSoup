@@ -450,6 +450,29 @@ def test_non_finite_central_ack_local_only_since_is_reset(tmp_path: Path, monkey
     assert calls == []
 
 
+def test_boolean_central_ack_local_only_since_is_reset(tmp_path: Path, monkeypatch):
+    missing = tmp_path / "missing-ack.json"
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_DOWN_MAX_AGE_SECONDS", "600")
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=missing)
+    _seed_memory(
+        config,
+        {
+            "lastClass": "healthy",
+            "consecutive": 1,
+            "healHistory": [],
+            "centralAckLocalOnlySince": True,
+        },
+    )
+
+    status = _mod.run_selfcheck(config, deps)
+
+    assert status["centralAck"]["localOnlySeconds"] == 0
+    assert status["centralAck"]["localOnlySince"] == "1970-01-01T00:16:40Z"
+    assert status["centralAck"]["centralDownSuspected"] is False
+    assert "centralDownAlert" not in status
+    assert calls == []
+
+
 def test_fresh_central_ack_clears_local_only_watch(tmp_path: Path):
     ack = tmp_path / "central-ack.json"
     ack.write_text("{}", encoding="utf-8")

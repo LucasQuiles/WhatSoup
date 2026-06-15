@@ -167,6 +167,8 @@ def parse_iso_epoch(value: object) -> Optional[float]:
 
 
 def finite_float(value: object) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
     try:
         result = float(value)
     except (TypeError, ValueError, OverflowError):

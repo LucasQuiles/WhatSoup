@@ -177,6 +177,8 @@ def int_or_zero(value: object) -> int:
 
 
 def finite_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         result = float(value)
     except (TypeError, ValueError, OverflowError):
