@@ -198,6 +198,10 @@ const designSystemRestrictions = [
           selector: 'TemplateLiteral[parent.key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight|padding|margin|gap|top|bottom|left|right)$/]:has(TemplateElement[value.raw=/px/]):has(Literal[raw=/^[1-9]\\d*$/])',
           message: '⛔ Template literal hardcoded px formula in style. FIX: use tokenized string values such as var(--sp-*) or calc(var(--token) + var(--sp-*)); measured runtime layout values are allowed.',
         },
+        {
+          selector: 'VariableDeclarator[id.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight|top|bottom|left|right)$/][init.type="ConditionalExpression"] Literal[raw=/^[1-9]\\d*$/]',
+          message: '⛔ Dimensional const with raw numeric branch. FIX: store tokenized string values such as var(--chart-panel-h), then pass that identifier into style.',
+        },
         // Raw numeric literals (React converts to px) — excludes 0
         {
           selector: 'Property[key.name=/^(width|height|minWidth|minHeight|maxWidth|maxHeight|padding|margin|gap|top|bottom|left|right)$/][value.type="Literal"][value.raw=/^[1-9]\\d*$/]',

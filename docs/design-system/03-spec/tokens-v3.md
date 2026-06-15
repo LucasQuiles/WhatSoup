@@ -286,6 +286,7 @@ promoted from v2 + the legacy census:
 | `--modal-w-sm` / `--modal-w-md` / `--modal-w-lg` | 480px / 560px / 720px | Modal (lg carries the legacy wizard width) |
 | `--panel-side-w` | 320px | Fleet dashboard side column |
 | `--inbox-pane-chats` / `--inbox-pane-contact` | 264px / 248px | Inbox |
+| `--chart-panel-h` / `--chart-panel-h-expanded` | 140px / 240px | ChartPanel |
 | `--pipeline-node-pad-y` | 5px | PipelineNode |
 | `--message-bubble-max-w` | 65% | MessageBubble |
 | `--heartbeat-bar-w` | 3px | HeartbeatStrip |
@@ -457,7 +458,7 @@ Disposition vocabulary: **formalized** (concept survives; legacy name aliased to
 | `--avatar-sm` / `--avatar-md` | component | Avatar tokens 32px / 48px (md re-derived; v2 uses 32/48) |
 | `--avatar-lg` | **rejected-orphan** | deleted |
 | `--icon-empty` | rejected-superseded | empty-state icon = 20px ramp step (iconography.md) |
-| `--sparkline-h`, `--heatmap-cell`, `--heatmap-h`, `--chart-min-h` | component | chart-family tokens, co-located with chart components |
+| `--sparkline-h`, `--chart-panel-h`, `--chart-panel-h-expanded`, `--heatmap-cell`, `--heatmap-h`, `--chart-min-h` | component | chart-family tokens, co-located with chart components |
 | `--contact-search-max-h`, `--config-key-col`, `--badge-unread` | component | owning components (ContactPicker, ConfigTab, Badge) |
 | `--panel-chat-list`, `--panel-contact`, `--panel-actions`, `--panel-history`, `--panel-access-col` (5) | component | Inbox/LineDetail pane tokens; chat-list and contact panes take v2 values 264/248 |
 | `--pipeline-node-pad-y` | component | PipelineNode static vertical padding, retained as local compact-pill geometry |

@@ -141,7 +141,7 @@ Ranking:
 
 ### P3-2. Lint wall evasion shapes
 
-The ~106-selector eslint guard still has evasion shapes: identifier-passed numbers (ChartPanel heights) and Recharts `wrapperStyle`/`contentStyle` props slip through. Closed since the original audit: template-literal arbitrary utility values (`HeartbeatStrip` `w-[3px]`), hardcoded px formulas (`Skeleton` widths), and conditional hardcoded-px branches (`PipelineTab`) are tokenized and pinned by selectors. Evidence: duplication-register.md DUP-08/DUP-09 with selector-line citations into `console/eslint.config.js`. **Direction:** extend selectors to identifier-flow shapes; add wrapperStyle rule.
+The ~106-selector eslint guard still has one observed evasion shape: Recharts `wrapperStyle`/`contentStyle` props slip through. Closed since the original audit: template-literal arbitrary utility values (`HeartbeatStrip` `w-[3px]`), hardcoded px formulas (`Skeleton` widths), conditional hardcoded-px branches (`PipelineTab`), and dimensional const numeric branches (`ChartPanel`) are tokenized and pinned by selectors. Evidence: duplication-register.md DUP-08/DUP-09 with selector-line citations into `console/eslint.config.js`. **Direction:** add wrapperStyle/contentStyle rule.
 
 ### P3-3. Time/number formatting helpers duplicated
 

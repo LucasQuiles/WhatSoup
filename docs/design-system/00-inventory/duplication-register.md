@@ -181,15 +181,15 @@ Related single-purpose tables counted under DUP-06: `console/src/components/line
 
 - Volume: 125 `style={{` across `console/src` TSX; top files: `console/src/components/wizard/ConfigStep.tsx` (9), `console/src/components/ActiveHoursHeatmap.tsx` (8), `console/src/pages/Inbox.tsx` (6), `console/src/components/AddLineWizard.tsx` (6), `console/src/components/MessageContent.tsx` (5), `console/src/components/ChartPanel.tsx` (5).
 - Inline `padding:` keys: only 8 remain, 7 tokenized (e.g. `console/src/components/MessageBubble.tsx:140`, `console/src/components/wizard/ReviewStep.tsx:22`, `console/src/components/line-detail/PipelineTab.tsx:22`). Conditional string branches with hardcoded px are now pinned by ESLint.
-- Identifier-passed numerics: `console/src/components/ChartPanel.tsx:27` (`const height = expanded ? 240 : 140`) applied at `:57`, `:62`, `:81`, `:91` via `style={{ height }}` — shorthand `Identifier`, not `Literal`, so the raw-numeric-size rule (`console/eslint.config.js:186-188`) never fires. Lint-evasion path 1: identifiers.
+- Identifier-passed numerics: closed for observed dimensional consts — `ChartPanel.tsx` now uses `--chart-panel-h` / `--chart-panel-h-expanded`, and ESLint rejects dimensional consts initialized from raw numeric conditional branches before they flow into `style={{ height }}`.
 - Template-literal classNames: closed for utility-size payloads — `HeartbeatStrip.tsx` now uses `w-[var(--heartbeat-bar-w)] rounded-[var(--bw)]`, and `soup/no-utility-smell` scans `TemplateLiteral` quasis for non-`var()` arbitrary utility payloads.
 - Template-literal hardcoded px formulas in style: closed for numeric-literal formulas — `Skeleton.tsx` now uses tokenized `TABLE_SKELETON_WIDTHS`, and `eslint.config.js` rejects dimensional style template literals that combine `px` quasis with numeric literals. Measured runtime layout values such as virtualizer heights remain allowed.
 
 **Classification.** lint rule (close remaining evasion shapes) + tokens for surviving hardcoded geometry.
 
-**Proposed consolidation.** Add identifier-aware variants of the px selectors (or a custom rule), then tokenize the remaining chart-height residue (`240/140`). Template-literal utility px, hardcoded px-formula, and conditional hardcoded-px re-entry are now pinned.
+**Proposed consolidation.** Template-literal utility px, hardcoded px-formula, conditional hardcoded-px, and observed dimensional-const re-entry are now pinned. Broader identifier dataflow stays out of scope until a concrete source pattern appears.
 
-**Guarded by lint?** Mostly guarded for `Literal` values (`console/eslint.config.js:157-191`, `:227-229`) plus the newly covered `TemplateLiteral` class/style shapes and conditional raw-px branches. Remaining unguarded paths are identifier-passed numerics and Recharts wrapper props.
+**Guarded by lint?** Mostly guarded for `Literal` values (`console/eslint.config.js:157-191`, `:227-229`) plus the newly covered `TemplateLiteral` class/style shapes, conditional raw-px branches, and dimensional const numeric branches. Remaining unguarded path is Recharts wrapper props.
 
 ---
 

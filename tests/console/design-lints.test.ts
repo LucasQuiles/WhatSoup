@@ -754,6 +754,13 @@ describe('soup/no-utility-smell', () => {
     expect(hasWarning(messages, 'Conditional style branch with hardcoded px')).toBe(true)
   })
 
+  it('fires on dimensional consts initialized from raw numeric branches', async () => {
+    const messages = await lintWarnings(
+      'const height = expanded ? 240 : 140; const x = <div style={{ height }} />'
+    )
+    expect(hasWarning(messages, 'Dimensional const with raw numeric branch')).toBe(true)
+  })
+
   it('is silent on w-[var(--x)] — var() payload is compliant', async () => {
     const messages = await lintWarnings(
       'const x = <div className="w-[var(--sidebar-w)] flex-shrink-0" />'
@@ -794,6 +801,13 @@ describe('soup/no-utility-smell', () => {
       'const compact = false; const x = <div style={{ padding: compact ? "var(--sp-1) var(--sp-3)" : "var(--pipeline-node-pad-y) var(--sp-3)" }} />'
     )
     expect(hasWarning(messages, 'Conditional style branch with hardcoded px')).toBe(false)
+  })
+
+  it('is silent on dimensional consts initialized from tokenized branches', async () => {
+    const messages = await lintWarnings(
+      'const height = expanded ? "var(--chart-panel-h-expanded)" : "var(--chart-panel-h)"; const x = <div style={{ height }} />'
+    )
+    expect(hasWarning(messages, 'Dimensional const with raw numeric branch')).toBe(false)
   })
 
   it('is silent on standard Tailwind utilities without arbitrary values', async () => {

@@ -316,12 +316,11 @@ cannot express the check).
 - **Purpose:** no hardcoded spacing/sizing/radius/shadow/z-index/opacity/filter/type-size values. The 106
   existing selectors already cover the `Literal`/`style`-attribute shapes
   (`console/eslint.config.js:157-191` spacing/sizing, `:95-106` radius, `:459-466` shadow,
-  `:481-488` z-index, `:544-551` opacity, `:227-229` arbitrary px utilities). One proven evasion
-  shape remains (DUP-08): identifier-passed numerics (`console/src/components/ChartPanel.tsx:27`
-  heights 240/140 applied at `:57,:62,:81,:91`). The former template-literal utility/class,
-  hardcoded px-formula, and conditional hardcoded-px residues are closed: `HeartbeatStrip.tsx` is
-  tokenized, `Skeleton.tsx` uses tokenized widths, `PipelineTab.tsx` uses tokenized padding, and
-  selector coverage pins re-entry. The recharts non-`style` prop hole remains:
+  `:481-488` z-index, `:544-551` opacity, `:227-229` arbitrary px utilities). DUP-08's observed
+  evasion shapes are closed: `HeartbeatStrip.tsx` is tokenized, `Skeleton.tsx` uses tokenized
+  widths, `PipelineTab.tsx` uses tokenized padding, `ChartPanel.tsx` uses tokenized body heights,
+  and selector coverage pins re-entry for template-literal, conditional, and dimensional-const
+  branches. The Recharts non-`style` prop hole remains:
   `wrapperStyle`/`contentStyle` (4
   Legend copies, DUP-09).
 - **CSS-side coverage:** `check-design-burndown.mjs` owns CSS-only gaps that ESLint cannot see,
@@ -333,10 +332,10 @@ cannot express the check).
   token fallbacks do not dominate the debt signal.
 - **Mechanism:** keep the selector wall; `TemplateLiteral` quasis now catch arbitrary utility values
   with non-`var()` payloads and hardcoded dimensional px formulas, and `ConditionalExpression`
-  branches now catch static hardcoded px values in dimensional style positions. Add a custom rule for
-  the remaining closures: (a) track numeric-literal constants flowing into style props within the
-  same file (one-hop identifier resolution — no cross-file dataflow, by design); (b) extend the
-  style-prop attribute set to `/^(style|wrapperStyle|contentStyle)$/`.
+  branches now catch static hardcoded px values in dimensional style positions. Dimensional consts
+  initialized from raw numeric conditional branches are rejected before they flow into style props.
+  Add a custom rule for the remaining closure: extend the style-prop attribute set to
+  `/^(style|wrapperStyle|contentStyle)$/`.
 - **Scope:** all TSX. Exemptions stay where they are today via documented waivers (recharts
   `CHART_MARGIN`, QR `margin: 2`).
 - **Violation / valid:** `const height = expanded ? 240 : 140; … style={{ height }}` →

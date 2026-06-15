@@ -15,6 +15,8 @@
   --avatar-md: 36px;         /* chat list items */
   --icon-empty: 40px;        /* empty state icon */
   --sparkline-h: 32px;       /* KPI sparkline height */
+  --chart-panel-h: 140px;    /* compact chart panel body height */
+  --chart-panel-h-expanded: 240px; /* expanded chart panel body height */
   --heatmap-cell: 18px;      /* active hours heatmap cell height */
   --heatmap-h: 64px;         /* active hours 24h bar chart height */
   --chart-min-h: 220px;      /* metrics chart minimum height */

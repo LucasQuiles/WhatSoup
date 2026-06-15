@@ -25,7 +25,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
   onRetry,
   children,
 }) => {
-  const height = expanded ? 240 : 140;
+  const panelHeight = expanded ? 'var(--chart-panel-h-expanded)' : 'var(--chart-panel-h)';
 
   return (
     <section
@@ -54,12 +54,12 @@ export const ChartPanel: FC<ChartPanelProps> = ({
         <div
           data-testid="chart-shimmer"
           className="animate-shimmer rounded-sm bg-d4"
-          style={{ height }}
+          style={{ height: panelHeight }}
         />
       ) : isError ? (
         <div
           className="flex flex-col items-center justify-center text-center"
-          style={{ height }}
+          style={{ height: panelHeight }}
         >
           <span className="text-s-crit font-sans text-sm">
             Failed to load
@@ -78,7 +78,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
       ) : !hasData ? (
         <div
           className="flex flex-col items-center justify-center text-center text-t5"
-          style={{ height }}
+          style={{ height: panelHeight }}
         >
           <BarChart3 size={24} strokeWidth={1.25} className="mb-[var(--sp-2)]" />
           <span className="font-sans text-sm">
@@ -86,7 +86,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
           </span>
         </div>
       ) : (
-        <div style={{ height }}>
+        <div style={{ height: panelHeight }}>
           {children}
         </div>
       )}

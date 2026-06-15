@@ -149,7 +149,7 @@ are the shadow-baseline falls for that file.
 | Surface | Primitives used | Legacy remnants | Adopt % | Blocks |
 |---|---|---|---|---|
 | KpiCard.tsx | none | raw `<button>` 29 (clickable KPI card); LT×5 incl. legacy vars 20, 35, 36; sp-half 48 | 0/1 | yes |
-| ChartPanel.tsx | none | raw `<button>` 67 (expand control); LT×3: 31, 55, 78; sp-half 38; WVR-001-adjacent height literals | 0/1 | yes |
+| ChartPanel.tsx | none | raw `<button>` 67 (expand control); LT×3: 31, 55, 78; sp-half 38; body heights now tokenized via `--chart-panel-h*` | 0/1 | yes |
 | FleetMetricsChart / FleetSessionChart / FleetTokenChart / MetricsChart | recharts (no chart spec exists — M4) | legacy vars in axis/series colors: FleetMetricsChart 24, 29; FleetSessionChart 42, 43, 64, 65; FleetTokenChart 41, 46, 104, 109; MetricsChart 23, 28; lib/chart-utils.ts legacy vars 7, 16, 17, 20 (+WVR-001 margins) | — | yes (tokens) |
 | ActivityFeed.tsx | none | raw `<button>` 155; LT×2: 177, 180 | 0/1 | yes |
 | FeedCard.tsx | none | raw `<button>`×4: 344, 366, 388, 408 (feed actions); LT×4 incl. legacy vars 80, 88, 92 | 0/4 | yes |
