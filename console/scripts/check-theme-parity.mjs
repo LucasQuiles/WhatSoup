@@ -34,6 +34,16 @@ function scopeTokens(scopeMatcher) {
 const dark = scopeTokens((s) => s.includes('[data-theme="dark"]'));
 const light = scopeTokens((s) => s.includes('[data-theme="light"]'));
 
+// Fail-closed on an empty scan. If BOTH scopes parsed zero tokens, the target was
+// renamed/emptied/parse-broken (or the [data-theme] selectors changed shape) — the
+// parity diff below would vacuously pass ("OK: 0 semantic tokens"). A one-sided empty
+// is still caught by the mismatch logic (every token of the non-empty scope is reported
+// missing → exit 1). Exit 2 distinguishes this structural fault from a parity mismatch.
+if (dark.size === 0 && light.size === 0) {
+  console.error(`FAIL: no theme-scoped tokens parsed from ${cssPath} — empty or unparseable scan (expected dark + light [data-theme] blocks). Refusing to report parity on an empty scan.`);
+  process.exit(2);
+}
+
 const missingInLight = [...dark].filter((t) => !light.has(t)).sort();
 const missingInDark = [...light].filter((t) => !dark.has(t)).sort();
 

@@ -65,4 +65,25 @@ describe('check-theme-parity.mjs', () => {
     expect(result.stderr).toContain('defined in light but missing in dark');
     expect(result.stderr).toContain('--only-light');
   });
+
+  // Fail-closed: an empty scan must not vacuously report "parity OK". Before the
+  // dark.size===0 && light.size===0 guard, an emptied/renamed/parse-broken token
+  // file fell through to exit 0 with "OK: 0 semantic tokens" — a silent fail-open.
+  it('fails closed (exit 2) on an empty file — no theme scopes parsed', () => {
+    const file = makeFixture('');
+    const result = run(['--file', file]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('empty or unparseable scan');
+    expect(result.stdout).not.toContain('theme parity OK');
+  });
+
+  it('fails closed (exit 2) when tokens exist but no [data-theme] blocks match', () => {
+    // Tokens are present but live under a non-theme selector, so both scopes parse
+    // zero tokens — the structural shape the guard is meant to catch.
+    const file = makeFixture('.panel { --a: #000; --b: #111; }\n:root { --c: #222; }\n');
+    const result = run(['--file', file]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('empty or unparseable scan');
+    expect(result.stdout).not.toContain('theme parity OK');
+  });
 });

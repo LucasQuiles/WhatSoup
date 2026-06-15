@@ -236,6 +236,7 @@ Each enforcement rule should include a negative fixture or documented negative e
 | status chip without text label | fails status law rule/test |
 | color-only status rendering | fails status law rule/test |
 | semantic token missing light value | fails theme-parity check — negative fixtures live in `tests/scripts/theme-parity.test.ts` via the `check-theme-parity.mjs --file` seam (default no-flag run is byte-for-byte unchanged) |
+| theme-parity run against an emptied/renamed/parse-broken token file | fails closed with exit 2 (`no theme-scoped tokens parsed … Refusing to report parity on an empty scan`) — `check-theme-parity.mjs` guards `dark.size===0 && light.size===0` so an empty scan can no longer vacuously report "OK: 0 semantic tokens"; one-sided empties remain exit 1. Negative fixtures in `tests/scripts/theme-parity.test.ts` |
 | deprecated token usage in migrated directory | fails legacy-token rule |
 | utility/spec-smell class | fails or warns per lifecycle |
 | new shadow-lint warning over the ratchet ceiling | fails shadow-baseline check — negative fixtures live in `tests/scripts/shadow-baseline.test.ts` via the `check-shadow-baseline.mjs --results-json`/`--baseline` seam (default no-flag run is byte-for-byte unchanged; fixtures can never write a baseline) |
