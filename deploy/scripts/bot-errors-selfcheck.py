@@ -17,6 +17,8 @@ import subprocess
 import sys
 import time
 from typing import Callable, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import sentinel_pin as sp  # noqa: E402
@@ -40,6 +42,8 @@ class SelfcheckConfig:
     lock_path: Path
     status_path: Path
     memory_path: Path
+    heartbeat_path: Path
+    central_ack_path: Optional[Path]
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,7 @@ class SelfcheckDeps:
     commit_exists: Callable[[str], bool]
     deploy: Callable[[Path, Path, Path], tuple[int, str]]
     runtime_verify: Callable[[Path, Path], tuple[int, str]]
+    push_heartbeat: Callable[[dict], dict]
     now_epoch: Callable[[], float]
     hostname: Callable[[], str]
     service_status: Callable[[str], str] = lambda _unit: "unknown"
@@ -68,6 +73,7 @@ def default_state_dir() -> Path:
 def default_config(root: Path, state_dir: Optional[Path] = None) -> SelfcheckConfig:
     scripts = root / "deploy" / "scripts"
     sentinel_state = state_dir or default_state_dir()
+    central_ack = os.environ.get("BOT_ERRORS_SELFCHECK_CENTRAL_ACK")
     return SelfcheckConfig(
         root=root,
         state_dir=sentinel_state,
@@ -80,6 +86,8 @@ def default_config(root: Path, state_dir: Optional[Path] = None) -> SelfcheckCon
         lock_path=sentinel_state / "selfcheck.lock",
         status_path=sentinel_state / "status.json",
         memory_path=sentinel_state / "selfcheck-state.json",
+        heartbeat_path=Path(os.environ.get("BOT_ERRORS_SELFCHECK_HEARTBEAT", sentinel_state / "heartbeat.json")).expanduser(),
+        central_ack_path=Path(central_ack).expanduser() if central_ack else None,
     )
 
 
@@ -446,11 +454,112 @@ def default_runtime_verify(deployer_path: Path) -> Callable[[Path, Path], tuple[
     return _verify
 
 
+def heartbeat_push_timeout() -> float:
+    raw = os.environ.get("BOT_ERRORS_SELFCHECK_HEARTBEAT_TIMEOUT_SECONDS", "5")
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return 5.0
+
+
+def central_ack_max_age_seconds() -> int:
+    raw = os.environ.get("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", str(3 * 30 * 60))
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 3 * 30 * 60
+
+
+def central_ack_inventory(path: Optional[Path], now: float) -> dict:
+    if path is None:
+        return {"configured": False, "mode": "local_only", "status": "not_configured"}
+    max_age = central_ack_max_age_seconds()
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return {"configured": True, "mode": "local_only", "status": "missing", "path": str(path), "maxAgeSeconds": max_age}
+    except OSError as exc:
+        return {
+            "configured": True,
+            "mode": "local_only",
+            "status": f"stat_error:{type(exc).__name__}",
+            "path": str(path),
+            "maxAgeSeconds": max_age,
+        }
+    age = max(0, int(now - stat.st_mtime))
+    status = "fresh" if age <= max_age else "stale"
+    mode = "central_acked" if status == "fresh" else "local_only"
+    return {"configured": True, "mode": mode, "status": status, "path": str(path), "ageSeconds": age, "maxAgeSeconds": max_age}
+
+
+def heartbeat_payload(status: dict) -> dict:
+    keys = (
+        "schemaVersion",
+        "host",
+        "checkedAt",
+        "root",
+        "healthy",
+        "class",
+        "action",
+        "problems",
+        "consecutive",
+        "pin",
+        "bundle",
+        "runtimeMismatches",
+        "unitStatuses",
+        "freshness",
+        "runtimeVerify",
+        "centralAck",
+    )
+    payload = {"kind": "bot-errors-selfcheck-heartbeat"}
+    payload.update({key: status[key] for key in keys if key in status})
+    return payload
+
+
+def default_push_heartbeat(payload: dict) -> dict:
+    url = os.environ.get("BOT_ERRORS_SELFCHECK_HEARTBEAT_URL", "").strip()
+    if not url:
+        return {"attempted": False, "mode": "disabled"}
+    data = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+    req = Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urlopen(req, timeout=heartbeat_push_timeout()) as response:
+            body = response.read(1024)
+            return {"attempted": True, "ok": True, "status": getattr(response, "status", None), "body": tail_text(body, 200)}
+    except HTTPError as exc:
+        return {"attempted": True, "ok": False, "status": exc.code, "error": tail_text(exc.read(512), 200)}
+    except (OSError, URLError) as exc:
+        return {"attempted": True, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+
+
+def publish_heartbeat(config: SelfcheckConfig, deps: SelfcheckDeps, status: dict) -> None:
+    payload = heartbeat_payload(status)
+    result = {"path": str(config.heartbeat_path), "local": "pending", "push": {"attempted": False, "mode": "not_run"}}
+    try:
+        atomic_write_json(config.heartbeat_path, payload)
+        result["local"] = "ok"
+    except Exception as exc:  # noqa: BLE001 - heartbeat failure must not mask runtime status.
+        result["local"] = f"write_failed:{type(exc).__name__}"
+    try:
+        result["push"] = deps.push_heartbeat(payload)
+    except Exception as exc:  # noqa: BLE001 - best-effort central push.
+        result["push"] = {"attempted": True, "ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+    status["heartbeat"] = result
+
+
+def finalize_status(config: SelfcheckConfig, deps: SelfcheckDeps, memory: dict, status: dict) -> dict:
+    publish_heartbeat(config, deps, status)
+    atomic_write_json(config.memory_path, memory)
+    atomic_write_json(config.status_path, status)
+    return status
+
+
 def default_deps(config: SelfcheckConfig) -> SelfcheckDeps:
     return SelfcheckDeps(
         commit_exists=default_commit_exists(config.root),
         deploy=default_deploy(config.deployer_path),
         runtime_verify=default_runtime_verify(config.deployer_path),
+        push_heartbeat=default_push_heartbeat,
         now_epoch=time.time,
         hostname=socket.gethostname,
         service_status=default_service_status,
@@ -483,6 +592,7 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         "disabled": disabled_reason,
         "autohealOff": autoheal_reason,
     }
+    status["centralAck"] = central_ack_inventory(config.central_ack_path, now)
 
     try:
         pin = sp.load_pin(config.manifest_path)
@@ -492,18 +602,14 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         status["class"] = "pin_untrusted"
         status["problems"] = [str(exc)]
         status["consecutive"] = update_consecutive(memory, status["class"])
-        atomic_write_json(config.memory_path, memory)
-        atomic_write_json(config.status_path, status)
-        return status
+        return finalize_status(config, deps, memory, status)
 
     status["pin"] = {"headSha": pin.head_sha, "f10Sha": pin.f10_sha, "trust": trust_reason}
     if not trusted:
         status["class"] = "pin_untrusted"
         status["problems"] = [trust_reason]
         status["consecutive"] = update_consecutive(memory, status["class"])
-        atomic_write_json(config.memory_path, memory)
-        atomic_write_json(config.status_path, status)
-        return status
+        return finalize_status(config, deps, memory, status)
 
     try:
         bundle = current_bundle_path(config.current_link)
@@ -511,17 +617,13 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         status["class"] = "bundle_missing"
         status["problems"] = [str(exc)]
         status["consecutive"] = update_consecutive(memory, status["class"])
-        atomic_write_json(config.memory_path, memory)
-        atomic_write_json(config.status_path, status)
-        return status
+        return finalize_status(config, deps, memory, status)
     status["bundle"] = str(bundle)
     if pin.head_sha and bundle.name != pin.head_sha:
         status["class"] = "bundle_mismatch"
         status["problems"] = [f"current bundle {bundle.name} != pin {pin.head_sha}"]
         status["consecutive"] = update_consecutive(memory, status["class"])
-        atomic_write_json(config.memory_path, memory)
-        atomic_write_json(config.status_path, status)
-        return status
+        return finalize_status(config, deps, memory, status)
 
     bundle_ok, bundle_mismatches = sp.verify_bundle(bundle, pin)
     status["bundleMismatches"] = bundle_mismatches
@@ -529,9 +631,7 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         status["class"] = "bundle_bad"
         status["problems"] = [f"{path}:{kind}" for path, kind in bundle_mismatches]
         status["consecutive"] = update_consecutive(memory, status["class"])
-        atomic_write_json(config.memory_path, memory)
-        atomic_write_json(config.status_path, status)
-        return status
+        return finalize_status(config, deps, memory, status)
 
     root_ok, root_mismatches = sp.verify_bundle(config.root, pin)
     status["runtimeMismatches"] = root_mismatches
@@ -544,17 +644,13 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         status["action"] = "escalate"
         status["problems"] = unit_problems + [f"{path}:{kind}" for path, kind in root_mismatches]
         status["consecutive"] = update_consecutive(memory, status["class"])
-        atomic_write_json(config.memory_path, memory)
-        atomic_write_json(config.status_path, status)
-        return status
+        return finalize_status(config, deps, memory, status)
     if freshness_problems:
         status["class"] = "stale_run"
         status["action"] = "escalate"
         status["problems"] = freshness_problems + [f"{path}:{kind}" for path, kind in root_mismatches]
         status["consecutive"] = update_consecutive(memory, status["class"])
-        atomic_write_json(config.memory_path, memory)
-        atomic_write_json(config.status_path, status)
-        return status
+        return finalize_status(config, deps, memory, status)
     if root_ok:
         verify_rc, verify_output = deps.runtime_verify(config.root, config.deployer_path)
         status["runtimeVerify"] = {"rc": verify_rc, "output": verify_output[-1000:]}
@@ -565,16 +661,12 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
             if verify_output:
                 status["problems"].append(verify_output[-1000:])
             status["consecutive"] = update_consecutive(memory, status["class"])
-            atomic_write_json(config.memory_path, memory)
-            atomic_write_json(config.status_path, status)
-            return status
+            return finalize_status(config, deps, memory, status)
         status["healthy"] = True
         status["class"] = "healthy"
         status["consecutive"] = update_consecutive(memory, status["class"])
         status["action"] = "noop"
-        atomic_write_json(config.memory_path, memory)
-        atomic_write_json(config.status_path, status)
-        return status
+        return finalize_status(config, deps, memory, status)
 
     observed_class = classify_runtime_mismatches(root_mismatches)
     status["class"] = observed_class
@@ -615,9 +707,7 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
                 finally:
                     release_lock(config.lock_path, fd)
 
-    atomic_write_json(config.memory_path, memory)
-    atomic_write_json(config.status_path, status)
-    return status
+    return finalize_status(config, deps, memory, status)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

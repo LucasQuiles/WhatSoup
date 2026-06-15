@@ -6,6 +6,7 @@ deployer is injected, not executed.
 from __future__ import annotations
 
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -39,7 +40,7 @@ def _write(path: Path, data: bytes) -> str:
     return _sha(data)
 
 
-def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: bytes = b"redact\n"):
+def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: bytes = b"redact\n", central_ack_path=None):
     head = "a" * 40
     root = tmp_path / "runtime"
     state = tmp_path / "state" / "sentinel"
@@ -80,6 +81,8 @@ def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: byt
         lock_path=state / "selfcheck.lock",
         status_path=state / "status.json",
         memory_path=state / "selfcheck-state.json",
+        heartbeat_path=state / "heartbeat.json",
+        central_ack_path=central_ack_path,
     )
     calls: list[tuple[Path, Path, Path]] = []
 
@@ -90,10 +93,14 @@ def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: byt
     def runtime_verify(_root_arg: Path, _deployer_arg: Path) -> tuple[int, str]:
         return 0, "VERIFY_OK\n  SMOKE    redaction ok\n"
 
+    def push_heartbeat(_payload: dict) -> dict:
+        return {"attempted": False, "mode": "disabled"}
+
     deps = _mod.SelfcheckDeps(
         commit_exists=lambda _sha: True,
         deploy=deploy,
         runtime_verify=runtime_verify,
+        push_heartbeat=push_heartbeat,
         now_epoch=lambda: 1000.0,
         hostname=lambda: "test-host",
         service_status=lambda _unit: "active",
@@ -118,6 +125,13 @@ def test_clean_runtime_writes_healthy_status_without_heal(tmp_path: Path):
     assert status["action"] == "noop"
     assert status["runtimeVerify"]["rc"] == 0
     assert status["pin"]["headSha"] == head
+    assert status["centralAck"] == {"configured": False, "mode": "local_only", "status": "not_configured"}
+    assert status["heartbeat"]["local"] == "ok"
+    assert status["heartbeat"]["push"] == {"attempted": False, "mode": "disabled"}
+    heartbeat = json.loads(config.heartbeat_path.read_text(encoding="utf-8"))
+    assert heartbeat["kind"] == "bot-errors-selfcheck-heartbeat"
+    assert heartbeat["host"] == "test-host"
+    assert heartbeat["class"] == "healthy"
     assert calls == []
     assert _read_status(config)["class"] == "healthy"
 
@@ -134,6 +148,7 @@ def test_clean_runtime_runs_deployer_verify_smoke(tmp_path: Path):
         commit_exists=deps.commit_exists,
         deploy=deps.deploy,
         runtime_verify=runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
         service_status=deps.service_status,
@@ -156,6 +171,7 @@ def test_runtime_verify_failure_escalates_without_heal(tmp_path: Path):
         commit_exists=deps.commit_exists,
         deploy=deps.deploy,
         runtime_verify=runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
         service_status=deps.service_status,
@@ -180,6 +196,7 @@ def test_root_drift_skips_runtime_verify_until_after_heal(tmp_path: Path):
         commit_exists=deps.commit_exists,
         deploy=deps.deploy,
         runtime_verify=runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
         service_status=deps.service_status,
@@ -190,12 +207,144 @@ def test_root_drift_skips_runtime_verify_until_after_heal(tmp_path: Path):
     assert calls == []
 
 
+def test_heartbeat_push_receives_status_payload(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    pushed: list[dict] = []
+
+    def push_heartbeat(payload: dict) -> dict:
+        pushed.append(payload)
+        return {"attempted": True, "ok": True, "status": 202}
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
+        push_heartbeat=push_heartbeat,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=deps.service_status,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    assert pushed[0]["kind"] == "bot-errors-selfcheck-heartbeat"
+    assert pushed[0]["class"] == "healthy"
+    assert pushed[0]["pin"]["headSha"] == "a" * 40
+    assert status["heartbeat"]["push"] == {"attempted": True, "ok": True, "status": 202}
+    assert calls == []
+
+
+def test_heartbeat_push_failure_does_not_mask_runtime_status(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+
+    def push_heartbeat(_payload: dict) -> dict:
+        raise RuntimeError("central down")
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
+        push_heartbeat=push_heartbeat,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=deps.service_status,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    assert status["class"] == "healthy"
+    assert status["heartbeat"]["push"]["ok"] is False
+    assert "central down" in status["heartbeat"]["push"]["error"]
+    assert calls == []
+
+
+def test_central_ack_fresh_records_central_acked(tmp_path: Path):
+    ack = tmp_path / "central-ack.json"
+    ack.write_text("{}", encoding="utf-8")
+    os.utime(ack, (980.0, 980.0))
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "central_acked"
+    assert status["centralAck"]["status"] == "fresh"
+    assert status["centralAck"]["ageSeconds"] == 20
+    assert status["healthy"] is True
+    assert calls == []
+
+
+def test_central_ack_missing_or_stale_records_local_only(tmp_path: Path, monkeypatch):
+    missing = tmp_path / "missing-ack.json"
+    config, deps, calls, _head = _fixture(tmp_path, central_ack_path=missing)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "missing"
+
+    stale_root = tmp_path / "stale-case"
+    stale_root.mkdir()
+    ack = stale_root / "stale-ack.json"
+    ack.write_text("{}", encoding="utf-8")
+    os.utime(ack, (900.0, 900.0))
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "60")
+    config, deps, calls, _head = _fixture(stale_root, central_ack_path=ack)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["centralAck"]["mode"] == "local_only"
+    assert status["centralAck"]["status"] == "stale"
+    assert status["centralAck"]["ageSeconds"] == 100
+    assert calls == []
+
+
+def test_central_ack_stat_error_and_invalid_max_age_fallback(tmp_path: Path, monkeypatch):
+    ack = tmp_path / "central-ack.json"
+    original_stat = Path.stat
+
+    def stat(path: Path):
+        if path == ack:
+            raise PermissionError("denied")
+        return original_stat(path)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK_MAX_AGE_SECONDS", "bad")
+    result = _mod.central_ack_inventory(ack, 1000.0)
+    assert result == {
+        "configured": True,
+        "mode": "local_only",
+        "status": "stat_error:PermissionError",
+        "path": str(ack),
+        "maxAgeSeconds": 3 * 30 * 60,
+    }
+
+
+def test_heartbeat_helper_fallbacks_and_local_write_failure(tmp_path: Path, monkeypatch):
+    assert _mod.tail_text(None) == ""
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEARTBEAT_TIMEOUT_SECONDS", "bad")
+    assert _mod.heartbeat_push_timeout() == 5.0
+
+    config, deps, _calls, _head = _fixture(tmp_path)
+    status = {
+        "schemaVersion": 1,
+        "host": "test-host",
+        "checkedAt": "1970-01-01T00:00:00Z",
+        "healthy": True,
+        "class": "healthy",
+        "action": "noop",
+        "problems": [],
+        "consecutive": 1,
+    }
+
+    def atomic(path: Path, _payload: dict) -> None:
+        if path == config.heartbeat_path:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(_mod, "atomic_write_json", atomic)
+    _mod.publish_heartbeat(config, deps, status)
+    assert status["heartbeat"]["local"] == "write_failed:OSError"
+    assert status["heartbeat"]["push"] == {"attempted": False, "mode": "disabled"}
+
+
 def test_untrusted_pin_records_problem_and_does_not_heal(tmp_path: Path):
     config, deps, calls, _head = _fixture(tmp_path)
     deps = _mod.SelfcheckDeps(
         commit_exists=lambda _sha: False,
         deploy=deps.deploy,
         runtime_verify=deps.runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
     )
@@ -237,6 +386,7 @@ def test_unit_bad_blocks_file_heal_and_escalates(tmp_path: Path, monkeypatch):
         commit_exists=deps.commit_exists,
         deploy=deps.deploy,
         runtime_verify=deps.runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
         service_status=lambda unit: "loaded" if unit == "com.bot-errors.health" else "inactive",
@@ -405,6 +555,7 @@ def test_current_symlink_race_refuses_deploy(tmp_path: Path):
         commit_exists=deps.commit_exists,
         deploy=deps.deploy,
         runtime_verify=deps.runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
         before_heal=before_heal,
@@ -425,6 +576,7 @@ def test_deployer_failure_is_reported_and_lock_is_released(tmp_path: Path):
         commit_exists=deps.commit_exists,
         deploy=deploy,
         runtime_verify=deps.runtime_verify,
+        push_heartbeat=deps.push_heartbeat,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
     )
@@ -574,12 +726,18 @@ def test_default_config_uses_env_overrides(tmp_path: Path, monkeypatch):
     root = tmp_path / "root"
     state = tmp_path / "custom-state"
     manifest = tmp_path / "manifest.json"
+    heartbeat = tmp_path / "heartbeat.json"
+    ack = tmp_path / "central-ack.json"
     monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state-root"))
     monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(manifest))
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEARTBEAT", str(heartbeat))
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_CENTRAL_ACK", str(ack))
     assert _mod.default_state_dir() == tmp_path / "state-root" / "sentinel"
     config = _mod.default_config(root, state)
     assert config.manifest_path == manifest
     assert config.current_link == state / "current"
+    assert config.heartbeat_path == heartbeat
+    assert config.central_ack_path == ack
 
 
 def test_private_dir_chmod_error_is_nonfatal(tmp_path: Path, monkeypatch):
@@ -806,15 +964,73 @@ def test_default_runtime_verify_reports_timeout_and_exec_errors(tmp_path: Path, 
     assert "VERIFY_EXEC_ERROR: OSError" in output
 
 
+def test_default_push_heartbeat_disabled_without_url(monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_SELFCHECK_HEARTBEAT_URL", raising=False)
+    assert _mod.default_push_heartbeat({"host": "test-host"}) == {"attempted": False, "mode": "disabled"}
+
+
+def test_default_push_heartbeat_posts_json_and_handles_errors(monkeypatch):
+    seen = {}
+
+    class Response:
+        status = 202
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return b"ACK"
+
+    def ok(req, timeout):
+        seen["url"] = req.full_url
+        seen["method"] = req.get_method()
+        seen["data"] = json.loads(req.data.decode("utf-8"))
+        seen["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEARTBEAT_URL", "http://127.0.0.1:9123/heartbeat")
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEARTBEAT_TIMEOUT_SECONDS", "0")
+    monkeypatch.setattr(_mod, "urlopen", ok)
+    result = _mod.default_push_heartbeat({"host": "test-host"})
+    assert result == {"attempted": True, "ok": True, "status": 202, "body": "ACK"}
+    assert seen == {
+        "url": "http://127.0.0.1:9123/heartbeat",
+        "method": "POST",
+        "data": {"host": "test-host"},
+        "timeout": 0.1,
+    }
+
+    def http_error(_req, **_kwargs):
+        raise _mod.HTTPError("http://127.0.0.1:9123/heartbeat", 503, "unavailable", hdrs=None, fp=io.BytesIO(b"busy"))
+
+    monkeypatch.setattr(_mod, "urlopen", http_error)
+    result = _mod.default_push_heartbeat({"host": "test-host"})
+    assert result == {"attempted": True, "ok": False, "status": 503, "error": "busy"}
+
+    def url_error(_req, **_kwargs):
+        raise _mod.URLError("refused")
+
+    monkeypatch.setattr(_mod, "urlopen", url_error)
+    result = _mod.default_push_heartbeat({"host": "test-host"})
+    assert result["attempted"] is True
+    assert result["ok"] is False
+    assert "URLError" in result["error"]
+
+
 def test_default_deps_wires_default_callables(tmp_path: Path, monkeypatch):
     config, _deps, _calls, _head = _fixture(tmp_path)
     monkeypatch.setattr(_mod, "default_commit_exists", lambda root: (lambda sha: True))
     monkeypatch.setattr(_mod, "default_deploy", lambda deployer: (lambda root, bundle, path: (0, "ok")))
     monkeypatch.setattr(_mod, "default_runtime_verify", lambda deployer: (lambda root, path: (0, "verify ok")))
+    monkeypatch.setattr(_mod, "default_push_heartbeat", lambda payload: {"attempted": True, "ok": True})
     deps = _mod.default_deps(config)
     assert deps.commit_exists("a" * 40) is True
     assert deps.deploy(config.root, config.root, config.deployer_path) == (0, "ok")
     assert deps.runtime_verify(config.root, config.deployer_path) == (0, "verify ok")
+    assert deps.push_heartbeat({"host": "test-host"}) == {"attempted": True, "ok": True}
     assert isinstance(deps.hostname(), str)
 
 
