@@ -240,7 +240,6 @@ export interface PineconeEntitySearchDetails {
   results: EntitySearchResult[];
   status: PineconeSearchStatus;
   durationMs?: number;
-  retried?: boolean;
   error?: string;
   projectGuardError?: string;
 }
@@ -538,7 +537,6 @@ export class PineconeMemory {
       });
 
     const startMs = Date.now();
-    let retried = false;
     try {
       // Step 1: vector search (no server-side rerank — docs may exceed 512-token reranker limit)
       let response: Awaited<ReturnType<typeof doSearch>>;
@@ -547,7 +545,6 @@ export class PineconeMemory {
       } catch (firstErr) {
         logger.debug({ err: (firstErr as Error).message, operation: 'searchEntities' }, 'pinecone_first_attempt_failed');
         // One retry after short delay
-        retried = true;
         await sleep(RETRY_DELAY_MS);
         response = await doSearch();
       }
@@ -612,7 +609,7 @@ export class PineconeMemory {
         'Pinecone entity search complete',
       );
       trackSuccess('searchEntities');
-      return { results: capped, status: 'ok', durationMs, ...(retried ? { retried } : {}) };
+      return { results: capped, status: 'ok', durationMs };
     } catch (err) {
       const durationMs = Date.now() - startMs;
       const message = errorMessage(err);
@@ -621,7 +618,7 @@ export class PineconeMemory {
         { err, ...queryLogFields(query), durationMs },
         'Pinecone entity search failed — returning empty results',
       );
-      return { results: [], status: 'failed', durationMs, retried, error: message };
+      return { results: [], status: 'failed', durationMs, error: message };
     }
   }
 
