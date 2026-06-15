@@ -218,7 +218,10 @@ def redacted_watchdog_payload(value: Any) -> Any:
 
 def append_log(kind: str, payload: dict[str, Any]) -> None:
     path = state_root() / "logs" / "heartbeat-watchdog.jsonl"
-    append_private_jsonl(path, {"time": now_iso(), "kind": kind, **redacted_watchdog_payload(payload)})
+    try:
+        append_private_jsonl(path, {"time": now_iso(), "kind": kind, **redacted_watchdog_payload(payload)})
+    except Exception:  # noqa: BLE001 - diagnostic log failure must not block alerts or state updates.
+        pass
 
 
 def critical_file_problem(path: Path) -> str | None:

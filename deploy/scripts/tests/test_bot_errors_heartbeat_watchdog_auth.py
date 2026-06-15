@@ -184,6 +184,45 @@ def test_non_finite_open_incident_counters_do_not_crash_reconcile(tmp_path: Path
     assert incident["lastEvidence"] == "fleet sentinel heartbeat stale"
 
 
+def test_log_write_failure_does_not_block_renotify_event(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    outbox = tmp_path / "outbox"
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
+    monkeypatch.setenv("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", "1")
+    mod.atomic_write_json(
+        state / "heartbeat-watchdog-state.json",
+        {
+            "version": 1,
+            "open": {
+                "fleet_sentinel": {
+                    "firstSeenAt": "1970-01-01T00:00:00Z",
+                    "lastNotifiedAt": "1970-01-01T00:00:00Z",
+                    "ageSeconds": 999,
+                    "suppressed": 2,
+                    "lastEvidence": "prior evidence",
+                }
+            },
+        },
+    )
+
+    def fail_log(_path: Path, _record: dict):
+        raise OSError("log disk full")
+
+    monkeypatch.setattr(mod, "append_private_jsonl", fail_log)
+
+    written = mod.reconcile({"fleet_sentinel": "fleet sentinel heartbeat stale"}, ["fleet_sentinel"])
+
+    assert len(written) == 1
+    event = json.loads(written[0].read_text(encoding="utf-8"))
+    assert event["alertSource"] == "fleet_sentinel"
+    assert event["diagnostics"]["forceNotify"] is True
+    saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
+    incident = saved["open"]["fleet_sentinel"]
+    assert incident["suppressed"] == 3
+    assert incident["lastNotificationSuppressed"] == 3
+
+
 def test_malformed_open_incident_record_realerts_when_problem_persists(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
