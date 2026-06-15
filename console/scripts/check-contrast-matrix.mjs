@@ -308,6 +308,10 @@ function buildMatrix(css) {
   const skipped = [];
   for (const theme of ['dark', 'light']) {
     const tokens = parseThemeTokens(css, theme);
+    if (Object.keys(tokens).length === 0) {
+      process.stderr.write(`EMPTY_SCAN: no [data-theme] tokens parsed for theme "${theme}" — the token file is empty, renamed, or its [data-theme="${theme}"] block was lost. Refusing to PASS on a degenerate scan.\n`);
+      process.exit(2);
+    }
     for (const pair of staticPairs()) addPair(rows, tokens, theme, pair);
     for (const pair of channelWashPairs(tokens)) addCompositePair(rows, tokens, theme, pair);
 

@@ -1142,10 +1142,10 @@ export function Dialog({ onClose }: { onClose: () => void }) {
     })
   })
 
-  // ─── Group M: migrated surfaces ────────────────────────────────────────────
+  // ─── Group M: migrated surfaces (now console-wide, promoted 2026-06-15) ────────────────────────
 
-  describe('Group M — migrated surface rules fire at error for M-list paths', () => {
-    it('no-raw-button fires as error at LineDetail.tsx (M list)', async () => {
+  describe('Group M — no-raw-button / no-adhoc-modal now CONSOLE-WIDE error (promoted 2026-06-15)', () => {
+    it('no-raw-button fires as error at LineDetail.tsx (former M list)', async () => {
       const messages = await lintErrors(
         'const x = <button type="button">Click</button>',
         LINEDETAIL_PATH
@@ -1153,15 +1153,24 @@ export function Dialog({ onClose }: { onClose: () => void }) {
       expect(hasError(messages, 'no-raw-button')).toBe(true)
     })
 
-    it('no-raw-button is silent at LinePicker.tsx (NOT in M list — not yet error)', async () => {
+    it('no-raw-button fires as error at LinePicker.tsx (was NOT in M list — now console-wide)', async () => {
+      // Previously: "NOT in M list — not yet error". Now promoted to console-wide.
       const messages = await lintErrors(
         'const x = <button type="button">Click</button>',
         LINEPICKER_PATH
       )
-      expect(hasError(messages, 'no-raw-button')).toBe(false)
+      expect(hasError(messages, 'no-raw-button')).toBe(true)
     })
 
-    it('no-adhoc-modal (c-dialog-backdrop) fires as error at RelinkModal.tsx (M list)', async () => {
+    it('no-raw-button fires as error at base fixture path (console-wide, outside former M scope)', async () => {
+      const messages = await lintErrors(
+        'const x = <button type="button">Click</button>',
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-raw-button')).toBe(true)
+    })
+
+    it('no-adhoc-modal (c-dialog-backdrop) fires as error at RelinkModal.tsx (former M list)', async () => {
       const messages = await lintErrors(
         'const x = <div className="c-dialog-backdrop fixed inset-0" />',
         resolve(REPO_ROOT, 'console/src/components/RelinkModal.tsx')
@@ -1169,10 +1178,26 @@ export function Dialog({ onClose }: { onClose: () => void }) {
       expect(hasError(messages, 'no-adhoc-modal')).toBe(true)
     })
 
-    it('no-adhoc-modal (role=dialog) fires as error at RelinkModal.tsx (M list)', async () => {
+    it('no-adhoc-modal (c-dialog-backdrop) fires as error at LinePicker.tsx (outside former M scope)', async () => {
+      const messages = await lintErrors(
+        'const x = <div className="c-dialog-backdrop fixed inset-0" />',
+        LINEPICKER_PATH
+      )
+      expect(hasError(messages, 'no-adhoc-modal')).toBe(true)
+    })
+
+    it('no-adhoc-modal (role=dialog) fires as error at RelinkModal.tsx (former M list)', async () => {
       const messages = await lintErrors(
         'const x = <div role="dialog" aria-modal="true"><p>Content</p></div>',
         resolve(REPO_ROOT, 'console/src/components/RelinkModal.tsx')
+      )
+      expect(hasError(messages, 'no-adhoc-modal')).toBe(true)
+    })
+
+    it('no-adhoc-modal (role=dialog) fires as error at base fixture path (console-wide, outside former M scope)', async () => {
+      const messages = await lintErrors(
+        'const x = <div role="dialog" aria-modal="true"><p>Content</p></div>',
+        FIXTURE_PATH
       )
       expect(hasError(messages, 'no-adhoc-modal')).toBe(true)
     })
@@ -1182,6 +1207,42 @@ export function Dialog({ onClose }: { onClose: () => void }) {
         'const x = <button type="button" className="btn-base">{children}</button>'
       )
       expect(hasError(messages, 'no-raw-button')).toBe(false)
+    })
+  })
+
+  // ─── no-infinite-animation: promoted from shadow to console-wide error (2026-06-15) ─────────
+
+  describe('no-infinite-animation — promoted from shadow to CONSOLE-WIDE error (2026-06-15)', () => {
+    it('no-infinite-animation fires as error at base fixture path (console-wide)', async () => {
+      const messages = await lintErrors(
+        'const x = <div style={{ animation: "spin 1s linear infinite" }} />',
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-infinite-animation')).toBe(true)
+    })
+
+    it('no-infinite-animation fires as error at LinePicker.tsx (outside former M scope)', async () => {
+      const messages = await lintErrors(
+        'const x = <div style={{ animation: "pulse 2s ease-in-out infinite" }} />',
+        LINEPICKER_PATH
+      )
+      expect(hasError(messages, 'no-infinite-animation')).toBe(true)
+    })
+
+    it('no-infinite-animation is silent for finite animations', async () => {
+      const messages = await lintErrors(
+        'const x = <div style={{ animation: "fade-in 120ms ease-out" }} />',
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-infinite-animation')).toBe(false)
+    })
+
+    it('no-infinite-animation is silent when animation is applied via className', async () => {
+      const messages = await lintErrors(
+        'const x = <div className="animate-pulse-once" />',
+        FIXTURE_PATH
+      )
+      expect(hasError(messages, 'no-infinite-animation')).toBe(false)
     })
   })
 

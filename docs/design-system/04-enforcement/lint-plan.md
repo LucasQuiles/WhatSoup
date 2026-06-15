@@ -91,7 +91,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-hover-only-content | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | hover-revealed content needs keyboard/focus parity |
 | soup/no-vw-font-size | package-script fail-on-rule | global-error | P4/G7 | typography must use tokenized type scale, not viewport width |
 | soup/no-static-viewport-height | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | full-height surfaces use `dvh`, not static `vh` / `h-screen` |
-| soup/layer-owner-required | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | z-index uses `--z-*` layer tokens or a documented owner |
+| soup/layer-owner-required | blocking script | scoped-error / blocking script | P4/G7 | z-index uses `--z-*` layer tokens or a documented owner |
 | soup/no-raw-viewport-js | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | viewport branching must route through `useBreakpoint` / `useViewportPlacement`, not local `window.innerWidth` or `matchMedia` reads |
 | soup/no-duplicate-shell | shadow (advisory) | warn-on-changed-files | P2 | heuristic; routes to duplication-register, never error |
 | soup/theme-parity (script) | CI-blocking script | CI-blocking script | P1 | not an ESLint rule; section 5 |
@@ -668,7 +668,7 @@ cannot express the check).
 - **FP strategy:** fixtures must include valid tokenized layer, invalid literal layer, and a portal
   fixture that proves the owner annotation is not a bypass for arbitrary literals.
 - **Autofix:** partial literal-to-token suggestions only when mapping is exact. **Phase:** P4/G7.
-  **Entry:** report-only script.
+  **Entry:** blocking script.
 
 ### soup/no-raw-viewport-js
 

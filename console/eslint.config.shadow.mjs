@@ -16,7 +16,7 @@
  *   soup/no-brand-regression   — custom rule (implemented in eslint-rules/index.mjs)
  *   soup/protected-identifiers — custom rule; scoped-error in default config, warn here
  *   soup/icon-family           — custom rule; scoped-error in default config, warn here
- *   soup/no-infinite-animation — TSX-side inline animation: ... infinite
+ *   soup/no-infinite-animation — PROMOTED to console-wide error 2026-06-15 (see structuralSelectors)
  *   soup/no-raw-color          — hex/rgb/hsl literals (selector extension; already error
  *                                in default config, kept here for shadow baseline parity)
  *   soup/no-format-bypass      — custom rule; global-error in default config, warn here
@@ -33,7 +33,11 @@
  *   Group F: soup/no-focus-suppression
  *            — promoted to scoped-error (console-wide minus composer carve-out)
  *   Group M: soup/no-raw-button, soup/no-adhoc-modal (both prongs)
- *            — promoted to scoped-error for the 8 migrated-surface files
+ *            — promoted 2026-06-15 from scoped-error (8 files) to CONSOLE-WIDE error
+ *              (structuralSelectors/Block 1); pre-promotion rg audit = 0 violations
+ *   soup/no-infinite-animation (TSX side)
+ *            — promoted 2026-06-15 from shadow to CONSOLE-WIDE error in structuralSelectors;
+ *              pre-promotion rg audit = 0 TSX violations
  *   Group P: soup/no-legacy-tokens (3 selectors), soup/no-utility-smell
  *            — promoted to scoped-error for components/primitives/**
  *
@@ -56,19 +60,8 @@ import baseConfig from './eslint.config.js'
 
 const shadowSyntaxRules = [
 
-  // ── soup/no-infinite-animation (shadow, TSX side) ────────────────────────
-  // Flag inline animation property containing "infinite".
-  // CSS-side covered by design-regression.sh check 13.
-  {
-    selector: 'Property[key.name="animation"][value.value=/infinite/]',
-    message:
-      '[soup/no-infinite-animation SHADOW] Inline style animation: ...infinite. ' +
-      'P5 goal: only the sanctioned ok-breathing token is permitted. ' +
-      'Non-blocking baseline counter.',
-  },
-
   // NOTE: The following selectors are intentionally ABSENT from this array.
-  // They were promoted to scoped-error in eslint.config.js (D6 flip groups S/F/M/P)
+  // They were promoted to scoped-error (or console-wide error) in eslint.config.js
   // and now flow into the shadow run automatically via baseSyntaxSelectors (which
   // flat-maps every base-block no-restricted-syntax entry). Keeping them here would
   // produce duplicate selector entries with different message text, inflating the
@@ -79,9 +72,11 @@ const shadowSyntaxRules = [
   //                    Literal[value=/var\(--log-col-/]
   // Removed (raw form): JSXOpeningElement[name.name=/^(input|select|textarea)$/]
   // Removed (Group F): Literal[value=/\boutline-none\b/][value!=/focus-visible:/]
-  // Removed (Group M): JSXOpeningElement[name.name="button"],
+  // Removed (Group M→console-wide, 2026-06-15): JSXOpeningElement[name.name="button"],
   //                    Literal[value=/c-dialog-backdrop/],
   //                    JSXAttribute[name.name="role"][value.value="dialog"]
+  // Removed (no-infinite-animation→console-wide, 2026-06-15):
+  //                    Property[key.name="animation"][value.value=/infinite/]
   // Removed (Group P): Literal[value=/\b(bg-d[0-6]|text-t[1-5]|border-t[1-5])\b/],
   //                    Literal[value=/var\(--color-[dt]\d\)/],
   //                    Literal[value=/var\(--b[1-4]\)/],

@@ -444,6 +444,11 @@ palette lands; below-threshold designated pairs fail the gate.
 Any score below 4 requires a remediation note. Any score below 3 blocks final acceptance unless the user
 explicitly waives it.
 
+**Fail-closed empty-scan guard (2026-06-15).** After parsing the theme token blocks, the collector
+asserts each theme yielded >0 tokens; if `tokens.semantic.css` loses its `[data-theme]` blocks the
+script prints a named `EMPTY_SCAN: no [data-theme] tokens parsed for theme "<theme>"` error and exits
+`2` (structurally impossible to mask as a PASS), mirroring `check-theme-parity.mjs`.
+
 ### 17.1 Browser A11y Contract Lane
 
 The browser a11y contract lane lives in `tests/browser/a11y-contracts.test.tsx` and runs through:
@@ -588,7 +593,10 @@ The audit scans `console/src` for promoted and report-only findings:
 - `soup/layer-owner-required` candidates: raw z-index utilities that do not consume `--z-*` tokens;
 - `soup/no-raw-viewport-js` candidates: component-local `window.innerWidth`, `window.innerHeight`,
   `window.matchMedia`, or global `matchMedia` reads outside sanctioned breakpoint/placement owner
-  hooks (promoted: fails the package script);
+  hooks (promoted: fails the package script); the sanctioned-owner exemption is pinned to the EXACT
+  owner file paths (`console/src/hooks/useBreakpoint.{ts,tsx}`, `useViewportPlacement.{ts,tsx}`) as of
+  2026-06-15 — a prefix-matching regex previously exempted any `useBreakpoint*`/`useViewportPlacement*`
+  file under `hooks/` or `lib/`;
 
 Reviewers apply these rule-of-thumb checks before accepting any migrated surface:
 
