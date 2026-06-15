@@ -91,6 +91,7 @@ class HostSpec:
 class SentinelConfig:
     state_dir: Path
     hosts_path: Path
+    oracle_path: Optional[Path] = None
     heartbeat_max_age_seconds: int = DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     hysteresis_cycles: int = DEFAULT_HYSTERESIS_CYCLES
     flap_window_seconds: int = DEFAULT_FLAP_WINDOW_SECONDS
@@ -102,6 +103,7 @@ class SentinelDeps:
     now_epoch: Callable[[], float]
     hostname: Callable[[], str]
     pull_probe: Callable[[HostSpec], dict]
+    reachability_oracle: Callable[[], dict] = lambda: {"configured": False, "reachable": True, "class": "not_configured"}
 
 
 class SentinelError(RuntimeError):
@@ -129,9 +131,11 @@ def positive_int_env(name: str, default: int, minimum: int = 0) -> int:
 
 
 def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] = None) -> SentinelConfig:
+    oracle_raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_ORACLE", "").strip()
     return SentinelConfig(
         state_dir=state_dir or state_root(),
         hosts_path=hosts_path or default_hosts_path(),
+        oracle_path=Path(oracle_raw).expanduser() if oracle_raw else None,
         heartbeat_max_age_seconds=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS", DEFAULT_HEARTBEAT_MAX_AGE_SECONDS),
         hysteresis_cycles=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES", DEFAULT_HYSTERESIS_CYCLES, 1),
         flap_window_seconds=positive_int_env("BOT_ERRORS_FLEET_SENTINEL_FLAP_WINDOW_SECONDS", DEFAULT_FLAP_WINDOW_SECONDS),
@@ -328,6 +332,22 @@ def default_pull_probe(spec: HostSpec) -> dict:
     return {}
 
 
+def oracle_inventory(path: Optional[Path]) -> dict:
+    if path is None:
+        return {"configured": False, "reachable": True, "class": "not_configured"}
+    payload = optional_json_object(path)
+    if payload is None:
+        return {"configured": True, "reachable": None, "class": "invalid_oracle", "path": str(path)}
+    reachable = payload.get("reachable")
+    if reachable is not True and reachable is not False:
+        reachable = None
+    klass = str(payload.get("class") or ("reachable" if reachable is True else "unreachable" if reachable is False else "unknown"))
+    result = {"configured": True, "reachable": reachable, "class": klass, "path": str(path)}
+    if "error" in payload:
+        result["error"] = payload["error"]
+    return result
+
+
 def env_key_segment(value: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in value).strip("_").upper()
 
@@ -508,11 +528,15 @@ def evaluate_host(spec: HostSpec, heartbeat: dict, probe: dict, record: dict, no
     }
 
 
-def central_connectivity_suspect(results: list[dict]) -> bool:
+def mass_out_of_rotation(results: list[dict]) -> bool:
     if len(results) < 2:
         return False
     unreachable = [result for result in results if result.get("class") == "out_of_rotation" and result.get("twoSignals") is True]
     return len(unreachable) >= max(2, (len(results) + 1) // 2)
+
+
+def central_connectivity_suspect(results: list[dict], oracle: dict) -> bool:
+    return mass_out_of_rotation(results) and oracle.get("reachable") is False
 
 
 def write_ack(spec: HostSpec, result: dict, now: float) -> Optional[str]:
@@ -529,12 +553,18 @@ def write_ack(spec: HostSpec, result: dict, now: float) -> Optional[str]:
     return str(spec.ack_path)
 
 
-def default_deps() -> SentinelDeps:
-    return SentinelDeps(now_epoch=time.time, hostname=socket.gethostname, pull_probe=default_pull_probe)
+def default_deps(config: Optional[SentinelConfig] = None) -> SentinelDeps:
+    oracle_path = config.oracle_path if config is not None else None
+    return SentinelDeps(
+        now_epoch=time.time,
+        hostname=socket.gethostname,
+        pull_probe=default_pull_probe,
+        reachability_oracle=lambda: oracle_inventory(oracle_path),
+    )
 
 
 def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dict:
-    deps = deps or default_deps()
+    deps = deps or default_deps(config)
     now = deps.now_epoch()
     hosts = load_hosts(config.hosts_path)
     state = load_state(config)
@@ -559,20 +589,30 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
         results.append(result)
 
     fleet_action = "none"
-    if central_connectivity_suspect(results):
+    try:
+        oracle = deps.reachability_oracle()
+    except Exception as exc:
+        oracle = {"configured": True, "reachable": None, "class": "oracle_error", "error": f"{type(exc).__name__}: {exc}"[:300]}
+    if not isinstance(oracle, dict):
+        oracle = {"configured": True, "reachable": None, "class": "invalid_oracle"}
+    if central_connectivity_suspect(results, oracle):
         fleet_action = "central_connectivity_suspect"
         for result in results:
             if result["class"] == "out_of_rotation" and result["action"] != "hysteresis_wait":
                 result["action"] = "suppress_central_connectivity_suspect"
                 host_state[result["host"]]["lastAction"] = result["action"]
+    elif mass_out_of_rotation(results):
+        fleet_action = "mass_unreachable_confirmed"
 
     state["lastFleetAction"] = fleet_action
+    state["lastReachabilityOracle"] = oracle
     save_state(config, state)
     return {
         "schemaVersion": 1,
         "checkedAt": now_iso(now),
         "controllerHost": deps.hostname(),
         "fleetAction": fleet_action,
+        "reachabilityOracle": oracle,
         "hosts": results,
         "statePath": str(state_path(config)),
     }

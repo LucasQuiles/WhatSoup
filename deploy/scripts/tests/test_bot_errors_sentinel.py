@@ -58,6 +58,7 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
     return _mod.SentinelConfig(
         state_dir=tmp_path / "state",
         hosts_path=hosts_path,
+        oracle_path=kwargs.get("oracle_path"),
         heartbeat_max_age_seconds=kwargs.get("heartbeat_max_age_seconds", 60),
         hysteresis_cycles=kwargs.get("hysteresis_cycles", 2),
         flap_window_seconds=kwargs.get("flap_window_seconds", 300),
@@ -65,11 +66,12 @@ def _config(tmp_path: Path, hosts_path: Path, **kwargs):
     )
 
 
-def _deps(now: float, probes: dict[str, dict]):
+def _deps(now: float, probes: dict[str, dict], oracle: dict | None = None):
     return _mod.SentinelDeps(
         now_epoch=lambda: now,
         hostname=lambda: "central-test",
         pull_probe=lambda spec: probes.get(spec.host, {}),
+        reachability_oracle=lambda: oracle or {"configured": False, "reachable": True, "class": "not_configured"},
     )
 
 
@@ -257,7 +259,7 @@ def test_flapping_suppresses_auto_heal_candidate(tmp_path: Path):
     assert host["action"] == "escalate_flapping"
 
 
-def test_central_connectivity_suspect_suppresses_mass_out_of_rotation(tmp_path: Path):
+def test_central_connectivity_suspect_requires_failed_oracle_to_suppress(tmp_path: Path):
     hosts_payload = []
     probes = {}
     for name in ("host-a", "host-b", "host-c"):
@@ -266,10 +268,16 @@ def test_central_connectivity_suspect_suppresses_mass_out_of_rotation(tmp_path: 
         probes[name] = {"reachable": False, "healthy": False, "class": "unreachable"}
     hosts = _hosts_file(tmp_path, hosts_payload)
     result = _mod.run_once(_config(tmp_path, hosts, hysteresis_cycles=1), _deps(1000.0, probes))
+    assert result["fleetAction"] == "mass_unreachable_confirmed"
+    assert {host["action"] for host in result["hosts"]} == {"escalate"}
+
+    oracle_down = {"configured": True, "reachable": False, "class": "gateway_unreachable"}
+    result = _mod.run_once(_config(tmp_path / "oracle-down", hosts, hysteresis_cycles=1), _deps(1000.0, probes, oracle_down))
     assert result["fleetAction"] == "central_connectivity_suspect"
     assert {host["action"] for host in result["hosts"]} == {"suppress_central_connectivity_suspect"}
+    assert result["reachabilityOracle"] == oracle_down
 
-    waiting = _mod.run_once(_config(tmp_path / "waiting", hosts, hysteresis_cycles=2), _deps(1000.0, probes))
+    waiting = _mod.run_once(_config(tmp_path / "waiting", hosts, hysteresis_cycles=2), _deps(1000.0, probes, oracle_down))
     assert waiting["fleetAction"] == "central_connectivity_suspect"
     assert {host["action"] for host in waiting["hosts"]} == {"hysteresis_wait"}
 
@@ -409,6 +417,18 @@ def test_signal_classification_and_inventory_edges(tmp_path: Path, monkeypatch):
 
     assert _mod.normalize_probe({}) == {"configured": False, "signal": "unknown", "class": "not_configured"}
     assert _mod.normalize_probe({"reachable": True, "healthy": None, "headSha": "a" * 40})["signal"] == "unknown"
+    assert _mod.oracle_inventory(None) == {"configured": False, "reachable": True, "class": "not_configured"}
+    assert _mod.oracle_inventory(tmp_path / "missing-oracle.json")["reachable"] is None
+    invalid_oracle = _write_json(tmp_path / "invalid-oracle.json", {"reachable": "maybe", "class": "ambiguous"})
+    assert _mod.oracle_inventory(invalid_oracle)["reachable"] is None
+    up_oracle = _write_json(tmp_path / "up-oracle.json", {"reachable": True})
+    assert _mod.oracle_inventory(up_oracle)["class"] == "reachable"
+    down_oracle = _write_json(tmp_path / "down-oracle.json", {"reachable": False, "error": "gateway timeout"})
+    down_result = _mod.oracle_inventory(down_oracle)
+    assert down_result["class"] == "unreachable"
+    assert down_result["error"] == "gateway timeout"
+    assert _mod.parse_probe_stdout("\n[]\n{\"class\":\"healthy\"}\n") == {"class": "healthy"}
+    assert _mod.parse_probe_stdout("\n") is None
 
     cases = [
         ({"signal": "unhealthy", "class": "permission_denied"}, {"signal": "unreachable", "class": "unreachable"}, "runtime_unverified"),
@@ -438,17 +458,48 @@ def test_transition_pruning_and_state_cleanup(tmp_path: Path):
         {"schemaVersion": 1, "hosts": {"host-a": {"alertState": "closed"}, "removed": {"alertState": "open"}}},
     )
     result = _mod.run_once(config, _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
-    assert _mod.central_connectivity_suspect([result["hosts"][0]]) is False
+    assert _mod.mass_out_of_rotation([result["hosts"][0]]) is False
+    assert _mod.central_connectivity_suspect([result["hosts"][0]], {"reachable": False}) is False
     state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
     assert sorted(state["hosts"]) == ["host-a"]
+
+
+def test_reachability_oracle_errors_fail_safe_without_suppression(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=100.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, hysteresis_cycles=1)
+
+    def raise_oracle():
+        raise RuntimeError("oracle down")
+
+    error_deps = _mod.SentinelDeps(
+        now_epoch=lambda: 1000.0,
+        hostname=lambda: "central-test",
+        pull_probe=lambda _spec: {"reachable": False, "healthy": False, "class": "unreachable"},
+        reachability_oracle=raise_oracle,
+    )
+    result = _mod.run_once(config, error_deps)
+    assert result["fleetAction"] == "none"
+    assert result["reachabilityOracle"]["class"] == "oracle_error"
+
+    invalid_deps = _mod.SentinelDeps(
+        now_epoch=lambda: 1000.0,
+        hostname=lambda: "central-test",
+        pull_probe=lambda _spec: {"reachable": False, "healthy": False, "class": "unreachable"},
+        reachability_oracle=lambda: "bad",
+    )
+    result = _mod.run_once(_config(tmp_path / "invalid", hosts, hysteresis_cycles=1), invalid_deps)
+    assert result["reachabilityOracle"] == {"configured": True, "reachable": None, "class": "invalid_oracle"}
 
 
 def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, capsys):
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HEARTBEAT_MAX_AGE_SECONDS", "bad")
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HYSTERESIS_CYCLES", "0")
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_ORACLE", str(tmp_path / "oracle.json"))
     config = _mod.default_config(tmp_path / "hosts.json", tmp_path / "state")
     assert config.heartbeat_max_age_seconds == _mod.DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
     assert config.hysteresis_cycles == 1
+    assert config.oracle_path == tmp_path / "oracle.json"
 
     healthy_hb = _heartbeat(tmp_path / "healthy.json", healthy=True, mtime=1000.0)
     healthy_probe = _write_json(tmp_path / "healthy-probe.json", {"reachable": True, "healthy": True, "class": "healthy"})
