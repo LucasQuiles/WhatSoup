@@ -170,7 +170,7 @@ body::before {
   gap: var(--sp-1);
   font-family: var(--font-sans);
   font-size: var(--text-sm);
-  color: var(--color-t5);
+  color: var(--color-t4);
   cursor: pointer;
   padding: var(--sp-1) var(--sp-2);
   border-radius: var(--radius-sm);
@@ -220,7 +220,7 @@ body::before {
   padding: var(--sp-12) var(--sp-4);
   font-family: var(--font-mono);
   font-size: var(--text-data);
-  color: var(--color-t5);
+  color: var(--color-t4);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

@@ -358,7 +358,7 @@ export default function Inbox() {
                     variant="ghost"
                     onClick={handleLoadOlder}
                     disabled={loadingOlder}
-                    className="pt-[var(--sp-2)] pb-[var(--sp-4)] gap-[var(--sp-2)] w-full justify-center text-t5"
+                    className="pt-[var(--sp-2)] pb-[var(--sp-4)] gap-[var(--sp-2)] w-full justify-center text-t2"
                     icon={loadingOlder
                       ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
                       : <ChevronsUp size={14} strokeWidth={1.75} />
@@ -598,7 +598,7 @@ export default function Inbox() {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center p-[var(--sp-4)]">
-            <div className="text-center text-t5 text-sm">
+            <div className="text-center text-t2 text-sm">
               Select a conversation to see details
             </div>
           </div>

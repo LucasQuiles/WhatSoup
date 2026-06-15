@@ -136,7 +136,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             <Button
               variant="ghost"
               size="sm"
-              className="w-full flex items-center justify-center c-hover text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)] hover:text-t2"
+              className="w-full flex items-center justify-center c-hover text-t2 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
               onClick={loadOlder}
               loading={loadingOlder}
               icon={<ChevronsUp size={14} strokeWidth={1.75} />}
@@ -147,7 +147,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             </Button>
           ) : (
             <div
-              className="flex items-center justify-center text-t5 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
+              className="flex items-center justify-center text-t2 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
             >
               <span className="text-sm">No more messages</span>
             </div>
@@ -186,7 +186,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
         <Button
           variant="ghost"
           size="sm"
-          className="absolute flex items-center justify-center hover:text-t2 c-hover text-t5 left-1/2 -translate-x-1/2 bottom-[var(--sp-4)] py-[var(--sp-2)] px-[var(--sp-5)] gap-[var(--sp-2)] rounded-md z-[var(--z-float)]"
+          className="absolute flex items-center justify-center c-hover text-t2 left-1/2 -translate-x-1/2 bottom-[var(--sp-4)] py-[var(--sp-2)] px-[var(--sp-5)] gap-[var(--sp-2)] rounded-md z-[var(--z-float)]"
           style={{
             background: 'color-mix(in srgb, var(--color-d4) 80%, transparent)',
             backdropFilter: 'blur(4px)',

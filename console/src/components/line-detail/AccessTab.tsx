@@ -180,7 +180,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
             Blocked ({blocked.length})
           </div>
           {blocked.length === 0 ? (
-            <div className="text-t5 text-center py-6 font-mono text-data">
+            <div className="text-t2 text-center py-6 font-mono text-data">
               No blocked contacts
             </div>
           ) : (

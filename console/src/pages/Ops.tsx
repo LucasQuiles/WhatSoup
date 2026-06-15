@@ -158,7 +158,7 @@ export default function Ops() {
         <div className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide p-[var(--sp-3)]">
           <div className="flex flex-col gap-[var(--sp-2)]">
             {linesLoading ? (
-              <div className="text-t5 text-center py-8 font-mono text-data">
+              <div className="text-t2 text-center py-8 font-mono text-data">
                 Loading fleet status...
               </div>
             ) : linesError ? (
@@ -176,7 +176,7 @@ export default function Ops() {
                 </Button>
               </div>
             ) : lines.length === 0 ? (
-              <div className="text-t5 text-center py-8 font-mono text-data">
+              <div className="text-t2 text-center py-8 font-mono text-data">
                 No instances discovered. Create one from the Soup Kitchen.
               </div>
             ) : lines.map(line => (

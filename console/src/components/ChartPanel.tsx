@@ -77,7 +77,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
         </div>
       ) : !hasData ? (
         <div
-          className="flex flex-col items-center justify-center text-center text-t5"
+          className="flex flex-col items-center justify-center text-center text-t2"
           style={{ height: panelHeight }}
         >
           <BarChart3 size={24} strokeWidth={1.25} className="mb-[var(--sp-2)]" />
