@@ -206,6 +206,8 @@ def critical_file_problem(path: Path) -> str | None:
         st = path.lstat()
     except FileNotFoundError:
         return f"missing {path}"
+    except OSError as exc:
+        return f"failed to inspect critical file {path}: {type(exc).__name__}: {exc}"
     if path.is_symlink():
         return f"refusing to trust symlinked critical file {path}"
     if not os.path.isfile(path):
@@ -217,6 +219,8 @@ def critical_file_problem(path: Path) -> str | None:
         parent_stat = path.parent.lstat()
     except FileNotFoundError:
         return f"missing critical file parent {path.parent}"
+    except OSError as exc:
+        return f"failed to inspect critical file parent {path.parent}: {type(exc).__name__}: {exc}"
     if path.parent.is_symlink():
         return f"refusing to trust critical file under symlinked directory {path.parent}"
     if not os.path.isdir(path.parent):
@@ -326,7 +330,11 @@ def file_age(path: Path) -> tuple[int | None, str]:
     problem = critical_file_problem(path)
     if problem is not None:
         return None, problem
-    return max(0, now_epoch() - int(path.stat().st_mtime)), f"{path} mtime={int(path.stat().st_mtime)}"
+    try:
+        mtime = int(path.stat().st_mtime)
+    except OSError as exc:
+        return None, f"failed to stat {path}: {type(exc).__name__}: {exc}"
+    return max(0, now_epoch() - mtime), f"{path} mtime={mtime}"
 
 
 def fleet_sentinel_age(path: Path) -> tuple[int | None, str]:

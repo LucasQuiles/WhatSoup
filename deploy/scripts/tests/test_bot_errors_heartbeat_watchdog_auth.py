@@ -181,6 +181,53 @@ def test_malformed_open_incident_record_restarts_recovery_confirmation(tmp_path:
     assert incident["recoveryObservations"] == 1
 
 
+def test_dispatcher_heartbeat_critical_inspect_error_is_reported_not_crashed(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    target = state / "dispatcher-state.json"
+    mod.atomic_write_json(target, {"updated_at": 1000})
+    original_stat = Path.stat
+
+    def stat(path: Path, *args, **kwargs):
+        if path == target:
+            raise PermissionError("denied")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    problems = mod.collect_problems(_watchdog_args(), {"dispatcher"})
+
+    assert problems["dispatcher"] == (
+        "dispatcher heartbeat stale: age_seconds=missing max=300 "
+        f"detail=failed to inspect critical file {target}: PermissionError: denied"
+    )
+
+
+def test_dispatcher_heartbeat_stat_error_after_private_check_is_reported_not_crashed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    target = state / "dispatcher-state.json"
+    mod.atomic_write_json(target, {"updated_at": 1000})
+    original_stat = Path.stat
+
+    def stat(path: Path, *args, **kwargs):
+        if path == target and kwargs.get("follow_symlinks") is not False:
+            raise PermissionError("denied")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    problems = mod.collect_problems(_watchdog_args(), {"dispatcher"})
+
+    assert problems["dispatcher"] == (
+        "dispatcher heartbeat stale: age_seconds=missing max=300 "
+        f"detail=failed to stat {target}: PermissionError: denied"
+    )
+
+
 def test_local_instance_health_flags_terminal_auth_class_as_physical_intervention(
     tmp_path: Path,
     monkeypatch,
