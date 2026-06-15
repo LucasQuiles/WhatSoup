@@ -100,11 +100,11 @@
       },
       "file": "console/src/mock-data.ts",
       "lines": [
-        726,
-        731,
-        855,
-        942,
-        943
+        723,
+        728,
+        852,
+        939,
+        940
       ],
       "total": 5
     }
@@ -218,7 +218,7 @@
       "category": "base-wall",
       "column": 36,
       "file": "console/src/mock-data.ts",
-      "line": 726,
+      "line": 723,
       "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
       "rule": "no-restricted-syntax"
     },
@@ -226,7 +226,7 @@
       "category": "base-wall",
       "column": 36,
       "file": "console/src/mock-data.ts",
-      "line": 731,
+      "line": 728,
       "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
       "rule": "no-restricted-syntax"
     },
@@ -234,7 +234,7 @@
       "category": "base-wall",
       "column": 83,
       "file": "console/src/mock-data.ts",
-      "line": 855,
+      "line": 852,
       "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
       "rule": "no-restricted-syntax"
     },
@@ -242,7 +242,7 @@
       "category": "base-wall",
       "column": 66,
       "file": "console/src/mock-data.ts",
-      "line": 942,
+      "line": 939,
       "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
       "rule": "no-restricted-syntax"
     },
@@ -250,7 +250,7 @@
       "category": "base-wall",
       "column": 60,
       "file": "console/src/mock-data.ts",
-      "line": 943,
+      "line": 940,
       "message": "⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).",
       "rule": "no-restricted-syntax"
     },
