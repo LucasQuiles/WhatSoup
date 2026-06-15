@@ -230,8 +230,7 @@ virtualization awaits a streaming source), DD-23 (popover collision flip),
 DD-24 (collapse-orphaned contact actions), DD-26 (type ramp has consumers
 with fallbacks but no CSS definitions), DD-28/DD-29 (state-model spec homes),
 DD-32..34 (dialog/ruling/live-QA residues), DD-36..39 (icon/type/card/color-mix
-enforcement), DD-42 (raw-CSS focus suppression guard promotion), and DD-43
-(toolkit primitive gaps).
+enforcement), and DD-43 (toolkit primitive gaps).
 
 **INCONCLUSIVE conformance rows and what flips them:**
 

@@ -9,6 +9,7 @@ const PROMOTED_RULES = [
   'soup/layer-owner-required',
   'soup/no-hover-only-content',
   'soup/no-layout-shift-interaction',
+  'soup/no-raw-css-focus-suppression',
   'soup/no-raw-viewport-js',
   'soup/no-static-viewport-height',
   'soup/no-unsafe-truncation',
@@ -71,6 +72,7 @@ describe('check-design-resilience.mjs', () => {
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/layer-owner-required');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-hover-only-content');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-layout-shift-interaction');
+    expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-raw-css-focus-suppression');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-raw-viewport-js');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-static-viewport-height');
     expect(pkg.scripts?.['design:resilience']).toContain('--fail-on-rule soup/no-unsafe-truncation');
@@ -324,6 +326,67 @@ export function Fixture() {
     const output = parsedOutput(result);
 
     expect(output.finding_count).toBe(0);
+  });
+
+  it('flags raw CSS outline suppression without a tokenized focus-visible outline replacement', () => {
+    const root = makeFixture(`
+.bad-row {
+  outline: none;
+}
+
+.bad-row:focus-visible {
+  box-shadow: inset 0 0 0 var(--bw-focus) var(--focus-ring);
+}
+`, 'console/src/fixture.css');
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule).toEqual({ 'soup/no-raw-css-focus-suppression': 1 });
+  });
+
+  it('stays silent for raw CSS suppression paired with a tokenized focus-visible outline', () => {
+    const root = makeFixture(`
+.good-row {
+  outline: 0;
+}
+
+.good-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-focus);
+}
+`, 'console/src/fixture.css');
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.finding_count).toBe(0);
+  });
+
+  it('requires every selector in a grouped CSS reset to have the focus-visible outline replacement', () => {
+    const root = makeFixture(`
+input,
+button {
+  outline: none;
+}
+
+input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-focus);
+}
+`, 'console/src/fixture.css');
+    const result = runScript(root);
+    const output = parsedOutput(result);
+
+    expect(output.by_rule).toEqual({ 'soup/no-raw-css-focus-suppression': 1 });
+  });
+
+  it('pins the real-source raw CSS focus suppression inventory to zero findings', () => {
+    const result = runScript(process.cwd());
+    const output = parsedOutput(result);
+    const findings = output.findings.filter((f) => f.rule === 'soup/no-raw-css-focus-suppression');
+
+    expect(result.status).toBe(0);
+    expect(output.by_rule['soup/no-raw-css-focus-suppression']).toBeUndefined();
+    expect(findings).toEqual([]);
   });
 
   it('pins the real-source static viewport-height inventory to zero', () => {

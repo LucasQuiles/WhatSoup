@@ -180,8 +180,7 @@ Pill, Table, Toolbar, LogStream, Drawer, Tabs, Popover, index. Raw elements insi
 by design (canonical renderers). Primitive tier CSS (`styles/primitives.css`) is born clean of
 legacy color tokens; it still consumes half-step spacing at 55, 247, 294, 306, 552 (DD-9).
 Known primitive-layer defects (register): DD-23 Popover no collision flip, DD-22 LogStream no
-virtualization, and DD-42 raw-CSS focus suppression guard promotion. DD-10, DD-27, and DD-30
-are closed in the current register.
+virtualization. DD-10, DD-27, DD-30, and DD-42 are closed in the current register.
 
 ### 3.10 Non-UI files carrying design vocabulary
 

@@ -119,9 +119,113 @@ const interactionLayoutUtilityPattern = /\b(?:hover|focus|focus-visible|focus-wi
 const interactionLayoutCssPattern = /:(?:hover|focus|focus-visible|focus-within|active)[^{]*\{[^}]*\b(?:width|height|min-width|max-width|min-height|max-height|padding|padding-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|margin|margin-(?:top|right|bottom|left|block|block-start|block-end|inline|inline-start|inline-end)|gap|row-gap|column-gap|flex-basis|grid-template-columns|grid-template-rows|border-width|border-(?:top|right|bottom|left)-width)\s*:/;
 const rawViewportJsPattern = /\bwindow\s*\.\s*(?:innerWidth|innerHeight|matchMedia|visualViewport)\b|\bmatchMedia\s*\(/;
 const staticViewportHeightPattern = /\b(?:min-|max-)?h-screen\b|(?<![a-z])\d*\.?\d+vh\b/i;
+const rawCssFocusSuppressionPattern = /\boutline\s*:\s*(?:none|0(?:px)?)(?=\s*(?:!important\s*)?(?:;|$))/ig;
+const focusRingOutlinePattern = /\boutline\s*:\s*(?!(?:none|0(?:px)?)(?=\s*(?:!important\s*)?(?:;|$)))[^;{}]*var\(--focus-ring\)[^;{}]*(?:;|$)/i;
+const outlineOffsetPattern = /\boutline-offset\s*:\s*[^;{}]+(?:;|$)/i;
 
 function isViewportOwnerFile(file) {
   return /^console\/src\/(?:hooks|lib)\/use(?:Breakpoint|ViewportPlacement)\.tsx?$/.test(file);
+}
+
+function maskCssComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, (match) => match.replace(/[^\n]/g, ' '));
+}
+
+function findMatchingBrace(text, openIndex) {
+  let depth = 1;
+  for (let i = openIndex + 1; i < text.length; i += 1) {
+    if (text[i] === '{') depth += 1;
+    else if (text[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function collectCssRules(text, baseOffset = 0) {
+  const rules = [];
+  let segmentStart = 0;
+  let openIndex = text.indexOf('{');
+
+  while (openIndex !== -1) {
+    const closeIndex = findMatchingBrace(text, openIndex);
+    if (closeIndex === -1) break;
+
+    const selector = text.slice(segmentStart, openIndex).trim();
+    const body = text.slice(openIndex + 1, closeIndex);
+    const bodyStart = baseOffset + openIndex + 1;
+
+    if (selector.startsWith('@') || body.includes('{')) {
+      rules.push(...collectCssRules(body, bodyStart));
+    } else if (selector) {
+      rules.push({ body, bodyStart, selector });
+    }
+
+    segmentStart = closeIndex + 1;
+    openIndex = text.indexOf('{', segmentStart);
+  }
+
+  return rules;
+}
+
+function lineNumberAtOffset(text, offset) {
+  return text.slice(0, Math.max(0, offset)).split('\n').length;
+}
+
+function lineAtOffset(text, offset) {
+  const start = text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+  const end = text.indexOf('\n', offset);
+  return text.slice(start, end === -1 ? text.length : end);
+}
+
+function splitSelectors(selectorText) {
+  return selectorText
+    .split(',')
+    .map((selector) => selector.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function baseFocusSelector(selector) {
+  return selector
+    .replace(/:focus-visible\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasTokenizedFocusOutline(body) {
+  return focusRingOutlinePattern.test(body) && outlineOffsetPattern.test(body);
+}
+
+function hasFocusVisibleReplacement(selector, rules) {
+  return splitSelectors(selector).every((rawSelector) => {
+    const baseSelector = baseFocusSelector(rawSelector);
+    return rules.some((rule) => hasTokenizedFocusOutline(rule.body)
+      && splitSelectors(rule.selector).some((candidate) => (
+        /:focus-visible\b/.test(candidate) && baseFocusSelector(candidate) === baseSelector
+      )));
+  });
+}
+
+function scanCssFocusSuppression(findings, file, text) {
+  const masked = maskCssComments(text);
+  const rules = collectCssRules(masked);
+
+  for (const rule of rules) {
+    for (const match of rule.body.matchAll(rawCssFocusSuppressionPattern)) {
+      if (hasFocusVisibleReplacement(rule.selector, rules)) continue;
+
+      const offset = rule.bodyStart + match.index;
+      addFinding(
+        findings,
+        'soup/no-raw-css-focus-suppression',
+        file,
+        lineNumberAtOffset(text, offset),
+        lineAtOffset(text, offset),
+        'Raw CSS outline suppression needs a tokenized :focus-visible outline replacement.',
+      );
+    }
+  }
 }
 
 function scanLine(findings, file, lines, index) {
@@ -238,9 +342,11 @@ function scanLine(findings, file, lines, index) {
 
 function scanFile(root, filePath) {
   const file = normalizeRepoPath(root, filePath);
-  const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+  const text = readFileSync(filePath, 'utf8');
+  const lines = text.split(/\r?\n/);
   const findings = [];
   for (let i = 0; i < lines.length; i += 1) scanLine(findings, file, lines, i);
+  if (extensionOf(filePath) === '.css') scanCssFocusSuppression(findings, file, text);
   return findings;
 }
 

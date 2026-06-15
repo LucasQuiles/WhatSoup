@@ -254,6 +254,8 @@ describe('D1.3 trusted focus-visible and clipping contract', () => {
 
     expect(document.activeElement).toBe(row);
     expect(row.matches(':focus-visible')).toBe(true);
+    expect(styles.outlineStyle).not.toBe('none');
+    expect(styles.outlineWidth).not.toBe('0px');
     expect(styles.boxShadow).not.toBe('none');
   });
 });

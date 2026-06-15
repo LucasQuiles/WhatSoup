@@ -384,18 +384,24 @@ cannot express the check).
 
 - **Purpose:** never remove focus affordance without a focus-visible replacement. Current state:
   TSX-level `outline-none` has been zeroed; the former Inbox and HistoryTab chat-composer carve-outs
-  were retired by routing those composers through primitives without outline suppression.
+  were retired by routing those composers through primitives without outline suppression. CSS-side
+  raw `outline:none`/`outline:0` is also zeroed unless paired with a tokenized `:focus-visible`
+  outline replacement.
 - **Mechanism:** selector `Literal[value=/\boutline-none\b/]` (+ template-literal variant) flagging
-  unless the same className string contains `focus-visible:`; CSS-side `rg` for `outline: none`
-  outside the two sanctioned blocks.
-- **Scope:** all TSX. Exemption: none beyond the focus-visible-pairing escape.
+  unless the same className string contains `focus-visible:`; CSS-side
+  `soup/no-raw-css-focus-suppression` in `check-design-resilience.mjs`, promoted by
+  `design:resilience`, rejects raw suppression unless every selector in the reset has a
+  `:focus-visible` block with `outline: ... var(--focus-ring)` and `outline-offset`.
+- **Scope:** TSX className utilities plus CSS under `console/src`. Exemption: none beyond the
+  focus-visible-pairing escape.
 - **Violation / valid:** `className="… outline-none …"` →
   `className="… focus-visible:ring-[var(--focus-ring)] …"` or rely on the global ring by not
-  suppressing.
+  suppressing. `.bad { outline: none; }` → `.bad:focus-visible { outline: 2px solid
+  var(--focus-ring); outline-offset: var(--bw-focus); }`.
 - **FP strategy:** string-pairing check is conservative; composite classes that embed their own
-  ring get registered in the rule's allowlist as primitives land.
-- **Autofix:** no. **Phase:** P2 (composers are absorbed by the ConversationView/Input work).
-  **Entry:** shadow.
+  ring get registered in the rule's allowlist as primitives land. CSS selector matching is exact and
+  intentionally conservative for grouped resets.
+- **Autofix:** no. **Phase:** P2. **Entry:** TSX scoped-error plus CSS design-resilience error.
 
 ### soup/focus-visible-required
 

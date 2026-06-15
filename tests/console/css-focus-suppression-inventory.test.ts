@@ -7,8 +7,8 @@ import { resolve } from 'node:path'
 // safe when paired with a `:focus-visible` replacement (and is a forced-colors
 // hazard otherwise). The eslint rule `soup/no-focus-suppression` ONLY scans TSX
 // `outline-none` className utilities — raw `outline:none` / `outline:0` in the
-// .css style files bypasses it entirely (verified: 5 occurrences, 0 guarded at
-// this layer). This is the "hand-rolled style / conflicting layer" class.
+// .css style files used to bypass it entirely. The promoted design-resilience
+// guard now blocks any suppression without a tokenized focus-visible outline.
 //
 // Frozen-inventory ratchet: pin the current sanctioned suppressions (each reviewed
 // to sit on a container shell or to carry a paired focus-visible replacement) and
@@ -32,14 +32,12 @@ const SELECTOR_OPEN = /\{/
 
 // Current sanctioned suppressions, keyed `file::selector` (line-number-independent).
 // Each reviewed: modal/drawer shells are focusable containers with the ring applied
-// via :focus-visible; the form-control reset re-adds the ring per primitive; the
-// chat-item carries a tokenized inset-ring replacement (DD-17).
+// via :focus-visible; the form-control reset and FeedCard each re-add the ring.
 const ALLOWLIST = new Set<string>([
   'console/src/styles/primitives.css::.soup-modal-shell',
   'console/src/styles/primitives.css::.soup-drawer',
   'console/src/styles/composites.css::input, select, textarea, button',
   'console/src/styles/composites.css::.fc',
-  'console/src/styles/composites.css::.c-chat-item:focus-visible',
 ])
 
 /** Each raw-CSS outline-suppression keyed by file + nearest enclosing selector. */

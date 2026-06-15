@@ -117,7 +117,8 @@ describe('design token component classes', () => {
     const css = readCompositeCss()
     const block = blockFor(css, '.c-chat-item:focus-visible')
 
-    expect(block).toContain('outline: none;')
+    expect(block).toContain('outline: var(--bw-accent) solid var(--focus-ring);')
+    expect(block).toContain('outline-offset: calc(var(--bw-accent) * -1);')
     expect(block).toContain('background: var(--surface-overlay);')
     expect(block).toContain('box-shadow:')
     expect(block).toContain('var(--focus-ring)')

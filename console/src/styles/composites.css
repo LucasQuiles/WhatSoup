@@ -248,6 +248,12 @@ body::before {
   border-bottom-color: var(--b2);
 }
 
+.fc:focus-visible {
+  outline: var(--bw-accent) solid var(--focus-ring);
+  outline-offset: calc(var(--bw-accent) * -1);
+  transition: none;
+}
+
 .fc--error {
   background-color: var(--s-crit-wash);
 }
@@ -965,7 +971,8 @@ textarea:focus-visible {
 }
 .c-chat-item:hover { background: var(--color-d3); }
 .c-chat-item:focus-visible {
-  outline: none;
+  outline: var(--bw-accent) solid var(--focus-ring);
+  outline-offset: calc(var(--bw-accent) * -1);
   background: var(--surface-overlay);
   border-color: var(--mode-chat-border);
   box-shadow:
