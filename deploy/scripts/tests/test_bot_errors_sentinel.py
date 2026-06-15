@@ -127,6 +127,24 @@ def test_load_hosts_validates_schema_and_duplicates(tmp_path: Path):
     with pytest.raises(_mod.SentinelError, match=r"hosts\[0\] requires host"):
         _mod.load_hosts(missing_host)
 
+    malformed_fields = [
+        ("host", True),
+        ("role", True),
+        ("heartbeatPath", True),
+        ("probePath", 123),
+        ("ackPath", True),
+        ("sshHost", True),
+        ("root", True),
+        ("python", True),
+    ]
+    for field, value in malformed_fields:
+        payload = {"host": "host-a", field: value}
+        if field == "host":
+            payload = {field: value}
+        bad = _write_json(tmp_path / f"bad-{field}.json", {"schemaVersion": 1, "hosts": [payload]})
+        with pytest.raises(_mod.SentinelError, match=rf"hosts\[0\]\.{field} must be a string"):
+            _mod.load_hosts(bad)
+
 
 def test_expected_fleet_roster_derives_heartbeat_and_ack_paths(tmp_path: Path):
     roster = _write_json(

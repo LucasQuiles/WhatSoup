@@ -298,14 +298,29 @@ def optional_json_object(path: Path) -> Optional[dict]:
         return None
 
 
-def path_or_none(value: object) -> Optional[Path]:
-    text = str(value or "").strip()
+def optional_text(value: object, field: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SentinelError(f"{field} must be a string")
+    text = value.strip()
+    return text or None
+
+
+def required_text(value: object, field: str, missing: str) -> str:
+    text = optional_text(value, field)
+    if text is None:
+        raise SentinelError(missing)
+    return text
+
+
+def path_or_none(value: object, field: str) -> Optional[Path]:
+    text = optional_text(value, field)
     return Path(text).expanduser() if text else None
 
 
-def text_or_none(value: object) -> Optional[str]:
-    text = str(value or "").strip()
-    return text or None
+def text_or_none(value: object, field: str) -> Optional[str]:
+    return optional_text(value, field)
 
 
 def default_heartbeat_path(state_dir: Optional[Path], host: str) -> Optional[Path]:
@@ -336,22 +351,22 @@ def load_hosts(path: Path, state_dir: Optional[Path] = None) -> list[HostSpec]:
     for index, item in enumerate(hosts):
         if not isinstance(item, dict):
             raise SentinelError(f"hosts[{index}] must be an object")
-        host = str(item.get("host") or "").strip()
-        if not host:
-            raise SentinelError(f"hosts[{index}] requires host")
+        host = required_text(item.get("host"), f"hosts[{index}].host", f"hosts[{index}] requires host")
         if host in seen:
             raise SentinelError(f"duplicate host: {host}")
         seen.add(host)
         result.append(
             HostSpec(
                 host=host,
-                role=str(item.get("role") or "runtime"),
-                heartbeat_path=path_or_none(item.get("heartbeatPath")) or (default_heartbeat_path(state_dir, host) if derive_default_paths else None),
-                probe_path=path_or_none(item.get("probePath")),
-                ack_path=path_or_none(item.get("ackPath")) or (default_ack_path(state_dir, host) if derive_default_paths else None),
-                ssh_host=text_or_none(item.get("sshHost")),
-                root=path_or_none(item.get("root")),
-                python=str(item.get("python") or "python3").strip() or "python3",
+                role=text_or_none(item.get("role"), f"hosts[{index}].role") or "runtime",
+                heartbeat_path=path_or_none(item.get("heartbeatPath"), f"hosts[{index}].heartbeatPath")
+                or (default_heartbeat_path(state_dir, host) if derive_default_paths else None),
+                probe_path=path_or_none(item.get("probePath"), f"hosts[{index}].probePath"),
+                ack_path=path_or_none(item.get("ackPath"), f"hosts[{index}].ackPath")
+                or (default_ack_path(state_dir, host) if derive_default_paths else None),
+                ssh_host=text_or_none(item.get("sshHost"), f"hosts[{index}].sshHost"),
+                root=path_or_none(item.get("root"), f"hosts[{index}].root"),
+                python=text_or_none(item.get("python"), f"hosts[{index}].python") or "python3",
             )
         )
     return result
