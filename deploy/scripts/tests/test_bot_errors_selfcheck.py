@@ -1295,6 +1295,25 @@ def test_default_deploy_invokes_local_deployer(tmp_path: Path, monkeypatch):
     assert len(output) == 4000
 
 
+def test_default_deploy_reports_timeout_and_exec_errors(tmp_path: Path, monkeypatch):
+    def timeout(_cmd, **_kwargs):
+        raise _mod.subprocess.TimeoutExpired(["bash"], 120, output=b"partial deploy output")
+
+    monkeypatch.setattr(_mod.subprocess, "run", timeout)
+    rc, output = _mod.default_deploy(tmp_path / "deployer.sh")(tmp_path / "root", tmp_path / "bundle")
+    assert rc == 124
+    assert "DEPLOY_TIMEOUT" in output
+    assert "partial deploy output" in output
+
+    def exec_error(_cmd, **_kwargs):
+        raise OSError("missing bash")
+
+    monkeypatch.setattr(_mod.subprocess, "run", exec_error)
+    rc, output = _mod.default_deploy(tmp_path / "deployer.sh")(tmp_path / "root", tmp_path / "bundle")
+    assert rc == 127
+    assert "DEPLOY_EXEC_ERROR: OSError" in output
+
+
 def test_default_runtime_verify_invokes_deployer_verify(tmp_path: Path, monkeypatch):
     class Proc:
         returncode = 1

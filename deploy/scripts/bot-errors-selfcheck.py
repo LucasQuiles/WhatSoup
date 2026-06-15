@@ -500,15 +500,20 @@ def default_commit_exists(repo_root: Path) -> Callable[[str], bool]:
 
 def default_deploy(deployer_path: Path) -> Callable[[Path, Path, Path], tuple[int, str]]:
     def _deploy(root: Path, bundle: Path, _deployer: Path = deployer_path) -> tuple[int, str]:
-        proc = subprocess.run(
-            ["bash", str(_deployer), "deploy", str(root), str(bundle)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        return proc.returncode, proc.stdout[-4000:]
+        try:
+            proc = subprocess.run(
+                ["bash", str(_deployer), "deploy", str(root), str(bundle)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return 124, tail_text(f"DEPLOY_TIMEOUT: {exc}\n{tail_text(exc.stdout, 3600)}")
+        except OSError as exc:
+            return 127, tail_text(f"DEPLOY_EXEC_ERROR: {type(exc).__name__}: {exc}")
+        return proc.returncode, tail_text(proc.stdout)
 
     return _deploy
 
