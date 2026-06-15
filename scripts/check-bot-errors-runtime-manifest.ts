@@ -51,6 +51,8 @@ export const REQUIRED_RUNTIME_MANIFEST_PATHS = [
   'deploy/scripts/bot-errors-runner.py',
   'deploy/scripts/lib/__init__.py',
   'deploy/scripts/lib/bot_errors_redaction.py',
+  'deploy/scripts/bot-errors-gui-session-monitor.py',
+  'deploy/scripts/install-bot-errors-gui-monitor-launchd.sh',
 ] as const;
 
 function finding(
