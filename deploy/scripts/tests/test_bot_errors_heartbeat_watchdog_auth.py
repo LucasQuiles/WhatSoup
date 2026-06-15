@@ -119,6 +119,24 @@ def test_malformed_open_incident_counters_do_not_crash_reconcile(tmp_path: Path,
     assert incident["lastEvidence"] == "fleet sentinel heartbeat stale"
 
 
+def test_malformed_open_incident_record_realerts_when_problem_persists(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    mod.atomic_write_json(
+        state / "heartbeat-watchdog-state.json",
+        {"version": 1, "open": {"fleet_sentinel": ["corrupt"]}},
+    )
+
+    written = mod.reconcile({"fleet_sentinel": "fleet sentinel heartbeat stale"}, ["fleet_sentinel"])
+
+    assert len(written) == 1
+    saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
+    incident = saved["open"]["fleet_sentinel"]
+    assert isinstance(incident, dict)
+    assert incident["suppressed"] == 0
+    assert incident["lastEvidence"] == "fleet sentinel heartbeat stale"
+
+
 def test_malformed_recovery_counter_restarts_recovery_confirmation(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)
@@ -144,6 +162,23 @@ def test_malformed_recovery_counter_restarts_recovery_confirmation(tmp_path: Pat
     assert written == []
     saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
     assert saved["open"]["fleet_sentinel"]["recoveryObservations"] == 1
+
+
+def test_malformed_open_incident_record_restarts_recovery_confirmation(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    mod.atomic_write_json(
+        state / "heartbeat-watchdog-state.json",
+        {"version": 1, "open": {"fleet_sentinel": ["corrupt"]}},
+    )
+
+    written = mod.reconcile({}, ["fleet_sentinel"])
+
+    assert written == []
+    saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
+    incident = saved["open"]["fleet_sentinel"]
+    assert isinstance(incident, dict)
+    assert incident["recoveryObservations"] == 1
 
 
 def test_local_instance_health_flags_terminal_auth_class_as_physical_intervention(

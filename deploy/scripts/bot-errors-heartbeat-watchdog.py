@@ -956,6 +956,16 @@ def incident_age_seconds(incident: dict[str, Any], current: int) -> int:
     return max(previous_age, wall_age)
 
 
+def replacement_incident(current: int) -> dict[str, Any]:
+    return {
+        "firstSeenAt": now_iso(current),
+        "lastSeenAt": now_iso(current),
+        "lastNotifiedAt": now_iso(current),
+        "lastEvidence": "malformed incident record",
+        "suppressed": 0,
+    }
+
+
 def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path]:
     state = load_state()
     open_incidents: dict[str, Any] = state["open"]
@@ -963,6 +973,8 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
     current = now_epoch()
     for key, evidence in sorted(problems.items()):
         redacted_evidence = redact_watchdog_text(evidence)
+        if key in open_incidents and not isinstance(open_incidents[key], dict):
+            open_incidents.pop(key, None)
         if key in open_incidents:
             incident = open_incidents[key]
             incident["suppressed"] = int_or_zero(incident.get("suppressed")) + 1
@@ -1038,6 +1050,9 @@ def reconcile(problems: dict[str, str], active_prefixes: list[str]) -> list[Path
         if not key_in_active_scope(key, active_prefixes):
             continue
         incident = open_incidents[key]
+        if not isinstance(incident, dict):
+            incident = replacement_incident(current)
+            open_incidents[key] = incident
         recovery_observations = int_or_zero(incident.get("recoveryObservations")) + 1
         incident["recoveryObservations"] = recovery_observations
         incident["lastRecoveryObservedAt"] = now_iso(current)
