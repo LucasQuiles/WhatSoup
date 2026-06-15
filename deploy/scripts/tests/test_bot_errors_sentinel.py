@@ -832,6 +832,34 @@ def test_recent_q_unavailable_timeout_is_deduped_and_clears_inflight(tmp_path: P
     assert state["qUnavailableEvent"]["lastActionEventKey"] == key
 
 
+def test_non_finite_q_unavailable_event_time_does_not_dedupe_timeout(tmp_path: Path):
+    hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, action_event_cooldown_seconds=3600)
+    key = "q_unavailable:host-q:request-1:action-hash-1"
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {},
+            "qRemediation": {
+                "requestId": "request-1",
+                "host": "host-q",
+                "actionHash": "action-hash-1",
+                "expiresAtEpoch": 900.0,
+            },
+            "qUnavailableEvent": {"lastActionEventKey": key, "lastActionEventAt": float("inf")},
+        },
+    )
+
+    result = _mod.run_once(config, _deps(1000.0, {"host-q": {"reachable": True, "healthy": True, "class": "healthy"}}))
+
+    assert result["actionEvents"][0]["action"] == "q_unavailable"
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert "qRemediation" not in state
+    assert state["qUnavailableEvent"]["lastActionEventAt"] == 1000.0
+
+
 def test_malformed_q_unavailable_event_state_is_reinitialized(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
@@ -870,6 +898,11 @@ def test_expired_q_remediation_helper_edges():
     assert _mod.expired_q_remediation({"qRemediation": {"expiresAtEpoch": 1001.0}}, 1000.0) is None
     invalid = {"qRemediation": {"host": "host-q", "expiresAtEpoch": "bad"}}
     assert _mod.expired_q_remediation(invalid, 1000.0) == invalid["qRemediation"]
+    non_finite = {"qRemediation": {"host": "host-q", "expiresAtEpoch": float("inf")}}
+    assert _mod.expired_q_remediation(non_finite, 1000.0) == non_finite["qRemediation"]
+    active_non_finite = {"qRemediation": {"host": "host-q", "expiresAtEpoch": float("inf")}}
+    assert _mod.active_q_remediation(active_non_finite, 1000.0) is None
+    assert active_non_finite["qRemediation"] == {}
 
 
 def test_q_unavailable_timeout_respects_critical_whatsapp_cap(tmp_path: Path):
@@ -1183,7 +1216,7 @@ def test_malformed_pull_probe_payload_fails_closed_without_crashing(tmp_path: Pa
 
 
 def test_transition_pruning_and_state_cleanup(tmp_path: Path):
-    record = {"transitions": ["bad", 1.0, 995.0]}
+    record = {"transitions": ["bad", 1.0, 995.0, 1005.0, float("inf")]}
     assert _mod.prune_transition_times(record, 1000.0, 10) == [995.0]
 
     hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=995.0)

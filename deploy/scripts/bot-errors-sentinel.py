@@ -12,6 +12,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 import secrets
 from dataclasses import dataclass
@@ -163,6 +164,14 @@ def parse_iso_epoch(value: object) -> Optional[float]:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(timezone.utc).timestamp()
+
+
+def finite_float(value: object) -> Optional[float]:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
 
 
 def state_root() -> Path:
@@ -653,11 +662,10 @@ def prune_transition_times(record: dict, now: float, window_seconds: int) -> lis
     if not isinstance(transitions, list):
         transitions = []
     for item in transitions:
-        try:
-            stamp = float(item)
-        except (TypeError, ValueError):
+        stamp = finite_float(item)
+        if stamp is None:
             continue
-        if stamp >= floor:
+        if floor <= stamp <= now:
             kept.append(stamp)
     record["transitions"] = kept
     return kept
@@ -825,9 +833,8 @@ def fleet_event_route(fleet_action: str) -> tuple[str, str, str, bool]:
 def event_recently_emitted(record: dict, key: str, now: float, cooldown_seconds: int) -> bool:
     if record.get("lastActionEventKey") != key:
         return False
-    try:
-        last_at = float(record.get("lastActionEventAt"))
-    except (TypeError, ValueError):
+    last_at = finite_float(record.get("lastActionEventAt"))
+    if last_at is None or last_at > now:
         return False
     return now - last_at < cooldown_seconds
 
@@ -880,10 +887,7 @@ def active_q_remediation(state: dict, now: float) -> Optional[dict]:
     if not isinstance(record, dict):
         state.pop("qRemediation", None)
         return None
-    try:
-        expires_at = float(record.get("expiresAtEpoch"))
-    except (TypeError, ValueError):
-        expires_at = 0.0
+    expires_at = finite_float(record.get("expiresAtEpoch")) or 0.0
     if expires_at > now and not q_remediation_redeemed(record, now):
         return record
     record.clear()
@@ -896,10 +900,7 @@ def expired_q_remediation(state: dict, now: float) -> Optional[dict]:
         return None
     if q_remediation_redeemed(record, now):
         return None
-    try:
-        expires_at = float(record.get("expiresAtEpoch"))
-    except (TypeError, ValueError):
-        expires_at = 0.0
+    expires_at = finite_float(record.get("expiresAtEpoch")) or 0.0
     if expires_at > now:
         return None
     return dict(record)
