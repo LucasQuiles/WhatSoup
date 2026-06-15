@@ -574,7 +574,7 @@ def expected_local_instances() -> list[dict[str, Any]]:
             continue
         item: dict[str, Any] = {"name": name, "service": service}
         health_port = instance.get("healthPort")
-        if isinstance(health_port, int):
+        if isinstance(health_port, int) and not isinstance(health_port, bool):
             item["healthPort"] = health_port
         elif isinstance(health_port, str) and health_port.strip().isdigit():
             item["healthPort"] = int(health_port.strip())
@@ -755,7 +755,7 @@ def local_instance_health_problems() -> dict[str, str]:
     problems: dict[str, str] = {}
     for item in expected_local_instances():
         port = item.get("healthPort")
-        if not isinstance(port, int):
+        if isinstance(port, bool) or not isinstance(port, int):
             continue
         name = str(item["name"])
         status, body, url = local_health_http_response(name, port)

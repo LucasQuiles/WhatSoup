@@ -650,6 +650,36 @@ def test_daily_health_event_stat_error_is_reported_not_crashed(tmp_path: Path, m
     )
 
 
+def test_boolean_health_port_is_ignored(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    profile = tmp_path / "profile.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "instances": [
+                    {
+                        "name": "line-alpha",
+                        "service": "whatsoup-line-alpha.service",
+                        "expected": "always_on",
+                        "healthPort": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(profile))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_LOCAL_HEALTH_RESPONSES",
+        json.dumps({"line-alpha": {"status": 500, "body": "should not be probed"}}),
+    )
+
+    assert mod.expected_local_instances() == [
+        {"name": "line-alpha", "service": "whatsoup-line-alpha.service"}
+    ]
+    assert mod.local_instance_health_problems() == {}
+
+
 def test_local_instance_health_bad_dry_status_is_reported_not_crashed(
     tmp_path: Path,
     monkeypatch,
