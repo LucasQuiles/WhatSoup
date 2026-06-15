@@ -46,6 +46,7 @@ class SelfcheckConfig:
 class SelfcheckDeps:
     commit_exists: Callable[[str], bool]
     deploy: Callable[[Path, Path, Path], tuple[int, str]]
+    runtime_verify: Callable[[Path, Path], tuple[int, str]]
     now_epoch: Callable[[], float]
     hostname: Callable[[], str]
     service_status: Callable[[str], str] = lambda _unit: "unknown"
@@ -415,10 +416,41 @@ def default_deploy(deployer_path: Path) -> Callable[[Path, Path, Path], tuple[in
     return _deploy
 
 
+def tail_text(value: object, limit: int = 4000) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", "replace")
+    else:
+        text = str(value)
+    return text[-limit:]
+
+
+def default_runtime_verify(deployer_path: Path) -> Callable[[Path, Path], tuple[int, str]]:
+    def _verify(root: Path, _deployer: Path = deployer_path) -> tuple[int, str]:
+        try:
+            proc = subprocess.run(
+                ["bash", str(_deployer), "verify", str(root)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return 124, tail_text(f"VERIFY_TIMEOUT: {exc}\n{tail_text(exc.stdout, 3600)}")
+        except OSError as exc:
+            return 127, tail_text(f"VERIFY_EXEC_ERROR: {type(exc).__name__}: {exc}")
+        return proc.returncode, tail_text(proc.stdout)
+
+    return _verify
+
+
 def default_deps(config: SelfcheckConfig) -> SelfcheckDeps:
     return SelfcheckDeps(
         commit_exists=default_commit_exists(config.root),
         deploy=default_deploy(config.deployer_path),
+        runtime_verify=default_runtime_verify(config.deployer_path),
         now_epoch=time.time,
         hostname=socket.gethostname,
         service_status=default_service_status,
@@ -524,6 +556,18 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         atomic_write_json(config.status_path, status)
         return status
     if root_ok:
+        verify_rc, verify_output = deps.runtime_verify(config.root, config.deployer_path)
+        status["runtimeVerify"] = {"rc": verify_rc, "output": verify_output[-1000:]}
+        if verify_rc != 0:
+            status["class"] = "runtime_verify_failed"
+            status["action"] = "escalate"
+            status["problems"] = [f"runtime_verify_rc={verify_rc}"]
+            if verify_output:
+                status["problems"].append(verify_output[-1000:])
+            status["consecutive"] = update_consecutive(memory, status["class"])
+            atomic_write_json(config.memory_path, memory)
+            atomic_write_json(config.status_path, status)
+            return status
         status["healthy"] = True
         status["class"] = "healthy"
         status["consecutive"] = update_consecutive(memory, status["class"])

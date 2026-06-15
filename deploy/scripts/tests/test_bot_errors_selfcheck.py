@@ -87,9 +87,13 @@ def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: byt
         calls.append((root_arg, bundle_arg, deployer_arg))
         return 0, "DEPLOY_OK"
 
+    def runtime_verify(_root_arg: Path, _deployer_arg: Path) -> tuple[int, str]:
+        return 0, "VERIFY_OK\n  SMOKE    redaction ok\n"
+
     deps = _mod.SelfcheckDeps(
         commit_exists=lambda _sha: True,
         deploy=deploy,
+        runtime_verify=runtime_verify,
         now_epoch=lambda: 1000.0,
         hostname=lambda: "test-host",
         service_status=lambda _unit: "active",
@@ -112,9 +116,78 @@ def test_clean_runtime_writes_healthy_status_without_heal(tmp_path: Path):
     assert status["healthy"] is True
     assert status["class"] == "healthy"
     assert status["action"] == "noop"
+    assert status["runtimeVerify"]["rc"] == 0
     assert status["pin"]["headSha"] == head
     assert calls == []
     assert _read_status(config)["class"] == "healthy"
+
+
+def test_clean_runtime_runs_deployer_verify_smoke(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    verify_calls: list[tuple[Path, Path]] = []
+
+    def runtime_verify(root_arg: Path, deployer_arg: Path) -> tuple[int, str]:
+        verify_calls.append((root_arg, deployer_arg))
+        return 0, "x" * 1200
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        runtime_verify=runtime_verify,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=deps.service_status,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    assert status["class"] == "healthy"
+    assert verify_calls == [(config.root, config.deployer_path)]
+    assert status["runtimeVerify"] == {"rc": 0, "output": "x" * 1000}
+    assert calls == []
+
+
+def test_runtime_verify_failure_escalates_without_heal(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+
+    def runtime_verify(_root_arg: Path, _deployer_arg: Path) -> tuple[int, str]:
+        return 7, "VERIFY_FAIL\nSMOKE failed\n"
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        runtime_verify=runtime_verify,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=deps.service_status,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is False
+    assert status["class"] == "runtime_verify_failed"
+    assert status["action"] == "escalate"
+    assert status["runtimeVerify"]["rc"] == 7
+    assert "runtime_verify_rc=7" in status["problems"]
+    assert "VERIFY_FAIL" in status["problems"][1]
+    assert calls == []
+
+
+def test_root_drift_skips_runtime_verify_until_after_heal(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+
+    def runtime_verify(_root_arg: Path, _deployer_arg: Path) -> tuple[int, str]:
+        raise AssertionError("runtime verify should wait for matching file hashes")
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        runtime_verify=runtime_verify,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=deps.service_status,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "drift"
+    assert status["action"] == "hysteresis_wait"
+    assert calls == []
 
 
 def test_untrusted_pin_records_problem_and_does_not_heal(tmp_path: Path):
@@ -122,6 +195,7 @@ def test_untrusted_pin_records_problem_and_does_not_heal(tmp_path: Path):
     deps = _mod.SelfcheckDeps(
         commit_exists=lambda _sha: False,
         deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
     )
@@ -162,6 +236,7 @@ def test_unit_bad_blocks_file_heal_and_escalates(tmp_path: Path, monkeypatch):
     deps = _mod.SelfcheckDeps(
         commit_exists=deps.commit_exists,
         deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
         service_status=lambda unit: "loaded" if unit == "com.bot-errors.health" else "inactive",
@@ -329,6 +404,7 @@ def test_current_symlink_race_refuses_deploy(tmp_path: Path):
     deps = _mod.SelfcheckDeps(
         commit_exists=deps.commit_exists,
         deploy=deps.deploy,
+        runtime_verify=deps.runtime_verify,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
         before_heal=before_heal,
@@ -348,6 +424,7 @@ def test_deployer_failure_is_reported_and_lock_is_released(tmp_path: Path):
     deps = _mod.SelfcheckDeps(
         commit_exists=deps.commit_exists,
         deploy=deploy,
+        runtime_verify=deps.runtime_verify,
         now_epoch=deps.now_epoch,
         hostname=deps.hostname,
     )
@@ -686,13 +763,58 @@ def test_default_deploy_invokes_local_deployer(tmp_path: Path, monkeypatch):
     assert len(output) == 4000
 
 
+def test_default_runtime_verify_invokes_deployer_verify(tmp_path: Path, monkeypatch):
+    class Proc:
+        returncode = 1
+        stdout = "x" * 5000
+
+    seen = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["timeout"] = kwargs["timeout"]
+        seen["stderr"] = kwargs["stderr"]
+        return Proc()
+
+    monkeypatch.setattr(_mod.subprocess, "run", run)
+    deployer = tmp_path / "deployer.sh"
+    root = tmp_path / "root"
+    rc, output = _mod.default_runtime_verify(deployer)(root, deployer)
+    assert rc == 1
+    assert seen["cmd"] == ["bash", str(deployer), "verify", str(root)]
+    assert seen["timeout"] == 120
+    assert seen["stderr"] == _mod.subprocess.STDOUT
+    assert len(output) == 4000
+
+
+def test_default_runtime_verify_reports_timeout_and_exec_errors(tmp_path: Path, monkeypatch):
+    def timeout(_cmd, **_kwargs):
+        raise _mod.subprocess.TimeoutExpired(["bash"], 120, output=b"partial output")
+
+    monkeypatch.setattr(_mod.subprocess, "run", timeout)
+    rc, output = _mod.default_runtime_verify(tmp_path / "deployer.sh")(tmp_path / "root", tmp_path / "deployer.sh")
+    assert rc == 124
+    assert "VERIFY_TIMEOUT" in output
+    assert "partial output" in output
+
+    def exec_error(_cmd, **_kwargs):
+        raise OSError("missing bash")
+
+    monkeypatch.setattr(_mod.subprocess, "run", exec_error)
+    rc, output = _mod.default_runtime_verify(tmp_path / "deployer.sh")(tmp_path / "root", tmp_path / "deployer.sh")
+    assert rc == 127
+    assert "VERIFY_EXEC_ERROR: OSError" in output
+
+
 def test_default_deps_wires_default_callables(tmp_path: Path, monkeypatch):
     config, _deps, _calls, _head = _fixture(tmp_path)
     monkeypatch.setattr(_mod, "default_commit_exists", lambda root: (lambda sha: True))
     monkeypatch.setattr(_mod, "default_deploy", lambda deployer: (lambda root, bundle, path: (0, "ok")))
+    monkeypatch.setattr(_mod, "default_runtime_verify", lambda deployer: (lambda root, path: (0, "verify ok")))
     deps = _mod.default_deps(config)
     assert deps.commit_exists("a" * 40) is True
     assert deps.deploy(config.root, config.root, config.deployer_path) == (0, "ok")
+    assert deps.runtime_verify(config.root, config.deployer_path) == (0, "verify ok")
     assert isinstance(deps.hostname(), str)
 
 
