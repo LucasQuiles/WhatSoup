@@ -37,9 +37,53 @@ prepare_old_root() {
   rm -f "$root/deploy/scripts/bot-errors-runner.py"
 }
 
+copy_manifest_files() {
+  local from="$1" to="$2" rel
+  rm -rf "$to"
+  mkdir -p "$to"
+  while IFS= read -r rel; do
+    mkdir -p "$to/$(dirname "$rel")"
+    cp -p "$from/$rel" "$to/$rel"
+  done < "$files_list"
+}
+
+prepare_current_root() {
+  copy_manifest_files "$PWD" "$1"
+}
+
+prepare_staging() {
+  copy_manifest_files "$PWD" "$1"
+}
+
 backup_from_log() {
   local log="$1"
   awk -F= '/^BACKUP=/{print $2; exit}' "$log"
+}
+
+pointer_from_log() {
+  local log="$1"
+  awk -F= '/^LAST_KNOWN_GOOD_POINTER=/{print $2; exit}' "$log"
+}
+
+assert_backup_metadata() {
+  local metadata="$1" expected_verified="$2" expected_head="$3"
+  [ -f "$metadata" ] || fail "backup metadata missing: $metadata"
+  python3 - "$metadata" "$expected_verified" "$expected_head" <<'PY' || fail "backup metadata mismatch: $metadata"
+import json
+import sys
+
+path, expected_verified, expected_head = sys.argv[1:4]
+with open(path, encoding="utf-8") as fh:
+    data = json.load(fh)
+assert data["schemaVersion"] == 1
+assert data["backupVerified"] is (expected_verified == "true")
+if expected_head == "null":
+    assert data["headSha"] is None
+    assert data["headShaSource"] == "unknown"
+else:
+    assert data["headSha"] == expected_head
+    assert data["headShaSource"] == "staging_dir_basename"
+PY
 }
 
 assert_backup_outside_root() {
@@ -60,12 +104,56 @@ bash "$D" deploy "$root" "$PWD" > "$tmp/deploy.log" 2>&1
 grep -q "DEPLOY_OK" "$tmp/deploy.log" || { cat "$tmp/deploy.log"; fail "deploy did not report DEPLOY_OK"; }
 backup=$(backup_from_log "$tmp/deploy.log")
 assert_backup_outside_root "$root" "$backup"
+grep -q "BACKUP_VERIFIED=0" "$tmp/deploy.log" || { cat "$tmp/deploy.log"; fail "drifted pre-deploy backup was not marked unverified"; }
+grep -q "LAST_KNOWN_GOOD_SKIPPED=backup_not_clean" "$tmp/deploy.log" || { cat "$tmp/deploy.log"; fail "unclean backup updated last_known_good"; }
+[ ! -e "$tmp/.bot-errors-last-known-good-runtime" ] || fail "unclean backup created last_known_good pointer"
+assert_backup_metadata "$backup/.bot-errors-backup.json" false null
 bash "$D" verify "$root" > "$tmp/verify.log" 2>&1 || { cat "$tmp/verify.log"; fail "deployed root did not verify"; }
 
 bash "$D" rollback "$root" "$backup" > "$tmp/rollback.log" 2>&1
 grep -q "ROLLBACK_OK" "$tmp/rollback.log" || { cat "$tmp/rollback.log"; fail "rollback did not report ROLLBACK_OK"; }
 grep -q "old:deploy/scripts/bot-errors-emit.py" "$root/deploy/scripts/bot-errors-emit.py" || fail "rollback did not restore old bytes"
 [ ! -e "$root/deploy/scripts/bot-errors-runner.py" ] || fail "rollback did not delete pre-deploy absent file"
+
+stage_sha=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+staging="$tmp/$stage_sha"
+prepare_staging "$staging"
+clean_root="$tmp/clean-runtime"
+prepare_current_root "$clean_root"
+bash "$D" deploy "$clean_root" "$staging" > "$tmp/clean-deploy.log" 2>&1
+grep -q "DEPLOY_OK" "$tmp/clean-deploy.log" || { cat "$tmp/clean-deploy.log"; fail "clean deploy did not report DEPLOY_OK"; }
+clean_backup=$(backup_from_log "$tmp/clean-deploy.log")
+assert_backup_outside_root "$clean_root" "$clean_backup"
+grep -q "BACKUP_VERIFIED=1" "$tmp/clean-deploy.log" || { cat "$tmp/clean-deploy.log"; fail "clean backup was not verified"; }
+clean_pointer=$(pointer_from_log "$tmp/clean-deploy.log")
+[ -f "$clean_pointer" ] || fail "last_known_good pointer missing: $clean_pointer"
+IFS= read -r pointed_backup < "$clean_pointer"
+[ "$pointed_backup" = "$clean_backup" ] || fail "last_known_good pointer did not target verified backup"
+assert_backup_metadata "$clean_backup/.bot-errors-backup.json" true "$stage_sha"
+printf 'damaged\n' > "$clean_root/deploy/scripts/bot-errors-emit.py"
+bash "$D" rollback-lkg "$clean_root" > "$tmp/rollback-lkg.log" 2>&1
+grep -q "ROLLBACK_LKG_OK" "$tmp/rollback-lkg.log" || { cat "$tmp/rollback-lkg.log"; fail "rollback-lkg did not report ROLLBACK_LKG_OK"; }
+bash "$D" verify "$clean_root" > "$tmp/verify-lkg.log" 2>&1 || { cat "$tmp/verify-lkg.log"; fail "rollback-lkg root did not verify"; }
+
+missing_lkg_root="$tmp/missing-lkg-runtime"
+prepare_current_root "$missing_lkg_root"
+if bash "$D" rollback-lkg "$missing_lkg_root" > "$tmp/missing-lkg.log" 2>&1; then
+  cat "$tmp/missing-lkg.log"
+  fail "rollback-lkg unexpectedly succeeded without a pointer"
+fi
+grep -q "last_known_good pointer missing" "$tmp/missing-lkg.log" || {
+  cat "$tmp/missing-lkg.log"
+  fail "missing last_known_good pointer was not reported"
+}
+
+if bash "$D" rollback "$clean_root" "$tmp/not-a-backup" > "$tmp/missing-backup.log" 2>&1; then
+  cat "$tmp/missing-backup.log"
+  fail "rollback unexpectedly succeeded with a missing backup"
+fi
+grep -q "backup dir not found" "$tmp/missing-backup.log" || {
+  cat "$tmp/missing-backup.log"
+  fail "missing backup was not reported"
+}
 
 fail_root="$tmp/fail-runtime"
 prepare_old_root "$fail_root"
@@ -88,6 +176,8 @@ grep -q "DEPLOY_FAILED_ROLLED_BACK" "$tmp/fail-deploy.log" || {
 }
 fail_backup=$(backup_from_log "$tmp/fail-deploy.log")
 assert_backup_outside_root "$fail_root" "$fail_backup"
+grep -q "BACKUP_VERIFIED=0" "$tmp/fail-deploy.log" || { cat "$tmp/fail-deploy.log"; fail "smoke-failing deploy backup was not marked unverified"; }
+assert_backup_metadata "$fail_backup/.bot-errors-backup.json" false null
 grep -q "old:deploy/scripts/bot-errors-emit.py" "$fail_root/deploy/scripts/bot-errors-emit.py" || fail "auto-rollback did not restore old bytes"
 [ ! -e "$fail_root/deploy/scripts/bot-errors-runner.py" ] || fail "auto-rollback did not delete pre-deploy absent file"
 
