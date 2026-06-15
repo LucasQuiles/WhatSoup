@@ -641,6 +641,15 @@ body::before {
   outline-offset: var(--bw-focus);
   transition: none;
 }
+/* P1-5: disabled input state — input.md spec: ink --text-3, background --surface-base, dashed border --border-subtle, cursor not-allowed */
+.c-input:disabled,
+.c-input[aria-disabled="true"] {
+  color: var(--text-3);
+  background: var(--surface-base);
+  border-style: dashed;
+  border-color: var(--border-subtle);
+  cursor: not-allowed;
+}
 .c-input-search {
   padding-left: var(--sp-7);
   padding-right: var(--sp-8);
@@ -701,6 +710,11 @@ body::before {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+}
+
+/* P1-4: label ink via CSS class — eliminates inline style={{ color: 'var(--text-2)' }} on RadioField/CheckboxField spans */
+.c-checkbox-label {
+  color: var(--text-2);
 }
 
 
@@ -960,9 +974,9 @@ textarea:focus-visible {
   transition: none;
 }
 
-/* Hover transition base: 0.15s background + border-color */
+/* Hover transition base: dur-fast (120ms) background + border-color — P1-6: replaced raw 0.15s with token */
 .c-hover {
-  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
+  transition: background var(--dur-fast) var(--ease-enter), border-color var(--dur-fast) var(--ease-enter), color var(--dur-fast) var(--ease-enter);
 }
 
 /* Chat list item hover */
@@ -988,9 +1002,9 @@ textarea:focus-visible {
 }
 .c-msg-bubble:hover { filter: brightness(1.1); }
 
-/* KPI card hover: compositor-safe properties only (no transition: all) */
+/* KPI card hover: compositor-safe properties only (no transition: all) — P1-6: replaced raw 0.25s with token */
 .c-kpi-hover {
-  transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease);
+  transition: transform var(--dur-base) var(--ease-enter), box-shadow var(--dur-base) var(--ease-enter);
 }
 .c-kpi-hover:hover {
   transform: translateY(-2px);

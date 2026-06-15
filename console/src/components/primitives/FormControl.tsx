@@ -222,7 +222,7 @@ export const RadioField: FC<RadioFieldProps> = ({
       onChange={event => onChange(event.target.value)}
       className={inputClassName}
     />
-    <span className={`text-data ${labelClassName ?? ''}`} style={{ color: 'var(--text-2)' }}>{label}</span>
+    <span className={`text-data c-checkbox-label ${labelClassName ?? ''}`}>{label}</span>
   </label>
 );
 
@@ -267,7 +267,7 @@ export const CheckboxField: FC<CheckboxFieldProps> = ({
         aria-describedby={ariaDescribedBy}
         aria-invalid={ariaInvalid}
       />
-      <span className={`text-data ${labelClassName ?? ''}`} style={{ color: 'var(--text-2)' }}>{label}</span>
+      <span className={`text-data c-checkbox-label ${labelClassName ?? ''}`}>{label}</span>
       {suffix && <span aria-hidden="true">{suffix}</span>}
     </label>
     {helper && <div className="c-helper ml-[var(--sp-5)]">{helper}</div>}

@@ -404,6 +404,9 @@ describe('RadioField', () => {
     expect(row?.classList.contains('c-checkbox-row')).toBe(true)
     expect(row?.classList.contains('row-extra')).toBe(true)
     expect(labelText.classList.contains('label-extra')).toBe(true)
+    // P1-4: label ink must come from CSS class, not inline style
+    expect(labelText.classList.contains('c-checkbox-label')).toBe(true)
+    expect(labelText.getAttribute('style')).not.toContain('color')
   })
 
   it('emits the selected value through user interaction', async () => {
@@ -500,6 +503,9 @@ describe('CheckboxField', () => {
     expect(row?.classList.contains('row-extra')).toBe(true)
     expect(labelText.classList.contains('label-extra')).toBe(true)
     expect(screen.getByTestId('suffix').textContent).toBe('offline')
+    // P1-4: label ink must come from CSS class, not inline style
+    expect(labelText.classList.contains('c-checkbox-label')).toBe(true)
+    expect(labelText.getAttribute('style')).not.toContain('color')
   })
 
   it('changes checked state through user interaction', async () => {
