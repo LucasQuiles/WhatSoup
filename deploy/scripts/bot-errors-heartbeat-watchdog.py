@@ -29,6 +29,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
 
 
+class QueueDirectoryError(RuntimeError):
+    pass
+
+
 def positive_env_int(name: str, default: int) -> int:
     value = int(os.environ.get(name, str(default)))
     if value <= 0:
@@ -381,12 +385,15 @@ def env_int(name: str, default: int) -> int:
 
 
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
-    if not path.exists():
-        return 0, 0
-    files = [item for item in path.glob(pattern) if item.is_file()]
-    if not files:
-        return 0, 0
-    oldest = max(0, now_epoch() - min(int(item.stat().st_mtime) for item in files))
+    try:
+        if not path.exists():
+            return 0, 0
+        files = [item for item in path.glob(pattern) if item.is_file()]
+        if not files:
+            return 0, 0
+        oldest = max(0, now_epoch() - min(int(item.stat().st_mtime) for item in files))
+    except OSError as exc:
+        raise QueueDirectoryError(f"path={path} pattern={pattern} error={type(exc).__name__}: {exc}") from exc
     return len(files), oldest
 
 
@@ -400,7 +407,10 @@ def queue_backlog_problem(
     total_count = 0
     oldest_seconds = 0
     for path in paths:
-        count, oldest = directory_stats(path, pattern)
+        try:
+            count, oldest = directory_stats(path, pattern)
+        except QueueDirectoryError as exc:
+            return f"{label} backlog scan failed: {exc}"
         total_count += count
         oldest_seconds = max(oldest_seconds, oldest)
     over_count = max_count > 0 and total_count >= max_count

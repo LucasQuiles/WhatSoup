@@ -267,6 +267,59 @@ def test_queue_backlog_threshold_env_falls_back_for_bad_values(tmp_path: Path, m
     assert mod.queue_backlog_problems() == {}
 
 
+def test_queue_backlog_directory_scan_error_is_reported_not_crashed(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    _private_state(monkeypatch, mod, tmp_path)
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
+    original_glob = Path.glob
+
+    def glob(path: Path, pattern: str):
+        if path == outbox:
+            raise PermissionError("denied")
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", glob)
+
+    problems = mod.collect_problems(_watchdog_args(), {"queue_backlog"})
+
+    assert problems["queue:outbox"] == (
+        f"outbox backlog scan failed: path={outbox} pattern=*.json "
+        "error=PermissionError: denied"
+    )
+
+
+def test_queue_backlog_file_stat_error_is_reported_not_crashed(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    _private_state(monkeypatch, mod, tmp_path)
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    target = outbox / "event.json"
+    target.write_text("{}", encoding="utf-8")
+    target.chmod(0o600)
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
+    original_stat = Path.stat
+    target_calls = 0
+
+    def stat(path: Path, *args, **kwargs):
+        nonlocal target_calls
+        if path == target:
+            target_calls += 1
+            if target_calls > 1:
+                raise PermissionError("denied")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    problems = mod.collect_problems(_watchdog_args(), {"queue_backlog"})
+
+    assert problems["queue:outbox"] == (
+        f"outbox backlog scan failed: path={outbox} pattern=*.json "
+        "error=PermissionError: denied"
+    )
+
+
 def test_local_instance_health_flags_terminal_auth_class_as_physical_intervention(
     tmp_path: Path,
     monkeypatch,
