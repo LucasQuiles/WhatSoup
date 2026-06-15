@@ -594,6 +594,20 @@ def test_non_finite_consecutive_memory_restarts_hysteresis(tmp_path: Path):
     assert memory["consecutive"] == 1
 
 
+def test_boolean_consecutive_memory_restarts_hysteresis(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": True, "healHistory": []})
+
+    status = _mod.run_selfcheck(config, deps)
+
+    assert status["class"] == "drift"
+    assert status["consecutive"] == 1
+    assert status["action"] == "hysteresis_wait"
+    assert calls == []
+    memory = json.loads(config.memory_path.read_text(encoding="utf-8"))
+    assert memory["consecutive"] == 1
+
+
 def test_unit_bad_blocks_file_heal_and_escalates(tmp_path: Path, monkeypatch):
     config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
     _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})

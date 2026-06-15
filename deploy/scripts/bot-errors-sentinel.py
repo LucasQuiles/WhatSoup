@@ -990,6 +990,8 @@ def q_unavailable_event_path(config: SentinelConfig, now: float, host: str, requ
 
 
 def int_or_zero(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
     try:
         return max(0, int(value))
     except (TypeError, ValueError, OverflowError):

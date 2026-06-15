@@ -127,6 +127,34 @@ def test_malformed_open_incident_counters_do_not_crash_reconcile(tmp_path: Path,
     assert incident["lastEvidence"] == "fleet sentinel heartbeat stale"
 
 
+def test_boolean_open_incident_counters_are_reinitialized(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    state = _private_state(monkeypatch, mod, tmp_path)
+    mod.atomic_write_json(
+        state / "heartbeat-watchdog-state.json",
+        {
+            "version": 1,
+            "open": {
+                "fleet_sentinel": {
+                    "firstSeenAt": "1970-01-01T00:00:00Z",
+                    "lastNotifiedAt": "1970-01-01T00:16:00Z",
+                    "ageSeconds": True,
+                    "suppressed": True,
+                    "lastEvidence": "prior evidence",
+                }
+            },
+        },
+    )
+
+    written = mod.reconcile({"fleet_sentinel": "fleet sentinel heartbeat stale"}, ["fleet_sentinel"])
+
+    assert written == []
+    saved = json.loads((state / "heartbeat-watchdog-state.json").read_text(encoding="utf-8"))
+    incident = saved["open"]["fleet_sentinel"]
+    assert incident["suppressed"] == 1
+    assert incident["ageSeconds"] == 1000
+
+
 def test_non_finite_open_incident_counters_do_not_crash_reconcile(tmp_path: Path, monkeypatch):
     mod = _load_module()
     state = _private_state(monkeypatch, mod, tmp_path)

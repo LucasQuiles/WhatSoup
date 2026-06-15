@@ -168,6 +168,8 @@ def load_memory(path: Path) -> dict:
 
 
 def int_or_zero(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
     try:
         return max(0, int(value))
     except (TypeError, ValueError, OverflowError):

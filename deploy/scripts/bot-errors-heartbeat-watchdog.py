@@ -1026,6 +1026,8 @@ def incident_epoch(incident: dict[str, Any], key: str, fallback: int) -> int:
 
 
 def int_or_zero(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
     try:
         return max(0, int(value))
     except (TypeError, ValueError, OverflowError):
