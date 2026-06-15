@@ -351,4 +351,54 @@ describe('fallback-provider usage-limit cascade', () => {
       { provider: 'openai-api', model: 'gpt-5.5', eligible: true },
     ]);
   });
+
+  it('uses the session provider instead of session-id prefix when an OpenCode fallback fails', () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'minimax/minimax-m2' },
+      { provider: 'openai-api', model: 'gpt-5.5' },
+    ]);
+    cv(runtime).activateProviderFallback(null, 'auth-required');
+    expect(cv(runtime).effectiveProvider).toBe('opencode-cli');
+    vi.mocked(emitAlertChecked).mockClear();
+
+    vi.advanceTimersByTime(60 * 60 * 1000);
+
+    const queue = makeFakeQueue();
+    const fallbackSession = {
+      getProviderId: vi.fn(() => 'opencode-cli'),
+      getStatus: vi.fn(() => ({
+        active: true,
+        pid: null,
+        sessionId: 'raw-opencode-session-id',
+        startedAt: new Date().toISOString(),
+        messageCount: 1,
+        lastMessageAt: new Date().toISOString(),
+      })),
+      getDbRowId: vi.fn(() => null),
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(async () => {}),
+    };
+    cv(runtime).handleEventWithContext(
+      { type: 'result', text: USAGE_LIMIT_TEXT },
+      queue,
+      fallbackSession,
+      'conv-key',
+      1,
+      'mapkey-opencode-fallback-raw-session-id',
+    );
+
+    expect(cv(runtime).effectiveProvider).toBe('openai-api');
+    expect(cv(runtime).effectiveModel).toBe('gpt-5.5');
+    expect(cv(runtime).failedFallbackEntryKeys.has('opencode-cli\u0000minimax/minimax-m2')).toBe(true);
+    expect(emitAlertChecked).toHaveBeenCalledWith(
+      'test',
+      'fallback_provider_failed',
+      'Active fallback provider failed during fallback window',
+      expect.stringContaining('provider=opencode-cli model=minimax/minimax-m2 reason=usage-limit'),
+    );
+    expect(cv(runtime).getFallbackState().fallbackChain).toEqual([
+      { provider: 'opencode-cli', model: 'minimax/minimax-m2', eligible: false },
+      { provider: 'openai-api', model: 'gpt-5.5', eligible: true },
+    ]);
+  });
 });

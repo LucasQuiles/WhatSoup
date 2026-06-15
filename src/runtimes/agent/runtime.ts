@@ -5915,8 +5915,13 @@ export class AgentRuntime implements Runtime {
     evidenceText?: string,
   ): string | null {
     if (!this.isFallbackWindowActive || !this.activeFallbackEntry || !session) return null;
-    const sessionId = session.getStatus().sessionId;
-    if (!sessionId?.startsWith(`${this.activeFallbackEntry.provider}-`)) return null;
+    const sessionProvider = typeof session.getProviderId === 'function' ? session.getProviderId() : null;
+    if (sessionProvider !== null) {
+      if (sessionProvider !== this.activeFallbackEntry.provider) return null;
+    } else {
+      const sessionId = session.getStatus().sessionId;
+      if (!sessionId?.startsWith(`${this.activeFallbackEntry.provider}-`)) return null;
+    }
 
     const key = this.fallbackEntryKey(this.activeFallbackEntry);
     if (!this.failedFallbackEntryKeys.has(key)) {
