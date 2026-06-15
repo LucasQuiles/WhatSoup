@@ -395,6 +395,13 @@ def heartbeat_inventory(spec: HostSpec, now: float, max_age_seconds: int, max_cl
     if spec.heartbeat_path is None:
         return {"configured": False, "signal": "unknown", "status": "not_configured"}
     path = spec.heartbeat_path
+    if os.path.islink(path):
+        return {
+            "configured": True,
+            "signal": "stale",
+            "status": "symlink",
+            "path": str(path),
+        }
     try:
         stat = path.stat()
     except FileNotFoundError:
@@ -463,6 +470,13 @@ def normalize_probe(payload: dict) -> dict:
 
 def default_pull_probe(spec: HostSpec) -> dict:
     if spec.probe_path is not None:
+        if os.path.islink(spec.probe_path):
+            return {
+                "reachable": False,
+                "healthy": False,
+                "class": "invalid_probe",
+                "error": "symlinked_probe_path",
+            }
         return optional_json_object(spec.probe_path) or {"reachable": False, "healthy": False, "class": "invalid_probe"}
     if spec.ssh_host or spec.root is not None:
         return ssh_runtime_probe(spec)
@@ -472,6 +486,14 @@ def default_pull_probe(spec: HostSpec) -> dict:
 def oracle_inventory(path: Optional[Path]) -> dict:
     if path is None:
         return {"configured": False, "reachable": True, "class": "not_configured"}
+    if os.path.islink(path):
+        return {
+            "configured": True,
+            "reachable": None,
+            "class": "invalid_oracle",
+            "status": "symlink",
+            "path": str(path),
+        }
     payload = optional_json_object(path)
     if payload is None:
         return {"configured": True, "reachable": None, "class": "invalid_oracle", "path": str(path)}

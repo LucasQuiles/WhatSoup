@@ -767,6 +767,69 @@ def test_probe_path_default_and_bad_heartbeat_json(tmp_path: Path):
     assert missing_probe == {"reachable": False, "healthy": False, "class": "invalid_probe"}
 
 
+def test_symlinked_file_based_signals_are_not_trusted(tmp_path: Path):
+    heartbeat_target = _heartbeat(tmp_path / "heartbeat-target.json", healthy=True, klass="healthy", mtime=1000.0)
+    heartbeat_link = tmp_path / "heartbeat-link.json"
+    os.symlink(heartbeat_target, heartbeat_link)
+
+    heartbeat = _mod.heartbeat_inventory(_mod.HostSpec(host="host-a", heartbeat_path=heartbeat_link), 1000.0, 60, 300)
+
+    assert heartbeat == {
+        "configured": True,
+        "signal": "stale",
+        "status": "symlink",
+        "path": str(heartbeat_link),
+    }
+
+    probe_target = _write_json(tmp_path / "probe-target.json", {"reachable": True, "healthy": True, "class": "healthy"})
+    probe_link = tmp_path / "probe-link.json"
+    os.symlink(probe_target, probe_link)
+
+    probe = _mod.default_pull_probe(_mod.HostSpec(host="host-a", probe_path=probe_link))
+
+    assert probe == {"reachable": False, "healthy": False, "class": "invalid_probe", "error": "symlinked_probe_path"}
+
+    oracle_target = _write_json(tmp_path / "oracle-target.json", {"reachable": False, "class": "gateway_unreachable"})
+    oracle_link = tmp_path / "oracle-link.json"
+    os.symlink(oracle_target, oracle_link)
+
+    assert _mod.oracle_inventory(oracle_link) == {
+        "configured": True,
+        "reachable": None,
+        "class": "invalid_oracle",
+        "status": "symlink",
+        "path": str(oracle_link),
+    }
+
+
+def test_symlinked_oracle_does_not_suppress_mass_unreachable(tmp_path: Path):
+    hosts_payload = []
+    probes = {}
+    for name in ("host-a", "host-b"):
+        hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=True, mtime=100.0)
+        hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
+        probes[name] = {"reachable": False, "healthy": False, "class": "ssh_failed"}
+    hosts = _hosts_file(tmp_path, hosts_payload)
+    oracle_target = _write_json(tmp_path / "oracle-target.json", {"reachable": False, "class": "gateway_unreachable"})
+    oracle_link = tmp_path / "oracle-link.json"
+    os.symlink(oracle_target, oracle_link)
+    deps = _mod.SentinelDeps(
+        now_epoch=lambda: 1000.0,
+        hostname=lambda: "controller",
+        pull_probe=lambda spec: probes[spec.host],
+        reachability_oracle=lambda: _mod.oracle_inventory(oracle_link),
+    )
+
+    result = _mod.run_once(
+        _config(tmp_path, hosts, hysteresis_cycles=1, connectivity_hysteresis_cycles=1),
+        deps,
+    )
+
+    assert result["fleetAction"] == "mass_unreachable_confirmed"
+    assert result["reachabilityOracle"]["status"] == "symlink"
+    assert {host["action"] for host in result["hosts"]} == {"escalate"}
+
+
 def test_ssh_runtime_probe_success_uses_batchmode_and_remote_script(tmp_path: Path, monkeypatch):
     seen = {}
 
