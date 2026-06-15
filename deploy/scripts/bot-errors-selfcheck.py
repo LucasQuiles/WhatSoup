@@ -280,10 +280,10 @@ def dry_service_states() -> dict[str, str]:
 
 def service_check_timeout() -> float:
     raw = os.environ.get("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "5")
-    try:
-        return max(0.1, float(raw))
-    except ValueError:
+    value = finite_float(raw)
+    if value is None:
         return 5.0
+    return max(0.1, value)
 
 
 def launchd_service_status(unit: str) -> str:
@@ -541,10 +541,10 @@ def default_runtime_verify(deployer_path: Path) -> Callable[[Path, Path], tuple[
 
 def heartbeat_push_timeout() -> float:
     raw = os.environ.get("BOT_ERRORS_SELFCHECK_HEARTBEAT_TIMEOUT_SECONDS", "5")
-    try:
-        return max(0.1, float(raw))
-    except ValueError:
+    value = finite_float(raw)
+    if value is None:
         return 5.0
+    return max(0.1, value)
 
 
 def central_ack_max_age_seconds() -> int:

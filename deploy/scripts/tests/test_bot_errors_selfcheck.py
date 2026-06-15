@@ -499,6 +499,8 @@ def test_heartbeat_helper_fallbacks_and_local_write_failure(tmp_path: Path, monk
     assert _mod.tail_text(None) == ""
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEARTBEAT_TIMEOUT_SECONDS", "bad")
     assert _mod.heartbeat_push_timeout() == 5.0
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEARTBEAT_TIMEOUT_SECONDS", "inf")
+    assert _mod.heartbeat_push_timeout() == 5.0
     monkeypatch.setenv("BOT_ERRORS_SELFCHECK_HEAL_MIN_FREE_BYTES", "bad")
     assert _mod.heal_min_free_bytes() == 64 * 1024 * 1024
 
@@ -920,6 +922,8 @@ def test_service_check_timeout_has_floor_and_fallback(monkeypatch):
     monkeypatch.setenv("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "0")
     assert _mod.service_check_timeout() == 0.1
     monkeypatch.setenv("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "bad")
+    assert _mod.service_check_timeout() == 5.0
+    monkeypatch.setenv("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "inf")
     assert _mod.service_check_timeout() == 5.0
 
 
