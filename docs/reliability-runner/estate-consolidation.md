@@ -1,13 +1,14 @@
 # Reliability Estate Consolidation
 
-Status: active ledger. Updated: 2026-06-14T23:02Z.
+Status: active ledger. Updated: 2026-06-15T02:55Z.
 
 Purpose: keep merge, branch, worktree, sweep, and instruction-hierarchy cleanup evidence in one tracked place while the reliability runner stays active.
 
 ## Current Live Queue
 
-- GitHub PR queue is volatile; re-run `gh pr list --state open` before merge or cleanup. Recorded checkpoint at 2026-06-14T22:58Z showed no open PRs after PR #857 merged.
-- Audited docs/merge hygiene checkpoints: PR #848 merged as `2954b695`; PR #849 merged as `35b18970`; PR #850 merged as `470e768b`; PR #851 merged as `cb1bedad`; PR #852 merged as `556919e4` and records the mock-data coverage slice; PR #853 merged as `37ab6f7b`; PR #854 merged as `1f6bcb91`; PR #855 merged as `1c07f8ef` and records the GroupDetailModal coverage slice; PR #856 merged as `2327667a` and records post-#855 hygiene state; PR #857 merged as `c947d639` and records post-#856 hygiene state.
+- GitHub PR queue is volatile; re-run `gh pr list --state open` before merge or cleanup. Recorded checkpoint at 2026-06-15T02:52Z showed no open PRs after PR #864 and PR #865 merged.
+- Audited docs/merge hygiene checkpoints: PR #848 merged as `2954b695`; PR #849 merged as `35b18970`; PR #850 merged as `470e768b`; PR #851 merged as `cb1bedad`; PR #852 merged as `556919e4` and records the mock-data coverage slice; PR #853 merged as `37ab6f7b`; PR #854 merged as `1f6bcb91`; PR #855 merged as `1c07f8ef` and records the GroupDetailModal coverage slice; PR #856 merged as `2327667a` and records post-#855 hygiene state; PR #857 merged as `c947d639`; PR #858 merged as `88434a9c`; PR #864 merged as `2a75f2c0` and records the deferred live provider-fallback acceptance gate.
+- Coverage/consolidation checkpoints: PR #859 merged as `82d67c19`; PR #860 merged as `35a32a86`; PR #861 merged as `25aed01c`; PR #862 merged as `6a2f567d`; PR #863 merged as `e09d0e31`; PR #865 merged as `052f17d9`.
 - Open GitHub issue: #640, `Prevent ignored canonical docs from disappearing from work-index coverage`; do not close or comment without explicit operator approval.
 - `test/session-classifier-pid-coverage-20260614` was merged through PR #843 and then pruned locally and remotely after `git cherry -v origin/main test/session-classifier-pid-coverage-20260614` returned empty.
 - `test/fleet-silence-route-coverage-20260614` was merged through PR #844 and then pruned locally and remotely after `git merge-base --is-ancestor test/fleet-silence-route-coverage-20260614 origin/main` succeeded and `git cherry -v origin/main test/fleet-silence-route-coverage-20260614` returned empty.
@@ -31,6 +32,7 @@ Purpose: keep merge, branch, worktree, sweep, and instruction-hierarchy cleanup 
 - Artifact sweep dry-run `20260614T213735Z`: 1950 matched artifacts, 1355 report-only residuals, 1322 low-confidence artifacts, 0 swept.
 - Artifact sweep dry-run `20260614-coverage-hygiene`: 1954 matched artifacts, 1356 report-only residuals, 1325 low-confidence artifacts, 0 swept.
 - Artifact sweep dry-run `20260614T224223Z`: 1956 matched artifacts, 1354 report-only residuals, 1331 low-confidence artifacts, 0 swept.
+- Artifact sweep dry-run `20260615T0101Z`: 1957 matched artifacts, 1390 report-only residuals, 1338 low-confidence artifacts, 0 swept.
 - Broad artifact-sweep apply mode is deferred: the latest dry-run still marks canonical tracked docs under `docs/specs`, `docs/superpowers`, and closed SDLC evidence under `docs/sdlc` as `would-sweep`, so cleanup needs a narrow allowlist rather than a whole-manifest archive/delete pass.
 - Ignored `.sweep/` cache was pruned reversibly: 109 older run directories were moved to the sweep-backup namespace `whatsoup-457b0e0360/ignored-cache-prune-20260614T193531Z`, the superseded `20260614T193531Z` run moved to `whatsoup-457b0e0360/ignored-cache-prune-20260614T201310Z`, the older `20260614T074934Z` plus `20260614T201234Z` dry-runs moved to `whatsoup-457b0e0360/ignored-cache-prune-20260614T203418Z`, `20260614T203303Z` moved to `whatsoup-457b0e0360/ignored-cache-prune-20260614T214000Z`, and `20260614-coverage-hygiene` plus `20260614T213735Z` moved to `whatsoup-457b0e0360/ignored-cache-prune-20260614T224600Z`. The repo keeps only `.sweep/20260614T224223Z` and `.sweep/superseded-local`.
 - Coverage slice validation: `tests/console/mock-data.test.ts` passed 11/11, Test Integrity reported no findings, focused coverage for `console/src/mock-data.ts` is statements 100%, branches 99%, functions 100%, lines 100%, branch `npm run coverage:check` passed with 596 files passed, 2 skipped files, 9713 tests passed, 11 skipped tests, and isolated Node 24 `npm run verify:release` passed with 597 files passed, 1 skipped file, 9723 tests passed, 1 skipped test, aggregate coverage at statements 84.46%, branches 77.84%, functions 82.86%, lines 86.12%, and console production build complete.
@@ -39,7 +41,7 @@ Purpose: keep merge, branch, worktree, sweep, and instruction-hierarchy cleanup 
 
 ## Instruction Hierarchy
 
-Instruction audit summary at 2026-06-14T22:42Z: all configured root-router references resolved for the checked machine/global and project surfaces; every audited surface had 0 missing refs, 0 ambiguous refs, and 0 hardcoded-count hits. Strict verification passed with 10 checks, 0 failures, and 0 warnings. No instruction files were edited in this pass.
+Instruction audit summary at 2026-06-15T02:47Z: all configured root-router references resolved for the checked machine/global and project surfaces; every audited surface had 0 missing refs, 0 ambiguous refs, and 0 hardcoded-count hits. Strict verification passed with 10 checks, 0 failures, and 0 warnings. No instruction files were edited in this pass. One stale global memory router was narrowed so its old `origin/main`, PR-count, and worktree-count claims are explicitly historical, not current-state instructions.
 
 ## Branch And Worktree Hygiene
 
@@ -53,6 +55,10 @@ Instruction audit summary at 2026-06-14T22:42Z: all configured root-router refer
 - Post-#856 prune checks: `git fetch --all --prune`, `git worktree prune --dry-run --verbose`, and `git remote prune origin --dry-run` produced no cleanup output.
 - Post-#856 merged-branch check: `git branch --merged origin/main` returned only the detached HEAD plus `feat/systemd-unit-reconciliation` and the merged agent branches `worktree-agent-a361a4a53a4323750`, `worktree-agent-a4279b57df647e6a7`, `worktree-agent-a5ef92da83488803f`, `worktree-agent-a7681ff96f17ce486`, and `worktree-agent-a91f218ef14989532`. All are attached to worktrees with modified or untracked files, so no branch or worktree was deleted. `worktree-agent-a95f0ed6926a574a0` is clean but is not merged into `origin/main`, so it is also not a deletion candidate.
 - PR #857 branch `docs/post-856-hygiene-ledger-20260614` was merged as `c947d639` and pruned locally/remotely after `git merge-base --is-ancestor docs/post-856-hygiene-ledger-20260614 origin/main` succeeded, `git cherry -v origin/main docs/post-856-hygiene-ledger-20260614` returned empty, and `git range-diff origin/main^2~1..origin/main^2 docs/post-856-hygiene-ledger-20260614~1..docs/post-856-hygiene-ledger-20260614` showed `0aa1b7a7 = 0aa1b7a7`.
+- PR #859, #860, #861, #862, #863, #864, and #865 branches were pruned locally/remotely after merge-base, empty `git cherry -v`, and exact `git range-diff` proof for each merged topic branch.
+- PR #864 isolated temp worktree was removed after the branch was proven absorbed; only ignored dependency cache content was present and `git worktree remove` succeeded without force.
+- One clean detached temp worktree was removed after proving its HEAD is contained in `origin/main`; only ignored cache files were present and `git worktree remove` succeeded without force.
+- Eight remote-only stale branches were deleted after exact merged-PR SHA match, no local branch, and `git cherry -v origin/main origin/<branch>` showing no positive patches. Exact private branch names remain in local/private evidence rather than this public ledger.
 - `git fetch --prune origin`, `git worktree prune --dry-run --verbose`, and `git remote prune origin --dry-run` produced no cleanup output after cache relocation.
 - Broad worktree/branch deletion is deferred while peer-agent worktrees and nonzero cherry evidence remain. Do not prune shared worktrees solely from clean status or stale branch names unless the owning process is clear or the operator explicitly approves the batch.
 - Do not create a new docs-only ledger PR solely to record the merge of another docs-only ledger PR. Record the next checkpoint only when there is a material estate change: source work landing, branch/worktree/cache pruning, instruction hierarchy edits, artifact disposition changes, or a new blocker.
