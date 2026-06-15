@@ -163,6 +163,32 @@
         "WHATSAPP_SERVICE_UNIT_RE",
         "PEM_PRIVATE_KEY_RE"
       ]
+    },
+    {
+      "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
+      "sha256": "75edc59aecb6477c9ca98ef7a6bcb1382e4db275e4fac74242979469a6546db1",
+      "mustContain": [
+        "classify_gui_session",
+        "gui_targets_from_fleet",
+        "policy_for_target",
+        "guiSessionExpected",
+        "distill_boot_id",
+        "detect_reboot",
+        "classify_with_reboot",
+        "post_reboot_regression",
+        "build_emit_argv",
+        "gui_session_monitor"
+      ]
+    },
+    {
+      "path": "deploy/scripts/install-bot-errors-gui-monitor-launchd.sh",
+      "sha256": "224b48e22ce7df6d60151c0e9d7d0558206c551546392616751fef985df2baea",
+      "mustContain": [
+        "render_systemd_timer",
+        "render_launchd_plist",
+        "bot-errors-gui-session-monitor.py",
+        "--dry-run"
+      ]
     }
   ]
 }

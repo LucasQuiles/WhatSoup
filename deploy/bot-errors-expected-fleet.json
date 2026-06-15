@@ -5,6 +5,7 @@
     {
       "host": "maclab",
       "role": "relay-only",
+      "guiSessionExpected": "headless_ok",
       "profile": "maclab.json",
       "collectorRemote": true,
       "instances": [
@@ -20,6 +21,7 @@
     {
       "host": "mwlab",
       "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mwlab.json",
       "collectorRemote": true,
       "instances": [
@@ -40,6 +42,7 @@
     {
       "host": "gupta",
       "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "gupta.json",
       "collectorRemote": true,
       "instances": [
@@ -54,6 +57,7 @@
     {
       "host": "nucles",
       "role": "central",
+      "guiSessionExpected": "not_applicable",
       "profile": "nucles.json",
       "collectorRemote": false,
       "instances": [
@@ -80,6 +84,7 @@
     {
       "host": "mini1",
       "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mini1.json",
       "collectorRemote": true,
       "instances": [
@@ -100,6 +105,7 @@
     {
       "host": "mini2",
       "role": "bot-host-blocked",
+      "guiSessionExpected": "not_applicable",
       "profile": "mini2.json",
       "collectorRemote": true,
       "instances": [
@@ -114,6 +120,7 @@
     {
       "host": "mini3",
       "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mini3.json",
       "collectorRemote": true,
       "instances": [
@@ -128,6 +135,7 @@
     {
       "host": "mini4",
       "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mini4.json",
       "collectorRemote": true,
       "instances": [
@@ -142,6 +150,7 @@
     {
       "host": "mini5",
       "role": "no-bot",
+      "guiSessionExpected": "not_applicable",
       "profile": "mini5.json",
       "collectorRemote": true,
       "instances": []
@@ -149,6 +158,7 @@
     {
       "host": "mini6",
       "role": "no-bot",
+      "guiSessionExpected": "not_applicable",
       "profile": "mini6.json",
       "collectorRemote": true,
       "instances": []
@@ -156,6 +166,7 @@
     {
       "host": "mini7",
       "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mini7.json",
       "collectorRemote": true,
       "instances": [
@@ -170,6 +181,7 @@
     {
       "host": "mini8",
       "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mini8.json",
       "collectorRemote": true,
       "instances": [
@@ -184,6 +196,7 @@
     {
       "host": "mini9",
       "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mini9.json",
       "collectorRemote": true,
       "instances": [
@@ -198,6 +211,7 @@
     {
       "host": "mini10",
       "role": "bot-host",
+      "guiSessionExpected": "always_aqua",
       "profile": "mini10.json",
       "collectorRemote": true,
       "instances": [
@@ -212,6 +226,7 @@
     {
       "host": "mini11",
       "role": "no-bot",
+      "guiSessionExpected": "not_applicable",
       "profile": "mini11.json",
       "collectorRemote": true,
       "instances": []

@@ -1,6 +1,52 @@
 {
-  "captured_at": "2026-06-12T17:58:53+00:00",
-  "captured_at_sha": "ca799b4fc00ef7ffd1eced4aabfe997029b35430",
-  "findings": [],
+  "captured_at": "2026-05-13T02:37:01+00:00",
+  "captured_at_sha": "7a9331c43d0bb32dbfc37eed57390528da528fe5",
+  "findings": [
+    {
+      "content_signature": "8ea19d5da1c675e7826ffec9b3741fa761b19bd82a04dc2347b2a218a7485efc",
+      "file": "tests/console/nav-status.test.ts",
+      "line": 55,
+      "rule_id": "js-terminal-weak-assertion",
+      "signature": "22341164f5e5d533e09baa8037724d79a02cfb85bead9781d7ad366d7345c15b",
+      "owner": "q",
+      "reason": "false-positive: expect(url).toBe(null) is a tight null assertion appropriate for the 'rejects' path; the rule fires because the value is null/undefined but the assertion is semantically precise here"
+    },
+    {
+      "content_signature": "663d6bb13b87731991bc4ddea8f40be2f96f0c9bccf03cef31b1423303f82661",
+      "file": "tests/fleet/spawn-absolute-paths.test.ts",
+      "line": 1,
+      "rule_id": "test-file-tree-sitter-parse-error",
+      "signature": "436b4ae651dec2a4786eb84d6f19866107c2104b50d76e7ae170245669c10a45",
+      "owner": "q",
+      "reason": "tree-sitter grammar gap: top-level await import() and vi.mock async importOriginal<T> generic syntax not yet supported; unblock when grammar updated"
+    },
+    {
+      "content_signature": "61b61994bb7da80424da7b92af0cbcbb4d5fce5e8779dd6dff266ebec6029796",
+      "file": "tests/fleet/paths.test.ts",
+      "line": 1,
+      "rule_id": "test-file-tree-sitter-parse-error",
+      "signature": "97b47799deb5f3ac347f629880032ce29ee3ff549b7310cb0926d72741a2436f",
+      "owner": "q",
+      "reason": "tree-sitter grammar gap: vi.mock async importOriginal<typeof import('node:os')> generic type parameter not yet supported; unblock when grammar updated"
+    },
+    {
+      "content_signature": "673becea5140d515c88913784533cdeb05bf823b569e3195599e32894e143ac5",
+      "file": "tests/console/soup-kitchen.test.tsx",
+      "line": 1,
+      "rule_id": "test-file-tree-sitter-parse-error",
+      "signature": "d45e85d31ec0e22ac3fa0a613461dc6c65bee3018958e2904a14b012d5660038",
+      "owner": "q",
+      "reason": "tree-sitter grammar gap: JSX + vi.hoisted + async importOriginal in .tsx file; unblock when grammar updated"
+    },
+    {
+      "content_signature": "29e36964b14b79ce5129f26d4d302c0161d87221e778313fa157219df8d2a106",
+      "file": "deploy/scripts/tests/test_bot_errors_gui_session_monitor.py",
+      "line": 199,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "4265c6424d9ffe1aa89bca7fcf99a97c0cfb9299f35e56b8b6dff88b445393ea",
+      "owner": "q",
+      "reason": "advisory-suggestion: the 7 garbage-payload fail-closed cases are intentionally enumerated literals (each is a named adversarial input — empty/whitespace/permission-prompt/multi-token/unknown-token); hypothesis adds a dependency not used elsewhere in these tests and would obscure the specific fail-closed cases. Keep explicit parametrize."
+    }
+  ],
   "schema_version": "1"
 }
