@@ -92,6 +92,7 @@ def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: byt
         deploy=deploy,
         now_epoch=lambda: 1000.0,
         hostname=lambda: "test-host",
+        service_status=lambda _unit: "active",
     )
     return config, deps, calls, head
 
@@ -152,6 +153,82 @@ def test_safe_drift_requires_two_consecutive_cycles_before_heal(tmp_path: Path):
     assert second["consecutive"] == 2
     assert second["action"] == "healed"
     assert len(calls) == 1
+
+
+def test_unit_bad_blocks_file_heal_and_escalates(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_UNITS", "com.bot-errors.health=loaded,bot-errors-dispatcher.service=active")
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        service_status=lambda unit: "loaded" if unit == "com.bot-errors.health" else "inactive",
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "unit_bad"
+    assert status["action"] == "escalate"
+    assert "bot-errors-dispatcher.service" in status["problems"][0]
+    assert len(status["unitStatuses"]) == 2
+    assert calls == []
+
+
+def test_loaded_expectation_accepts_active_status(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path)
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_UNITS", "com.bot-errors.health=loaded")
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    assert status["unitStatuses"] == [
+        {"unit": "com.bot-errors.health", "expected": "loaded", "status": "active", "ok": "true"}
+    ]
+    assert calls == []
+
+
+def test_stale_run_blocks_file_heal_and_escalates(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    stamp = tmp_path / "last-run.json"
+    stamp.write_text("ok", encoding="utf-8")
+    os.utime(stamp, (100.0, 100.0))
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+    monkeypatch.setenv(
+        "BOT_ERRORS_SELFCHECK_FRESHNESS_JSON",
+        json.dumps([{"name": "daily-health", "path": str(stamp), "maxAgeSeconds": 60}]),
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "stale_run"
+    assert status["action"] == "escalate"
+    assert "age_seconds=900" in status["problems"][0]
+    assert calls == []
+
+
+def test_freshness_ok_is_recorded_without_blocking(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path)
+    stamp = tmp_path / "last-run.json"
+    stamp.write_text("ok", encoding="utf-8")
+    os.utime(stamp, (980.0, 980.0))
+    monkeypatch.setenv(
+        "BOT_ERRORS_SELFCHECK_FRESHNESS_JSON",
+        json.dumps([{"name": "daily-health", "path": str(stamp), "maxAgeSeconds": 60}]),
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    assert status["freshness"][0]["ageSeconds"] == 20
+    assert status["freshness"][0]["ok"] == "true"
+    assert calls == []
+
+
+def test_missing_freshness_path_is_stale_run(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path)
+    missing = tmp_path / "missing.json"
+    monkeypatch.setenv(
+        "BOT_ERRORS_SELFCHECK_FRESHNESS_JSON",
+        json.dumps([{"name": "daily-health", "path": str(missing), "maxAgeSeconds": 60}]),
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "stale_run"
+    assert status["freshness"][0]["status"] == "missing"
+    assert calls == []
 
 
 def test_manifest_missing_is_safe_heal_class_after_hysteresis(tmp_path: Path):
@@ -288,6 +365,134 @@ def test_no_heal_mode_is_monitor_only(tmp_path: Path):
     assert calls == []
 
 
+def test_dry_service_states_parse_json_and_pairs(monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_DRY_SERVICE_STATES", '{"a.service":"active"}')
+    assert _mod.dry_service_states() == {"a.service": "active"}
+    monkeypatch.setenv("BOT_ERRORS_DRY_SERVICE_STATES", "a=loaded,ignored,b=inactive")
+    assert _mod.dry_service_states() == {"a": "loaded", "b": "inactive"}
+
+
+def test_service_check_timeout_has_floor_and_fallback(monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "0")
+    assert _mod.service_check_timeout() == 0.1
+    monkeypatch.setenv("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "bad")
+    assert _mod.service_check_timeout() == 5.0
+
+
+def test_default_service_status_uses_dry_state(monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_DRY_SERVICE_STATES", "com.bot-errors.health=loaded")
+    assert _mod.default_service_status("com.bot-errors.health") == "loaded"
+
+
+def test_default_service_status_uses_systemd_for_service_units(monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_DRY_SERVICE_STATES", raising=False)
+    monkeypatch.setattr(_mod.sys, "platform", "linux")
+    monkeypatch.setattr(_mod, "systemd_service_status", lambda unit: "active")
+    assert _mod.default_service_status("bot-errors-dispatcher.service") == "active"
+
+
+def test_launchd_and_systemd_status_helpers(monkeypatch):
+    class Proc:
+        def __init__(self, returncode: int, stdout: str):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    def run_launchd(cmd, **_kwargs):
+        assert cmd[:2] == ["launchctl", "print"]
+        return Proc(0, "state = running\n\tpid = 123\n")
+
+    monkeypatch.setattr(_mod.subprocess, "run", run_launchd)
+    assert _mod.launchd_service_status("com.bot-errors.health") == "active"
+
+    def run_systemd(cmd, **_kwargs):
+        assert cmd[:3] == ["systemctl", "--user", "is-active"]
+        return Proc(0, "active\n")
+
+    monkeypatch.setattr(_mod.subprocess, "run", run_systemd)
+    assert _mod.systemd_service_status("bot-errors-dispatcher.service") == "active"
+
+
+def test_launchd_loaded_and_inactive_statuses(monkeypatch):
+    class Proc:
+        def __init__(self, returncode: int, stdout: str):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    monkeypatch.setattr(_mod.subprocess, "run", lambda *_args, **_kwargs: Proc(0, "state = waiting\n"))
+    assert _mod.launchd_service_status("com.bot-errors.health") == "loaded"
+    monkeypatch.setattr(_mod.subprocess, "run", lambda *_args, **_kwargs: Proc(1, ""))
+    assert _mod.launchd_service_status("com.bot-errors.health") == "inactive"
+
+
+def test_default_service_status_reports_check_failures(monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_DRY_SERVICE_STATES", raising=False)
+
+    def boom(*_args, **_kwargs):
+        raise _mod.subprocess.TimeoutExpired(cmd="launchctl", timeout=5)
+
+    monkeypatch.setattr(_mod, "launchd_service_status", boom)
+    assert _mod.default_service_status("com.bot-errors.health") == "check_failed:TimeoutExpired"
+
+
+def test_parse_unit_expectations_and_status_matching():
+    assert _mod.parse_unit_expectations("a.service,b.service=loaded,=active") == [
+        ("a.service", "active"),
+        ("b.service", "loaded"),
+    ]
+    assert _mod.unit_status_ok("active_process_fallback", "active") is True
+    assert _mod.unit_status_ok("loaded", "loaded") is True
+    assert _mod.unit_status_ok("inactive", "loaded") is False
+    assert _mod.unit_status_ok("waiting", "waiting") is True
+
+
+def test_invalid_freshness_config_fails_closed(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path)
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_FRESHNESS_JSON", '{"bad": true}')
+    with pytest.raises(_mod.SelfcheckError, match="freshness expectations"):
+        _mod.run_selfcheck(config, deps)
+    assert calls == []
+
+
+def test_invalid_freshness_json_fails_closed(monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_FRESHNESS_JSON", "{bad json")
+    with pytest.raises(_mod.SelfcheckError, match="invalid freshness JSON"):
+        _mod.freshness_expectations()
+
+
+def test_invalid_freshness_entry_fails_closed(monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_FRESHNESS_JSON", json.dumps([{"name": "x"}]))
+    with pytest.raises(_mod.SelfcheckError, match="requires name"):
+        _mod.freshness_expectations()
+
+
+def test_non_object_freshness_entry_fails_closed(monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_SELFCHECK_FRESHNESS_JSON", json.dumps(["bad"]))
+    with pytest.raises(_mod.SelfcheckError, match="must be an object"):
+        _mod.freshness_expectations()
+
+
+def test_freshness_stat_error_is_stale_run(tmp_path: Path, monkeypatch):
+    config, deps, calls, _head = _fixture(tmp_path)
+    target = tmp_path / "last-run.json"
+    target.write_text("ok", encoding="utf-8")
+    original_stat = Path.stat
+
+    def stat(path: Path):
+        if path == target:
+            raise PermissionError("denied")
+        return original_stat(path)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setenv(
+        "BOT_ERRORS_SELFCHECK_FRESHNESS_JSON",
+        json.dumps([{"name": "daily-health", "path": str(target), "maxAgeSeconds": 60}]),
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "stale_run"
+    assert status["freshness"][0]["status"] == "stat_error:PermissionError"
+    assert calls == []
+
+
 def test_default_config_uses_env_overrides(tmp_path: Path, monkeypatch):
     root = tmp_path / "root"
     state = tmp_path / "custom-state"
@@ -336,6 +541,24 @@ def test_atomic_write_json_cleans_temp_on_replace_error(tmp_path: Path, monkeypa
     with pytest.raises(RuntimeError):
         _mod.atomic_write_json(path, {"ok": True})
     assert list(path.parent.glob(".status.json.*.tmp")) == []
+
+
+def test_atomic_write_json_ignores_temp_unlink_error_after_failure(tmp_path: Path, monkeypatch):
+    path = tmp_path / "state" / "status.json"
+    original_unlink = Path.unlink
+
+    def replace(_src, _dst):
+        raise RuntimeError("replace failed")
+
+    def unlink(path_obj: Path):
+        if path_obj.name.startswith(".status.json."):
+            raise OSError("unlink denied")
+        original_unlink(path_obj)
+
+    monkeypatch.setattr(_mod.os, "replace", replace)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(RuntimeError):
+        _mod.atomic_write_json(path, {"ok": True})
 
 
 def test_read_json_object_rejects_bad_json_and_non_object(tmp_path: Path):

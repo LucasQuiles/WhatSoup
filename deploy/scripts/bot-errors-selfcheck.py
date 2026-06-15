@@ -48,6 +48,7 @@ class SelfcheckDeps:
     deploy: Callable[[Path, Path, Path], tuple[int, str]]
     now_epoch: Callable[[], float]
     hostname: Callable[[], str]
+    service_status: Callable[[str], str] = lambda _unit: "unknown"
     before_heal: Callable[[], None] = lambda: None
 
 
@@ -183,6 +184,161 @@ def record_heal(memory: dict, now: float) -> None:
     memory["healHistory"] = history
 
 
+def dry_service_states() -> dict[str, str]:
+    raw = os.environ.get("BOT_ERRORS_DRY_SERVICE_STATES", "").strip()
+    if not raw:
+        return {}
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError:
+        loaded = None
+    if isinstance(loaded, dict):
+        return {str(key): str(value) for key, value in loaded.items()}
+    states = {}
+    for item in raw.split(","):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        if key.strip():
+            states[key.strip()] = value.strip()
+    return states
+
+
+def service_check_timeout() -> float:
+    raw = os.environ.get("BOT_ERRORS_SERVICE_CHECK_TIMEOUT_SECONDS", "5")
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return 5.0
+
+
+def launchd_service_status(unit: str) -> str:
+    proc = subprocess.run(
+        ["launchctl", "print", f"gui/{os.getuid()}/{unit}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=service_check_timeout(),
+        check=False,
+    )
+    if proc.returncode != 0:
+        return "inactive"
+    output = proc.stdout
+    if "state = running" in output or "\tpid = " in output or "\n\tpid = " in output:
+        return "active"
+    return "loaded"
+
+
+def systemd_service_status(unit: str) -> str:
+    proc = subprocess.run(
+        ["systemctl", "--user", "is-active", unit],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=service_check_timeout(),
+        check=False,
+    )
+    return proc.stdout.strip() or f"rc={proc.returncode}"
+
+
+def default_service_status(unit: str) -> str:
+    dry = dry_service_states()
+    if unit in dry:
+        return dry[unit]
+    try:
+        if sys.platform == "darwin" or not unit.endswith(".service"):
+            return launchd_service_status(unit)
+        return systemd_service_status(unit)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"check_failed:{type(exc).__name__}"
+
+
+def parse_unit_expectations(raw: str) -> list[tuple[str, str]]:
+    expectations = []
+    for item in raw.split(","):
+        part = item.strip()
+        if not part:
+            continue
+        if "=" in part:
+            unit, expected = part.split("=", 1)
+        else:
+            unit, expected = part, "active"
+        unit = unit.strip()
+        expected = expected.strip().lower() or "active"
+        if unit:
+            expectations.append((unit, expected))
+    return expectations
+
+
+def unit_status_ok(status: str, expected: str) -> bool:
+    normalized = status.strip().lower()
+    expected = expected.strip().lower()
+    if expected == "loaded":
+        return normalized == "loaded" or normalized == "active" or normalized.startswith("active")
+    if expected == "active":
+        return normalized == "active" or normalized.startswith("active")
+    return normalized == expected
+
+
+def unit_state_inventory(deps: SelfcheckDeps) -> tuple[list[dict[str, str]], list[str]]:
+    raw = os.environ.get("BOT_ERRORS_SELFCHECK_UNITS", "")
+    statuses = []
+    problems = []
+    for unit, expected in parse_unit_expectations(raw):
+        status = deps.service_status(unit)
+        ok = unit_status_ok(status, expected)
+        statuses.append({"unit": unit, "expected": expected, "status": status, "ok": str(ok).lower()})
+        if not ok:
+            problems.append(f"unit {unit} status={status} expected={expected}")
+    return statuses, problems
+
+
+def freshness_expectations() -> list[dict]:
+    raw = os.environ.get("BOT_ERRORS_SELFCHECK_FRESHNESS_JSON", "").strip()
+    if not raw:
+        return []
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SelfcheckError(f"invalid freshness JSON: {exc}") from exc
+    if not isinstance(loaded, list):
+        raise SelfcheckError("freshness expectations must be a list")
+    expectations = []
+    for index, item in enumerate(loaded):
+        if not isinstance(item, dict):
+            raise SelfcheckError(f"freshness[{index}] must be an object")
+        name = str(item.get("name") or "").strip()
+        path = str(item.get("path") or "").strip()
+        max_age = item.get("maxAgeSeconds")
+        if not name or not path or not isinstance(max_age, int) or max_age < 0:
+            raise SelfcheckError(f"freshness[{index}] requires name, path, maxAgeSeconds")
+        expectations.append({"name": name, "path": path, "maxAgeSeconds": max_age})
+    return expectations
+
+
+def freshness_inventory(now: float) -> tuple[list[dict], list[str]]:
+    statuses = []
+    problems = []
+    for item in freshness_expectations():
+        path = Path(str(item["path"])).expanduser()
+        max_age = int(item["maxAgeSeconds"])
+        try:
+            age = max(0, int(now - path.stat().st_mtime))
+        except FileNotFoundError:
+            statuses.append({"name": item["name"], "path": str(path), "status": "missing", "maxAgeSeconds": max_age})
+            problems.append(f"freshness {item['name']} missing path={path}")
+            continue
+        except OSError as exc:
+            statuses.append({"name": item["name"], "path": str(path), "status": f"stat_error:{type(exc).__name__}", "maxAgeSeconds": max_age})
+            problems.append(f"freshness {item['name']} stat_error={type(exc).__name__} path={path}")
+            continue
+        fresh = age <= max_age
+        statuses.append({"name": item["name"], "path": str(path), "ageSeconds": age, "maxAgeSeconds": max_age, "ok": str(fresh).lower()})
+        if not fresh:
+            problems.append(f"freshness {item['name']} age_seconds={age} max={max_age} path={path}")
+    return statuses, problems
+
+
 def acquire_lock(path: Path) -> Optional[int]:
     ensure_private_dir(path.parent)
     try:
@@ -265,6 +421,7 @@ def default_deps(config: SelfcheckConfig) -> SelfcheckDeps:
         deploy=default_deploy(config.deployer_path),
         now_epoch=time.time,
         hostname=socket.gethostname,
+        service_status=default_service_status,
     )
 
 
@@ -346,6 +503,26 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
 
     root_ok, root_mismatches = sp.verify_bundle(config.root, pin)
     status["runtimeMismatches"] = root_mismatches
+    unit_statuses, unit_problems = unit_state_inventory(deps)
+    freshness_statuses, freshness_problems = freshness_inventory(now)
+    status["unitStatuses"] = unit_statuses
+    status["freshness"] = freshness_statuses
+    if unit_problems:
+        status["class"] = "unit_bad"
+        status["action"] = "escalate"
+        status["problems"] = unit_problems + [f"{path}:{kind}" for path, kind in root_mismatches]
+        status["consecutive"] = update_consecutive(memory, status["class"])
+        atomic_write_json(config.memory_path, memory)
+        atomic_write_json(config.status_path, status)
+        return status
+    if freshness_problems:
+        status["class"] = "stale_run"
+        status["action"] = "escalate"
+        status["problems"] = freshness_problems + [f"{path}:{kind}" for path, kind in root_mismatches]
+        status["consecutive"] = update_consecutive(memory, status["class"])
+        atomic_write_json(config.memory_path, memory)
+        atomic_write_json(config.status_path, status)
+        return status
     if root_ok:
         status["healthy"] = True
         status["class"] = "healthy"
