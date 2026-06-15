@@ -24,6 +24,8 @@ Options:
   --plugin <path>         soup plugin file. Default: console/eslint-rules/index.mjs
   --shadow-config <path>  Shadow ESLint config. Default: console/eslint.config.shadow.mjs
   --lint-plan <path>      Enforcement docs. Default: docs/design-system/04-enforcement/lint-plan.md
+  --min-implemented <n>   Live-tree floor: fail if fewer than n implemented rules (default 0 = off).
+  --min-stub <n>          Live-tree floor: fail if fewer than n stub rules (default 0 = off).
   --help                  Print this message.
 `;
 }
@@ -34,11 +36,19 @@ function requireValue(argv, index, flag) {
   return value;
 }
 
+function requireInt(argv, index, flag) {
+  const raw = requireValue(argv, index, flag);
+  if (!/^\d+$/.test(raw)) throw new Error(`${flag} requires a non-negative integer`);
+  return Number(raw);
+}
+
 function parseArgs(argv) {
   const opts = {
     designLints: DEFAULT_DESIGN_LINTS,
     help: false,
     lintPlan: DEFAULT_LINT_PLAN,
+    minImplemented: 0,
+    minStub: 0,
     plugin: DEFAULT_PLUGIN,
     selectors: DEFAULT_SELECTORS,
     shadowConfig: DEFAULT_SHADOW_CONFIG,
@@ -51,6 +61,8 @@ function parseArgs(argv) {
     else if (arg === '--plugin') opts.plugin = resolve(requireValue(argv, ++i, arg));
     else if (arg === '--shadow-config') opts.shadowConfig = resolve(requireValue(argv, ++i, arg));
     else if (arg === '--lint-plan') opts.lintPlan = resolve(requireValue(argv, ++i, arg));
+    else if (arg === '--min-implemented') opts.minImplemented = requireInt(argv, ++i, arg);
+    else if (arg === '--min-stub') opts.minStub = requireInt(argv, ++i, arg);
     else throw new Error(`unknown argument: ${arg}`);
   }
   return opts;
@@ -111,7 +123,7 @@ function hasLintPlanRow(lintPlan, ruleId) {
   return new RegExp(`^\\|\\s*soup/${ruleId}\\s*\\|`, 'm').test(lintPlan);
 }
 
-function buildReport(paths, files) {
+function buildReport(paths, files, floors = { minImplemented: 0, minStub: 0 }) {
   const promotedSelectorRules = extractMessageRuleIds(files.selectors);
   const shadowSelectorRules = extractMessageRuleIds(files.shadowConfig);
   const pluginImplementedRules = extractMessageRuleIds(files.plugin);
@@ -175,6 +187,18 @@ function buildReport(paths, files) {
     failures.push({ code: 'EMPTY_RULE_SET', rule: '(scan)' });
   }
 
+  // Live-tree floors (opt-in; default 0 = off so flagged fixtures are exempt). EMPTY_RULE_SET
+  // only catches the all-zero parse. A PARTIAL parse — e.g. selectors/shadow emptied but one
+  // plugin message survives → implementedRules.length===1 — slips past it and the per-rule loop
+  // certifies coverage over a degenerate subset. The default `design:lint-fixtures` script opts
+  // into the documented contract (>=10 implemented, >=4 stub) so that degradation fails closed.
+  if (floors.minImplemented > 0 && implementedRules.length < floors.minImplemented) {
+    failures.push({ code: 'IMPLEMENTED_FLOOR', rule: `(${implementedRules.length}<${floors.minImplemented})` });
+  }
+  if (floors.minStub > 0 && stubRules.length < floors.minStub) {
+    failures.push({ code: 'STUB_FLOOR', rule: `(${stubRules.length}<${floors.minStub})` });
+  }
+
   return {
     error_probe_rules: errorProbeRules,
     failures,
@@ -217,7 +241,7 @@ function main() {
     plugin: read(opts.plugin),
     selectors: read(opts.selectors),
     shadowConfig: read(opts.shadowConfig),
-  });
+  }, { minImplemented: opts.minImplemented, minStub: opts.minStub });
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (report.verdict !== 'PASS') process.exit(1);
 }

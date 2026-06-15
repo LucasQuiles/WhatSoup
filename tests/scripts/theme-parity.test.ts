@@ -73,17 +73,47 @@ describe('check-theme-parity.mjs', () => {
     const file = makeFixture('');
     const result = run(['--file', file]);
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain('empty or unparseable scan');
+    expect(result.stderr).toContain('degenerate scan');
     expect(result.stdout).not.toContain('theme parity OK');
   });
 
   it('fails closed (exit 2) when tokens exist but no [data-theme] blocks match', () => {
-    // Tokens are present but live under a non-theme selector, so both scopes parse
-    // zero tokens — the structural shape the guard is meant to catch.
+    // Tokens are present but live under a non-theme selector, so no theme-specific block
+    // is seen — the structural shape the guard is meant to catch.
     const file = makeFixture('.panel { --a: #000; --b: #111; }\n:root { --c: #222; }\n');
     const result = run(['--file', file]);
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain('empty or unparseable scan');
+    expect(result.stderr).toContain('degenerate scan');
+    expect(result.stdout).not.toContain('theme parity OK');
+  });
+
+  // [adversarial Hole 1] A comment whose TEXT contains `[data-theme="dark"]{...}` must not be
+  // parsed as a real block. Before comment-stripping, the phantom tokens made both scopes
+  // non-empty and the parity diff compared phantom-vs-phantom → vacuous exit-0 PASS.
+  it('fails closed (exit 2) when only a comment carries theme selectors (phantom tokens)', () => {
+    const file = makeFixture(
+      '/* [data-theme="dark"]{--x:1} [data-theme="light"]{--x:1} */\n' +
+      '[data-theme="dark"] { }\n[data-theme="light"] { }\n',
+    );
+    const result = run(['--file', file]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('degenerate scan');
+    expect(result.stdout).not.toContain('theme parity OK');
+  });
+
+  // [adversarial Hole 2] A shared `:root,[data-theme="dark"],[data-theme="light"]` alias block
+  // (the live token file ships one) trivially balances parity on its own. If the two real
+  // per-theme blocks are emptied/lost but the shared block survives, dark===light (non-empty)
+  // and a naive guard passes. Requiring a theme-SPECIFIC block on each side refuses it.
+  it('fails closed (exit 2) when only a shared dark+light alias block survives', () => {
+    const file = makeFixture(
+      ':root, [data-theme="dark"] { }\n' +
+      '[data-theme="light"] { }\n' +
+      ':root, [data-theme="dark"], [data-theme="light"] { --color-d0: var(--x); --b1: var(--y); }\n',
+    );
+    const result = run(['--file', file]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('degenerate scan');
     expect(result.stdout).not.toContain('theme parity OK');
   });
 });

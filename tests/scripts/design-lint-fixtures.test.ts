@@ -305,6 +305,48 @@ const noRawTable = makeStub('[stub] soup/no-raw-table — stale duplicate stub.'
     expect(failureKeys).toContain('EMPTY_RULE_SET:(scan)');
   });
 
+  // [adversarial Hole 4] EMPTY_RULE_SET only catches an all-zero parse. A PARTIAL parse where
+  // one source survives (implemented>=1) slips past it. The opt-in --min-implemented floor (the
+  // default `design:lint-fixtures` script passes 10/4) fails closed on that degradation. The
+  // floor is OFF by default (0), so the flagged fixtures above are unaffected — proven here by
+  // firing it explicitly on a small fixture set.
+  it('fires IMPLEMENTED_FLOOR/STUB_FLOOR when --min floors exceed the parsed rule counts', () => {
+    const paths = makeFixture();
+    const result = spawnSync(
+      'node',
+      [
+        SCRIPT,
+        '--design-lints', paths.designLints,
+        '--selectors', paths.selectors,
+        '--plugin', paths.plugin,
+        '--shadow-config', paths.shadowConfig,
+        '--lint-plan', paths.lintPlan,
+        '--min-implemented', '10',
+        '--min-stub', '4',
+      ],
+      { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
+    );
+    const output = parsedOutput(result);
+    const failureKeys = output.failures.map((failure) => `${failure.code}:${failure.rule}`);
+
+    // The fixture set has 3 implemented / 1 stub — below the 10/4 floors.
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(failureKeys).toContain('IMPLEMENTED_FLOOR:(3<10)');
+    expect(failureKeys).toContain('STUB_FLOOR:(1<4)');
+  });
+
+  it('does not apply floors when --min flags are absent (default off)', () => {
+    // The same small fixture set passes with no floor flags — fixtures are exempt by default.
+    const result = runScript();
+    const output = parsedOutput(result);
+    const floorKeys = output.failures
+      .map((failure) => failure.code)
+      .filter((code) => code === 'IMPLEMENTED_FLOOR' || code === 'STUB_FLOOR');
+    expect(result.status).toBe(0);
+    expect(floorKeys).toEqual([]);
+  });
+
   it('passes the live repository design-lint fixture contract', () => {
     const result = spawnSync('node', [SCRIPT], {
       encoding: 'utf8',

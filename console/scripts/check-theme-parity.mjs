@@ -15,32 +15,48 @@ const fileArgIndex = process.argv.indexOf('--file');
 const cssPath = fileArgIndex !== -1 && process.argv[fileArgIndex + 1]
   ? resolve(process.argv[fileArgIndex + 1])
   : resolve(here, '../src/styles/tokens.semantic.css');
-const css = readFileSync(cssPath, 'utf8');
+// Strip CSS comments before scanning. The block regex below captures `selector { body }`
+// pairs; without stripping, a comment containing `[data-theme="dark"]{--x:1}` is read as a
+// real block and injects phantom tokens into a scope. That would let a 95%-broken file (where
+// only a comment survives) compare phantom-vs-phantom and vacuously pass. [adversarial Hole 1]
+const css = readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 
-// Capture the body of each theme scope block. Dark is declared as `:root,\n[data-theme="dark"]`
-// (possibly multiple blocks); light as `[data-theme="light"]`.
-function scopeTokens(scopeMatcher) {
-  const tokens = new Set();
-  const blockRe = /([^{}]+)\{([^{}]*)\}/g;
-  let m;
-  while ((m = blockRe.exec(css)) !== null) {
-    const selector = m[1].trim();
-    if (!scopeMatcher(selector)) continue;
-    for (const tok of m[2].matchAll(/--([a-z0-9-]+)\s*:/g)) tokens.add(tok[1]);
+const DARK_SEL = '[data-theme="dark"]';
+const LIGHT_SEL = '[data-theme="light"]';
+
+// Single pass over every `selector { body }` block: collect token NAMES per scope, and
+// separately record whether a *theme-specific* block (matches one theme but not the other)
+// carried any tokens. The specific-block flags are the structural anchor — the live token
+// file also ships a shared `:root,[data-theme="dark"],[data-theme="light"]` alias block, and
+// that shared block ALONE would satisfy a naive parity check (identical dark/light sets) even
+// if both real per-theme blocks were emptied/renamed. Requiring a dark-specific AND a
+// light-specific block refuses to certify that degenerate scan. [adversarial Hole 2/3]
+const dark = new Set();
+const light = new Set();
+let sawDarkSpecific = false;
+let sawLightSpecific = false;
+const blockRe = /([^{}]+)\{([^{}]*)\}/g;
+let m;
+while ((m = blockRe.exec(css)) !== null) {
+  const selector = m[1].trim();
+  const isDark = selector.includes(DARK_SEL);
+  const isLight = selector.includes(LIGHT_SEL);
+  if (!isDark && !isLight) continue;
+  const names = [...m[2].matchAll(/--([a-z0-9-]+)\s*:/g)].map((t) => t[1]);
+  if (isDark) for (const n of names) dark.add(n);
+  if (isLight) for (const n of names) light.add(n);
+  if (names.length) {
+    if (isDark && !isLight) sawDarkSpecific = true;
+    if (isLight && !isDark) sawLightSpecific = true;
   }
-  return tokens;
 }
 
-const dark = scopeTokens((s) => s.includes('[data-theme="dark"]'));
-const light = scopeTokens((s) => s.includes('[data-theme="light"]'));
-
-// Fail-closed on an empty scan. If BOTH scopes parsed zero tokens, the target was
-// renamed/emptied/parse-broken (or the [data-theme] selectors changed shape) — the
-// parity diff below would vacuously pass ("OK: 0 semantic tokens"). A one-sided empty
-// is still caught by the mismatch logic (every token of the non-empty scope is reported
-// missing → exit 1). Exit 2 distinguishes this structural fault from a parity mismatch.
-if (dark.size === 0 && light.size === 0) {
-  console.error(`FAIL: no theme-scoped tokens parsed from ${cssPath} — empty or unparseable scan (expected dark + light [data-theme] blocks). Refusing to report parity on an empty scan.`);
+// Fail-closed on an empty/degenerate scan (exit 2, distinct from the exit-1 parity mismatch
+// below). A missing theme-specific block means the file was emptied/renamed/parse-broken or
+// its per-theme blocks were lost — the parity diff would otherwise vacuously pass.
+if (!sawDarkSpecific || !sawLightSpecific) {
+  const which = !sawDarkSpecific ? 'dark' : 'light';
+  console.error(`FAIL: theme-parity scan of ${cssPath} found no ${which}-specific [data-theme] token block — the file is empty, renamed, parse-broken, or its per-theme blocks were lost (a shared :root/dark/light alias block alone is not sufficient). Refusing to report parity on a degenerate scan.`);
   process.exit(2);
 }
 
