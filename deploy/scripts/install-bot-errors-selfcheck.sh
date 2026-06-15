@@ -127,7 +127,8 @@ PLIST
     uid_value=$(id -u)
     launchctl bootout "gui/$uid_value" "$plist" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/$uid_value" "$plist"
-    launchctl enable "gui/$uid_value/$LABEL" >/dev/null 2>&1 || true
+    launchctl enable "gui/$uid_value/$LABEL" >/dev/null 2>&1 \
+      || fail_config "cannot enable BOT ERRORS selfcheck launchd job"
   fi
   echo "installed $LABEL platform=launchd dry_run=$DRY_RUN interval=${INTERVAL_SECONDS}s path=$plist"
 }

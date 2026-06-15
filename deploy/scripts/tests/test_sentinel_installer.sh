@@ -167,6 +167,35 @@ grep -q 'cannot secure BOT ERRORS sentinel state directories' "$tmp/chmod.err" |
   exit 1
 }
 
+activatebin="$tmp/activatebin"
+mkdir -p "$activatebin"
+cat > "$activatebin/plutil" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+cat > "$activatebin/launchctl" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "enable" ]; then
+  echo "enable denied" >&2
+  exit 42
+fi
+exit 0
+SH
+chmod +x "$activatebin/plutil" "$activatebin/launchctl"
+if PATH="$activatebin:$PATH" env "${common_env[@]}" \
+  BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN=0 \
+  BOT_ERRORS_FLEET_SENTINEL_PLATFORM=launchd \
+  BOT_ERRORS_LAUNCH_AGENTS_DIR="$tmp/enable-fail-LaunchAgents" \
+  bash "$S" > "$tmp/enable-fail.out" 2> "$tmp/enable-fail.err"; then
+  echo "SENTINEL_INSTALLER_FAIL continued after launchctl enable failure"
+  exit 1
+fi
+grep -q 'cannot enable BOT ERRORS sentinel launchd job' "$tmp/enable-fail.err" || {
+  echo "SENTINEL_INSTALLER_FAIL launchctl enable failure reason"
+  cat "$tmp/enable-fail.err"
+  exit 1
+}
+
 badroot="$tmp/bad-root"
 mkdir -p "$badroot/deploy/scripts"
 if env BOT_ERRORS_REPO_ROOT="$badroot" BOT_ERRORS_FLEET_SENTINEL_HOSTS="$hosts" BOT_ERRORS_FLEET_SENTINEL_PLATFORM=launchd BOT_ERRORS_FLEET_SENTINEL_INSTALL_DRY_RUN=1 bash "$S" > "$tmp/missing-script.out" 2> "$tmp/missing-script.err"; then

@@ -205,8 +205,10 @@ PLIST
     launchctl bootout "gui/$uid_value" "$watchdog_plist" >/dev/null 2>&1 || true
     launchctl bootstrap "gui/$uid_value" "$plist"
     launchctl bootstrap "gui/$uid_value" "$watchdog_plist"
-    launchctl enable "gui/$uid_value/$LABEL" >/dev/null 2>&1 || true
-    launchctl enable "gui/$uid_value/$WATCHDOG_LABEL" >/dev/null 2>&1 || true
+    launchctl enable "gui/$uid_value/$LABEL" >/dev/null 2>&1 \
+      || fail_config "cannot enable BOT ERRORS sentinel launchd job"
+    launchctl enable "gui/$uid_value/$WATCHDOG_LABEL" >/dev/null 2>&1 \
+      || fail_config "cannot enable BOT ERRORS sentinel watchdog launchd job"
   fi
   echo "installed $LABEL $WATCHDOG_LABEL platform=launchd dry_run=$DRY_RUN interval=${INTERVAL_SECONDS}s watchdog_interval=${WATCHDOG_INTERVAL_SECONDS}s path=$plist watchdog_path=$watchdog_plist"
 }
