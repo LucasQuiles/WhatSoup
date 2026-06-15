@@ -136,7 +136,6 @@ Conventions:
 - Re-rolled status dot: `console/src/components/line-detail/ScheduledMessageRow.tsx:92-98` — dot sized with `w-[var(--radius-md)] h-[var(--radius-md)]` (a border-radius token used as a width) and colored by `statusColor(...)` inline.
 - Line-header mode dot: `console/src/pages/LineDetail.tsx:247` (`background: var(--color-m-${modeColor})` inline).
 - Badge tone sets in CSS: `.fc-inst--passive/chat/agent` `console/src/index.css:533-535`, `.fc-badge--ok/warn/crit/recv/sent/agent` `console/src/index.css:556-562`, `.fc-headline--ok/warn/crit/...` `console/src/index.css:579-584`.
-- Log level badges: `console/src/lib/log-theme.ts:3-21` (`levelColor`/`levelBg`/`levelLineBg`) rendered at `console/src/components/line-detail/LogsTab.tsx:49-62` and `console/src/pages/Ops.tsx:274-287`.
 - Scheduled status badge: `console/src/components/line-detail/scheduled-utils.ts:6-15` (`statusColor`) rendered at `console/src/components/line-detail/ScheduledMessageRow.tsx:88-100`.
 - Health status icon tones: `console/src/components/FeedIcon.tsx:44` (`online -> text-s-ok : unreachable -> text-s-crit : text-s-warn` ternary).
 - Role badges: `console/src/components/line-detail/groups-utils.ts:7-11` (`roleBadgeStyle` wash/color pairs).
@@ -145,7 +144,7 @@ Conventions:
 
 **Proposed consolidation.** Define one semantic status token map in CSS, make StatusDot/Pill consume it, and replace the six per-domain color tables with domain->semantic-status adapters.
 
-**Guarded by lint?** Partially — inline `color: var(--color-s-*)` in style is pushed to classes (`console/eslint.config.js:202-204`) and hex/hsl blocked (`:115-117`, `:577-583`), but Record-valued maps (`StatusDot.tsx:16-26`, `log-theme.ts:3-21`) and the token-misuse (`w-[var(--radius-md)]` as a size) are unguarded.
+**Guarded by lint?** Partially — inline `color: var(--color-s-*)` in style is pushed to classes (`console/eslint.config.js:202-204`) and hex/hsl blocked (`:115-117`, `:577-583`), while `soup/no-component-local-palette` now reaches all `console/src/**` TS/TSX files except the canonical `console/src/lib/color-semantics.ts` helper. Remaining gaps include component-specific status maps such as `StatusDot.tsx:16-26` and the token-misuse (`w-[var(--radius-md)]` as a size).
 
 ---
 
@@ -164,7 +163,7 @@ Conventions:
 7. Color-var -> wash-var table: `console/src/components/CardSelector.tsx:18-28` (`colorToWash`).
 8. Reverse class -> color-var table: `console/src/components/KpiCard.tsx:13-21` (`colorMap`).
 
-Related single-purpose tables counted under DUP-06: `console/src/lib/log-theme.ts:3-21`, `console/src/components/line-detail/scheduled-utils.ts:6-15`, `console/src/components/LineTags.tsx:16-33`.
+Related single-purpose tables counted under DUP-06: `console/src/components/line-detail/scheduled-utils.ts:6-15`, `console/src/components/LineTags.tsx:16-33`.
 
 **Classification.** helper.
 

@@ -524,8 +524,8 @@ cannot express the check).
 - **Mechanism:** blocking slice of `console/scripts/check-color-semantics.mjs` via
   `--fail-on-rule soup/no-component-local-palette`. The package script also fail-closes the zeroed
   provider, data-series, and traffic lanes.
-- **Scope:** `console/src/components/**` and `console/src/pages/**`. Exempt canonical token/helper
-  modules and documented one-off visual test fixtures.
+- **Scope:** all `console/src/**` TS/TSX files. Exempt the canonical transitional helper
+  `console/src/lib/color-semantics.ts` and documented one-off visual test fixtures.
 - **Violation / valid:** component `const colorMap = { 'text-s-ok': 'var(--color-s-ok)' }` →
   import the documented status/provider/data token helper. The transitional component-to-token
   SSOT is `console/src/lib/color-semantics.ts`; component and page files must not carry local

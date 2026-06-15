@@ -684,8 +684,9 @@ canonical transitional helper at `console/src/lib/color-semantics.ts` have lande
 - `soup/traffic-neutrality` neutral paths: `KpiCard color="neutral"` and direct semantic `--text-2`
   styling for raw values. Status/severity KPIs such as connected, attention, unread, failed,
   warning, and health remain outside this rule;
-- `soup/no-component-local-palette` candidates: component-local colour maps that duplicate design
-  truth outside documented provider/data/status token maps.
+- `soup/no-component-local-palette` candidates: source-local colour maps anywhere under
+  `console/src/**` that duplicate design truth outside documented provider/data/status token maps;
+  the canonical transitional helper is `console/src/lib/color-semantics.ts`.
 
 The underlying CLI remains report-only when invoked without fail flags, but `npm --prefix console run
 design:color-semantics` runs with one `--fail-on-rule` for each promoted lane. A `PASS` from that

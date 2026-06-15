@@ -360,15 +360,12 @@ No shared `Banner`/`Callout` primitive exists.
   (`console/src/index.css:522-535`, `console/src/components/FeedCard.tsx:454`): two mode-badge systems (§5).
 - `fc-badge` tone system: 7 modifiers (`console/src/index.css:556-562`), applied via map in
   `console/src/components/FeedCard.tsx:31-37`, `:133`.
-- Log level badge: `console/src/components/line-detail/LogsTab.tsx:48-53` — raw `px-1.5 py-0.5
-  rounded` with color maps from `console/src/components/line-detail/LogsTab.tsx:1`
-  (`lib/log-theme`); not shared with `fc-badge` tones.
 - Unread badges: Nav pill (`console/src/components/Nav.tsx:80-86`) vs ChatListItem circle
   (`console/src/components/ChatListItem.tsx:64-70`) — different shape/color for the same metric.
 - Access status badge: `console/src/components/line-detail/AccessTab.tsx:80-84` (inline
   `statusBadge` map at `:46`).
 - Scheduled status: colored dot + `c-meta` label (`console/src/components/line-detail/ScheduledMessageRow.tsx:87-100`),
-  colors from `scheduled-utils` — a fourth status-color mapping alongside StatusDot, log-theme, and fc-badge.
+  colors from `scheduled-utils` — another status-color mapping alongside StatusDot and fc-badge.
 
 ## 12. Tables
 

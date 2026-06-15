@@ -297,6 +297,27 @@ export function FleetTokenChart() {
     });
   });
 
+  it('flags local palette maps outside component and page directories', () => {
+    const root = makeFixture({
+      'console/src/lib/log-theme.ts': `
+export const levelColor: Record<string, string> = {
+  warn: 'text-s-warn',
+};
+`,
+    });
+    const result = runScript(root, ['--fail-on-rule', 'soup/no-component-local-palette']);
+    const output = parsedOutput(result);
+
+    expect(result.status).toBe(1);
+    expect(output.verdict).toBe('FAIL');
+    expect(output.failed_rules).toEqual(['soup/no-component-local-palette']);
+    expect(output.by_rule).toEqual({ 'soup/no-component-local-palette': 1 });
+    expect(output.findings[0]).toMatchObject({
+      file: 'console/src/lib/log-theme.ts',
+      rule: 'soup/no-component-local-palette',
+    });
+  });
+
   it('supports repeated scan directories for focused inventories', () => {
     const root = makeFixture({
       'console/src/components/FleetMetricsChart.tsx': '<Area dataKey="inbound" stroke="var(--color-m-cht)" />\n',

@@ -130,7 +130,7 @@ definition: **essential** = the ghost rendering is the only rendering of a datum
 | Placeholders | `styles/composites.css:630`, `:664`, `styles/primitives.css:973`, `components/shared/SearchInput.tsx:15` | **EXEMPT** — placeholder convention; light text-3 clears the 3:1 floor on inset (3.37) per color.md §5 |
 | Disabled / pending / skipped states | `styles/primitives.css:1363` (disabled tab), `components/UpdateModal.tsx:317`, `:320`, `:376`, `:380`, `:437`, `components/AddLineWizard.tsx:46-76` (incomplete steps), `components/MessageBubble.tsx:53`, `:97` | **EXEMPT** — state de-emphasis; the datum returns to full ink when the state activates |
 | Decorative icons, separators, hints | `components/FeedIcon.tsx:23`, `:53`, `components/EmptyState.tsx:38` (icon only), `components/Nav.tsx:158`, `:185`, `:192`, `components/line-detail/PipelineTab.tsx:71`, `components/KeyboardShortcutsHelp.tsx:57`, `styles/composites.css:410` (hover-reveal meta row), `styles/primitives.css:126` (unknown-mode dot), `components/line-detail/ModeTab.tsx:103` (boolean dot off-state), `components/wizard/ConfigStep.tsx:342`, `:705`, `components/wizard/IdentityStep.tsx:151` ("(optional)" tags, descriptions) | **EXEMPT** — incidental by color.md's definition; non-text items need only the 3:1 floor, which live text-3 clears on every bed in both themes |
-| Orphan mapping | `lib/log-theme.ts:7` (`debug: 'text-t5'`) | **DEAD CODE (apparent)** — no importer found in `console/src`; flag for deletion at the LogStream-adjacent C3 pass rather than classification |
+| Orphan mapping | deleted `lib/log-theme.ts` (`debug: 'text-t5'`) | **CLOSED 2026-06-14** — no production importer; self-referential test-only coverage removed; future `console/src/lib/**` local palette helpers are caught by `soup/no-component-local-palette` unless they are the canonical `lib/color-semantics.ts` helper |
 
 Survey cross-check: the staged survey's four essential-suspects are confirmed (items 1-4
 above, with current line numbers — `primitives.css` drifted from ~1057/~1138 to
@@ -244,9 +244,9 @@ migration confirms no essential text on ghost tier," and it blocks final accepta
   theme parity).
 - The decision-independent corrections: `c-col-header` default re-tier to text-2, the
   empty-state copy tier (settle via the C3 state-taxonomy index page), the absent-value
-  exemption wording in color.md, deletion of the orphan `lib/log-theme.ts`, and the
-  Inbox chat-meta-lane re-tier (essential under any option, since no option reclassifies
-  *identity* metadata).
+  exemption wording in color.md, and the Inbox chat-meta-lane re-tier (essential under any
+  option, since no option reclassifies *identity* metadata). The orphan `lib/log-theme.ts`
+  deletion is already closed.
 - All exempt-class surfaces in §2.3 — no rework under any option.
 
 Note the asymmetry: if Option B is chosen, the blocked set unblocks with a two-line CSS
@@ -268,8 +268,9 @@ blocked set open longer (redundancy patches / token-ladder rework respectively).
   `component` differently from `source` was not traced to the data source. Confidence:
   medium — if they are always identical, the detail-component site downgrades to
   incidental-by-redundancy.
-- "`lib/log-theme.ts` has no importer": text search over `console/src` only; a dynamic
-  or aliased import would evade it. Confidence: medium.
+- "`lib/log-theme.ts` has no importer": closed after a whole-tree import scan found only
+  self-referential test imports; the module and those test assertions were deleted.
+  Confidence: high.
 - Reference-library citations (annunciator scan-by-position, Grafana, Datadog) are
   quoted from `01-research/reference-library.md` entries marked known-canon /
   search-verified there; the operator-triage "correlate-by-time" claim is argument from

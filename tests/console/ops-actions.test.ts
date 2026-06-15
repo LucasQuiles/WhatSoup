@@ -1,9 +1,8 @@
 /**
- * Ops page — structural tests for format helpers and log theme.
+ * Ops page — structural tests for format helpers.
  * Tests the pure functions used by the Ops page without mounting React.
  */
 import { describe, it, expect } from 'vitest';
-import { levelColor, levelBg } from '../../console/src/lib/log-theme';
 import {
   formatChatTime,
   formatFullTime,
@@ -12,35 +11,6 @@ import {
   formatTimeWithSeconds,
 } from '../../console/src/lib/format-time';
 import { displayInstanceName } from '../../console/src/lib/text-utils';
-
-// ---------------------------------------------------------------------------
-// Log theme helpers (used by Ops log viewer)
-// ---------------------------------------------------------------------------
-
-describe('log theme helpers', () => {
-  it('levelColor maps each log level to a CSS class', () => {
-    expect(levelColor).toEqual({
-      info: 'text-t3',
-      warn: 'text-s-warn',
-      error: 'text-s-crit',
-      debug: 'text-t5',
-    });
-  });
-
-  it('levelBg maps each log level to a CSS class', () => {
-    expect(levelBg).toEqual({
-      info: 'var(--color-d5)',
-      warn: 'var(--s-warn-wash)',
-      error: 'var(--s-crit-soft)',
-      debug: 'var(--color-d4)',
-    });
-  });
-
-  it('different levels return different colors', () => {
-    expect(levelColor['info']).not.toBe(levelColor['error']);
-    expect(levelBg['warn']).not.toBe(levelBg['error']);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Format helpers

@@ -351,24 +351,12 @@ checkpoint eyeballs both themes. **Rollback:** CSS default + class strips revert
 
 ## Item 9 — `log-theme.ts` orphan verification
 
-**Files inspected:** `console/src/lib/log-theme.ts` (20 ln — `levelColor`, `levelBg`,
-`levelLineBg` records); whole-`console/` grep for importers: **zero production importers**
-(confirmed — no `console/src` file references it). **BUT the dd8 "no importer" claim is
-incomplete for the tree as a whole:** two TEST files import it —
-`tests/console/log-theme-motion.test.ts:14` (a suite whose log-theme half exists solely to
-pin the dead module against itself — vacuous coverage) and
-`tests/console/ops-actions.test.ts:6,21–41` (imports `levelColor`/`levelBg` and asserts
-the records equal themselves — also self-referential; Ops's real level styling now lives
-in the Pill tones + LogStream primitive, Ops.tsx 30–34/256–272).
-
-**Intended change:** delete `console/src/lib/log-theme.ts`; delete the log-theme describe
-block from `log-theme-motion.test.ts` (keep its motion half if independent — verify at
-implementation; the filename suggests a split file: rename or split accordingly); remove
-the import + both vacuous `it` blocks from `ops-actions.test.ts` (no behavioral coverage
-is lost — the assertions never touched a component). Dynamic-import evasion: searched
-`import(`/template-path patterns under console/src — none reference `lib/log-theme`;
-confidence high (the dd8 audit's "medium" upgraded by the broader sweep, with the test
-importers as the new fact).
+**Closed 2026-06-14.** `console/src/lib/log-theme.ts` was deleted after a whole-tree import
+scan found zero production importers; the two test-only importers were removed because they
+asserted the dead record values against themselves. Ops and LogsTab level styling now lives in
+Pill tones plus the `LogStream` primitive. The color-semantics guard was widened so a new
+source-local palette helper under `console/src/lib/**` fails `soup/no-component-local-palette`
+unless it is the canonical `console/src/lib/color-semantics.ts` helper.
 
 **Change-now:** yes. **Test plan:** suite green after deletion is itself the proof;
 typecheck catches any missed importer. **Rollback:** restore three files.
@@ -839,10 +827,10 @@ unchanged. Verify `icons.svg` carries no brand text at the same time (T7 #22).
   `components/ChartPanel.tsx`, `lib/providers.ts` (PROVIDER_COLORS), `lib/api.ts`
   (error helper), `components/primitives/Popover.tsx` (+`emptyMessage`),
   `components/shared/ChatPicker.tsx`, `components/shared/ContactSearchPicker.tsx`,
-  `console/src/mock-data.ts` (config fixture), deletion `console/src/lib/log-theme.ts`.
+  `console/src/mock-data.ts` (config fixture).
 - Tests: `tests/console/use-exit-presence.test.tsx`, `tests/browser/keyboard-proofs.test.tsx`,
   `tests/browser-motion/` (+reopen case), `tests/console/ops-actions.test.ts`,
-  `tests/console/log-theme-motion.test.ts` (rework/delete), nav/kpi/metrics/inbox
+  `tests/console/log-theme-motion.test.ts`, nav/kpi/metrics/inbox
   class-assertion updates as named per item, new LineDetail-config-dialog pin, api-error
   helper unit test, popover empty-row pins.
 - Design branch (docs): `design-debt-register.md` (DD-8/9/15/24/26/27/28/29/30 deltas +
@@ -889,9 +877,8 @@ bootstrap lines untouched), `console/public/favicon.svg` (new asset),
 9. **Microcopy & fixtures:** api error helper + test; mock `config`; vocabulary flips
    (instance→line table) + their test pins; UnlockScreen rebuild (DD-31).
 10. **Motion conformance + closures:** page-entry fades + LineDetail tab animation
-    removal; log-theme deletion + test rework; DD-9 final sweep + token deletions +
-    shadow-baseline regen (counts fall-only; regen LAST, coordinate with any parallel
-    lane per the C-B3W4-7 precedent).
+    removal; DD-9 final sweep + token deletions + shadow-baseline regen (counts
+    fall-only; regen LAST, coordinate with any parallel lane per the C-B3W4-7 precedent).
 
 C4 wave (separate packet not required — this preflight + T7 + brand.md §1 are the spec):
 N1 nameplate+nav slice (incl. DD-5 close), N2 title+favicon, N3 SoupKitchen→Fleet rename
@@ -918,9 +905,9 @@ sub-PR, N4 alias removal sweep, N5 docs prose.
   namespace; NOT verified against a rendered build (no dev server in this window). If some
   other layer defines them, the finding downgrades from "broken" to "off-system" — either
   way DD-31 stands. Medium.
-- **log-theme orphan** — production-importer grep clean; the two TEST importers are a NEW
-  fact this packet adds over dd8's "no importer found" (which was scoped to console/src and
-  remains true as scoped). High.
+- **log-theme orphan** — closed 2026-06-14 by deletion plus test-only importer removal; the
+  widened color-semantics guard prevents another source-local palette helper from re-entering
+  under `console/src/lib/**` outside the canonical `lib/color-semantics.ts` helper. High.
 - **Counts (alias/status/mode utilities)** — `grep -o | wc -l` line-occurrence counts;
   substring-safe for the listed patterns; intended as sizing, not exact call-site counts.
 - **v2 citations** (KPI law 922–939, table 1462–1464, `.chat-unread` 1062–1069, nameplate

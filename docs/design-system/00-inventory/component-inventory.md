@@ -421,7 +421,7 @@ All nine `*Tab.tsx` components are re-exported through the barrel `console/src/c
 - Path: `console/src/components/line-detail/LogsTab.tsx`
 - Role: Log viewer with level filter pills (filter state lifted to parent).
 - Props: inline at `console/src/components/line-detail/LogsTab.tsx:6` — `logs`, `filter`, `onFilterChange`.
-- State: stateless (controlled); uses `FilterPill` + `console/src/lib/log-theme.ts`.
+- State: stateless (controlled); uses `Pill` tones for level filters and delegates rows to `LogStream`.
 
 ### MetricsTab
 - Path: `console/src/components/line-detail/MetricsTab.tsx`

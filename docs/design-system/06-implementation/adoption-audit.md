@@ -52,7 +52,7 @@ called out qualitatively and in the burndown; they are not double-counted in the
 - **Fully-conformant surfaces: 8 / 67 = 12%** (zero legacy patterns in-file):
   AddLineWizard, RelinkModal, LogsTab, ChatList, ErrorBoundary, StatusDot, ModeBadge,
   QrDisplay (waivered WVR-002). **Pages fully clean: 0 / 4.**
-- **Legacy token vocabulary still live:** 331 TSX-side shadow falls across 57 files
+- **Legacy token vocabulary still live:** 327 TSX-side shadow falls across 56 files
   (soup/no-legacy-tokens), plus ~153 legacy `var()` occurrences in `src/styles/composites.css`
   (97 lines — invisible to ESLint by design, lint-plan §1), plus 28 half-step spacing
   consumption lines (DD-9). TSX consumers reference the new semantic vocabulary directly only
@@ -185,11 +185,12 @@ virtualization, DD-30 use-exit-presence dead branch.
 
 ### 3.10 Non-UI files carrying design vocabulary
 
-lib/log-theme.ts (LT×4: 4, 7, 11, 14), lib/format-wa-text.tsx (LT×4), lib/providers.ts (LT×2 +
-hex 5 — provider brand colors), lib/status-map.ts (LT×3: 150, 159, 165 — inside the canonical
-status driver), lib/chart-utils.ts (above), lib/type-guards.ts + lib/api.ts + lib/realtime-events.ts
-(hex hits are JID/ID strings and escape sequences — false positives, verified by reading),
-mock-data.ts (hex×5 + no-restricted-syntax×5 — mock fixtures). hooks/use-toast.tsx (above).
+lib/format-wa-text.tsx (LT×4), lib/providers.ts (LT×2 + hex 5 — provider brand colors),
+lib/status-map.ts (LT×3: 150, 159, 165 — inside the canonical status driver), lib/chart-utils.ts
+(above), lib/type-guards.ts + lib/api.ts + lib/realtime-events.ts (hex hits are JID/ID strings
+and escape sequences — false positives, verified by reading), mock-data.ts (hex×5 +
+no-restricted-syntax×5 — mock fixtures). hooks/use-toast.tsx (above). The former
+lib/log-theme.ts row was removed with the color-semantics helper-scope hardening.
 
 NOT AUDITED: `tests/` (out of scope — code surfaces only), `console/index.html` beyond the title
 check noted in lint-plan, `console/public/`, runtime behavior of any surface (§9), and the
@@ -216,19 +217,19 @@ was not decomposed).
 | M13 | Hand-rolled mode radio-cards in ModeSwitchDialog duplicate the CardSelector pattern with inline legacy mode-color styles | ModeSwitchDialog.tsx:70-92 | CardSelector (DD-14 radiogroup) exists and is unused here | Migrate to CardSelector in the C3 LineDetail pass |
 | M14 | Local SearchInput recipe parallel to ToolbarSearch | shared/SearchInput.tsx | toolbar.md owns search-in-toolbar; standalone search input has no primitive | Promote into the form kit (or absorb into ToolbarSearch) during B-residue work |
 
-## 5. Shadow-baseline rollup (ground truth: console/lint-shadow-baseline.json, total 352)
+## 5. Shadow-baseline rollup (ground truth: console/lint-shadow-baseline.json, total 348)
 
 | Rule | Falls | Files | Top files |
 |---|---|---|---|
-| soup/no-legacy-tokens | 331 | 57 | Inbox 25 · ConfigStep 21 · GroupDetailModal 17 · SummaryTab 16 · Nav 15 · MessageContent 15 · ActiveHoursHeatmap 15 · MetricsTab 13 · UpdateModal 12 · ProvidersKeysCard 9 · (47 more files, full list in `console/lint-shadow-baseline.json`) |
+| soup/no-legacy-tokens | 327 | 56 | Inbox 25 · ConfigStep 21 · GroupDetailModal 17 · SummaryTab 16 · Nav 15 · MessageContent 15 · ActiveHoursHeatmap 15 · MetricsTab 13 · UpdateModal 12 · ProvidersKeysCard 9 · (46 more files, full list in `console/lint-shadow-baseline.json`) |
 | no-restricted-syntax (base wall) | 18 | 5 | Nav 6 · mock-data 5 · MessageContent 5 · PipelineTab 1 · ModeTab 1 |
 | soup/no-brand-regression | 2 | 2 | Nav (split wordmark) · UpdateModal ("Update WhatSoup") — both flip at the P4/C4 brand slice by design |
 | ~~soup/no-raw-form-control~~ | 0 | 0 | closed: `ConfigStep` file uploads route through `FileInput`; generated raw-form inventory is empty |
 | ~~soup/no-focus-suppression~~ | 0 | 0 | closed: zero TSX `outline-none` sites; former Inbox and HistoryTab composer carve-outs retired |
 | soup/no-utility-smell | 1 | 1 | GroupCard |
 
-Reconciliation: the live shadow baseline is 352 (= 331 + 18 + 2 + 1) and the live
-burndown queue is 661/596 with `focus-suppression` and `raw-form-control` absent. Focus
+Reconciliation: the live shadow baseline is 348 (= 327 + 18 + 2 + 1) and the live
+burndown queue is 657/592 with `focus-suppression` and `raw-form-control` absent. Focus
 suppression now reads zero in two independent checks: `design-regression` check 12 and
 whole-tree `outline-none` grep over `console/src`; both former chat composers route
 through `TextArea`, the HistoryTab send/load/jump actions route through button primitives,
@@ -246,7 +247,7 @@ Consumption outside the token tier (current tree):
 
 | Vocabulary | TSX/TS occurrences | CSS occurrences | Notes |
 |---|---|---|---|
-| Strict legacy utilities `bg-d*`/`text-t*`/`border-t*` | 313 | composites.css class definitions generate them | shadow rule counts 331 nodes total for its scope (utilities+vars, per-node) |
+| Strict legacy utilities `bg-d*`/`text-t*`/`border-t*` | 313 | composites.css class definitions generate them | shadow rule counts 327 nodes total for its scope (utilities+vars, per-node) |
 | Strict legacy vars `var(--color-[dt]N)`, `var(--b1..4)` | 75 | 97 lines in composites.css | composites.css is ESLint-invisible (lint-plan §1 — rg-script territory) |
 | Mode/status shorthand utilities `text-s-*`, `text-m-*`, etc. | 130 | throughout composites.css | semantically fine, names ride the alias map |
 | Extended legacy vars (washes/softs/shadows/ease) + above, total legacy var() in composites.css | — | 153 occurrences | includes `--card-shadow`, `--m-*-wash`, `--s-*-soft` etc. |
@@ -281,14 +282,14 @@ Per pattern family (primitive-rendered / total sites):
 | Buttons | 30/100 = 30% | 30 Button/ActionButton JSX vs 70 raw `<button>` |
 | Form controls | generated inventory 0 raw consumers | all consumer `input`/`select`/`textarea` sites route through promoted primitives; original 2026-06-12 site ratio is historical |
 | Status/badge rendering | high but not total | status-map driver + 18 StatusCell/ModeBadge uses; residual inline mode/status styling in ModeSwitchDialog, AlertBanner, KpiCard, FeedCard/FeedIcon, providers.ts |
-| Token vocabulary | far behind | §6: 331 TSX shadow falls + 153 composites.css refs; 3 direct semantic refs |
+| Token vocabulary | far behind | §6: 327 TSX shadow falls + 153 composites.css refs; 3 direct semantic refs |
 
 Per page (in-file sites): SoupKitchen 100% (27/27) · LineDetail 100% (8/8) · Ops 63% (5/8) ·
 Inbox 0% (0/9). Per family dir: wizard 54/64 = 84% sites but 0/7 files token-clean ·
 line-detail 41/64 = 64% · top-level components 36/26-legacy ≈ 58% · shared 3/3 files partial.
 
 **OVERALL: interactive/structural primitive adoption 64.6% (184/285 sites). Fully-conformant
-surfaces 8/67 = 12%. Token-vocabulary migration is the long pole: 331 TSX + ~153 CSS legacy
+surfaces 8/67 = 12%. Token-vocabulary migration is the long pole: 327 TSX + ~153 CSS legacy
 references must reach zero before the C4 alias removal can land. By the operator's 100%-adoption
 bar, the program is roughly two-thirds done on controls and at the beginning of the
 final token/brand burn.**
@@ -297,9 +298,9 @@ final token/brand burn.**
 
 Blocking items (14 tracked; B12 now closed):
 
-1. **B1 — Legacy token vocabulary burn** (331 TSX falls ×57 files; 153 composites.css refs;
+1. **B1 — Legacy token vocabulary burn** (327 TSX falls ×56 files; 153 composites.css refs;
    scrollbar M8; `--overlay-badge` literal). Largest debts first: Inbox 25, ConfigStep 21,
-   ActiveHoursHeatmap 19, GroupDetailModal 17, SummaryTab 16, MessageContent 15, Nav 15.
+   ActiveHoursHeatmap 15, GroupDetailModal 17, SummaryTab 16, MessageContent 15, Nav 15.
    Mechanical alias rewrite is the sanctioned codemod (lint-plan soup/no-legacy-tokens).
 2. **B2 — Raw `<button>` elimination** (70 ×29 files → Button/ActionButton). Top: GroupDetailModal 9,
    Inbox 8, ConfigStep 5, FeedCard 4, AccessTab 4, ScheduledMessageRow 4.
@@ -338,7 +339,7 @@ register · WizardStepper extraction · type-ramp definition (DD-26).
 ## 9. Strong-claim audit and limits of static analysis
 
 Claims re-verified before publication:
-- "352 = 331+18+2+1" — recomputed from the live `console/lint-shadow-baseline.json`;
+- "348 = 327+18+2+1" — recomputed from the live `console/lint-shadow-baseline.json`;
   sums match the declared total.
 - "zero TSX outline-none sites" — independent whole-tree grep plus `design-regression`
   check 12; the retired Inbox and HistoryTab sites now read as `TextArea`/button primitives.

@@ -744,9 +744,11 @@ chat kind), the MessageBubble at-rest timestamp and media-type row, and the Nav 
 promotion with positive controls and branch-isolation proofs; exempt de-emphasis sites
 verified untouched. Ratchet counts fall below ceiling; the baseline regen deliberately waited
 for the in-flight wizard lane so its mid-slice falls could not contaminate the ceiling.
-Remaining DD-8 legs (c-col-header tier, empty-state tiering, the log-theme orphan) stay
-queued on the wizard lane's CSS files and the C3 per-screen pass — the register row stays
-open and blocking.
+Remaining DD-8 legs (c-col-header tier, empty-state tiering) stay queued on the wizard
+lane's CSS files and the C3 per-screen pass — the register row stays open and blocking.
+2026-06-14 follow-up: the log-theme orphan was deleted with the color-semantics scope
+widening; future `console/src/lib/**` palette helpers are caught unless they are the
+canonical `lib/color-semantics.ts` helper.
 
 ---
 

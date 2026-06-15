@@ -21,6 +21,9 @@ const DATA_TOKEN_RE = /var\(--data-[^)]+\)/;
 const DATA_SERIES_FILE_RE = /(?:Chart|Heatmap|MetricsTab)\.tsx$/;
 const CHART_COLOR_RE = /\b(?:stroke|fill|stopColor|activeColor|background|color)\s*[=:]|\b(?:bg|text|border)-\[var\(--|color-mix\(|return\s+['"`]var\(--|return\s+['"`]color-mix/;
 const LOCAL_PALETTE_RE = /\b(?:export\s+)?(?:const|let)\s+\w*(?:color|Color|palette|Palette)\w*\s*(?::\s*Record<[^>]+>\s*=|=\s*\{)|Record<string,\s*string>\s*=\s*\{/;
+const LOCAL_PALETTE_HELPER_FILES = new Set([
+  'console/src/lib/color-semantics.ts',
+]);
 const NEUTRAL_TRAFFIC_LABELS = new Set([
   'Messages Sent',
   'Messages Received',
@@ -220,7 +223,8 @@ function scanLine(findings, file, lines, index) {
     );
   }
 
-  if (/^console\/src\/(?:components|pages)\//.test(file)
+  if (/^console\/src\//.test(file)
+    && !LOCAL_PALETTE_HELPER_FILES.has(file)
     && LOCAL_PALETTE_RE.test(line)
     && /color/i.test(line)
     && !/data-local-palette-exception/.test(context)) {
