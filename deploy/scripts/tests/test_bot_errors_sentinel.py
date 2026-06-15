@@ -526,12 +526,25 @@ def test_critical_whatsapp_daily_cap_suppresses_overflow_and_updates_digest(tmp_
 
 def test_tier2_action_event_includes_q_remediation_token(tmp_path: Path, monkeypatch):
     hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
-    hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
+    q_hb = _heartbeat(tmp_path / "q-agent-host-hb.json", healthy=True, klass="healthy", mtime=995.0)
+    hosts = _hosts_file(
+        tmp_path,
+        [
+            {"host": "host-q", "heartbeatPath": str(hb)},
+            {"host": "q-agent-host", "heartbeatPath": str(q_hb)},
+        ],
+    )
     config = _config(tmp_path, hosts, hysteresis_cycles=1, tier2_token_ttl_seconds=900, q_host="q-agent-host")
     monkeypatch.setattr(_mod.secrets, "token_urlsafe", lambda _length: "fixed-token")
     result = _mod.run_once(
         config,
-        _deps(1000.0, {"host-q": {"reachable": True, "healthy": False, "class": "permission_denied"}}),
+        _deps(
+            1000.0,
+            {
+                "host-q": {"reachable": True, "healthy": False, "class": "permission_denied"},
+                "q-agent-host": {"reachable": True, "healthy": True, "class": "healthy"},
+            },
+        ),
     )
     assert len(result["actionEvents"]) == 1
     payload = json.loads(Path(result["actionEvents"][0]["path"]).read_text(encoding="utf-8"))
@@ -557,6 +570,29 @@ def test_tier2_action_event_includes_q_remediation_token(tmp_path: Path, monkeyp
         remediation["requestId"],
     )
     assert "fixed-token" not in json.dumps(q_state)
+
+
+def test_missing_q_host_health_blocks_tier2_q_routing(tmp_path: Path, monkeypatch):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, q_host="q-agent-host")
+    monkeypatch.setattr(_mod.secrets, "token_urlsafe", lambda _length: "should-not-issue")
+
+    result = _mod.run_once(
+        config,
+        _deps(1000.0, {"host-a": {"reachable": True, "healthy": False, "class": "permission_denied"}}),
+    )
+
+    payload = json.loads(Path(result["actionEvents"][0]["path"]).read_text(encoding="utf-8"))
+    assert payload["remediation"] == {
+        "qEligible": False,
+        "reason": "q_host_unverified",
+        "qHost": "q-agent-host",
+        "handledBy": "central_direct",
+    }
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert state.get("qRemediation") in (None, {})
+    assert "should-not-issue" not in json.dumps(payload)
 
 
 def test_q_host_self_failure_is_not_routed_to_q(tmp_path: Path):
@@ -616,6 +652,9 @@ def test_q_remediation_is_one_host_at_a_time(tmp_path: Path, monkeypatch):
         hb = _heartbeat(tmp_path / f"{name}-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
         hosts_payload.append({"host": name, "heartbeatPath": str(hb)})
         probes[name] = {"reachable": True, "healthy": False, "class": "permission_denied"}
+    q_hb = _heartbeat(tmp_path / "q-agent-host-hb.json", healthy=True, klass="healthy", mtime=995.0)
+    hosts_payload.append({"host": "q-agent-host", "heartbeatPath": str(q_hb)})
+    probes["q-agent-host"] = {"reachable": True, "healthy": True, "class": "healthy"}
     hosts = _hosts_file(tmp_path, hosts_payload)
     config = _config(tmp_path, hosts, hysteresis_cycles=1, q_host="q-agent-host")
     monkeypatch.setattr(_mod.secrets, "token_urlsafe", lambda _length: "first-token")

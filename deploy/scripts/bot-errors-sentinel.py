@@ -872,6 +872,14 @@ def add_tier2_remediation(payload: dict, state: dict, config: SentinelConfig, no
             "handledBy": "central_direct",
         }
         return
+    if q_host_result is None:
+        payload["remediation"] = {
+            "qEligible": False,
+            "reason": "q_host_unverified",
+            "qHost": config.q_host,
+            "handledBy": "central_direct",
+        }
+        return
     if q_host_result is not None and q_host_result.get("healthy") is not True:
         payload["remediation"] = {
             "qEligible": False,
