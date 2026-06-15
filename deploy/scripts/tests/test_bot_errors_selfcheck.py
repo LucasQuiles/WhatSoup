@@ -1,0 +1,512 @@
+"""Tests for host-local BOT ERRORS selfcheck.
+
+All fixtures are scratch directories. No host services are queried and the
+deployer is injected, not executed.
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+import pytest
+
+
+_SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-selfcheck.py"
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("bot_errors_selfcheck", _SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_mod = _load_module()
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _write(path: Path, data: bytes) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return _sha(data)
+
+
+def _fixture(tmp_path: Path, *, root_data: bytes = b"redact\n", bundle_data: bytes = b"redact\n"):
+    head = "a" * 40
+    root = tmp_path / "runtime"
+    state = tmp_path / "state" / "sentinel"
+    fleet_state = tmp_path / "state" / "fleet-sentinel"
+    bundle = state / "bundle" / head
+    current = state / "current"
+    manifest = tmp_path / "manifest.json"
+    ledger = tmp_path / "ledger.json"
+    deployer = tmp_path / "deployer.sh"
+
+    f10 = _write(bundle / _mod.sp.F10_PATH, bundle_data)
+    _write(root / _mod.sp.F10_PATH, root_data)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "expected_head_sha": head,
+                "files": [{"path": _mod.sp.F10_PATH, "sha256": f10}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    ledger.write_text(json.dumps({"approved_f10": [f10]}), encoding="utf-8")
+    state.mkdir(parents=True, exist_ok=True)
+    fleet_state.mkdir(parents=True, exist_ok=True)
+    os.symlink(bundle, current)
+    deployer.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+
+    config = _mod.SelfcheckConfig(
+        root=root,
+        state_dir=state,
+        manifest_path=manifest,
+        ledger_path=ledger,
+        current_link=current,
+        deployer_path=deployer,
+        autoheal_off_path=fleet_state / "AUTOHEAL_OFF",
+        disabled_path=state / "DISABLED",
+        lock_path=state / "selfcheck.lock",
+        status_path=state / "status.json",
+        memory_path=state / "selfcheck-state.json",
+    )
+    calls: list[tuple[Path, Path, Path]] = []
+
+    def deploy(root_arg: Path, bundle_arg: Path, deployer_arg: Path) -> tuple[int, str]:
+        calls.append((root_arg, bundle_arg, deployer_arg))
+        return 0, "DEPLOY_OK"
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=lambda _sha: True,
+        deploy=deploy,
+        now_epoch=lambda: 1000.0,
+        hostname=lambda: "test-host",
+    )
+    return config, deps, calls, head
+
+
+def _read_status(config) -> dict:
+    return json.loads(config.status_path.read_text(encoding="utf-8"))
+
+
+def _seed_memory(config, payload: dict) -> None:
+    config.memory_path.parent.mkdir(parents=True, exist_ok=True)
+    config.memory_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_clean_runtime_writes_healthy_status_without_heal(tmp_path: Path):
+    config, deps, calls, head = _fixture(tmp_path)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["healthy"] is True
+    assert status["class"] == "healthy"
+    assert status["action"] == "noop"
+    assert status["pin"]["headSha"] == head
+    assert calls == []
+    assert _read_status(config)["class"] == "healthy"
+
+
+def test_untrusted_pin_records_problem_and_does_not_heal(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    deps = _mod.SelfcheckDeps(
+        commit_exists=lambda _sha: False,
+        deploy=deps.deploy,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "pin_untrusted"
+    assert "not on origin/main" in status["problems"][0]
+    assert calls == []
+
+
+def test_pin_load_error_is_fail_closed_status(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    config.manifest_path.write_text("{bad json", encoding="utf-8")
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "pin_untrusted"
+    assert status["healthy"] is False
+    assert calls == []
+
+
+def test_safe_drift_requires_two_consecutive_cycles_before_heal(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    first = _mod.run_selfcheck(config, deps)
+    assert first["class"] == "drift"
+    assert first["consecutive"] == 1
+    assert first["action"] == "hysteresis_wait"
+    assert calls == []
+
+    second = _mod.run_selfcheck(config, deps)
+    assert second["class"] == "drift"
+    assert second["consecutive"] == 2
+    assert second["action"] == "healed"
+    assert len(calls) == 1
+
+
+def test_manifest_missing_is_safe_heal_class_after_hysteresis(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    (config.root / _mod.sp.F10_PATH).unlink()
+    _seed_memory(config, {"lastClass": "manifest_missing", "consecutive": 1, "healHistory": []})
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "manifest_missing"
+    assert status["action"] == "healed"
+    assert len(calls) == 1
+
+
+def test_autoheal_off_checks_before_hysteresis_and_never_deploys(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    config.autoheal_off_path.touch()
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "drift"
+    assert status["action"] == "monitor_only"
+    assert status["levers"]["autohealOff"] == "present"
+    assert calls == []
+
+
+def test_disabled_lever_prevents_mutation(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    config.disabled_path.touch()
+    status = _mod.run_selfcheck(config, deps)
+    assert status["action"] == "mutation_disabled"
+    assert status["levers"]["disabled"] == "present"
+    assert calls == []
+
+
+def test_bad_current_bundle_refuses_heal(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n", bundle_data=b"also-wrong\n")
+    (config.current_link.parent / "bundle" / ("a" * 40) / _mod.sp.F10_PATH).write_text("mutated", encoding="utf-8")
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "bundle_bad"
+    assert status["action"] == "none"
+    assert calls == []
+
+
+def test_current_bundle_name_must_match_pin_head(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    other = config.current_link.parent / "bundle" / ("b" * 40)
+    other.mkdir(parents=True)
+    config.current_link.unlink()
+    os.symlink(other, config.current_link)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "bundle_mismatch"
+    assert calls == []
+
+
+def test_missing_current_bundle_records_bundle_missing(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    config.current_link.unlink()
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "bundle_missing"
+    assert "current bundle unavailable" in status["problems"][0]
+    assert calls == []
+
+
+def test_symlinked_runtime_path_is_risky_and_not_healed(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path)
+    (config.root / _mod.sp.F10_PATH).unlink()
+    os.symlink(config.current_link.parent / "bundle" / ("a" * 40) / _mod.sp.F10_PATH, config.root / _mod.sp.F10_PATH)
+    status = _mod.run_selfcheck(config, deps)
+    assert status["class"] == "unsafe_runtime_path"
+    assert status["action"] == "escalate"
+    assert calls == []
+
+
+def test_rate_limit_blocks_third_heal_inside_window(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": [999.0, 998.0]})
+    status = _mod.run_selfcheck(config, deps)
+    assert status["action"] == "rate_limited"
+    assert calls == []
+
+
+def test_existing_lock_blocks_heal(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+    config.lock_path.write_text("busy", encoding="utf-8")
+    status = _mod.run_selfcheck(config, deps)
+    assert status["action"] == "lock_busy"
+    assert calls == []
+
+
+def test_current_symlink_race_refuses_deploy(tmp_path: Path):
+    config, deps, calls, head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+    alternate = tmp_path / "alternate" / head
+    alternate.mkdir(parents=True)
+
+    def before_heal() -> None:
+        config.current_link.unlink()
+        os.symlink(alternate, config.current_link)
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deps.deploy,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+        before_heal=before_heal,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["action"] == "current_changed"
+    assert calls == []
+
+
+def test_deployer_failure_is_reported_and_lock_is_released(tmp_path: Path):
+    config, deps, _calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+
+    def deploy(_root: Path, _bundle: Path, _deployer: Path) -> tuple[int, str]:
+        return 4, "VERIFY_FAILED"
+
+    deps = _mod.SelfcheckDeps(
+        commit_exists=deps.commit_exists,
+        deploy=deploy,
+        now_epoch=deps.now_epoch,
+        hostname=deps.hostname,
+    )
+    status = _mod.run_selfcheck(config, deps)
+    assert status["action"] == "heal_failed"
+    assert "deployer_rc=4" in status["problems"]
+    assert not config.lock_path.exists()
+
+
+def test_no_heal_mode_is_monitor_only(tmp_path: Path):
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+    status = _mod.run_selfcheck(config, deps, heal_enabled=False)
+    assert status["action"] == "monitor_only"
+    assert calls == []
+
+
+def test_default_config_uses_env_overrides(tmp_path: Path, monkeypatch):
+    root = tmp_path / "root"
+    state = tmp_path / "custom-state"
+    manifest = tmp_path / "manifest.json"
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state-root"))
+    monkeypatch.setenv("BOT_ERRORS_RUNTIME_MANIFEST", str(manifest))
+    assert _mod.default_state_dir() == tmp_path / "state-root" / "sentinel"
+    config = _mod.default_config(root, state)
+    assert config.manifest_path == manifest
+    assert config.current_link == state / "current"
+
+
+def test_private_dir_chmod_error_is_nonfatal(tmp_path: Path, monkeypatch):
+    original_chmod = Path.chmod
+
+    def chmod(path: Path, mode: int) -> None:
+        if path == tmp_path / "state":
+            raise OSError("chmod denied")
+        original_chmod(path, mode)
+
+    monkeypatch.setattr(Path, "chmod", chmod)
+    _mod.ensure_private_dir(tmp_path / "state")
+    assert (tmp_path / "state").is_dir()
+
+
+def test_fsync_parent_ignores_open_error(tmp_path: Path, monkeypatch):
+    called = False
+
+    def boom(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise OSError("no directory fd")
+
+    monkeypatch.setattr(_mod.os, "open", boom)
+    _mod.fsync_parent(tmp_path / "missing" / "status.json")
+    assert called is True
+
+
+def test_atomic_write_json_cleans_temp_on_replace_error(tmp_path: Path, monkeypatch):
+    path = tmp_path / "state" / "status.json"
+
+    def replace(_src, _dst):
+        raise RuntimeError("replace failed")
+
+    monkeypatch.setattr(_mod.os, "replace", replace)
+    with pytest.raises(RuntimeError):
+        _mod.atomic_write_json(path, {"ok": True})
+    assert list(path.parent.glob(".status.json.*.tmp")) == []
+
+
+def test_read_json_object_rejects_bad_json_and_non_object(tmp_path: Path):
+    bad = tmp_path / "bad.json"; bad.write_text("{bad", encoding="utf-8")
+    with pytest.raises(_mod.SelfcheckError, match="cannot read"):
+        _mod.read_json_object(bad, {})
+    array = tmp_path / "array.json"; array.write_text("[]", encoding="utf-8")
+    with pytest.raises(_mod.SelfcheckError, match="must be a JSON object"):
+        _mod.read_json_object(array, {})
+
+
+def test_load_memory_rejects_bad_history_shape(tmp_path: Path):
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"healHistory": "bad"}), encoding="utf-8")
+    with pytest.raises(_mod.SelfcheckError, match="healHistory"):
+        _mod.load_memory(path)
+
+
+def test_lever_stat_error_is_engaged(tmp_path: Path, monkeypatch):
+    lever = tmp_path / "DISABLED"
+
+    def stat(path: Path):
+        if path == lever:
+            raise PermissionError("denied")
+        return original_stat(path)
+
+    original_stat = Path.stat
+    monkeypatch.setattr(Path, "stat", stat)
+    engaged, reason = _mod.lever_engaged(lever)
+    assert engaged is True
+    assert reason == "stat_error:PermissionError"
+
+
+def test_invalid_heal_history_blocks_mutation():
+    allowed, reason = _mod.heal_allowed({"healHistory": ["not-a-number"]}, 1000.0)
+    assert allowed is False
+    assert reason == "invalid_heal_history"
+
+
+def test_old_heal_history_is_pruned():
+    memory = {"healHistory": [1.0, 29999.0]}
+    allowed, reason = _mod.heal_allowed(memory, 30000.0)
+    assert allowed is True
+    assert reason == "ok"
+    assert memory["healHistory"] == [29999.0]
+
+
+def test_release_lock_tolerates_missing_lock(tmp_path: Path):
+    lock = tmp_path / "lock"
+    fd = _mod.acquire_lock(lock)
+    assert fd is not None
+    lock.unlink()
+    _mod.release_lock(lock, fd)
+    assert not lock.exists()
+
+
+def test_relative_current_symlink_resolves_against_state_dir(tmp_path: Path):
+    state = tmp_path / "state"
+    bundle = state / "bundle" / ("a" * 40)
+    bundle.mkdir(parents=True)
+    current = state / "current"
+    os.symlink(Path("bundle") / ("a" * 40), current)
+    assert _mod.current_bundle_path(current) == bundle.resolve()
+
+
+def test_classify_empty_mismatch_defaults_to_drift():
+    assert _mod.classify_runtime_mismatches([]) == "drift"
+
+
+def test_default_commit_exists_requires_commit_and_origin_main(tmp_path: Path, monkeypatch):
+    calls: list[list[str]] = []
+
+    class Proc:
+        def __init__(self, returncode: int):
+            self.returncode = returncode
+
+    def run(cmd, **_kwargs):
+        calls.append(cmd)
+        if cmd[3] == "cat-file":
+            return Proc(0)
+        return Proc(0)
+
+    monkeypatch.setattr(_mod.subprocess, "run", run)
+    exists = _mod.default_commit_exists(tmp_path)("a" * 40)
+    assert exists is True
+    assert calls[0][3] == "cat-file"
+    assert calls[1][3] == "merge-base"
+
+    def cat_fails(cmd, **_kwargs):
+        return Proc(1 if cmd[3] == "cat-file" else 0)
+
+    monkeypatch.setattr(_mod.subprocess, "run", cat_fails)
+    assert _mod.default_commit_exists(tmp_path)("a" * 40) is False
+
+
+def test_default_commit_exists_rejects_commit_not_on_origin_main(tmp_path: Path, monkeypatch):
+    class Proc:
+        def __init__(self, returncode: int):
+            self.returncode = returncode
+
+    def run(cmd, **_kwargs):
+        return Proc(1 if cmd[3] == "merge-base" else 0)
+
+    monkeypatch.setattr(_mod.subprocess, "run", run)
+    assert _mod.default_commit_exists(tmp_path)("a" * 40) is False
+
+
+def test_default_deploy_invokes_local_deployer(tmp_path: Path, monkeypatch):
+    class Proc:
+        returncode = 0
+        stdout = "x" * 5000
+
+    seen = {}
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["timeout"] = kwargs["timeout"]
+        return Proc()
+
+    monkeypatch.setattr(_mod.subprocess, "run", run)
+    rc, output = _mod.default_deploy(tmp_path / "deployer.sh")(tmp_path / "root", tmp_path / "bundle")
+    assert rc == 0
+    assert seen["cmd"][:2] == ["bash", str(tmp_path / "deployer.sh")]
+    assert seen["timeout"] == 120
+    assert len(output) == 4000
+
+
+def test_default_deps_wires_default_callables(tmp_path: Path, monkeypatch):
+    config, _deps, _calls, _head = _fixture(tmp_path)
+    monkeypatch.setattr(_mod, "default_commit_exists", lambda root: (lambda sha: True))
+    monkeypatch.setattr(_mod, "default_deploy", lambda deployer: (lambda root, bundle, path: (0, "ok")))
+    deps = _mod.default_deps(config)
+    assert deps.commit_exists("a" * 40) is True
+    assert deps.deploy(config.root, config.root, config.deployer_path) == (0, "ok")
+    assert isinstance(deps.hostname(), str)
+
+
+def test_parse_args_accepts_root_state_and_no_heal(tmp_path: Path):
+    args = _mod.parse_args(["--root", str(tmp_path / "root"), "--state-dir", str(tmp_path / "state"), "--no-heal"])
+    assert args.root == str(tmp_path / "root")
+    assert args.state_dir == str(tmp_path / "state")
+    assert args.no_heal is True
+
+
+def test_main_success_and_unhealthy_exit_codes(tmp_path: Path, monkeypatch, capsys):
+    config, _deps, _calls, _head = _fixture(tmp_path)
+    monkeypatch.setattr(_mod, "default_config", lambda root, state_dir: config)
+    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, heal_enabled=True: {"healthy": True, "action": "noop"})
+    assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 0
+    assert '"healthy": true' in capsys.readouterr().out
+
+    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, heal_enabled=True: {"healthy": False, "action": "escalate"})
+    assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 1
+
+
+def test_main_error_writes_selfcheck_error_status(tmp_path: Path, monkeypatch, capsys):
+    config, _deps, _calls, _head = _fixture(tmp_path)
+    monkeypatch.setattr(_mod, "default_config", lambda root, state_dir: config)
+
+    def fail(_cfg, heal_enabled=True):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_mod, "run_selfcheck", fail)
+    assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 2
+    assert "selfcheck_error" in capsys.readouterr().err
+    assert json.loads(config.status_path.read_text(encoding="utf-8"))["class"] == "selfcheck_error"
+
+
+def test_main_error_still_returns_when_status_write_fails(tmp_path: Path, monkeypatch):
+    config, _deps, _calls, _head = _fixture(tmp_path)
+    monkeypatch.setattr(_mod, "default_config", lambda root, state_dir: config)
+    monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, heal_enabled=True: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(_mod, "atomic_write_json", lambda path, payload: (_ for _ in ()).throw(RuntimeError("write failed")))
+    assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 2
