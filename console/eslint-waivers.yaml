@@ -189,6 +189,9 @@ waivers:
       Retire if react-refresh capability changes or helper extraction happens.
     safer_alternative_considered: separate popover-keyboard.ts module — rejected as spec-orphan fragmentation.
     status: temporary
+    expiration_phase: D-series-close
+    cleanup_trigger: react-refresh gains mixed-export support or helpers gain a second consumer
+    user_approval_required: no
   - id: WVR-015
     rule: react-hooks/set-state-in-effect
     owner: console-maintainer

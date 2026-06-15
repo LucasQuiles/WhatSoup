@@ -42,7 +42,21 @@ function makeWaiverFixture(opts: {
   writeFileSync(
     join(consoleDir, 'eslint-waivers.yaml'),
     opts.waivers ??
-      `waivers:\n  - id: WVR-001\n    scope: console/src/Fixture.tsx\n    expiry: 2099-12-31\n`,
+      [
+        'waivers:',
+        '  - id: WVR-001',
+        '    rule: react-hooks/set-state-in-effect',
+        '    owner: test-fixture',
+        '    reason: test fixture only.',
+        '    scope: console/src/Fixture.tsx',
+        '    expiry: 2099-12-31',
+        '    replacement_plan: retire with the fixture.',
+        '    safer_alternative_considered: none — test only.',
+        '    status: temporary',
+        '    expiration_phase: C1',
+        '    cleanup_trigger: fixture removed',
+        '    user_approval_required: no',
+      ].join('\n') + '\n',
   );
 
   return consoleDir;
