@@ -852,7 +852,12 @@ def q_remediation_redeemed(record: dict, now: float) -> bool:
 
 
 def active_q_remediation(state: dict, now: float) -> Optional[dict]:
-    record = state.setdefault("qRemediation", {})
+    record = state.get("qRemediation")
+    if record is None:
+        record = state.setdefault("qRemediation", {})
+    if not isinstance(record, dict):
+        state.pop("qRemediation", None)
+        return None
     try:
         expires_at = float(record.get("expiresAtEpoch"))
     except (TypeError, ValueError):

@@ -691,6 +691,43 @@ def test_q_remediation_is_one_host_at_a_time(tmp_path: Path, monkeypatch):
     assert host_events[1]["remediation"]["activeHost"] == "host-a"
 
 
+def test_malformed_q_remediation_state_does_not_crash_tier2(tmp_path: Path, monkeypatch):
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=False, klass="permission_denied", mtime=995.0)
+    q_hb = _heartbeat(tmp_path / "q-agent-host-hb.json", healthy=True, klass="healthy", mtime=995.0)
+    hosts = _hosts_file(
+        tmp_path,
+        [
+            {"host": "host-a", "heartbeatPath": str(hb)},
+            {"host": "q-agent-host", "heartbeatPath": str(q_hb)},
+        ],
+    )
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, q_host="q-agent-host")
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {"schemaVersion": 1, "hosts": {}, "qRemediation": ["corrupt"]},
+    )
+    monkeypatch.setattr(_mod.secrets, "token_urlsafe", lambda _length: "replacement-token")
+
+    result = _mod.run_once(
+        config,
+        _deps(
+            1000.0,
+            {
+                "host-a": {"reachable": True, "healthy": False, "class": "permission_denied"},
+                "q-agent-host": {"reachable": True, "healthy": True, "class": "healthy"},
+            },
+        ),
+    )
+
+    payload = json.loads(Path(result["actionEvents"][0]["path"]).read_text(encoding="utf-8"))
+    assert payload["host"] == "host-a"
+    assert payload["remediation"]["qEligible"] is True
+    assert payload["remediation"]["token"] == "replacement-token"
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert isinstance(state["qRemediation"], dict)
+    assert state["qRemediation"]["host"] == "host-a"
+
+
 def test_expired_q_remediation_emits_q_unavailable_tier3_event(tmp_path: Path):
     hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=True, mtime=995.0)
     hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
