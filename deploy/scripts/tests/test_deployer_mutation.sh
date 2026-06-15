@@ -135,6 +135,21 @@ bash "$D" rollback-lkg "$clean_root" > "$tmp/rollback-lkg.log" 2>&1
 grep -q "ROLLBACK_LKG_OK" "$tmp/rollback-lkg.log" || { cat "$tmp/rollback-lkg.log"; fail "rollback-lkg did not report ROLLBACK_LKG_OK"; }
 bash "$D" verify "$clean_root" > "$tmp/verify-lkg.log" 2>&1 || { cat "$tmp/verify-lkg.log"; fail "rollback-lkg root did not verify"; }
 
+retention_root="$tmp/retention-runtime"
+prepare_current_root "$retention_root"
+for run in 1 2 3; do
+  BOT_ERRORS_DEPLOY_BACKUP_RETENTION=2 bash "$D" deploy "$retention_root" "$staging" > "$tmp/retention-$run.log" 2>&1
+  grep -q "DEPLOY_OK" "$tmp/retention-$run.log" || { cat "$tmp/retention-$run.log"; fail "retention deploy $run did not report DEPLOY_OK"; }
+  grep -q "BACKUP_RETENTION_LIMIT=2" "$tmp/retention-$run.log" || { cat "$tmp/retention-$run.log"; fail "retention limit was not reported"; }
+done
+retained_count=$(find "$tmp" -maxdepth 1 -type d -name '.bot-errors-deploy-backup-retention-runtime-*' -print | wc -l | tr -d ' ')
+[ "$retained_count" = "2" ] || fail "retention kept $retained_count backups, expected 2"
+retention_pointer="$tmp/.bot-errors-last-known-good-retention-runtime"
+[ -f "$retention_pointer" ] || fail "retention last_known_good pointer missing"
+IFS= read -r retention_lkg < "$retention_pointer"
+[ -d "$retention_lkg" ] || fail "retention pruned last_known_good backup"
+bash "$D" verify "$retention_root" > "$tmp/verify-retention.log" 2>&1 || { cat "$tmp/verify-retention.log"; fail "retention root did not verify"; }
+
 missing_lkg_root="$tmp/missing-lkg-runtime"
 prepare_current_root "$missing_lkg_root"
 if bash "$D" rollback-lkg "$missing_lkg_root" > "$tmp/missing-lkg.log" 2>&1; then

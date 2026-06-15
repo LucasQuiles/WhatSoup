@@ -144,6 +144,43 @@ require_backup_dir() {
   esac
 }
 
+prune_backup_dir() {
+  local root_parent="$1" safe_root_base="$2" dir="$3" dir_parent base
+  dir_parent="$(cd "$(dirname "$dir")" && pwd -P)" || return 1
+  [ "$dir_parent" = "$root_parent" ] || return 1
+  base="$(basename "$dir")"
+  case "$base" in
+    ".bot-errors-deploy-backup-${safe_root_base}-"*) ;;
+    *) return 1 ;;
+  esac
+  [ -f "$dir/.was-absent" ] || return 1
+  [ -f "$dir/.bot-errors-backup.json" ] || return 1
+  rm -rf "$dir"
+}
+
+prune_verified_backups() {
+  local root_parent="$1" safe_root_base="$2" lkg_pointer="$3"
+  local retention_raw="${BOT_ERRORS_DEPLOY_BACKUP_RETENTION:-8}" limit lkg="" kept=0 pruned=0 dir
+  if ! [[ "$retention_raw" =~ ^[0-9]+$ ]] || (( retention_raw < 1 )); then
+    echo "BACKUP_RETENTION_SKIPPED=invalid_limit"
+    return 0
+  fi
+  limit="$retention_raw"
+  if [[ -f "$lkg_pointer" ]]; then IFS= read -r lkg < "$lkg_pointer" || lkg=""; fi
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    [ -d "$dir" ] || continue
+    [ -f "$dir/.was-absent" ] || continue
+    [ -f "$dir/.bot-errors-backup.json" ] || continue
+    kept=$((kept + 1))
+    if (( kept <= limit )); then continue; fi
+    if [[ -n "$lkg" && "$dir" == "$lkg" ]]; then continue; fi
+    if prune_backup_dir "$root_parent" "$safe_root_base" "$dir"; then pruned=$((pruned + 1)); fi
+  done < <(find "$root_parent" -maxdepth 1 -type d -name ".bot-errors-deploy-backup-${safe_root_base}-*" -print | sort -r)
+  echo "BACKUP_RETENTION_LIMIT=$limit"
+  echo "BACKUP_RETENTION_PRUNED=$pruned"
+}
+
 case "$MODE" in
   deploy)
     STAGING="${3:?missing <staging-dir>}"
@@ -193,6 +230,7 @@ case "$MODE" in
     echo "== materialized =="
     # 3) fail-closed verify + redaction smoke; auto-rollback on failure
     if do_verify "$ROOT" && smoke_redaction "$ROOT"; then
+      if [[ "$BACKUP_VERIFIED" == "1" ]]; then prune_verified_backups "$ROOT_PARENT" "$SAFE_ROOT_BASE" "$LKG_POINTER"; fi
       echo "DEPLOY_OK backup=$BKDIR"
     else
       echo "VERIFY_FAILED -> auto-rollback"; bash "$0" rollback "$ROOT" "$BKDIR"; echo "DEPLOY_FAILED_ROLLED_BACK"; exit 4
