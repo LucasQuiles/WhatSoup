@@ -282,3 +282,169 @@ def test_threshold_one_emits_immediately(mod):
         state="inconclusive", consecutive_failures=1, threshold=1,
     )
     assert decision.should_emit is True
+
+
+# ---------------------------------------------------------------------------
+# Test 8: SSOT-driven GUI target enumeration (no hardcoded host list)
+# ---------------------------------------------------------------------------
+
+
+_FAKE_FLEET = {
+    "schemaVersion": 1,
+    "hosts": [
+        {
+            "host": "botbox-a",
+            "role": "bot-host",
+            "instances": [
+                {"name": "x-bot", "expected": "always_on",
+                 "service": "com.whatsoup.x-bot", "healthPort": 9095},
+            ],
+        },
+        {
+            "host": "botbox-b",
+            "role": "bot-host",
+            "instances": [
+                {"name": "y-bot", "expected": "always_on",
+                 "service": "com.whatsoup.y-bot", "healthPort": 9096},
+                {"name": "z-bot", "expected": "always_on",
+                 "service": "com.whatsoup.z-bot", "healthPort": 9097},
+            ],
+        },
+        {  # systemd central host — NOT a GUI LaunchAgent host, must be excluded
+            "host": "central-box",
+            "role": "central",
+            "instances": [
+                {"name": "primary", "expected": "always_on",
+                 "service": "whatsoup-primary.service", "healthPort": 9092},
+            ],
+        },
+        {  # relay-only on_demand — excluded (down is healthy)
+            "host": "relay-box",
+            "role": "relay-only",
+            "instances": [
+                {"name": "agent", "expected": "on_demand",
+                 "service": "com.whatsoup.agent", "healthPort": 9095},
+            ],
+        },
+        {  # blocked instance — excluded (intentionally down)
+            "host": "blocked-box",
+            "role": "bot-host-blocked",
+            "instances": [
+                {"name": "b-bot", "expected": "blocked",
+                 "service": "com.whatsoup.b-bot"},
+            ],
+        },
+        {  # no-bot host — excluded (no instances)
+            "host": "empty-box",
+            "role": "no-bot",
+            "instances": [],
+        },
+    ],
+}
+
+
+def test_gui_targets_only_always_on_launchagent_hosts(mod):
+    targets = mod.gui_targets_from_fleet(_FAKE_FLEET)
+    hosts = sorted({t["host"] for t in targets})
+    assert hosts == ["botbox-a", "botbox-b"]
+
+
+def test_gui_targets_expand_per_instance_with_label(mod):
+    targets = mod.gui_targets_from_fleet(_FAKE_FLEET)
+    pairs = sorted((t["host"], t["label"]) for t in targets)
+    assert pairs == [
+        ("botbox-a", "com.whatsoup.x-bot"),
+        ("botbox-b", "com.whatsoup.y-bot"),
+        ("botbox-b", "com.whatsoup.z-bot"),
+    ]
+
+
+def test_gui_targets_carry_instance_name(mod):
+    targets = mod.gui_targets_from_fleet(_FAKE_FLEET)
+    by_label = {t["label"]: t for t in targets}
+    assert by_label["com.whatsoup.x-bot"]["instance"] == "x-bot"
+
+
+def test_gui_targets_exclude_non_launchagent_service_labels(mod):
+    # systemd .service units are not gui/<uid>/<label> agents — never targets.
+    targets = mod.gui_targets_from_fleet(_FAKE_FLEET)
+    assert all(t["label"].startswith("com.whatsoup.") for t in targets)
+
+
+def test_gui_targets_empty_on_missing_hosts_key(mod):
+    assert mod.gui_targets_from_fleet({"schemaVersion": 1}) == []
+
+
+# ---------------------------------------------------------------------------
+# Test 9: distill raw `launchctl print` output into an agent_state token
+# ---------------------------------------------------------------------------
+
+
+def test_distill_agent_state_running(mod):
+    # `launchctl print gui/<uid>/<label>` for a live agent reports a pid + state.
+    raw = (
+        "com.whatsoup.x-bot = {\n"
+        "\tactive count = 1\n"
+        "\tstate = running\n"
+        "\tpid = 4821\n"
+        "}\n"
+    )
+    assert mod.distill_agent_state(raw, ok=True) == "running"
+
+
+def test_distill_agent_state_not_running_when_no_pid(mod):
+    # Loaded but waiting (no pid, state not running).
+    raw = (
+        "com.whatsoup.x-bot = {\n"
+        "\tactive count = 0\n"
+        "\tstate = waiting\n"
+        "}\n"
+    )
+    assert mod.distill_agent_state(raw, ok=True) == "not_running"
+
+
+def test_distill_agent_state_unloaded_on_not_found(mod):
+    # The agent_unloaded shape: launchctl cannot find the service.
+    raw = "Could not find service \"com.whatsoup.x-bot\" in domain for gui"
+    assert mod.distill_agent_state(raw, ok=True) == "unloaded"
+
+
+def test_distill_agent_state_unloaded_when_domain_missing(mod):
+    # No Aqua session => the gui/<uid> domain itself is absent.
+    raw = "Could not find domain for gui/501"
+    assert mod.distill_agent_state(raw, ok=True) == "unloaded"
+
+
+def test_distill_agent_state_none_when_probe_failed(mod):
+    # Transport failure => no state to distill (classifier -> unreachable).
+    assert mod.distill_agent_state("", ok=False) is None
+
+
+def test_distill_agent_state_none_on_empty_ok_output(mod):
+    # ok transport but empty payload => garbage => no distilled state (fail-closed).
+    assert mod.distill_agent_state("   ", ok=True) is None
+
+
+def test_distill_agent_state_none_on_unrecognized_output(mod):
+    assert mod.distill_agent_state("totally unexpected blob", ok=True) is None
+
+
+# ---------------------------------------------------------------------------
+# Test 10: distill console owner from `stat -f %Su /dev/console`
+# ---------------------------------------------------------------------------
+
+
+def test_distill_console_owner_strips_whitespace(mod):
+    assert mod.distill_console_owner("botuser\n", ok=True) == "botuser"
+
+
+def test_distill_console_owner_root_at_loginwindow(mod):
+    assert mod.distill_console_owner("root\n", ok=True) == "root"
+
+
+def test_distill_console_owner_none_when_probe_failed(mod):
+    assert mod.distill_console_owner("anything", ok=False) is None
+
+
+def test_distill_console_owner_none_on_empty(mod):
+    assert mod.distill_console_owner("\n", ok=True) is None

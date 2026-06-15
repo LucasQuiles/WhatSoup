@@ -128,6 +128,58 @@ def _norm(value) -> str:
     return str(value).strip()
 
 
+# --- probe-output distillation (raw SSH stdout -> classifier inputs) -------
+
+
+def distill_console_owner(raw, ok: bool):
+    """Distill ``stat -f %Su /dev/console`` stdout into a console-owner login.
+
+    Returns the bare username, or ``None`` when the probe failed (transport)
+    or produced empty output — both of which the classifier treats as
+    unreachable / inconclusive (fail-closed).
+    """
+    if not ok:
+        return None
+    owner = _norm(raw)
+    return owner or None
+
+
+def distill_agent_state(raw, ok: bool):
+    """Distill ``launchctl print gui/<uid>/<label>`` stdout into an agent state.
+
+    Returns one of the KNOWN_AGENT_STATES, or ``None`` when the probe failed,
+    was empty, or was unrecognizable — fail-closed so the classifier never
+    reads such output as ``ok``.
+    """
+    if not ok:
+        return None
+    text = _norm(raw)
+    if not text:
+        return None
+    lowered = text.lower()
+    # launchctl emits "Could not find service ..." / "Could not find domain ..."
+    # when the agent is not loaded or the gui/<uid> Aqua domain is absent.
+    if "could not find" in lowered:
+        return AGENT_STATE_UNLOADED
+    # A printed service block: distinguish running (has pid / state = running)
+    # from merely loaded-but-not-running.
+    if "= {" in text or "= {\n" in text or text.rstrip().endswith("}"):
+        if "state = running" in lowered or _has_live_pid(text):
+            return AGENT_STATE_RUNNING
+        return AGENT_STATE_NOT_RUNNING
+    return None
+
+
+def _has_live_pid(text: str) -> bool:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("pid ") or stripped.startswith("pid="):
+            digits = "".join(ch for ch in stripped if ch.isdigit())
+            if digits and int(digits) > 0:
+                return True
+    return False
+
+
 # --- emit-decision (consecutive-failure threshold gating) ------------------
 
 DEFAULT_FAILURE_THRESHOLD = 2
@@ -148,6 +200,48 @@ def default_failure_threshold() -> int:
     except ValueError:
         return DEFAULT_FAILURE_THRESHOLD
     return value if value >= 1 else DEFAULT_FAILURE_THRESHOLD
+
+
+# --- SSOT-driven GUI-LaunchAgent target enumeration -----------------------
+
+# Only macOS GUI LaunchAgents live under gui/<uid>/<label> and depend on an
+# Aqua session. Their labels are the reverse-DNS ``com.whatsoup.*`` form.
+# systemd .service units (central host) and on_demand/blocked/no-bot entries
+# are NOT GUI-session targets.
+GUI_LABEL_PREFIX = "com.whatsoup."
+
+
+def gui_targets_from_fleet(fleet: dict) -> list[dict]:
+    """Enumerate GUI-LaunchAgent monitor targets from the expected-fleet SSOT.
+
+    A target is produced per (host, always_on instance) whose service label is
+    a ``com.whatsoup.*`` LaunchAgent. Consumes the SSOT — never a hardcoded
+    host list. Returns dicts with: host, instance, label.
+    """
+    targets: list[dict] = []
+    hosts = fleet.get("hosts")
+    if not isinstance(hosts, list):
+        return targets
+    for host_entry in hosts:
+        if not isinstance(host_entry, dict):
+            continue
+        host = _norm(host_entry.get("host"))
+        if not host:
+            continue
+        instances = host_entry.get("instances")
+        if not isinstance(instances, list):
+            continue
+        for instance in instances:
+            if not isinstance(instance, dict):
+                continue
+            if _norm(instance.get("expected")) != "always_on":
+                continue
+            label = _norm(instance.get("service"))
+            if not label.startswith(GUI_LABEL_PREFIX):
+                continue
+            name = _norm(instance.get("name")) or label
+            targets.append({"host": host, "instance": name, "label": label})
+    return targets
 
 
 @dataclass(frozen=True)
