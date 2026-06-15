@@ -835,13 +835,18 @@ def remediation_token_hash(token: str, host: str, action_hash: str, request_id: 
     return hashlib.sha256(material).hexdigest()
 
 
+def q_remediation_redeemed(record: dict, now: float) -> bool:
+    redeemed_at = parse_iso_epoch(record.get("redeemedAt"))
+    return redeemed_at is not None and redeemed_at <= now
+
+
 def active_q_remediation(state: dict, now: float) -> Optional[dict]:
     record = state.setdefault("qRemediation", {})
     try:
         expires_at = float(record.get("expiresAtEpoch"))
     except (TypeError, ValueError):
         expires_at = 0.0
-    if expires_at > now and not record.get("redeemedAt"):
+    if expires_at > now and not q_remediation_redeemed(record, now):
         return record
     record.clear()
     return None
@@ -849,7 +854,9 @@ def active_q_remediation(state: dict, now: float) -> Optional[dict]:
 
 def expired_q_remediation(state: dict, now: float) -> Optional[dict]:
     record = state.get("qRemediation")
-    if not isinstance(record, dict) or not record or record.get("redeemedAt"):
+    if not isinstance(record, dict) or not record:
+        return None
+    if q_remediation_redeemed(record, now):
         return None
     try:
         expires_at = float(record.get("expiresAtEpoch"))

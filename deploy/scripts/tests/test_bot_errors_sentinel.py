@@ -757,6 +757,10 @@ def test_expired_q_remediation_helper_edges():
     assert _mod.expired_q_remediation({}, 1000.0) is None
     assert _mod.expired_q_remediation({"qRemediation": []}, 1000.0) is None
     assert _mod.expired_q_remediation({"qRemediation": {"redeemedAt": "1970-01-01T00:10:00Z"}}, 1000.0) is None
+    malformed_redeemed = {"qRemediation": {"host": "host-q", "expiresAtEpoch": 900.0, "redeemedAt": "not-a-time"}}
+    assert _mod.expired_q_remediation(malformed_redeemed, 1000.0) == malformed_redeemed["qRemediation"]
+    future_redeemed = {"qRemediation": {"host": "host-q", "expiresAtEpoch": 900.0, "redeemedAt": "1970-01-01T00:20:00Z"}}
+    assert _mod.expired_q_remediation(future_redeemed, 1000.0) == future_redeemed["qRemediation"]
     assert _mod.expired_q_remediation({"qRemediation": {"expiresAtEpoch": 1001.0}}, 1000.0) is None
     invalid = {"qRemediation": {"host": "host-q", "expiresAtEpoch": "bad"}}
     assert _mod.expired_q_remediation(invalid, 1000.0) == invalid["qRemediation"]
