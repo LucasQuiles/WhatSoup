@@ -58,6 +58,11 @@ the existing fallback-window fields:
   during the current window (the terminal "nothing left to fall back to"
   condition);
 - `failedEntryCount` — how many entries have failed this window.
+- `turnErrorCounts` — cumulative process-lifetime count of user-turn failures by
+  class (`rate-limit`, `usage-limit`, `auth-required`, `model-unavailable`,
+  `policy-block`, `context-overflow`, `unknown-terminal`, `empty-output`), so you
+  can see which provider-failure classes fire most. Captured on both the legacy
+  and dispatcher paths.
 
 These are derived and read-only — observability only, no behaviour change.
 

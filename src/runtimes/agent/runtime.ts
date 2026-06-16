@@ -1535,6 +1535,9 @@ export class AgentRuntime implements Runtime {
   private lastSuccessfulTurnAt: number | null = null;
   private lastTurnErrorClass: TurnCapabilityErrorClass | null = null;
   private lastTurnErrorAt: number | null = null;
+  // Cumulative count of user-turn failures by class (process lifetime). Telemetry
+  // for which provider-failure classes fire most; surfaced verbatim in /health.
+  private readonly turnErrorCounts = new Map<TurnCapabilityErrorClass, number>();
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -6082,6 +6085,7 @@ export class AgentRuntime implements Runtime {
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
     fallbackChainExhausted: boolean;
     failedEntryCount: number;
+    turnErrorCounts: Record<string, number>;
   } {
     const active = this.isFallbackWindowActive;
     const fallbackEntry = active ? this.effectiveFallbackEntry : null;
@@ -6107,6 +6111,7 @@ export class AgentRuntime implements Runtime {
       fallbackChain: this.fallbackChainSnapshot(),
       fallbackChainExhausted: this.isFallbackChainExhausted(),
       failedEntryCount: this.failedFallbackEntryKeys.size,
+      turnErrorCounts: Object.fromEntries(this.turnErrorCounts),
     };
   }
 
@@ -6156,6 +6161,7 @@ export class AgentRuntime implements Runtime {
     if (!isUserTurnResult) return;
     this.lastTurnErrorClass = errorClass;
     this.lastTurnErrorAt = Date.now();
+    this.turnErrorCounts.set(errorClass, (this.turnErrorCounts.get(errorClass) ?? 0) + 1);
   }
 
   /**

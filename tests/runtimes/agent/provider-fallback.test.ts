@@ -191,7 +191,9 @@ type FallbackView = {
     fallbackRecoveryProbeRequired: boolean;
     fallbackChainExhausted: boolean;
     failedEntryCount: number;
+    turnErrorCounts: Record<string, number>;
   };
+  recordTurnCapabilityFailure(isUserTurnResult: boolean, errorClass: string): void;
   agentFallbacks: Array<{ provider: string; model?: string }>;
   failedFallbackEntryKeys: Set<string>;
   fallbackEntryKey(entry: { provider: string; model?: string }): string;
@@ -353,6 +355,15 @@ describe('AgentRuntime — provider fallback state machine', () => {
     const v = view(makeRuntime({}));
     expect(v.agentFallbacks).toHaveLength(0);
     expect(v.getFallbackState().fallbackChainExhausted).toBe(false);
+  });
+
+  it('accumulates per-class turn-error counts for telemetry; ignores non-user turns', () => {
+    const v = view(makeRuntime({}));
+    v.recordTurnCapabilityFailure(true, 'rate-limit');
+    v.recordTurnCapabilityFailure(true, 'rate-limit');
+    v.recordTurnCapabilityFailure(true, 'auth-required');
+    v.recordTurnCapabilityFailure(false, 'usage-limit'); // system turn — must not count
+    expect(v.getFallbackState().turnErrorCounts).toEqual({ 'rate-limit': 2, 'auth-required': 1 });
   });
 
   it('formatContextLines renders "sender: content" with a media fallback (SSOT)', () => {
