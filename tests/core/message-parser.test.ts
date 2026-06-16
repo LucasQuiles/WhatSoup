@@ -205,6 +205,24 @@ describe('parseIncomingMessage — positive cases', () => {
     expect(result!.isGroup).toBe(false);
     expect(result!.senderJid).toBe('15551112222@s.whatsapp.net');
   });
+
+  it('from-me DM sender falls back to remoteJid when participant is absent', () => {
+    const msg = msgWith(
+      { conversation: 'sent text' },
+      {
+        key: {
+          id: 'sent-001',
+          remoteJid: '15552223333@s.whatsapp.net',
+          fromMe: true,
+          participant: undefined,
+        },
+      },
+    );
+    const result = parseIncomingMessage(msg);
+    expect(result).not.toBeNull();
+    expect(result!.isFromMe).toBe(true);
+    expect(result!.senderJid).toBe('15552223333@s.whatsapp.net');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -605,6 +623,186 @@ describe('parseIncomingMessage — structured content (SP2)', () => {
     expect(result.contentType).toBe('text');
     expect(result.content).toBe('Hello world');
     expect(result.contentText).toStrictEqual(null);
+  });
+});
+
+describe('parseIncomingMessage — fallback/default structured content', () => {
+  it('video without caption or metadata uses null metadata and unknown duration text', () => {
+    const result = parseIncomingMessage(msgWith({ videoMessage: {} }))!;
+    expect(result.contentType).toBe('video');
+    expect(JSON.parse(result.content!)).toEqual({
+      type: 'video',
+      duration: null,
+      width: null,
+      height: null,
+    });
+    expect(result.contentText).toBe('Video: ?s');
+  });
+
+  it('document without caption or metadata uses null metadata and generic filename text', () => {
+    const result = parseIncomingMessage(msgWith({ documentMessage: {} }))!;
+    expect(result.contentType).toBe('document');
+    expect(JSON.parse(result.content!)).toEqual({
+      type: 'document',
+      fileName: null,
+      mimetype: null,
+      pageCount: null,
+    });
+    expect(result.contentText).toBe('Document: file');
+  });
+
+  it('sticker with associatedEmoji but no emoji uses the associated emoji', () => {
+    const result = parseIncomingMessage(msgWith({ stickerMessage: { associatedEmoji: '\u{1F602}' } }))!;
+    expect(result.contentType).toBe('sticker');
+    expect(JSON.parse(result.content!)).toEqual({
+      type: 'sticker',
+      emoji: '\u{1F602}',
+      isAnimated: false,
+    });
+    expect(result.contentText).toBe('Sticker: \u{1F602}');
+  });
+
+  it('location without optional fields uses null metadata and shared summary text', () => {
+    const result = parseIncomingMessage(msgWith({ locationMessage: {} }))!;
+    expect(result.contentType).toBe('location');
+    expect(JSON.parse(result.content!)).toEqual({
+      type: 'location',
+      latitude: null,
+      longitude: null,
+      name: null,
+      address: null,
+      url: null,
+    });
+    expect(result.contentText).toBe('Location: shared (undefined, undefined)');
+  });
+
+  it('live location without coordinates defaults numeric fields to zero', () => {
+    const result = parseIncomingMessage(msgWith({ liveLocationMessage: {} }))!;
+    expect(result.contentType).toBe('live_location');
+    expect(result.content).toBe('Live location: 0, 0 (accuracy: 0m)');
+    expect(result.contentText).toBe('Live location: 0, 0 (accuracy: 0m)');
+  });
+
+  it('group invite with group name and caption includes both in the summary', () => {
+    const result = parseIncomingMessage(msgWith({
+      groupInviteMessage: {
+        groupName: 'Kitchen Crew',
+        caption: 'Join here',
+      },
+    }))!;
+    expect(result.contentType).toBe('group_invite');
+    expect(result.content).toBe('Group invite: Kitchen Crew - Join here');
+    expect(result.contentText).toBe('Group invite: Kitchen Crew - Join here');
+  });
+
+  it('group invite without optional fields uses the unknown-group fallback', () => {
+    const result = parseIncomingMessage(msgWith({ groupInviteMessage: {} }))!;
+    expect(result.contentType).toBe('group_invite');
+    expect(result.content).toBe('Group invite: Unknown group');
+    expect(result.contentText).toBe('Group invite: Unknown group');
+  });
+
+  it('product message with nested product details includes description and price text', () => {
+    const result = parseIncomingMessage(msgWith({
+      productMessage: {
+        product: {
+          title: 'Sauce Kit',
+          description: 'Batch tools',
+          currencyCode: 'USD',
+          priceAmount1000: 12999,
+        },
+      },
+    }))!;
+    expect(result.contentType).toBe('product');
+    expect(result.content).toBe('Product: Sauce Kit - Batch tools(USD 12.999)');
+    expect(result.contentText).toBe('Product: Sauce Kit - Batch tools(USD 12.999)');
+  });
+
+  it('direct product message can use price without currency', () => {
+    const result = parseIncomingMessage(msgWith({
+      productMessage: {
+        title: 'Tokens',
+        priceAmount1000: 5000,
+      },
+    }))!;
+    expect(result.contentType).toBe('product');
+    expect(result.content).toBe('Product: Tokens( 5)');
+  });
+
+  it('product message without details uses the unknown-product fallback', () => {
+    const result = parseIncomingMessage(msgWith({ productMessage: {} }))!;
+    expect(result.contentType).toBe('product');
+    expect(result.content).toBe('Product: Unknown product');
+    expect(result.contentText).toBe('Product: Unknown product');
+  });
+
+  it('pin message produces the pinned-message summary', () => {
+    const result = parseIncomingMessage(msgWith({ pinInChatMessage: { type: 1 } }))!;
+    expect(result.contentType).toBe('pin');
+    expect(result.content).toBe('Pinned a message');
+    expect(result.contentText).toBe('Pinned a message');
+  });
+
+  it('interactive message prefers body text when present', () => {
+    const result = parseIncomingMessage(msgWith({
+      interactiveMessage: {
+        body: { text: 'Choose a button' },
+        type: 'button',
+      },
+    }))!;
+    expect(result.contentType).toBe('interactive');
+    expect(result.content).toBe('Interactive: Choose a button');
+    expect(result.contentText).toBe('Interactive: Choose a button');
+  });
+
+  it('interactive message without body or type uses the generic fallback', () => {
+    const result = parseIncomingMessage(msgWith({ interactiveMessage: {} }))!;
+    expect(result.contentType).toBe('interactive');
+    expect(result.content).toBe('Interactive: interactive');
+    expect(result.contentText).toBe('Interactive: interactive');
+  });
+
+  it('contact without display name or vcard uses null fields and unknown summary', () => {
+    const result = parseIncomingMessage(msgWith({ contactMessage: {} }))!;
+    expect(result.contentType).toBe('contact');
+    expect(JSON.parse(result.content!)).toEqual({
+      type: 'contact',
+      displayName: null,
+      vcard: null,
+    });
+    expect(result.contentText).toBe('Contact: Unknown');
+  });
+
+  it('contacts array without contacts uses an empty array', () => {
+    const result = parseIncomingMessage(msgWith({ contactsArrayMessage: {} }))!;
+    expect(result.contentType).toBe('contact');
+    expect(JSON.parse(result.content!)).toEqual({
+      type: 'contacts',
+      contacts: [],
+    });
+    expect(result.contentText).toBe('Contacts: ');
+  });
+
+  it('contacts array contact without details uses null fields', () => {
+    const result = parseIncomingMessage(msgWith({ contactsArrayMessage: { contacts: [{}] } }))!;
+    expect(result.contentType).toBe('contact');
+    expect(JSON.parse(result.content!)).toEqual({
+      type: 'contacts',
+      contacts: [{ displayName: null, vcard: null }],
+    });
+    expect(result.contentText).toBe('Contacts: ');
+  });
+
+  it('poll without name or options uses unnamed empty-option summary', () => {
+    const result = parseIncomingMessage(msgWith({ pollCreationMessage: {} }))!;
+    expect(result.contentType).toBe('poll');
+    expect(JSON.parse(result.content!)).toEqual({
+      type: 'poll',
+      name: null,
+      options: [],
+      selectableCount: null,
+    });
+    expect(result.contentText).toBe('Poll: Unnamed — 0 options');
   });
 });
 
