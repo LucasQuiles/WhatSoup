@@ -203,6 +203,12 @@ function responseRegistryDispatchEnabled(): boolean {
 function diagnosticBundleEnabled(): boolean {
   return process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'] === '1';
 }
+// Guardrail: the diagnostic bundle probes the PRIMARY provider's health, which
+// is instance-global (identical across chats). Throttle it to at most once per
+// window so a fallback storm — many chats failing at once, or rapid repeated
+// failures — cannot spawn a flurry of CLI auth-status probes, and so we do not
+// re-probe the same primary health redundantly.
+const DIAGNOSTIC_BUNDLE_THROTTLE_MS = 60_000;
 
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
 type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empty-output';
@@ -1501,6 +1507,8 @@ export class AgentRuntime implements Runtime {
   private fallbackActivations = 0;
   private fallbackReverts = 0;
   private fallbackReplays = 0;
+  // Epoch ms of the last diagnostic-bundle kick (instance-level throttle).
+  private lastDiagnosticBundleAt = 0;
   // Lifetime-of-process USD cost of turns served while a fallback window was
   // active (provider-reported costUsd on result events; opencode-only today).
   // Mirrors fallbackTurnsServed semantics: accumulates only during windows,
@@ -6983,6 +6991,11 @@ export class AgentRuntime implements Runtime {
    * redacted digest (probe summaries are pre-redacted by their probes).
    */
   private kickDiagnosticBundle(wf: ResponseWorkflow, providerText: string): void {
+    const now = Date.now();
+    // Instance-level throttle (see DIAGNOSTIC_BUNDLE_THROTTLE_MS): skip if we
+    // diagnosed the primary within the window — a storm cannot fan out probes.
+    if (now - this.lastDiagnosticBundleAt < DIAGNOSTIC_BUNDLE_THROTTLE_MS) return;
+    this.lastDiagnosticBundleAt = now;
     try {
       const probes = buildDiagnosticProbes({
         providerText,
@@ -7027,7 +7040,7 @@ export class AgentRuntime implements Runtime {
           },
         },
       });
-      void runDiagnosticBundle({ workflow: wf, probes, now: Date.now() })
+      void runDiagnosticBundle({ workflow: wf, probes, now })
         .then((bundle) => {
           const digest = bundle.findings
             .map((f) => `${f.id}:${f.ok ? 'ok' : 'flagged'}/${f.confidence}`)

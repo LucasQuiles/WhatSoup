@@ -194,6 +194,8 @@ type FallbackView = {
   agentFallbacks: Array<{ provider: string; model?: string }>;
   failedFallbackEntryKeys: Set<string>;
   fallbackEntryKey(entry: { provider: string; model?: string }): string;
+  kickDiagnosticBundle(wf: unknown, providerText: string): void;
+  lastDiagnosticBundleAt: number;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -346,6 +348,17 @@ describe('AgentRuntime — provider fallback state machine', () => {
     const v = view(makeRuntime({}));
     expect(v.agentFallbacks).toHaveLength(0);
     expect(v.getFallbackState().fallbackChainExhausted).toBe(false);
+  });
+
+  it('throttles the diagnostic bundle so a fallback storm cannot fan out probes', () => {
+    const v = view(makeRuntime({ agentFallbackProvider: 'opencode-cli' }));
+    // Simulate a very recent prior kick: a second kick within the window must be
+    // throttled — it returns before building or spawning any probe, leaving the
+    // timestamp unchanged.
+    const recent = Date.now();
+    v.lastDiagnosticBundleAt = recent;
+    v.kickDiagnosticBundle({}, 'usage limit reached');
+    expect(v.lastDiagnosticBundleAt).toBe(recent);
   });
 
   it('keeps auth-required fallback armed until a primary recovery probe succeeds', async () => {
