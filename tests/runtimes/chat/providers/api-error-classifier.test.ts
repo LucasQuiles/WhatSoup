@@ -59,6 +59,7 @@ describe('extractStatusCode', () => {
 describe('classifyApiError', () => {
   it.each([
     { status: 400, expected: 'bad_request' as const },
+    { status: 413, expected: 'bad_request' as const }, // request_too_large
     { status: 401, expected: 'auth' as const },
     { status: 403, expected: 'auth' as const },
     { status: 408, expected: 'timeout' as const },
@@ -67,6 +68,7 @@ describe('classifyApiError', () => {
     { status: 502, expected: 'server' as const },
     { status: 503, expected: 'server' as const },
     { status: 504, expected: 'server' as const },
+    { status: 529, expected: 'server' as const }, // overloaded_error
   ])('maps HTTP $status to $expected', ({ status, expected }) => {
     expect(classifyApiError(makeStatusError(status))).toBe(expected);
   });

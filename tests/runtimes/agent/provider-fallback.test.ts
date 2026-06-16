@@ -108,7 +108,8 @@ import {
   AgentRuntime,
   extractUsageLimitResetTime,
 } from '../../../src/runtimes/agent/runtime.ts';
-import type { Database } from '../../../src/core/database.ts';
+import { Database } from '../../../src/core/database.ts';
+import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-notice.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
 
@@ -188,7 +189,20 @@ type FallbackView = {
     fallbackModel: string | null;
     fallbackResetAt: number | null;
     fallbackRecoveryProbeRequired: boolean;
+    fallbackChainExhausted: boolean;
+    failedEntryCount: number;
+    turnErrorCounts: Record<string, number>;
   };
+  recordTurnCapabilityFailure(isUserTurnResult: boolean, errorClass: string): void;
+  agentFallbacks: Array<{ provider: string; model?: string }>;
+  failedFallbackEntryKeys: Set<string>;
+  fallbackEntryKey(entry: { provider: string; model?: string }): string;
+  kickDiagnosticBundle(wf: unknown, providerText: string): void;
+  lastDiagnosticBundleAt: number;
+  stashHandoffNotice(chatJid: string, message: string, now: number): boolean;
+  withHandoffPrefix(chatJid: string, text: string): string;
+  flushPendingHandoffNotice(queue: { targetChatJid: string; enqueueText(text: string): void }): void;
+  formatContextLines(messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>): string;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -322,6 +336,73 @@ describe('AgentRuntime — provider fallback state machine', () => {
     vi.advanceTimersByTime(5 * 60 * 60 * 1000 + 1);
     expect(view(runtime).fallbackActiveUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
+  });
+
+  it('reports the fallback chain exhausted once every configured entry has failed', () => {
+    const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli', agentFallbackModel: 'minimax/MiniMax-M2.7' });
+    const v = view(runtime);
+    expect(v.getFallbackState().fallbackChainExhausted).toBe(false);
+    expect(v.getFallbackState().failedEntryCount).toBe(0);
+
+    for (const entry of v.agentFallbacks) {
+      v.failedFallbackEntryKeys.add(v.fallbackEntryKey(entry));
+    }
+    expect(v.getFallbackState().fallbackChainExhausted).toBe(true);
+    expect(v.getFallbackState().failedEntryCount).toBe(1);
+  });
+
+  it('a runtime with no configured fallbacks is never reported exhausted', () => {
+    const v = view(makeRuntime({}));
+    expect(v.agentFallbacks).toHaveLength(0);
+    expect(v.getFallbackState().fallbackChainExhausted).toBe(false);
+  });
+
+  it('accumulates per-class turn-error counts for telemetry; ignores non-user turns', () => {
+    const v = view(makeRuntime({}));
+    v.recordTurnCapabilityFailure(true, 'rate-limit');
+    v.recordTurnCapabilityFailure(true, 'rate-limit');
+    v.recordTurnCapabilityFailure(true, 'auth-required');
+    v.recordTurnCapabilityFailure(false, 'usage-limit'); // system turn — must not count
+    expect(v.getFallbackState().turnErrorCounts).toEqual({ 'rate-limit': 2, 'auth-required': 1 });
+  });
+
+  it('formatContextLines renders "sender: content" with a media fallback (SSOT)', () => {
+    const v = view(makeRuntime({}));
+    const lines = v.formatContextLines([
+      { timestamp: 0, senderName: 'Alice', senderJid: 'a@x', content: 'hello there' },
+      { timestamp: 0, senderName: null, senderJid: 'bob@x', content: null },
+    ]).split('\n');
+    // Timestamp prefix is locale/TZ-dependent; assert the stable sender:content tail.
+    expect(lines[0]).toContain('Alice: hello there');
+    expect(lines[1]).toContain('bob@x: [media]');
+    expect(lines).toHaveLength(2);
+  });
+
+  it('scrubs secret shapes from context only when injecting into a cross-provider fallback', () => {
+    const v = view(makeRuntime({ agentFallbackProvider: 'opencode-cli' }));
+    // A Bearer token embedded in chat content (the redactor catches the shape).
+    const token = 'tokFAKE1234567890abcd';
+    const msgs = [{ timestamp: 0, senderName: 'Lucas', senderJid: 'l@x', content: `use Bearer ${token} for the call` }];
+    // No fallback active → same provider, no new exposure → verbatim.
+    expect(v.formatContextLines(msgs)).toContain(token);
+    // Fallback active → content crosses to a DIFFERENT provider → scrubbed.
+    v.activateProviderFallback(null);
+    const redacted = v.formatContextLines(msgs);
+    expect(redacted).not.toContain(token);
+    expect(redacted).toContain('Bearer [REDACTED]');
+    expect(redacted).toContain('for the call'); // surgical — conversation text preserved
+    v.deactivateProviderFallback('test cleanup');
+  });
+
+  it('throttles the diagnostic bundle so a fallback storm cannot fan out probes', () => {
+    const v = view(makeRuntime({ agentFallbackProvider: 'opencode-cli' }));
+    // Simulate a very recent prior kick: a second kick within the window must be
+    // throttled — it returns before building or spawning any probe, leaving the
+    // timestamp unchanged.
+    const recent = Date.now();
+    v.lastDiagnosticBundleAt = recent;
+    v.kickDiagnosticBundle({}, 'usage limit reached');
+    expect(v.lastDiagnosticBundleAt).toBe(recent);
   });
 
   it('keeps auth-required fallback armed until a primary recovery probe succeeds', async () => {
@@ -1123,5 +1204,93 @@ describe('createSessionManager — custom-endpoint providerConfig scoping', () =
     });
 
     view(runtime).deactivateProviderFallback('test cleanup');
+  });
+});
+
+describe('one-message handoff collapse (real db)', () => {
+  function makeRealDbRuntime(): { runtime: AgentRuntime; db: Database } {
+    const config = mockConfigRef();
+    config['agentProvider'] = 'claude-cli';
+    config['agentProviderConfig'] = undefined;
+    config['agentFallbackProvider'] = 'opencode-cli';
+    config['agentFallbackModel'] = undefined;
+    const db = new Database(':memory:');
+    db.open();
+    // start() ensures this schema in production; mirror it here without the rest
+    // of start()'s heavy setup.
+    ensureStandbyNoticeSchema(db);
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]' });
+    return { runtime, db };
+  }
+
+  function withFlag(value: '1' | undefined, fn: () => void): void {
+    const prev = process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
+    if (value === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
+    else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = value;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
+      else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = prev;
+    }
+  }
+
+  it('prepends a stashed notice to the stand-in reply exactly once', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'collapse@s.whatsapp.net';
+    withFlag('1', () => {
+      expect(v.stashHandoffNotice(chat, 'Primary model hit a limit. I will continue here.', Date.now())).toBe(true);
+      expect(v.withHandoffPrefix(chat, 'here is the answer')).toBe(
+        'Primary model hit a limit. I will continue here.\n\nhere is the answer',
+      );
+      // Latch consumed — the next reply is unprefixed.
+      expect(v.withHandoffPrefix(chat, 'a later reply')).toBe('a later reply');
+    });
+    db.close();
+  });
+
+  it('leaves the reply unchanged when the flag is off, even with a notice stashed', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'collapse2@s.whatsapp.net';
+    // Stash is unconditional; consume is flag-gated.
+    v.stashHandoffNotice(chat, 'should not appear', Date.now());
+    withFlag(undefined, () => {
+      expect(v.withHandoffPrefix(chat, 'plain reply')).toBe('plain reply');
+    });
+    db.close();
+  });
+
+  it('flushes a pending notice standalone at turn end when no reply consumed it', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'flush@s.whatsapp.net';
+    const enqueued: string[] = [];
+    const queue = { targetChatJid: chat, enqueueText: (t: string) => { enqueued.push(t); } };
+    withFlag('1', () => {
+      v.stashHandoffNotice(chat, 'pending notice', Date.now());
+      v.flushPendingHandoffNotice(queue);
+      expect(enqueued).toEqual(['pending notice']);
+      // Consumed — a second flush is a no-op.
+      v.flushPendingHandoffNotice(queue);
+      expect(enqueued).toEqual(['pending notice']);
+    });
+    db.close();
+  });
+
+  it('flush is a no-op once a reply has already prepended the notice', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'flush2@s.whatsapp.net';
+    const enqueued: string[] = [];
+    const queue = { targetChatJid: chat, enqueueText: (t: string) => { enqueued.push(t); } };
+    withFlag('1', () => {
+      v.stashHandoffNotice(chat, 'notice', Date.now());
+      expect(v.withHandoffPrefix(chat, 'reply')).toBe('notice\n\nreply');
+      v.flushPendingHandoffNotice(queue);
+      expect(enqueued).toEqual([]);
+    });
+    db.close();
   });
 });

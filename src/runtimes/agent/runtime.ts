@@ -11,6 +11,18 @@ import {
   isProviderAuthRequiredMessage,
   type ProviderFailureKind,
 } from './failure-taxonomy.ts';
+import {
+  workflowForProviderText,
+  type ResponseWorkflow,
+} from './response-registry.ts';
+import { runDiagnosticBundle } from './diagnostic-bundle.ts';
+import { buildDiagnosticProbes } from './diagnostic-probes.ts';
+import {
+  ensureStandbyNoticeSchema,
+  stashStandbyNotice,
+  consumeStandbyNotice,
+} from './standby-notice.ts';
+import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
@@ -183,6 +195,34 @@ const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 12;
   return Math.min(Math.max(Math.trunc(raw), 3), 100);
 })();
+// Opt-in: route terminal provider-failure results through the declarative
+// response-workflow registry (handleProviderFailureResult) instead of the
+// hand-rolled per-chat / singleton branch ladders. Behaviour-preserving — the
+// legacy ladders remain the default and the fall-through for non-failure text.
+// Read per-call (not memoised) so tests can toggle it without re-importing.
+function responseRegistryDispatchEnabled(): boolean {
+  return process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] === '1';
+}
+// Opt-in: on an arming provider failure (via the registry dispatcher), run the
+// best-effort diagnostic bundle and emit its findings to the alert outbox.
+// Fire-and-forget — never blocks, delays, or alters the turn's fallback path.
+function diagnosticBundleEnabled(): boolean {
+  return process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'] === '1';
+}
+// Guardrail: the diagnostic bundle probes the PRIMARY provider's health, which
+// is instance-global (identical across chats). Throttle it to at most once per
+// window so a fallback storm — many chats failing at once, or rapid repeated
+// failures — cannot spawn a flurry of CLI auth-status probes, and so we do not
+// re-probe the same primary health redundantly.
+const DIAGNOSTIC_BUNDLE_THROTTLE_MS = 60_000;
+// Opt-in: collapse the fallback notice and the stand-in's reply into ONE
+// user-facing message. When a replay is scheduled the notice is stashed (via the
+// crash-safe standby latch) and prepended to the stand-in's first visible reply
+// instead of being sent on its own. Off → the notice is enqueued standalone
+// exactly as before (byte-identical default path).
+function oneMessageHandoffEnabled(): boolean {
+  return process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] === '1';
+}
 
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
 type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empty-output';
@@ -1330,6 +1370,47 @@ function alertExcerpt(value: string): string {
     : cleaned;
 }
 
+/**
+ * Per-call context for {@link AgentRuntime.handleProviderFailureResult}. Captures
+ * the only points where the per-chat and singleton result handlers diverge
+ * (session reference, replay map key, cleanup args, log subject) so one method
+ * serves both. The trailing `this.singleTurnHadToolActivity = false` the
+ * singleton arming branches set is redundant — `cleanupUsageLimitTurn` already
+ * clears it on every path — so it is intentionally not threaded here.
+ */
+interface ProviderFailureResultContext {
+  queue: IOutboundQueue;
+  session: SessionManager | null;
+  providerText: string;
+  turnHadToolWork: boolean;
+  /** Subject for log lines: per-chat target jid, or the singleton's active/turn jid. */
+  logChatJid: string | null | undefined;
+  /** Forwarded to scheduleFallbackReplay; undefined in singleton/shared mode. */
+  scheduleReplayMapKey?: string;
+  /** Cleanup arguments matching the originating handler's shape. */
+  cleanupArgs: {
+    inboundSeq?: number;
+    conversationKey?: string;
+    mapKey?: string;
+    clearCurrentInboundSeq?: boolean;
+  };
+  recordTurnFailure: (errorClass: TurnCapabilityErrorClass) => void;
+}
+
+/** Per-kind log message for an arming terminal provider failure (matches the legacy ladders verbatim). */
+function armingFailureLogMessage(reason: ProviderFallbackReason): string {
+  switch (reason) {
+    case 'usage-limit':
+      return 'suppressed usage-limit message from result — session will be killed';
+    case 'auth-required':
+      return 'suppressed provider auth-required message from result — session will be shut down';
+    case 'rate-limit':
+      return 'terminal provider rate-limit result observed';
+    case 'model-unavailable':
+      return 'suppressed provider model-unavailable message from result — session will be shut down';
+  }
+}
+
 export class AgentRuntime implements Runtime {
   private static readonly WORKSPACE_IDLE_MS = 30 * 60 * 1000;
   private static readonly WORKSPACE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -1440,6 +1521,8 @@ export class AgentRuntime implements Runtime {
   private fallbackActivations = 0;
   private fallbackReverts = 0;
   private fallbackReplays = 0;
+  // Epoch ms of the last diagnostic-bundle kick (instance-level throttle).
+  private lastDiagnosticBundleAt = 0;
   // Lifetime-of-process USD cost of turns served while a fallback window was
   // active (provider-reported costUsd on result events; opencode-only today).
   // Mirrors fallbackTurnsServed semantics: accumulates only during windows,
@@ -1452,6 +1535,9 @@ export class AgentRuntime implements Runtime {
   private lastSuccessfulTurnAt: number | null = null;
   private lastTurnErrorClass: TurnCapabilityErrorClass | null = null;
   private lastTurnErrorAt: number | null = null;
+  // Cumulative count of user-turn failures by class (process lifetime). Telemetry
+  // for which provider-failure classes fire most; surfaced verbatim in /health.
+  private readonly turnErrorCounts = new Map<TurnCapabilityErrorClass, number>();
   private silentCompactScopes = new Map<string, ReturnType<typeof setTimeout>>();
   private compactBoundaryScopes = new Set<string>();
   private autoCompactCooldownUntil = new Map<string, number>();
@@ -2537,6 +2623,9 @@ export class AgentRuntime implements Runtime {
 
   async start(): Promise<void> {
     ensureAgentSchema(this.db);
+    // Crash-safe latch table for the one-message handoff collapse. Idempotent;
+    // created eagerly so an unconsumed notice from a prior process can flush.
+    ensureStandbyNoticeSchema(this.db);
     this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
 
@@ -3601,13 +3690,7 @@ export class AgentRuntime implements Runtime {
           const convKey = toConversationKey(chatJid);
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
-            const lines = recent
-              .reverse()
-              .map(
-                (m) =>
-                  `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
-              )
-              .join('\n');
+            const lines = this.formatContextLines(recent.reverse());
             this.markPendingSystemResult(mapKey);
             await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
           }
@@ -4834,6 +4917,18 @@ export class AgentRuntime implements Runtime {
         };
 
         if (event.text && !hasPendingPoll) {
+          if (responseRegistryDispatchEnabled() && this.dispatchProviderFailureResult({
+            queue,
+            session,
+            providerText: event.text,
+            turnHadToolWork,
+            logChatJid: queue.targetChatJid,
+            scheduleReplayMapKey: mapKey,
+            cleanupArgs: { inboundSeq, conversationKey, mapKey },
+            recordTurnFailure,
+          })) {
+            break;
+          }
           const providerFailureKind = classifyProviderFailure(event.text);
           // Suppress usage-limit messages — log and skip instead of forwarding
           if (providerFailureKind === 'usage-limit') {
@@ -5003,7 +5098,7 @@ export class AgentRuntime implements Runtime {
               );
               queue.enqueueText(this.providerUnknownTerminalNotice());
             } else {
-              queue.enqueueResultText(event.text);
+              queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, event.text));
               // Accumulate result text for voice reply (SP4)
               if (mapKey !== undefined) {
                 this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
@@ -5111,6 +5206,9 @@ export class AgentRuntime implements Runtime {
             // increment the empty counter when neither text nor tool work occurred.
             // turnHadToolWork was captured before clearToolNames above.
             this.recordFallbackTurnOutcome(queue, hadVisible, turnHadToolWork);
+            // Empty/tool-only turn: surface any still-pending handoff notice
+            // standalone rather than deferring it to the next reply.
+            this.flushPendingHandoffNotice(queue);
             if (!turnCapabilityFailureRecorded) {
               if (hadVisible || turnHadToolWork) {
                 this.recordTurnCapabilitySuccess(true);
@@ -5985,6 +6083,9 @@ export class AgentRuntime implements Runtime {
     turnCapability: RuntimeTurnCapability;
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
+    fallbackChainExhausted: boolean;
+    failedEntryCount: number;
+    turnErrorCounts: Record<string, number>;
   } {
     const active = this.isFallbackWindowActive;
     const fallbackEntry = active ? this.effectiveFallbackEntry : null;
@@ -6008,7 +6109,23 @@ export class AgentRuntime implements Runtime {
       turnCapability: this.getTurnCapability(),
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
+      fallbackChainExhausted: this.isFallbackChainExhausted(),
+      failedEntryCount: this.failedFallbackEntryKeys.size,
+      turnErrorCounts: Object.fromEntries(this.turnErrorCounts),
     };
+  }
+
+  /**
+   * True when every configured fallback entry has failed during the current
+   * window — the terminal "nothing left to fall back to" condition. Surfaced for
+   * observability (health) and to drive the exhausted user-message template;
+   * read-only and derived, it changes no fallback behaviour.
+   */
+  private isFallbackChainExhausted(): boolean {
+    if (this.agentFallbacks.length === 0) return false;
+    return this.agentFallbacks.every((entry) =>
+      this.failedFallbackEntryKeys.has(this.fallbackEntryKey(entry)),
+    );
   }
 
   private getTurnCapability(): RuntimeTurnCapability {
@@ -6044,6 +6161,7 @@ export class AgentRuntime implements Runtime {
     if (!isUserTurnResult) return;
     this.lastTurnErrorClass = errorClass;
     this.lastTurnErrorAt = Date.now();
+    this.turnErrorCounts.set(errorClass, (this.turnErrorCounts.get(errorClass) ?? 0) + 1);
   }
 
   /**
@@ -6813,6 +6931,156 @@ export class AgentRuntime implements Runtime {
     return !isProviderAuthRequiredMessage(result.output);
   }
 
+  /**
+   * Registry-driven entry point for a terminal result's text. Returns true if
+   * the text classified as a provider failure and was fully handled (the caller
+   * must `break`); false if it is not a provider failure (caller falls through
+   * to normal result handling). Gated by {@link responseRegistryDispatchEnabled}.
+   */
+  private dispatchProviderFailureResult(ctx: ProviderFailureResultContext): boolean {
+    const wf = workflowForProviderText(ctx.providerText);
+    if (!wf) return false;
+    this.handleProviderFailureResult(wf, ctx);
+    return true;
+  }
+
+  /**
+   * Execute the response workflow for a terminal provider-failure result —
+   * the single, behaviour-preserving replacement for the six hand-rolled
+   * `providerFailureKind === …` branches in both result handlers. Only invoked
+   * with a workflow whose `providerKind` is non-null (the provider-text path).
+   */
+  private handleProviderFailureResult(wf: ResponseWorkflow, ctx: ProviderFailureResultContext): void {
+    const { queue, session, providerText, turnHadToolWork, logChatJid } = ctx;
+    const kind = wf.providerKind;
+    if (kind === null) return; // unreachable on the text path; defensive.
+    ctx.recordTurnFailure(kind);
+    const textPreview = providerText.slice(0, 300);
+
+    // Non-arming, kill-and-respawn classes: context-overflow surfaces a notice,
+    // policy-block stays silent. Neither activates a fallback.
+    if (!wf.fallback.arms) {
+      if (wf.userTemplate === 'context-overflow') {
+        log.warn({ chatJid: logChatJid, textPreview }, 'prompt too long — killing session');
+        queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
+      } else {
+        log.error({ chatJid: logChatJid, textPreview }, 'suppressed provider policy-block message from result — session will be killed');
+      }
+      this.cleanupUsageLimitTurn(queue, ctx.cleanupArgs);
+      session?.shutdown();
+      return;
+    }
+
+    // Arming classes: usage-limit / auth-required / rate-limit / model-unavailable.
+    const reason = kind as ProviderFallbackReason;
+    log.warn({ chatJid: logChatJid, textPreview }, armingFailureLogMessage(reason));
+    // Best-effort diagnostics (opt-in) — fire-and-forget, never blocks the turn.
+    if (diagnosticBundleEnabled()) this.kickDiagnosticBundle(wf, providerText);
+    const resetAt = reason === 'usage-limit' ? extractUsageLimitResetTime(providerText) : null;
+    const activation = wf.fallback.markActiveEntryFailedOnTrigger
+      ? this.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, providerText)
+      : this.activateProviderFallback(resetAt, reason);
+    const replayScheduled = activation
+      ? this.scheduleFallbackReplay({
+          activation,
+          chatJid: queue.targetChatJid,
+          ...(ctx.scheduleReplayMapKey !== undefined ? { mapKey: ctx.scheduleReplayMapKey } : {}),
+          oldSession: session,
+          hadToolActivity: turnHadToolWork,
+        })
+      : false;
+    if (activation) {
+      this.notifyProviderFallbackActivated(queue, activation, {
+        replayScheduled,
+        blockedByToolActivity: turnHadToolWork,
+      });
+    }
+    this.cleanupUsageLimitTurn(queue, ctx.cleanupArgs);
+    if (!replayScheduled) {
+      // Only usage-limit emits a standalone notice when no fallback armed.
+      if (reason === 'usage-limit' && !activation) queue.enqueueText(this.usageLimitNotice());
+      session?.shutdown();
+    }
+  }
+
+  /**
+   * Best-effort diagnostics for an arming provider failure. Builds the probe map
+   * from this runtime's capabilities, runs the bundle, and emits the findings to
+   * the alert outbox as operator observability. Fully fire-and-forget: it never
+   * throws into the turn, never blocks the fallback path, and surfaces only a
+   * redacted digest (probe summaries are pre-redacted by their probes).
+   */
+  private kickDiagnosticBundle(wf: ResponseWorkflow, providerText: string): void {
+    const now = Date.now();
+    // Instance-level throttle (see DIAGNOSTIC_BUNDLE_THROTTLE_MS): skip if we
+    // diagnosed the primary within the window — a storm cannot fan out probes.
+    if (now - this.lastDiagnosticBundleAt < DIAGNOSTIC_BUNDLE_THROTTLE_MS) return;
+    this.lastDiagnosticBundleAt = now;
+    try {
+      const probes = buildDiagnosticProbes({
+        providerText,
+        target: {
+          provider: this.agentProvider,
+          model: this.model ?? undefined,
+          providerConfig: this.agentProviderConfig,
+        },
+        getHealthSnapshot: () => {
+          const s = this.getFallbackState();
+          return {
+            summary: `effective=${s.effectiveProvider} fallbackReason=${s.fallbackReason ?? 'none'}`
+              + ` modelUsable=${s.turnCapability.modelUsable ?? 'unknown'}`,
+            data: {
+              effectiveProvider: s.effectiveProvider,
+              fallbackReason: s.fallbackReason,
+              fallbackActiveUntil: s.fallbackActiveUntil,
+              modelUsabilityStatus: s.turnCapability.modelUsabilityStatus,
+            },
+          };
+        },
+        parseUsageLimitReset: (text) => {
+          const d = extractUsageLimitResetTime(text);
+          return d ? d.getTime() : null;
+        },
+        runPrimaryModelUsability: () => probePrimaryModelUsability(
+          { provider: this.agentProvider, model: this.model ?? null },
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
+        ),
+        runPrimaryRecoveryProbe: () => this.probePrimaryProviderRecovered(),
+        accountAuthDeps: {
+          resolveKeyService: resolveProviderKeyService,
+          lookupCredential,
+          getProviderBinary,
+          probeBinaryAuthStatus,
+          isAuthRequiredMessage: isProviderAuthRequiredMessage,
+          // Explicit allowlist — never hand the CLI probe the full process env.
+          env: {
+            HOME: process.env['HOME'],
+            PATH: process.env['PATH'],
+            USER: process.env['USER'],
+          },
+        },
+      });
+      void runDiagnosticBundle({ workflow: wf, probes, now })
+        .then((bundle) => {
+          const digest = bundle.findings
+            .map((f) => `${f.id}:${f.ok ? 'ok' : 'flagged'}/${f.confidence}`)
+            .join(' ');
+          const resetClause = bundle.resetAt ? ` resetAt=${new Date(bundle.resetAt).toISOString()}` : '';
+          emitAlertChecked(
+            this.instanceName,
+            'provider_failure_diagnostics',
+            `Diagnostics for ${wf.providerKind} on ${this.agentProvider}`,
+            `${digest}${resetClause}`,
+          );
+        })
+        .catch((err) => {
+          log.warn({ err, provider: this.agentProvider }, 'diagnostic bundle failed');
+        });
+    } catch (err) {
+      log.warn({ err }, 'failed to kick diagnostic bundle');
+    }
+  }
+
   private notifyProviderFallbackActivated(
     queue: IOutboundQueue,
     activation: ProviderFallbackActivation,
@@ -6841,7 +7109,68 @@ export class AgentRuntime implements Runtime {
         : replay.replayScheduled
           ? ' I will continue here.'
           : ' Please resend the last message here.';
-    queue.enqueueText(`Primary model ${fallbackReasonForUser(activation.reason, activation.activeUntil)}. Backup: ${card}.${suffix}`);
+    const message = `Primary model ${fallbackReasonForUser(activation.reason, activation.activeUntil)}. Backup: ${card}.${suffix}`;
+    // One-message collapse: when the stand-in will continue (a replay is
+    // scheduled, not blocked, with credentials), stash the notice so it prepends
+    // to the stand-in's first reply instead of being a separate message. Any
+    // other case (resend / blocked / missing creds) has no continuation coming,
+    // so the notice is sent standalone as before. Stash failure falls back to
+    // standalone — the notice is never lost.
+    const collapse = oneMessageHandoffEnabled()
+      && replay.replayScheduled
+      && !replay.blockedByToolActivity
+      && activation.keyPresent !== false;
+    if (collapse && this.stashHandoffNotice(queue.targetChatJid, message, now)) {
+      return;
+    }
+    queue.enqueueText(message);
+  }
+
+  /** Stash the handoff notice for prepend-on-first-reply. Returns false on failure. */
+  private stashHandoffNotice(chatJid: string, message: string, now: number): boolean {
+    try {
+      stashStandbyNotice(this.db, toConversationKey(chatJid), message, now);
+      return true;
+    } catch (err) {
+      log.warn({ err, chatJid }, 'failed to stash handoff notice — sending standalone');
+      return false;
+    }
+  }
+
+  /**
+   * Prepend a pending handoff notice (if any) to a stand-in reply, collapsing the
+   * fallback notice and the reply into one message. No-op when the flag is off or
+   * no notice is pending. Never throws into the reply path.
+   */
+  private withHandoffPrefix(chatJid: string, text: string): string {
+    if (!oneMessageHandoffEnabled()) return text;
+    let prefix: string | null = null;
+    try {
+      prefix = consumeStandbyNotice(this.db, toConversationKey(chatJid));
+    } catch (err) {
+      log.warn({ err, chatJid }, 'failed to consume handoff notice');
+      return text;
+    }
+    return prefix ? `${prefix}\n\n${text}` : text;
+  }
+
+  /**
+   * Flush a still-pending handoff notice as a standalone message at turn end.
+   * Closes the empty-turn gap: if the stand-in's turn produced no visible reply,
+   * {@link withHandoffPrefix} never consumed the notice, so it would otherwise
+   * defer to the next reply. Consume-once means this is a no-op when a reply
+   * already prepended the notice this turn. Never throws into the turn.
+   */
+  private flushPendingHandoffNotice(queue: IOutboundQueue): void {
+    if (!oneMessageHandoffEnabled()) return;
+    let pending: string | null = null;
+    try {
+      pending = consumeStandbyNotice(this.db, toConversationKey(queue.targetChatJid));
+    } catch (err) {
+      log.warn({ err, chatJid: queue.targetChatJid }, 'failed to flush pending handoff notice');
+      return;
+    }
+    if (pending) queue.enqueueText(pending);
   }
 
   private recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void {
@@ -7563,6 +7892,32 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Format chat messages into the `[HH:MM] sender: content` lines injected as
+   * recent-context into a fresh/stand-in session. Single source of truth for
+   * that line shape (previously duplicated across the three injection sites).
+   * Caller controls ordering — getRecentMessages is reverse-chronological (pass
+   * a reversed copy), getMessagesSince is already chronological.
+   *
+   * Cross-provider safety: while a fallback window is active the target session
+   * is a DIFFERENT provider than the conversation originated on, so message
+   * content is scrubbed of secret shapes (tokens, keys, Bearer, emails) before
+   * it crosses the provider boundary. Same-provider respawns inject verbatim —
+   * the content was already seen by that provider, so there is no new exposure.
+   */
+  private formatContextLines(
+    messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>,
+  ): string {
+    const redactForBackup = this.isFallbackWindowActive;
+    return messages
+      .map((m) => {
+        const content = m.content ?? '[media]';
+        const safe = redactForBackup ? sanitizeProviderPreviewText(content) : content;
+        return `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${safe}`;
+      })
+      .join('\n');
+  }
+
+  /**
    * Inject messages the agent missed during downtime into a resumed session.
    * Uses `sinceUnixSec` (typically the checkpoint's updated_at) to fetch only
    * messages that arrived after the session was last active.
@@ -7578,12 +7933,7 @@ export class AgentRuntime implements Runtime {
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
 
-      const lines = missed
-        .map(
-          (m) =>
-            `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
-        )
-        .join('\n');
+      const lines = this.formatContextLines(missed);
       await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
       log.info({ chatJid, messageCount: missed.length, sinceUnixSec }, 'injected missed messages after resume');
       return true;
@@ -7669,13 +8019,7 @@ export class AgentRuntime implements Runtime {
           try {
             const recent = getRecentMessages(this.db, toConversationKey(chatJid), 30);
             if (recent.length > 0) {
-              const lines = recent
-                .reverse()
-                .map(
-                  (m) =>
-                    `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
-                )
-                .join('\n');
+              const lines = this.formatContextLines(recent.reverse());
               this.markPendingSystemResult(mapKey);
               await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
             }
@@ -7910,6 +8254,21 @@ export class AgentRuntime implements Runtime {
 
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
+          if (responseRegistryDispatchEnabled() && this.dispatchProviderFailureResult({
+            queue,
+            session: this.session,
+            providerText: event.text,
+            turnHadToolWork,
+            logChatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
+            cleanupArgs: {
+              inboundSeq: this.currentInboundSeq,
+              conversationKey: toConversationKey(queue.targetChatJid),
+              clearCurrentInboundSeq: true,
+            },
+            recordTurnFailure,
+          })) {
+            break;
+          }
           const providerFailureKind = classifyProviderFailure(event.text);
           // Suppress usage-limit messages — log and kill session instead of forwarding
           if (providerFailureKind === 'usage-limit') {
@@ -8078,7 +8437,7 @@ export class AgentRuntime implements Runtime {
               );
               queue.enqueueText(this.providerUnknownTerminalNotice());
             } else {
-              queue.enqueueResultText(event.text);
+              queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, event.text));
               this.turnHadVisibleOutput = true;
               // Accumulate result text for voice reply (SP4)
               this.currentTurnAssistantText += event.text;
@@ -8090,6 +8449,9 @@ export class AgentRuntime implements Runtime {
         const lastOpId = queue.getLastOpId();
         if (!wasSilentCompact && !isSystemResult) {
           this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, turnHadToolWork);
+          // Empty/tool-only turn: surface any still-pending handoff notice
+          // standalone rather than deferring it to the next reply.
+          this.flushPendingHandoffNotice(queue);
           if (!turnCapabilityFailureRecorded) {
             if (this.turnHadVisibleOutput || turnHadToolWork) {
               this.recordTurnCapabilitySuccess(true);

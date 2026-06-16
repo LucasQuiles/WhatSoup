@@ -567,3 +567,38 @@ describe('enum coverage for extended failure classes', () => {
     expect(permDenied).toBe('provider_permission_denied');
   });
 });
+
+describe('canonical structured error-token classification', () => {
+  // Anthropic API (error.type) and OpenAI API (error.type / error.code) tokens —
+  // these may arrive in a structured JSON body without the legacy English phrasing.
+  it.each([
+    // usage-limit (account action), NOT transient rate-limit
+    ['{"error":{"type":"insufficient_quota","message":"You exceeded your quota"}}', 'usage-limit'],
+    ['{"error":{"type":"billing_error","message":"credit balance too low"}}', 'usage-limit'],
+    // transient rate-limit
+    ['{"error":{"type":"rate_limit_exceeded","message":"slow down"}}', 'rate-limit'],
+    ['{"error":{"type":"rate_limit_error","message":"too many requests"}}', 'rate-limit'],
+    // auth
+    ['{"error":{"type":"authentication_error","message":"invalid x-api-key"}}', 'auth-required'],
+    ['{"error":{"code":"invalid_api_key","message":"Incorrect API key"}}', 'auth-required'],
+    // model unavailable
+    ['{"error":{"type":"not_found_error","message":"model: claude-x"}}', 'model-unavailable'],
+    ['{"error":{"code":"model_not_found"}}', 'model-unavailable'],
+    // context overflow
+    ['{"error":{"type":"request_too_large","message":"413"}}', 'context-overflow'],
+    ['stop_reason: model_context_window_exceeded', 'context-overflow'],
+  ] as const)('classifies %s as %s', (text, expected) => {
+    expect(classifyProviderFailure(text)).toBe(expected);
+  });
+
+  it('keeps the 429 split: insufficient_quota is usage-limit, not rate-limit', () => {
+    const quota = 'HTTP 429 {"error":{"type":"insufficient_quota"}}';
+    // Even though the text contains 429, the quota token wins → usage-limit.
+    expect(classifyProviderFailure(quota)).toBe('usage-limit');
+  });
+
+  it('does not over-match ordinary prose mentioning rate limits or quotas', () => {
+    expect(classifyProviderFailure('We should document how rate limits and quota work.')).toBeNull();
+    expect(isRateLimitResultMessage('Discussing the rate limit policy for the docs.')).toBe(false);
+  });
+});
