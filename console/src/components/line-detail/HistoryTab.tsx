@@ -136,7 +136,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             <Button
               variant="ghost"
               size="sm"
-              className="w-full flex items-center justify-center c-hover text-t2 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
+              className="w-full flex items-center justify-center c-hover text-text-2 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
               onClick={loadOlder}
               loading={loadingOlder}
               icon={<ChevronsUp size={14} strokeWidth={1.75} />}
@@ -147,7 +147,7 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
             </Button>
           ) : (
             <div
-              className="flex items-center justify-center text-t2 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
+              className="flex items-center justify-center text-text-2 pt-[var(--sp-3)] pb-[var(--sp-4)] gap-[var(--sp-2)]"
             >
               <span className="text-sm">No more messages</span>
             </div>
@@ -186,9 +186,9 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
         <Button
           variant="ghost"
           size="sm"
-          className="absolute flex items-center justify-center c-hover text-t2 left-1/2 -translate-x-1/2 bottom-[var(--sp-4)] py-[var(--sp-2)] px-[var(--sp-5)] gap-[var(--sp-2)] rounded-md z-[var(--z-float)]"
+          className="absolute flex items-center justify-center c-hover text-text-2 left-1/2 -translate-x-1/2 bottom-[var(--sp-4)] py-[var(--sp-2)] px-[var(--sp-5)] gap-[var(--sp-2)] rounded-md z-[var(--z-float)]"
           style={{
-            background: 'color-mix(in srgb, var(--color-d4) 80%, transparent)',
+            background: 'color-mix(in srgb, var(--btn-neutral-bg) 80%, transparent)',
             backdropFilter: 'blur(4px)',
           }}
           onClick={jumpToBottom}
@@ -202,11 +202,11 @@ function HistoryMessages({ messages, outgoingBg, selectedChat, lineName }: {
 
       {/* Input bar */}
       <div
-        className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-t bg-d2"
+        className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-t bg-surface-raised"
       >
         <TextArea
           ref={textareaRef}
-          className="flex-1 text-t2 placeholder-t5 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
+          className="flex-1 text-text-2 placeholder-text-3 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
           rows={1}
           minHeight={0}
           maxHeight="var(--feed-preview-max)"
@@ -247,11 +247,11 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
     >
       {/* Chat list */}
       <div
-        className="flex-shrink-0 flex flex-col w-[var(--panel-history)] c-border-r bg-d1"
+        className="flex-shrink-0 flex flex-col w-[var(--panel-history)] c-border-r bg-surface-inset"
       >
         {/* Chat list header */}
         <div
-          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
+          className="flex items-center justify-between flex-shrink-0 bg-surface-raised c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
           <span className="c-heading">Conversations</span>
           <span className="c-label">{chats.length} chats</span>
@@ -271,7 +271,7 @@ export function HistoryTab({ chats, messages, selectedChat, onSelectChat, mode, 
       </div>
 
       {/* Messages */}
-      <div className="flex-1 flex flex-col min-h-0 bg-d0">
+      <div className="flex-1 flex flex-col min-h-0 bg-surface-base">
         {selectedChat ? (
           <HistoryMessages
             messages={messages}

@@ -88,7 +88,7 @@ export function MetricsTab({
         <div className="flex flex-col gap-[var(--sp-4)]">
           {/* Hero: Message Volume bar chart */}
           {metrics?.hasMessageData && (
-            <section className="c-card font-mono p-[var(--sp-4)] bg-d2 min-h-[var(--chart-min-h)]">
+            <section className="c-card font-mono p-[var(--sp-4)] bg-surface-raised min-h-[var(--chart-min-h)]">
               <div className="c-section-label mb-[var(--sp-3)]">Message Volume</div>
               <MetricsChart data={metrics.messageVolume} range={metricsRange} />
             </section>
@@ -101,7 +101,7 @@ export function MetricsTab({
 
           {/* Detail metrics — tabbed */}
           {hasDetailData && (
-            <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
+            <section className="c-card font-mono p-[var(--sp-4)] bg-surface-raised">
               <Tabs
                 label="Metric detail series"
                 value={activeDetailTab}
@@ -142,32 +142,32 @@ export function MetricsTab({
 
           {/* Token Usage Card (static totals) */}
           {line?.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0) && (
-            <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
+            <section className="c-card font-mono p-[var(--sp-4)] bg-surface-raised">
               <div className="c-section-label mb-[var(--sp-3)]">Token Usage</div>
               <div className="flex items-center gap-[var(--sp-5)]">
                 <div className="flex items-center gap-[var(--sp-2)]">
                   <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--data-token-input-solid)] opacity-50" />
-                  <span className="text-data text-t3">Input</span>
-                  <span className="font-medium text-t1 text-data">
+                  <span className="text-data text-text-2">Input</span>
+                  <span className="font-medium text-text-1 text-data">
                     {formatCount(line.tokenUsage.input)}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
                   <div className="w-[var(--dot-header)] h-[var(--dot-header)] rounded-sm bg-[var(--data-token-output-solid)]" />
-                  <span className="text-data text-t3">Output</span>
-                  <span className="font-medium text-t1 text-data">
+                  <span className="text-data text-text-2">Output</span>
+                  <span className="font-medium text-text-1 text-data">
                     {formatCount(line.tokenUsage.output)}
                   </span>
                 </div>
                 <div className="flex items-center gap-[var(--sp-2)]">
-                  <Cpu size={13} strokeWidth={1.5} className="text-t4" />
-                  <span className="text-data text-t4">Total</span>
-                  <span className="text-t2 text-data">
+                  <Cpu size={13} strokeWidth={1.5} className="text-text-2" />
+                  <span className="text-data text-text-2">Total</span>
+                  <span className="text-text-2 text-data">
                     {formatCount(line.tokenUsage.input + line.tokenUsage.output)}
                   </span>
                 </div>
               </div>
-              <div className="mt-[var(--sp-3)] h-[var(--dot-feed)] rounded-sm bg-d4 overflow-hidden flex">
+              <div className="mt-[var(--sp-3)] h-[var(--dot-feed)] rounded-sm bg-btn-neutral-bg overflow-hidden flex">
                 <div
                   style={{
                     width: `${(line.tokenUsage.input / (line.tokenUsage.input + line.tokenUsage.output)) * 100}%`,
@@ -182,7 +182,7 @@ export function MetricsTab({
 
           {/* Model Configuration Card */}
           {line?.models && (
-            <section className="c-card font-mono p-[var(--sp-4)] bg-d2">
+            <section className="c-card font-mono p-[var(--sp-4)] bg-surface-raised">
               <div className="c-section-label mb-[var(--sp-3)]">Model Configuration</div>
               <div
                 className="grid gap-y-[var(--sp-1)] gap-x-[var(--sp-3)]"
@@ -191,7 +191,7 @@ export function MetricsTab({
                 {Object.entries(line.models).map(([role, model]) =>
                   model ? (
                     <React.Fragment key={role}>
-                      <span className="text-data text-t4 capitalize">{role}</span>
+                      <span className="text-data text-text-2 capitalize">{role}</span>
                       <span className="text-data text-m-pas">{model}</span>
                     </React.Fragment>
                   ) : null

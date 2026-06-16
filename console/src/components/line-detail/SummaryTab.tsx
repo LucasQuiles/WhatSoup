@@ -40,7 +40,7 @@ export function SummaryTab({
 
   // All instance KPIs in one row — health, runtime, identity, tokens
   // Resolve connection state via the single-owner map (DD-11).
-  // Deliberate behavior change: disconnected is now text-s-crit (was text-t4) — a
+  // Deliberate behavior change: disconnected is now text-s-crit (was text-text-2) — a
   // disconnected line IS a problem; spec-aligned (CONNECTION_MAP in status-map.ts).
   const conn = resolveConnection(connectionState)
   const cards = [
@@ -50,26 +50,26 @@ export function SummaryTab({
       ? [{
           label: 'LINK',
           value: line.linkedStatus,
-          color: line.linkedStatus === 'linked' ? 'text-s-ok' : line.linkedStatus === 'unlinked' ? 'text-s-warn' : 'text-t4',
+          color: line.linkedStatus === 'linked' ? 'text-s-ok' : line.linkedStatus === 'unlinked' ? 'text-s-warn' : 'text-text-2',
         }]
       : []),
     // Mode-specific runtime metrics
     ...(line.mode === 'passive' ? [
-      { label: 'UNREAD', value: String(line.unread ?? 0), color: (line.unread ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
+      { label: 'UNREAD', value: String(line.unread ?? 0), color: (line.unread ?? 0) > 0 ? 'text-s-warn' : 'text-text-2' },
       ...(line.health?.runtime?.passive?.lastActivityAt
-        ? [{ label: 'LAST ACTIVITY', value: formatRelative(line.health.runtime.passive.lastActivityAt), color: 'text-t3' }]
+        ? [{ label: 'LAST ACTIVITY', value: formatRelative(line.health.runtime.passive.lastActivityAt), color: 'text-text-2' }]
         : []),
     ] : []),
     ...(line.mode === 'chat' ? [
-      { label: 'QUEUE', value: String(line.queueDepth ?? 0), color: (line.queueDepth ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
-      { label: 'ENRICHMENT', value: String(line.enrichmentUnprocessed ?? 0), color: (line.enrichmentUnprocessed ?? 0) > 0 ? 'text-s-warn' : 'text-t3' },
+      { label: 'QUEUE', value: String(line.queueDepth ?? 0), color: (line.queueDepth ?? 0) > 0 ? 'text-s-warn' : 'text-text-2' },
+      { label: 'ENRICHMENT', value: String(line.enrichmentUnprocessed ?? 0), color: (line.enrichmentUnprocessed ?? 0) > 0 ? 'text-s-warn' : 'text-text-2' },
     ] : []),
     ...(line.mode === 'agent' ? [
       { label: 'PROVIDER', value: providerDisplay, color: '', style: { color: providerInk } },
       {
         label: 'SESSIONS',
         value: String(line.activeSessions ?? 0),
-        color: (line.activeSessions ?? 0) > 0 ? '' : 'text-t3',
+        color: (line.activeSessions ?? 0) > 0 ? '' : 'text-text-2',
         style: (line.activeSessions ?? 0) > 0 ? { color: 'var(--text-2)' } : undefined,
       },
       ...(line.health?.runtime?.agent?.lastSessionStatus
@@ -78,13 +78,13 @@ export function SummaryTab({
     ] : []),
     // Instance metadata
     ...(line.models?.conversation
-      ? [{ label: 'MODEL', value: line.models.conversation, color: 'text-t2' }]
+      ? [{ label: 'MODEL', value: line.models.conversation, color: 'text-text-2' }]
       : []),
     ...(line.sandboxPerChat
       ? [{ label: 'ISOLATION', value: 'per-chat', color: 'text-m-agt' }]
       : []),
     ...(line.tokenUsage && (line.tokenUsage.input > 0 || line.tokenUsage.output > 0)
-      ? [{ label: 'TOKENS', value: formatCount(line.tokenUsage.input + line.tokenUsage.output), color: 'text-t2' }]
+      ? [{ label: 'TOKENS', value: formatCount(line.tokenUsage.input + line.tokenUsage.output), color: 'text-text-2' }]
       : []),
   ]
 
@@ -119,7 +119,7 @@ export function SummaryTab({
     <div className="flex flex-col gap-[var(--sp-3)]">
       {/* Row 1: KPI cards — 6-wide single row */}
       <div
-        className="grid gap-[var(--sp-2)] bg-d1 c-border rounded-lg p-[var(--sp-2)]"
+        className="grid gap-[var(--sp-2)] bg-surface-inset c-border rounded-lg p-[var(--sp-2)]"
         style={{
           gridTemplateColumns: 'repeat(auto-fit, minmax(var(--input-number-w), 1fr))',
         }}
@@ -132,7 +132,7 @@ export function SummaryTab({
             transition={{ duration: 0.3, delay: i * 0.04, ease: [0.22, 1, 0.36, 1] }}
             className="c-card py-[var(--sp-3)] px-[var(--sp-4)]"
           >
-            <div className="c-col-header text-t4 mb-[var(--sp-1)]">
+            <div className="c-col-header text-text-2 mb-[var(--sp-1)]">
               {card.label}
             </div>
             <div
@@ -152,7 +152,7 @@ export function SummaryTab({
         transition={{ duration: 0.4, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
         className="c-card flex items-center justify-between py-[var(--sp-4)] px-[var(--sp-5)]"
       >
-        <div className="c-col-header text-t4 flex-shrink-0 mr-[var(--sp-5)]">
+        <div className="c-col-header text-text-2 flex-shrink-0 mr-[var(--sp-5)]">
           Pipeline
         </div>
         <div className="flex items-center flex-1 justify-center flex-wrap gap-[var(--sp-2)]">
@@ -174,8 +174,8 @@ export function SummaryTab({
           transition={{ duration: 0.4, delay: 0.25, ease: [0.22, 1, 0.36, 1] }}
           className="c-card flex-1 overflow-hidden"
         >
-          <div className="flex items-center justify-between c-toolbar bg-d3 c-border-b">
-            <span className="c-col-header text-t4">{line.mode} Configuration</span>
+          <div className="flex items-center justify-between c-toolbar bg-surface-raised c-border-b">
+            <span className="c-col-header text-text-2">{line.mode} Configuration</span>
             {config && (
               <Button
                 variant="ghost"
@@ -206,7 +206,7 @@ export function SummaryTab({
               ))}
             </div>
           ) : (
-            <div className="text-t4 p-[var(--sp-5)] text-sm">
+            <div className="text-text-2 p-[var(--sp-5)] text-sm">
               Passive mode — no configuration required.
             </div>
           )}
@@ -219,8 +219,8 @@ export function SummaryTab({
           transition={{ duration: 0.4, delay: 0.3, ease: [0.22, 1, 0.36, 1] }}
           className="c-card overflow-hidden w-[var(--panel-actions)] flex-shrink-0"
         >
-          <div className="c-toolbar bg-d3 c-border-b">
-            <span className="c-col-header text-t4">Actions</span>
+          <div className="c-toolbar bg-surface-raised c-border-b">
+            <span className="c-col-header text-text-2">Actions</span>
           </div>
           <div className="flex flex-col py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-2)]">
             <Button

@@ -62,8 +62,8 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
     if (severity === 'crit') return <UserX size={16} strokeWidth={1.75} className={statusTextClassForSeverity(severity)} />
     if (severity === 'warn') return <UserPlus size={16} strokeWidth={1.75} className={statusTextClassForSeverity(severity)} />
     return type === 'group'
-      ? <Users size={16} strokeWidth={1.75} className="text-t3" />
-      : <User size={16} strokeWidth={1.75} className="text-t3" />
+      ? <Users size={16} strokeWidth={1.75} className="text-text-2" />
+      : <User size={16} strokeWidth={1.75} className="text-text-2" />
   }
 
   const renderItem = (entry: AccessEntry, showActions: 'pending' | 'allowed' | 'blocked') => {
@@ -71,22 +71,22 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
     return (
       <div
         key={entry.subjectId}
-        className={`flex items-center gap-3 hover:bg-d3 c-hover py-[var(--sp-2h)] px-[var(--sp-4)] c-border-b${showActions === 'pending' ? ' bg-[var(--status-warn-wash)]' : ''}`}
+        className={`flex items-center gap-3 hover:bg-surface-raised c-hover py-[var(--sp-2h)] px-[var(--sp-4)] c-border-b${showActions === 'pending' ? ' bg-[var(--status-warn-wash)]' : ''}`}
         style={showActions === 'blocked' ? { opacity: 'var(--opacity-muted)' } : undefined}
       >
         {/* Avatar */}
         <div
-          className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-d5"
+          className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-surface-overlay"
         >
           {statusIcon(entry.status, entry.subjectType)}
         </div>
 
         {/* Info */}
         <div className="flex-1 min-w-0">
-          <div className="font-sans font-medium text-t2 text-body">
+          <div className="font-sans font-medium text-text-2 text-body">
             {entry.subjectName}
           </div>
-          <div className="c-data text-t4">
+          <div className="c-data text-text-2">
             {entry.subjectId}
           </div>
         </div>
@@ -155,7 +155,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       {pending.length > 0 && (
         <div className="c-card overflow-hidden">
           <div
-            className="c-toolbar c-border-b c-col-header text-t4"
+            className="c-toolbar c-border-b c-col-header text-text-2"
           >
             Pending ({pending.length})
           </div>
@@ -167,7 +167,7 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
       <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(var(--panel-access-col), 1fr))' }}>
         <div className="c-card overflow-hidden">
           <div
-            className="c-toolbar c-border-b c-col-header text-t4"
+            className="c-toolbar c-border-b c-col-header text-text-2"
           >
             Allowed ({allowed.length})
           </div>
@@ -175,12 +175,12 @@ export function AccessTab({ access, lineName }: { access: AccessEntry[]; lineNam
         </div>
         <div className="c-card overflow-hidden">
           <div
-            className="c-toolbar c-border-b c-col-header text-t4"
+            className="c-toolbar c-border-b c-col-header text-text-2"
           >
             Blocked ({blocked.length})
           </div>
           {blocked.length === 0 ? (
-            <div className="text-t2 text-center py-6 font-mono text-data">
+            <div className="text-text-2 text-center py-6 font-mono text-data">
               No blocked contacts
             </div>
           ) : (

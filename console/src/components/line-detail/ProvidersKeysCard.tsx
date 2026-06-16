@@ -85,7 +85,7 @@ const SlotRow: FC<{
       <span className="c-label">{label}</span>
       <span className="flex items-center gap-[var(--sp-2)]">
         <span className="font-mono text-data" style={{ color: providerColor }}>{displayName(slot.provider, catalog)}</span>
-        <span className="font-mono text-t3 text-data">{slot.model ?? '—'}</span>
+        <span className="font-mono text-text-2 text-data">{slot.model ?? '—'}</span>
         <KeyBadge keyPresent={slot.keyPresent} />
       </span>
     </div>
@@ -104,7 +104,7 @@ const ChainEntry: FC<{
     entry.eligible === false ? 'unavailable' :
     'unknown'
   return (
-    <span className="inline-flex items-center gap-[var(--sp-0h)] text-xs font-mono text-t4">
+    <span className="inline-flex items-center gap-[var(--sp-0h)] text-xs font-mono text-text-2">
       <span className="text-data" style={{ color: providerColor }}>{displayName(entry.provider, catalog)}</span>
       {entry.model && <span>{entry.model}</span>}
       <span>{status}</span>
@@ -152,8 +152,8 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
       transition={{ duration: 0.4, delay: 0.35, ease: [0.22, 1, 0.36, 1] }}
       className="c-card overflow-hidden"
     >
-      <div className="c-toolbar bg-d3 c-border-b">
-        <span className="c-col-header text-t4">Providers &amp; Keys</span>
+      <div className="c-toolbar bg-surface-raised c-border-b">
+        <span className="c-col-header text-text-2">Providers &amp; Keys</span>
       </div>
       <div className="py-[var(--sp-3)] px-[var(--sp-4)]">
         {error ? (
@@ -164,7 +164,7 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
             onRetry={() => { void refetch() }}
           />
         ) : isLoading || !status ? (
-          <div className="text-t4 text-sm">Loading provider status…</div>
+          <div className="text-text-2 text-sm">Loading provider status…</div>
         ) : (
           <>
             <SlotRow label="primary" slot={status.primary} catalog={catalog} border />
@@ -176,20 +176,20 @@ export const ProvidersKeysCard: FC<{ lineName: string }> = ({ lineName }) => {
                   <span>Fallback active — reverts {formatRevertIn(status.fallback.activeUntil, now)}</span>
                 </div>
               ) : (
-                <div className="text-t4 pt-[var(--sp-2)] text-sm">fallback configured</div>
+                <div className="text-text-2 pt-[var(--sp-2)] text-sm">fallback configured</div>
               )
             ) : (
-              <div className="text-t4 pt-[var(--sp-2)] text-sm">no fallback</div>
+              <div className="text-text-2 pt-[var(--sp-2)] text-sm">no fallback</div>
             )}
             {fallbackMetrics.length > 0 && (
-              <div className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-t4 text-xs font-mono">
+              <div className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-text-2 text-xs font-mono">
                 {fallbackMetrics.map((metric) => (
                   <span key={metric}>{metric}</span>
                 ))}
               </div>
             )}
             {fallbackChain.length > 1 && (
-              <div className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-t4 text-xs">
+              <div className="flex flex-wrap items-center gap-[var(--sp-2)] pt-[var(--sp-1)] text-text-2 text-xs">
                 <span className="c-label">chain</span>
                 {fallbackChain.map((entry, index) => (
                   <ChainEntry

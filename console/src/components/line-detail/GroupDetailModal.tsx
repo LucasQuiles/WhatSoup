@@ -171,7 +171,7 @@ function InfoTab({
             value={subject}
             onChange={e => setSubject(e.target.value)}
             onBlur={handleSubjectSave}
-            className="text-t2"
+            className="text-text-2"
           />
         ) : (
           <div className="c-body">{detail.subject}</div>
@@ -192,11 +192,11 @@ function InfoTab({
             rows={3}
             placeholder="Group description..."
             minHeight={72}
-            className="text-t2 h-auto"
+            className="text-text-2 h-auto"
           />
         ) : (
-          <div className="c-body text-t3">
-            {detail.desc || <span className="text-t4">No description</span>}
+          <div className="c-body text-text-2">
+            {detail.desc || <span className="text-text-2">No description</span>}
           </div>
         )}
       </div>
@@ -217,7 +217,7 @@ function InfoTab({
         )}
         <div className="flex items-center gap-2">
           <span className="c-label" style={metaLabelStyle}>Group JID</span>
-          <span className="c-data text-t4">{detail.id}</span>
+          <span className="c-data text-text-2">{detail.id}</span>
         </div>
       </div>
 
@@ -230,7 +230,7 @@ function InfoTab({
           <div className="flex flex-col gap-[var(--sp-2)]">
             <div
               title={inviteLink}
-              className="c-data text-t3 truncate py-[var(--sp-2)] px-[var(--sp-3)] bg-d1 rounded-md [border:var(--bw)_solid_var(--b1)]"
+              className="c-data text-text-2 truncate py-[var(--sp-2)] px-[var(--sp-3)] bg-surface-inset rounded-md [border:var(--bw)_solid_var(--border-hairline)]"
             >
               {inviteLink}
             </div>
@@ -395,7 +395,7 @@ function ParticipantsTab({
       {/* Pending requests (admin only) */}
       {isAdmin && pendingRequests.length > 0 && (
         <div>
-          <div className="font-mono text-t4 c-col-header mb-[var(--sp-2)]">
+          <div className="font-mono text-text-2 c-col-header mb-[var(--sp-2)]">
             Join requests ({pendingRequests.length})
           </div>
           <div className="flex flex-col gap-[var(--sp-1)]">
@@ -445,7 +445,7 @@ function ParticipantsTab({
             >
               <span title={p.id} className="c-data flex-1 truncate">
                 {p.id}
-                {isMe && <span className="text-t4 ml-[var(--sp-1)]">(you)</span>}
+                {isMe && <span className="text-text-2 ml-[var(--sp-1)]">(you)</span>}
               </span>
               {badge && (
                 <span
@@ -614,7 +614,7 @@ function SettingsTab({
     padding: 'var(--sp-3) 0',
     borderBottomWidth: 'var(--bw)',
     borderBottomStyle: 'solid',
-    borderBottomColor: 'var(--b1)',
+    borderBottomColor: 'var(--border-hairline)',
   }
 
   return (
@@ -624,7 +624,7 @@ function SettingsTab({
       <div style={rowStyle}>
         <div>
           <div className="c-body">Messaging</div>
-          <div className="c-body text-t4">
+          <div className="c-body text-text-2">
             {detail.announce ? 'Only admins can send' : 'All participants can send'}
           </div>
         </div>
@@ -643,7 +643,7 @@ function SettingsTab({
       <div style={rowStyle}>
         <div>
           <div className="c-body">Edit group info</div>
-          <div className="c-body text-t4">
+          <div className="c-body text-text-2">
             {detail.locked ? 'Only admins can edit info' : 'All participants can edit info'}
           </div>
         </div>
@@ -663,7 +663,7 @@ function SettingsTab({
         <div style={rowStyle}>
           <div>
             <div className="c-body">Who can add members</div>
-            <div className="c-body text-t4">
+            <div className="c-body text-text-2">
               {detail.memberAddMode === 'admin_add' ? 'Admins only' : 'All members'}
             </div>
           </div>
@@ -682,7 +682,7 @@ function SettingsTab({
         <div style={rowStyle}>
           <div>
             <div className="c-body">Join approval</div>
-            <div className="c-body text-t4">
+            <div className="c-body text-text-2">
               {detail.joinApprovalMode === 'on' ? 'Admin approval required' : 'No approval required'}
             </div>
           </div>
@@ -700,7 +700,7 @@ function SettingsTab({
       <div style={rowStyle}>
         <div>
           <label htmlFor={isAdmin ? ephemeralSelectId : undefined} className="c-body">Disappearing messages</label>
-          <div className="c-body text-t4">
+          <div className="c-body text-text-2">
             {ephemeralLabel(detail.ephemeralDuration)}
           </div>
         </div>
@@ -710,7 +710,7 @@ function SettingsTab({
             value={detail.ephemeralDuration ?? 0}
             disabled={saving === 'ephemeral'}
             onChange={e => handleEphemeral(Number(e.target.value))}
-            className="font-mono text-t2 bg-d1 max-w-[var(--input-number-w)] shrink-0"
+            className="font-mono text-text-2 bg-surface-inset max-w-[var(--input-number-w)] shrink-0"
           >
             {EPHEMERAL_OPTIONS.map(opt => (
               <option key={opt.seconds} value={opt.seconds}>{opt.label}</option>

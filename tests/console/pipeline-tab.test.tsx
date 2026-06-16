@@ -46,12 +46,12 @@ describe('PipelineTab — passive mode', () => {
   it('marks Done active when online with zero unread, inactive when unread > 0', () => {
     const { unmount } = renderTab('passive', makeLine({ status: 'online', unread: 0 }), 'pas')
     const doneActive = screen.getByText('Done')
-    // Active styling uses var(--m-pas-wash) background; inactive uses --color-d4
+    // Active styling uses var(--m-pas-wash) background; inactive uses --btn-neutral-bg
     expect((doneActive as HTMLElement).getAttribute('style')).toContain('--m-pas-wash')
     unmount()
     renderTab('passive', makeLine({ status: 'online', unread: 5 }), 'pas')
     const doneInactive = screen.getByText('Done')
-    expect((doneInactive as HTMLElement).getAttribute('style')).toContain('--color-d4')
+    expect((doneInactive as HTMLElement).getAttribute('style')).toContain('--btn-neutral-bg')
   })
 
   it('expands Inbound detail card with status + messagesToday on click; toggles closed on re-click', () => {
@@ -98,7 +98,7 @@ describe('PipelineTab — chat mode', () => {
   it('marks Access inactive when accessMode is self_only', () => {
     renderTab('chat', makeLine({ status: 'online', accessMode: 'self_only' }), 'cht')
     const accessBtn = screen.getByRole('button', { name: /Access/ }) as HTMLButtonElement
-    expect(accessBtn.getAttribute('style')).toContain('--color-d4')
+    expect(accessBtn.getAttribute('style')).toContain('--btn-neutral-bg')
   })
 
   it('expands API detail card with model + token usage', () => {
@@ -129,9 +129,9 @@ describe('PipelineTab — agent mode', () => {
   it('marks SDK Loop, Tools, Outbound inactive when activeSessions is 0', () => {
     renderTab('agent', makeLine({ status: 'online', activeSessions: 0 }), 'agt')
     const sdkBtn = screen.getByRole('button', { name: /SDK Loop/ }) as HTMLButtonElement
-    expect(sdkBtn.getAttribute('style')).toContain('--color-d4')
+    expect(sdkBtn.getAttribute('style')).toContain('--btn-neutral-bg')
     const toolsBtn = screen.getByRole('button', { name: /Tools/ }) as HTMLButtonElement
-    expect(toolsBtn.getAttribute('style')).toContain('--color-d4')
+    expect(toolsBtn.getAttribute('style')).toContain('--btn-neutral-bg')
   })
 
   it('expands SDK Loop detail card with session counts and last status', () => {
@@ -171,15 +171,15 @@ describe('PipelineTab — offline state', () => {
     const offline = makeLine({ status: 'unreachable' })
     const { unmount: u1 } = renderTab('passive', offline, 'pas')
     let inbound = screen.getByRole('button', { name: /^Inbound$/ }) as HTMLButtonElement
-    expect(inbound.getAttribute('style')).toContain('--color-d4')
+    expect(inbound.getAttribute('style')).toContain('--btn-neutral-bg')
     u1()
     const { unmount: u2 } = renderTab('chat', offline, 'cht')
     inbound = screen.getByRole('button', { name: /^Inbound$/ }) as HTMLButtonElement
-    expect(inbound.getAttribute('style')).toContain('--color-d4')
+    expect(inbound.getAttribute('style')).toContain('--btn-neutral-bg')
     u2()
     renderTab('agent', offline, 'agt')
     inbound = screen.getByRole('button', { name: /^Inbound$/ }) as HTMLButtonElement
-    expect(inbound.getAttribute('style')).toContain('--color-d4')
+    expect(inbound.getAttribute('style')).toContain('--btn-neutral-bg')
   })
 
   it('does not render detail card before any node is clicked', () => {
