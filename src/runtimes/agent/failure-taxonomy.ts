@@ -113,6 +113,8 @@ function isProviderCreditBalanceLimitMessage(lower: string): boolean {
   );
   return (
     lower.includes('insufficient_quota') ||
+    // Anthropic 403 billing_error — a quota/billing cap, not a permission issue.
+    lower.includes('billing_error') ||
     lower.includes('billing quota exceeded') ||
     (
       providerBillingContext &&
@@ -139,6 +141,10 @@ export function isPromptTooLongMessage(text: string): boolean {
     lower.includes('maximum context length') ||
     lower.includes('context_length_exceeded') ||
     lower.includes('max_tokens_exceeded') ||
+    // Canonical structured tokens: Anthropic 413 request_too_large and the
+    // model_context_window_exceeded stop reason; OpenAI context_length_exceeded.
+    lower.includes('request_too_large') ||
+    lower.includes('model_context_window_exceeded') ||
     (lower.includes('token') && lower.includes('limit') && lower.includes('exceed'))
   );
 }
@@ -151,6 +157,11 @@ export function isRateLimitResultMessage(text: string): boolean {
     normalized === 'rate limited - please wait a moment and try again.' ||
     normalized.includes('provider rate limited') ||
     normalized.includes('api rate limited') ||
+    // Canonical structured tokens for a TRANSIENT rate limit. insufficient_quota
+    // is deliberately excluded by the isUsageLimitMessage guard below — a quota
+    // cap is a usage-limit (account action), not a transient rate limit.
+    normalized.includes('rate_limit_exceeded') ||
+    normalized.includes('rate_limit_error') ||
     /\b429\b/.test(normalized)
   ) && !isUsageLimitMessage(text);
 }
@@ -166,6 +177,10 @@ export function isProviderAuthRequiredMessage(text: string): boolean {
     lower.includes('invalid api key') ||
     lower.includes('missing api key') ||
     lower.includes('no api key') ||
+    // Canonical structured tokens: Anthropic authentication_error (401),
+    // OpenAI invalid_api_key (401).
+    lower.includes('authentication_error') ||
+    lower.includes('invalid_api_key') ||
     (lower.includes('oauth') && lower.includes('expired'))
   );
 }
@@ -189,6 +204,10 @@ export function isProviderModelUnavailableMessage(text: string): boolean {
       lower.includes('may not have access')) ||
     lower.includes('does not exist or you do not have access') ||
     lower.includes('model not found in provider catalog') ||
+    // Canonical structured tokens: Anthropic not_found_error (404 model id),
+    // OpenAI model_not_found.
+    lower.includes('not_found_error') ||
+    lower.includes('model_not_found') ||
     (lower.includes('unknown model') && lower.includes('provider'))
   );
 }

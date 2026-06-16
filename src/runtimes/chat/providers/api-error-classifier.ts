@@ -21,20 +21,24 @@ export function extractStatusCode(error: unknown): number | undefined {
  * Classify an API error into a structured category.
  *
  * Checks:
+ *  - 400, 413 → 'bad_request'
  *  - 401, 403 → 'auth'
  *  - 429 → 'rate_limit'
  *  - 408 / AbortError → 'timeout'
- *  - 5xx → 'server'
+ *  - 5xx (incl. 529 overloaded) → 'server'
  *  - ECONNREFUSED, ENOTFOUND → 'network'
  *  - else → 'unknown'
  */
 export function classifyApiError(error: unknown): ApiErrorType {
   const statusCode = extractStatusCode(error);
 
-  if (statusCode === 400) return 'bad_request';
+  // 400 invalid_request_error / 413 request_too_large — both non-retryable
+  // client errors with a malformed/oversized payload.
+  if (statusCode === 400 || statusCode === 413) return 'bad_request';
   if (statusCode === 401 || statusCode === 403) return 'auth';
   if (statusCode === 429) return 'rate_limit';
   if (statusCode === 408) return 'timeout';
+  // 5xx covers Anthropic 500 api_error and 529 overloaded_error (both retryable).
   if (statusCode !== undefined && statusCode >= 500 && statusCode <= 599) return 'server';
 
   if (error instanceof Error) {
