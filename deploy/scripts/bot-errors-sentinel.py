@@ -139,7 +139,7 @@ class SentinelConfig:
 class SentinelDeps:
     now_epoch: Callable[[], float]
     hostname: Callable[[], str]
-    pull_probe: Callable[[HostSpec], dict]
+    pull_probe: Callable[..., dict]
     reachability_oracle: Callable[[], dict] = lambda: {"configured": False, "reachable": True, "class": "not_configured"}
 
 
@@ -527,7 +527,11 @@ def normalize_probe(payload: object) -> dict:
     return result
 
 
-def default_pull_probe(spec: HostSpec) -> dict:
+def default_pull_probe(
+    spec: HostSpec,
+    now: Optional[float] = None,
+    max_age_seconds: int = DEFAULT_HEARTBEAT_MAX_AGE_SECONDS,
+) -> dict:
     if spec.probe_path is not None:
         if os.path.islink(spec.probe_path):
             return {
@@ -536,6 +540,32 @@ def default_pull_probe(spec: HostSpec) -> dict:
                 "class": "invalid_probe",
                 "error": "symlinked_probe_path",
             }
+        # Mtime staleness gate: reject probe files older than the freshness
+        # window, mirroring heartbeat_inventory. Without this a probe written
+        # hours ago that still says {"healthy": true} is trusted as a live
+        # signal and can mask a stale heartbeat, suppressing escalation.
+        # `now` is None only for legacy direct callers (no gate) so existing
+        # non-staleness tests are unaffected; the sentinel loop always passes now.
+        if now is not None:
+            try:
+                probe_age = int(now - spec.probe_path.stat().st_mtime)
+            except FileNotFoundError:
+                return {"reachable": False, "healthy": False, "class": "invalid_probe"}
+            except OSError as exc:
+                return {
+                    "reachable": False,
+                    "healthy": False,
+                    "class": "probe_stat_error",
+                    "error": f"stat_error:{type(exc).__name__}",
+                }
+            if probe_age > max_age_seconds:
+                return {
+                    "reachable": False,
+                    "healthy": False,
+                    "class": "probe_stale",
+                    "ageSeconds": probe_age,
+                    "maxAgeSeconds": max_age_seconds,
+                }
         return optional_json_object(spec.probe_path) or {"reachable": False, "healthy": False, "class": "invalid_probe"}
     if spec.ssh_host or spec.root is not None:
         return ssh_runtime_probe(spec)
@@ -1345,7 +1375,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
             host_state[spec.host] = record
         heartbeat = heartbeat_inventory(spec, now, config.heartbeat_max_age_seconds, config.max_clock_skew_seconds)
         try:
-            raw_probe = deps.pull_probe(spec)
+            raw_probe = deps.pull_probe(spec, now, config.heartbeat_max_age_seconds)
         except Exception as exc:
             raw_probe = {
                 "reachable": True,
