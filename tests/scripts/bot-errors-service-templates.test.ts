@@ -29,6 +29,7 @@ const launchdInstallers = [
   'deploy/scripts/install-bot-errors-health-launchd.sh',
   'deploy/scripts/install-bot-errors-launchd.sh',
 ];
+const guiMonitorInstaller = 'deploy/scripts/install-bot-errors-gui-monitor-launchd.sh';
 const unitTemplates = [...serviceTemplates, ...timerTemplates];
 const PRIVATE_SOCKET_SEGMENT = ['instances', 'personal', 'whatsoup.sock'].join('/');
 const PRIVATE_DB_SEGMENT = ['instances', 'personal', 'bot.db'].join('/');
@@ -76,6 +77,15 @@ function writeFakeBotErrorsRepo(repoRoot: string): void {
   ]) {
     writeFileSync(path.join(repoRoot, 'deploy', 'scripts', script), '#!/usr/bin/env python3\n', 'utf8');
   }
+}
+
+function writeFakeGuiMonitorRepo(repoRoot: string): void {
+  mkdirSync(path.join(repoRoot, 'deploy', 'scripts'), { recursive: true });
+  writeFileSync(
+    path.join(repoRoot, 'deploy', 'scripts', 'bot-errors-gui-session-monitor.py'),
+    '#!/usr/bin/env python3\n',
+    'utf8',
+  );
 }
 
 function writeLaunchdShims(shimDir: string): void {
@@ -531,5 +541,120 @@ describe('BOT ERRORS service templates', () => {
       expect(existsSync(launchAgentPath(home, 'com.bot-errors.health-only'))).toBe(false);
       expect(existsSync(path.join(home, 'launchctl.log'))).toBe(false);
     }
+  });
+
+  it('GUI monitor installer preflights config without sourcing the private env file', () => {
+    const text = readFileSync(guiMonitorInstaller, 'utf8');
+    expect(text).toContain('BOT_ERRORS_ENV_FILE');
+    expect(text).toContain('read_env_value');
+    expect(text).toContain('env_or_default');
+    expect(text).toContain('xml_escape');
+    expect(text).toContain('--config-check');
+    expect(text).toContain('systemd_env_line BOT_ERRORS_EXPECTED_FLEET');
+    expect(text).toContain('launchd_env_entry BOT_ERRORS_EXPECTED_FLEET');
+    expect(text).not.toMatch(/\bsource\s+"\$ENV_FILE"|\.\s+"\$ENV_FILE"/);
+  });
+
+  it('GUI monitor installer writes no scheduler artifacts when config preflight fails', () => {
+    const home = makeTempRoot('whatsoup-gui-monitor-home-');
+    const shimDir = makeTempRoot('whatsoup-gui-monitor-shims-');
+    const envFile = path.join(home, 'bot-errors.env');
+    const repoRoot = path.join(home, 'repo');
+
+    writeFakeGuiMonitorRepo(repoRoot);
+    writeFileSync(envFile, 'BOT_ERRORS_EXPECTED_FLEET=/private/fleet.json\n', 'utf8');
+    writeShim(shimDir, 'fake-python', [
+      '#!/usr/bin/env bash',
+      'echo "$@" >> "$HOME/python.log"',
+      'echo "config failed" >&2',
+      'exit 2',
+      '',
+    ].join('\n'));
+    writeShim(shimDir, 'systemctl', [
+      '#!/usr/bin/env bash',
+      'echo "$@" >> "$HOME/systemctl.log"',
+      'exit 0',
+      '',
+    ].join('\n'));
+
+    const result = spawnSync('bash', [guiMonitorInstaller], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+        BOT_ERRORS_PYTHON: path.join(shimDir, 'fake-python'),
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(2);
+    expect(result.stderr).toContain('config failed');
+    expect(readFileSync(path.join(home, 'python.log'), 'utf8')).toContain('--config-check');
+    expect(existsSync(path.join(home, 'systemctl.log'))).toBe(false);
+    expect(existsSync(path.join(home, '.config', 'systemd', 'user', 'com.bot-errors.gui-session-monitor.service'))).toBe(false);
+  });
+
+  it('GUI monitor installer persists private expected-fleet env values without executing env-file shell', () => {
+    const home = makeTempRoot('whatsoup-gui-monitor-home-');
+    const shimDir = makeTempRoot('whatsoup-gui-monitor-shims-');
+    const envFile = path.join(home, 'bot-errors.env');
+    const maliciousTouch = path.join(home, 'sourced-env-file');
+    const repoRoot = path.join(home, 'repo');
+    const expectedFleet = path.join(home, 'expected fleet.private.json');
+    const users = 'host-a=user-a,host-b=user-b';
+
+    writeFakeGuiMonitorRepo(repoRoot);
+    writeFileSync(expectedFleet, '{"hosts":[]}\n', 'utf8');
+    writeFileSync(envFile, [
+      `BOT_ERRORS_EXPECTED_FLEET=${expectedFleet}`,
+      `BOT_ERRORS_GUI_MONITOR_USERS=${users}`,
+      'BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS=4',
+      `MALICIOUS_TOUCH=$(touch ${maliciousTouch})`,
+      '',
+    ].join('\n'), 'utf8');
+    writeShim(shimDir, 'fake-python', [
+      '#!/usr/bin/env bash',
+      'echo "$@" >> "$HOME/python.log"',
+      'printf "expected=%s\\n" "${BOT_ERRORS_EXPECTED_FLEET:-}" >> "$HOME/python.env"',
+      'printf "users=%s\\n" "${BOT_ERRORS_GUI_MONITOR_USERS:-}" >> "$HOME/python.env"',
+      'printf "timeout=%s\\n" "${BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS:-}" >> "$HOME/python.env"',
+      'exit 0',
+      '',
+    ].join('\n'));
+    writeShim(shimDir, 'systemctl', [
+      '#!/usr/bin/env bash',
+      'echo "$@" >> "$HOME/systemctl.log"',
+      'exit 0',
+      '',
+    ].join('\n'));
+
+    execFileSync('bash', [guiMonitorInstaller], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+        BOT_ERRORS_PYTHON: path.join(shimDir, 'fake-python'),
+      },
+    });
+
+    const service = readFileSync(
+      path.join(home, '.config', 'systemd', 'user', 'com.bot-errors.gui-session-monitor.service'),
+      'utf8',
+    );
+    expect(existsSync(maliciousTouch)).toBe(false);
+    expect(readFileSync(path.join(home, 'python.log'), 'utf8')).toContain('--config-check');
+    expect(readFileSync(path.join(home, 'python.env'), 'utf8')).toContain(`expected=${expectedFleet}`);
+    expect(readFileSync(path.join(home, 'python.env'), 'utf8')).toContain(`users=${users}`);
+    expect(service).toContain(`EnvironmentFile=-${envFile}`);
+    expect(service).toContain(`Environment="BOT_ERRORS_EXPECTED_FLEET=${expectedFleet}"`);
+    expect(service).toContain(`Environment="BOT_ERRORS_GUI_MONITOR_USERS=${users}"`);
+    expect(service).toContain('Environment="BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS=4"');
+    expect(readFileSync(path.join(home, 'systemctl.log'), 'utf8')).toContain('enable --now com.bot-errors.gui-session-monitor.timer');
   });
 });

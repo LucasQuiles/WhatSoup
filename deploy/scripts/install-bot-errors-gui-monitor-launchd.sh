@@ -34,10 +34,98 @@ if [[ "${1:-}" == "--dry-run" ]]; then
   DRY_RUN=1
 fi
 
+read_env_value(){
+  local key="$1"
+  [[ -f "$ENV_FILE" ]] || return 0
+  awk -v key="$key" '
+    /^[[:space:]]*#/ { next }
+    index($0, key "=") == 1 { value=substr($0, length(key) + 2); found=1 }
+    END { if (found) printf "%s", value }
+  ' "$ENV_FILE"
+}
+
+env_or_default(){
+  local key="$1" fallback="$2" current file_value
+  current="${!key:-}"
+  if [[ -n "$current" ]]; then
+    printf "%s" "$current"
+    return 0
+  fi
+  file_value="$(read_env_value "$key")"
+  if [[ -n "$file_value" ]]; then
+    printf "%s" "$file_value"
+  else
+    printf "%s" "$fallback"
+  fi
+}
+
+xml_escape(){
+  local value="$1"
+  value=${value//&/\&amp;}
+  value=${value//</\&lt;}
+  value=${value//>/\&gt;}
+  value=${value//\"/\&quot;}
+  value=${value//"'"/\&apos;}
+  printf "%s" "$value"
+}
+
+systemd_escape(){
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  printf "%s" "$value"
+}
+
+systemd_env_line(){
+  local key="$1" value="$2"
+  [[ -n "$value" ]] || return 0
+  printf 'Environment="%s=%s"\n' "$key" "$(systemd_escape "$value")"
+}
+
+launchd_env_entry(){
+  local key="$1" value="$2"
+  [[ -n "$value" ]] || return 0
+  printf '    <key>%s</key><string>%s</string>\n' "$(xml_escape "$key")" "$(xml_escape "$value")"
+}
+
+EXPECTED_FLEET_VALUE="$(env_or_default BOT_ERRORS_EXPECTED_FLEET "")"
+GUI_MONITOR_USERS_VALUE="$(env_or_default BOT_ERRORS_GUI_MONITOR_USERS "")"
+SSH_TIMEOUT_VALUE="$(env_or_default BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS "")"
+FAILURE_THRESHOLD_VALUE="$(env_or_default BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD "")"
+GUI_MONITOR_STATE_VALUE="$(env_or_default BOT_ERRORS_GUI_MONITOR_STATE "")"
+
+LABEL_XML="$(xml_escape "$LABEL")"
+REPO_ROOT_XML="$(xml_escape "$REPO_ROOT")"
+PYTHON_XML="$(xml_escape "$PYTHON")"
+STATE_DIR_XML="$(xml_escape "$STATE_DIR")"
+MONITOR_SCRIPT_XML="$(xml_escape "$MONITOR_SCRIPT")"
+
 if [[ ! -f "$MONITOR_SCRIPT" ]]; then
   echo "missing required monitor script: $MONITOR_SCRIPT" >&2
   exit 2
 fi
+
+run_config_check(){
+  local env_args=(
+    "BOT_ERRORS_STATE_DIR=$STATE_DIR"
+  )
+  if [[ -n "$EXPECTED_FLEET_VALUE" ]]; then
+    env_args+=("BOT_ERRORS_EXPECTED_FLEET=$EXPECTED_FLEET_VALUE")
+  fi
+  if [[ -n "$GUI_MONITOR_USERS_VALUE" ]]; then
+    env_args+=("BOT_ERRORS_GUI_MONITOR_USERS=$GUI_MONITOR_USERS_VALUE")
+  fi
+  if [[ -n "$SSH_TIMEOUT_VALUE" ]]; then
+    env_args+=("BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS=$SSH_TIMEOUT_VALUE")
+  fi
+  if [[ -n "$FAILURE_THRESHOLD_VALUE" ]]; then
+    env_args+=("BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD=$FAILURE_THRESHOLD_VALUE")
+  fi
+  if [[ -n "$GUI_MONITOR_STATE_VALUE" ]]; then
+    env_args+=("BOT_ERRORS_GUI_MONITOR_STATE=$GUI_MONITOR_STATE_VALUE")
+  fi
+  env "${env_args[@]}" "$PYTHON" "$MONITOR_SCRIPT" --config-check
+}
 
 render_systemd_service() {
   cat <<UNIT
@@ -50,6 +138,11 @@ Type=oneshot
 WorkingDirectory=$REPO_ROOT
 EnvironmentFile=-$ENV_FILE
 Environment=BOT_ERRORS_STATE_DIR=$STATE_DIR
+$(systemd_env_line BOT_ERRORS_EXPECTED_FLEET "$EXPECTED_FLEET_VALUE")
+$(systemd_env_line BOT_ERRORS_GUI_MONITOR_USERS "$GUI_MONITOR_USERS_VALUE")
+$(systemd_env_line BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS "$SSH_TIMEOUT_VALUE")
+$(systemd_env_line BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD "$FAILURE_THRESHOLD_VALUE")
+$(systemd_env_line BOT_ERRORS_GUI_MONITOR_STATE "$GUI_MONITOR_STATE_VALUE")
 ExecStart=$PYTHON $MONITOR_SCRIPT --once
 
 [Install]
@@ -80,22 +173,27 @@ render_launchd_plist() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$LABEL</string>
+  <key>Label</key><string>$LABEL_XML</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$PYTHON</string>
-    <string>$MONITOR_SCRIPT</string>
+    <string>$PYTHON_XML</string>
+    <string>$MONITOR_SCRIPT_XML</string>
     <string>--once</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>BOT_ERRORS_STATE_DIR</key><string>$STATE_DIR</string>
+    <key>BOT_ERRORS_STATE_DIR</key><string>$STATE_DIR_XML</string>
+$(launchd_env_entry BOT_ERRORS_EXPECTED_FLEET "$EXPECTED_FLEET_VALUE")
+$(launchd_env_entry BOT_ERRORS_GUI_MONITOR_USERS "$GUI_MONITOR_USERS_VALUE")
+$(launchd_env_entry BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS "$SSH_TIMEOUT_VALUE")
+$(launchd_env_entry BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD "$FAILURE_THRESHOLD_VALUE")
+$(launchd_env_entry BOT_ERRORS_GUI_MONITOR_STATE "$GUI_MONITOR_STATE_VALUE")
   </dict>
-  <key>WorkingDirectory</key><string>$REPO_ROOT</string>
+  <key>WorkingDirectory</key><string>$REPO_ROOT_XML</string>
   <key>RunAtLoad</key><false/>
   <key>StartInterval</key><integer>$INTERVAL_SECONDS</integer>
-  <key>StandardOutPath</key><string>$STATE_DIR/logs/gui-session-monitor.out.log</string>
-  <key>StandardErrorPath</key><string>$STATE_DIR/logs/gui-session-monitor.err.log</string>
+  <key>StandardOutPath</key><string>$STATE_DIR_XML/logs/gui-session-monitor.out.log</string>
+  <key>StandardErrorPath</key><string>$STATE_DIR_XML/logs/gui-session-monitor.err.log</string>
 </dict>
 </plist>
 PLIST
@@ -143,8 +241,14 @@ install_launchd() {
 }
 
 if command -v systemctl >/dev/null 2>&1; then
+  if [[ "$DRY_RUN" != "1" ]]; then
+    run_config_check
+  fi
   install_systemd
 elif [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ "$DRY_RUN" != "1" ]]; then
+    run_config_check
+  fi
   install_launchd
 else
   echo "no supported scheduler found (need systemd or macOS launchd)" >&2

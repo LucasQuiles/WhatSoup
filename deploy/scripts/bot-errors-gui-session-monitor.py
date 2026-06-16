@@ -625,6 +625,33 @@ def load_fleet() -> dict:
         return {}
 
 
+def config_check() -> int:
+    """Validate monitor configuration without probing hosts or writing state."""
+    path = fleet_path()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"expected fleet file is not readable JSON: {path}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(data, dict):
+        print(f"expected fleet file must contain a JSON object: {path}", file=sys.stderr)
+        return 2
+
+    private_override_error = private_override_contract_error(data)
+    if private_override_error is not None:
+        print(private_override_error, file=sys.stderr)
+        return 2
+
+    targets = gui_targets_from_fleet(data)
+    if not targets:
+        print(f"expected fleet file has no GUI-session monitor targets: {path}", file=sys.stderr)
+        return 2
+
+    print(f"gui-session-monitor config ok: expected_fleet={path} targets={len(targets)}")
+    return 0
+
+
 def state_path() -> Path:
     raw = os.environ.get("BOT_ERRORS_GUI_MONITOR_STATE", "").strip()
     if raw:
@@ -820,11 +847,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--once", action="store_true",
         help="Run a single cycle (default; reserved for future loop mode).",
     )
+    parser.add_argument(
+        "--config-check", action="store_true",
+        help="Validate monitor config only; do not SSH, write state, or emit events.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if args.config_check:
+        return config_check()
     return run_once(dry_run=args.dry_run)
 
 
