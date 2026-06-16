@@ -246,19 +246,19 @@ export default function Inbox() {
           <>
             {/* Chat header */}
             <div
-              className="flex items-center bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)] gap-[var(--sp-3)]"
+              className="flex items-center bg-surface-raised c-toolbar c-border-b min-h-[var(--toolbar-h)] gap-[var(--sp-3)]"
             >
               <div
-                className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-d5"
+                className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-surface-overlay"
               >
                 {currentChat.isGroup
-                  ? <Users size={16} className="text-t3" />
-                  : <User size={16} className="text-t3" />
+                  ? <Users size={16} className="text-text-2" />
+                  : <User size={16} className="text-text-2" />
                 }
               </div>
               <div className="flex-1">
-                <div className="text-t1 font-medium text-body">{resolveDisplayName(currentChat.name)}</div>
-                <div className="text-t2 font-mono text-label">
+                <div className="text-text-1 font-medium text-body">{resolveDisplayName(currentChat.name)}</div>
+                <div className="text-text-2 font-mono text-label">
                   {activeLine} · {currentChat.isGroup ? 'group' : 'direct'}
                 </div>
               </div>
@@ -266,7 +266,7 @@ export default function Inbox() {
             </div>
 
             <div
-              className="flex items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-b bg-d2"
+              className="flex items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-b bg-surface-raised"
             >
               <SearchInput
                 containerClassName="flex-1"
@@ -279,14 +279,14 @@ export default function Inbox() {
                     <Loader2
                       size={14}
                       strokeWidth={1.75}
-                      className="animate-spin text-t4"
+                      className="animate-spin text-text-2"
                     />
                   ) : isSearchMode ? (
                     <Button
                       variant="ghost"
                       size="xs"
                       onClick={() => setSearchInput('')}
-                      className="c-hover cursor-pointer text-t5 hover:text-t2 p-[var(--sp-1)]"
+                      className="c-hover cursor-pointer text-text-3 hover:text-text-2 p-[var(--sp-1)]"
                       title="Clear search"
                       aria-label="Clear search"
                     >
@@ -358,7 +358,7 @@ export default function Inbox() {
                     variant="ghost"
                     onClick={handleLoadOlder}
                     disabled={loadingOlder}
-                    className="pt-[var(--sp-2)] pb-[var(--sp-4)] gap-[var(--sp-2)] w-full justify-center text-t2"
+                    className="pt-[var(--sp-2)] pb-[var(--sp-4)] gap-[var(--sp-2)] w-full justify-center text-text-2"
                     icon={loadingOlder
                       ? <Loader2 size={14} strokeWidth={1.75} className="animate-spin" />
                       : <ChevronsUp size={14} strokeWidth={1.75} />
@@ -413,12 +413,12 @@ export default function Inbox() {
 
             {/* Input bar */}
             <div
-              className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] border-t border-[var(--b1)] bg-d2"
+              className="flex flex-shrink-0 items-center py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] border-t border-[var(--border-hairline)] bg-surface-raised"
               style={{ borderTopWidth: 'var(--bw)' }}
             >
               <TextArea
                 ref={textareaRef}
-                className="flex-1 text-t2 placeholder-t5 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
+                className="flex-1 text-text-2 placeholder-text-3 leading-tight py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
                 rows={1}
                 minHeight={0}
                 maxHeight="var(--feed-preview-max)"
@@ -467,18 +467,18 @@ export default function Inbox() {
           <>
             {/* Contact header */}
             <div
-              className="flex items-center bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)] gap-[var(--sp-3)]"
+              className="flex items-center bg-surface-raised c-toolbar c-border-b min-h-[var(--toolbar-h)] gap-[var(--sp-3)]"
             >
               <div
-                className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-d5"
+                className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-surface-overlay"
               >
                 {currentChat.isGroup
-                  ? <Users size={16} className="text-t4" />
-                  : <User size={16} className="text-t4" />
+                  ? <Users size={16} className="text-text-2" />
+                  : <User size={16} className="text-text-2" />
                 }
               </div>
               <div className="flex-1 min-w-0">
-                <div title={currentChatDisplayName} className="text-t1 font-medium truncate text-body">{currentChatDisplayName}</div>
+                <div title={currentChatDisplayName} className="text-text-1 font-medium truncate text-body">{currentChatDisplayName}</div>
                 <div title={currentChat.conversationKey} className="c-label truncate">{currentChat.conversationKey.slice(0, 18)}...</div>
               </div>
             </div>
@@ -489,7 +489,7 @@ export default function Inbox() {
               <div className="mb-[var(--sp-4)]">
                 <div className="c-col-header mb-[var(--sp-2)]">Details</div>
                 <div
-                  className="bg-d2 rounded-md py-[var(--sp-3)] px-[var(--sp-4)] c-border"
+                  className="bg-surface-raised rounded-md py-[var(--sp-3)] px-[var(--sp-4)] c-border"
                 >
                   {[
                     { label: 'Line', value: activeLine },
@@ -502,7 +502,7 @@ export default function Inbox() {
                       className={`flex justify-between py-[var(--sp-2)] px-0${i < arr.length - 1 ? ' c-border-b' : ''}`}
                     >
                       <span className="c-label">{item.label}</span>
-                      <span className="font-mono text-t2 text-data">{item.value}</span>
+                      <span className="font-mono text-text-2 text-data">{item.value}</span>
                     </div>
                   ))}
                 </div>
@@ -515,7 +515,7 @@ export default function Inbox() {
                   {currentChat.unreadCount > 0 && (
                     <Button
                       size="sm"
-                      className="w-full justify-center border-[var(--b2)] text-t2"
+                      className="w-full justify-center border-[var(--border-subtle)] text-text-2"
                       disabled={actionBusy}
                       icon={<CheckCheck size={14} strokeWidth={1.75} />}
                       onClick={async () => {
@@ -581,7 +581,7 @@ export default function Inbox() {
                   {!currentChat.isGroup && (
                     <Button
                       variant="neutral"
-                      className="w-full justify-center border-[var(--b2)] text-t2"
+                      className="w-full justify-center border-[var(--border-subtle)] text-text-2"
                       disabled={actionBusy}
                       icon={<UserPlus size={14} strokeWidth={1.75} />}
                       onClick={() => {
@@ -598,7 +598,7 @@ export default function Inbox() {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center p-[var(--sp-4)]">
-            <div className="text-center text-t2 text-sm">
+            <div className="text-center text-text-2 text-sm">
               Select a conversation to see details
             </div>
           </div>

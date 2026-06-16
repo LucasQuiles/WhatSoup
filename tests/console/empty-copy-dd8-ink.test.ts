@@ -37,13 +37,15 @@ describe('DD-8 empty and paused state copy carries secondary ink', () => {
     expect(source).not.toContain('text-t5 text-center py-8 font-mono text-data')
   })
 
-  it('keeps Inbox load-more and empty-selection labels off text-t5', () => {
+  it('keeps Inbox load-more and empty-selection labels off ghost ink (text-text-3)', () => {
     const source = read('console/src/pages/Inbox.tsx')
 
-    expect(source).toContain('w-full justify-center text-t2')
-    expect(source).toContain('text-center text-t2 text-sm')
-    expect(source).not.toContain('w-full justify-center text-t5')
-    expect(source).not.toContain('text-center text-t5 text-sm')
+    // v3 semantic class names: secondary ink is text-text-2 (--text-2),
+    // ghost ink is text-text-3 (--text-3). These labels must carry secondary ink.
+    expect(source).toContain('w-full justify-center text-text-2')
+    expect(source).toContain('text-center text-text-2 text-sm')
+    expect(source).not.toContain('w-full justify-center text-text-3')
+    expect(source).not.toContain('text-center text-text-3 text-sm')
   })
 
   it('keeps HistoryTab load/no-more/jump controls off text-t5', () => {
