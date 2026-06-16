@@ -1129,3 +1129,47 @@ def test_config_check_passes_private_override_without_ssh_or_state(mod, tmp_path
     assert mod.config_check() == 0
     captured = capsys.readouterr()
     assert "gui-session-monitor config ok" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# A5: config_check branch tests — unreadable/invalid JSON, non-dict payload,
+# zero GUI targets.  These branches exist in the source; the tests assert the
+# correct exit code and stderr message for each path.
+# ---------------------------------------------------------------------------
+
+
+def test_config_check_fails_closed_on_unreadable_invalid_json(mod, tmp_path, monkeypatch, capsys):
+    """config_check must return 2 when the fleet file is not valid JSON."""
+    bad_file = tmp_path / "fleet-bad.json"
+    bad_file.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: bad_file)
+
+    assert mod.config_check() == 2
+    captured = capsys.readouterr()
+    assert "not readable JSON" in captured.err
+
+
+def test_config_check_fails_closed_on_non_dict_json_payload(mod, tmp_path, monkeypatch, capsys):
+    """config_check must return 2 when the fleet file contains a JSON array, not an object."""
+    list_file = tmp_path / "fleet-list.json"
+    list_file.write_text("[1, 2, 3]", encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: list_file)
+
+    assert mod.config_check() == 2
+    captured = capsys.readouterr()
+    assert "must contain a JSON object" in captured.err
+
+
+def test_config_check_fails_closed_on_zero_gui_targets(mod, tmp_path, monkeypatch, capsys):
+    """config_check must return 2 when the fleet yields no GUI-session monitor targets."""
+    no_targets_file = tmp_path / "fleet-no-targets.json"
+    # A valid JSON object but with no bot-host entries that would yield targets.
+    no_targets_file.write_text(
+        '{"hosts":[{"host":"central","role":"central","instances":[]}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "fleet_path", lambda: no_targets_file)
+
+    assert mod.config_check() == 2
+    captured = capsys.readouterr()
+    assert "no GUI-session monitor targets" in captured.err
