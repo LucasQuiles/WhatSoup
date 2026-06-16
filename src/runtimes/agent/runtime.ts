@@ -5208,6 +5208,9 @@ export class AgentRuntime implements Runtime {
             // increment the empty counter when neither text nor tool work occurred.
             // turnHadToolWork was captured before clearToolNames above.
             this.recordFallbackTurnOutcome(queue, hadVisible, turnHadToolWork);
+            // Empty/tool-only turn: surface any still-pending handoff notice
+            // standalone rather than deferring it to the next reply.
+            this.flushPendingHandoffNotice(queue);
             if (!turnCapabilityFailureRecorded) {
               if (hadVisible || turnHadToolWork) {
                 this.recordTurnCapabilitySuccess(true);
@@ -7150,6 +7153,25 @@ export class AgentRuntime implements Runtime {
     return prefix ? `${prefix}\n\n${text}` : text;
   }
 
+  /**
+   * Flush a still-pending handoff notice as a standalone message at turn end.
+   * Closes the empty-turn gap: if the stand-in's turn produced no visible reply,
+   * {@link withHandoffPrefix} never consumed the notice, so it would otherwise
+   * defer to the next reply. Consume-once means this is a no-op when a reply
+   * already prepended the notice this turn. Never throws into the turn.
+   */
+  private flushPendingHandoffNotice(queue: IOutboundQueue): void {
+    if (!oneMessageHandoffEnabled()) return;
+    let pending: string | null = null;
+    try {
+      pending = consumeStandbyNotice(this.db, toConversationKey(queue.targetChatJid));
+    } catch (err) {
+      log.warn({ err, chatJid: queue.targetChatJid }, 'failed to flush pending handoff notice');
+      return;
+    }
+    if (pending) queue.enqueueText(pending);
+  }
+
   private recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void {
     this.operationTrackers.get(mapKey)?.shutdown();
     this.operationTrackers.delete(mapKey);
@@ -8411,6 +8433,9 @@ export class AgentRuntime implements Runtime {
         const lastOpId = queue.getLastOpId();
         if (!wasSilentCompact && !isSystemResult) {
           this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, turnHadToolWork);
+          // Empty/tool-only turn: surface any still-pending handoff notice
+          // standalone rather than deferring it to the next reply.
+          this.flushPendingHandoffNotice(queue);
           if (!turnCapabilityFailureRecorded) {
             if (this.turnHadVisibleOutput || turnHadToolWork) {
               this.recordTurnCapabilitySuccess(true);

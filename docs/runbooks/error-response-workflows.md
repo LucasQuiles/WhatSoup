@@ -72,10 +72,11 @@ under `BEGIN IMMEDIATE`). When there is no continuation (resend / blocked by too
 activity / missing backup credentials) the notice is sent standalone as before,
 and a stash failure also falls back to standalone — the notice is never lost.
 
-Known limitation (follow-up): if the stand-in's first turn produces no visible
-output (a tool-only or empty turn), the stashed notice is not flushed
-immediately — it prepends to the next visible reply instead. It is deferred, not
-lost. The empty-turn flush is the next increment.
+Empty/tool-only turns are handled: at turn end the runtime flushes any
+still-pending notice standalone, so a stand-in turn with no visible reply still
+surfaces the notice in the same turn rather than deferring it. Consume-once means
+the flush is a no-op when a reply already prepended the notice — the notice is
+emitted exactly once per turn (prepended, or flushed).
 
 ## Canonical error taxonomy
 

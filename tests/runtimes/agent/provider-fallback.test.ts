@@ -199,6 +199,7 @@ type FallbackView = {
   lastDiagnosticBundleAt: number;
   stashHandoffNotice(chatJid: string, message: string, now: number): boolean;
   withHandoffPrefix(chatJid: string, text: string): string;
+  flushPendingHandoffNotice(queue: { targetChatJid: string; enqueueText(text: string): void }): void;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -1217,6 +1218,38 @@ describe('one-message handoff collapse (real db)', () => {
     v.stashHandoffNotice(chat, 'should not appear', Date.now());
     withFlag(undefined, () => {
       expect(v.withHandoffPrefix(chat, 'plain reply')).toBe('plain reply');
+    });
+    db.close();
+  });
+
+  it('flushes a pending notice standalone at turn end when no reply consumed it', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'flush@s.whatsapp.net';
+    const enqueued: string[] = [];
+    const queue = { targetChatJid: chat, enqueueText: (t: string) => { enqueued.push(t); } };
+    withFlag('1', () => {
+      v.stashHandoffNotice(chat, 'pending notice', Date.now());
+      v.flushPendingHandoffNotice(queue);
+      expect(enqueued).toEqual(['pending notice']);
+      // Consumed — a second flush is a no-op.
+      v.flushPendingHandoffNotice(queue);
+      expect(enqueued).toEqual(['pending notice']);
+    });
+    db.close();
+  });
+
+  it('flush is a no-op once a reply has already prepended the notice', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'flush2@s.whatsapp.net';
+    const enqueued: string[] = [];
+    const queue = { targetChatJid: chat, enqueueText: (t: string) => { enqueued.push(t); } };
+    withFlag('1', () => {
+      v.stashHandoffNotice(chat, 'notice', Date.now());
+      expect(v.withHandoffPrefix(chat, 'reply')).toBe('notice\n\nreply');
+      v.flushPendingHandoffNotice(queue);
+      expect(enqueued).toEqual([]);
     });
     db.close();
   });
