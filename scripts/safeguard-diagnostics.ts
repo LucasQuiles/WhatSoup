@@ -45,6 +45,7 @@ interface ChainRequirement {
   id: string;
   scriptName: string;
   orderedSteps: string[];
+  forbiddenSteps?: string[];
 }
 
 interface AnchorRequirement {
@@ -165,6 +166,14 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run coverage:check',
       'bash scripts/run-with-pinned-npm.sh --prefix console run build',
       'npm run verify:console-design',
+    ],
+    forbiddenSteps: [
+      'npm --prefix tools/whatsoup_guard ci',
+      'npm --prefix tools/whatsoup_guard run typecheck',
+      'npm --prefix tools/whatsoup_guard test',
+      'npm --prefix console ci',
+      'npm --prefix console run lint',
+      'npm --prefix console run build',
     ],
   },
   {
@@ -482,6 +491,14 @@ function checkScriptPresence(scripts: Record<string, string>): DiagnosticCheck {
   };
 }
 
+function commandMatches(expected: string, actual: string): boolean {
+  return actual === expected || actual.startsWith(`${expected} `);
+}
+
+function findCommandIndex(chainSteps: string[], expected: string): number {
+  return chainSteps.findIndex((actual) => commandMatches(expected, actual));
+}
+
 function checkChainRequirement(scripts: Record<string, string>, requirement: ChainRequirement): DiagnosticCheck {
   const chain = scripts[requirement.scriptName];
   if (!chain) {
@@ -495,11 +512,13 @@ function checkChainRequirement(scripts: Record<string, string>, requirement: Cha
     };
   }
 
-  const missing = requirement.orderedSteps.filter((step) => !chain.includes(step));
+  const chainSteps = chain.split(/\s+&&\s+/).map((step) => step.trim()).filter(Boolean);
+  const missing = requirement.orderedSteps.filter((step) => findCommandIndex(chainSteps, step) < 0);
+  const forbiddenPresent = (requirement.forbiddenSteps ?? []).filter((step) => findCommandIndex(chainSteps, step) >= 0);
   const outOfOrder: string[] = [];
   let previousIndex = -1;
   for (const step of requirement.orderedSteps) {
-    const index = chain.indexOf(step);
+    const index = findCommandIndex(chainSteps, step);
     if (index < 0) continue;
     if (index < previousIndex) outOfOrder.push(step);
     previousIndex = Math.max(previousIndex, index);
@@ -508,6 +527,7 @@ function checkChainRequirement(scripts: Record<string, string>, requirement: Cha
   const failures = [
     ...missing.map((step) => `missing ${step}`),
     ...outOfOrder.map((step) => `out-of-order ${step}`),
+    ...forbiddenPresent.map((step) => `forbidden ${step}`),
   ];
 
   return {

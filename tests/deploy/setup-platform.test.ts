@@ -42,6 +42,11 @@ function writeExecutable(dir: string, name: string, body: string): void {
   fs.chmodSync(file, 0o755);
 }
 
+function writeHealthProfile(file: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{}\n', 'utf8');
+}
+
 function writeLinuxSetupShims(dir: string): void {
   writeExecutable(dir, 'uname', '#!/usr/bin/env bash\nprintf "Linux\\n"\n');
   writeExecutable(dir, 'node', [
@@ -206,6 +211,18 @@ describe('deploy/setup.sh platform portability', () => {
     expect(linuxUnitBlock).not.toMatch(/daemon-reload[^\n]*\|\|\s*true/);
   });
 
+  it('Linux setup validates the BOT ERRORS health profile before installing units', () => {
+    const linuxUnitBlock = sliceBetween(
+      setupSource,
+      '# --- linux (systemd) unit install ---',
+      'fi\nmkdir -p "$HOME/.config/whatsoup"',
+    );
+    expect(linuxUnitBlock).toContain('require_readable_bot_errors_health_profile');
+    expect(linuxUnitBlock.indexOf('require_readable_bot_errors_health_profile')).toBeLessThan(
+      linuxUnitBlock.indexOf('for unit in "${BOT_ERRORS_SYSTEMD_UNITS[@]}"'),
+    );
+  });
+
   it('setup provisions the full BOT ERRORS routing env contract', () => {
     const routingBlock = sliceBetween(
       setupSource,
@@ -227,13 +244,15 @@ describe('deploy/setup.sh platform portability', () => {
   it('Linux setup replay copies BOT ERRORS units and writes private routing env', () => {
     const home = makeTempRoot('whatsoup-setup-home-');
     const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
     writeLinuxSetupShims(shimDir);
 
     const result = runLinuxSetupReplay(home, shimDir, {
       BOT_ERRORS_JID: '120363555555550001@g.us',
       BOT_ERRORS_SOCKET_PATH: path.join(home, 'runtime', 'whatsoup.sock'),
       BOT_ERRORS_DB: path.join(home, 'state', 'bot.db'),
-      BOT_ERRORS_HEALTH_PROFILE: path.join(home, 'profiles', 'testhost.json'),
+      BOT_ERRORS_HEALTH_PROFILE: profile,
     });
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -250,7 +269,7 @@ describe('deploy/setup.sh platform portability', () => {
     expect(envFile).toContain(`BOT_ERRORS_SOCKET_PATH=${path.join(home, 'runtime', 'whatsoup.sock')}`);
     expect(envFile).toContain(`BOT_ERRORS_SOCKET=${path.join(home, 'runtime', 'whatsoup.sock')}`);
     expect(envFile).toContain(`BOT_ERRORS_DB=${path.join(home, 'state', 'bot.db')}`);
-    expect(envFile).toContain(`BOT_ERRORS_HEALTH_PROFILE=${path.join(home, 'profiles', 'testhost.json')}`);
+    expect(envFile).toContain(`BOT_ERRORS_HEALTH_PROFILE=${profile}`);
     expect(fs.readFileSync(path.join(home, 'systemctl.log'), 'utf8')).toContain('--user daemon-reload');
     expect(result.stdout).toContain('BOT ERRORS service/timer units installed');
     expect(result.stdout).toContain('systemctl --user enable --now bot-errors-dispatcher.service bot-errors-q-loop.service bot-errors-collector.service');
@@ -259,10 +278,13 @@ describe('deploy/setup.sh platform portability', () => {
   it('Linux setup replay mirrors BOT_ERRORS_SOCKET when BOT_ERRORS_SOCKET_PATH is absent', () => {
     const home = makeTempRoot('whatsoup-setup-home-');
     const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
     const socket = path.join(home, 'alias-only.sock');
+    writeHealthProfile(profile);
     writeLinuxSetupShims(shimDir);
 
     const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
       BOT_ERRORS_SOCKET: socket,
       BOT_ERRORS_SOCKET_PATH: '',
     } as NodeJS.ProcessEnv);
@@ -277,9 +299,11 @@ describe('deploy/setup.sh platform portability', () => {
     const home = makeTempRoot('whatsoup-setup-home-');
     const shimDir = makeTempRoot('whatsoup-setup-shims-');
     const existingSocket = path.join(home, 'existing.sock');
+    const profile = path.join(home, 'profiles', 'testhost.json');
     const maliciousTouch = path.join(home, 'sourced-env-file');
     const envDir = path.join(home, '.config', 'whatsoup');
     const envPath = path.join(envDir, 'bot-errors.env');
+    writeHealthProfile(profile);
     writeLinuxSetupShims(shimDir);
     fs.mkdirSync(envDir, { recursive: true });
     fs.writeFileSync(envPath, [
@@ -289,7 +313,9 @@ describe('deploy/setup.sh platform portability', () => {
       '',
     ].join('\n'), 'utf8');
 
-    const result = runLinuxSetupReplay(home, shimDir);
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
+    });
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     const envFile = fs.readFileSync(envPath, 'utf8');
@@ -300,17 +326,48 @@ describe('deploy/setup.sh platform portability', () => {
     expect(envFile).toContain(`BOT_ERRORS_SOCKET=${existingSocket}`);
     expect(envFile).toContain(`BOT_ERRORS_SOCKET_PATH=${existingSocket}`);
     expect(envFile).toContain(`BOT_ERRORS_DB=${path.join(home, '.local', 'share', 'whatsoup', 'instances', 'personal', 'bot.db')}`);
-    expect(envFile).toContain('BOT_ERRORS_HEALTH_PROFILE=');
+    expect(envFile).toContain(`BOT_ERRORS_HEALTH_PROFILE=${profile}`);
     expect(fs.existsSync(maliciousTouch)).toBe(false);
     expect(result.stdout).toContain('Existing BOT ERRORS routing config preserved');
+  });
+
+  it('Linux setup replay validates the persisted health profile when BOT ERRORS env already exists', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const envDir = path.join(home, '.config', 'whatsoup');
+    const envPath = path.join(envDir, 'bot-errors.env');
+    const persistedMissingProfile = path.join(home, 'profiles', 'persisted-missing.json');
+    const processOnlyProfile = path.join(home, 'profiles', 'process-only.json');
+    writeHealthProfile(processOnlyProfile);
+    writeLinuxSetupShims(shimDir);
+    fs.mkdirSync(envDir, { recursive: true });
+    fs.writeFileSync(envPath, [
+      'BOT_ERRORS_EXPECTED_JID=',
+      `BOT_ERRORS_HEALTH_PROFILE=${persistedMissingProfile}`,
+      '',
+    ].join('\n'), 'utf8');
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: processOnlyProfile,
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('missing BOT_ERRORS_HEALTH_PROFILE; expected readable profile path');
+    for (const unit of botErrorsSystemdUnits) {
+      expect(fs.existsSync(path.join(home, '.config', 'systemd', 'user', unit))).toBe(false);
+    }
+    expect(result.stdout).not.toContain('BOT ERRORS service/timer units installed');
   });
 
   it('Linux setup replay stops before routing env creation when daemon-reload fails', () => {
     const home = makeTempRoot('whatsoup-setup-home-');
     const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
     writeLinuxSetupShims(shimDir);
 
     const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: profile,
       SYSTEMCTL_DAEMON_RELOAD_EXIT: '42',
     });
 
@@ -324,6 +381,28 @@ describe('deploy/setup.sh platform portability', () => {
     }
     expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'bot-errors.env'))).toBe(false);
     expect(result.stdout).not.toContain('Setup complete. Next steps:');
+  });
+
+  it('Linux setup replay stops before BOT ERRORS unit installation when the health profile is missing', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const missingProfile = path.join(home, 'profiles', 'missing.json');
+    writeLinuxSetupShims(shimDir);
+
+    const result = runLinuxSetupReplay(home, shimDir, {
+      BOT_ERRORS_HEALTH_PROFILE: missingProfile,
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('missing BOT_ERRORS_HEALTH_PROFILE; expected readable profile path');
+    for (const unit of botErrorsSystemdUnits) {
+      expect(
+        fs.existsSync(path.join(home, '.config', 'systemd', 'user', unit)),
+        `setup replay should not copy ${unit} before validating the health profile`,
+      ).toBe(false);
+    }
+    expect(fs.existsSync(path.join(home, '.config', 'whatsoup', 'bot-errors.env'))).toBe(false);
+    expect(result.stdout).not.toContain('BOT ERRORS service/timer units installed');
   });
 });
 

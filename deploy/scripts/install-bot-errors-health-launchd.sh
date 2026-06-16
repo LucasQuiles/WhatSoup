@@ -50,6 +50,19 @@ xml_escape(){
   printf "%s" "$value"
 }
 
+validate_calendar_integer(){
+  local name="$1" value="$2" min="$3" max="$4"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "invalid $name; expected integer $min..$max" >&2
+    exit 2
+  fi
+  local numeric=$((10#$value))
+  if (( numeric < min || numeric > max )); then
+    echo "invalid $name; expected integer $min..$max" >&2
+    exit 2
+  fi
+}
+
 if [[ -z "$HEALTH_PROFILE" ]]; then
   host_profile=$(hostname -s | tr '[:upper:]' '[:lower:]')
   if [[ -f "$REPO_ROOT/deploy/health-profiles/$host_profile.json" ]]; then
@@ -66,7 +79,9 @@ if [[ -z "$BOT_ERRORS_SOCKET_PATH_VALUE" && -n "$BOT_ERRORS_SOCKET_VALUE" ]]; th
 elif [[ -z "$BOT_ERRORS_SOCKET_VALUE" && -n "$BOT_ERRORS_SOCKET_PATH_VALUE" ]]; then
   BOT_ERRORS_SOCKET_VALUE="$BOT_ERRORS_SOCKET_PATH_VALUE"
 fi
-BOT_ERRORS_DB_VALUE="$(env_or_default BOT_ERRORS_DB "$HOME/.local/share/whatsoup/instances/personal/bot.db")"
+BOT_ERRORS_DB_VALUE="$(env_or_default BOT_ERRORS_DB "")"
+validate_calendar_integer BOT_ERRORS_HEALTH_HOUR "$HEALTH_HOUR" 0 23
+validate_calendar_integer BOT_ERRORS_HEALTH_MINUTE "$HEALTH_MINUTE" 0 59
 LABEL_XML="$(xml_escape "$LABEL")"
 REPO_ROOT_XML="$(xml_escape "$REPO_ROOT")"
 PYTHON_XML="$(xml_escape "$PYTHON")"
@@ -80,7 +95,7 @@ BOT_ERRORS_SOCKET_PATH_XML="$(xml_escape "$BOT_ERRORS_SOCKET_PATH_VALUE")"
 BOT_ERRORS_SOCKET_XML="$(xml_escape "$BOT_ERRORS_SOCKET_VALUE")"
 BOT_ERRORS_DB_XML="$(xml_escape "$BOT_ERRORS_DB_VALUE")"
 
-if [[ -z "$HEALTH_PROFILE" || ! -f "$HEALTH_PROFILE" ]]; then
+if [[ -z "$HEALTH_PROFILE" || ! -f "$HEALTH_PROFILE" || ! -r "$HEALTH_PROFILE" ]]; then
   echo "missing BOT_ERRORS_HEALTH_PROFILE; expected readable profile path" >&2
   exit 2
 fi
