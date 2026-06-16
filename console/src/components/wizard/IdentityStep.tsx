@@ -120,9 +120,11 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
     <WizardStep title="Identity" subtitle="Name this line and choose its type.">
       {/* Type — first so it drives the rest of the wizard */}
       <div>
-        <label className="c-heading c-field-label">
+        {/* Visual heading only — CardSelector's radiogroup carries its own
+            accessible name ("Line Type"), so a bound <label> would be orphaned. */}
+        <div className="c-heading c-field-label" aria-hidden="true">
           Type
-        </label>
+        </div>
         <CardSelector
           label="Line Type"
           options={TYPE_OPTIONS}

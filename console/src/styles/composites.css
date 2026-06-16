@@ -959,7 +959,11 @@ body::before {
    Focus feedback is INSTANT per motion spec (interaction-patterns/motion: focus and
    validation feedback never animate) — no transition on the ring. */
 button:focus-visible,
-a:focus-visible {
+a:focus-visible,
+/* role=radio CardSelector options (div, roving tabindex) — ISM-03 WCAG 2.4.7 */
+[role="radio"]:focus-visible,
+/* keyboard-focusable cards (e.g. Ops fleet rows) — ISM-06 */
+.c-card[tabindex]:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: var(--bw-accent);
   transition: none;

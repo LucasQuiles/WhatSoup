@@ -185,7 +185,17 @@ export default function Ops() {
                 className={`c-card c-hover cursor-pointer py-[var(--sp-3)] px-[var(--sp-4)] ${
                   line.name === activeLine ? 'ring-1 ring-m-cht/30' : ''
                 } ${statusWashClass(line.status) || 'bg-d2'}`}
+                role="button"
+                tabIndex={0}
+                aria-label={`Select ${displayInstanceName(line.name)}`}
+                aria-pressed={line.name === activeLine}
                 onClick={() => setSelectedLine(line.name)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setSelectedLine(line.name)
+                  }
+                }}
               >
                 {/* Row 1: Name + mode + phone */}
                 <div className="flex items-center justify-between mb-[var(--sp-2)]">
