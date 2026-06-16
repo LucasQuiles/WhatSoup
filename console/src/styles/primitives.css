@@ -1615,3 +1615,115 @@ button.soup-pill[aria-disabled="true"] {
     display: none;
   }
 }
+
+/* --------------------------------------------------------------------------
+   AVATAR — soup-av (avatar.md; showcase §20; DD-43)
+   Identity at a glance on the two shipped size tokens (--avatar-sm 32 /
+   --avatar-md 36) and the 8-hue identity palette (--avatar-hue-0..7).
+   Variants: neutral initials · hue identity · presence ring · overflow stack ·
+   image + initials fallback.
+   Presence follows the §12 shape law (never colour alone): online=filled,
+   away=hollow ring, offline=small hollow — survives forced-colors. The accessible
+   name is set in TSX (aria-label), so presence is announced as text, not colour.
+   -------------------------------------------------------------------------- */
+
+.soup-av {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font: 600 13px/1 var(--font-sans);
+  color: var(--avatar-ink);
+  flex: none;
+  overflow: hidden;
+  user-select: none;
+  box-shadow: inset 0 0 0 var(--bw) color-mix(in srgb, var(--text-1) 9%, transparent);
+}
+
+/* Size modifiers — the two shipped tokens. */
+.soup-av--sm {
+  width: var(--avatar-sm);
+  height: var(--avatar-sm);
+  font: 600 12px/1 var(--font-sans);
+}
+
+.soup-av--md {
+  width: var(--avatar-md);
+  height: var(--avatar-md);
+  font: 600 13px/1 var(--font-sans);
+}
+
+/* Neutral initials — the chat-list shape: no identity hue. */
+.soup-av--neutral {
+  background: color-mix(in srgb, var(--text-3) 22%, var(--surface-raised));
+  color: var(--text-1);
+}
+
+/* Overflow chip ("+N") — caps a stacked row. Mono, muted. */
+.soup-av--more {
+  background: var(--surface-overlay);
+  color: var(--text-2);
+  font: 600 11px/1 var(--font-mono);
+}
+
+/* Image fill — the <img> covers the disc; falls back to initials on error. */
+.soup-av__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Presence ring — shape + colour, never colour alone.
+   The dot is a positioned pseudo-content span; shape encodes the state and
+   survives forced-colors:
+     online  — filled disc            (--status-ok-solid)
+     away    — hollow ring            (--status-warn-solid inset ring)
+     offline — smaller hollow ring    (--text-3 inset ring)
+   The surface-coloured outer ring punches the dot out of the avatar edge. */
+.soup-av__presence {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: var(--sp-2);
+  height: var(--sp-2);
+  border-radius: 50%;
+  box-shadow: 0 0 0 var(--bw-accent) var(--surface-raised);
+}
+
+.soup-av__presence--online {
+  background: var(--status-ok-solid);
+}
+
+.soup-av__presence--away {
+  background: var(--surface-raised);
+  box-shadow:
+    0 0 0 var(--bw-accent) var(--surface-raised),
+    inset 0 0 0 var(--bw-accent) var(--status-warn-solid);
+}
+
+.soup-av__presence--offline {
+  width: var(--sp-1);
+  height: var(--sp-1);
+  background: var(--surface-raised);
+  box-shadow:
+    0 0 0 var(--bw-accent) var(--surface-raised),
+    inset 0 0 0 var(--bw) var(--text-3);
+}
+
+/* Overflow stack — overlapping avatars with a surface ring separating them. */
+.soup-av-stack {
+  display: inline-flex;
+}
+
+.soup-av-stack > .soup-av {
+  margin-left: calc(-1 * var(--sp-2));
+  box-shadow:
+    0 0 0 var(--bw-accent) var(--surface-raised),
+    inset 0 0 0 var(--bw) color-mix(in srgb, var(--text-1) 9%, transparent);
+}
+
+.soup-av-stack > .soup-av:first-child {
+  margin-left: var(--sp-0);
+}
