@@ -326,6 +326,8 @@ export function providerKindToClass(kind: ProviderFailureKind): AgentFailureClas
       return 'provider_policy_block';
     case 'context-overflow':
       return 'provider_context_overflow';
+    case 'server-error':
+      return 'provider_server_error';
   }
 }
 

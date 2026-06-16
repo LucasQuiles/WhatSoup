@@ -72,7 +72,77 @@ export type ProviderFailureKind =
   | 'auth-required'
   | 'model-unavailable'
   | 'policy-block'
-  | 'context-overflow';
+  | 'context-overflow'
+  // Transient backend / overload (HTTP 5xx, 529 overloaded_error, "Service
+  // temporarily unavailable"). Terminal for the turn but recoverable on retry —
+  // arms fallback so the user gets continuity, with a deterministic retry timer.
+  | 'server-error';
+
+/**
+ * SSOT registry of the terminal limit-name tokens the agent provider CLI emits.
+ * Its limit-name map covers the 5-hour session cap, the 7-day weekly cap, the
+ * per-model-tier weekly caps, and the usage-credit overage, plus the API/plan
+ * tier caps. Every provider parser and the runtime classifier key off this list,
+ * so onboarding a new provider limit name is a one-line edit here rather than a
+ * scatter of substrings that silently drift (the "session limit" non-rollover class).
+ */
+export const LIMIT_NAME_TOKENS: readonly string[] = [
+  'session limit',
+  'weekly limit',
+  'opus limit',
+  'sonnet limit',
+  'usage credit limit',
+  'usage limit',
+  'usage cap',
+  'plan limit',
+  'fast limit',
+  'monthly spend limit',
+];
+
+/**
+ * Detect the agent provider CLI's assembled TERMINAL limit phrasings
+ * (`You've hit your ${name}` / `${name} reached` / org `$0` allocation). Anchored
+ * on a possessive/terminal verb so a conversational mention of a limit name
+ * ("add a weekly limit to the config") never matches. The non-terminal
+ * `Approaching ${name}` warning is intentionally NOT matched here — arming
+ * fallback on a warning would be a premature-rollover failure mode.
+ */
+function hasTerminalLimitAssembler(lower: string): boolean {
+  for (const name of LIMIT_NAME_TOKENS) {
+    if (
+      lower.includes(`hit your ${name}`) ||
+      lower.includes(`reached your ${name}`) ||
+      lower.includes(`${name} reached`) ||
+      lower.includes(`${name} is set to $0`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Detect the agent provider CLI's NON-terminal limit warnings ("Approaching ${name}",
+ * "You're now using ${name}", "You're close to your ${name}", "You've used N% of
+ * your ${name}"). Anchored on a known limit name so it cannot swallow a genuine
+ * terminal message that merely happens to contain the word "approaching" or
+ * "now using" in another position — those must still classify as terminal via the
+ * reset-cue branch (a false negative here is a silent no-rollover).
+ */
+function hasApproachingLimitWarning(lower: string): boolean {
+  if (lower.includes('% of your')) return true;
+  for (const name of LIMIT_NAME_TOKENS) {
+    if (
+      lower.includes(`approaching ${name}`) ||
+      lower.includes(`approaching your ${name}`) ||
+      lower.includes(`now using ${name}`) ||
+      lower.includes(`close to your ${name}`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Detect provider usage-limit / quota-exceeded messages that should not be
@@ -83,23 +153,30 @@ export function isUsageLimitMessage(text: string): boolean {
 
   const lower = text.toLowerCase();
   if (isProviderCreditBalanceLimitMessage(lower)) return true;
+
   if (
     lower.includes('out of extra usage') ||
-    lower.includes('usage limit reached') ||
-    lower.includes('usage cap reached') ||
-    lower.includes("you've reached your usage limit") ||
-    lower.includes('you have reached your usage limit') ||
-    lower.includes('you have hit your usage limit') ||
-    lower.includes('claude usage limit')
+    lower.includes('claude usage limit') ||
+    // Model-policy credit gate: the account's plan only permits a model that
+    // needs usage credits the account lacks (e.g. a Fable-5-only policy). The
+    // provider emits this during compaction and it is terminal for the turn —
+    // route it to fallback rather than stalling on an unusable model.
+    lower.includes('requires usage credits') ||
+    (lower.includes('model policy only allows') && lower.includes('usage credit')) ||
+    hasTerminalLimitAssembler(lower)
   ) {
     return true;
   }
 
+  // Non-terminal warnings ("Approaching <name>", "You're now using <name>",
+  // "You've used N% of your <name>"): the provider can still serve this turn, so
+  // they must not arm fallback. Excluded before the reset-cue branch so that a
+  // warning carrying a reset time does not get classified as terminal.
+  if (hasApproachingLimitWarning(lower)) return false;
+
   const resetPattern = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
   return resetPattern.test(text) && (
-    lower.includes('usage limit') ||
-    lower.includes('usage cap') ||
-    lower.includes('plan limit') ||
+    LIMIT_NAME_TOKENS.some((token) => lower.includes(token)) ||
     lower.includes('quota exceeded')
   );
 }
@@ -116,6 +193,19 @@ function isProviderCreditBalanceLimitMessage(lower: string): boolean {
     // Anthropic 403 billing_error — a quota/billing cap, not a permission issue.
     lower.includes('billing_error') ||
     lower.includes('billing quota exceeded') ||
+    // Subscription credit/overage + org-allocation exhaustion. These are
+    // terminal for the turn but carry no billing co-word, so match them directly.
+    lower.includes('out of usage credits') ||
+    (
+      lower.includes('out of usage') &&
+      (
+        lower.includes('add funds') ||
+        lower.includes('contact your admin') ||
+        lower.includes('your org') ||
+        lower.includes('org is') ||
+        lower.includes('group')
+      )
+    ) ||
     (
       providerBillingContext &&
       (
@@ -212,6 +302,68 @@ export function isProviderModelUnavailableMessage(text: string): boolean {
   );
 }
 
+/**
+ * Detect transient provider server-side failures: HTTP 5xx, Anthropic's 529
+ * overloaded_error, and the friendly compaction/result variants the CLI emits.
+ * These are turn-terminal but recoverable on retry — they arm fallback so the
+ * user sees continuity instead of silence, with a deterministic retry timer.
+ *
+ * Ordering: classifyProviderFailure() puts server-error AFTER usage/rate/auth so
+ * a 5xx that's actually a quota/auth-tagged response is classified by its richer
+ * meaning first.
+ */
+export function isProviderServerErrorMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (
+    lower.includes('_service temporarily unavailable') ||
+    lower.includes('service temporarily unavailable') ||
+    lower.includes('_service error (') ||
+    lower.includes('overloaded_error') ||
+    lower.includes('api_error') ||
+    lower.includes('server_error') ||
+    lower.includes('server_unavailable') ||
+    // "We are experiencing high demand for <model>" — backend capacity message.
+    lower.includes('experiencing high demand for')
+  ) return true;
+  // Bare HTTP status — matches 500/502/503/504/529 with a word boundary so it
+  // does not collide with body text like "500 tokens" or "529ms".
+  return /\b(50[0-9]|529)\b/.test(lower) && (
+    lower.includes('http') ||
+    lower.includes('status') ||
+    lower.includes('error') ||
+    lower.includes('overload')
+  );
+}
+
+/**
+ * Detect the harness's TRANSPARENCY notice that it auto-switched the active
+ * model (e.g. "Switched to Opus 4.7 due to high demand for Opus 4.8"). This is
+ * NOT a failure — the harness recovered locally — but the user should see it so
+ * they understand which model is currently answering. Surface to the conversation
+ * for visibility; do NOT arm fallback.
+ */
+export interface AutoSwitchNotice { from: string | null; to: string; reason: string }
+export function detectAutoSwitchNotice(text: string): AutoSwitchNotice | null {
+  // The CLI emits two compatible forms:
+  //   "Switched to <to> due to high demand for <from>"
+  //   "(You're) Now using <to> · resets <time>"
+  // Anchored on the literal verbs at start-of-line / start-of-text so ordinary
+  // mid-sentence usage ("Now using opus is the default…") never matches.
+  const switched = text.match(/(?:^|\n|\s)Switched to (?<to>[^·\n]+?) due to high demand for (?<from>[^\n·]+?)(?:\s*·|\s*$|\.\s*$|\.\s+(?=[A-Z]))/i);
+  if (switched?.groups) {
+    return {
+      from: switched.groups.from.trim(),
+      to: switched.groups.to.trim(),
+      reason: 'high-demand',
+    };
+  }
+  const nowUsing = text.match(/(?:^|\n)(?:You're n|N)ow using (?<to>[^·\n]+?)\s*·/);
+  if (nowUsing?.groups) {
+    return { from: null, to: nowUsing.groups.to.trim(), reason: 'auto-routed' };
+  }
+  return null;
+}
+
 export function classifyProviderFailure(text: string): ProviderFailureKind | null {
   if (!text) return null;
   if (isPromptTooLongMessage(text)) return 'context-overflow';
@@ -220,6 +372,7 @@ export function classifyProviderFailure(text: string): ProviderFailureKind | nul
   if (isRateLimitResultMessage(text)) return 'rate-limit';
   if (isProviderPolicyBlockMessage(text)) return 'policy-block';
   if (isProviderModelUnavailableMessage(text)) return 'model-unavailable';
+  if (isProviderServerErrorMessage(text)) return 'server-error';
   return null;
 }
 
@@ -228,6 +381,7 @@ const FALLBACK_PROVIDER_FAILURE_KINDS: ReadonlySet<ProviderFailureKind> = new Se
   'rate-limit',
   'auth-required',
   'model-unavailable',
+  'server-error',
 ]);
 
 export function providerFailureArmsFallback(kind: ProviderFailureKind): boolean {

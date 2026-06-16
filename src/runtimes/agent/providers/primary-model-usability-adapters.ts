@@ -128,6 +128,7 @@ function mapCliProbeResult(result: BinaryAuthStatusResult): BinaryModelProbeResu
       return { status: 'credential_unavailable' };
     case 'usage-limit':
     case 'rate-limit':
+    case 'server-error':
       return { status: 'provider_unavailable' };
     case 'context-overflow':
     case 'policy-block':
