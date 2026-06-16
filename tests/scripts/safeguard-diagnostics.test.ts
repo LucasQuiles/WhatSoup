@@ -207,6 +207,7 @@ const requiredFiles: Record<string, string> = {
     'GITHUB_ACTIONS=true',
     'baseline --check --ci',
   ].join('\n'),
+  'console/scripts/design-regression.sh': 'command -v rg',
   '.github/workflows/quality.yml': [
     'name: Install console dependencies',
     'name: Design-system hygiene changed files',

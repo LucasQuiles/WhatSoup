@@ -105,6 +105,7 @@
   --tracking-tight:   -0.04em;
   --tracking-pill:    0.02em;
   --tracking-label:   0.06em;
+  --tracking-wide:    0.08em;
   --tracking-caps:    0.12em;
 
   /* Font weights — legacy kept for consumers pending C2 */
