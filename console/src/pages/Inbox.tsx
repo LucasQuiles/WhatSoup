@@ -252,8 +252,8 @@ export default function Inbox() {
                 className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-d5"
               >
                 {currentChat.isGroup
-                  ? <Users size={15} className="text-t3" />
-                  : <User size={15} className="text-t3" />
+                  ? <Users size={16} className="text-t3" />
+                  : <User size={16} className="text-t3" />
                 }
               </div>
               <div className="flex-1">
@@ -473,8 +473,8 @@ export default function Inbox() {
                 className="rounded-full flex items-center justify-center flex-shrink-0 w-[var(--avatar-sm)] h-[var(--avatar-sm)] bg-d5"
               >
                 {currentChat.isGroup
-                  ? <Users size={14} className="text-t4" />
-                  : <User size={14} className="text-t4" />
+                  ? <Users size={16} className="text-t4" />
+                  : <User size={16} className="text-t4" />
                 }
               </div>
               <div className="flex-1 min-w-0">
