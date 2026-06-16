@@ -79,7 +79,7 @@ def _deps(now: float, probes: dict[str, dict], oracle: dict | None = None):
     return _mod.SentinelDeps(
         now_epoch=lambda: now,
         hostname=lambda: "central-test",
-        pull_probe=lambda spec: probes.get(spec.host, {}),
+        pull_probe=lambda spec, *_: probes.get(spec.host, {}),
         reachability_oracle=lambda: oracle or {"configured": False, "reachable": True, "class": "not_configured"},
     )
 
@@ -1148,7 +1148,7 @@ def test_symlinked_oracle_does_not_suppress_mass_unreachable(tmp_path: Path):
     deps = _mod.SentinelDeps(
         now_epoch=lambda: 1000.0,
         hostname=lambda: "controller",
-        pull_probe=lambda spec: probes[spec.host],
+        pull_probe=lambda spec, *_: probes[spec.host],
         reachability_oracle=lambda: _mod.oracle_inventory(oracle_link),
     )
 
@@ -1364,7 +1364,7 @@ def test_pull_probe_exception_is_contained_per_host(tmp_path: Path):
     deps = _mod.SentinelDeps(
         now_epoch=lambda: 1000.0,
         hostname=lambda: "central-test",
-        pull_probe=lambda _spec: (_ for _ in ()).throw(RuntimeError("probe exploded")),
+        pull_probe=lambda _spec, *_: (_ for _ in ()).throw(RuntimeError("probe exploded")),
         reachability_oracle=lambda: {"configured": False, "reachable": True, "class": "not_configured"},
     )
 
@@ -1484,7 +1484,7 @@ def test_reachability_oracle_errors_fail_safe_without_suppression(tmp_path: Path
     error_deps = _mod.SentinelDeps(
         now_epoch=lambda: 1000.0,
         hostname=lambda: "central-test",
-        pull_probe=lambda _spec: {"reachable": False, "healthy": False, "class": "unreachable"},
+        pull_probe=lambda _spec, *_: {"reachable": False, "healthy": False, "class": "unreachable"},
         reachability_oracle=raise_oracle,
     )
     result = _mod.run_once(config, error_deps)
@@ -1494,7 +1494,7 @@ def test_reachability_oracle_errors_fail_safe_without_suppression(tmp_path: Path
     invalid_deps = _mod.SentinelDeps(
         now_epoch=lambda: 1000.0,
         hostname=lambda: "central-test",
-        pull_probe=lambda _spec: {"reachable": False, "healthy": False, "class": "unreachable"},
+        pull_probe=lambda _spec, *_: {"reachable": False, "healthy": False, "class": "unreachable"},
         reachability_oracle=lambda: "bad",
     )
     result = _mod.run_once(_config(tmp_path / "invalid", hosts, hysteresis_cycles=1), invalid_deps)
@@ -1633,3 +1633,93 @@ def test_cycle_seq_increments_and_appears_in_state(tmp_path: Path):
     _mod.run_once(config, _deps(1001.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
     state2 = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
     assert state2.get("cycleSeq") == seq1 + 1
+
+
+# --- P0-9: probe staleness blind spot ---------------------------------------
+# A file-based probe is read for its payload with no mtime gate, so a probe
+# written hours ago that still says {"healthy": true} is trusted as a live
+# signal. heartbeat_inventory already rejects stale heartbeats by st_mtime;
+# the probe path must apply the same age gate or it can mask a stale heartbeat
+# and suppress the two-signal escalation. These tests fail before the fix.
+
+
+def test_probe_path_stale_mtime_rejected(tmp_path: Path):
+    """A probe file older than the host's max-age window must be classified
+    probe_stale, not passed through as healthy. Before fix: returns healthy."""
+    probe_file = tmp_path / "probe.json"
+    probe_file.write_text(
+        '{"reachable": true, "healthy": true, "class": "healthy"}',
+        encoding="utf-8",
+    )
+    now = 1_000_000.0
+    stale_mtime = now - (13 * 60 * 60)  # 13h ago, far beyond the 45m window
+    os.utime(probe_file, (stale_mtime, stale_mtime))
+
+    spec = _mod.HostSpec(host="host-a", probe_path=probe_file)
+    result = _mod.default_pull_probe(spec, now=now)
+    assert result["class"] == "probe_stale", f"expected probe_stale, got {result}"
+    assert result.get("healthy") is False
+    assert result.get("reachable") is False
+    assert result["ageSeconds"] > _mod.DEFAULT_HEARTBEAT_MAX_AGE_SECONDS
+
+
+def test_probe_path_fresh_mtime_accepted(tmp_path: Path):
+    """A probe file with recent mtime must still be returned as healthy."""
+    probe_file = tmp_path / "probe.json"
+    probe_file.write_text(
+        '{"reachable": true, "healthy": true, "class": "healthy"}',
+        encoding="utf-8",
+    )
+    now = 1_000_000.0
+    fresh_mtime = now - 60  # 1 minute ago
+    os.utime(probe_file, (fresh_mtime, fresh_mtime))
+
+    spec = _mod.HostSpec(host="host-a", probe_path=probe_file)
+    result = _mod.default_pull_probe(spec, now=now)
+    assert result["class"] == "healthy"
+    assert result.get("healthy") is True
+
+
+def test_probe_path_no_now_preserves_legacy_passthrough(tmp_path: Path):
+    """Calling default_pull_probe without `now` (legacy callers) keeps the old
+    no-gate behavior so existing direct unit tests are unaffected."""
+    probe_file = tmp_path / "probe.json"
+    probe_file.write_text(
+        '{"reachable": true, "healthy": true, "class": "healthy"}',
+        encoding="utf-8",
+    )
+    os.utime(probe_file, (1.0, 1.0))  # ancient, but no `now` => no gate
+    spec = _mod.HostSpec(host="host-a", probe_path=probe_file)
+    assert _mod.default_pull_probe(spec)["class"] == "healthy"
+
+
+def test_stale_probe_prevents_healthy_classification(tmp_path: Path):
+    """End-to-end via run_once with the real default_pull_probe: a stale probe
+    file plus a fresh healthy heartbeat must NOT classify the host as healthy.
+    Before fix: stale probe reads healthy, two-signal fires -> class=healthy."""
+    now = 1_000_000.0
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, klass="healthy", mtime=now - 30)
+    probe_file = tmp_path / "host-a-probe.json"
+    probe_file.write_text(
+        '{"reachable": true, "healthy": true, "class": "healthy"}',
+        encoding="utf-8",
+    )
+    os.utime(probe_file, (now - 13 * 3600, now - 13 * 3600))
+
+    hosts = _hosts_file(
+        tmp_path,
+        [{"host": "host-a", "heartbeatPath": str(hb), "probePath": str(probe_file)}],
+    )
+    config = _config(tmp_path, hosts, heartbeat_max_age_seconds=60)
+    deps = _mod.SentinelDeps(
+        now_epoch=lambda: now,
+        hostname=lambda: "central-test",
+        pull_probe=_mod.default_pull_probe,
+        reachability_oracle=lambda: {"configured": False, "reachable": True, "class": "not_configured"},
+    )
+    report = _mod.run_once(config, deps)
+    host_result = report["hosts"][0]
+    assert host_result["class"] != "healthy", (
+        f"stale probe must not yield healthy, got {host_result['class']}"
+    )
+    assert host_result["probe"]["class"] == "probe_stale"
