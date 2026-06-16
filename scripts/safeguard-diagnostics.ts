@@ -215,6 +215,14 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'Restore the fail-closed ripgrep preflight in design-regression.sh; without it a missing rg makes rg_count() silently return 0 and every blocking check FALSE-PASSes.',
   },
   {
+    id: 'modal-focus-restore',
+    category: 'public-exposure',
+    file: 'console/src/components/primitives/Modal.tsx',
+    anchors: ['useDismissable'],
+    remediation:
+      'Modal must keep useDismissable wired — it captures document.activeElement on open and restores focus to the opener on close (the FF-C1 modal-must-restore-focus a11y contract). Every dialog composes the Modal primitive, so removing it silently breaks keyboard focus return across all dialogs.',
+  },
+  {
     id: 'repo-hygiene-sensitive-patterns',
     category: 'secret-surface',
     file: 'scripts/repo-hygiene-guard.ts',
