@@ -1376,6 +1376,56 @@ export function classifyToolError(toolName: string, content: string): ToolUpdate
   return { category, detail };
 }
 
+/**
+ * Does a tool_result error carry a signature that an OPERATOR (not the agent)
+ * may need to act on — free disk, restart a host, restore connectivity, or wait
+ * out a provider throttle? These reflect host/runtime/provider health.
+ *
+ * Everything else in the `error` category — a search that found nothing, a
+ * failed conditional, a missing path, a bad glob — is a normal agent-loop result
+ * the agent recovers from inline (e.g. claude-cli marks any non-zero Bash exit
+ * `is_error`). Those are NOT operator-actionable and must not page BOT ERRORS.
+ */
+export function isOperatorActionableToolError(content: string): boolean {
+  const lower = content.toLowerCase();
+  return (
+    // Disk exhaustion
+    lower.includes('enospc') ||
+    lower.includes('no space left') ||
+    // Memory exhaustion
+    lower.includes('enomem') ||
+    lower.includes('out of memory') ||
+    // Connectivity / integration down
+    lower.includes('econnrefused') ||
+    lower.includes('econnreset') ||
+    lower.includes('etimedout') ||
+    lower.includes('fetch failed') ||
+    // Provider throttle / capacity
+    lower.includes('rate limit') ||
+    lower.includes('overloaded') ||
+    // Context / token budget exhaustion
+    lower.includes('context window') ||
+    lower.includes('context length') ||
+    lower.includes('max_tokens')
+  );
+}
+
+/**
+ * Gate for `runtime-tool-error` BOT ERRORS alert emission.
+ *
+ * `blocked` (permission/hook denial) and `cancelled` keep their existing alert
+ * behavior. A plain execution `error` only pages when it carries an
+ * operator-actionable infra/provider signature — otherwise it is benign,
+ * agent-recoverable noise (the dominant false-positive class on this channel).
+ */
+export function shouldEmitToolFailureAlert(
+  category: ToolUpdate['category'],
+  content: string,
+): boolean {
+  if (category !== 'error') return true;
+  return isOperatorActionableToolError(content);
+}
+
 function safeAlertSegment(value: string): string {
   const cleaned = value.trim().replace(/[^A-Za-z0-9_.:-]+/g, '_').replace(/^_+|_+$/g, '');
   return cleaned.length > 0 ? cleaned.slice(0, 80) : 'unknown';
@@ -1702,6 +1752,22 @@ export class AgentRuntime implements Runtime {
     mapKey?: string;
   }): void {
     if (process.env['BOT_ERRORS_RUNTIME_TOOL_FAILURE_ALERTS'] === '0') return;
+
+    // Root-cause noise gate: a non-zero Bash exit (glob/grep no-match, failed
+    // conditional, missing path) is reported by claude-cli as `is_error` but is
+    // a normal agent-loop result, not an operator-actionable failure. Only page
+    // when the error carries an infra/provider-health signature.
+    if (!shouldEmitToolFailureAlert(args.classification.category, args.content)) {
+      log.debug(
+        {
+          instance: this.instanceName,
+          toolName: args.toolName,
+          category: args.classification.category,
+        },
+        'suppressing benign tool-error (not operator-actionable) — no BOT ERRORS alert',
+      );
+      return;
+    }
 
     const now = Date.now();
     for (const [key, recordedAt] of this.recentToolFailureAlerts) {
