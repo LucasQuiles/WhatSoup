@@ -23,6 +23,7 @@ import {
   consumeStandbyNotice,
 } from './standby-notice.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
+import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact, upsertHandoffArtifact } from './handoff-artifact.ts';
 import { buildHandoffPrelude, type HandoffArtifact } from './handoff-prelude.ts';
@@ -2097,7 +2098,7 @@ export class AgentRuntime implements Runtime {
         endpoint: resolved.endpoint,
         conversationKey,
         loadMessages: () => getRecentMessages(this.db, conversationKey, HANDOFF_DISTILL_VERBATIM_N),
-        redact: (t) => sanitizeProviderPreviewText(t),
+        redact: (t) => redactHandoffPii(t),
         verbatimN: HANDOFF_DISTILL_VERBATIM_N,
       });
       return run().then((o) => ({ summary: o.summary, seededArtifacts: o.seededArtifacts ?? null, tokensUsed: o.tokensUsed }));
@@ -7594,10 +7595,10 @@ export class AgentRuntime implements Runtime {
         backupContextWindow: 'unknown',
         now: Date.now(),
         staleAfterMs: HANDOFF_STALE_MS,
-        // Reuse the established provider-preview redactor. This path injects a
-        // distilled summary into the system prompt; redaction can be hardened
-        // (PII-specific) in a follow-up if the summary corpus warrants it.
-        redact: (t) => sanitizeProviderPreviewText(t),
+        // PII-hardened handoff redactor: provider-preview sanitizer (Bearer /
+        // secret / token / email) plus phone-number redaction. This path injects
+        // a distilled summary built from WhatsApp content into the system prompt.
+        redact: (t) => redactHandoffPii(t),
       }).systemBlock;
     };
   }
