@@ -126,6 +126,25 @@ and either an explicit reviewed release path or the active bot plist's
 tracks future re-cuts. It must remain read-only: no apply, re-cut, plist
 mutation, restart, cleanup, WhatsApp turn, or credential change.
 
+## Pinned npm toolchain in `verify:release`
+
+The `verify:release` npm script routes all `npm ci`, `run typecheck`, `test`,
+`run lint`, and `run build` invocations for the `tools/whatsoup_guard` and
+`console` sub-packages through `scripts/run-with-pinned-npm.sh`. This wrapper
+sources `deploy/lib/resolve-node.sh`, resolves the Node binary pinned in
+`.nvmrc`, and derives npm as the binary co-located with that Node. It does not
+fall back to a system npm; if the pinned Node or its adjacent npm is missing it
+exits 1 with a FATAL message.
+
+The effect is that sub-package installs in `verify:release` are subject to the
+same Node-pin and version-compatibility gate (`package.json#engines.node`) as
+the rest of WhatSoup. A system Node outside the declared range cannot sneak in
+via a nested `npm --prefix` call.
+
+If you need to override the npm binary (e.g., for a host with a non-standard
+directory layout), set `WHATSOUP_NPM=/absolute/path/to/npm` before running
+`verify:release`.
+
 ## Live Acceptance
 
 After a separately approved re-cut:
