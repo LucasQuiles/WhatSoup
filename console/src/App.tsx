@@ -22,7 +22,7 @@ const UpdateModal = lazy(() => import('./components/UpdateModal'))
 function PageLoader() {
   return (
     <div className="flex-1 flex items-center justify-center">
-      <div className="text-t4 font-mono text-data">Loading...</div>
+      <div className="text-text-2 font-mono text-data">Loading...</div>
     </div>
   )
 }
@@ -62,7 +62,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
 
   return (
     <MotionConfig reducedMotion="user">
-      <div className="flex flex-col h-dvh bg-d0 overflow-hidden">
+      <div className="flex flex-col h-dvh bg-surface-base overflow-hidden">
         <Nav
           alertCount={alertCount}
           unreadCount={unreadCount}

@@ -103,7 +103,7 @@ export default function Ops() {
       >
         {/* Row 1: Header — matches toolbar pattern */}
         <div
-          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
+          className="flex items-center justify-between flex-shrink-0 bg-surface-raised c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
           <span className="c-heading">Fleet Status</span>
           {feedError ? (
@@ -158,7 +158,7 @@ export default function Ops() {
         <div className="flex-1 min-h-0 min-w-0 overflow-auto scrollbar-hide p-[var(--sp-3)]">
           <div className="flex flex-col gap-[var(--sp-2)]">
             {linesLoading ? (
-              <div className="text-t2 text-center py-8 font-mono text-data">
+              <div className="text-text-2 text-center py-8 font-mono text-data">
                 Loading fleet status...
               </div>
             ) : linesError ? (
@@ -176,7 +176,7 @@ export default function Ops() {
                 </Button>
               </div>
             ) : lines.length === 0 ? (
-              <div className="text-t2 text-center py-8 font-mono text-data">
+              <div className="text-text-2 text-center py-8 font-mono text-data">
                 No instances discovered. Create one from the Soup Kitchen.
               </div>
             ) : lines.map(line => (
@@ -184,7 +184,7 @@ export default function Ops() {
                 key={line.name}
                 className={`c-card c-hover cursor-pointer py-[var(--sp-3)] px-[var(--sp-4)] ${
                   line.name === activeLine ? 'ring-1 ring-m-cht/30' : ''
-                } ${statusWashClass(line.status) || 'bg-d2'}`}
+                } ${statusWashClass(line.status) || 'bg-surface-raised'}`}
                 role="button"
                 tabIndex={0}
                 aria-label={`Select ${displayInstanceName(line.name)}`}
@@ -201,7 +201,7 @@ export default function Ops() {
                 <div className="flex items-center justify-between mb-[var(--sp-2)]">
                   <div className="flex items-center gap-[var(--sp-2)]">
                     <StatusDot status={line.status} size="sm" />
-                    <span className="font-sans font-medium text-t1 text-body">
+                    <span className="font-sans font-medium text-text-1 text-body">
                       {displayInstanceName(line.name)}
                     </span>
                     <ModeBadge mode={line.mode} />
@@ -213,7 +213,7 @@ export default function Ops() {
                 {/* Row 2: Heartbeat + runtime stats */}
                 <div className="flex items-center justify-between">
                   <HeartbeatStrip beats={line.heartbeat} />
-                  <div className="flex items-center font-mono text-t4 gap-[var(--sp-3)] text-sm">
+                  <div className="flex items-center font-mono text-text-2 gap-[var(--sp-3)] text-sm">
                     <span>{line.messagesToday ?? 0} msgs</span>
                     {line.mode === 'passive' && (
                       <span className={(line.unread ?? 0) > 0 ? 'text-s-warn' : ''}>
@@ -288,7 +288,7 @@ export default function Ops() {
       >
         {/* Row 1: Line picker toolbar — not a Toolbar primitive; heading + picker stay here */}
         <div
-          className="flex items-center justify-between flex-shrink-0 bg-d3 c-toolbar c-border-b min-h-[var(--toolbar-h)]"
+          className="flex items-center justify-between flex-shrink-0 bg-surface-raised c-toolbar c-border-b min-h-[var(--toolbar-h)]"
         >
           <div className="flex items-center gap-[var(--sp-3)]">
             <Terminal size={15} strokeWidth={1.75} className="text-m-agt" />
@@ -342,7 +342,7 @@ export default function Ops() {
 
         {/* Status bar */}
         <div
-          className="flex items-center justify-between flex-shrink-0 font-mono text-t5 py-[var(--sp-1h)] px-[var(--sp-4)] c-border-t bg-d1 text-xs"
+          className="flex items-center justify-between flex-shrink-0 font-mono text-text-3 py-[var(--sp-1h)] px-[var(--sp-4)] c-border-t bg-surface-inset text-xs"
         >
           <span>{filteredLogs.length} entries</span>
           <span>{activeLine} — {currentLine?.mode ?? '—'}</span>

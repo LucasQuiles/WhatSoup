@@ -156,7 +156,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
             confirmed={nameStatus === 'available' || nameLocked}
           />
           {!nameLocked && nameStatus === 'checking' && (
-            <Loader2 size={16} className="animate-spin text-t4 flex-none" />
+            <Loader2 size={16} className="animate-spin text-text-2 flex-none" />
           )}
           {(nameStatus === 'available' || nameLocked) && (
             <Check size={16} className="wizard-check" />
@@ -179,7 +179,7 @@ const IdentityStep: FC<IdentityStepProps> = ({ data, onChange, errors, nameLocke
       {/* Description */}
       <div>
         <label htmlFor={descriptionInputId} className="c-heading c-field-label">
-          Description <span className="text-t5">(optional)</span>
+          Description <span className="text-text-3">(optional)</span>
         </label>
         <div className="flex items-center gap-[var(--sp-2)]">
         <TextInput

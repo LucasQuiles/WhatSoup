@@ -128,7 +128,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
           <span className="c-heading text-lg">
             Line is live!
           </span>
-          <span className="c-body text-t3">
+          <span className="c-body text-text-2">
             <strong>{lineName}</strong> is now connected and running.
           </span>
         </div>
@@ -154,7 +154,7 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
           <span className="c-heading text-lg">
             {isTimeout ? 'Session timed out' : 'Authentication failed'}
           </span>
-          <span className="c-body text-t3">
+          <span className="c-body text-text-2">
             {errorMsg || 'An unexpected error occurred. Check that the fleet server is running.'}
           </span>
         </div>
@@ -179,20 +179,20 @@ const LinkStep: FC<LinkStepProps> = ({ lineName, onComplete }) => {
         >
           <Loader2
             size={32}
-            className="animate-spin text-t4"
+            className="animate-spin text-text-2"
           />
         </div>
       )}
 
       <div className="flex flex-col gap-[var(--sp-1)]">
         <span className="c-heading">Scan with WhatsApp</span>
-        <span className="c-body text-t3">
+        <span className="c-body text-text-2">
           Open WhatsApp &rarr; Settings &rarr; Linked Devices &rarr; Link a Device
         </span>
       </div>
 
       <div
-        className={`flex items-center gap-[var(--sp-2)] ${qrExpiring ? 'text-s-warn' : 'text-t4'}`}
+        className={`flex items-center gap-[var(--sp-2)] ${qrExpiring ? 'text-s-warn' : 'text-text-2'}`}
       >
         {qrValue ? (
           qrExpiring ? (

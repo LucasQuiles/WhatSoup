@@ -30,11 +30,14 @@ describe('DD-8 empty and paused state copy carries secondary ink', () => {
     }
   })
 
-  it('keeps Ops empty/loading fleet state copy off text-t5', () => {
+  it('keeps Ops empty/loading fleet state copy off ghost ink (text-text-3)', () => {
     const source = read('console/src/pages/Ops.tsx')
 
-    expect(source).toContain('text-t2 text-center py-8 font-mono text-data')
-    expect(source).not.toContain('text-t5 text-center py-8 font-mono text-data')
+    // v3 semantic class names: secondary ink is text-text-2 (--text-2),
+    // ghost ink is text-text-3 (--text-3). Empty/loading fleet copy is sole
+    // visible state text and must carry secondary ink, not ghost ink.
+    expect(source).toContain('text-text-2 text-center py-8 font-mono text-data')
+    expect(source).not.toContain('text-text-3 text-center py-8 font-mono text-data')
   })
 
   it('keeps Inbox load-more and empty-selection labels off ghost ink (text-text-3)', () => {

@@ -748,7 +748,7 @@ const SoupKitchen: FC = () => {
                   key={m}
                   label={m === "all" ? "All" : m}
                   isActive={modeFilter === m}
-                  activeColor={m === "all" ? "text-t2" : modeTextClass[m]}
+                  activeColor={m === "all" ? "text-text-2" : modeTextClass[m]}
                   activeBorder={
                     modeFilter === m
                       ? `var(--bw) solid ${
@@ -758,7 +758,7 @@ const SoupKitchen: FC = () => {
                               ? "var(--color-m-cht)"
                               : m === "agent"
                                 ? "var(--color-m-agt)"
-                                : "var(--b4)"
+                                : "var(--border-strong)"
                         }`
                       : undefined
                   }
@@ -950,12 +950,12 @@ const SoupKitchen: FC = () => {
                             <ModeBadge mode={line.mode} />
                           </TableCell>
                           <TableCell numeric>
-                            <span className="c-data text-t2">
+                            <span className="c-data text-text-2">
                               {line.chatCounts?.chats ?? 0}
                             </span>
                           </TableCell>
                           <TableCell numeric>
-                            <span className="c-data text-t4">
+                            <span className="c-data text-text-2">
                               {line.chatCounts?.groups ?? 0}
                             </span>
                           </TableCell>
@@ -965,7 +965,7 @@ const SoupKitchen: FC = () => {
                                 {line.unread}
                               </span>
                             ) : (
-                              <span className="c-data text-t5">0</span>
+                              <span className="c-data text-text-3">0</span>
                             )}
                           </TableCell>
                           <TableCell numeric>
@@ -983,7 +983,7 @@ const SoupKitchen: FC = () => {
                           <TableCell numeric>
                             {(line.tokenUsage?.input ?? 0) > 0 ? (
                               <span
-                                className="c-data text-t2"
+                                className="c-data text-text-2"
                                 title={`${formatCount(line.tokenUsage?.input)} in / ${formatCount(line.tokenUsage?.output)} out`}
                               >
                                 {formatCompact(
@@ -1023,7 +1023,7 @@ const SoupKitchen: FC = () => {
                           <TableCell numeric>
                             <span
                               title={lastActiveLabel}
-                              className={`c-data whitespace-nowrap ${isError ? "text-s-crit" : "text-t4"}`}
+                              className={`c-data whitespace-nowrap ${isError ? "text-s-crit" : "text-text-2"}`}
                             >
                               {line.lastActive ? (
                                 lastActiveLabel
