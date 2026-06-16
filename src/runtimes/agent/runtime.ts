@@ -3686,13 +3686,7 @@ export class AgentRuntime implements Runtime {
           const convKey = toConversationKey(chatJid);
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
-            const lines = recent
-              .reverse()
-              .map(
-                (m) =>
-                  `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
-              )
-              .join('\n');
+            const lines = this.formatContextLines(recent.reverse());
             this.markPendingSystemResult(mapKey);
             await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
           }
@@ -7891,6 +7885,22 @@ export class AgentRuntime implements Runtime {
   }
 
   /**
+   * Format chat messages into the `[HH:MM] sender: content` lines injected as
+   * recent-context into a fresh/stand-in session. Single source of truth for
+   * that line shape (previously duplicated across the three injection sites);
+   * the one place a future cross-provider content redaction would hook in.
+   * Caller controls ordering — getRecentMessages is reverse-chronological (pass
+   * a reversed copy), getMessagesSince is already chronological.
+   */
+  private formatContextLines(
+    messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>,
+  ): string {
+    return messages
+      .map((m) => `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`)
+      .join('\n');
+  }
+
+  /**
    * Inject messages the agent missed during downtime into a resumed session.
    * Uses `sinceUnixSec` (typically the checkpoint's updated_at) to fetch only
    * messages that arrived after the session was last active.
@@ -7906,12 +7916,7 @@ export class AgentRuntime implements Runtime {
       const missed = getMessagesSince(this.db, convKey, sinceUnixSec, 30);
       if (missed.length === 0) return false;
 
-      const lines = missed
-        .map(
-          (m) =>
-            `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
-        )
-        .join('\n');
+      const lines = this.formatContextLines(missed);
       await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
       log.info({ chatJid, messageCount: missed.length, sinceUnixSec }, 'injected missed messages after resume');
       return true;
@@ -7997,13 +8002,7 @@ export class AgentRuntime implements Runtime {
           try {
             const recent = getRecentMessages(this.db, toConversationKey(chatJid), 30);
             if (recent.length > 0) {
-              const lines = recent
-                .reverse()
-                .map(
-                  (m) =>
-                    `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`,
-                )
-                .join('\n');
+              const lines = this.formatContextLines(recent.reverse());
               this.markPendingSystemResult(mapKey);
               await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
             }

@@ -200,6 +200,7 @@ type FallbackView = {
   stashHandoffNotice(chatJid: string, message: string, now: number): boolean;
   withHandoffPrefix(chatJid: string, text: string): string;
   flushPendingHandoffNotice(queue: { targetChatJid: string; enqueueText(text: string): void }): void;
+  formatContextLines(messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>): string;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -352,6 +353,18 @@ describe('AgentRuntime — provider fallback state machine', () => {
     const v = view(makeRuntime({}));
     expect(v.agentFallbacks).toHaveLength(0);
     expect(v.getFallbackState().fallbackChainExhausted).toBe(false);
+  });
+
+  it('formatContextLines renders "sender: content" with a media fallback (SSOT)', () => {
+    const v = view(makeRuntime({}));
+    const lines = v.formatContextLines([
+      { timestamp: 0, senderName: 'Alice', senderJid: 'a@x', content: 'hello there' },
+      { timestamp: 0, senderName: null, senderJid: 'bob@x', content: null },
+    ]).split('\n');
+    // Timestamp prefix is locale/TZ-dependent; assert the stable sender:content tail.
+    expect(lines[0]).toContain('Alice: hello there');
+    expect(lines[1]).toContain('bob@x: [media]');
+    expect(lines).toHaveLength(2);
   });
 
   it('throttles the diagnostic bundle so a fallback storm cannot fan out probes', () => {
