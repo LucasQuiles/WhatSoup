@@ -168,7 +168,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "04ce1f79bd67b1c7face27c01850a1b27f9e4c1126e17c62fa07e7ddb67ebbf5",
+      "sha256": "5e78a09b4ff271ab3ccb993602302386b7d1c5bbae34b57720682b5c6b40877c",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",

@@ -1173,3 +1173,944 @@ def test_config_check_fails_closed_on_zero_gui_targets(mod, tmp_path, monkeypatc
     assert mod.config_check() == 2
     captured = capsys.readouterr()
     assert "no GUI-session monitor targets" in captured.err
+
+
+# ===========================================================================
+# NEW TESTS — added to raise coverage from 63% to >=98%
+# Covers: ssh_command, ssh_timeout_seconds, fleet_path, load_fleet,
+# state_path, load_state, save_state, resolve_expected_user,
+# _parse_user_overrides, _run_ssh, probe_host, emit_event, run_once,
+# parse_args, main, plus scattered branch lines in pure functions.
+# ===========================================================================
+
+import subprocess
+from unittest.mock import MagicMock
+
+
+# ---------------------------------------------------------------------------
+# sys.path branch (line 46) — module-level: if SCRIPT_DIR not in sys.path
+# The fixture reloads a fresh copy with SCRIPT_DIR removed from sys.path.
+# ---------------------------------------------------------------------------
+
+
+def test_script_dir_added_to_sys_path_when_missing(tmp_path):
+    """The module inserts SCRIPT_DIR into sys.path when it is not already present."""
+    import importlib.util as ilu
+    import sys as _sys
+
+    script = Path(__file__).resolve().parents[1] / "bot-errors-gui-session-monitor.py"
+    spec = ilu.spec_from_file_location("_gui_monitor_fresh", script)
+    fresh = ilu.module_from_spec(spec)
+
+    script_dir = str(script.parent)
+    was_present = script_dir in _sys.path
+    if was_present:
+        _sys.path.remove(script_dir)
+    try:
+        _sys.modules[spec.name] = fresh
+        spec.loader.exec_module(fresh)
+        assert script_dir in _sys.path
+    finally:
+        if not was_present and script_dir in _sys.path:
+            _sys.path.remove(script_dir)
+        _sys.modules.pop(spec.name, None)
+
+
+# ---------------------------------------------------------------------------
+# _has_live_pid (lines 188-190) — pid= form and pid with digits > 0
+# ---------------------------------------------------------------------------
+
+
+def test_has_live_pid_pid_equals_form(mod):
+    text = "pid=1234\n"
+    assert mod._has_live_pid(text) is True
+
+
+def test_has_live_pid_pid_space_form(mod):
+    text = "\tpid 4821\n"
+    assert mod._has_live_pid(text) is True
+
+
+def test_has_live_pid_zero_pid_returns_false(mod):
+    # pid = 0 is not a live process
+    text = "\tpid = 0\n"
+    assert mod._has_live_pid(text) is False
+
+
+def test_has_live_pid_no_pid_line_returns_false(mod):
+    text = "state = running\nactive count = 1\n"
+    assert mod._has_live_pid(text) is False
+
+
+# ---------------------------------------------------------------------------
+# default_failure_threshold (lines 272-276) — env var parsing branches
+# ---------------------------------------------------------------------------
+
+
+def test_default_failure_threshold_custom_valid(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD", "5")
+    assert mod.default_failure_threshold() == 5
+
+
+def test_default_failure_threshold_invalid_string_falls_back(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD", "not-a-number")
+    assert mod.default_failure_threshold() == 2
+
+
+def test_default_failure_threshold_zero_falls_back(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD", "0")
+    assert mod.default_failure_threshold() == 2
+
+
+def test_default_failure_threshold_negative_falls_back(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD", "-1")
+    assert mod.default_failure_threshold() == 2
+
+
+# ---------------------------------------------------------------------------
+# policy_for_target (line 316) — non-dict source skipped
+# ---------------------------------------------------------------------------
+
+
+def test_policy_for_target_skips_non_dict_instance(mod):
+    host = {"host": "botbox", "guiSessionExpected": "always_aqua", "instances": []}
+    # Pass a non-dict instance — should fall through to host policy
+    result = mod.policy_for_target(host, "not-a-dict")
+    assert result == "always_aqua"
+
+
+# ---------------------------------------------------------------------------
+# gui_targets_from_fleet branch lines (349, 352, 355, 358, 368->370)
+# ---------------------------------------------------------------------------
+
+
+def test_gui_targets_skips_non_dict_host_entry(mod):
+    fleet = {"hosts": ["not-a-dict", {"host": "botbox", "instances": [
+        {"name": "x", "expected": "always_on", "service": "com.whatsoup.x"}
+    ]}]}
+    targets = mod.gui_targets_from_fleet(fleet)
+    assert len(targets) == 1
+    assert targets[0]["host"] == "botbox"
+
+
+def test_gui_targets_skips_host_with_empty_host_key(mod):
+    fleet = {"hosts": [
+        {"host": "", "instances": [
+            {"name": "x", "expected": "always_on", "service": "com.whatsoup.x"}
+        ]},
+        {"host": "botbox", "instances": [
+            {"name": "y", "expected": "always_on", "service": "com.whatsoup.y"}
+        ]},
+    ]}
+    targets = mod.gui_targets_from_fleet(fleet)
+    assert len(targets) == 1
+    assert targets[0]["host"] == "botbox"
+
+
+def test_gui_targets_skips_non_list_instances(mod):
+    fleet = {"hosts": [
+        {"host": "botbox", "instances": "not-a-list"},
+    ]}
+    assert mod.gui_targets_from_fleet(fleet) == []
+
+
+def test_gui_targets_skips_non_dict_instance_item(mod):
+    fleet = {"hosts": [
+        {"host": "botbox", "instances": [
+            "not-a-dict",
+            {"name": "x", "expected": "always_on", "service": "com.whatsoup.x"},
+        ]},
+    ]}
+    targets = mod.gui_targets_from_fleet(fleet)
+    assert len(targets) == 1
+    assert targets[0]["instance"] == "x"
+
+
+def test_gui_targets_always_aqua_with_empty_label_skipped(mod):
+    # always_aqua policy but empty service label -> skipped (line 368->370)
+    fleet = {"hosts": [
+        {"host": "botbox", "guiSessionExpected": "always_aqua", "instances": [
+            {"name": "x", "expected": "always_on", "service": ""},
+        ]},
+    ]}
+    targets = mod.gui_targets_from_fleet(fleet)
+    assert targets == []
+
+
+def test_gui_targets_always_aqua_with_label_uses_name_or_label(mod):
+    # always_aqua + no name -> falls back to label
+    fleet = {"hosts": [
+        {"host": "botbox", "guiSessionExpected": "always_aqua", "instances": [
+            {"name": "", "expected": "always_on", "service": "com.whatsoup.x"},
+        ]},
+    ]}
+    targets = mod.gui_targets_from_fleet(fleet)
+    assert len(targets) == 1
+    assert targets[0]["instance"] == "com.whatsoup.x"
+
+
+# ---------------------------------------------------------------------------
+# private_monitor_override_required_count (line 392) — non-list hosts
+# ---------------------------------------------------------------------------
+
+
+def test_private_monitor_override_required_count_non_list_hosts(mod):
+    assert mod.private_monitor_override_required_count({"hosts": "bad"}) == 0
+
+
+def test_private_monitor_override_required_count_no_hosts_key(mod):
+    assert mod.private_monitor_override_required_count({}) == 0
+
+
+# ---------------------------------------------------------------------------
+# _path_is_under (lines 404-405) — OSError branch
+# ---------------------------------------------------------------------------
+
+
+def test_path_is_under_oserror_returns_false(mod, monkeypatch):
+    """_path_is_under must return False on OSError (e.g. invalid path)."""
+    from pathlib import Path as _Path
+
+    class BrokenPath(_Path):
+        _flavour = _Path(".")._flavour
+
+        def resolve(self):
+            raise OSError("simulated resolve failure")
+
+    broken = BrokenPath("/nonexistent/probe")
+    result = mod._path_is_under(broken, _Path("/some/root"))
+    assert result is False
+
+
+# ---------------------------------------------------------------------------
+# run_target (lines 521-522) — unparseable prior_count
+# ---------------------------------------------------------------------------
+
+
+def test_run_target_handles_unparseable_prior_count(mod):
+    prior = {"consecutive_failures": "not-an-int", "last_state": "ok"}
+    outcome = mod.run_target(
+        target={"host": "h", "instance": "i", "label": "com.whatsoup.x"},
+        expected_user="x",
+        probe=_probe(console_owner="root", agent_state="running"),
+        prior_state=prior,
+        threshold=2,
+    )
+    # Unparseable prior count treated as 0, so this is the first failure (count=1)
+    assert outcome.new_state["consecutive_failures"] == 1
+    assert outcome.emit_decision.should_emit is False
+
+
+# ---------------------------------------------------------------------------
+# evaluate_emit_decision (line 578) — unknown state branch (pass)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_emit_decision_unknown_state_still_gates_by_threshold(mod):
+    # A completely unknown state falls through the `if state not in NON_OK_STATES: pass`
+    # branch and is still threshold-gated (not suppressed, not raised).
+    below = mod.evaluate_emit_decision(
+        state="alien_state", consecutive_failures=1, threshold=2,
+    )
+    at = mod.evaluate_emit_decision(
+        state="alien_state", consecutive_failures=2, threshold=2,
+    )
+    assert below.should_emit is False
+    assert at.should_emit is True
+
+
+# ---------------------------------------------------------------------------
+# ssh_command (lines 598-599) — env var vs default
+# ---------------------------------------------------------------------------
+
+
+def test_ssh_command_returns_default_ssh(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_SSH_COMMAND", raising=False)
+    assert mod.ssh_command() == ["ssh"]
+
+
+def test_ssh_command_reads_env_var(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_SSH_COMMAND", "ssh -o StrictHostKeyChecking=no")
+    result = mod.ssh_command()
+    assert result == ["ssh", "-o", "StrictHostKeyChecking=no"]
+
+
+# ---------------------------------------------------------------------------
+# ssh_timeout_seconds (lines 603-607) — valid, invalid, custom
+# ---------------------------------------------------------------------------
+
+
+def test_ssh_timeout_seconds_default(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS", raising=False)
+    assert mod.ssh_timeout_seconds() == 15.0
+
+
+def test_ssh_timeout_seconds_custom(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS", "30")
+    assert mod.ssh_timeout_seconds() == 30.0
+
+
+def test_ssh_timeout_seconds_invalid_falls_back(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS", "bad")
+    assert mod.ssh_timeout_seconds() == 15.0
+
+
+def test_ssh_timeout_seconds_below_minimum_clamped(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS", "0")
+    assert mod.ssh_timeout_seconds() == 1.0
+
+
+# ---------------------------------------------------------------------------
+# fleet_path (lines 611-614) — env var vs default
+# ---------------------------------------------------------------------------
+
+
+def test_fleet_path_default(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_EXPECTED_FLEET", raising=False)
+    p = mod.fleet_path()
+    assert p.name == "bot-errors-expected-fleet.json"
+    assert "deploy" in str(p)
+
+
+def test_fleet_path_custom_env(mod, monkeypatch, tmp_path):
+    custom = tmp_path / "my-fleet.json"
+    monkeypatch.setenv("BOT_ERRORS_EXPECTED_FLEET", str(custom))
+    assert mod.fleet_path() == custom
+
+
+# ---------------------------------------------------------------------------
+# load_fleet (lines 618-625) — success, OSError, JSONDecodeError, non-dict
+# ---------------------------------------------------------------------------
+
+
+def test_load_fleet_reads_valid_json(mod, monkeypatch, tmp_path):
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text('{"hosts": []}', encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    result = mod.load_fleet()
+    assert result == {"hosts": []}
+
+
+def test_load_fleet_returns_empty_on_missing_file(mod, monkeypatch, tmp_path):
+    missing = tmp_path / "nonexistent.json"
+    monkeypatch.setattr(mod, "fleet_path", lambda: missing)
+    assert mod.load_fleet() == {}
+
+
+def test_load_fleet_returns_empty_on_invalid_json(mod, monkeypatch, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: bad)
+    assert mod.load_fleet() == {}
+
+
+def test_load_fleet_returns_empty_on_non_dict_json(mod, monkeypatch, tmp_path):
+    arr = tmp_path / "array.json"
+    arr.write_text("[1, 2, 3]", encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: arr)
+    assert mod.load_fleet() == {}
+
+
+# ---------------------------------------------------------------------------
+# state_path (lines 656-661) — env var forms
+# ---------------------------------------------------------------------------
+
+
+def test_state_path_custom_env_var(mod, monkeypatch, tmp_path):
+    custom = tmp_path / "custom-state.json"
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_STATE", str(custom))
+    monkeypatch.delenv("BOT_ERRORS_STATE_DIR", raising=False)
+    assert mod.state_path() == custom
+
+
+def test_state_path_state_dir_env_var(mod, monkeypatch, tmp_path):
+    monkeypatch.delenv("BOT_ERRORS_GUI_MONITOR_STATE", raising=False)
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    p = mod.state_path()
+    assert p.parent == tmp_path
+    assert p.name == "gui-session-monitor-state.json"
+
+
+def test_state_path_default_no_env(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_GUI_MONITOR_STATE", raising=False)
+    monkeypatch.delenv("BOT_ERRORS_STATE_DIR", raising=False)
+    p = mod.state_path()
+    assert p.name == "gui-session-monitor-state.json"
+    assert ".local" in str(p) or "state" in str(p)
+
+
+# ---------------------------------------------------------------------------
+# load_state (lines 665-670) — success, missing, invalid, non-dict
+# ---------------------------------------------------------------------------
+
+
+def test_load_state_reads_valid_json(mod, monkeypatch, tmp_path):
+    state_file = tmp_path / "state.json"
+    state_file.write_text('{"key": {"consecutive_failures": 3}}', encoding="utf-8")
+    monkeypatch.setattr(mod, "state_path", lambda: state_file)
+    result = mod.load_state()
+    assert result == {"key": {"consecutive_failures": 3}}
+
+
+def test_load_state_returns_empty_on_missing(mod, monkeypatch, tmp_path):
+    missing = tmp_path / "no-state.json"
+    monkeypatch.setattr(mod, "state_path", lambda: missing)
+    assert mod.load_state() == {}
+
+
+def test_load_state_returns_empty_on_invalid_json(mod, monkeypatch, tmp_path):
+    bad = tmp_path / "bad-state.json"
+    bad.write_text("{bad", encoding="utf-8")
+    monkeypatch.setattr(mod, "state_path", lambda: bad)
+    assert mod.load_state() == {}
+
+
+def test_load_state_returns_empty_on_non_dict(mod, monkeypatch, tmp_path):
+    arr = tmp_path / "arr-state.json"
+    arr.write_text("[1, 2]", encoding="utf-8")
+    monkeypatch.setattr(mod, "state_path", lambda: arr)
+    assert mod.load_state() == {}
+
+
+# ---------------------------------------------------------------------------
+# save_state (lines 674-679) — atomic write via temp file
+# ---------------------------------------------------------------------------
+
+
+def test_save_state_writes_json_atomically(mod, monkeypatch, tmp_path):
+    state_file = tmp_path / "subdir" / "state.json"
+    monkeypatch.setattr(mod, "state_path", lambda: state_file)
+    payload = {"host/label": {"consecutive_failures": 2, "last_state": "unreachable"}}
+    mod.save_state(payload)
+    assert state_file.exists()
+    import json as _json
+    data = _json.loads(state_file.read_text())
+    assert data == payload
+
+
+def test_save_state_creates_parent_dirs(mod, monkeypatch, tmp_path):
+    deep = tmp_path / "a" / "b" / "c" / "state.json"
+    monkeypatch.setattr(mod, "state_path", lambda: deep)
+    mod.save_state({"x": 1})
+    assert deep.exists()
+
+
+# ---------------------------------------------------------------------------
+# _parse_user_overrides (lines 714-721) — env var parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_user_overrides_empty(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_GUI_MONITOR_USERS", raising=False)
+    assert mod._parse_user_overrides() == {}
+
+
+def test_parse_user_overrides_single_entry(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_USERS", "botbox=alice")
+    assert mod._parse_user_overrides() == {"botbox": "alice"}
+
+
+def test_parse_user_overrides_multiple_entries(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_USERS", "hosta=alice,hostb=bob")
+    result = mod._parse_user_overrides()
+    assert result == {"hosta": "alice", "hostb": "bob"}
+
+
+def test_parse_user_overrides_skips_empty_host_or_user(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_USERS", "=alice,hostb=,hostc=charlie")
+    result = mod._parse_user_overrides()
+    assert result == {"hostc": "charlie"}
+
+
+def test_parse_user_overrides_entry_without_equals_ignored(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_USERS", "noequalssign,host=user")
+    result = mod._parse_user_overrides()
+    assert result == {"host": "user"}
+
+
+# ---------------------------------------------------------------------------
+# resolve_expected_user (lines 690-710) — override map, SSH success/fail
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_expected_user_from_override(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_GUI_MONITOR_USERS", "botbox=alice")
+    monkeypatch.delenv("BOT_ERRORS_SSH_COMMAND", raising=False)
+    # Should return from override without touching subprocess
+    assert mod.resolve_expected_user("botbox") == "alice"
+
+
+def test_resolve_expected_user_ssh_success(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_GUI_MONITOR_USERS", raising=False)
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.stdout = "Host botbox\nUser alice\nPort 22\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    assert mod.resolve_expected_user("botbox") == "alice"
+
+
+def test_resolve_expected_user_ssh_nonzero_returns_none(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_GUI_MONITOR_USERS", raising=False)
+    fake_proc = MagicMock()
+    fake_proc.returncode = 1
+    fake_proc.stdout = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    assert mod.resolve_expected_user("botbox") is None
+
+
+def test_resolve_expected_user_oserror_returns_none(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_GUI_MONITOR_USERS", raising=False)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(OSError("no ssh")))
+    assert mod.resolve_expected_user("botbox") is None
+
+
+def test_resolve_expected_user_subprocess_error_returns_none(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_GUI_MONITOR_USERS", raising=False)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(subprocess.SubprocessError("timeout")))
+    assert mod.resolve_expected_user("botbox") is None
+
+
+def test_resolve_expected_user_no_user_line_returns_none(mod, monkeypatch):
+    monkeypatch.delenv("BOT_ERRORS_GUI_MONITOR_USERS", raising=False)
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.stdout = "Host botbox\nPort 22\nHostName botbox.local\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    assert mod.resolve_expected_user("botbox") is None
+
+
+# ---------------------------------------------------------------------------
+# _run_ssh (lines 725-741) — success, nonzero+stdout, nonzero+empty, OSError
+# ---------------------------------------------------------------------------
+
+
+def test_run_ssh_success(mod, monkeypatch):
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.stdout = "alice\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    ok, out = mod._run_ssh("botbox", ["stat", "-f", "%Su", "/dev/console"])
+    assert ok is True
+    assert out == "alice\n"
+
+
+def test_run_ssh_nonzero_with_stdout_is_usable(mod, monkeypatch):
+    fake_proc = MagicMock()
+    fake_proc.returncode = 1
+    fake_proc.stdout = "Could not find service com.whatsoup.x\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    ok, out = mod._run_ssh("botbox", ["launchctl", "print", "gui/501/com.whatsoup.x"])
+    assert ok is True
+    assert "Could not find" in out
+
+
+def test_run_ssh_nonzero_empty_stdout_is_failure(mod, monkeypatch):
+    fake_proc = MagicMock()
+    fake_proc.returncode = 255
+    fake_proc.stdout = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    ok, out = mod._run_ssh("botbox", ["stat", "-f", "%Su", "/dev/console"])
+    assert ok is False
+    assert out == ""
+
+
+def test_run_ssh_oserror_returns_false(mod, monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(OSError("unreachable")))
+    ok, out = mod._run_ssh("botbox", ["stat", "-f", "%Su", "/dev/console"])
+    assert ok is False
+    assert out == ""
+
+
+def test_run_ssh_subprocess_error_returns_false(mod, monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(subprocess.SubprocessError("timeout")))
+    ok, out = mod._run_ssh("botbox", ["stat", "-f", "%Su", "/dev/console"])
+    assert ok is False
+    assert out == ""
+
+
+# ---------------------------------------------------------------------------
+# probe_host (lines 750-769) — integration of SSH probes
+# ---------------------------------------------------------------------------
+
+
+def _make_run_ssh_mock(responses):
+    """Return a _run_ssh mock that returns successive (ok, stdout) pairs."""
+    calls = iter(responses)
+
+    def _mock(host, remote_cmd):
+        return next(calls)
+
+    return _mock
+
+
+def test_probe_host_all_probes_succeed(mod, monkeypatch):
+    """When all SSH probes succeed, probe dict has correct fields."""
+    responses = [
+        (True, "alice\n"),          # console probe
+        (True, "501\n"),            # uid probe
+        (True, "com.whatsoup.x = {\n\tstate = running\n\tpid = 1234\n}\n"),  # agent probe
+        (True, "{ sec = 1718000000, usec = 1 }"),  # boot probe
+    ]
+    monkeypatch.setattr(mod, "_run_ssh", _make_run_ssh_mock(responses))
+    result = mod.probe_host("botbox", "alice", "com.whatsoup.x")
+    assert result["console_ok"] is True
+    assert result["console_owner"] == "alice"
+    assert result["agent_ok"] is True
+    assert result["agent_state"] == "running"
+    assert result["boot_id"] == "1718000000"
+
+
+def test_probe_host_console_failure(mod, monkeypatch):
+    """Console SSH failure -> console_ok=False, fail-closed."""
+    responses = [
+        (False, ""),            # console probe fails
+        (True, "501\n"),        # uid probe (still called)
+        (True, "com.whatsoup.x = {\n\tstate = running\n}\n"),
+        (True, "{ sec = 1718000000, usec = 1 }"),
+    ]
+    monkeypatch.setattr(mod, "_run_ssh", _make_run_ssh_mock(responses))
+    result = mod.probe_host("botbox", "alice", "com.whatsoup.x")
+    assert result["console_ok"] is False
+    assert result["console_owner"] is None
+
+
+def test_probe_host_uid_probe_fails_skips_agent(mod, monkeypatch):
+    """When uid probe fails, agent probe is skipped (agent_ok=False)."""
+    responses = [
+        (True, "alice\n"),        # console
+        (False, ""),              # uid probe fails
+        # NO agent probe call (uid not obtained)
+        (True, "{ sec = 1718000000, usec = 1 }"),  # boot
+    ]
+    monkeypatch.setattr(mod, "_run_ssh", _make_run_ssh_mock(responses))
+    result = mod.probe_host("botbox", "alice", "com.whatsoup.x")
+    assert result["agent_ok"] is False
+    assert result["agent_state"] is None
+
+
+def test_probe_host_none_expected_user_skips_uid_and_agent(mod, monkeypatch):
+    """When expected_user is None, uid+agent probes are skipped entirely."""
+    responses = [
+        (True, "alice\n"),         # console
+        # No uid probe (expected_user is None)
+        # No agent probe
+        (True, "{ sec = 1718000000, usec = 1 }"),  # boot
+    ]
+    monkeypatch.setattr(mod, "_run_ssh", _make_run_ssh_mock(responses))
+    result = mod.probe_host("botbox", None, "com.whatsoup.x")
+    assert result["agent_ok"] is False
+    assert result["agent_state"] is None
+
+
+def test_probe_host_boot_probe_fails(mod, monkeypatch):
+    """Boot probe failure yields boot_id=None (no fabricated reboot)."""
+    responses = [
+        (True, "alice\n"),
+        (True, "501\n"),
+        (True, "com.whatsoup.x = {\n\tstate = running\n\tpid = 1234\n}\n"),
+        (False, ""),              # boot probe fails
+    ]
+    monkeypatch.setattr(mod, "_run_ssh", _make_run_ssh_mock(responses))
+    result = mod.probe_host("botbox", "alice", "com.whatsoup.x")
+    assert result["boot_id"] is None
+
+
+def test_probe_host_uid_non_digit_skips_agent(mod, monkeypatch):
+    """When uid output is non-digit, agent probe is skipped."""
+    responses = [
+        (True, "alice\n"),
+        (True, "not-a-uid\n"),   # uid ok but non-digit
+        # No agent probe
+        (True, "{ sec = 1718000000, usec = 1 }"),
+    ]
+    monkeypatch.setattr(mod, "_run_ssh", _make_run_ssh_mock(responses))
+    result = mod.probe_host("botbox", "alice", "com.whatsoup.x")
+    assert result["agent_ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# emit_event (lines 780-791) — dry_run, subprocess success, failure, OSError
+# ---------------------------------------------------------------------------
+
+
+def test_emit_event_dry_run_prints_and_returns_zero(mod, capsys):
+    argv = ["--severity", "critical", "--summary", "test alert"]
+    rc = mod.emit_event(argv, dry_run=True)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "[dry-run]" in out
+    assert "--severity" in out
+
+
+def test_emit_event_real_run_success(mod, monkeypatch):
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    rc = mod.emit_event(["--summary", "x"], dry_run=False)
+    assert rc == 0
+
+
+def test_emit_event_real_run_nonzero(mod, monkeypatch):
+    fake_proc = MagicMock()
+    fake_proc.returncode = 1
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_proc)
+    rc = mod.emit_event(["--summary", "x"], dry_run=False)
+    assert rc == 1
+
+
+def test_emit_event_oserror_returns_one(mod, monkeypatch, capsys):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(OSError("no emit")))
+    rc = mod.emit_event(["--summary", "x"], dry_run=False)
+    assert rc == 1
+    assert "emit failed" in capsys.readouterr().err
+
+
+def test_emit_event_subprocess_error_returns_one(mod, monkeypatch, capsys):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(subprocess.SubprocessError("boom")))
+    rc = mod.emit_event(["--summary", "x"], dry_run=False)
+    assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# run_once (lines 795-835) — orchestration with mocked I/O
+# ---------------------------------------------------------------------------
+
+
+def _minimal_fleet_json():
+    return '{"hosts":[{"host":"botbox","guiSessionExpected":"always_aqua","instances":[{"name":"x-bot","service":"com.whatsoup.x-bot"}]}]}'
+
+
+def test_run_once_dry_run_no_state_write(mod, monkeypatch, tmp_path, capsys):
+    """dry_run=True must not call save_state."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setattr(mod, "load_state", lambda: {})
+    monkeypatch.setattr(mod, "resolve_expected_user", lambda host: "alice")
+    monkeypatch.setattr(mod, "probe_host", lambda host, user, label: {
+        "console_owner": "alice", "agent_state": "running",
+        "console_ok": True, "agent_ok": True, "boot_id": None, "error": None,
+    })
+
+    save_called = []
+    monkeypatch.setattr(mod, "save_state", lambda s: save_called.append(s))
+
+    rc = mod.run_once(dry_run=True)
+    assert rc == 0
+    assert save_called == [], "save_state must not be called in dry_run mode"
+
+
+def test_run_once_persists_state_on_real_run(mod, monkeypatch, tmp_path):
+    """dry_run=False must call save_state with updated state."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setattr(mod, "load_state", lambda: {})
+    monkeypatch.setattr(mod, "resolve_expected_user", lambda host: "alice")
+    monkeypatch.setattr(mod, "probe_host", lambda host, user, label: {
+        "console_owner": "alice", "agent_state": "running",
+        "console_ok": True, "agent_ok": True, "boot_id": None, "error": None,
+    })
+
+    saved = {}
+
+    def _save(s):
+        saved.update(s)
+
+    monkeypatch.setattr(mod, "save_state", _save)
+    rc = mod.run_once(dry_run=False)
+    assert rc == 0
+    assert "botbox/com.whatsoup.x-bot" in saved
+
+
+def test_run_once_emits_on_threshold_met(mod, monkeypatch, tmp_path):
+    """When threshold is met, emit_event is called and rc propagates."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    # prior state: already 1 failure -> second failure reaches threshold=2
+    monkeypatch.setattr(mod, "load_state", lambda: {
+        "botbox/com.whatsoup.x-bot": {"consecutive_failures": 1, "last_state": "gui_session_absent"}
+    })
+    monkeypatch.setattr(mod, "resolve_expected_user", lambda host: "alice")
+    monkeypatch.setattr(mod, "probe_host", lambda host, user, label: {
+        "console_owner": "root", "agent_state": "running",
+        "console_ok": True, "agent_ok": True, "boot_id": None, "error": None,
+    })
+    monkeypatch.setattr(mod, "save_state", lambda s: None)
+
+    emitted = []
+    monkeypatch.setattr(mod, "emit_event", lambda argv, dry_run: (emitted.append(argv), 0)[1])
+
+    rc = mod.run_once(dry_run=False)
+    assert rc == 0
+    assert len(emitted) == 1
+    assert "--source" in emitted[0]
+
+
+def test_run_once_emit_failure_returns_nonzero(mod, monkeypatch, tmp_path):
+    """If emit_event returns nonzero, run_once returns 1."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setattr(mod, "load_state", lambda: {
+        "botbox/com.whatsoup.x-bot": {"consecutive_failures": 1, "last_state": "gui_session_absent"}
+    })
+    monkeypatch.setattr(mod, "resolve_expected_user", lambda host: "alice")
+    monkeypatch.setattr(mod, "probe_host", lambda host, user, label: {
+        "console_owner": "root", "agent_state": "running",
+        "console_ok": True, "agent_ok": True, "boot_id": None, "error": None,
+    })
+    monkeypatch.setattr(mod, "save_state", lambda s: None)
+    monkeypatch.setattr(mod, "emit_event", lambda argv, dry_run: 1)
+
+    rc = mod.run_once(dry_run=False)
+    assert rc == 1
+
+
+def test_run_once_unresolvable_user_uses_fail_closed_probe(mod, monkeypatch, tmp_path, capsys):
+    """resolve_expected_user returning None -> fail-closed probe (unreachable)."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setattr(mod, "load_state", lambda: {})
+    monkeypatch.setattr(mod, "resolve_expected_user", lambda host: None)
+    probe_called = []
+    monkeypatch.setattr(mod, "probe_host", lambda *a, **kw: (probe_called.append(True), {})[1])
+    monkeypatch.setattr(mod, "save_state", lambda s: None)
+
+    rc = mod.run_once(dry_run=True)
+    assert rc == 0
+    assert probe_called == [], "probe_host must not be called when user is unresolved"
+
+
+def test_run_once_private_override_error_returns_two(mod, monkeypatch, tmp_path, capsys):
+    """When private override error exists, run_once returns 2 without probing."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setattr(mod, "load_fleet", lambda: {"hosts": []})
+    monkeypatch.setattr(mod, "private_override_contract_error", lambda fleet: "config error: missing override")
+
+    rc = mod.run_once(dry_run=True)
+    assert rc == 2
+    assert "config error" in capsys.readouterr().err
+
+
+def test_run_once_empty_targets_returns_zero(mod, monkeypatch, tmp_path):
+    """An empty target list (no GUI bots) is valid — returns 0, writes empty state."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text('{"hosts":[]}', encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setattr(mod, "load_state", lambda: {})
+
+    saved = {}
+    monkeypatch.setattr(mod, "save_state", lambda s: saved.update(s))
+
+    rc = mod.run_once(dry_run=False)
+    assert rc == 0
+    assert saved == {}
+
+
+# ---------------------------------------------------------------------------
+# parse_args (lines 839-854)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_args_defaults(mod):
+    args = mod.parse_args([])
+    assert args.dry_run is False
+    assert args.once is False
+    assert args.config_check is False
+
+
+def test_parse_args_dry_run(mod):
+    args = mod.parse_args(["--dry-run"])
+    assert args.dry_run is True
+
+
+def test_parse_args_once(mod):
+    args = mod.parse_args(["--once"])
+    assert args.once is True
+
+
+def test_parse_args_config_check(mod):
+    args = mod.parse_args(["--config-check"])
+    assert args.config_check is True
+
+
+def test_parse_args_combined(mod):
+    args = mod.parse_args(["--dry-run", "--once"])
+    assert args.dry_run is True
+    assert args.once is True
+
+
+# ---------------------------------------------------------------------------
+# main (lines 858-861)
+# ---------------------------------------------------------------------------
+
+
+def test_main_config_check_mode(mod, monkeypatch, capsys, tmp_path):
+    """main --config-check calls config_check() and returns its exit code."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.delenv("BOT_ERRORS_EXPECTED_FLEET", raising=False)
+    rc = mod.main(["--config-check"])
+    assert rc == 0
+    assert "gui-session-monitor config ok" in capsys.readouterr().out
+
+
+def test_main_dry_run_mode(mod, monkeypatch, tmp_path):
+    """main --dry-run calls run_once(dry_run=True)."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setattr(mod, "load_state", lambda: {})
+    monkeypatch.setattr(mod, "resolve_expected_user", lambda host: "alice")
+    monkeypatch.setattr(mod, "probe_host", lambda host, user, label: {
+        "console_owner": "alice", "agent_state": "running",
+        "console_ok": True, "agent_ok": True, "boot_id": None, "error": None,
+    })
+    save_called = []
+    monkeypatch.setattr(mod, "save_state", lambda s: save_called.append(s))
+
+    rc = mod.main(["--dry-run"])
+    assert rc == 0
+    assert save_called == []
+
+
+def test_main_normal_run(mod, monkeypatch, tmp_path):
+    """main with no flags calls run_once(dry_run=False)."""
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setattr(mod, "load_state", lambda: {})
+    monkeypatch.setattr(mod, "resolve_expected_user", lambda host: "alice")
+    monkeypatch.setattr(mod, "probe_host", lambda host, user, label: {
+        "console_owner": "alice", "agent_state": "running",
+        "console_ok": True, "agent_ok": True, "boot_id": None, "error": None,
+    })
+    monkeypatch.setattr(mod, "save_state", lambda s: None)
+
+    rc = mod.main([])
+    assert rc == 0
+
+
+def test_main_default_argv_uses_sys_argv(mod, monkeypatch, tmp_path):
+    """main(None) reads from sys.argv[1:]."""
+    import sys as _sys
+    fleet_file = tmp_path / "fleet.json"
+    fleet_file.write_text(_minimal_fleet_json(), encoding="utf-8")
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setattr(mod, "load_state", lambda: {})
+    monkeypatch.setattr(mod, "resolve_expected_user", lambda host: "alice")
+    monkeypatch.setattr(mod, "probe_host", lambda host, user, label: {
+        "console_owner": "alice", "agent_state": "running",
+        "console_ok": True, "agent_ok": True, "boot_id": None, "error": None,
+    })
+    monkeypatch.setattr(mod, "save_state", lambda s: None)
+    monkeypatch.setattr(_sys, "argv", ["bot-errors-gui-session-monitor.py"])
+
+    rc = mod.main(None)
+    assert rc == 0
