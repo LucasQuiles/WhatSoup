@@ -153,6 +153,12 @@ export function isUsageLimitMessage(text: string): boolean {
   if (
     lower.includes('out of extra usage') ||
     lower.includes('claude usage limit') ||
+    // Model-policy credit gate: the account's plan only permits a model that
+    // needs usage credits the account lacks (e.g. a Fable-5-only policy). The
+    // provider emits this during compaction and it is terminal for the turn —
+    // route it to fallback rather than stalling on an unusable model.
+    lower.includes('requires usage credits') ||
+    (lower.includes('model policy only allows') && lower.includes('usage credit')) ||
     hasTerminalLimitAssembler(lower)
   ) {
     return true;

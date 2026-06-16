@@ -60,6 +60,13 @@ describe('terminal provider-limit detection (silent-non-rollover failure class)'
     expect(classifyProviderFailure('Approaching session limit · resets 9pm')).not.toBe('usage-limit');
   });
 
+  it('classifies the model-policy credit gate (Fable-5-only plan) as a terminal usage-limit', () => {
+    // Real provider compaction error when the account plan only permits a
+    // credit-gated model. Must arm fallback instead of stalling.
+    expect(isUsageLimitMessage('Compaction unavailable: your model policy only allows Fable 5, which requires usage credits · /model to set it up')).toBe(true);
+    expect(classifyProviderFailure('Compaction unavailable: your model policy only allows Fable 5, which requires usage credits · /model to set it up')).toBe('usage-limit');
+  });
+
   it('still classifies a terminal message that merely contains "approaching"/"now using" in a non-warning position', () => {
     // Anchored warning guard must not swallow a genuinely-terminal message.
     expect(isUsageLimitMessage('Weekly limit approaching and now exceeded. Claude will be available at 9pm.')).toBe(true);
