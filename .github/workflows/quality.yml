@@ -157,6 +157,9 @@ jobs:
       - name: BOT ERRORS runtime manifest guard
         run: npm run guard:bot-errors-runtime-manifest
 
+      - name: Fleet bot-hardening parity guard
+        run: npm run guard:fleet-bot-hardening-parity
+
       - name: Simulation matrix guard
         run: npm run guard:bot-errors-simulation-matrix
 

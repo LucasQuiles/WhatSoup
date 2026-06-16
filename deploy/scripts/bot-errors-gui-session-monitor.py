@@ -861,5 +861,5 @@ def main(argv: list[str] | None = None) -> int:
     return run_once(dry_run=args.dry_run)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
