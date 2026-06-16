@@ -1,5 +1,19 @@
-import { describe, it, expect } from 'vitest';
-import { formatMentions, ContactsDirectory } from '../../src/core/mentions.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { describe, it, expect, afterEach } from 'vitest';
+import { Database } from '../../src/core/database.ts';
+import { buildLidMappings, formatMentions, ContactsDirectory } from '../../src/core/mentions.ts';
+
+function openMentionsDb(): Database {
+  const db = new Database(':memory:');
+  db.open();
+  return db;
+}
+
+function seedLidMapping(raw: DatabaseSync, lid: string, phoneJid: string): void {
+  raw
+    .prepare('INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, ?)')
+    .run(lid, phoneJid, '2026-06-15T00:00:00.000Z');
+}
 
 // ---------------------------------------------------------------------------
 // formatMentions — no contacts (pure number detection)
@@ -128,10 +142,117 @@ describe('formatMentions (with contacts)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// formatMentions — with LID mappings
+// ---------------------------------------------------------------------------
+
+describe('formatMentions (with LID mappings)', () => {
+  it('rewrites pasted LID numbers to phone mentions and emits both phone and LID JIDs', () => {
+    const lidMappings = {
+      phoneToLid: new Map([['15550100001', '1111111888666']]),
+      lidToPhone: new Map([['1111111888666', '15550100001']]),
+    };
+
+    const result = formatMentions('Hey @1111111888666 review this', undefined, lidMappings);
+
+    expect(result.text).toBe('Hey @15550100001 review this');
+    expect(result.jids).toEqual(['15550100001@s.whatsapp.net', '1111111888666@lid']);
+    expect(result.hasMentions).toBe(true);
+  });
+
+  it('adds the corresponding LID JID for phone-number mentions when mapping is known', () => {
+    const lidMappings = {
+      phoneToLid: new Map([['15550100001', '1111111888666']]),
+      lidToPhone: new Map([['1111111888666', '15550100001']]),
+    };
+
+    const result = formatMentions('Hey @15550100001 review this', undefined, lidMappings);
+
+    expect(result.text).toBe('Hey @15550100001 review this');
+    expect(result.jids).toEqual(['15550100001@s.whatsapp.net', '1111111888666@lid']);
+  });
+
+  it('adds the corresponding LID JID for contact-name mentions when mapping is known', () => {
+    const dir = new ContactsDirectory();
+    dir.observe('15550100001@s.whatsapp.net', 'Q');
+    const lidMappings = {
+      phoneToLid: new Map([['15550100001', '1111111888666']]),
+      lidToPhone: new Map([['1111111888666', '15550100001']]),
+    };
+
+    const result = formatMentions('Hey @Q review this', dir.contacts, lidMappings);
+
+    expect(result.text).toBe('Hey @15550100001 review this');
+    expect(result.jids).toEqual(['15550100001@s.whatsapp.net', '1111111888666@lid']);
+  });
+
+  it('deduplicates phone and LID mentions that resolve to the same person', () => {
+    const lidMappings = {
+      phoneToLid: new Map([['15550100001', '1111111888666']]),
+      lidToPhone: new Map([['1111111888666', '15550100001']]),
+    };
+
+    const result = formatMentions('@1111111888666 and @15550100001 same person', undefined, lidMappings);
+
+    expect(result.text).toBe('@15550100001 and @15550100001 same person');
+    expect(result.jids).toEqual(['15550100001@s.whatsapp.net', '1111111888666@lid']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LID mapping hydration
+// ---------------------------------------------------------------------------
+
+describe('buildLidMappings', () => {
+  let db: Database | undefined;
+  let rawDb: DatabaseSync | undefined;
+
+  afterEach(() => {
+    db?.close();
+    rawDb?.close();
+    db = undefined;
+    rawDb = undefined;
+  });
+
+  it('builds bidirectional mappings from the Database wrapper', () => {
+    db = openMentionsDb();
+    seedLidMapping(db.raw, '1111111888666', '15550100001@s.whatsapp.net');
+    seedLidMapping(db.raw, '', '15550200002@s.whatsapp.net');
+    seedLidMapping(db.raw, '111222333444', '');
+
+    const mappings = buildLidMappings(db);
+
+    expect(mappings.phoneToLid.get('15550100001')).toBe('1111111888666');
+    expect(mappings.lidToPhone.get('1111111888666')).toBe('15550100001');
+    expect(mappings.phoneToLid.has('15550200002')).toBe(false);
+    expect(mappings.lidToPhone.has('111222333444')).toBe(false);
+  });
+
+  it('builds bidirectional mappings from a raw DatabaseSync instance', () => {
+    rawDb = new DatabaseSync(':memory:');
+    rawDb.exec('CREATE TABLE lid_mappings (lid TEXT, phone_jid TEXT)');
+    rawDb
+      .prepare('INSERT INTO lid_mappings (lid, phone_jid) VALUES (?, ?)')
+      .run('1111111444333', '15550300003@s.whatsapp.net');
+
+    const mappings = buildLidMappings(rawDb);
+
+    expect(mappings.phoneToLid.get('15550300003')).toBe('1111111444333');
+    expect(mappings.lidToPhone.get('1111111444333')).toBe('15550300003');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ContactsDirectory
 // ---------------------------------------------------------------------------
 
 describe('ContactsDirectory', () => {
+  let db: Database | undefined;
+
+  afterEach(() => {
+    db?.close();
+    db = undefined;
+  });
+
   it('indexes by phone, full name, and first name', () => {
     const dir = new ContactsDirectory();
     dir.observe('15551234567@s.whatsapp.net', 'Jason Bradshaw');
@@ -195,4 +316,86 @@ describe('ContactsDirectory', () => {
     expect(dir.resolve('short')).toBeUndefined();
     expect(dir.size).toBe(0);
   });
+
+  it('returns undefined LID mappings until a database is attached', () => {
+    const dir = new ContactsDirectory();
+    expect(dir.getLidMappings()).toBeUndefined();
+
+    db = openMentionsDb();
+    seedLidMapping(db.raw, '1111111888666', '15550100001@s.whatsapp.net');
+    dir.setDatabase(db);
+
+    const mappings = dir.getLidMappings();
+    expect(mappings?.phoneToLid.get('15550100001')).toBe('1111111888666');
+  });
+
+  it('resolves LID senders through the attached database and caches the result', () => {
+    db = openMentionsDb();
+    seedLidMapping(db.raw, '1111111888666', '15550100001@s.whatsapp.net');
+    const dir = new ContactsDirectory(db);
+
+    dir.observe('1111111888666@lid', 'Q');
+    dir.observe('1111111888666@lid', 'Queue');
+
+    expect(dir.resolve('q')).toBe('15550100001');
+    expect(dir.resolve('queue')).toBe('15550100001');
+    expect(dir.resolve('1111111888666')).toBeUndefined();
+  });
+
+  it('evicts oldest entries when the LID-backed directory reaches capacity', () => {
+    db = openMentionsDb();
+    seedLidMapping(db.raw, '1111111888666', '15550100001@s.whatsapp.net');
+    seedLidMapping(db.raw, '1111111444333', '15550200002@s.whatsapp.net');
+    const dir = new ContactsDirectory(db, 1);
+
+    dir.observe('1111111888666@lid', 'Q');
+    dir.observe('1111111444333@lid', 'Loops');
+
+    expect(dir.resolve('q')).toBeUndefined();
+    expect(dir.resolve('loops')).toBe('15550200002');
+  });
+
+  it('invalidateLidCache clears cached LID resolutions for subsequent observations', () => {
+    db = openMentionsDb();
+    seedLidMapping(db.raw, '1111111888666', '15550100001@s.whatsapp.net');
+    const dir = new ContactsDirectory(db);
+
+    dir.observe('1111111888666@lid', 'Before');
+    db.raw
+      .prepare('UPDATE lid_mappings SET phone_jid = ? WHERE lid = ?')
+      .run('15550999999@s.whatsapp.net', '1111111888666');
+    dir.invalidateLidCache();
+    dir.observe('1111111888666@lid', 'After');
+
+    expect(dir.resolve('before')).toBe('15550100001');
+    expect(dir.resolve('after')).toBe('15550999999');
+  });
+
+  it('resolves non-LID JIDs through the attached database path', () => {
+    db = openMentionsDb();
+    const dir = new ContactsDirectory(db);
+
+    dir.observe('15550100001@s.whatsapp.net', 'Q');
+
+    expect(dir.resolve('q')).toBe('15550100001');
+    expect(dir.resolve('15550100001')).toBe('15550100001');
+  });
+
+  it('handles whitespace-only sender names by indexing the phone only', () => {
+    const dir = new ContactsDirectory();
+    dir.observe('15551234567@s.whatsapp.net', '   ');
+
+    expect(dir.resolve('15551234567')).toBe('15551234567');
+    expect(dir.resolve('')).toBeUndefined();
+    expect(dir.size).toBe(1);
+  });
+
+  it('does not index numeric first-name tokens from display names', () => {
+    const dir = new ContactsDirectory();
+    dir.observe('15551239999@s.whatsapp.net', '12345 Dispatch');
+
+    expect(dir.resolve('12345 dispatch')).toBe('15551239999');
+    expect(dir.resolve('12345')).toBeUndefined();
+  });
+
 });
