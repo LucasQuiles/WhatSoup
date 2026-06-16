@@ -683,4 +683,62 @@ describe('safeguard diagnostics', () => {
     expect(process.exitCode).toBe(1);
     expect(output).toHaveBeenCalled();
   });
+
+  // A2: commandMatches piggyback bypass regression tests
+  it('does not treat a semicolon-piggybacked command as matching the expected ordered step', () => {
+    // 'npm run guard:safeguard-diagnostics ; rm -rf x' — with space before semicolon.
+    // startsWith(expected + ' ') would match; commandMatches must reject this.
+    const fixture = makeRepo({
+      scripts: {
+        'verify:push:branch': requiredPackageScripts['verify:push:branch']
+          .replace(
+            ' && npm run guard:safeguard-diagnostics',
+            ' && npm run guard:safeguard-diagnostics ; rm -rf x',
+          ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'branch-push-chain')?.evidence)
+      .toContain('missing npm run guard:safeguard-diagnostics');
+  });
+
+  it('does not treat a pipe-piggybacked command as matching the expected ordered step', () => {
+    // 'npm run guard:safeguard-diagnostics | tee y' — startsWith(expected + ' ') matches.
+    // commandMatches must reject this trailing-pipe form.
+    const fixture = makeRepo({
+      scripts: {
+        'verify:push:branch': requiredPackageScripts['verify:push:branch']
+          .replace(
+            ' && npm run guard:safeguard-diagnostics',
+            ' && npm run guard:safeguard-diagnostics | tee y',
+          ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'branch-push-chain')?.evidence)
+      .toContain('missing npm run guard:safeguard-diagnostics');
+  });
+
+  it('does not treat an inline-background-op piggybacked command as matching the expected ordered step', () => {
+    // 'npm run guard:safeguard-diagnostics & npm i evil' — startsWith(expected + ' ') matches.
+    // commandMatches must reject this trailing-& form.
+    const fixture = makeRepo({
+      scripts: {
+        'verify:push:branch': requiredPackageScripts['verify:push:branch']
+          .replace(
+            ' && npm run guard:safeguard-diagnostics',
+            ' && npm run guard:safeguard-diagnostics & npm i evil',
+          ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'branch-push-chain')?.evidence)
+      .toContain('missing npm run guard:safeguard-diagnostics');
+  });
 });

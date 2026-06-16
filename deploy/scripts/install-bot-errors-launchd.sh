@@ -49,6 +49,14 @@ xml_escape(){
   printf "%s" "$value"
 }
 
+validate_label(){
+  local name="$1" value="$2"
+  if [[ ! "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; then
+    echo "invalid $name: label must match ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?\\$  (no '/', '..', whitespace or shell metacharacters)" >&2
+    exit 2
+  fi
+}
+
 if [[ -z "$HEALTH_PROFILE" ]]; then
   host_profile=$(hostname -s | tr '[:upper:]' '[:lower:]')
   if [[ -f "$REPO_ROOT/deploy/health-profiles/$host_profile.json" ]]; then
@@ -72,6 +80,7 @@ if [[ -z "$HEALTH_PROFILE" || ! -f "$HEALTH_PROFILE" || ! -r "$HEALTH_PROFILE" ]
   exit 2
 fi
 
+validate_label BOT_ERRORS_LABEL_PREFIX "$LABEL_PREFIX"
 LABEL_PREFIX_XML="$(xml_escape "$LABEL_PREFIX")"
 REPO_ROOT_XML="$(xml_escape "$REPO_ROOT")"
 PYTHON_XML="$(xml_escape "$PYTHON")"

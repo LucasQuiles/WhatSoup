@@ -88,6 +88,16 @@ launchd_env_entry(){
   printf '    <key>%s</key><string>%s</string>\n' "$(xml_escape "$key")" "$(xml_escape "$value")"
 }
 
+validate_label(){
+  local name="$1" value="$2"
+  if [[ ! "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; then
+    echo "invalid $name: label must match ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?\\$  (no '/', '..', whitespace or shell metacharacters)" >&2
+    exit 2
+  fi
+}
+
+validate_label BOT_ERRORS_GUI_MONITOR_LABEL "$LABEL"
+
 EXPECTED_FLEET_VALUE="$(env_or_default BOT_ERRORS_EXPECTED_FLEET "")"
 GUI_MONITOR_USERS_VALUE="$(env_or_default BOT_ERRORS_GUI_MONITOR_USERS "")"
 SSH_TIMEOUT_VALUE="$(env_or_default BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS "")"
