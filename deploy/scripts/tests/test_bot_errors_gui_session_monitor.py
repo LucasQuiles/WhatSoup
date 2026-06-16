@@ -1025,3 +1025,77 @@ def test_missing_policy_non_launchagent_still_excluded(mod):
               instances=[_inst("primary", service="whatsoup-primary.service")]),
     ]}
     assert mod.gui_targets_from_fleet(fleet) == []
+
+
+# ---------------------------------------------------------------------------
+# Test 21: public sanitized manifests must not arm private-label monitors
+# without a hub-private expected-fleet override.
+# ---------------------------------------------------------------------------
+
+
+def test_private_monitor_override_not_required_by_default(mod):
+    fleet = {"hosts": [
+        _host("botbox", role="bot-host", policy="always_aqua",
+              instances=[_inst("x-bot")]),
+    ]}
+    assert mod.private_monitor_override_required_count(fleet) == 0
+    assert mod.private_override_contract_error(fleet, expected_fleet_override="") is None
+
+
+def test_private_monitor_override_required_marker_counts_hosts(mod):
+    fleet = {"hosts": [
+        {
+            **_host("sanitized-box", role="bot-host", policy="always_aqua",
+                    instances=[_inst("placeholder-a")]),
+            "privateMonitorOverrideRequired": True,
+        },
+    ]}
+    assert mod.private_monitor_override_required_count(fleet) == 1
+
+
+def test_private_monitor_override_missing_fails_closed(mod):
+    fleet = {"hosts": [
+        {
+            **_host("sanitized-box", role="bot-host", policy="always_aqua",
+                    instances=[_inst("placeholder-a")]),
+            "privateMonitorOverrideRequired": True,
+        },
+    ]}
+    error = mod.private_override_contract_error(fleet, expected_fleet_override="")
+    assert error is not None
+    assert "BOT_ERRORS_EXPECTED_FLEET" in error
+
+
+def test_private_monitor_override_inside_repo_fails_closed(mod):
+    fleet = {"hosts": [
+        {
+            **_host("sanitized-box", role="bot-host", policy="always_aqua",
+                    instances=[_inst("placeholder-a")]),
+            "privateMonitorOverrideRequired": True,
+        },
+    ]}
+    error = mod.private_override_contract_error(
+        fleet,
+        expected_fleet_override=str(mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"),
+    )
+    assert error is not None
+    assert "outside the repo root" in error
+
+
+def test_private_monitor_override_outside_repo_passes(mod, tmp_path):
+    fleet = {"hosts": [
+        {
+            **_host("sanitized-box", role="bot-host", policy="always_aqua",
+                    instances=[_inst("placeholder-a")]),
+            "privateMonitorOverrideRequired": True,
+        },
+    ]}
+    private_file = tmp_path / "expected-fleet.private.json"
+    private_file.write_text("{}", encoding="utf-8")
+    assert (
+        mod.private_override_contract_error(
+            fleet,
+            expected_fleet_override=str(private_file),
+        )
+        is None
+    )

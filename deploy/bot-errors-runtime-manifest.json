@@ -168,7 +168,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "75edc59aecb6477c9ca98ef7a6bcb1382e4db275e4fac74242979469a6546db1",
+      "sha256": "355c2021cc266111d9b1764afff8c3a93fa880f30e9aca8ff3d8262a8fdc5cfe",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -179,7 +179,9 @@
         "classify_with_reboot",
         "post_reboot_regression",
         "build_emit_argv",
-        "gui_session_monitor"
+        "gui_session_monitor",
+        "privateMonitorOverrideRequired",
+        "private_override_contract_error"
       ]
     },
     {
