@@ -120,6 +120,7 @@ export {
 } from './Drawer';
 export type {
   DrawerProps,
+  DrawerPlacement,
   DrawerLayoutProps,
   DrawerHeaderProps,
   DrawerBodyProps,

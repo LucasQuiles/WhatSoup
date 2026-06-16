@@ -23,6 +23,9 @@
  *   - Computed CSS (animation, transforms) not verifiable in jsdom.
  *   - Real focus ring visual appearance not verifiable.
  */
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, act } from '@testing-library/react';
 import { useRef, useState } from 'react';
@@ -35,6 +38,8 @@ import {
   DrawerFooter,
 } from '../../console/src/components/primitives/Drawer';
 import { Modal, ModalHeader, ModalBody } from '../../console/src/components/primitives/Modal';
+
+const __here = dirname(fileURLToPath(import.meta.url));
 
 afterEach(() => {
   cleanup();
@@ -519,6 +524,245 @@ describe('Drawer — exit presence: jsdom instant path (C-B5-1)', () => {
     expect(document.querySelector('.soup-drawer')).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Bottom-sheet placement (narrow/phone surfaces — reachable action path)
+//
+// The bottom-sheet docks the same Drawer surface to the bottom edge as a MODAL
+// sheet so the contact-pane / inspector actions land on-screen on narrow widths.
+// Spec (showcase §26): role="dialog" aria-modal, focus-trapped, Escape +
+// scrim-tap dismiss, focus restores to the opener, a grab handle affordance,
+// and a translateY slide (removed under prefers-reduced-motion).
+// ---------------------------------------------------------------------------
+
+/** Bottom-sheet fixture: trigger + controlled Drawer with action rows. */
+const BottomSheetFixture: FC<{
+  onClose?: () => void;
+}> = ({ onClose }) => {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const close = () => {
+    setOpen(false);
+    onClose?.();
+  };
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        data-testid="sheet-trigger"
+        onClick={() => setOpen(true)}
+      >
+        Open contact actions
+      </button>
+      <Drawer
+        open={open}
+        onClose={close}
+        aria-label="Contact actions"
+        placement="bottom-sheet"
+      >
+        <DrawerHeader title="+34 612 88 04 19" onClose={close} />
+        <DrawerBody>
+          <button type="button" data-testid="act-mark-read">
+            Mark read
+          </button>
+          <button type="button" data-testid="act-allow">
+            Allow
+          </button>
+          <button type="button" data-testid="act-block">
+            Block
+          </button>
+          <button type="button" data-testid="act-save">
+            Save contact
+          </button>
+        </DrawerBody>
+      </Drawer>
+    </>
+  );
+};
+
+describe('Drawer — bottom-sheet placement (modal)', () => {
+  it('shell is role="dialog" with aria-modal="true" (modal, not complementary)', () => {
+    render(
+      <Drawer open onClose={() => {}} aria-label="sheet" placement="bottom-sheet">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    const shell = screen.getByRole('dialog');
+    expect(shell.getAttribute('aria-modal')).toBe('true');
+    expect(shell.classList.contains('soup-drawer--bottom-sheet')).toBe(true);
+    expect(shell.getAttribute('data-placement')).toBe('bottom-sheet');
+    // It must NOT be exposed as a complementary landmark in this mode.
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  it('default placement stays role="complementary" (non-modal right anchor)', () => {
+    render(
+      <Drawer open onClose={() => {}} aria-label="sheet">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    expect(screen.getByRole('complementary')).toBeDefined();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.querySelector('.soup-drawer--bottom-sheet')).toBeNull();
+  });
+
+  it('renders a grab-handle affordance above the content (aria-hidden)', () => {
+    render(
+      <Drawer open onClose={() => {}} aria-label="sheet" placement="bottom-sheet">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    const grab = document.querySelector('.soup-drawer-grab');
+    expect(grab).not.toBeNull();
+    // Affordance only — hidden from the accessibility tree, never the sole exit.
+    expect(grab!.getAttribute('aria-hidden')).toBe('true');
+    expect(grab!.querySelector('.soup-drawer-grab__bar')).not.toBeNull();
+  });
+
+  it('renders a modal scrim variant (always present, covers the surface beneath)', () => {
+    render(
+      <Drawer open onClose={() => {}} aria-label="sheet" placement="bottom-sheet">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    const scrim = document.querySelector('.soup-drawer-scrim--bottom-sheet');
+    expect(scrim).not.toBeNull();
+    expect(scrim!.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('Escape dismisses the bottom-sheet exactly once', () => {
+    const onClose = vi.fn();
+    render(
+      <Drawer open onClose={onClose} aria-label="sheet" placement="bottom-sheet">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    fireEvent.keyDown(document, { key: 'Escape', bubbles: true });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('scrim-tap (outside pointerdown) dismisses the modal bottom-sheet', () => {
+    const onClose = vi.fn();
+    render(
+      <Drawer open onClose={onClose} aria-label="sheet" placement="bottom-sheet">
+        <DrawerBody><span data-testid="inside">x</span></DrawerBody>
+      </Drawer>,
+    );
+    // A pointerdown OUTSIDE the sheet shell (on the scrim) dismisses — the
+    // bottom-sheet opts into dismissable=true because it is modal.
+    const scrim = document.querySelector('.soup-drawer-scrim--bottom-sheet')!;
+    fireEvent.pointerDown(scrim);
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    // A pointerdown INSIDE the sheet does NOT dismiss.
+    onClose.mockClear();
+    fireEvent.pointerDown(screen.getByTestId('inside'));
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('right placement does NOT dismiss on outside pointerdown (non-modal)', () => {
+    const onClose = vi.fn();
+    render(
+      <Drawer open onClose={onClose} aria-label="inspector">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    const scrim = document.querySelector('.soup-drawer-scrim')!;
+    fireEvent.pointerDown(scrim);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('traps focus and restores it to the opener on Escape (modal containment)', async () => {
+    render(<BottomSheetFixture />);
+    const trigger = screen.getByTestId('sheet-trigger');
+    act(() => { trigger.focus(); });
+    fireEvent.click(trigger);
+    await act(async () => {});
+
+    // Initial focus lands on the close X (focus moved into the trapped sheet).
+    const closeBtn = screen.getByRole('button', { name: 'Close inspector' });
+    expect(document.activeElement).toBe(closeBtn);
+
+    // Close via Escape → focus restores to the opening trigger.
+    fireEvent.keyDown(document, { key: 'Escape', bubbles: true });
+    await act(async () => {});
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('opening sheet starts in data-state="open" and closes cleanly', async () => {
+    const { rerender } = render(
+      <Drawer open onClose={() => {}} aria-label="sheet" placement="bottom-sheet">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    const shell = document.querySelector('.soup-drawer--bottom-sheet') as HTMLElement;
+    expect(shell).not.toBeNull();
+    // The open sheet is in the open phase (its enter keyframe is the slide-up).
+    expect(shell.getAttribute('data-state')).toBe('open');
+
+    rerender(
+      <Drawer open={false} onClose={() => {}} aria-label="sheet" placement="bottom-sheet">
+        <DrawerBody><span>x</span></DrawerBody>
+      </Drawer>,
+    );
+    await act(async () => {});
+    // jsdom (no stylesheet) → instant unmount path (C-B5-1); a closing shell, if
+    // present, is finished by its OWN slide-down keyframe (soup-drawer-sheet-out).
+    await act(async () => {
+      const closing = document.querySelector('.soup-drawer--bottom-sheet');
+      if (closing) {
+        fireEvent.animationEnd(closing, { animationName: 'soup-drawer-sheet-out' });
+      }
+    });
+    await act(async () => {});
+    expect(document.querySelector('.soup-drawer--bottom-sheet')).toBeNull();
+  });
+
+  it('wires the slide-DOWN (translateY) exit keyframe in the stylesheet', () => {
+    // The sheet shell watches soup-drawer-sheet-out; the keyframe must move the
+    // surface via translateY 0→100% (slide down off the bottom edge), the
+    // bottom-sheet's spatial exit — distinct from the right placement's translateX.
+    const css = readFileSync(
+      resolve(__here, '../../console/src/styles/primitives.css'),
+      'utf8',
+    );
+    expect(css).toMatch(
+      /@keyframes soup-drawer-sheet-out \{\s*from \{ transform: translateY\(0\); \}\s*to\s+\{ transform: translateY\(100%\); \}/,
+    );
+    expect(css).toMatch(
+      /@keyframes soup-drawer-sheet-in \{\s*from \{ transform: translateY\(100%\); \}\s*to\s+\{ transform: translateY\(0\); \}/,
+    );
+  });
+
+  it('reduced-motion neutralizes the bottom-sheet slide (off-and-instant)', () => {
+    // The reduced-motion rule sets animation:none on .soup-drawer--bottom-sheet
+    // so the translateY slide is REMOVED, not shortened. We assert the stylesheet
+    // carries that rule (jsdom does not apply media queries, so this is a
+    // source-contract check, mirroring the right-placement reduced-motion idiom).
+    const css = readFileSync(
+      resolve(__here, '../../console/src/styles/primitives.css'),
+      'utf8',
+    );
+    expect(css).toMatch(
+      /@media \(prefers-reduced-motion: reduce\) \{[^}]*\.soup-drawer--bottom-sheet[^]*?animation: none/,
+    );
+  });
+
+  it('wired consumer actions stay reachable inside the bottom-sheet (DD-24 fix)', async () => {
+    render(<BottomSheetFixture />);
+    fireEvent.click(screen.getByTestId('sheet-trigger'));
+    await act(async () => {});
+
+    // All four contact-pane actions render INSIDE the modal sheet shell —
+    // on a narrow viewport they are docked on-screen, not off the right edge.
+    const shell = screen.getByRole('dialog');
+    for (const id of ['act-mark-read', 'act-allow', 'act-block', 'act-save']) {
+      const action = screen.getByTestId(id);
+      expect(shell.contains(action)).toBe(true);
+    }
+  });
+});
 
 describe('Drawer — exit presence: closing phase with stubbed duration', () => {
   it('animationend on the shell with matching animationName → unmounts drawer', async () => {

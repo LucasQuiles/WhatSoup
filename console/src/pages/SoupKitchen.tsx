@@ -14,6 +14,7 @@ import { Plus, RotateCw } from "lucide-react";
 const AddLineWizard = lazy(() => import("../components/AddLineWizard"));
 import { motion } from "framer-motion";
 import { useLines, useFeed, useLogs } from "../hooks/use-fleet";
+import { useDrawerPlacement } from "../hooks/useViewportPlacement";
 import { useFleetMetrics } from "../hooks/use-metrics";
 import { computeKpis } from "../lib/compute-kpis";
 import {
@@ -153,6 +154,12 @@ const FleetDrawer: FC<FleetDrawerProps> = ({
   const logsResult = useLogs(selectedName ?? "");
   const isOpen = selectedName !== null;
 
+  // Narrow/phone viewports get the bottom-sheet placement so the inspector's
+  // actions ("Open line", "Close") dock on-screen instead of sitting off the
+  // right edge — the reachable action path narrow surfaces previously lacked.
+  // Viewport branching routes through the sanctioned placement owner.
+  const drawerPlacement = useDrawerPlacement();
+
   const line = selectedName
     ? lines.find((l) => l.name === selectedName) ?? null
     : null;
@@ -166,6 +173,7 @@ const FleetDrawer: FC<FleetDrawerProps> = ({
       onClose={onClose}
       aria-labelledby={titleId}
       restoreFocus={restoreFocus}
+      placement={drawerPlacement}
     >
       {isMissing ? (
         <>
