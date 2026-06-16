@@ -63,6 +63,14 @@ validate_calendar_integer(){
   fi
 }
 
+validate_label(){
+  local name="$1" value="$2"
+  if [[ ! "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; then
+    echo "invalid $name: label must match ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?\\$  (no '/', '..', whitespace or shell metacharacters)" >&2
+    exit 2
+  fi
+}
+
 if [[ -z "$HEALTH_PROFILE" ]]; then
   host_profile=$(hostname -s | tr '[:upper:]' '[:lower:]')
   if [[ -f "$REPO_ROOT/deploy/health-profiles/$host_profile.json" ]]; then
@@ -80,6 +88,7 @@ elif [[ -z "$BOT_ERRORS_SOCKET_VALUE" && -n "$BOT_ERRORS_SOCKET_PATH_VALUE" ]]; 
   BOT_ERRORS_SOCKET_VALUE="$BOT_ERRORS_SOCKET_PATH_VALUE"
 fi
 BOT_ERRORS_DB_VALUE="$(env_or_default BOT_ERRORS_DB "")"
+validate_label BOT_ERRORS_HEALTH_LABEL "$LABEL"
 validate_calendar_integer BOT_ERRORS_HEALTH_HOUR "$HEALTH_HOUR" 0 23
 validate_calendar_integer BOT_ERRORS_HEALTH_MINUTE "$HEALTH_MINUTE" 0 59
 LABEL_XML="$(xml_escape "$LABEL")"

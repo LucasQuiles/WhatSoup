@@ -520,8 +520,15 @@ function checkScriptPresence(scripts: Record<string, string>): DiagnosticCheck {
   };
 }
 
+// Shell metacharacters that indicate a piggybacked command after the expected prefix.
+// We reject any suffix that contains these to close the trailing-piggyback bypass.
+const SHELL_METACHAR_RE = /[;|&\\$()<>`\n]/;
+
 function commandMatches(expected: string, actual: string): boolean {
-  return actual === expected || actual.startsWith(`${expected} `);
+  if (actual === expected) return true;
+  if (!actual.startsWith(`${expected} `)) return false;
+  const suffix = actual.slice(expected.length);
+  return !SHELL_METACHAR_RE.test(suffix);
 }
 
 function findCommandIndex(chainSteps: string[], expected: string): number {

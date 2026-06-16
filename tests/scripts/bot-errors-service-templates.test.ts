@@ -657,4 +657,134 @@ describe('BOT ERRORS service templates', () => {
     expect(service).toContain('Environment="BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS=4"');
     expect(readFileSync(path.join(home, 'systemctl.log'), 'utf8')).toContain('enable --now com.bot-errors.gui-session-monitor.timer');
   });
+
+  // A1: label path-traversal regression tests
+  it('rejects path-traversal label in install-bot-errors-launchd.sh before writing any plist', () => {
+    const home = makeTempRoot('whatsoup-label-traversal-main-');
+    const shimDir = makeTempRoot('whatsoup-label-traversal-main-shims-');
+    const profile = path.join(home, 'health-profile.json');
+    const envFile = path.join(home, 'bot-errors.env');
+    const repoRoot = path.join(home, 'repo');
+    const jid = 'fixture-label-traversal@g.us';
+    const socket = path.join(home, 'whatsoup.sock');
+    const db = path.join(home, 'bot.sqlite');
+    const traversalLabel = '../../../../tmp/whatsoup-traversal-poc';
+
+    writeFileSync(profile, '{}\n', 'utf8');
+    writeFakeBotErrorsRepo(repoRoot);
+    writeFileSync(envFile, [
+      `BOT_ERRORS_JID=${jid}`,
+      `BOT_ERRORS_EXPECTED_JID=${jid}`,
+      `BOT_ERRORS_SOCKET_PATH=${socket}`,
+      `BOT_ERRORS_SOCKET=${socket}`,
+      `BOT_ERRORS_DB=${db}`,
+      `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
+      '',
+    ].join('\n'), 'utf8');
+    writeLaunchdShims(shimDir);
+
+    const result = spawnSync('bash', ['deploy/scripts/install-bot-errors-launchd.sh'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+        BOT_ERRORS_LABEL_PREFIX: traversalLabel,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status, `install-bot-errors-launchd.sh accepted traversal label\n${result.stdout}\n${result.stderr}`).toBe(2);
+    expect(result.stderr).toMatch(/invalid.*label/i);
+    expect(existsSync('/tmp/whatsoup-traversal-poc.plist')).toBe(false);
+    expect(existsSync(path.join(home, 'launchctl.log'))).toBe(false);
+  });
+
+  it('rejects path-traversal label in install-bot-errors-health-launchd.sh before writing any plist', () => {
+    const home = makeTempRoot('whatsoup-label-traversal-health-');
+    const shimDir = makeTempRoot('whatsoup-label-traversal-health-shims-');
+    const profile = path.join(home, 'health-profile.json');
+    const envFile = path.join(home, 'bot-errors.env');
+    const repoRoot = path.join(home, 'repo');
+    const jid = 'fixture-label-traversal-health@g.us';
+    const socket = path.join(home, 'whatsoup.sock');
+    const db = path.join(home, 'bot.sqlite');
+    const traversalLabel = '../../../../tmp/whatsoup-traversal-poc';
+
+    writeFileSync(profile, '{}\n', 'utf8');
+    writeFakeBotErrorsRepo(repoRoot);
+    writeFileSync(envFile, [
+      `BOT_ERRORS_JID=${jid}`,
+      `BOT_ERRORS_EXPECTED_JID=${jid}`,
+      `BOT_ERRORS_SOCKET_PATH=${socket}`,
+      `BOT_ERRORS_SOCKET=${socket}`,
+      `BOT_ERRORS_DB=${db}`,
+      `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
+      '',
+    ].join('\n'), 'utf8');
+    writeLaunchdShims(shimDir);
+
+    const result = spawnSync('bash', ['deploy/scripts/install-bot-errors-health-launchd.sh'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+        BOT_ERRORS_HEALTH_LABEL: traversalLabel,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status, `install-bot-errors-health-launchd.sh accepted traversal label\n${result.stdout}\n${result.stderr}`).toBe(2);
+    expect(result.stderr).toMatch(/invalid.*label/i);
+    expect(existsSync('/tmp/whatsoup-traversal-poc.plist')).toBe(false);
+    expect(existsSync(path.join(home, 'launchctl.log'))).toBe(false);
+  });
+
+  it('rejects path-traversal label in install-bot-errors-gui-monitor-launchd.sh before writing any plist', () => {
+    const home = makeTempRoot('whatsoup-label-traversal-gui-');
+    const shimDir = makeTempRoot('whatsoup-label-traversal-gui-shims-');
+    const envFile = path.join(home, 'bot-errors.env');
+    const repoRoot = path.join(home, 'repo');
+    const traversalLabel = '../../../../tmp/whatsoup-traversal-poc';
+
+    writeFakeGuiMonitorRepo(repoRoot);
+    writeFileSync(envFile, 'BOT_ERRORS_EXPECTED_FLEET=/private/fleet.json\n', 'utf8');
+    writeShim(shimDir, 'fake-python', [
+      '#!/usr/bin/env bash',
+      'echo "$@" >> "$HOME/python.log"',
+      'exit 0',
+      '',
+    ].join('\n'));
+    writeShim(shimDir, 'systemctl', [
+      '#!/usr/bin/env bash',
+      'echo "$@" >> "$HOME/systemctl.log"',
+      'exit 0',
+      '',
+    ].join('\n'));
+
+    const result = spawnSync('bash', [guiMonitorInstaller], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        BOT_ERRORS_REPO_ROOT: repoRoot,
+        BOT_ERRORS_ENV_FILE: envFile,
+        BOT_ERRORS_PYTHON: path.join(shimDir, 'fake-python'),
+        BOT_ERRORS_GUI_MONITOR_LABEL: traversalLabel,
+      },
+      encoding: 'utf8',
+    });
+
+    expect(result.status, `install-bot-errors-gui-monitor-launchd.sh accepted traversal label\n${result.stdout}\n${result.stderr}`).toBe(2);
+    expect(result.stderr).toMatch(/invalid.*label/i);
+    expect(existsSync('/tmp/whatsoup-traversal-poc.plist')).toBe(false);
+    expect(existsSync(path.join(home, 'launchctl.log'))).toBe(false);
+    expect(existsSync(path.join(home, 'systemctl.log'))).toBe(false);
+  });
 });
