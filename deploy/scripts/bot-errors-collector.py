@@ -907,9 +907,59 @@ def remote_failure_context(host: str, error: str = "") -> tuple[list[str], dict[
     return lines, diagnostics
 
 
+def reachability_probe_port() -> int:
+    """SSH port used by the offline-confirmation TCP probe. 0 disables probing."""
+    raw = os.environ.get("BOT_ERRORS_REACHABILITY_PROBE_PORT", "22")
+    try:
+        return int(raw)
+    except ValueError:
+        return 22
+
+
+def reachability_probe_timeout() -> float:
+    raw = os.environ.get("BOT_ERRORS_REACHABILITY_PROBE_TIMEOUT_SECONDS", "2")
+    try:
+        return max(float(raw), 0.1)
+    except ValueError:
+        return 2.0
+
+
+def tcp_probe_reachable(summary: dict[str, Any]) -> bool:
+    """Best-effort TCP connect to the peer's SSH port across its Tailscale IPs.
+
+    Tailscale's ``Online`` field reflects the coordination server's view, which can
+    transiently flip a peer to ``False`` during a control-plane / DERP reconnect
+    even while the direct peer-to-peer path is still up. A successful TCP connect
+    proves the path is live, so we must NOT declare the host unreachable on the
+    control-plane flag alone. Set ``BOT_ERRORS_REACHABILITY_PROBE_PORT=0`` to
+    disable the probe (restores trust-the-flag behaviour).
+    """
+    port = reachability_probe_port()
+    if port <= 0:
+        return False
+    ips = summary.get("tailscaleIPs")
+    if not isinstance(ips, list):
+        return False
+    timeout = reachability_probe_timeout()
+    for ip in ips:
+        if not isinstance(ip, str) or not ip:
+            continue
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def preflight_remote_unreachable(host: str) -> dict[str, Any] | None:
     tailscale = tailscale_peer_summary(host)
     if tailscale.get("status") == "found" and tailscale.get("online") is False:
+        # Control plane reports offline — confirm with a fast TCP probe before
+        # skipping SSH, so a transient Tailscale flip does not page a false
+        # CRITICAL across every still-reachable host.
+        if tcp_probe_reachable(tailscale):
+            return None
         return tailscale
     return None
 
