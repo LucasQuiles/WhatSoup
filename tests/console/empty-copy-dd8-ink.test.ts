@@ -25,8 +25,8 @@ describe('DD-8 empty and paused state copy carries secondary ink', () => {
     for (const selector of ['.feed-empty', '.feed-toolbar__pause']) {
       const body = cssRuleBody(selector)
 
-      expect(body).toContain('color: var(--color-t4);')
-      expect(body).not.toContain('color: var(--color-t5);')
+      expect(body).toContain('color: var(--text-2);')
+      expect(body).not.toContain('color: var(--text-3);')
     }
   })
 
