@@ -72,7 +72,11 @@ export type ProviderFailureKind =
   | 'auth-required'
   | 'model-unavailable'
   | 'policy-block'
-  | 'context-overflow';
+  | 'context-overflow'
+  // Transient backend / overload (HTTP 5xx, 529 overloaded_error, "Service
+  // temporarily unavailable"). Terminal for the turn but recoverable on retry —
+  // arms fallback so the user gets continuity, with a deterministic retry timer.
+  | 'server-error';
 
 /**
  * SSOT registry of the terminal limit-name tokens the agent provider CLI emits.
@@ -298,6 +302,68 @@ export function isProviderModelUnavailableMessage(text: string): boolean {
   );
 }
 
+/**
+ * Detect transient provider server-side failures: HTTP 5xx, Anthropic's 529
+ * overloaded_error, and the friendly compaction/result variants the CLI emits.
+ * These are turn-terminal but recoverable on retry — they arm fallback so the
+ * user sees continuity instead of silence, with a deterministic retry timer.
+ *
+ * Ordering: classifyProviderFailure() puts server-error AFTER usage/rate/auth so
+ * a 5xx that's actually a quota/auth-tagged response is classified by its richer
+ * meaning first.
+ */
+export function isProviderServerErrorMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (
+    lower.includes('_service temporarily unavailable') ||
+    lower.includes('service temporarily unavailable') ||
+    lower.includes('_service error (') ||
+    lower.includes('overloaded_error') ||
+    lower.includes('api_error') ||
+    lower.includes('server_error') ||
+    lower.includes('server_unavailable') ||
+    // "We are experiencing high demand for <model>" — backend capacity message.
+    lower.includes('experiencing high demand for')
+  ) return true;
+  // Bare HTTP status — matches 500/502/503/504/529 with a word boundary so it
+  // does not collide with body text like "500 tokens" or "529ms".
+  return /\b(50[0-9]|529)\b/.test(lower) && (
+    lower.includes('http') ||
+    lower.includes('status') ||
+    lower.includes('error') ||
+    lower.includes('overload')
+  );
+}
+
+/**
+ * Detect the harness's TRANSPARENCY notice that it auto-switched the active
+ * model (e.g. "Switched to Opus 4.7 due to high demand for Opus 4.8"). This is
+ * NOT a failure — the harness recovered locally — but the user should see it so
+ * they understand which model is currently answering. Surface to the conversation
+ * for visibility; do NOT arm fallback.
+ */
+export interface AutoSwitchNotice { from: string | null; to: string; reason: string }
+export function detectAutoSwitchNotice(text: string): AutoSwitchNotice | null {
+  // The CLI emits two compatible forms:
+  //   "Switched to <to> due to high demand for <from>"
+  //   "(You're) Now using <to> · resets <time>"
+  // Anchored on the literal verbs at start-of-line / start-of-text so ordinary
+  // mid-sentence usage ("Now using opus is the default…") never matches.
+  const switched = text.match(/(?:^|\n|\s)Switched to (?<to>[^·\n]+?) due to high demand for (?<from>[^\n·]+?)(?:\s*·|\s*$|\.\s*$|\.\s+(?=[A-Z]))/i);
+  if (switched?.groups) {
+    return {
+      from: switched.groups.from.trim(),
+      to: switched.groups.to.trim(),
+      reason: 'high-demand',
+    };
+  }
+  const nowUsing = text.match(/(?:^|\n)(?:You're n|N)ow using (?<to>[^·\n]+?)\s*·/);
+  if (nowUsing?.groups) {
+    return { from: null, to: nowUsing.groups.to.trim(), reason: 'auto-routed' };
+  }
+  return null;
+}
+
 export function classifyProviderFailure(text: string): ProviderFailureKind | null {
   if (!text) return null;
   if (isPromptTooLongMessage(text)) return 'context-overflow';
@@ -306,6 +372,7 @@ export function classifyProviderFailure(text: string): ProviderFailureKind | nul
   if (isRateLimitResultMessage(text)) return 'rate-limit';
   if (isProviderPolicyBlockMessage(text)) return 'policy-block';
   if (isProviderModelUnavailableMessage(text)) return 'model-unavailable';
+  if (isProviderServerErrorMessage(text)) return 'server-error';
   return null;
 }
 
@@ -314,6 +381,7 @@ const FALLBACK_PROVIDER_FAILURE_KINDS: ReadonlySet<ProviderFailureKind> = new Se
   'rate-limit',
   'auth-required',
   'model-unavailable',
+  'server-error',
 ]);
 
 export function providerFailureArmsFallback(kind: ProviderFailureKind): boolean {
