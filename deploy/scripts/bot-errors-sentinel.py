@@ -1388,20 +1388,26 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
 
     state["lastFleetAction"] = fleet_action
     state["lastReachabilityOracle"] = oracle
+    # Advance a generation counter so workers can detect stale events.
+    state["cycleSeq"] = int_or_zero(state.get("cycleSeq")) + 1
     action_events = emit_action_events(results, state, config, now, controller_host, fleet_action, oracle)
-    save_state(config, state)
-    result = {
-        "schemaVersion": 1,
-        "checkedAt": now_iso(now),
-        "controllerHost": controller_host,
-        "fleetAction": fleet_action,
-        "reachabilityOracle": oracle,
-        "hosts": results,
-        "actionEvents": action_events,
-        "statePath": str(state_path(config)),
-    }
-    result["heartbeatPath"] = save_central_heartbeat(config, result)
-    return result
+    try:
+        result = {
+            "schemaVersion": 1,
+            "checkedAt": now_iso(now),
+            "controllerHost": controller_host,
+            "fleetAction": fleet_action,
+            "reachabilityOracle": oracle,
+            "hosts": results,
+            "actionEvents": action_events,
+            "statePath": str(state_path(config)),
+            "cycleSeq": state["cycleSeq"],
+        }
+        result["heartbeatPath"] = save_central_heartbeat(config, result)
+        return result
+    finally:
+        # Guarantee state is persisted even if save_central_heartbeat raises.
+        save_state(config, state)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

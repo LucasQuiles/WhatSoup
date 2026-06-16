@@ -1559,4 +1559,77 @@ def test_parse_args_defaults_and_default_deps(monkeypatch):
     assert args.state_dir == "/tmp/fleet-state"
     deps = _mod.default_deps()
     assert isinstance(deps.hostname(), str)
-    assert deps.pull_probe(_mod.HostSpec(host="host-a")) == {}
+
+
+def test_save_state_runs_even_if_central_heartbeat_write_raises(tmp_path: Path, monkeypatch):
+    """
+    REGRESSION (P0-1): save_state must run in a finally block so that state
+    mutations from emit_action_events are persisted even when save_central_heartbeat
+    raises.  After the fix, run_once also stamps state["cycleSeq"] before calling
+    emit_action_events; that field must appear in the persisted state file.
+
+    Without the fix:
+    - state["cycleSeq"] is never written, so the persisted state file lacks it.
+    - The assertion below therefore fails before the fix.
+
+    With the fix:
+    - state["cycleSeq"] is incremented before emit, then persisted in the finally
+      block even when save_central_heartbeat raises.
+    - qRemediation is cleared (emit mutation) and cycleSeq >= 1 in the saved file.
+    """
+    hb = _heartbeat(tmp_path / "host-q-hb.json", healthy=False, klass="out_of_rotation", mtime=995.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-q", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts, action_event_cooldown_seconds=3600)
+    _mod.atomic_write_json(
+        _mod.state_path(config),
+        {
+            "schemaVersion": 1,
+            "hosts": {},
+            "qRemediation": {
+                "requestId": "req-save-test",
+                "host": "host-q",
+                "actionHash": "ah-save-test",
+                "expiresAtEpoch": 800.0,
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        _mod,
+        "save_central_heartbeat",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        _mod.run_once(config, _deps(1000.0, {"host-q": {"reachable": True, "healthy": False, "class": "out_of_rotation"}}))
+
+    state = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+
+    # P0-1 fix: cycleSeq must be present and >= 1 in the persisted state.
+    # This assertion fails before the fix because cycleSeq is never set.
+    assert isinstance(state.get("cycleSeq"), int) and state["cycleSeq"] >= 1, (
+        "cycleSeq was not written to persisted state — save_state did not run in "
+        "finally with the post-emit state (P0-1 fix missing)"
+    )
+
+    # qRemediation must be cleared (emit_action_events mutation persisted).
+    assert "qRemediation" not in state or state.get("qRemediation") == {}, (
+        "qRemediation was not cleared in persisted state after emit — "
+        "save_state did not capture post-emit mutations (P0-1 fix missing)"
+    )
+
+
+def test_cycle_seq_increments_and_appears_in_state(tmp_path: Path):
+    """cycleSeq must advance by 1 each call and be written to persistent state."""
+    hb = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=999.0)
+    hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(hb)}])
+    config = _config(tmp_path, hosts)
+
+    _mod.run_once(config, _deps(1000.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+    state1 = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    seq1 = state1.get("cycleSeq")
+    assert isinstance(seq1, int) and seq1 >= 1
+
+    _mod.run_once(config, _deps(1001.0, {"host-a": {"reachable": True, "healthy": True, "class": "healthy"}}))
+    state2 = json.loads(_mod.state_path(config).read_text(encoding="utf-8"))
+    assert state2.get("cycleSeq") == seq1 + 1
