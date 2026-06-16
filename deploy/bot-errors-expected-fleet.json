@@ -22,6 +22,7 @@
       "host": "mwlab",
       "role": "bot-host",
       "guiSessionExpected": "always_aqua",
+      "privateMonitorOverrideRequired": true,
       "profile": "mwlab.json",
       "collectorRemote": true,
       "instances": [

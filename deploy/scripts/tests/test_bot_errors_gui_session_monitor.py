@@ -1025,3 +1025,107 @@ def test_missing_policy_non_launchagent_still_excluded(mod):
               instances=[_inst("primary", service="whatsoup-primary.service")]),
     ]}
     assert mod.gui_targets_from_fleet(fleet) == []
+
+
+# ---------------------------------------------------------------------------
+# Test 21: public sanitized manifests must not arm private-label monitors
+# without a hub-private expected-fleet override.
+# ---------------------------------------------------------------------------
+
+
+def test_private_monitor_override_not_required_by_default(mod):
+    fleet = {"hosts": [
+        _host("botbox", role="bot-host", policy="always_aqua",
+              instances=[_inst("x-bot")]),
+    ]}
+    assert mod.private_monitor_override_required_count(fleet) == 0
+    assert mod.private_override_contract_error(fleet, expected_fleet_override="") is None
+
+
+def test_private_monitor_override_required_marker_counts_hosts(mod):
+    fleet = {"hosts": [
+        {
+            **_host("sanitized-box", role="bot-host", policy="always_aqua",
+                    instances=[_inst("placeholder-a")]),
+            "privateMonitorOverrideRequired": True,
+        },
+    ]}
+    assert mod.private_monitor_override_required_count(fleet) == 1
+
+
+def test_private_monitor_override_missing_fails_closed(mod):
+    fleet = {"hosts": [
+        {
+            **_host("sanitized-box", role="bot-host", policy="always_aqua",
+                    instances=[_inst("placeholder-a")]),
+            "privateMonitorOverrideRequired": True,
+        },
+    ]}
+    error = mod.private_override_contract_error(fleet, expected_fleet_override="")
+    assert error is not None
+    assert "BOT_ERRORS_EXPECTED_FLEET" in error
+
+
+def test_private_monitor_override_inside_repo_fails_closed(mod):
+    fleet = {"hosts": [
+        {
+            **_host("sanitized-box", role="bot-host", policy="always_aqua",
+                    instances=[_inst("placeholder-a")]),
+            "privateMonitorOverrideRequired": True,
+        },
+    ]}
+    error = mod.private_override_contract_error(
+        fleet,
+        expected_fleet_override=str(mod.REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"),
+    )
+    assert error is not None
+    assert "outside the repo root" in error
+
+
+def test_private_monitor_override_outside_repo_passes(mod, tmp_path):
+    fleet = {"hosts": [
+        {
+            **_host("sanitized-box", role="bot-host", policy="always_aqua",
+                    instances=[_inst("placeholder-a")]),
+            "privateMonitorOverrideRequired": True,
+        },
+    ]}
+    private_file = tmp_path / "expected-fleet.private.json"
+    private_file.write_text("{}", encoding="utf-8")
+    assert (
+        mod.private_override_contract_error(
+            fleet,
+            expected_fleet_override=str(private_file),
+        )
+        is None
+    )
+
+
+def test_config_check_fails_closed_when_private_override_missing(mod, tmp_path, monkeypatch, capsys):
+    fleet_file = tmp_path / "expected-fleet.public.json"
+    fleet_file.write_text(
+        """{"hosts":[{"host":"sanitized-box","role":"bot-host","guiSessionExpected":"always_aqua","privateMonitorOverrideRequired":true,"instances":[{"name":"placeholder-a","service":"com.whatsoup.placeholder-a","port":9090}]}]}""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.delenv("BOT_ERRORS_EXPECTED_FLEET", raising=False)
+
+    assert mod.config_check() == 2
+    captured = capsys.readouterr()
+    assert "private expected-fleet override required" in captured.err
+
+
+def test_config_check_passes_private_override_without_ssh_or_state(mod, tmp_path, monkeypatch, capsys):
+    fleet_file = tmp_path / "expected-fleet.private.json"
+    fleet_file.write_text(
+        """{"hosts":[{"host":"sanitized-box","role":"bot-host","guiSessionExpected":"always_aqua","privateMonitorOverrideRequired":true,"instances":[{"name":"real-bot","service":"com.whatsoup.real-bot","port":9090}]}]}""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "fleet_path", lambda: fleet_file)
+    monkeypatch.setenv("BOT_ERRORS_EXPECTED_FLEET", str(fleet_file))
+    monkeypatch.setattr(mod, "resolve_expected_user", lambda host: (_ for _ in ()).throw(AssertionError("config check must not resolve SSH users")))
+    monkeypatch.setattr(mod, "save_state", lambda state: (_ for _ in ()).throw(AssertionError("config check must not write state")))
+
+    assert mod.config_check() == 0
+    captured = capsys.readouterr()
+    assert "gui-session-monitor config ok" in captured.out

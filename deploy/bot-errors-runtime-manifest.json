@@ -168,7 +168,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "75edc59aecb6477c9ca98ef7a6bcb1382e4db275e4fac74242979469a6546db1",
+      "sha256": "04ce1f79bd67b1c7face27c01850a1b27f9e4c1126e17c62fa07e7ddb67ebbf5",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -179,17 +179,24 @@
         "classify_with_reboot",
         "post_reboot_regression",
         "build_emit_argv",
-        "gui_session_monitor"
+        "gui_session_monitor",
+        "privateMonitorOverrideRequired",
+        "private_override_contract_error",
+        "config_check"
       ]
     },
     {
       "path": "deploy/scripts/install-bot-errors-gui-monitor-launchd.sh",
-      "sha256": "224b48e22ce7df6d60151c0e9d7d0558206c551546392616751fef985df2baea",
+      "sha256": "2241c5965be94b3fb8f0d8da3db23005f8bb88e7d30a6081bc684bb435dd3e9a",
       "mustContain": [
+        "read_env_value",
+        "env_or_default",
+        "run_config_check",
         "render_systemd_timer",
         "render_launchd_plist",
         "bot-errors-gui-session-monitor.py",
-        "--dry-run"
+        "--dry-run",
+        "--config-check"
       ]
     }
   ]

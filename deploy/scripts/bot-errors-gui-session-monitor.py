@@ -297,6 +297,11 @@ KNOWN_GUI_SESSION_POLICIES = frozenset(
 # Declared policies that explicitly EXCLUDE a target from GUI-session monitoring.
 _EXCLUDING_POLICIES = (POLICY_HEADLESS_OK, POLICY_NOT_APPLICABLE)
 
+# Public manifests may use sanitized placeholder labels for private hosts. Those
+# hosts must declare this marker and provide their live labels via a hub-private
+# BOT_ERRORS_EXPECTED_FLEET file outside the repo root before the monitor probes.
+PRIVATE_MONITOR_OVERRIDE_REQUIRED_KEY = "privateMonitorOverrideRequired"
+
 
 def policy_for_target(host_entry: dict, instance: dict):
     """Resolve the declared ``guiSessionExpected`` policy for a host/instance.
@@ -373,6 +378,67 @@ def gui_targets_from_fleet(fleet: dict) -> list[dict]:
             name = _norm(instance.get("name")) or label
             targets.append({"host": host, "instance": name, "label": label})
     return targets
+
+
+def private_monitor_override_required_count(fleet: dict) -> int:
+    """Count hosts that require a hub-private expected-fleet override.
+
+    This carries no live labels. It lets the public SSOT mark "the checked-in
+    labels are sanitized; do not arm from this file" without committing private
+    service names.
+    """
+    hosts = fleet.get("hosts")
+    if not isinstance(hosts, list):
+        return 0
+    return sum(
+        1
+        for host_entry in hosts
+        if isinstance(host_entry, dict)
+        and host_entry.get(PRIVATE_MONITOR_OVERRIDE_REQUIRED_KEY) is True
+    )
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        return path.expanduser().resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
+def private_override_contract_error(
+    fleet: dict,
+    *,
+    expected_fleet_override: str | None = None,
+) -> str | None:
+    """Return a fail-closed config error when a private override is required.
+
+    If any public manifest host declares privateMonitorOverrideRequired, the
+    monitor must be launched with BOT_ERRORS_EXPECTED_FLEET pointing to a
+    hub-private JSON file outside the repository. Otherwise it would probe
+    sanitized placeholder labels and create false health evidence.
+    """
+    required_count = private_monitor_override_required_count(fleet)
+    if required_count == 0:
+        return None
+
+    raw_override = (
+        os.environ.get("BOT_ERRORS_EXPECTED_FLEET", "")
+        if expected_fleet_override is None
+        else expected_fleet_override
+    )
+    override = _norm(raw_override)
+    if not override:
+        return (
+            f"private expected-fleet override required for {required_count} host(s); "
+            "set BOT_ERRORS_EXPECTED_FLEET to a hub-private JSON path outside the repo"
+        )
+
+    if _path_is_under(Path(override), REPO_ROOT):
+        return (
+            "BOT_ERRORS_EXPECTED_FLEET must point outside the repo root when "
+            "private monitor overrides are required"
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -559,6 +625,33 @@ def load_fleet() -> dict:
         return {}
 
 
+def config_check() -> int:
+    """Validate monitor configuration without probing hosts or writing state."""
+    path = fleet_path()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"expected fleet file is not readable JSON: {path}: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(data, dict):
+        print(f"expected fleet file must contain a JSON object: {path}", file=sys.stderr)
+        return 2
+
+    private_override_error = private_override_contract_error(data)
+    if private_override_error is not None:
+        print(private_override_error, file=sys.stderr)
+        return 2
+
+    targets = gui_targets_from_fleet(data)
+    if not targets:
+        print(f"expected fleet file has no GUI-session monitor targets: {path}", file=sys.stderr)
+        return 2
+
+    print(f"gui-session-monitor config ok: expected_fleet={path} targets={len(targets)}")
+    return 0
+
+
 def state_path() -> Path:
     raw = os.environ.get("BOT_ERRORS_GUI_MONITOR_STATE", "").strip()
     if raw:
@@ -701,6 +794,10 @@ def emit_event(emit_argv: list[str], *, dry_run: bool) -> int:
 def run_once(*, dry_run: bool) -> int:
     threshold = default_failure_threshold()
     fleet = load_fleet()
+    private_override_error = private_override_contract_error(fleet)
+    if private_override_error is not None:
+        print(private_override_error, file=sys.stderr)
+        return 2
     targets = gui_targets_from_fleet(fleet)
     state = load_state()
     exit_code = 0
@@ -750,11 +847,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--once", action="store_true",
         help="Run a single cycle (default; reserved for future loop mode).",
     )
+    parser.add_argument(
+        "--config-check", action="store_true",
+        help="Validate monitor config only; do not SSH, write state, or emit events.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    if args.config_check:
+        return config_check()
     return run_once(dry_run=args.dry_run)
 
 
