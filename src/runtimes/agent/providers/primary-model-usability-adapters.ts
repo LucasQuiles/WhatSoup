@@ -132,6 +132,7 @@ function mapCliProbeResult(result: BinaryAuthStatusResult): BinaryModelProbeResu
       return { status: 'provider_unavailable' };
     case 'context-overflow':
     case 'policy-block':
+    case 'transient-network':
       return { status: 'unknown', reason: kind };
     case null:
       return result.output.trim()

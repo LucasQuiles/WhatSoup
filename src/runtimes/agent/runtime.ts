@@ -5258,6 +5258,21 @@ export class AgentRuntime implements Runtime {
             session?.shutdown();
             break;
           }
+          // Transient streaming-socket drop — recoverable, next message respawns the session.
+          // Suppress raw provider text; emit a generic notice and a WARNING (not CRITICAL) alert.
+          if (providerFailureKind === 'transient-network') {
+            recordTurnFailure(providerFailureKind);
+            log.warn({ chatJid: queue.targetChatJid, textPreview: event.text.slice(0, 300) }, 'transient provider connection drop — session will recover on next message');
+            emitAlertChecked(
+              this.instanceName,
+              'provider_transient_network',
+              'Transient provider connection drop (recoverable)',
+              event.text.slice(0, 400),
+              'warning',
+            );
+            queue.enqueueText(this.providerUnknownTerminalNotice());
+            break;
+          }
           if (!wasSilentCompact) {
             if (event.isError) {
               recordTurnFailure('unknown-terminal');
@@ -8690,6 +8705,22 @@ export class AgentRuntime implements Runtime {
               clearCurrentInboundSeq: true,
             });
             this.session?.shutdown();
+            break;
+          }
+          // Transient streaming-socket drop — recoverable, next message respawns the session.
+          // Suppress raw provider text; emit a generic notice and a WARNING (not CRITICAL) alert.
+          if (providerFailureKind === 'transient-network') {
+            recordTurnFailure(providerFailureKind);
+            log.warn({ chatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid, textPreview: event.text.slice(0, 300) }, 'transient provider connection drop — session will recover on next message');
+            emitAlertChecked(
+              this.instanceName,
+              'provider_transient_network',
+              'Transient provider connection drop (recoverable)',
+              event.text.slice(0, 400),
+              'warning',
+            );
+            queue.enqueueText(this.providerUnknownTerminalNotice());
+            this.singleTurnHadToolActivity = false;
             break;
           }
           if (!wasSilentCompact) {

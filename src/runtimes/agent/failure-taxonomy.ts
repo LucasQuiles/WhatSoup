@@ -76,7 +76,11 @@ export type ProviderFailureKind =
   // Transient backend / overload (HTTP 5xx, 529 overloaded_error, "Service
   // temporarily unavailable"). Terminal for the turn but recoverable on retry —
   // arms fallback so the user gets continuity, with a deterministic retry timer.
-  | 'server-error';
+  | 'server-error'
+  // Transient provider streaming-socket drop (ECONNRESET, socket hang up, etc.).
+  // Terminal for the turn but recoverable — the next inbound message respawns the
+  // session. Does NOT arm fallback (no provider-level action needed).
+  | 'transient-network';
 
 /**
  * SSOT registry of the terminal limit-name tokens the agent provider CLI emits.
@@ -364,6 +368,40 @@ export function detectAutoSwitchNotice(text: string): AutoSwitchNotice | null {
   return null;
 }
 
+/**
+ * Detect transient provider streaming-socket drops that are terminal for the
+ * turn but immediately recoverable — the next inbound message respawns the
+ * session, so these must NOT page CRITICAL or arm fallback.
+ *
+ * Anchored on literal socket/connection/errno tokens so that ordinary
+ * discussion of connection handling ("document how socket timeouts and
+ * connection resets are handled") never matches. Mirrors the false-positive
+ * guards in isRateLimitResultMessage and isProviderModelUnavailableMessage
+ * (anchor on a known-error verb/token, not on ambient prose words).
+ *
+ * ETIMEDOUT requires a connection/socket context word alongside it to avoid
+ * matching generic "request timed out" messages that should fall through to
+ * server-error classification.
+ */
+export function isTransientProviderConnectionMessage(text: string): boolean {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  if (
+    lower.includes('socket connection was closed unexpectedly') ||
+    lower.includes('socket hang up') ||
+    lower.includes('connection closed unexpectedly') ||
+    lower.includes('connection reset by peer') ||
+    lower.includes('econnreset')
+  ) return true;
+  // ETIMEDOUT only in a connection/socket context to avoid swallowing generic
+  // request-timeout messages (those are server-error territory).
+  if (
+    lower.includes('etimedout') &&
+    (lower.includes('socket') || lower.includes('connect') || lower.includes('peer'))
+  ) return true;
+  return false;
+}
+
 export function classifyProviderFailure(text: string): ProviderFailureKind | null {
   if (!text) return null;
   if (isPromptTooLongMessage(text)) return 'context-overflow';
@@ -373,6 +411,7 @@ export function classifyProviderFailure(text: string): ProviderFailureKind | nul
   if (isProviderPolicyBlockMessage(text)) return 'policy-block';
   if (isProviderModelUnavailableMessage(text)) return 'model-unavailable';
   if (isProviderServerErrorMessage(text)) return 'server-error';
+  if (isTransientProviderConnectionMessage(text)) return 'transient-network';
   return null;
 }
 

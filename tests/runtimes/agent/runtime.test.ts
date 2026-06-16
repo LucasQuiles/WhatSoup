@@ -3130,6 +3130,40 @@ describe('AgentRuntime', () => {
     });
   });
 
+  it('transient-network (socket-close) is_error result emits provider_transient_network WARNING, not provider_unknown_terminal CRITICAL (single path)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger);
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    const socketText = 'API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()';
+    mockEmitAlert.mockClear();
+    capturedOnEventRef.current!({ type: 'result', text: socketText, isError: true });
+
+    await vi.waitFor(() =>
+      expect(mockEmitAlert).toHaveBeenCalledWith(
+        expect.any(String),
+        'provider_transient_network',
+        'Transient provider connection drop (recoverable)',
+        expect.stringContaining('socket connection was closed unexpectedly'),
+        'warning',
+      ),
+    );
+    // Must NOT emit the CRITICAL unknown-terminal alert
+    const unknownCriticalCall = mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_unknown_terminal');
+    expect(unknownCriticalCall).toBeUndefined();
+    // Raw provider text must not be forwarded to the user
+    const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
+    expect(forwardedRaw).not.toContain(socketText);
+    // A generic notice is sent
+    const allText = mockQueue.enqueueText.mock.calls.map((a) => a[0] as string).join('\n');
+    expect(allText).toMatch(/operator has been notified|try again/i);
+    // Turn capability records transient-network
+    const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
+    expect(turnCapability.lastTurnErrorClass).toBe('transient-network');
+  });
+
   it('non-error result with text is still forwarded (no over-suppression)', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
@@ -5768,6 +5802,69 @@ describe('AgentRuntime', () => {
       skipDurabilityMark: true,
     });
     expect(queue.clearLastOpId).not.toHaveBeenCalled();
+  });
+
+  it('per_chat transient-network (socket-close) result emits provider_transient_network WARNING, not provider_unknown_terminal CRITICAL', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
+    const queue = makeQueueMock('111@s.whatsapp.net');
+    const completeTurn = vi.fn();
+    const session = {
+      clearTurnWatchdog: vi.fn(),
+      shutdown: vi.fn(),
+      getDbRowId: vi.fn(() => 41),
+      getStatus: vi.fn(() => ({ active: true })),
+    };
+    (queue.getLastOpId as ReturnType<typeof vi.fn>).mockReturnValue(77);
+    (runtime as unknown as { durability: { completeTurn: typeof completeTurn } }).durability = { completeTurn };
+    const handleEventWithContext = (
+      runtime as unknown as {
+        handleEventWithContext: (
+          event: AgentEvent,
+          queue: IOutboundQueue,
+          session: {
+            clearTurnWatchdog: ReturnType<typeof vi.fn>;
+            shutdown: ReturnType<typeof vi.fn>;
+            getDbRowId: ReturnType<typeof vi.fn>;
+          } | null,
+          conversationKey?: string,
+          inboundSeq?: number,
+          mapKey?: string,
+          toolScopeKey?: string,
+        ) => void;
+      }
+    ).handleEventWithContext.bind(runtime);
+
+    const socketText = 'API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()';
+    mockEmitAlert.mockClear();
+
+    handleEventWithContext(
+      { type: 'result', text: socketText, isError: true },
+      queue,
+      session,
+      'conv-111',
+      17,
+      '111',
+      '111#session',
+    );
+
+    // Must emit provider_transient_network at warning severity
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      expect.any(String),
+      'provider_transient_network',
+      'Transient provider connection drop (recoverable)',
+      expect.stringContaining('socket connection was closed unexpectedly'),
+      'warning',
+    );
+    // Must NOT emit the CRITICAL unknown-terminal alert
+    const unknownCriticalCall = mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_unknown_terminal');
+    expect(unknownCriticalCall).toBeUndefined();
+    // Raw provider text must not be forwarded
+    const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
+    expect(forwardedRaw).not.toContain(socketText);
+    // Generic user notice is sent
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('operator has been notified'));
   });
 
   it('per_chat system-turn result does not terminate the user inbound seq or disarm its reply guarantee', () => {

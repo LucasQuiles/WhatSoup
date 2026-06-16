@@ -11,6 +11,7 @@ import {
   isProviderModelUnavailableMessage,
   isProviderPolicyBlockMessage,
   isRateLimitResultMessage,
+  isTransientProviderConnectionMessage,
   isUsageLimitMessage,
   providerFailureArmsFallback,
 } from '../../../src/runtimes/agent/failure-taxonomy.ts';
@@ -79,8 +80,30 @@ describe('agent failure taxonomy detectors', () => {
     ['Request blocked by policy.', 'policy-block'],
     ['Unknown model from provider registry.', 'model-unavailable'],
     ['ordinary provider discussion', null],
+    // transient-network cases
+    ['API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()', 'transient-network'],
+    ['Error: ECONNRESET — read ECONNRESET', 'transient-network'],
+    // false-positive guard: benign documentation text must not match
+    ['Please document how socket timeouts and connection resets are handled.', null],
   ] as const)('classifyProviderFailure maps %j to %j', (message, expected) => {
     expect(classifyProviderFailure(message)).toBe(expected);
+  });
+
+  it('isTransientProviderConnectionMessage — true cases', () => {
+    expect(isTransientProviderConnectionMessage('The socket connection was closed unexpectedly.')).toBe(true);
+    expect(isTransientProviderConnectionMessage('API Error: The socket connection was closed unexpectedly. Pass verbose:true')).toBe(true);
+    expect(isTransientProviderConnectionMessage('socket hang up')).toBe(true);
+    expect(isTransientProviderConnectionMessage('connection closed unexpectedly while streaming')).toBe(true);
+    expect(isTransientProviderConnectionMessage('Error: ECONNRESET')).toBe(true);
+    expect(isTransientProviderConnectionMessage('read ECONNRESET')).toBe(true);
+    expect(isTransientProviderConnectionMessage('connection reset by peer')).toBe(true);
+    expect(isTransientProviderConnectionMessage('ETIMEDOUT connecting to api.anthropic.com')).toBe(true);
+  });
+
+  it('isTransientProviderConnectionMessage — false-positive guard: benign prose must not match', () => {
+    expect(isTransientProviderConnectionMessage('Please document how socket timeouts and connection resets are handled.')).toBe(false);
+    expect(isTransientProviderConnectionMessage('ordinary provider discussion')).toBe(false);
+    expect(isTransientProviderConnectionMessage('')).toBe(false);
   });
 
   it('arms fallback only for provider failures that can be recovered by backup providers', () => {
@@ -88,7 +111,7 @@ describe('agent failure taxonomy detectors', () => {
       expect(providerFailureArmsFallback(kind)).toBe(true);
     }
 
-    for (const kind of ['context-overflow', 'policy-block'] as const) {
+    for (const kind of ['context-overflow', 'policy-block', 'transient-network'] as const) {
       expect(providerFailureArmsFallback(kind)).toBe(false);
     }
   });
