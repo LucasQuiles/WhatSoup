@@ -495,7 +495,8 @@ export class HealthPoller {
     try {
       const parsed = await res.json();
       return asRecord(parsed) ?? null;
-    } catch {
+    } catch (err) {
+      log.debug({ err }, 'readHealthBody: JSON parse failed; returning null');
       return null;
     }
   }

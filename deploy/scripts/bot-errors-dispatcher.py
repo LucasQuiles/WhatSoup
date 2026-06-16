@@ -2321,6 +2321,17 @@ def prune_suppressed(paths: dict[str, Path]) -> int:
         return 0
 
     def sort_key(path: Path) -> tuple[int, str]:
+        # Prefer the authoritative in-record suppressedAt timestamp over file
+        # mtime, which is clock-skew / touch-fragile.  Fall back to mtime only
+        # when the field is absent or unparseable (e.g. legacy/malformed files).
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            suppressed_at = raw.get("delivery", {}).get("suppressedAt") if isinstance(raw, dict) else None
+            if isinstance(suppressed_at, str):
+                epoch_ns = int(datetime.fromisoformat(suppressed_at.replace("Z", "+00:00")).timestamp() * 1_000_000_000)
+                return epoch_ns, str(path)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             return path.stat().st_mtime_ns, str(path)
         except OSError:
