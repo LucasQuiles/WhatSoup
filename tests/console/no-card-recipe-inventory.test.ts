@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-// Anti-sprawl guard (DD-38). card.md:60 mandates `card-via-primitive`, but no
-// Card.tsx exists yet — 13 files render the raw `.c-card` CSS recipe directly.
-// This pins those 13 current consumers to an allowlist (tracked migration debt →
-// the future Card primitive, scoped in 06-implementation/card-primitive-build-spec.md)
+// Anti-sprawl guard (DD-38). card.md:60 mandates `card-via-primitive`. As of
+// 2026-06-16 Card.tsx IS built (f315b1a5) and 2 consumers are migrated onto it
+// (ErrorBoundary, LogsTab); 11 files still render the raw `.c-card` CSS recipe.
+// This pins those 11 remaining consumers to an allowlist (tracked migration debt →
+// the Card primitive, scoped in 06-implementation/card-primitive-build-spec.md)
 // and FAILS on any NEW file that reaches for the raw recipe, so new cards cannot
 // bypass the primitive while the existing ones migrate. Migrating a file off
 // `c-card` (good!) makes its entry stale and the honesty test prompts deletion.

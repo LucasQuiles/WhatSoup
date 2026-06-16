@@ -82,6 +82,24 @@ describe('design-token type-ramp definitions (DD-26)', () => {
     expect(defs.get(token)).toBe(value)
   })
 
+  it('every primitives.css --type-* fallback matches its canonical bridge value (no divergence)', () => {
+    // Guards the seg-btn / log-msg class of bug: a `var(--type-X, <fallback>)`
+    // consumer whose inline fallback diverges from the canonical token, so the
+    // wrong weight/font renders whenever the token fails to resolve.
+    const css = stripCssComments(readPrimitivesCss())
+    const divergences: string[] = []
+    for (const [token, canonical] of Object.entries(BRIDGE_TYPE_VALUES)) {
+      const re = new RegExp(`var\\(\\s*${token}\\s*,\\s*([^)]*\\([^)]*\\)[^)]*|[^)]*)\\)`, 'g')
+      for (const m of css.matchAll(re)) {
+        const fallback = m[1].trim().replace(/\s+/g, ' ')
+        if (fallback && fallback !== canonical) {
+          divergences.push(`${token}: fallback "${fallback}" != canonical "${canonical}"`)
+        }
+      }
+    }
+    expect(divergences).toEqual([])
+  })
+
   it('pending spec-only type tokens remain explicit DD-26/DD-37 debt', () => {
     const defs = readPrimitiveTokenDefinitions()
     for (const token of PENDING_SPEC_TOKENS) {

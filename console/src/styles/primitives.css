@@ -1188,7 +1188,7 @@ button.soup-pill[aria-disabled="true"] {
    Note: class-level assertion in tests confirms the wrap policy is applied;
    visual proof that wrapping actually occurs requires a layout engine. */
 .soup-log__msg {
-  font: var(--type-data-sm, 400 11px/16px var(--font-sans));
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
   color: var(--text-1);
   overflow-wrap: anywhere;
   word-break: break-word;
