@@ -24,8 +24,12 @@ import {
 } from './standby-notice.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
-import { ensureHandoffArtifactSchema, getHandoffArtifact } from './handoff-artifact.ts';
-import { buildHandoffPrelude } from './handoff-prelude.ts';
+import { ensureHandoffArtifactSchema, getHandoffArtifact, upsertHandoffArtifact } from './handoff-artifact.ts';
+import { buildHandoffPrelude, type HandoffArtifact } from './handoff-prelude.ts';
+import { HandoffDistillRunner } from './handoff-distill-runner.ts';
+import { buildHandoffDistill } from './handoff-summarizer.ts';
+import { type DistillBudgetConfig } from './handoff-distill-gate.ts';
+import { resolveDistillModel, type ResolvedDistillModel } from './handoff-distill-model.ts';
 import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
@@ -54,6 +58,7 @@ import {
   backfillSessionProvider,
   getSessionTokenSnapshot,
   markSessionCompacted,
+  listActiveSessionRows,
 } from './session-db.ts';
 import {
   ensureFallbackStateSchema,
@@ -223,6 +228,27 @@ const DIAGNOSTIC_BUNDLE_THROTTLE_MS = 60_000;
 // the injected system block. A stale summary misleads the stand-in, so the
 // prelude builder rejects artifacts older than this when composing context.
 const HANDOFF_STALE_MS = 120_000;
+// ── Background handoff-distiller sweep tuning (all gated behind the flag) ──────
+// One periodic sweep enumerates active conversations and asks the runner to
+// (maybe) distill each. The runner+gate own growth/budget/breaker/concurrency,
+// so the interval only sets how often that machinery is consulted.
+const HANDOFF_DISTILL_SWEEP_MS = 60_000;
+// Token growth (since last distill baseline) that makes a conversation eligible
+// for a fresh distill. Below this the runner skips the conversation (no model
+// call). Tuned conservatively so short chats never trigger a summary.
+const HANDOFF_DISTILL_GROWTH_THRESHOLD = 4_000;
+// Trailing messages handed to the summarizer corpus.
+const HANDOFF_DISTILL_VERBATIM_N = 40;
+// Per-conversation + global cost guard for the distiller. Conservative ceilings:
+// the distiller is an unobserved spend surface, so it stays cheap by default.
+const HANDOFF_DISTILL_BUDGET: DistillBudgetConfig = {
+  maxTokensPerWindow: 50_000,
+  maxCallsPerWindow: 6,
+  windowMs: 3_600_000,
+  failureThreshold: 3,
+  breakerCooldownMs: 300_000,
+  globalConcurrency: 2,
+};
 // Opt-in: collapse the fallback notice and the stand-in's reply into ONE
 // user-facing message. When a replay is scheduled the notice is stashed (via the
 // crash-safe standby latch) and prepended to the stand-in's first visible reply
@@ -1483,6 +1509,11 @@ export class AgentRuntime implements Runtime {
   private healthStatsTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceSweepTimer: ReturnType<typeof setInterval> | null = null;
   private queueSweepTimer: ReturnType<typeof setInterval> | null = null;
+  // Background handoff distiller (flag-gated). Both stay null when the flag is
+  // off OR the configured model/key fails to resolve — see start() — so the
+  // sweep does nothing and no runner is constructed.
+  private handoffDistillTimer: ReturnType<typeof setInterval> | null = null;
+  private handoffDistillRunner: HandoffDistillRunner | null = null;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
   // Provider-fallback window: epoch ms until which new sessions route to the
   // fallback provider, or null when the primary provider is active.
@@ -2009,6 +2040,141 @@ export class AgentRuntime implements Runtime {
       AgentRuntime.WORKSPACE_SWEEP_INTERVAL_MS,
     );
     this.workspaceSweepTimer.unref?.();
+  }
+
+  // ── Background handoff distiller production loop ─────────────────────────────
+  // Arms a single periodic unref'd sweep that asks the runner to (maybe) distill
+  // each active conversation. Construction + arming happen ONLY when the flag is
+  // on AND a model/key resolves; otherwise nothing is armed and behaviour is
+  // byte-identical to today. The runner+gate own growth/budget/breaker/global
+  // concurrency, so the timer just sets cadence.
+  private startHandoffDistillSweepTimer(): void {
+    if (!this.handoffDistillerEnabled()) return; // flag off → no runner, no timer
+    if (this.handoffDistillTimer) return; // already armed (idempotent)
+
+    const resolved = resolveDistillModel(this.handoffDistillModel(), process.env);
+    if (!resolved) {
+      // Enabled-but-inert: unknown model or no key. Don't arm — log once so the
+      // misconfiguration is observable, then behave as if disabled.
+      log.warn(
+        { instance: this.instanceName, model: this.handoffDistillModel() ?? null },
+        'handoff distiller enabled but inert: no model/key resolved — sweep not armed',
+      );
+      return;
+    }
+
+    this.handoffDistillRunner = this.buildHandoffDistillRunner(resolved);
+    this.handoffDistillTimer = setInterval(() => void this.sweepHandoffDistill(), HANDOFF_DISTILL_SWEEP_MS);
+    this.handoffDistillTimer.unref?.();
+    log.info(
+      { instance: this.instanceName, provider: resolved.provider, model: resolved.model, sweepMs: HANDOFF_DISTILL_SWEEP_MS },
+      'handoff distiller armed',
+    );
+  }
+
+  /** Construct the production runner. `resolved` is captured for distillFor. */
+  private buildHandoffDistillRunner(resolved: ResolvedDistillModel): HandoffDistillRunner {
+    // Per-conversation token baseline: total input+output since the row's last
+    // compact. The runner compares this against the growth threshold; the gate
+    // bills spend separately, so this only decides eligibility.
+    const tokenGrowth = (conversationKey: string): number => {
+      const rowId = this.handoffDistillRowIdFor(conversationKey);
+      if (rowId === null) return 0;
+      const snap = getSessionTokenSnapshot(this.db, rowId);
+      if (!snap) return 0;
+      const sinceCompact =
+        (snap.totalInputTokens - snap.lastCompactInputTokens) +
+        (snap.totalOutputTokens - snap.lastCompactOutputTokens);
+      return Math.max(0, sinceCompact);
+    };
+
+    const distillFor = (conversationKey: string): Promise<{ summary: string; seededArtifacts: string | null; tokensUsed: number }> => {
+      // Build a fresh distill closure per call so loadMessages reads current
+      // history. buildHandoffDistill throws HandoffSummarizerInertError if the
+      // key vanished; the runner folds any throw as a failure (fail-safe).
+      const run = buildHandoffDistill({
+        model: resolved.model,
+        apiKey: resolved.apiKey,
+        endpoint: resolved.endpoint,
+        conversationKey,
+        loadMessages: () => getRecentMessages(this.db, conversationKey, HANDOFF_DISTILL_VERBATIM_N),
+        redact: (t) => sanitizeProviderPreviewText(t),
+        verbatimN: HANDOFF_DISTILL_VERBATIM_N,
+      });
+      return run().then((o) => ({ summary: o.summary, seededArtifacts: o.seededArtifacts ?? null, tokensUsed: o.tokensUsed }));
+    };
+
+    return new HandoffDistillRunner({
+      config: HANDOFF_DISTILL_BUDGET,
+      now: () => Date.now(),
+      growthThreshold: HANDOFF_DISTILL_GROWTH_THRESHOLD,
+      tokenGrowth,
+      distillFor,
+      persist: (artifact: HandoffArtifact) => upsertHandoffArtifact(this.db, artifact),
+      onDegraded: (conversationKey, reason) => this.onHandoffDistillDegraded(conversationKey, reason),
+      sourceFor: () => ({ provider: resolved.provider, model: resolved.model }),
+    });
+  }
+
+  /** Resolve the active session rowId for a conversation key (or null). */
+  private handoffDistillRowIdFor(conversationKey: string): number | null {
+    for (const row of listActiveSessionRows(this.db)) {
+      if (row.conversationKey === conversationKey) return row.rowId;
+    }
+    return null;
+  }
+
+  /**
+   * One sweep tick: enumerate active conversations and ask the runner to maybe
+   * distill each. Fully best-effort — any throw is caught and swallowed so a
+   * distiller error can never crash a turn or the process.
+   */
+  private async sweepHandoffDistill(): Promise<void> {
+    const runner = this.handoffDistillRunner;
+    if (!runner) return;
+    try {
+      const rows = listActiveSessionRows(this.db);
+      const seen = new Set<string>();
+      for (const { conversationKey } of rows) {
+        if (seen.has(conversationKey)) continue; // dedup multiple rows per chat
+        seen.add(conversationKey);
+        try {
+          await runner.tickConversation(conversationKey);
+        } catch (err) {
+          log.warn(
+            { instance: this.instanceName, conversationKey, err: err instanceof Error ? err.message : String(err) },
+            'handoff distill tick failed (folded, continuing)',
+          );
+        }
+      }
+    } catch (err) {
+      // Enumeration itself failed — swallow; next tick retries.
+      log.warn(
+        { instance: this.instanceName, err: err instanceof Error ? err.message : String(err) },
+        'handoff distill sweep failed (folded)',
+      );
+    }
+  }
+
+  /** Degradation signal from the runner — emit a redacted operational alert. */
+  private onHandoffDistillDegraded(conversationKey: string, reason: string): void {
+    const source = `handoff-distill:${this.instanceName}`;
+    // Reason may echo upstream error text; redact before it leaves the process.
+    const safeReason = sanitizeProviderPreviewText(reason).slice(0, 200);
+    try {
+      emitAlertChecked(
+        this.instanceName,
+        source,
+        'Handoff distiller degraded',
+        [`conversation: ${conversationKey}`, `reason: ${safeReason}`].join('\n'),
+        'warning',
+      );
+    } catch (err) {
+      log.warn(
+        { instance: this.instanceName, conversationKey, err: err instanceof Error ? err.message : String(err) },
+        'failed to emit handoff distiller degraded alert',
+      );
+    }
   }
 
   private sweepIdleQueues(): void {
@@ -3166,6 +3332,7 @@ export class AgentRuntime implements Runtime {
     this.startHealthStatsTimer();
     this.startWorkspaceSweepTimer();
     this.startQueueSweepTimer();
+    this.startHandoffDistillSweepTimer();
 
     // Restore any pending polls from the previous process so votes-in-flight
     // and active AskUserQuestion polls survive a restart. Errors logged inside;
@@ -5639,6 +5806,11 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.queueSweepTimer);
       this.queueSweepTimer = null;
     }
+    if (this.handoffDistillTimer) {
+      clearInterval(this.handoffDistillTimer);
+      this.handoffDistillTimer = null;
+    }
+    this.handoffDistillRunner = null;
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
       this.revertTimer = null;

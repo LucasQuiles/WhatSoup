@@ -205,6 +205,10 @@ type FallbackView = {
   flushPendingHandoffNotice(queue: { targetChatJid: string; enqueueText(text: string): void }): void;
   formatContextLines(messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>): string;
   buildHandoffSystemBlock(conversationKey: string, provider: string): (() => string | null) | undefined;
+  // Background handoff distiller seams.
+  startHandoffDistillSweepTimer(): void;
+  handoffDistillTimer: ReturnType<typeof setInterval> | null;
+  handoffDistillRunner: unknown | null;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -1375,6 +1379,83 @@ describe('handoff context injection (real db)', () => {
       const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
       expect(cb).toBeTypeOf('function');
       expect(cb!()).toBeNull();
+    });
+    db.close();
+  });
+});
+
+describe('AgentRuntime — background handoff distiller arming (flag-gated)', () => {
+  const DISTILLER_FLAG = 'WHATSOUP_HANDOFF_DISTILLER';
+  const MODEL_FLAG = 'WHATSOUP_HANDOFF_DISTILL_MODEL';
+
+  function makeDistillRuntime(): { runtime: AgentRuntime; db: Database } {
+    const config = mockConfigRef();
+    config['agentProvider'] = 'claude-cli';
+    config['agentProviderConfig'] = undefined;
+    config['agentFallbackProvider'] = undefined;
+    config['agentFallbackModel'] = undefined;
+    const db = new Database(':memory:');
+    db.open();
+    ensureHandoffArtifactSchema(db);
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]' });
+    return { runtime, db };
+  }
+
+  /** Run fn with the distiller flag + model env set, restoring prior values. */
+  function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
+    const prev: Record<string, string | undefined> = {};
+    for (const k of Object.keys(env)) prev[k] = process.env[k];
+    for (const [k, val] of Object.entries(env)) {
+      if (val === undefined) delete process.env[k];
+      else process.env[k] = val;
+    }
+    try {
+      fn();
+    } finally {
+      for (const k of Object.keys(env)) {
+        if (prev[k] === undefined) delete process.env[k];
+        else process.env[k] = prev[k];
+      }
+    }
+  }
+
+  it('flag UNSET → arms no sweep timer and constructs no runner (byte-identical)', () => {
+    const { runtime, db } = makeDistillRuntime();
+    const v = view(runtime);
+    withEnv({ [DISTILLER_FLAG]: undefined, [MODEL_FLAG]: 'deepseek-chat', DEEPSEEK_API_KEY: 'sk' }, () => {
+      v.startHandoffDistillSweepTimer();
+      expect(v.handoffDistillTimer).toBeNull();
+      expect(v.handoffDistillRunner).toBeNull();
+    });
+    db.close();
+  });
+
+  it('flag ON but no model/key resolves → enabled-but-inert (no timer, no runner)', () => {
+    const { runtime, db } = makeDistillRuntime();
+    const v = view(runtime);
+    // Known flag, but unknown model id → resolveDistillModel returns null.
+    withEnv({ [DISTILLER_FLAG]: '1', [MODEL_FLAG]: 'gpt-4o-mini', DEEPSEEK_API_KEY: 'sk' }, () => {
+      v.startHandoffDistillSweepTimer();
+      expect(v.handoffDistillTimer).toBeNull();
+      expect(v.handoffDistillRunner).toBeNull();
+    });
+    db.close();
+  });
+
+  it('flag ON with a resolvable model+key → arms the sweep timer and runner (idempotent)', () => {
+    const { runtime, db } = makeDistillRuntime();
+    const v = view(runtime);
+    withEnv({ [DISTILLER_FLAG]: '1', [MODEL_FLAG]: 'deepseek-chat', DEEPSEEK_API_KEY: 'sk-deep' }, () => {
+      v.startHandoffDistillSweepTimer();
+      expect(v.handoffDistillTimer).not.toBeNull();
+      expect(v.handoffDistillRunner).not.toBeNull();
+      // Idempotent: a second call does not re-arm.
+      const timer = v.handoffDistillTimer;
+      v.startHandoffDistillSweepTimer();
+      expect(v.handoffDistillTimer).toBe(timer);
+      // Clean up the armed interval deterministically (it is unref'd anyway).
+      if (v.handoffDistillTimer) clearInterval(v.handoffDistillTimer);
+      v.handoffDistillTimer = null;
     });
     db.close();
   });
