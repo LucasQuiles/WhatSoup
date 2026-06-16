@@ -3435,11 +3435,12 @@ describe('AgentRuntime', () => {
       toolName: 'Bash',
       toolInput: { command: 'npm test' },
     });
+    // Operator-actionable signature (disk exhaustion) — exercises the alert path.
     capturedOnEventRef.current!({
       type: 'tool_result',
       isError: true,
       toolId: 'tool-1',
-      content: 'Exit code 1\ntoken=plain-secret',
+      content: 'ENOSPC: no space left on device\ntoken=plain-secret',
     });
 
     expect(mockEmitAlert).toHaveBeenCalledOnce();
@@ -3476,7 +3477,7 @@ describe('AgentRuntime', () => {
       type: 'tool_result',
       isError: true,
       toolId: 'tool-1',
-      content: 'Exit code 1',
+      content: 'ENOSPC: no space left on device',
     });
     capturedOnEventRef.current!({
       type: 'tool_use',
@@ -3488,11 +3489,41 @@ describe('AgentRuntime', () => {
       type: 'tool_result',
       isError: true,
       toolId: 'tool-2',
-      content: 'Exit code 1',
+      content: 'ENOSPC: no space left on device',
     });
 
     expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledTimes(4);
     expect(mockEmitAlert).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT alert for benign agent-recoverable tool errors (noise gate)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const runtime = new AgentRuntime(db, messenger, 'ana-bot');
+    await runtime.start();
+    await runtime.handleMessage(makeMsg({ content: 'hi' }));
+
+    capturedOnEventRef.current!({
+      type: 'tool_use',
+      toolId: 'tool-1',
+      toolName: 'Bash',
+      toolInput: { command: 'grep -r needle .' },
+    });
+    // zsh glob no-match → claude-cli marks is_error, but it is normal agent flow.
+    capturedOnEventRef.current!({
+      type: 'tool_result',
+      isError: true,
+      toolId: 'tool-1',
+      content: '(eval):1: no matches found: *statement*',
+    });
+
+    // The humanized ToolUpdate is still enqueued for the user/log…
+    expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ category: 'error' }),
+    );
+    // …but no operator alert fires.
+    expect(mockEmitAlert).not.toHaveBeenCalled();
   });
 
   it('tool_result with isError=false does not enqueue anything', async () => {

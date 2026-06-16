@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { classifyToolError } from '../../../src/runtimes/agent/runtime.ts';
+import {
+  classifyToolError,
+  isOperatorActionableToolError,
+  shouldEmitToolFailureAlert,
+} from '../../../src/runtimes/agent/runtime.ts';
 
 describe('classifyToolError', () => {
   // ── Error vs blocked classification ──
@@ -133,5 +137,70 @@ describe('classifyToolError', () => {
   it('falls through to technical detail for unknown patterns', () => {
     const result = classifyToolError('Bash', 'segfault at 0x0');
     expect(result.detail).toBe('Bash — segfault at 0x0');
+  });
+});
+
+describe('isOperatorActionableToolError', () => {
+  // ── Operator-actionable infra/provider-health signatures (DO alert) ──
+
+  it.each([
+    ['disk full (ENOSPC)', 'Error: ENOSPC: no space left on device, write'],
+    ['disk full (phrase)', 'write failed: No space left on device'],
+    ['out of memory (ENOMEM)', 'spawn ENOMEM'],
+    ['out of memory (phrase)', 'FATAL ERROR: Reached heap limit Out of memory'],
+    ['connection refused', 'connect ECONNREFUSED 127.0.0.1:5432'],
+    ['connection reset', 'read ECONNRESET'],
+    ['fetch failed', 'TypeError: fetch failed'],
+    ['socket timeout', 'connect ETIMEDOUT 10.0.0.1:443'],
+    ['provider rate limit', 'Error: rate limit exceeded, retry later'],
+    ['provider overloaded', 'API error: overloaded_error'],
+    ['context window', 'prompt is too long for the context window'],
+    ['context length', 'maximum context length exceeded'],
+    ['max tokens', 'request exceeds max_tokens for this model'],
+  ])('flags %s as operator-actionable', (_label, content) => {
+    expect(isOperatorActionableToolError(content)).toBe(true);
+  });
+
+  it('is case-insensitive', () => {
+    expect(isOperatorActionableToolError('ENOSPC: NO SPACE LEFT ON DEVICE')).toBe(true);
+  });
+
+  // ── Benign agent-recoverable results (do NOT alert) ──
+
+  it.each([
+    ['glob no-match (zsh)', '(eval):1: no matches found: *statement*'],
+    ['grep/glob no matches', 'No matches found'],
+    ['ripgrep no files', 'No files found'],
+    ['bare exit code', 'Exit code 1'],
+    ['missing path', 'ls: /tmp/nope: No such file or directory'],
+    ['failed conditional', 'Exit code 2'],
+    ['edit string miss', 'String to replace not found in file'],
+    ['merge conflict', 'CONFLICT (content): Merge conflict in src/app.ts'],
+    ['opaque command output', 'segfault at 0x0'],
+    ['empty content', ''],
+  ])('treats %s as benign (not operator-actionable)', (_label, content) => {
+    expect(isOperatorActionableToolError(content)).toBe(false);
+  });
+});
+
+describe('shouldEmitToolFailureAlert', () => {
+  it('always emits for blocked category (permission/hook denial)', () => {
+    expect(shouldEmitToolFailureAlert('blocked', 'Exit code 1')).toBe(true);
+    expect(shouldEmitToolFailureAlert('blocked', 'permission denied')).toBe(true);
+  });
+
+  it('always emits for cancelled category', () => {
+    expect(shouldEmitToolFailureAlert('cancelled', 'Cancelled')).toBe(true);
+  });
+
+  it('suppresses error category for benign agent-recoverable results', () => {
+    expect(shouldEmitToolFailureAlert('error', '(eval):1: no matches found: *statement*')).toBe(false);
+    expect(shouldEmitToolFailureAlert('error', 'Exit code 1')).toBe(false);
+    expect(shouldEmitToolFailureAlert('error', 'No matches found')).toBe(false);
+  });
+
+  it('emits error category only when an operator-actionable signature is present', () => {
+    expect(shouldEmitToolFailureAlert('error', 'ENOSPC: no space left on device')).toBe(true);
+    expect(shouldEmitToolFailureAlert('error', 'connect ECONNREFUSED 127.0.0.1:5432')).toBe(true);
   });
 });
