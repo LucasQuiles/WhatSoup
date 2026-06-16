@@ -395,7 +395,7 @@ Disposition vocabulary: **formalized** (concept survives; legacy name aliased to
 | `--text-2xl` | formalized | `--type-data-lg` (KPI value lane) |
 | `--text-{xs,sm,lg,xl}--line-height` (4) | rejected-superseded | leadings are baked into the `--type-*` shorthand ramp |
 
-### 6.6 Tracking (5)
+### 6.6 Tracking (6)
 
 | Legacy | Disposition | v3 target |
 |---|---|---|
@@ -404,6 +404,7 @@ Disposition vocabulary: **formalized** (concept survives; legacy name aliased to
 | `--tracking-pill` | component | Pill component token (0.01em, baked into `.pill` style) |
 | `--tracking-label` | rejected-superseded | labels are sentence-case untracked in v3 |
 | `--tracking-caps` | formalized | overline tracking +0.08em, baked into `--type-overline` usage |
+| `--tracking-wide` | component | expanded uppercase tracking (0.08em) for plugin-category headers (ConfigStep); defined to retire its dangling reference |
 
 ### 6.7 Radius (5)
 
