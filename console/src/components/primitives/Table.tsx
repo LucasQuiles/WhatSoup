@@ -134,6 +134,10 @@ export const TableHeaderCell: FC<TableHeaderCellProps> = ({
     onSort({ key: sortKey, dir: nextSortDir(currentDir) });
   };
 
+  const columnLabel = typeof children === 'string' ? children : String(sortKey ?? 'column');
+  const nextDir = nextSortDir(currentDir);
+  const sortActionLabel = `Sort by ${columnLabel}${nextDir === 'asc' ? ', ascending' : nextDir === 'desc' ? ', descending' : ''}`;
+
   return (
     <th className={thClass} scope="col" aria-sort={ariaSortValue} {...rest}>
       {isSortable ? (
@@ -141,6 +145,7 @@ export const TableHeaderCell: FC<TableHeaderCellProps> = ({
           type="button"
           className="soup-table-th__sort-btn"
           onClick={handleSort}
+          aria-label={sortActionLabel}
           tabIndex={0}
         >
           {children}

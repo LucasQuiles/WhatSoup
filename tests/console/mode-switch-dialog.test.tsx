@@ -262,3 +262,18 @@ describe('ModeSwitchDialog — cancel and dismiss', () => {
     expect(updateConfig).not.toHaveBeenCalled()
   })
 })
+
+describe('ModeSwitchDialog — a11y (selection state)', () => {
+  it('groups the mode options and reflects selection via aria-pressed', () => {
+    const h = makeHarness()
+    renderDialog(h, 'passive')
+
+    expect(screen.getByRole('group', { name: /operating mode/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Passive/ }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: /Chat/ }).getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(screen.getByRole('button', { name: /Chat/ }))
+    expect(screen.getByRole('button', { name: /Chat/ }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: /Passive/ }).getAttribute('aria-pressed')).toBe('false')
+  })
+})
