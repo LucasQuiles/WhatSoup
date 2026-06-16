@@ -92,6 +92,31 @@ describe('parsePinoLine', () => {
     }
   });
 
+  it('uses timestamp, default level, and current-time fallbacks when pino fields are absent', () => {
+    const timestampResult = parsePinoLine(
+      JSON.stringify({ msg: 'session start', timestamp: 1700000000000 }),
+      CTX,
+    );
+    expect(timestampResult).toMatchObject({
+      time: '2023-11-14T22:13:20.000Z',
+      level: 'info',
+      detail: { type: 'session', action: 'session start' },
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-02T03:04:05.000Z'));
+    try {
+      const fallbackResult = parsePinoLine(JSON.stringify({ msg: 'session end' }), CTX);
+      expect(fallbackResult).toMatchObject({
+        time: '2026-01-02T03:04:05.000Z',
+        level: 'info',
+        detail: { type: 'session', action: 'session end' },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('identifies connection error — stream errored out (marked as _streamError for coalescing)', () => {
     const result = parsePinoLine(
       makeLine({ msg: 'stream errored out', fullErrorNode: { tag: 'stream:error', attrs: { code: '408' } } }),
@@ -114,6 +139,16 @@ describe('parsePinoLine', () => {
     }
   });
 
+  it('extracts numeric stream status codes from malformed runtime payloads', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'stream errored out', level: 50, fullErrorNode: { tag: 'stream:error', attrs: { code: 418 } } }),
+      CTX,
+    );
+    expect(result).toMatchObject({
+      detail: { type: 'connection', statusCode: 418, reason: '_streamError' },
+    });
+  });
+
   it('omits malformed stream error status codes instead of surfacing NaN', () => {
     const result = parsePinoLine(
       makeLine({ msg: 'stream errored out', level: 50, fullErrorNode: { tag: 'stream:error', attrs: { code: 'not-a-number' } } }),
@@ -126,12 +161,36 @@ describe('parsePinoLine', () => {
     }
   });
 
+  it('omits absent stream error status codes and preserves unknown pino levels as info', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'stream errored out', level: 999, fullErrorNode: { tag: 'stream:error', attrs: {} } }),
+      CTX,
+    );
+    expect(result).toMatchObject({
+      level: 'info',
+      isError: true,
+      detail: { type: 'connection', reason: '_streamError' },
+    });
+    expect(result?.detail).not.toHaveProperty('statusCode');
+  });
+
   it('identifies connection error — WhatsApp connection closed', () => {
     const result = parsePinoLine(makeLine({ msg: 'WhatsApp connection closed' }), CTX);
     expect(result).not.toBeNull();
     if (result) {
       expect(result.detail).toMatchObject({ type: 'connection' });
     }
+  });
+
+  it('omits non-string connection close reason and non-number status code', () => {
+    const result = parsePinoLine(makeLine({
+      msg: 'WhatsApp connection closed',
+      statusCode: '401',
+      reason: { code: 'loggedOut' },
+    }), CTX);
+    expect(result).toMatchObject({ detail: { type: 'connection' } });
+    expect((result?.detail as any).statusCode).toBeUndefined();
+    expect((result?.detail as any).reason).toBeUndefined();
   });
 
   it('parses "Connecting to WhatsApp" as connection state', () => {
@@ -177,6 +236,32 @@ describe('parsePinoLine', () => {
     }
   });
 
+  it('normalizes malformed tool_error fields', () => {
+    const result = parsePinoLine(
+      makeLine({ msg: 'tool error reported', toolName: 42, toolId: 'tool-1', error: { message: 'boom' } }),
+      CTX,
+    );
+    expect(result).toMatchObject({
+      detail: {
+        type: 'tool_error',
+        toolName: '',
+        toolId: 'tool-1',
+        error: '[object Object]',
+      },
+    });
+  });
+
+  it('normalizes null tool_error messages to an empty error string', () => {
+    const result = parsePinoLine(makeLine({ msg: 'tool error reported', toolName: 'lookup_contact', error: null }), CTX);
+    expect(result).toMatchObject({
+      detail: {
+        type: 'tool_error',
+        toolName: 'lookup_contact',
+        error: '',
+      },
+    });
+  });
+
   it('identifies session spawn', () => {
     const result = parsePinoLine(
       makeLine({ msg: 'session spawn requested', sessionId: 'abc123', chatJid: '15551234567@s.whatsapp.net' }),
@@ -218,6 +303,20 @@ describe('parsePinoLine', () => {
     if (result) {
       expect(result.detail).toMatchObject({ type: 'message', direction: 'outbound' });
     }
+  });
+
+  it('handles message events without usable chat JIDs', () => {
+    const outbound = parsePinoLine(makeLine({ msg: 'Sending message' }), CTX);
+    expect(outbound).toMatchObject({
+      detail: { type: 'message', direction: 'outbound' },
+    });
+    expect((outbound?.detail as any).conversationKey).toBeUndefined();
+
+    const inbound = parsePinoLine(makeLine({ msg: 'inbound message received' }), CTX);
+    expect(inbound).toMatchObject({
+      detail: { type: 'message', direction: 'inbound' },
+    });
+    expect((inbound?.detail as any).conversationKey).toBeUndefined();
   });
 
   it('parses outbound message with messageId', () => {
@@ -360,6 +459,17 @@ describe('parsePinoLine', () => {
       expect(result.text).toContain('[agent-runner]');
       expect(result.component).toBe('agent-runner');
     }
+  });
+
+  it('falls back to name and module fields for component labels', () => {
+    expect(parsePinoLine(makeLine({ msg: 'session start', name: 'named-runner' }), CTX)).toMatchObject({
+      component: 'named-runner',
+      text: 'test-line: [named-runner] session start',
+    });
+    expect(parsePinoLine(makeLine({ msg: 'session start', module: 'module-runner' }), CTX)).toMatchObject({
+      component: 'module-runner',
+      text: 'test-line: [module-runner] session start',
+    });
   });
 
   it('ignores non-string component fields instead of rendering object text', () => {
@@ -838,6 +948,397 @@ describe('noise suppression via handleGetFeed', () => {
       }),
     ]));
   });
+
+  it('coalesces connection closure, stream error, reconnect, and recovery into one card', () => {
+    const lines = [
+      makeLine({ msg: 'stream errored out', level: 50, fullErrorNode: { attrs: { code: '515' } } }),
+      makeLine({ msg: 'WhatsApp connection closed', level: 50, statusCode: 440, reason: 'connectionReplaced' }),
+      makeLine({ msg: 'Scheduling reconnect in 5s' }),
+      makeLine({ msg: 'Connecting to WhatsApp' }),
+      makeLine({ msg: 'WhatsApp connected' }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'iota', type: 'agent', provider: 'claude', logDir });
+    const instances = new Map([['iota', inst]]);
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const body = res._body as any[];
+    const connectionEvents = body.filter((e: any) => e.detail?.type === 'connection');
+    expect(connectionEvents).toHaveLength(1);
+    expect(connectionEvents[0]).toMatchObject({
+      instance: 'iota',
+      provider: 'claude',
+      text: 'iota: connection replaced → reconnected',
+      detail: {
+        type: 'connection',
+        statusCode: 440,
+        reason: 'connectionReplaced',
+        state: 'connected',
+      },
+    });
+    expect(connectionEvents[0].detail).not.toHaveProperty('reconnecting');
+  });
+
+  it('coalesces stream-only failures into reconnecting or disconnected summaries', () => {
+    const lines = [
+      makeLine({ msg: 'stream errored out', level: 50, fullErrorNode: { attrs: { code: '515' } } }),
+      makeLine({ msg: 'Scheduling reconnect in 5s' }),
+      makeLine({ msg: 'stream errored out', level: 50, time: 1700000010000, fullErrorNode: { attrs: {} } }),
+      makeLine({ msg: 'stream errored out', level: 50, time: 1700000011000, fullErrorNode: { attrs: {} } }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'stream-only', type: 'agent', logDir });
+    const instances = new Map([['stream-only', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const connectionTexts = (res._body as any[])
+      .filter((event: any) => event.detail?.type === 'connection')
+      .map((event: any) => event.text);
+    expect(connectionTexts).toEqual(expect.arrayContaining([
+      'stream-only: 515 → reconnecting',
+      'stream-only: disconnected',
+    ]));
+  });
+
+  it('uses custom connection reasons when no friendly label exists', () => {
+    const lines = [
+      makeLine({ msg: 'WhatsApp connection closed', level: 50, statusCode: 499, reason: 'customDisconnect' }),
+      makeLine({ msg: 'stream errored out', level: 50, fullErrorNode: { attrs: { code: '499' } } }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'custom-reason', type: 'passive', logDir });
+    const instances = new Map([['custom-reason', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const event = (res._body as any[]).find((entry: any) => entry.detail?.type === 'connection');
+    expect(event).toMatchObject({
+      text: 'custom-reason: customDisconnect',
+      detail: {
+        type: 'connection',
+        statusCode: 499,
+        reason: 'customDisconnect',
+      },
+    });
+  });
+
+  it('coalesces state-only connection transitions without inventing an error', () => {
+    const lines = [
+      makeLine({ msg: 'Connecting to WhatsApp' }),
+      makeLine({ msg: 'WhatsApp connected' }),
+      makeLine({ msg: 'Connecting to WhatsApp', time: 'not-a-date' }),
+      makeLine({ msg: 'client disconnected', time: 'not-a-date' }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'kappa', type: 'passive', logDir });
+    const instances = new Map([['kappa', inst]]);
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const connectionEvents = (res._body as any[]).filter((e: any) => e.detail?.type === 'connection');
+    expect(connectionEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        text: 'kappa: WhatsApp connected',
+        detail: { type: 'connection', state: 'connected' },
+      }),
+      expect.objectContaining({
+        text: 'kappa: Connecting to WhatsApp',
+        detail: { type: 'connection', state: 'connecting' },
+      }),
+    ]));
+  });
+
+  it('coalesces connection events with unparseable timestamps into the same fallback bucket', () => {
+    const lines = [
+      makeLine({ msg: 'Connecting to WhatsApp', time: 1700000000000 }),
+      makeLine({ msg: 'WhatsApp connected', time: 1700000000000 }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'nan-time', type: 'passive', logDir });
+    const instances = new Map([['nan-time', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+    const parseSpy = vi.spyOn(Date, 'parse').mockReturnValue(Number.NaN);
+
+    try {
+      const res = mockRes();
+      handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+      expect(res._body).toEqual([
+        expect.objectContaining({
+          text: 'nan-time: WhatsApp connected',
+          detail: { type: 'connection', state: 'connected' },
+        }),
+      ]);
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
+  it('collapses rapid outbound sends without message ids by instance and chat', () => {
+    const lines = [
+      makeLine({ msg: 'Sending message', chatJid: 'chat@s.whatsapp.net', time: 1700000000000 }),
+      makeLine({ msg: 'Sending message', chatJid: 'chat@s.whatsapp.net', time: 1700000000500 }),
+      makeLine({ msg: 'Sending message', chatJid: 'other@s.whatsapp.net', time: 1700000000000 }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'lambda', type: 'agent', logDir });
+    const instances = new Map([['lambda', inst]]);
+
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const body = res._body as any[];
+    expect(body).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        text: 'lambda: sent ×2 to chat@s.whatsapp.net',
+        detail: {
+          type: 'message',
+          direction: 'outbound',
+          chatJid: 'chat@s.whatsapp.net',
+        },
+      }),
+      expect.objectContaining({
+        text: 'lambda: Sending message',
+        detail: expect.objectContaining({
+          type: 'message',
+          direction: 'outbound',
+          chatJid: 'other@s.whatsapp.net',
+        }),
+      }),
+    ]));
+  });
+
+  it('collapses rapid outbound sends without chat JIDs as unknown recipients', () => {
+    const lines = [
+      makeLine({ msg: 'Sending message', time: 1700000000000 }),
+      makeLine({ msg: 'Sending message', time: 1700000000500 }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'unknown-recipient', type: 'passive', logDir });
+    const instances = new Map([['unknown-recipient', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    expect((res._body as any[]).filter((event: any) => event.detail?.type === 'message')).toEqual([
+      expect.objectContaining({
+        text: 'unknown-recipient: sent ×2 to unknown',
+        detail: { type: 'message', direction: 'outbound', chatJid: undefined },
+      }),
+    ]);
+  });
+
+  it('passes through single connection events without coalescing', () => {
+    fs.writeFileSync(logFile, makeLine({ msg: 'Scheduling reconnect in 5s' }) + '\n');
+
+    const inst = fakeInstance({ name: 'mu', type: 'chat', logDir });
+    const instances = new Map([['mu', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    expect(res._body).toEqual([
+      expect.objectContaining({
+        text: 'mu: Scheduling reconnect in 5s',
+        detail: { type: 'connection', reconnecting: true },
+      }),
+    ]);
+  });
+
+  it('surfaces log tail read failures for latest .log paths', () => {
+    const badLogPath = path.join(logDir, 'latest.log');
+    fs.mkdirSync(badLogPath);
+    const inst = fakeInstance({ name: 'nu', type: 'agent', logDir });
+    const instances = new Map([['nu', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    expect(res._body).toEqual([
+      expect.objectContaining({
+        instance: 'nu',
+        component: 'logs',
+        level: 'warn',
+        text: 'nu: log evidence unavailable (EISDIR)',
+      }),
+    ]);
+  });
+
+  it('dedupes repeated non-message events within the same minute', () => {
+    const lines = [
+      makeLine({ msg: 'session start', sessionId: 'same' }),
+      makeLine({ msg: 'session start', sessionId: 'same' }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'xi', type: 'agent', logDir });
+    const instances = new Map([['xi', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const sessionEvents = (res._body as any[]).filter((event) => event.detail?.type === 'session');
+    expect(sessionEvents).toHaveLength(1);
+    expect(sessionEvents[0]).toMatchObject({
+      text: 'xi: session start',
+      detail: { type: 'session', sessionId: 'same' },
+    });
+  });
+
+  it('preserves equal-time distinct events through final sorting', () => {
+    const lines = [
+      makeLine({ msg: 'session start', sessionId: 'same-time-start', time: 1700000000000 }),
+      makeLine({ msg: 'session end', sessionId: 'same-time-end', time: 1700000000000 }),
+    ].join('\n') + '\n';
+    fs.writeFileSync(logFile, lines);
+
+    const inst = fakeInstance({ name: 'same-time', type: 'agent', logDir });
+    const instances = new Map([['same-time', inst]]);
+    const deps = makeDeps({
+      discovery: { getInstances: vi.fn(() => instances) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    });
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, deps);
+
+    const actions = (res._body as any[])
+      .filter((event: any) => event.detail?.type === 'session')
+      .map((event: any) => event.detail.action);
+    expect(actions.sort()).toEqual(['session end', 'session start']);
+  });
+
+  it('keeps the feed response alive when log parsing or post-processing fallbacks throw', () => {
+    const throwingLogInstance = fakeInstance({ name: 'log-throw', type: 'passive' });
+    Object.defineProperty(throwingLogInstance, 'logDir', {
+      get() { throw new Error('log dir getter exploded'); },
+    });
+    const logThrowRes = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), logThrowRes, makeDeps({
+      discovery: { getInstances: vi.fn(() => new Map([['log-throw', throwingLogInstance]])) } as any,
+      healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+    }));
+    expect(logThrowRes._status).toBe(200);
+    expect(logThrowRes._body).toEqual([]);
+
+    fs.writeFileSync(logFile, makeLine({ msg: 'WhatsApp connected', time: 1700000000000 }) + '\n');
+    const inst = fakeInstance({ name: 'coalesce-throw', type: 'agent', logDir });
+    const instances = new Map([['coalesce-throw', inst]]);
+    const parseSpy = vi.spyOn(Date, 'parse').mockImplementation(() => { throw new Error('date parse exploded'); });
+    try {
+      const res = mockRes();
+      handleGetFeed(mockReq('/api/feed?limit=10'), res, makeDeps({
+        discovery: { getInstances: vi.fn(() => instances) } as any,
+        healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+      }));
+      expect(res._status).toBe(200);
+      expect(res._body).toEqual([
+        expect.objectContaining({
+          text: 'coalesce-throw: WhatsApp connected',
+          detail: { type: 'connection', state: 'connected' },
+        }),
+      ]);
+    } finally {
+      parseSpy.mockRestore();
+    }
+
+    fs.writeFileSync(logFile, makeLine({ msg: 'Sending message', chatJid: 'chat@s.whatsapp.net', time: 1700000000000 }) + '\n');
+    const collapseSpy = vi.spyOn(Date, 'parse').mockImplementation(() => { throw new Error('collapse parse exploded'); });
+    try {
+      const res = mockRes();
+      handleGetFeed(mockReq('/api/feed?limit=10'), res, makeDeps({
+        discovery: { getInstances: vi.fn(() => instances) } as any,
+        healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+      }));
+      expect(res._status).toBe(200);
+      expect((res._body as any[]).some((event: any) => event.detail?.type === 'message')).toBe(true);
+    } finally {
+      collapseSpy.mockRestore();
+    }
+
+    fs.writeFileSync(logFile, makeLine({ msg: 'session start', time: 1700000000000 }) + '\n');
+    const originalFilter = Array.prototype.filter;
+    const filterSpy = vi.spyOn(Array.prototype, 'filter').mockImplementation(function filterWithDedupeFailure(
+      this: any[],
+      callback: Parameters<typeof Array.prototype.filter>[0],
+      thisArg?: unknown,
+    ) {
+      if (this.some((entry) => entry?.text === 'coalesce-throw: session start')) {
+        throw new Error('dedupe filter exploded');
+      }
+      return originalFilter.call(this, callback, thisArg);
+    });
+    try {
+      const res = mockRes();
+      handleGetFeed(mockReq('/api/feed?limit=10'), res, makeDeps({
+        discovery: { getInstances: vi.fn(() => instances) } as any,
+        healthPoller: { getStatus: vi.fn(() => undefined) } as any,
+      }));
+      expect(res._status).toBe(200);
+      expect(res._body).toEqual([
+        expect.objectContaining({
+          text: 'coalesce-throw: session start',
+          detail: { type: 'session', action: 'session start' },
+        }),
+      ]);
+    } finally {
+      filterSpy.mockRestore();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -952,6 +1453,508 @@ describe('message preview enrichment via handleGetFeed', () => {
     const msgEvent = events.find((e: any) => e.detail?.type === 'message');
     expect(msgEvent).toBeTruthy();
     expect(msgEvent.detail.preview).toBeUndefined();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('falls back after messageId lookup failure and records a preview miss', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-id-fail-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-fallback-after-id-fail',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'id-fail-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['id-fail-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: false, error: 'message id index unavailable' })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const msgEvent = (res._body as any[]).find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent).toBeTruthy();
+    expect(msgEvent.detail.preview).toBeUndefined();
+    expect(dbReader.getMessagesByIds).toHaveBeenCalledWith('id-fail-test', '/unused', ['msg-fallback-after-id-fail']);
+    expect(dbReader.getRecentMessagesByChat).toHaveBeenCalledWith(
+      'id-fail-test',
+      '/unused',
+      '15550100001',
+      'outbound',
+      expect.any(Number),
+      1,
+    );
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('enriches via fallback when messageId rows do not include the logged id', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-id-fallback-hit-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-fallback-hit',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'id-fallback-hit-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['id-fallback-hit-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [
+        { message_id: null, content: 'ignored row', sender_name: null, content_type: 'text' },
+      ] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [
+        { message_id: 'msg-from-fallback', content: 'Fallback after id miss', sender_name: 'Fallback Sender', content_type: 'text', pk: 1, conversation_key: '15550100001', chat_jid: '15550100001@s.whatsapp.net', sender_jid: 'bot', timestamp: 1700000000, is_from_me: 1, raw_message: null },
+      ] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const msgEvent = (res._body as any[]).find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent.detail.preview).toBe('Fallback after id miss');
+    expect(msgEvent.detail.senderName).toBe('Fallback Sender');
+    expect(msgEvent.detail.messageId).toBe('msg-fallback-hit');
+    expect(dbReader.getRecentMessagesByChat).toHaveBeenCalledOnce();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('records fallback preview errors without failing the feed response', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-fallback-fail-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'fallback-fail-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['fallback-fail-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: false, error: 'fallback query failed' })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const msgEvent = (res._body as any[]).find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent).toBeTruthy();
+    expect(msgEvent.detail.preview).toBeUndefined();
+    expect(dbReader.getRecentMessagesByChat).toHaveBeenCalledOnce();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('records thrown messageId and fallback preview errors without failing the feed response', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-thrown-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, [
+      JSON.stringify({
+        level: 30, time: 1775166900000, component: 'connection',
+        chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-throws',
+        msg: 'Sending message',
+      }),
+      JSON.stringify({
+        level: 30, time: 1775166901000, component: 'connection',
+        chatJid: '15550100001@s.whatsapp.net',
+        msg: 'Sending message',
+      }),
+    ].join('\n') + '\n');
+
+    const fakeInst = {
+      name: 'thrown-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['thrown-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => { throw new Error('message id lookup exploded'); }),
+      getRecentMessagesByChat: vi.fn(() => { throw new Error('fallback lookup exploded'); }),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const messageEvents = (res._body as any[]).filter((e: any) => e.detail?.type === 'message');
+    expect(messageEvents.length).toBeGreaterThan(0);
+    expect(messageEvents.every((event) => event.detail.preview === undefined)).toBe(true);
+    expect(dbReader.getMessagesByIds).toHaveBeenCalledOnce();
+    expect(dbReader.getRecentMessagesByChat).toHaveBeenCalled();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('records instance-level preview enrichment errors without dropping message events', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-instance-throw-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-instance-throw',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'instance-throw-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    class ThrowingGetMap<K, V> extends Map<K, V> {
+      override get(key: K): V | undefined {
+        if (key === 'instance-throw-test') throw new Error('instance lookup exploded');
+        return super.get(key);
+      }
+    }
+    const instances = new ThrowingGetMap<string, typeof fakeInst>([['instance-throw-test', fakeInst]]);
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, {
+      discovery: { getInstances: () => instances } as any,
+      healthPoller: { getStatus: vi.fn(() => null) } as any,
+      dbReader,
+    });
+
+    const msgEvent = (res._body as any[]).find((event: any) => event.detail?.type === 'message');
+    expect(msgEvent).toMatchObject({
+      instance: 'instance-throw-test',
+      detail: {
+        type: 'message',
+        messageId: 'msg-instance-throw',
+      },
+    });
+    expect(Object.keys(msgEvent.detail).sort()).toEqual([
+      'chatJid',
+      'conversationKey',
+      'direction',
+      'messageId',
+      'type',
+    ]);
+    expect(dbReader.getMessagesByIds).not.toHaveBeenCalled();
+    expect(dbReader.getRecentMessagesByChat).not.toHaveBeenCalled();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('skips preview enrichment when a parsed message instance is no longer discoverable', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-missing-instance-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-missing-instance',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'missing-instance-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    class MissingGetMap<K, V> extends Map<K, V> {
+      override get(): V | undefined {
+        return undefined;
+      }
+    }
+    const instances = new MissingGetMap<string, typeof fakeInst>([['missing-instance-test', fakeInst]]);
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, {
+      discovery: { getInstances: () => instances } as any,
+      healthPoller: { getStatus: vi.fn(() => null) } as any,
+      dbReader,
+    });
+
+    const msgEvent = (res._body as any[]).find((event: any) => event.detail?.type === 'message');
+    expect(msgEvent.detail.messageId).toBe('msg-missing-instance');
+    expect(msgEvent.detail.preview).toBeUndefined();
+    expect(dbReader.getMessagesByIds).not.toHaveBeenCalled();
+    expect(dbReader.getRecentMessagesByChat).not.toHaveBeenCalled();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('skips fallback preview lookup when message events lack a chat JID', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-no-chat-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'no-chat-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['no-chat-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const msgEvent = (res._body as any[]).find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent.detail.chatJid).toBeUndefined();
+    expect(dbReader.getRecentMessagesByChat).not.toHaveBeenCalled();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('skips fallback preview lookup when chat JID cannot become a conversation key', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-invalid-chat-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: 'not-a-jid',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'invalid-chat-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['invalid-chat-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const msgEvent = (res._body as any[]).find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent.detail.chatJid).toBe('not-a-jid');
+    expect(msgEvent.detail.conversationKey).toBeUndefined();
+    expect(dbReader.getRecentMessagesByChat).not.toHaveBeenCalled();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('treats unparseable message timestamps as fallback preview misses', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-bad-time-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'bad-time-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['bad-time-test', fakeInst]]);
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+    const parseSpy = vi.spyOn(Date, 'parse').mockReturnValue(Number.NaN);
+
+    try {
+      const res = mockRes();
+      handleGetFeed(mockReq('/api/feed?limit=10'), res, {
+        discovery: { getInstances: () => instances } as any,
+        healthPoller: { getStatus: vi.fn(() => null) } as any,
+        dbReader,
+      });
+
+      const msgEvent = (res._body as any[]).find((event: any) => event.detail?.type === 'message');
+      expect(msgEvent.detail.preview).toBeUndefined();
+      expect(dbReader.getRecentMessagesByChat).not.toHaveBeenCalled();
+    } finally {
+      parseSpy.mockRestore();
+      fs.unlinkSync(logFile);
+      fs.rmdirSync(tmpDir);
+    }
+  });
+
+  it('preserves log metadata when fallback preview rows provide alternate metadata', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-preserve-metadata-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net',
+      senderName: 'Log Sender',
+      contentType: 'log-type',
+      msg: 'inbound message received',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'preserve-metadata-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['preserve-metadata-test', fakeInst]]);
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [
+        { message_id: 'db-message-id', content: 'Fallback preview', sender_name: 'DB Sender', content_type: 'db-type', pk: 1, conversation_key: '15550100001', chat_jid: '15550100001@s.whatsapp.net', sender_jid: 'bot', timestamp: 1700000000, is_from_me: 0, raw_message: null },
+      ] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, {
+      discovery: { getInstances: () => instances } as any,
+      healthPoller: { getStatus: vi.fn(() => null) } as any,
+      dbReader,
+    });
+
+    const msgEvent = (res._body as any[]).find((event: any) => event.detail?.type === 'message');
+    expect(msgEvent.detail.preview).toBe('Fallback preview');
+    expect(msgEvent.detail.senderName).toBe('Log Sender');
+    expect(msgEvent.detail.contentType).toBe('log-type');
+    expect(msgEvent.detail.messageId).toBe('db-message-id');
+    expect(msgEvent.detail.conversationKey).toBe('15550100001');
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('keeps absent messageId row metadata absent on direct preview hits', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-undefined-row-metadata-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-undefined-row-metadata',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'undefined-row-metadata-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['undefined-row-metadata-test', fakeInst]]);
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [
+        { message_id: 'msg-undefined-row-metadata', content: 'Preview without metadata', sender_name: undefined, content_type: undefined },
+      ] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, {
+      discovery: { getInstances: () => instances } as any,
+      healthPoller: { getStatus: vi.fn(() => null) } as any,
+      dbReader,
+    });
+
+    const msgEvent = (res._body as any[]).find((event: any) => event.detail?.type === 'message');
+    expect(msgEvent.detail.preview).toBe('Preview without metadata');
+    expect(msgEvent.detail.senderName).toBeUndefined();
+    expect(msgEvent.detail.contentType).toBeUndefined();
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('treats blank DB content as an absent preview while preserving metadata', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-blank-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-blank-content',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'blank-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['blank-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [
+        { message_id: 'msg-blank-content', content: '   ', sender_name: 'Operator', content_type: 'text', pk: 1, conversation_key: '15550100001', chat_jid: '15550100001@s.whatsapp.net', sender_jid: 'bot', timestamp: 1700000000, is_from_me: 1, raw_message: null },
+      ] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const msgEvent = (res._body as any[]).find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent.detail.preview).toBeUndefined();
+    expect(msgEvent.detail.senderName).toBe('Operator');
+    expect(msgEvent.detail.contentType).toBe('text');
+
+    fs.unlinkSync(logFile);
+    fs.rmdirSync(tmpDir);
+  });
+
+  it('treats null DB content as an absent preview', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-enrich-null-'));
+    const logFile = path.join(tmpDir, 'current.log');
+    fs.writeFileSync(logFile, JSON.stringify({
+      level: 30, time: 1775166900000, component: 'connection',
+      chatJid: '15550100001@s.whatsapp.net', messageId: 'msg-null-content',
+      msg: 'Sending message',
+    }) + '\n');
+
+    const fakeInst = {
+      name: 'null-test', type: 'agent' as const, healthPort: 9090,
+      logDir: tmpDir, dbPath: '/unused', healthToken: null,
+      accessMode: 'self_only', configPath: '/x', stateRoot: '/x', socketPath: null,
+    };
+    const instances = new Map([['null-test', fakeInst]]);
+    const poller = { getStatus: vi.fn(() => null) };
+    const dbReader = {
+      getMessagesByIds: vi.fn(() => ({ ok: true, data: [
+        { message_id: 'msg-null-content', content: null, sender_name: null, content_type: 'image', pk: 1, conversation_key: '15550100001', chat_jid: '15550100001@s.whatsapp.net', sender_jid: 'bot', timestamp: 1700000000, is_from_me: 1, raw_message: null },
+      ] })),
+      getRecentMessagesByChat: vi.fn(() => ({ ok: true, data: [] })),
+    } as any;
+
+    const res = mockRes();
+    handleGetFeed(mockReq('/api/feed?limit=10'), res, { discovery: { getInstances: () => instances } as any, healthPoller: poller as any, dbReader });
+
+    const msgEvent = (res._body as any[]).find((e: any) => e.detail?.type === 'message');
+    expect(msgEvent.detail.preview).toBeUndefined();
+    expect(msgEvent.detail.contentType).toBe('image');
 
     fs.unlinkSync(logFile);
     fs.rmdirSync(tmpDir);
