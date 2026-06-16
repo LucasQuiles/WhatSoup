@@ -110,6 +110,7 @@ import {
 } from '../../../src/runtimes/agent/runtime.ts';
 import { Database } from '../../../src/core/database.ts';
 import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-notice.ts';
+import { ensureHandoffArtifactSchema, upsertHandoffArtifact } from '../../../src/runtimes/agent/handoff-artifact.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
 
@@ -203,6 +204,7 @@ type FallbackView = {
   withHandoffPrefix(chatJid: string, text: string): string;
   flushPendingHandoffNotice(queue: { targetChatJid: string; enqueueText(text: string): void }): void;
   formatContextLines(messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>): string;
+  buildHandoffSystemBlock(conversationKey: string, provider: string): (() => string | null) | undefined;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -1290,6 +1292,89 @@ describe('one-message handoff collapse (real db)', () => {
       expect(v.withHandoffPrefix(chat, 'reply')).toBe('notice\n\nreply');
       v.flushPendingHandoffNotice(queue);
       expect(enqueued).toEqual([]);
+    });
+    db.close();
+  });
+});
+
+describe('handoff context injection (real db)', () => {
+  const CONTEXT_FLAG = 'WHATSOUP_HANDOFF_CONTEXT';
+  // Header emitted by buildHandoffPrelude's system block (handoff-prelude.ts).
+  const SUMMARY_HEADER = '[Handoff context — prior conversation summary]';
+
+  function makeRealDbRuntime(): { runtime: AgentRuntime; db: Database } {
+    const config = mockConfigRef();
+    config['agentProvider'] = 'claude-cli';
+    config['agentProviderConfig'] = undefined;
+    config['agentFallbackProvider'] = 'opencode-cli';
+    config['agentFallbackModel'] = undefined;
+    const db = new Database(':memory:');
+    db.open();
+    // start() ensures this schema in production; mirror it here without the rest
+    // of start()'s heavy setup.
+    ensureHandoffArtifactSchema(db);
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]' });
+    return { runtime, db };
+  }
+
+  function withFlag(value: '1' | undefined, fn: () => void): void {
+    const prev = process.env[CONTEXT_FLAG];
+    if (value === undefined) delete process.env[CONTEXT_FLAG];
+    else process.env[CONTEXT_FLAG] = value;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env[CONTEXT_FLAG];
+      else process.env[CONTEXT_FLAG] = prev;
+    }
+  }
+
+  function seedArtifact(db: Database, conversationKey: string, summary: string): void {
+    upsertHandoffArtifact(db, {
+      conversationKey,
+      summary,
+      seededArtifacts: null,
+      updatedAt: Date.now(), // fresh — within HANDOFF_STALE_MS
+      sourceProvider: 'claude-cli',
+      sourceModel: 'claude-opus-4-8[1m]',
+      tokenBaseline: 0,
+    });
+  }
+
+  it('flag off → no callback (byte-identical: system prompt is untouched)', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'ctx-off@s.whatsapp.net';
+    seedArtifact(db, chat, 'prior summary should NOT appear');
+    withFlag(undefined, () => {
+      expect(v.buildHandoffSystemBlock(chat, 'claude-cli')).toBeUndefined();
+    });
+    db.close();
+  });
+
+  it('flag on + fresh artifact → callback yields the summary block with the handoff header', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'ctx-on@s.whatsapp.net';
+    seedArtifact(db, chat, 'User is migrating their config; open task: finish the cutover.');
+    withFlag('1', () => {
+      const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
+      expect(cb).toBeTypeOf('function');
+      const block = cb!();
+      expect(block).toContain(SUMMARY_HEADER);
+      expect(block).toContain('User is migrating their config');
+    });
+    db.close();
+  });
+
+  it('flag on but no artifact → callback yields null (no injection)', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'ctx-empty@s.whatsapp.net';
+    withFlag('1', () => {
+      const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
+      expect(cb).toBeTypeOf('function');
+      expect(cb!()).toBeNull();
     });
     db.close();
   });

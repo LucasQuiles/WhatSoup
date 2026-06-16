@@ -23,6 +23,10 @@ import {
   consumeStandbyNotice,
 } from './standby-notice.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
+import { seamForProvider } from './handoff-seam-routing.ts';
+import { ensureHandoffArtifactSchema, getHandoffArtifact } from './handoff-artifact.ts';
+import { buildHandoffPrelude } from './handoff-prelude.ts';
+import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
@@ -215,6 +219,10 @@ function diagnosticBundleEnabled(): boolean {
 // failures — cannot spawn a flurry of CLI auth-status probes, and so we do not
 // re-probe the same primary health redundantly.
 const DIAGNOSTIC_BUNDLE_THROTTLE_MS = 60_000;
+// Max age of a handoff artifact before it is considered stale and dropped from
+// the injected system block. A stale summary misleads the stand-in, so the
+// prelude builder rejects artifacts older than this when composing context.
+const HANDOFF_STALE_MS = 120_000;
 // Opt-in: collapse the fallback notice and the stand-in's reply into ONE
 // user-facing message. When a replay is scheduled the notice is stashed (via the
 // crash-safe standby latch) and prepended to the stand-in's first visible reply
@@ -2626,6 +2634,11 @@ export class AgentRuntime implements Runtime {
     // Crash-safe latch table for the one-message handoff collapse. Idempotent;
     // created eagerly so an unconsumed notice from a prior process can flush.
     ensureStandbyNoticeSchema(this.db);
+    // Handoff-artifact store for the distilled-context injection seam. Idempotent;
+    // created eagerly so a fresh stand-in session can read a prior distill. The
+    // injection itself is flag-gated (WHATSOUP_HANDOFF_CONTEXT); creating the
+    // table unconditionally is inert when the flag is off.
+    ensureHandoffArtifactSchema(this.db);
     this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
 
@@ -7351,6 +7364,55 @@ export class AgentRuntime implements Runtime {
     return rest;
   }
 
+  // ── Handoff distiller / context-injection flags (default OFF) ───────────────
+  // With all three unset the agent behaves byte-identically to today: no schema
+  // reads, no system-block injection, no distiller construction.
+  private handoffDistillerEnabled(): boolean {
+    return process.env['WHATSOUP_HANDOFF_DISTILLER'] === '1';
+  }
+
+  private handoffContextEnabled(): boolean {
+    return process.env['WHATSOUP_HANDOFF_CONTEXT'] === '1';
+  }
+
+  private handoffDistillModel(): string | null {
+    return process.env['WHATSOUP_HANDOFF_DISTILL_MODEL']?.trim() || null;
+  }
+
+  /**
+   * Build the `handoffSystemBlock` callback for a fresh/stand-in SessionManager.
+   * Returns `undefined` (no callback) unless the context flag is on AND this
+   * provider routes its handoff via the system prompt. The callback itself
+   * yields the distilled summary block only when a fresh artifact exists; a
+   * stale or absent artifact yields `null` (SessionManager omits it).
+   *
+   * Flag off → returns `undefined`, so buildSystemPrompt is byte-identical.
+   */
+  private buildHandoffSystemBlock(
+    conversationKey: string,
+    provider: string,
+  ): (() => string | null) | undefined {
+    if (!this.handoffContextEnabled()) return undefined;
+    if (seamForProvider(provider as AgentProvider) !== 'system') return undefined;
+    return () => {
+      const artifact = getHandoffArtifact(this.db, conversationKey);
+      if (!artifact) return null;
+      return buildHandoffPrelude({
+        artifact,
+        recentMessages: [],
+        verbatimN: 0,
+        isFirstStandInTurn: true,
+        backupContextWindow: 'unknown',
+        now: Date.now(),
+        staleAfterMs: HANDOFF_STALE_MS,
+        // Reuse the established provider-preview redactor. This path injects a
+        // distilled summary into the system prompt; redaction can be hardened
+        // (PII-specific) in a follow-up if the summary corpus warrants it.
+        redact: (t) => sanitizeProviderPreviewText(t),
+      }).systemBlock;
+    };
+  }
+
   /**
    * Construct a SessionManager with all instance-level fields pre-filled.
    * Callers supply only the variable parts: chatJid, cwd, and the three callbacks.
@@ -7402,6 +7464,7 @@ export class AgentRuntime implements Runtime {
       mcpSessionContext: providerToolSession,
       whatsoupInstance: this.instanceName,
       whatsoupMcpSocket: opts.mcpSocketPath ?? this.globalMcpSocketPath ?? undefined,
+      handoffSystemBlock: this.buildHandoffSystemBlock(conversationKey, this.effectiveProvider),
     });
     if (this.durability) {
       session.setDurability(this.durability);
