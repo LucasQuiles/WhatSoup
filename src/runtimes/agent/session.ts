@@ -105,6 +105,7 @@ export interface SessionManagerOptions {
   mcpSessionContext?: SessionContext;
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
+  handoffSystemBlock?: () => string | null;
 }
 
 /**
@@ -414,6 +415,7 @@ export class SessionManager {
   private readonly mcpSessionContext: SessionContext | undefined;
   private readonly whatsoupInstance: string | undefined;
   private readonly whatsoupMcpSocket: string | undefined;
+  private readonly handoffSystemBlock: (() => string | null) | undefined;
 
   private systemPrompt: string = '';
 
@@ -507,6 +509,7 @@ export class SessionManager {
     this.mcpSessionContext = opts.mcpSessionContext;
     this.whatsoupInstance = opts.whatsoupInstance;
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
+    this.handoffSystemBlock = opts.handoffSystemBlock;
 
     // Initialize budget enforcement if configured
     const budgetConfig = opts.providerConfig?.budget as BudgetConfig | undefined;
@@ -570,6 +573,11 @@ export class SessionManager {
       POLL_DECISION_GUIDANCE,
     ].join('\n');
     const sources = [transportPrelude];
+
+    const handoffBlock = this.handoffSystemBlock?.();
+    if (handoffBlock) {
+      sources.push(handoffBlock);
+    }
 
     if (this.configSystemPrompt) {
       sources.push(this.configSystemPrompt);

@@ -145,4 +145,44 @@ describe('SessionManager system prompt composition', () => {
 
     expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThanOrEqual(BASE_TRANSPORT_PROMPT_BYTES + 50);
   });
+
+  it('injects handoffSystemBlock content after the transport prelude when callback returns a string', () => {
+    const UNIQUE_MARKER = 'HANDOFF-SUMMARY-MARKER-7f3a2b9c';
+    const sm = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      cwd: '/mock/home',
+      handoffSystemBlock: () => `Context from previous session: ${UNIQUE_MARKER}`,
+    });
+
+    const prompt = sm.buildSystemPrompt();
+
+    expect(prompt).toContain(UNIQUE_MARKER);
+    // The marker must appear AFTER the transport prelude opener line.
+    const transportPreludeEnd = prompt.indexOf('agent running over WhatsApp');
+    expect(transportPreludeEnd).toBeGreaterThanOrEqual(0);
+    expect(prompt.indexOf(UNIQUE_MARKER)).toBeGreaterThan(transportPreludeEnd);
+  });
+
+  it('produces byte-identical output whether handoffSystemBlock is absent or returns null', () => {
+    const smNoCallback = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      cwd: '/mock/home',
+    });
+    const smNullCallback = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      cwd: '/mock/home',
+      handoffSystemBlock: () => null,
+    });
+
+    expect(smNoCallback.buildSystemPrompt()).toBe(smNullCallback.buildSystemPrompt());
+  });
 });
