@@ -223,9 +223,9 @@ function InfoTab({
 
       {/* Invite link */}
       <div>
-        <label className="c-field-label">
+        <span className="c-field-label">
           Invite link
-        </label>
+        </span>
         {inviteLink ? (
           <div className="flex flex-col gap-[var(--sp-2)]">
             <div

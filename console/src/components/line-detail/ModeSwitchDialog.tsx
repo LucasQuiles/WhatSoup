@@ -63,6 +63,7 @@ export function ModeSwitchDialog({
         <p className="text-t3 mb-[var(--sp-2)] text-sm">
           Select the operating mode for this instance. The instance will restart after switching.
         </p>
+        <div role="group" aria-label="Operating mode" className="flex flex-col gap-[var(--sp-3)]">
         {MODE_OPTIONS.map(opt => {
           const isSelected = selected === opt.value
           const isCurrent = currentMode === opt.value
@@ -71,6 +72,7 @@ export function ModeSwitchDialog({
             <Button
               key={opt.value}
               variant="ghost"
+              aria-pressed={isSelected}
               onClick={() => !switching && setSelected(opt.value)}
               className="flex items-start gap-3 text-left cursor-pointer c-hover rounded-md py-[var(--sp-3)] px-[var(--sp-4)]"
               style={{
@@ -79,8 +81,9 @@ export function ModeSwitchDialog({
                 opacity: switching ? 0.6 : 1,
               }}
             >
-              {/* Radio indicator */}
+              {/* Selection indicator (decorative; state conveyed via aria-pressed) */}
               <span
+                aria-hidden="true"
                 className="flex-shrink-0 rounded-full w-[var(--feed-col-icon)] h-[var(--feed-col-icon)]"
                 style={{
                   marginTop: 'var(--bw-accent)',
@@ -107,6 +110,7 @@ export function ModeSwitchDialog({
             </Button>
           )
         })}
+        </div>
         {changed && (
           <div
             className="flex items-center gap-2 rounded-sm bg-[var(--s-warn-wash)] text-s-warn py-[var(--sp-2)] px-[var(--sp-3)] text-sm"

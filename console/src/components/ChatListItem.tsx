@@ -25,7 +25,7 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabInd
       data-conv-key={chat.conversationKey}
       onClick={onClick}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
-      aria-label={`Open conversation with ${displayName}`}
+      aria-label={`Open conversation with ${displayName}${chat.unreadCount > 0 ? `, ${chat.unreadCount} unread` : ''}`}
       aria-selected={isSelected}
       className={`flex cursor-pointer c-chat-item py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-b ${isSelected ? 'active' : ''}`}
       style={isSelected ? { borderLeftWidth: 'var(--bw-accent)', borderLeftStyle: 'solid', borderLeftColor: 'var(--color-m-cht)', paddingLeft: 'var(--msg-pad-h)' } : undefined}
@@ -71,6 +71,7 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabInd
           )}
           {chat.unreadCount > 0 && (
             <span
+              aria-hidden="true"
               className="bg-m-cht text-d0 font-mono font-semibold flex items-center justify-center rounded-full flex-shrink-0 w-[var(--badge-unread)] h-[var(--badge-unread)] text-xs"
             >
               {chat.unreadCount}

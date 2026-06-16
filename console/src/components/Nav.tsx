@@ -87,11 +87,15 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               <Inbox size={18} strokeWidth={1.75} aria-hidden="true" />
               <span className="max-sm:sr-only">Inbox</span>
               {unreadCount > 0 && (
-                <span
-                  className="text-xs font-mono font-semibold rounded-md min-w-[var(--sp-4)] text-center ml-[var(--sp-0h)] bg-[var(--accent)] text-[var(--accent-fg)] py-[var(--sp-0h)] px-[var(--sp-1)]"
-                >
-                  {unreadCount > 99 ? "99+" : unreadCount}
-                </span>
+                <>
+                  <span
+                    aria-hidden="true"
+                    className="text-xs font-mono font-semibold rounded-md min-w-[var(--sp-4)] text-center ml-[var(--sp-0h)] bg-[var(--accent)] text-[var(--accent-fg)] py-[var(--sp-0h)] px-[var(--sp-1)]"
+                  >
+                    {unreadCount > 99 ? "99+" : unreadCount}
+                  </span>
+                  <span className="sr-only">{unreadCount} unread</span>
+                </>
               )}
               {isActive && (
                 <span

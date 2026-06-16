@@ -17,6 +17,8 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
 
   return (
     <div
+      role="alert"
+      aria-live="assertive"
       className="flex items-center gap-3 flex-shrink-0 rounded-md py-[var(--sp-2)] px-[var(--sp-4)] text-data"
       style={{
         backgroundColor: "var(--s-crit-wash)",

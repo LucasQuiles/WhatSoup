@@ -180,6 +180,8 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
               size="sm"
               onClick={() => setExpanded(!expanded)}
               aria-label={expanded ? 'Collapse details' : 'Expand details'}
+              aria-expanded={expanded}
+              aria-controls={`sched-details-${message.id}`}
               icon={expanded
                 ? <ChevronUp size={15} strokeWidth={1.75} />
                 : <ChevronDown size={15} strokeWidth={1.75} />}
@@ -191,6 +193,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       {/* Expanded details */}
       {expanded && (
         <div
+          id={`sched-details-${message.id}`}
           className="c-label flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 [border-top:var(--bw)_solid_var(--b1)] gap-[var(--sp-3)]"
         >
           {message.nextRunAt && (
