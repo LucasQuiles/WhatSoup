@@ -372,7 +372,11 @@ class ProviderHarness {
 
   private extractSystemPrompt(args: string[]): string {
     if (this.provider.id === 'claude-cli') {
-      const promptIndex = args.indexOf('--system-prompt');
+      // Default is --append-system-prompt (additive); --system-prompt only when
+      // providerConfig.rawSystemPrompt=true.
+      const promptIndex = args.indexOf('--append-system-prompt') >= 0
+        ? args.indexOf('--append-system-prompt')
+        : args.indexOf('--system-prompt');
       return promptIndex >= 0 ? (args[promptIndex + 1] ?? '') : '';
     }
 
@@ -587,7 +591,7 @@ describe('agent provider conformance', () => {
       if (provider.id === 'claude-cli') {
         expect(lastSpawn?.args).toEqual(
           expect.arrayContaining([
-            '--system-prompt',
+            '--append-system-prompt',
             expect.stringContaining('Always answer with the exact word BLUE.'),
           ]),
         );

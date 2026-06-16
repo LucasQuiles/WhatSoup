@@ -196,7 +196,7 @@ describe('SessionManager', () => {
         '--input-format', 'stream-json',
         '--output-format', 'stream-json',
         '--permission-mode', 'bypassPermissions',
-        '--system-prompt', expect.stringContaining('personal'),
+        '--append-system-prompt', expect.stringContaining('personal'),
       ]),
       expect.objectContaining({
         cwd: '/mock/home',
@@ -1295,7 +1295,7 @@ describe('SessionManager', () => {
 
     const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
     const args: string[] = callArgs[1];
-    const systemPromptIdx = args.indexOf('--system-prompt');
+    const systemPromptIdx = args.indexOf('--append-system-prompt');
     expect(systemPromptIdx).toBeGreaterThan(-1);
     const systemPrompt = args[systemPromptIdx + 1];
     expect(systemPrompt).toContain('mybot');
@@ -1316,7 +1316,7 @@ describe('SessionManager', () => {
 
     const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
     const args: string[] = callArgs[1];
-    const systemPromptIdx = args.indexOf('--system-prompt');
+    const systemPromptIdx = args.indexOf('--append-system-prompt');
     const systemPrompt = args[systemPromptIdx + 1];
     expect(systemPrompt).toContain('a personal Claude Code agent');
     expect(systemPrompt).not.toContain('a personal claude-cli agent');
