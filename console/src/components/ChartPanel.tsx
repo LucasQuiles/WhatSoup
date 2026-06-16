@@ -29,7 +29,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
 
   return (
     <section
-      className="font-mono flex-shrink-0 rounded-[var(--radius-md)] bg-d3 p-[var(--sp-3)] c-border"
+      className="font-mono flex-shrink-0 rounded-[var(--radius-md)] bg-surface-raised p-[var(--sp-3)] c-border"
     >
       {/* Header */}
       <div className="flex items-center justify-between mb-[var(--sp-2)]">
@@ -53,7 +53,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
       {isLoading ? (
         <div
           data-testid="chart-shimmer"
-          className="animate-shimmer rounded-sm bg-d4"
+          className="animate-shimmer rounded-sm bg-btn-neutral-bg"
           style={{ height: panelHeight }}
         />
       ) : isError ? (
@@ -77,7 +77,7 @@ export const ChartPanel: FC<ChartPanelProps> = ({
         </div>
       ) : !hasData ? (
         <div
-          className="flex flex-col items-center justify-center text-center text-t2"
+          className="flex flex-col items-center justify-center text-center text-text-2"
           style={{ height: panelHeight }}
         >
           <BarChart3 size={24} strokeWidth={1.25} className="mb-[var(--sp-2)]" />

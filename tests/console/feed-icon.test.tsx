@@ -35,14 +35,14 @@ const routes: Array<{
   iconClass: string
   colorClass: string
 }> = [
-  { name: 'missing detail fallback', iconClass: 'lucide-circle-dot', colorClass: 'text-t5' },
-  { name: 'generic detail fallback', detail: { type: 'generic' }, iconClass: 'lucide-circle-dot', colorClass: 'text-t5' },
+  { name: 'missing detail fallback', iconClass: 'lucide-circle-dot', colorClass: 'text-text-3' },
+  { name: 'generic detail fallback', detail: { type: 'generic' }, iconClass: 'lucide-circle-dot', colorClass: 'text-text-3' },
   { name: 'connection state="connected"', detail: { type: 'connection', state: 'connected' }, iconClass: 'lucide-wifi', colorClass: 'text-s-ok' },
   { name: 'connection state="disconnected"', detail: { type: 'connection', state: 'disconnected' }, iconClass: 'lucide-wifi-off', colorClass: 'text-s-crit' },
   { name: 'connection statusCode without reconnecting', detail: { type: 'connection', statusCode: 401 }, iconClass: 'lucide-wifi-off', colorClass: 'text-s-crit' },
   { name: 'connection reconnecting precedence over connecting state', detail: { type: 'connection', reconnecting: true, state: 'connecting' }, iconClass: 'lucide-plug', colorClass: 'text-s-warn' },
-  { name: 'connection state="connecting"', detail: { type: 'connection', state: 'connecting' }, iconClass: 'lucide-plug', colorClass: 'text-t4' },
-  { name: 'connection default with no fields', detail: { type: 'connection' }, iconClass: 'lucide-plug', colorClass: 'text-t4' },
+  { name: 'connection state="connecting"', detail: { type: 'connection', state: 'connecting' }, iconClass: 'lucide-plug', colorClass: 'text-text-2' },
+  { name: 'connection default with no fields', detail: { type: 'connection' }, iconClass: 'lucide-plug', colorClass: 'text-text-2' },
   { name: 'message direction="inbound"', detail: { type: 'message', direction: 'inbound' }, iconClass: 'lucide-arrow-down-left', colorClass: 'text-m-cht' },
   { name: 'message direction="outbound"', detail: { type: 'message', direction: 'outbound' }, iconClass: 'lucide-arrow-up-right', colorClass: 'text-m-agt' },
   { name: 'tool_error', detail: { type: 'tool_error', toolName: 'x', error: 'e' }, iconClass: 'lucide-triangle-alert', colorClass: 'text-s-crit' },
@@ -54,7 +54,7 @@ const routes: Array<{
   { name: 'health status="config_error"', detail: { type: 'health', status: 'config_error' }, iconClass: 'lucide-heart-pulse', colorClass: 'text-s-crit' },
   { name: 'health status="unknown"', detail: { type: 'health', status: 'unknown' }, iconClass: 'lucide-heart-pulse', colorClass: 'text-s-warn' },
   { name: 'health non-online/non-unreachable status', detail: { type: 'health', status: 'degraded' }, iconClass: 'lucide-heart-pulse', colorClass: 'text-s-warn' },
-  { name: 'import', detail: { type: 'import' }, iconClass: 'lucide-database', colorClass: 'text-t4' },
+  { name: 'import', detail: { type: 'import' }, iconClass: 'lucide-database', colorClass: 'text-text-2' },
 ]
 
 describe('FeedIcon rendered icon and color design contract', () => {

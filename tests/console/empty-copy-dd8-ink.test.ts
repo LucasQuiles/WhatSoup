@@ -64,8 +64,8 @@ describe('DD-8 empty and paused state copy carries secondary ink', () => {
     const chartPanel = read('console/src/components/ChartPanel.tsx')
 
     expect(accessTab).toContain('text-text-2 text-center py-6 font-mono text-data')
-    expect(chartPanel).toContain('items-center justify-center text-center text-t2')
+    expect(chartPanel).toContain('items-center justify-center text-center text-text-2')
     expect(accessTab).not.toContain('text-text-3 text-center py-6 font-mono text-data')
-    expect(chartPanel).not.toContain('items-center justify-center text-center text-t5')
+    expect(chartPanel).not.toContain('items-center justify-center text-center text-text-3')
   })
 })

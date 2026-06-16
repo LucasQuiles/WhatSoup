@@ -39,8 +39,8 @@ export function FleetSessionChart({ data, byProvider, providers, range = '24h' }
     return (
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={merged} margin={CHART_MARGIN}>
-          <CartesianGrid stroke="var(--b1)" vertical={false} />
-          <XAxis dataKey="bucket" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: 'var(--b1)' }} minTickGap={40} tickFormatter={(v) => formatBucketLabel(v, range)} />
+          <CartesianGrid stroke="var(--border-hairline)" vertical={false} />
+          <XAxis dataKey="bucket" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: 'var(--border-hairline)' }} minTickGap={40} tickFormatter={(v) => formatBucketLabel(v, range)} />
           <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={32} allowDecimals={false} tickFormatter={(v) => formatCompact(Number(v) || 0)} />
           <Tooltip contentStyle={TOOLTIP_STYLE} labelFormatter={(v) => formatTooltipLabel(String(v), range)} />
           <Legend wrapperStyle={LEGEND_STYLE} />
@@ -61,8 +61,8 @@ export function FleetSessionChart({ data, byProvider, providers, range = '24h' }
   return (
     <ResponsiveContainer width="100%" height="100%">
       <ComposedChart data={data} margin={CHART_MARGIN}>
-        <CartesianGrid stroke="var(--b1)" vertical={false} />
-        <XAxis dataKey="bucket" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: 'var(--b1)' }} minTickGap={40} tickFormatter={(v) => formatBucketLabel(v, range)} />
+        <CartesianGrid stroke="var(--border-hairline)" vertical={false} />
+        <XAxis dataKey="bucket" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: 'var(--border-hairline)' }} minTickGap={40} tickFormatter={(v) => formatBucketLabel(v, range)} />
         <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={32} allowDecimals={false} tickFormatter={(v) => formatCompact(Number(v) || 0)} />
         <Tooltip contentStyle={TOOLTIP_STYLE} labelFormatter={(v) => formatTooltipLabel(String(v), range)} />
         <Area type="monotone" dataKey="active" name="Active Sessions" stroke="var(--data-session-active-solid)" fill="var(--data-session-active-solid)" fillOpacity={0.3} />

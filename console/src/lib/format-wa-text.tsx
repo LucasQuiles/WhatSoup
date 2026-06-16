@@ -23,7 +23,7 @@ function renderHighlightedText(text: string, query: string | undefined, keyRef: 
     return (
       <mark
         key={`mark-${keyRef.value++}`}
-        className="bg-[var(--m-cht-soft)] text-t1 rounded-xs py-0 px-[var(--bw)]"
+        className="bg-[var(--m-cht-soft)] text-text-1 rounded-xs py-0 px-[var(--bw)]"
       >
         {segment.text}
       </mark>
@@ -56,13 +56,13 @@ export function formatWhatsAppText(text: string | null | undefined, highlightQue
 
     if (match[1] !== undefined) {
       parts.push(
-        <code key={keyRef.value++} className="font-mono block min-w-0 py-[var(--sp-1)] px-[var(--sp-2)] bg-d1 rounded-sm my-[var(--sp-1)] whitespace-pre-wrap overflow-x-auto" style={{
+        <code key={keyRef.value++} className="font-mono block min-w-0 py-[var(--sp-1)] px-[var(--sp-2)] bg-surface-inset rounded-sm my-[var(--sp-1)] whitespace-pre-wrap overflow-x-auto" style={{
           fontSize: 'inherit',
         }}>{renderHighlightedText(match[1], highlightQuery, keyRef)}</code>
       );
     } else if (match[2] !== undefined) {
       parts.push(
-        <code key={keyRef.value++} className="font-mono py-[var(--bw)] px-[var(--sp-1)] bg-d1 rounded-sm" style={{
+        <code key={keyRef.value++} className="font-mono py-[var(--bw)] px-[var(--sp-1)] bg-surface-inset rounded-sm" style={{
           fontSize: 'inherit',
         }}>{renderHighlightedText(match[2], highlightQuery, keyRef)}</code>
       );
@@ -73,7 +73,7 @@ export function formatWhatsAppText(text: string | null | undefined, highlightQue
     } else if (match[5] !== undefined) {
       parts.push(<em key={keyRef.value++}>{renderHighlightedText(match[5], highlightQuery, keyRef)}</em>);
     } else if (match[6] !== undefined) {
-      parts.push(<s key={keyRef.value++} className="text-t4">{renderHighlightedText(match[6], highlightQuery, keyRef)}</s>);
+      parts.push(<s key={keyRef.value++} className="text-text-2">{renderHighlightedText(match[6], highlightQuery, keyRef)}</s>);
     } else if (match[7] !== undefined) {
       parts.push(
         <a

@@ -45,8 +45,8 @@ const AlertBanner: FC<AlertBannerProps> = ({ alerts, onAlertClick }) => {
             className="inline-flex items-center gap-1 text-s-crit font-mono c-hover rounded cursor-pointer whitespace-nowrap hover:bg-[var(--s-crit-soft)] py-[var(--sp-1)] px-[var(--sp-3)] text-sm"
             style={{ backgroundColor: "var(--s-crit-wash)" }}
           >
-            <span className="text-t4">{alert.line}</span>
-            <span className="mx-1 text-t5">—</span>
+            <span className="text-text-2">{alert.line}</span>
+            <span className="mx-1 text-text-3">—</span>
             <span>{alert.message}</span>
           </Button>
         ))}

@@ -43,7 +43,7 @@ const ConfirmDialog: FC<ConfirmDialogProps> = ({
     >
       <ModalHeader title={title} onClose={onCancel} />
       <ModalBody>
-        <div className="text-body leading-relaxed text-t2">
+        <div className="text-body leading-relaxed text-text-2">
           {children}
         </div>
       </ModalBody>

@@ -157,7 +157,7 @@ describe('click selection', () => {
 
     rerender(<CardSelector label="Card type" options={options} selected="cht" onChange={onChange} />)
     const newSelected = screen.getByRole('radio', { name: /Chat Bot/ })
-    expect(newSelected.style.background).toBe('var(--color-d4)')
+    expect(newSelected.style.background).toBe('var(--btn-neutral-bg)')
   })
 })
 
@@ -175,15 +175,15 @@ describe('visual styling', () => {
     expect(pasCard!.style.background).toBe('var(--m-pas-wash)')
     expect(pasCard!.style.border).toContain('var(--color-m-pas)')
     // Unselected falls back to neutral surface and default border
-    expect(agtCard!.style.background).toBe('var(--color-d3)')
-    expect(agtCard!.style.border).toContain('var(--b2)')
+    expect(agtCard!.style.background).toBe('var(--surface-raised)')
+    expect(agtCard!.style.border).toContain('var(--border-subtle)')
   })
 
   it('falls back to the default wash for unmapped colors when selected', () => {
     render(<CardSelector label="Card type" options={makeOptions()} selected="cht" onChange={vi.fn()} />)
 
     const chtCard = screen.getByRole('radio', { name: /Chat Bot/ })
-    expect(chtCard.style.background).toBe('var(--color-d4)')
+    expect(chtCard.style.background).toBe('var(--btn-neutral-bg)')
     expect(chtCard.style.border).toContain('var(--color-unknown)')
   })
 })

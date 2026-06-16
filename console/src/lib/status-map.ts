@@ -186,11 +186,11 @@ export const CONNECTION_MAP: Readonly<Record<ConnectionState, ConnectionEntry>> 
   connected:    { label: 'connected',    inkClass: 'text-s-ok' },
   connecting:   { label: 'connecting',   inkClass: 'text-s-warn' },
   disconnected: { label: 'disconnected', inkClass: 'text-s-crit' },
-  unknown:      { label: 'unknown',      inkClass: 'text-t4' },
+  unknown:      { label: 'unknown',      inkClass: 'text-text-2' },
 } as const;
 
 /** Fail-visible: unrecognised states render their raw value with neutral ink. */
 export function resolveConnection(value: string): ConnectionEntry {
   if (value in CONNECTION_MAP) return CONNECTION_MAP[value as ConnectionState];
-  return { label: value, inkClass: 'text-t4' };
+  return { label: value, inkClass: 'text-text-2' };
 }

@@ -2,14 +2,14 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 289,
-    "blocking": 225,
+    "total": 192,
+    "blocking": 128,
     "byCategory": {
       "accent-law": 0,
       "base-wall": 18,
       "brand-regression": 2,
       "half-step": 63,
-      "legacy-token-tsx": 173,
+      "legacy-token-tsx": 76,
       "legacy-var-css": 0,
       "raw-color-css": 0,
       "raw-dimension-css": 32,
@@ -87,110 +87,10 @@
       "id": "burndown:legacy-token-tsx",
       "category": "legacy-token-tsx",
       "severity": "blocking",
-      "count": 173,
+      "count": 76,
       "files": [
         {
           "path": "src/App.tsx",
-          "count": 2,
-          "lines": null
-        },
-        {
-          "path": "src/components/ActiveHoursHeatmap.tsx",
-          "count": 15,
-          "lines": null
-        },
-        {
-          "path": "src/components/ActivityFeed.tsx",
-          "count": 2,
-          "lines": null
-        },
-        {
-          "path": "src/components/AlertBanner.tsx",
-          "count": 2,
-          "lines": null
-        },
-        {
-          "path": "src/components/CardSelector.tsx",
-          "count": 4,
-          "lines": null
-        },
-        {
-          "path": "src/components/ChartPanel.tsx",
-          "count": 3,
-          "lines": null
-        },
-        {
-          "path": "src/components/ChatListItem.tsx",
-          "count": 2,
-          "lines": null
-        },
-        {
-          "path": "src/components/ConfirmDialog.tsx",
-          "count": 1,
-          "lines": null
-        },
-        {
-          "path": "src/components/EmptyState.tsx",
-          "count": 3,
-          "lines": null
-        },
-        {
-          "path": "src/components/FeedCard.tsx",
-          "count": 4,
-          "lines": null
-        },
-        {
-          "path": "src/components/FeedIcon.tsx",
-          "count": 5,
-          "lines": null
-        },
-        {
-          "path": "src/components/FleetMetricsChart.tsx",
-          "count": 2,
-          "lines": null
-        },
-        {
-          "path": "src/components/FleetSessionChart.tsx",
-          "count": 4,
-          "lines": null
-        },
-        {
-          "path": "src/components/FleetTokenChart.tsx",
-          "count": 4,
-          "lines": null
-        },
-        {
-          "path": "src/components/KeyboardShortcutsHelp.tsx",
-          "count": 4,
-          "lines": null
-        },
-        {
-          "path": "src/components/KpiCard.tsx",
-          "count": 3,
-          "lines": null
-        },
-        {
-          "path": "src/components/LinePicker.tsx",
-          "count": 2,
-          "lines": null
-        },
-        {
-          "path": "src/components/LineTags.tsx",
-          "count": 4,
-          "lines": null
-        },
-        {
-          "path": "src/components/MessageBubble.tsx",
-          "count": 7,
-          "lines": null
-        },
-        {
-          "path": "src/components/MessageContent.tsx",
-          "count": 15,
-          "lines": null
-        },
-        {
-          "path": "src/components/MetricsChart.tsx",
           "count": 2,
           "lines": null
         },
@@ -212,11 +112,6 @@
         {
           "path": "src/components/shared/SearchInput.tsx",
           "count": 1,
-          "lines": null
-        },
-        {
-          "path": "src/components/Toast.tsx",
-          "count": 2,
           "lines": null
         },
         {
@@ -247,21 +142,6 @@
         {
           "path": "src/components/wizard/WizardStep.tsx",
           "count": 1,
-          "lines": null
-        },
-        {
-          "path": "src/lib/chart-utils.ts",
-          "count": 1,
-          "lines": null
-        },
-        {
-          "path": "src/lib/format-wa-text.tsx",
-          "count": 4,
-          "lines": null
-        },
-        {
-          "path": "src/lib/status-map.ts",
-          "count": 2,
           "lines": null
         },
         {

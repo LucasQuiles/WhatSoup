@@ -309,7 +309,7 @@ describe('DeliveryStatus', () => {
     const check = screen.getByTestId('icon-check')
     expect(check).toBeDefined()
     // Muted / soft opacity
-    expect(check.className).toContain('text-t5')
+    expect(check.className).toContain('text-text-3')
   })
 
   it('failed outgoing message (pk===-1) shows X icon', () => {
@@ -408,16 +408,16 @@ describe('incoming vs outgoing layout', () => {
     expect(bubble.style.background).toBe('var(--m-cht-soft)')
   })
 
-  it('incoming bubble has bg-d3 class', () => {
+  it('incoming bubble has bg-surface-raised class', () => {
     render(<MessageBubble msg={msg({ fromMe: false })} />)
     const bubble = document.querySelector('.c-msg-bubble') as HTMLElement
-    expect(bubble.className).toContain('bg-d3')
+    expect(bubble.className).toContain('bg-surface-raised')
   })
 
-  it('outgoing bubble does NOT have bg-d3 class', () => {
+  it('outgoing bubble does NOT have bg-surface-raised class', () => {
     render(<MessageBubble msg={outgoing()} />)
     const bubble = document.querySelector('.c-msg-bubble') as HTMLElement
-    expect(bubble.className).not.toContain('bg-d3')
+    expect(bubble.className).not.toContain('bg-surface-raised')
   })
 
   it('footer is right-aligned for outgoing messages', () => {

@@ -36,7 +36,7 @@ const EmptyState: FC<EmptyStateProps> = ({
     >
       {resolvedIcon && (
         <motion.div
-          className={`w-[var(--icon-empty)] h-[var(--icon-empty)] ${isError ? 'text-s-crit mb-4' : 'text-t5 mb-4'}`}
+          className={`w-[var(--icon-empty)] h-[var(--icon-empty)] ${isError ? 'text-s-crit mb-4' : 'text-text-3 mb-4'}`}
           initial={{ opacity: 0, scale: 0.8 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.4, ease }}
@@ -45,7 +45,7 @@ const EmptyState: FC<EmptyStateProps> = ({
         </motion.div>
       )}
       <motion.div
-        className={`font-sans font-semibold mb-[var(--sp-1)] text-lg ${isError ? 'text-s-crit' : 'text-t3'}`}
+        className={`font-sans font-semibold mb-[var(--sp-1)] text-lg ${isError ? 'text-s-crit' : 'text-text-2'}`}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ duration: 0.4, ease, delay: 0.1 }}
@@ -54,7 +54,7 @@ const EmptyState: FC<EmptyStateProps> = ({
       </motion.div>
       {description && (
         <motion.div
-          className="text-t4 leading-relaxed max-w-[var(--empty-max-w)] text-body"
+          className="text-text-2 leading-relaxed max-w-[var(--empty-max-w)] text-body"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.4, ease, delay: 0.15 }}

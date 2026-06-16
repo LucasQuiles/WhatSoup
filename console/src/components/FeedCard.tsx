@@ -75,7 +75,7 @@ function healthHeadline(d: HealthDetail): string {
 
 function edgeColor(event: FeedEvent): string {
   const d = event.detail;
-  if (!d) return "var(--b1)";
+  if (!d) return "var(--border-hairline)";
   if (d.type === "health") return healthEdgeColor(d);
   if (event.isError) return statusColorToken("crit");
   switch (d.type) {
@@ -83,11 +83,11 @@ function edgeColor(event: FeedEvent): string {
       if (d.state === "connected") return statusColorToken("ok");
       if (d.state === "connecting" || d.reconnecting) return statusColorToken("warn");
       if (d.state === "disconnected" || d.statusCode) return statusColorToken("crit");
-      return "var(--b2)";
+      return "var(--border-subtle)";
     case "message": return d.direction === "inbound" ? "var(--color-m-cht)" : "var(--color-m-agt)";
     case "tool_error": return statusColorToken("crit");
     case "session": return "var(--color-m-agt)";
-    default: return "var(--b1)";
+    default: return "var(--border-hairline)";
   }
 }
 
@@ -461,7 +461,7 @@ const FeedCard: FC<FeedCardProps> = ({ event, onRestart, onStop, onNavigate, onC
             </span>
           )}
           {event.provider && (
-            <span className="fc-badge text-t5">
+            <span className="fc-badge text-text-3">
               {getProvider(event.provider)?.shortName ?? event.provider}
             </span>
           )}

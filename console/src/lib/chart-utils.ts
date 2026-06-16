@@ -4,7 +4,7 @@ import type { MetricsRange } from '../types.js';
 
 export const AXIS_TICK = {
   fontSize: 'var(--text-xs)',
-  fill: 'var(--color-t4)',
+  fill: 'var(--text-2)',
 };
 
 export const LEGEND_STYLE = {

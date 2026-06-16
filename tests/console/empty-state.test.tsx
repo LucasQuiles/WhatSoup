@@ -14,7 +14,7 @@ describe('EmptyState default variant', () => {
     render(<EmptyState title="No conversations yet" />)
 
     const title = screen.getByText('No conversations yet')
-    expect(title.className).toContain('text-t3')
+    expect(title.className).toContain('text-text-2')
     expect(title.className).not.toContain('text-s-crit')
   })
 
@@ -29,7 +29,7 @@ describe('EmptyState default variant', () => {
 
     const description = screen.getByText('Try syncing again soon.')
     expect(description.className).toContain('text-body')
-    expect(description.className).toContain('text-t4')
+    expect(description.className).toContain('text-text-2')
   })
 
   it('renders no icon node when neither icon prop nor error variant is supplied', () => {
@@ -58,7 +58,7 @@ describe('EmptyState error variant', () => {
 
     const title = screen.getByText('Something went wrong')
     expect(title.className).toContain('text-s-crit')
-    expect(title.className).not.toContain('text-t3')
+    expect(title.className).not.toContain('text-text-2')
   })
 
   it('falls back to the AlertTriangle lucide icon when no icon prop is supplied in error variant', () => {

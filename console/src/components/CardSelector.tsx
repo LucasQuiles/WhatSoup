@@ -28,7 +28,7 @@ function colorToWash(color: string): string {
     'var(--color-s-warn)': 'var(--s-warn-wash)',
     'var(--color-s-crit)': 'var(--s-crit-wash)',
   }
-  return map[color] ?? 'var(--color-d4)'
+  return map[color] ?? 'var(--btn-neutral-bg)'
 }
 
 const CardSelector: FC<CardSelectorProps> = ({
@@ -97,10 +97,10 @@ const CardSelector: FC<CardSelectorProps> = ({
             onClick={() => onChange(opt.value)}
             className="cursor-pointer c-hover flex flex-col items-center text-center flex-1 rounded-lg p-[var(--sp-4)] min-w-0 min-h-[var(--sp-12)]"
             style={{
-              background: isSelected ? colorToWash(opt.color) : 'var(--color-d3)',
+              background: isSelected ? colorToWash(opt.color) : 'var(--surface-raised)',
               border: isSelected
                 ? `var(--bw) solid ${opt.color}`
-                : 'var(--bw) solid var(--b2)',
+                : 'var(--bw) solid var(--border-subtle)',
             }}
           >
             <div className="mb-[var(--sp-3)]" style={{ color: opt.color }}>
@@ -109,7 +109,7 @@ const CardSelector: FC<CardSelectorProps> = ({
             <div className="c-heading mb-[var(--sp-1)]">
               {opt.label}
             </div>
-            <div className="text-t3 text-data">
+            <div className="text-text-2 text-data">
               {opt.description}
             </div>
           </div>
