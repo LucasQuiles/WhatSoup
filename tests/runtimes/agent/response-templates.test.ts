@@ -80,6 +80,16 @@ describe('renderUserMessage — content', () => {
     expect(msg).not.toContain("I'll continue here.");
   });
 
+  it('omits both continuation clauses when suppressContinuation is set', () => {
+    const msg = renderUserMessage('usage-limit', ctx({ suppressContinuation: true }));
+    expect(msg).not.toContain('resend');
+    expect(msg).not.toContain('continue here');
+    // The message still carries the reason and backup, and ends right after the
+    // backup/digest clause (no dangling continuation).
+    expect(msg).toContain('usage/quota limit');
+    expect(msg).toContain('Switching to OpenCode / minimax.');
+  });
+
   it('digest reads all-ok when nothing is flagged, and is omitted with no findings', () => {
     const allOk = bundle({ findings: [{ id: 'health-snapshot', ok: true, confidence: 'confirmed', summary: 'ok' }] });
     expect(renderUserMessage('usage-limit', ctx({ bundle: allOk }))).toContain('(diagnostics: 1 ok)');

@@ -275,9 +275,9 @@ describe('fallback-provider usage-limit cascade', () => {
     ];
     expect(allEnqueued).toHaveLength(1);
     const notice = String(allEnqueued[0]);
-    expect(notice).toContain('Primary model hit a token/quota limit; switching until about');
-    expect(notice).toContain('Backup: OpenCode / minimax/minimax-m2.');
-    expect(notice).toContain('Please resend the last message here.');
+    expect(notice).toContain('Primary model hit a usage/quota limit until about');
+    expect(notice).toContain('Switching to OpenCode / minimax/minimax-m2.');
+    expect(notice).toContain('Please resend your last message.');
   });
 
   it('does not throw when fallback provider hits usage limit during active fallback window', () => {
