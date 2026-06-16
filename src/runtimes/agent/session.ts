@@ -293,17 +293,66 @@ function resolveProviderArgs(
   providerConfig?: Record<string, unknown>,
 ): string[] {
   switch (provider) {
-    case 'claude-cli':
+    case 'claude-cli': {
+      // providerConfig-driven claude-cli flags. Absorbed from fleet hosts that
+      // had patched these in locally; every value is optional and defaults to
+      // the prior behavior EXCEPT the system-prompt flag (see below).
+      const permissionMode = typeof providerConfig?.['permissionMode'] === 'string'
+        ? providerConfig['permissionMode']
+        : 'bypassPermissions';
+      // Default to --append-system-prompt (additive: keeps the provider CLI's
+      // base prompt and adds WhatSoup's) — the fleet's behavior. Set
+      // providerConfig.rawSystemPrompt=true to REPLACE the base prompt instead.
+      const promptFlag = providerConfig?.['rawSystemPrompt'] === true
+        ? '--system-prompt'
+        : '--append-system-prompt';
+      const tools = providerConfig?.['tools'];
+      const toolArgs = tools === undefined
+        ? []
+        : Array.isArray(tools)
+          ? ['--tools', ...(tools.length === 0 ? [''] : tools.map(String))]
+          : ['--tools', String(tools)];
+      const mcpConfigs = providerConfig?.['mcpConfig'];
+      const mcpConfigArgs = mcpConfigs === undefined
+        ? []
+        : Array.isArray(mcpConfigs)
+          ? ['--mcp-config', ...mcpConfigs.map(String)]
+          : ['--mcp-config', String(mcpConfigs)];
+      const settingSources = typeof providerConfig?.['settingSources'] === 'string'
+        ? ['--setting-sources', providerConfig['settingSources']]
+        : [];
+      const effort = typeof providerConfig?.['effort'] === 'string'
+        ? ['--effort', providerConfig['effort']]
+        : [];
+      const agents = providerConfig?.['agents'];
+      const agentArgs = agents === undefined || agents === ''
+        ? []
+        : ['--agents', typeof agents === 'string' ? agents : JSON.stringify(agents)];
+      const fallbackModel = providerConfig?.['fallbackModel'];
+      const fallbackModelArgs = fallbackModel === undefined || fallbackModel === ''
+        ? []
+        : ['--fallback-model', Array.isArray(fallbackModel) ? fallbackModel.map(String).join(',') : String(fallbackModel)];
+
       return [
         '-p', '--verbose',
         '--input-format', 'stream-json',
         '--output-format', 'stream-json',
-        '--permission-mode', 'bypassPermissions',
-        '--system-prompt', systemPrompt,
+        '--permission-mode', permissionMode,
+        promptFlag, systemPrompt,
+        ...(providerConfig?.['disableSlashCommands'] === true ? ['--disable-slash-commands'] : []),
+        ...(providerConfig?.['strictMcpConfig'] === true ? ['--strict-mcp-config'] : []),
+        ...(providerConfig?.['noSessionPersistence'] === true ? ['--no-session-persistence'] : []),
+        ...toolArgs,
+        ...mcpConfigArgs,
+        ...settingSources,
+        ...effort,
+        ...agentArgs,
+        ...fallbackModelArgs,
         ...(model ? ['--model', model] : []),
         ...pluginDirs.flatMap((dir) => ['--plugin-dir', dir]),
         ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
       ];
+    }
     case 'codex-cli':
       return [
         'app-server',

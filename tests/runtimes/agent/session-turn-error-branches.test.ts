@@ -327,7 +327,7 @@ describe('resolveProviderArgs — conditional argv branches', () => {
       'some-model',
       ['/plug/a', '/plug/b'],
     );
-    expect(args).toContain('--system-prompt');
+    expect(args).toContain('--append-system-prompt');
     expect(args).toContain('SYS');
     expect(args.join(' ')).toContain('--model some-model');
     expect(args.filter((a) => a === '--plugin-dir')).toHaveLength(2);
