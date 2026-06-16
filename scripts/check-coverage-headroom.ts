@@ -16,9 +16,9 @@ interface CoverageSummary {
 }
 
 const THRESHOLDS = {
-  lines: 82,
-  branches: 73,
-  functions: 79,
+  lines: 88,
+  branches: 80,
+  functions: 87,
 } as const;
 
 const MIN_HEADROOM_POINTS = 2;

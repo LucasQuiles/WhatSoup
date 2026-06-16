@@ -22,9 +22,9 @@ afterEach(() => {
 describe('coverage headroom guard', () => {
   it('passes when every enforced metric has at least two points of headroom', () => {
     const root = makeSummary({
-      lines: { pct: 84.1 },
-      branches: { pct: 75.1 },
-      functions: { pct: 81.1 },
+      lines: { pct: 90.1 },
+      branches: { pct: 82.1 },
+      functions: { pct: 89.1 },
     });
 
     expect(checkCoverageHeadroom(root)).toEqual([]);
@@ -32,13 +32,13 @@ describe('coverage headroom guard', () => {
 
   it('fails when any enforced metric is too close to its threshold', () => {
     const root = makeSummary({
-      lines: { pct: 83.9 },
-      branches: { pct: 75.1 },
-      functions: { pct: 81.1 },
+      lines: { pct: 89.9 },
+      branches: { pct: 82.1 },
+      functions: { pct: 89.1 },
     });
 
     expect(checkCoverageHeadroom(root)).toEqual([
-      'lines: pct=83.90 threshold=82 headroom=1.90 < 2',
+      'lines: pct=89.90 threshold=88 headroom=1.90 < 2',
     ]);
   });
 });
