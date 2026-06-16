@@ -342,7 +342,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           <Tab id="permissions">Permissions</Tab>
         )}
         <Tab id="limits">Limits</Tab>
-        <Tab id="rag">RAG <span className="text-t5 text-xs">(optional)</span></Tab>
+        <Tab id="rag">RAG <span className="text-text-3 text-xs">(optional)</span></Tab>
       </Tabs>
 
       {/* 1. Access — conditional-mount panel (Tabs.tsx header §11-13 sanctions this). */}
@@ -364,16 +364,16 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           </div>
 
           {accessMode === 'self_only' && (
-            <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
+            <div className="bg-surface-raised rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
               <span className="c-heading" style={{ color: 'var(--wizard-accent)' }}>Admin Only</span>
-              <p className="c-body text-t3">Only phone numbers listed as admin can interact with this line. All other messages are silently ignored. This is the most restrictive and secure setting.</p>
+              <p className="c-body text-text-2">Only phone numbers listed as admin can interact with this line. All other messages are silently ignored. This is the most restrictive and secure setting.</p>
             </div>
           )}
 
           {accessMode === 'allowlist' && (
-            <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
+            <div className="bg-surface-raised rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
               <span className="c-heading" style={{ color: 'var(--wizard-accent)' }}>Allowlist</span>
-              <p className="c-body text-t3">Only approved contacts can interact. New contacts will be held in a pending queue until an admin approves or blocks them.</p>
+              <p className="c-body text-text-2">Only approved contacts can interact. New contacts will be held in a pending queue until an admin approves or blocks them.</p>
               <div className="mt-[var(--sp-3)]">
                 <label htmlFor={allowedContactsInputId} className="c-label c-field-label">Pre-approved contacts</label>
                 <TagInput
@@ -391,16 +391,16 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           )}
 
           {accessMode === 'open_dm' && (
-            <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
+            <div className="bg-surface-raised rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
               <span className="c-heading text-s-warn">Open DMs — Use Caution</span>
-              <p className="c-body text-t3">Anyone can send a direct message and the agent will respond. The agent has access to its configured tools and workspace. Only use this if you trust all potential contacts or have strict sandbox restrictions in the Permissions tab.</p>
+              <p className="c-body text-text-2">Anyone can send a direct message and the agent will respond. The agent has access to its configured tools and workspace. Only use this if you trust all potential contacts or have strict sandbox restrictions in the Permissions tab.</p>
             </div>
           )}
 
           {accessMode === 'groups_only' && (
-            <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
+            <div className="bg-surface-raised rounded-md p-[var(--sp-4)] mt-[var(--sp-3)]">
               <span className="c-heading" style={{ color: 'var(--wizard-accent)' }}>Groups Only</span>
-              <p className="c-body text-t3">This line only responds in group chats when mentioned. Direct messages are ignored. Useful for shared team bots.</p>
+              <p className="c-body text-text-2">This line only responds in group chats when mentioned. Direct messages are ignored. Useful for shared team bots.</p>
             </div>
           )}
         </div>
@@ -436,11 +436,11 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                 )}
               </span>
             </label>
-            <div className="flex items-center justify-center cursor-pointer rounded-sm p-[var(--sp-4)] bg-d3 mb-[var(--sp-2)] c-border-dashed">
+            <div className="flex items-center justify-center cursor-pointer rounded-sm p-[var(--sp-4)] bg-surface-raised mb-[var(--sp-2)] c-border-dashed">
               <FileInput
                 accept=".md,.txt"
                 onChange={handleFileUpload}
-                className="w-full cursor-pointer text-t3"
+                className="w-full cursor-pointer text-text-2"
               />
             </div>
             <TextArea
@@ -631,7 +631,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           />
 
           {/* Plugin selection */}
-          <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-2)]">
+          <div className="bg-surface-raised rounded-md p-[var(--sp-4)] mt-[var(--sp-2)]">
             <label className="c-label c-field-label">
               <span className="inline-flex items-center gap-[var(--sp-1)]">
                 Enabled Plugins
@@ -681,7 +681,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
               if (plugins.length === 0) return null
               return (
                 <div key={cat} className="mt-[var(--sp-3)]">
-                  <div className="text-t4 uppercase tracking-[var(--tracking-wide)] mb-[var(--sp-1)] text-xs">
+                  <div className="text-text-2 uppercase tracking-[var(--tracking-wide)] mb-[var(--sp-1)] text-xs">
                     {catLabel}
                   </div>
                   {plugins.map(plugin => {
@@ -700,11 +700,11 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                         labelClassName="flex-1 min-w-0"
                         label={(
                           <span className="block flex-1 min-w-0">
-                            <span className={`${isEnabled ? 'text-t1' : 'text-t4'} text-data block`}>
+                            <span className={`${isEnabled ? 'text-text-1' : 'text-text-2'} text-data block`}>
                               {plugin.label}
                             </span>
                             {' '}
-                            <span className="text-t5 text-xs block">
+                            <span className="text-text-3 text-xs block">
                               {plugin.description}
                             </span>
                           </span>
@@ -718,7 +718,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
           </div>
 
           {/* Settings JSON — permissions for Claude Code */}
-          <div className="bg-d3 rounded-md p-[var(--sp-4)] mt-[var(--sp-2)]">
+          <div className="bg-surface-raised rounded-md p-[var(--sp-4)] mt-[var(--sp-2)]">
             <label className="c-label c-field-label">
               <span className="inline-flex items-center gap-[var(--sp-1)]">
                 Claude Code Permissions (settings.json)
@@ -768,7 +768,7 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                       }
                       reader.readAsText(file)
                     }}
-                    className="w-full cursor-pointer text-t3 mb-[var(--sp-2)]"
+                    className="w-full cursor-pointer text-text-2 mb-[var(--sp-2)]"
                   />
                 </div>
                 <TextArea
@@ -891,9 +891,9 @@ const ConfigStep: FC<ConfigStepProps> = ({ data, onChange, errors, onSkip }) => 
                   onClick={() => onChange({ pineconeSearchMode: mode })}
                   style={{
                     background:
-                      pineconeSearchMode === mode ? 'var(--wizard-accent)' : 'var(--color-d3)',
+                      pineconeSearchMode === mode ? 'var(--wizard-accent)' : 'var(--surface-raised)',
                     color:
-                      pineconeSearchMode === mode ? 'var(--color-d0)' : 'var(--color-t3)',
+                      pineconeSearchMode === mode ? 'var(--surface-base)' : 'var(--text-2)',
                     borderRadius:
                       mode === 'Memory'
                         ? 'var(--radius-sm) 0 0 var(--radius-sm)'
