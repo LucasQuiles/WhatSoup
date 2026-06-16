@@ -22,6 +22,7 @@ import {
   stashStandbyNotice,
   consumeStandbyNotice,
 } from './standby-notice.ts';
+import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
@@ -7887,16 +7888,26 @@ export class AgentRuntime implements Runtime {
   /**
    * Format chat messages into the `[HH:MM] sender: content` lines injected as
    * recent-context into a fresh/stand-in session. Single source of truth for
-   * that line shape (previously duplicated across the three injection sites);
-   * the one place a future cross-provider content redaction would hook in.
+   * that line shape (previously duplicated across the three injection sites).
    * Caller controls ordering — getRecentMessages is reverse-chronological (pass
    * a reversed copy), getMessagesSince is already chronological.
+   *
+   * Cross-provider safety: while a fallback window is active the target session
+   * is a DIFFERENT provider than the conversation originated on, so message
+   * content is scrubbed of secret shapes (tokens, keys, Bearer, emails) before
+   * it crosses the provider boundary. Same-provider respawns inject verbatim —
+   * the content was already seen by that provider, so there is no new exposure.
    */
   private formatContextLines(
     messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>,
   ): string {
+    const redactForBackup = this.isFallbackWindowActive;
     return messages
-      .map((m) => `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${m.content ?? '[media]'}`)
+      .map((m) => {
+        const content = m.content ?? '[media]';
+        const safe = redactForBackup ? sanitizeProviderPreviewText(content) : content;
+        return `[${this.formatRecoveryTimestamp(m.timestamp)}] ${m.senderName ?? m.senderJid}: ${safe}`;
+      })
       .join('\n');
   }
 

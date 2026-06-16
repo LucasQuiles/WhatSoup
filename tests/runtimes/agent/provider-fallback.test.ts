@@ -367,6 +367,22 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(lines).toHaveLength(2);
   });
 
+  it('scrubs secret shapes from context only when injecting into a cross-provider fallback', () => {
+    const v = view(makeRuntime({ agentFallbackProvider: 'opencode-cli' }));
+    // A Bearer token embedded in chat content (the redactor catches the shape).
+    const token = 'tokFAKE1234567890abcd';
+    const msgs = [{ timestamp: 0, senderName: 'Lucas', senderJid: 'l@x', content: `use Bearer ${token} for the call` }];
+    // No fallback active → same provider, no new exposure → verbatim.
+    expect(v.formatContextLines(msgs)).toContain(token);
+    // Fallback active → content crosses to a DIFFERENT provider → scrubbed.
+    v.activateProviderFallback(null);
+    const redacted = v.formatContextLines(msgs);
+    expect(redacted).not.toContain(token);
+    expect(redacted).toContain('Bearer [REDACTED]');
+    expect(redacted).toContain('for the call'); // surgical — conversation text preserved
+    v.deactivateProviderFallback('test cleanup');
+  });
+
   it('throttles the diagnostic bundle so a fallback storm cannot fan out probes', () => {
     const v = view(makeRuntime({ agentFallbackProvider: 'opencode-cli' }));
     // Simulate a very recent prior kick: a second kick within the window must be

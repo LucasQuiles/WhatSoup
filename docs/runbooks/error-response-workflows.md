@@ -102,15 +102,15 @@ is wired (per the runbook-and-PR co-update rule):
 
 - **Cross-harness context handoff** — note that the *verbatim* half already
   ships: `sendTurnToSession` injects the last N messages as `[Recent chat
-  context]` on every fresh/stand-in session spawn (the line shape is now a single
-  helper, `formatContextLines`). What remains is the *distilled summary* path —
-  `handoff-prelude.ts` (composer with the cost-compression / staleness / redaction
-  policies), `handoff-artifact.ts` (the `agent_handoff_artifacts` store), and
-  `handoff-distill-gate.ts` (the per-conversation token/call budget + global
-  concurrency + circuit-breaker gate). The warm distiller loop and the
-  system-prompt summary seam are pending; a cross-provider content redactor for
-  the verbatim injection (PII crossing to a backup provider) is a tracked
-  follow-up that would hook into `formatContextLines`.
+  context]` on every fresh/stand-in session spawn (the line shape is a single
+  helper, `formatContextLines`, which scrubs secret shapes from content while a
+  fallback window is active — content crossing to a different backup provider is
+  redacted; same-provider respawns inject verbatim). What remains is the
+  *distilled summary* path — `handoff-prelude.ts` (composer with the
+  cost-compression / staleness policies), `handoff-artifact.ts` (the
+  `agent_handoff_artifacts` store), and `handoff-distill-gate.ts` (the
+  per-conversation token/call budget + global concurrency + circuit-breaker
+  gate). The warm distiller loop and the system-prompt summary seam are pending.
 - **Deterministic message templates** — `response-templates.ts` (one renderer
   per user-template id) are built and unit-tested but not yet used by the live
   notice path, which still composes its string inline; unifying the two is a
