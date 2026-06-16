@@ -8,6 +8,14 @@
 export { StatusCell, ModeBadge } from './Badge';
 export type { StatusCellProps, ModeBadgeProps } from './Badge';
 
+export { Avatar, AvatarStack } from './Avatar';
+export type {
+  AvatarProps,
+  AvatarStackProps,
+  AvatarSize,
+  AvatarPresence,
+} from './Avatar';
+
 export { Card } from './Card';
 export type { CardProps, CardVariant, CardEdge } from './Card';
 

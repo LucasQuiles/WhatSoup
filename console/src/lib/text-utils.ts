@@ -24,6 +24,19 @@ export function getInitials(name: string | number | null | undefined): string {
   return text.split(/\s+/).map(w => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase()
 }
 
+/**
+ * Deterministic 0..7 index into the 8-hue avatar identity palette
+ * (--avatar-hue-0..7). Same hashing idiom as line-detail/groups-utils.avatarColor
+ * so a given identity resolves to a stable hue across the app.
+ */
+export function avatarHueIndex(name: string | number | null | undefined): number {
+  const text = textValue(name)
+  let hash = 0
+  for (let i = 0; i < text.length; i += 1) hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0
+  const HUE_COUNT = 8
+  return ((hash % HUE_COUNT) + HUE_COUNT) % HUE_COUNT
+}
+
 /** Strip markdown formatting for display in previews. */
 export function stripMarkdown(text: string | number | null | undefined): string {
   const source = textValue(text)

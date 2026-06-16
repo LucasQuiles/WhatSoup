@@ -1,6 +1,7 @@
 import { type FC } from 'react'
-import { getInitials, stripMarkdown, resolveDisplayName } from '../lib/text-utils'
+import { stripMarkdown, resolveDisplayName } from '../lib/text-utils'
 import { formatChatTime } from '../lib/format-time'
+import { Avatar } from './primitives'
 import type { ChatItem } from '../types'
 
 interface ChatListItemProps {
@@ -30,12 +31,8 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabInd
       className={`flex cursor-pointer c-chat-item py-[var(--sp-3)] px-[var(--sp-4)] gap-[var(--sp-3)] c-border-b ${isSelected ? 'active' : ''}`}
       style={isSelected ? { borderLeftWidth: 'var(--bw-accent)', borderLeftStyle: 'solid', borderLeftColor: 'var(--color-m-cht)', paddingLeft: 'var(--msg-pad-h)' } : undefined}
     >
-      {/* Avatar — fixed size */}
-      <div
-        className="rounded-full flex items-center justify-center flex-shrink-0 font-sans text-t3 font-semibold w-[var(--avatar-md)] h-[var(--avatar-md)] bg-d5 text-sm"
-      >
-        {getInitials(displayName)}
-      </div>
+      {/* Avatar — the identity primitive (neutral initials, md size). */}
+      <Avatar name={displayName} size="md" aria-label={displayName} />
 
       {/* Body — fixed layout with overflow control */}
       <div className="flex-1 min-w-0 overflow-hidden">
