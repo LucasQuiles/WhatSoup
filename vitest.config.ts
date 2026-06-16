@@ -46,9 +46,9 @@ export default defineConfig({
         'tools/whatsoup_guard/**',
       ],
       thresholds: {
-        lines: 82,
-        branches: 73,
-        functions: 79,
+        lines: 88,
+        branches: 80,
+        functions: 87,
       },
     },
     env: {
