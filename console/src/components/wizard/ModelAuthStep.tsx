@@ -180,7 +180,7 @@ const ApiKeyInput: FC<{
             aria-label={visible ? 'Hide API key' : 'Show API key'}
             onClick={() => setVisible((v) => !v)}
             icon={visible ? <EyeOff size={16} /> : <Eye size={16} />}
-            className="absolute right-[var(--sp-2)] top-1/2 -translate-y-1/2 cursor-pointer text-t3"
+            className="absolute right-[var(--sp-2)] top-1/2 -translate-y-1/2 cursor-pointer text-text-2"
             style={{
               background: 'none',
               border: 'none',
@@ -204,7 +204,7 @@ const PassiveView: FC = () => (
   <div className="flex flex-col items-center text-center gap-[var(--sp-3)] py-[var(--sp-5)] px-0">
     <Check size={32} className="text-s-ok" />
     <span className="c-heading">Passive lines don&apos;t require a model configuration.</span>
-    <span className="c-body text-t3">
+    <span className="c-body text-text-2">
       This line will listen and store messages without AI responses.
     </span>
   </div>
@@ -283,7 +283,7 @@ const AgentView: FC<{
           <Check size={16} className="wizard-check" />
         </div>
         {authMethod === 'oauth' && (
-          <div className="c-body text-t3 bg-d3 rounded-sm p-[var(--sp-3)]">
+          <div className="c-body text-text-2 bg-surface-raised rounded-sm p-[var(--sp-3)]">
             Requires active Claude CLI login on this machine.
           </div>
         )}

@@ -87,7 +87,7 @@ export function ContactSearchPicker({
     selected: false,
     renderOption: () => (
       <span className="flex items-center gap-2 min-w-0 w-full">
-        <UserPlus size={14} className="text-t4 flex-shrink-0" />
+        <UserPlus size={14} className="text-text-2 flex-shrink-0" />
         <span title={contactLabel(contact)} className="c-data min-w-0 truncate">{contactLabel(contact)}</span>
         {contact.number && (
           <span className="c-label flex-shrink-0">{contact.number}</span>

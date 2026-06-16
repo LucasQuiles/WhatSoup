@@ -170,7 +170,7 @@ export default function LineDetail() {
     >
       {/* ═══ Line Header ═══ */}
       <div
-        className="flex flex-wrap md:flex-nowrap items-center gap-4 c-toolbar flex-shrink-0 bg-d2 c-border rounded-lg"
+        className="flex flex-wrap md:flex-nowrap items-center gap-4 c-toolbar flex-shrink-0 bg-surface-raised c-border rounded-lg"
       >
         <ActionButton
           label="Back"
@@ -185,19 +185,19 @@ export default function LineDetail() {
         {/* Identity */}
         <div className="flex-1 min-w-[var(--header-identity-min)]">
           <div className="flex flex-wrap items-center gap-2 min-w-0">
-            <h1 title={line.name} className="text-t1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl truncate min-w-0 flex-1">
+            <h1 title={line.name} className="text-text-1 font-extrabold font-sans tracking-[var(--tracking-tight)] text-xl truncate min-w-0 flex-1">
               {line.name}
             </h1>
             <ModeBadge mode={line.mode} />
             <LineTags line={line} />
           </div>
-          <div className="font-mono text-t3 text-data">
+          <div className="font-mono text-text-2 text-data">
             {line.phone}
           </div>
         </div>
 
         {/* Meta */}
-        <div className="hidden lg:flex gap-4 font-mono text-t4 text-sm">
+        <div className="hidden lg:flex gap-4 font-mono text-text-2 text-sm">
           <span>uptime: {line.uptime ?? '—'}</span>
           <span>port: {line.healthPort}</span>
           <span>msgs: {formatCount(line.messagesTotal)}</span>
@@ -226,14 +226,14 @@ export default function LineDetail() {
 
       {/* ═══ Tab bar + content container ═══ */}
       <div
-        className="flex-1 flex flex-col min-h-0 bg-d1 c-border rounded-lg overflow-hidden"
+        className="flex-1 flex flex-col min-h-0 bg-surface-inset c-border rounded-lg overflow-hidden"
       >
       <Tabs
         label="Line detail tabs"
         value={activeTab}
         onChange={(id) => setActiveTab(id as TabId)}
         inset
-        className="flex-shrink-0 bg-d2"
+        className="flex-shrink-0 bg-surface-raised"
       >
         {tabs.map(tab => {
           const Icon = tab.icon
@@ -336,7 +336,7 @@ export default function LineDetail() {
           </motion.div>
         </AnimatePresence>
         {/* Bottom fade to indicate scrollable content */}
-        <div className="absolute bottom-0 left-0 right-0 h-[var(--sp-8)] pointer-events-none" style={{ background: 'linear-gradient(to top, var(--color-d0), transparent)' }} />
+        <div className="absolute bottom-0 left-0 right-0 h-[var(--sp-8)] pointer-events-none" style={{ background: 'linear-gradient(to top, var(--surface-base), transparent)' }} />
       </div>
       </div>
 

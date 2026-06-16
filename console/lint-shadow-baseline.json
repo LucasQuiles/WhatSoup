@@ -1,6 +1,6 @@
 {
   "generated": "shadow lint per-rule warning ceiling",
-  "total": 97,
+  "total": 48,
   "rules": {
     "no-restricted-syntax :: src/components/line-detail/ModeTab.tsx": 1,
     "no-restricted-syntax :: src/components/line-detail/PipelineTab.tsx": 1,
@@ -9,20 +9,8 @@
     "no-restricted-syntax :: src/mock-data.ts": 5,
     "soup/no-brand-regression :: src/components/Nav.tsx": 1,
     "soup/no-brand-regression :: src/components/UpdateModal.tsx": 1,
-    "soup/no-legacy-tokens :: src/App.tsx": 2,
     "soup/no-legacy-tokens :: src/components/Nav.tsx": 15,
-    "soup/no-legacy-tokens :: src/components/shared/ChatPicker.tsx": 6,
-    "soup/no-legacy-tokens :: src/components/shared/ContactSearchPicker.tsx": 1,
-    "soup/no-legacy-tokens :: src/components/shared/SearchInput.tsx": 1,
     "soup/no-legacy-tokens :: src/components/UpdateModal.tsx": 12,
-    "soup/no-legacy-tokens :: src/components/wizard/IdentityStep.tsx": 2,
-    "soup/no-legacy-tokens :: src/components/wizard/LinkStep.tsx": 5,
-    "soup/no-legacy-tokens :: src/components/wizard/ModelAuthStep.tsx": 3,
-    "soup/no-legacy-tokens :: src/components/wizard/ReviewStep.tsx": 6,
-    "soup/no-legacy-tokens :: src/components/wizard/WizardStep.tsx": 1,
-    "soup/no-legacy-tokens :: src/pages/LineDetail.tsx": 7,
-    "soup/no-legacy-tokens :: src/pages/Ops.tsx": 8,
-    "soup/no-legacy-tokens :: src/pages/SoupKitchen.tsx": 7,
     "soup/no-utility-smell :: src/components/line-detail/GroupCard.tsx": 1
   }
 }

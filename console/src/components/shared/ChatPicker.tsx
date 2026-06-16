@@ -78,9 +78,9 @@ export function ChatPicker({
     renderOption: () => (
       <span className="flex items-center gap-2 min-w-0">
         {chat.isGroup ? (
-          <Users size={14} className="text-t4 flex-shrink-0" />
+          <Users size={14} className="text-text-2 flex-shrink-0" />
         ) : (
-          <MessageSquare size={14} className="text-t4 flex-shrink-0" />
+          <MessageSquare size={14} className="text-text-2 flex-shrink-0" />
         )}
         <span title={chatLabel(chat)} className="c-data truncate">{chatLabel(chat)}</span>
       </span>
@@ -118,11 +118,11 @@ export function ChatPicker({
   // ---- Selected state display ----
   if (selected) {
     return (
-      <div className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] bg-d1 rounded-md [border:var(--bw)_solid_var(--b1)]">
+      <div className="flex items-center gap-2 py-[var(--sp-2)] px-[var(--sp-3)] bg-surface-inset rounded-md [border:var(--bw)_solid_var(--border-hairline)]">
         {selected.isGroup ? (
-          <Users size={14} className="text-t4" />
+          <Users size={14} className="text-text-2" />
         ) : (
-          <MessageSquare size={14} className="text-t4" />
+          <MessageSquare size={14} className="text-text-2" />
         )}
         <span title={chatLabel(selected)} className="c-data flex-1 truncate">{chatLabel(selected)}</span>
         <Button

@@ -18,8 +18,8 @@ interface ReviewStepProps {
 /* ── Shared styles ── */
 
 const cardStyle: React.CSSProperties = {
-  background: 'var(--color-d1)',
-  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--b2)',
+  background: 'var(--surface-inset)',
+  borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--border-subtle)',
   borderRadius: 'var(--radius-md)',
   padding: 'var(--sp-4)',
 }
@@ -33,7 +33,7 @@ const cardHeaderStyle: React.CSSProperties = {
 
 const headingStyle: React.CSSProperties = {
   letterSpacing: 'var(--tracking-label)',
-  color: 'var(--color-t2)',
+  color: 'var(--text-2)',
 }
 
 const kvRowStyle: React.CSSProperties = {
@@ -44,11 +44,11 @@ const kvRowStyle: React.CSSProperties = {
 }
 
 const kvLabelStyle: React.CSSProperties = {
-  color: 'var(--color-t4)',
+  color: 'var(--text-2)',
 }
 
 const kvValueStyle: React.CSSProperties = {
-  color: 'var(--color-t1)',
+  color: 'var(--text-1)',
 }
 
 /* ── Edit button ── */
@@ -199,7 +199,7 @@ const ReviewStep: FC<ReviewStepProps> = ({
       {/* Error message */}
       {error && (
         <div
-          className="flex items-center gap-[var(--sp-2)] p-[var(--sp-3)] bg-d3 rounded-sm"
+          className="flex items-center gap-[var(--sp-2)] p-[var(--sp-3)] bg-surface-raised rounded-sm"
           style={{ borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: 'var(--color-s-crit)' }}
         >
           <AlertCircle size={16} className="text-s-crit flex-shrink-0" />

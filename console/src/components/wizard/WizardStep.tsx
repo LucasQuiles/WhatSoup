@@ -23,7 +23,7 @@ const WizardStep: FC<WizardStepProps> = ({ title, subtitle, footerExtra, childre
     {(title || subtitle) && (
       <div className="flex flex-col gap-[var(--sp-1)]">
         {title && <h3 className="c-heading">{title}</h3>}
-        {subtitle && <p className="c-body text-t3">{subtitle}</p>}
+        {subtitle && <p className="c-body text-text-2">{subtitle}</p>}
       </div>
     )}
     {children}

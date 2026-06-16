@@ -14,7 +14,7 @@ export function SearchInput({ containerClassName, className, endAdornment, short
       <Search
         size={13}
         strokeWidth={1.75}
-        className="absolute top-1/2 -translate-y-1/2 pointer-events-none text-t5 left-[var(--sp-2h)]"
+        className="absolute top-1/2 -translate-y-1/2 pointer-events-none text-text-3 left-[var(--sp-2h)]"
       />
       <TextInput
         type="text"
