@@ -11,6 +11,10 @@ import {
   isProviderAuthRequiredMessage,
   type ProviderFailureKind,
 } from './failure-taxonomy.ts';
+import {
+  workflowForProviderText,
+  type ResponseWorkflow,
+} from './response-registry.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
@@ -183,6 +187,14 @@ const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 12;
   return Math.min(Math.max(Math.trunc(raw), 3), 100);
 })();
+// Opt-in: route terminal provider-failure results through the declarative
+// response-workflow registry (handleProviderFailureResult) instead of the
+// hand-rolled per-chat / singleton branch ladders. Behaviour-preserving — the
+// legacy ladders remain the default and the fall-through for non-failure text.
+// Read per-call (not memoised) so tests can toggle it without re-importing.
+function responseRegistryDispatchEnabled(): boolean {
+  return process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] === '1';
+}
 
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
 type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empty-output';
@@ -1328,6 +1340,47 @@ function alertExcerpt(value: string): string {
   return cleaned.length > TOOL_FAILURE_ALERT_EXCERPT_CHARS
     ? `${cleaned.slice(0, TOOL_FAILURE_ALERT_EXCERPT_CHARS - 1)}…`
     : cleaned;
+}
+
+/**
+ * Per-call context for {@link AgentRuntime.handleProviderFailureResult}. Captures
+ * the only points where the per-chat and singleton result handlers diverge
+ * (session reference, replay map key, cleanup args, log subject) so one method
+ * serves both. The trailing `this.singleTurnHadToolActivity = false` the
+ * singleton arming branches set is redundant — `cleanupUsageLimitTurn` already
+ * clears it on every path — so it is intentionally not threaded here.
+ */
+interface ProviderFailureResultContext {
+  queue: IOutboundQueue;
+  session: SessionManager | null;
+  providerText: string;
+  turnHadToolWork: boolean;
+  /** Subject for log lines: per-chat target jid, or the singleton's active/turn jid. */
+  logChatJid: string | null | undefined;
+  /** Forwarded to scheduleFallbackReplay; undefined in singleton/shared mode. */
+  scheduleReplayMapKey?: string;
+  /** Cleanup arguments matching the originating handler's shape. */
+  cleanupArgs: {
+    inboundSeq?: number;
+    conversationKey?: string;
+    mapKey?: string;
+    clearCurrentInboundSeq?: boolean;
+  };
+  recordTurnFailure: (errorClass: TurnCapabilityErrorClass) => void;
+}
+
+/** Per-kind log message for an arming terminal provider failure (matches the legacy ladders verbatim). */
+function armingFailureLogMessage(reason: ProviderFallbackReason): string {
+  switch (reason) {
+    case 'usage-limit':
+      return 'suppressed usage-limit message from result — session will be killed';
+    case 'auth-required':
+      return 'suppressed provider auth-required message from result — session will be shut down';
+    case 'rate-limit':
+      return 'terminal provider rate-limit result observed';
+    case 'model-unavailable':
+      return 'suppressed provider model-unavailable message from result — session will be shut down';
+  }
 }
 
 export class AgentRuntime implements Runtime {
@@ -4834,6 +4887,18 @@ export class AgentRuntime implements Runtime {
         };
 
         if (event.text && !hasPendingPoll) {
+          if (responseRegistryDispatchEnabled() && this.dispatchProviderFailureResult({
+            queue,
+            session,
+            providerText: event.text,
+            turnHadToolWork,
+            logChatJid: queue.targetChatJid,
+            scheduleReplayMapKey: mapKey,
+            cleanupArgs: { inboundSeq, conversationKey, mapKey },
+            recordTurnFailure,
+          })) {
+            break;
+          }
           const providerFailureKind = classifyProviderFailure(event.text);
           // Suppress usage-limit messages — log and skip instead of forwarding
           if (providerFailureKind === 'usage-limit') {
@@ -6813,6 +6878,76 @@ export class AgentRuntime implements Runtime {
     return !isProviderAuthRequiredMessage(result.output);
   }
 
+  /**
+   * Registry-driven entry point for a terminal result's text. Returns true if
+   * the text classified as a provider failure and was fully handled (the caller
+   * must `break`); false if it is not a provider failure (caller falls through
+   * to normal result handling). Gated by {@link responseRegistryDispatchEnabled}.
+   */
+  private dispatchProviderFailureResult(ctx: ProviderFailureResultContext): boolean {
+    const wf = workflowForProviderText(ctx.providerText);
+    if (!wf) return false;
+    this.handleProviderFailureResult(wf, ctx);
+    return true;
+  }
+
+  /**
+   * Execute the response workflow for a terminal provider-failure result —
+   * the single, behaviour-preserving replacement for the six hand-rolled
+   * `providerFailureKind === …` branches in both result handlers. Only invoked
+   * with a workflow whose `providerKind` is non-null (the provider-text path).
+   */
+  private handleProviderFailureResult(wf: ResponseWorkflow, ctx: ProviderFailureResultContext): void {
+    const { queue, session, providerText, turnHadToolWork, logChatJid } = ctx;
+    const kind = wf.providerKind;
+    if (kind === null) return; // unreachable on the text path; defensive.
+    ctx.recordTurnFailure(kind);
+    const textPreview = providerText.slice(0, 300);
+
+    // Non-arming, kill-and-respawn classes: context-overflow surfaces a notice,
+    // policy-block stays silent. Neither activates a fallback.
+    if (!wf.fallback.arms) {
+      if (wf.userTemplate === 'context-overflow') {
+        log.warn({ chatJid: logChatJid, textPreview }, 'prompt too long — killing session');
+        queue.enqueueText('_Context limit reached — starting fresh session. Send your message again._');
+      } else {
+        log.error({ chatJid: logChatJid, textPreview }, 'suppressed provider policy-block message from result — session will be killed');
+      }
+      this.cleanupUsageLimitTurn(queue, ctx.cleanupArgs);
+      session?.shutdown();
+      return;
+    }
+
+    // Arming classes: usage-limit / auth-required / rate-limit / model-unavailable.
+    const reason = kind as ProviderFallbackReason;
+    log.warn({ chatJid: logChatJid, textPreview }, armingFailureLogMessage(reason));
+    const resetAt = reason === 'usage-limit' ? extractUsageLimitResetTime(providerText) : null;
+    const activation = wf.fallback.markActiveEntryFailedOnTrigger
+      ? this.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, providerText)
+      : this.activateProviderFallback(resetAt, reason);
+    const replayScheduled = activation
+      ? this.scheduleFallbackReplay({
+          activation,
+          chatJid: queue.targetChatJid,
+          ...(ctx.scheduleReplayMapKey !== undefined ? { mapKey: ctx.scheduleReplayMapKey } : {}),
+          oldSession: session,
+          hadToolActivity: turnHadToolWork,
+        })
+      : false;
+    if (activation) {
+      this.notifyProviderFallbackActivated(queue, activation, {
+        replayScheduled,
+        blockedByToolActivity: turnHadToolWork,
+      });
+    }
+    this.cleanupUsageLimitTurn(queue, ctx.cleanupArgs);
+    if (!replayScheduled) {
+      // Only usage-limit emits a standalone notice when no fallback armed.
+      if (reason === 'usage-limit' && !activation) queue.enqueueText(this.usageLimitNotice());
+      session?.shutdown();
+    }
+  }
+
   private notifyProviderFallbackActivated(
     queue: IOutboundQueue,
     activation: ProviderFallbackActivation,
@@ -7910,6 +8045,21 @@ export class AgentRuntime implements Runtime {
 
         // Render result.text if present (e.g. terminal context-limit errors)
         if (event.text) {
+          if (responseRegistryDispatchEnabled() && this.dispatchProviderFailureResult({
+            queue,
+            session: this.session,
+            providerText: event.text,
+            turnHadToolWork,
+            logChatJid: this.shared ? this.currentTurnChatJid : this.activeChatJid,
+            cleanupArgs: {
+              inboundSeq: this.currentInboundSeq,
+              conversationKey: toConversationKey(queue.targetChatJid),
+              clearCurrentInboundSeq: true,
+            },
+            recordTurnFailure,
+          })) {
+            break;
+          }
           const providerFailureKind = classifyProviderFailure(event.text);
           // Suppress usage-limit messages — log and kill session instead of forwarding
           if (providerFailureKind === 'usage-limit') {
