@@ -1496,6 +1496,34 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('emits a debug log when readHealthBody JSON parse fails on a non-ok response', async () => {
+    const parseError = new Error('Unexpected token < in JSON at position 0');
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: () => Promise.reject(parseError),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    // Body parse failure is a debug-level observable event — silent catch is opaque
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.objectContaining({ err: parseError }),
+      expect.stringContaining('readHealthBody'),
+    );
+    // Control flow is unchanged: null body → HTTP failure path
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'degraded',
+      consecutiveFailures: 1,
+      error: 'HTTP 503',
+    });
+  });
+
   it('logs and continues when a status change listener throws', async () => {
     mockFetch.mockRejectedValue(new Error('connection refused'));
 

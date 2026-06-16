@@ -838,6 +838,45 @@ describe('bot-errors-dispatcher', () => {
     expect(rendered).toContain('BOT ERROR - flapping source restored');
   });
 
+  it('prune_suppressed uses delivery.suppressedAt from event JSON, not file mtime, to determine oldest', () => {
+    // The five files are written with mtimes in ASCENDING order (old-0 oldest by mtime)
+    // but suppressedAt timestamps in DESCENDING order (old-0 newest by suppressedAt).
+    // Correct behavior: prune old-4 and old-3 (oldest by suppressedAt).
+    // Mtime-only behavior: prune old-0 and old-1 (oldest by mtime) — wrong.
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
+    const suppressed = join(tmpRoot, 'suppressed');
+    const dispatchLog = join(tmpRoot, 'logs', 'dispatch.jsonl');
+    mkdirSync(suppressed, { recursive: true, mode: 0o700 });
+    for (let index = 0; index < 5; index += 1) {
+      const file = join(suppressed, `flip-${index}.json.suppressed`);
+      // suppressedAt in descending order: flip-0 is newest, flip-4 is oldest
+      const suppressedAt = new Date(Date.UTC(2026, 4, 31, 0, 4 - index, 0)).toISOString();
+      writeFileSync(file, JSON.stringify({
+        id: `flip-${index}`,
+        delivery: { status: 'suppressed', suppressedAt, suppressedReason: 'test' },
+      }), { mode: 0o600 });
+      // mtime in ascending order: flip-0 is oldest mtime, flip-4 is newest mtime
+      const mtime = new Date(Date.UTC(2026, 4, 31, 0, index, 0));
+      utimesSync(file, mtime, mtime);
+    }
+
+    const output = execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BOT_ERRORS_STATE_DIR: tmpRoot,
+        BOT_ERRORS_SUPPRESSED_MAX_FILES: '3',
+      },
+      encoding: 'utf8',
+    });
+
+    expect(JSON.parse(output)).toMatchObject({ suppressedPruned: 2 });
+    const remaining = readdirSync(suppressed).sort();
+    // flip-0, flip-1, flip-2 must survive (newest suppressedAt)
+    expect(remaining).toEqual(['flip-0.json.suppressed', 'flip-1.json.suppressed', 'flip-2.json.suppressed']);
+    expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "suppressed_pruned"');
+  });
+
   it('caps retained suppressed events after accounting for newly suppressed duplicates', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const suppressed = join(tmpRoot, 'suppressed');

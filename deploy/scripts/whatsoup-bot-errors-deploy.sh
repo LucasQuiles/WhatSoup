@@ -19,7 +19,7 @@ ROOT="${2:?missing <root>}"
 
 # F-id : path-relative-to-root : expected current-main sha256
 FILES=(
-  "deploy/scripts/bot-errors-dispatcher.py:955cb984f9c5fbecaef893d9c94b1f309f0b306cfc5974fcdef9ba4bf3db8010"
+  "deploy/scripts/bot-errors-dispatcher.py:9dde1cb136f609ab484827e4dadf9427f6c715be6f0582b8c5081f56eea95fd0"
   "deploy/scripts/bot-errors-health-check.py:8f12a71bd68ea239ccf27f973b4d45bc66042f35d8ecee19a75cb08e81af7f9d"
   "deploy/scripts/bot-errors-heartbeat-watchdog.py:c85c70ea597a64aa25f3cc0c6644e1f8f22286b9ee0de958360aa503c72575ff"
   "deploy/scripts/bot-errors-q-loop.py:de61c690343d334b508d2852bb5dca4558f2f26796bf355af3d582a1c6bba50a"
