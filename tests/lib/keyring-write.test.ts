@@ -22,18 +22,18 @@ describe('writeCredential — macos-keychain backend', () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it('invokes security add-generic-password with -U, -- separators, and the exact service/account', () => {
+  it('keeps the secret off argv and delivers it over stdin via the -w prompt (sent twice for the retype)', () => {
     execFileSyncMock.mockReturnValue(Buffer.from(''));
-    const out = writeCredential('deepseek', 'sk-test-VALUE');
+    const out = writeCredential('minimax', 'sk-test-VALUE');
     expect(execFileSyncMock).toHaveBeenCalledTimes(1);
-    const [cmd, args] = execFileSyncMock.mock.calls[0]!;
+    const [cmd, args, opts] = execFileSyncMock.mock.calls[0]!;
     expect(cmd).toBe('security');
-    expect(args).toEqual([
-      'add-generic-password', '-U',
-      '-s', '--', 'deepseek',
-      '-a', '--', os.userInfo().username,
-      '-w', 'sk-test-VALUE',
-    ]);
+    // The secret MUST NOT appear anywhere on argv (visible via `ps -ww`).
+    expect(JSON.stringify(args)).not.toContain('sk-test-VALUE');
+    // -w is the LAST option so `security` prompts for the password on stdin.
+    expect(args).toEqual(['add-generic-password', '-U', '-s', 'minimax', '-a', os.userInfo().username, '-w']);
+    // The value is delivered out-of-band on stdin, sent twice (enter + retype prompt).
+    expect((opts as { input?: string }).input).toBe('sk-test-VALUE\nsk-test-VALUE\n');
     expect(out.backend).toBe('macos-keychain');
   });
 
@@ -145,6 +145,6 @@ describe('lookupCredential — flag-injection guards', () => {
     execFileSyncMock.mockReturnValue(Buffer.from('val'));
     lookupCredential('deepseek', { skipEnv: true });
     const call = execFileSyncMock.mock.calls.find((c) => c[0] === 'security');
-    expect(call![1]).toEqual(['find-generic-password', '-s', '--', 'deepseek', '-a', '--', os.userInfo().username, '-w']);
+    expect(call![1]).toEqual(['find-generic-password', '-s', 'deepseek', '-a', os.userInfo().username, '-w']);
   });
 });
