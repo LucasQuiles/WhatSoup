@@ -245,6 +245,9 @@ function expectedFallbackDetails(): Record<string, unknown> {
     },
     activeFallbackEntry: null,
     fallbackChain: [],
+    fallbackChainExhausted: false,
+    failedEntryCount: 0,
+    turnErrorCounts: {},
   };
 }
 
