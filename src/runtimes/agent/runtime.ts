@@ -23,12 +23,14 @@ import {
   consumeStandbyNotice,
 } from './standby-notice.ts';
 import { sanitizeProviderPreviewText } from './provider-preview-sanitizer.ts';
+import { redactHandoffPii } from './handoff-pii-redactor.ts';
 import { seamForProvider } from './handoff-seam-routing.ts';
 import { ensureHandoffArtifactSchema, getHandoffArtifact, upsertHandoffArtifact } from './handoff-artifact.ts';
 import { buildHandoffPrelude, type HandoffArtifact } from './handoff-prelude.ts';
 import { HandoffDistillRunner } from './handoff-distill-runner.ts';
 import { buildHandoffDistill } from './handoff-summarizer.ts';
 import { type DistillBudgetConfig } from './handoff-distill-gate.ts';
+import { resolveHandoffDistillConfig } from './handoff-distill-config.ts';
 import { resolveDistillModel, type ResolvedDistillModel } from './handoff-distill-model.ts';
 import type { AgentProvider } from './providers/types.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
@@ -232,23 +234,21 @@ const HANDOFF_STALE_MS = 120_000;
 // One periodic sweep enumerates active conversations and asks the runner to
 // (maybe) distill each. The runner+gate own growth/budget/breaker/concurrency,
 // so the interval only sets how often that machinery is consulted.
-const HANDOFF_DISTILL_SWEEP_MS = 60_000;
-// Token growth (since last distill baseline) that makes a conversation eligible
-// for a fresh distill. Below this the runner skips the conversation (no model
-// call). Tuned conservatively so short chats never trigger a summary.
-const HANDOFF_DISTILL_GROWTH_THRESHOLD = 4_000;
-// Trailing messages handed to the summarizer corpus.
-const HANDOFF_DISTILL_VERBATIM_N = 40;
-// Per-conversation + global cost guard for the distiller. Conservative ceilings:
-// the distiller is an unobserved spend surface, so it stays cheap by default.
-const HANDOFF_DISTILL_BUDGET: DistillBudgetConfig = {
-  maxTokensPerWindow: 50_000,
-  maxCallsPerWindow: 6,
-  windowMs: 3_600_000,
-  failureThreshold: 3,
-  breakerCooldownMs: 300_000,
-  globalConcurrency: 2,
-};
+// All four knobs below are env-overridable via resolveHandoffDistillConfig
+// (WHATSOUP_HANDOFF_DISTILL_* — see docs/configuration.md). Resolved once at
+// module load; with no env set the values are byte-identical to the prior
+// hardcoded defaults (sweep 60s, growth 4_000, verbatim 40, budget below).
+//   sweepMs            — how often the periodic sweep consults the runner.
+//   growthThreshold    — token growth (since last distill) that makes a
+//                        conversation eligible for a fresh distill.
+//   verbatimN          — trailing messages handed to the summarizer corpus.
+//   budget             — per-conversation + global cost guard (conservative
+//                        ceilings; the distiller is an unobserved spend surface).
+const HANDOFF_DISTILL_RESOLVED = resolveHandoffDistillConfig(process.env);
+const HANDOFF_DISTILL_SWEEP_MS = HANDOFF_DISTILL_RESOLVED.sweepMs;
+const HANDOFF_DISTILL_GROWTH_THRESHOLD = HANDOFF_DISTILL_RESOLVED.growthThreshold;
+const HANDOFF_DISTILL_VERBATIM_N = HANDOFF_DISTILL_RESOLVED.verbatimN;
+const HANDOFF_DISTILL_BUDGET: DistillBudgetConfig = HANDOFF_DISTILL_RESOLVED.budget;
 // Opt-in: collapse the fallback notice and the stand-in's reply into ONE
 // user-facing message. When a replay is scheduled the notice is stashed (via the
 // crash-safe standby latch) and prepended to the stand-in's first visible reply
@@ -2098,7 +2098,7 @@ export class AgentRuntime implements Runtime {
         endpoint: resolved.endpoint,
         conversationKey,
         loadMessages: () => getRecentMessages(this.db, conversationKey, HANDOFF_DISTILL_VERBATIM_N),
-        redact: (t) => sanitizeProviderPreviewText(t),
+        redact: (t) => redactHandoffPii(t),
         verbatimN: HANDOFF_DISTILL_VERBATIM_N,
       });
       return run().then((o) => ({ summary: o.summary, seededArtifacts: o.seededArtifacts ?? null, tokensUsed: o.tokensUsed }));
@@ -7595,10 +7595,10 @@ export class AgentRuntime implements Runtime {
         backupContextWindow: 'unknown',
         now: Date.now(),
         staleAfterMs: HANDOFF_STALE_MS,
-        // Reuse the established provider-preview redactor. This path injects a
-        // distilled summary into the system prompt; redaction can be hardened
-        // (PII-specific) in a follow-up if the summary corpus warrants it.
-        redact: (t) => sanitizeProviderPreviewText(t),
+        // PII-hardened handoff redactor: provider-preview sanitizer (Bearer /
+        // secret / token / email) plus phone-number redaction. This path injects
+        // a distilled summary built from WhatsApp content into the system prompt.
+        redact: (t) => redactHandoffPii(t),
       }).systemBlock;
     };
   }
