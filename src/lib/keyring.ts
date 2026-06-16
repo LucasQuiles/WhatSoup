@@ -145,7 +145,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           const account = index === 0 && options.user ? options.user : username;
           const raw = execFileSync(
             'security',
-            ['find-generic-password', '-s', '--', candidate, '-a', '--', account, '-w'],
+            ['find-generic-password', '-s', candidate, '-a', account, '-w'],
             { timeout: 5_000 },
           );
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
@@ -234,9 +234,10 @@ export function writeCredential(
       // verified on macOS (readback matches). NOTE: no `--` separators here — `security
       // add-generic-password` consumes `--` as the value of `-s`/`-a` and fails (rc=2);
       // execFileSync already passes args as an array, so option-arguments cannot be
-      // reinterpreted as flags and `--` is both unnecessary and breaking. The read
-      // (find-generic-password) and delete paths still carry the broken `--` and are
-      // mock-tested only — tracked as a follow-up (real-`security` integration tests).
+      // reinterpreted as flags and `--` is both unnecessary and breaking. The same `--`
+      // removal is applied to the read (find-generic-password) and delete paths below —
+      // all three were broken against a real keychain (item-not-found / rc=2), masked by
+      // execFileSync mocks; integration-verified by round-trip on macOS.
       execFileSync(
         'security',
         ['add-generic-password', '-U', '-s', service, '-a', account, '-w'],
@@ -329,7 +330,7 @@ export function deleteCredential(
 
   if (backend === 'macos-keychain') {
     try {
-      execFileSync('security', ['delete-generic-password', '-s', '--', service, '-a', '--', account], {
+      execFileSync('security', ['delete-generic-password', '-s', service, '-a', account], {
         timeout: 5_000,
         stdio: ['ignore', 'ignore', 'pipe'],
       });

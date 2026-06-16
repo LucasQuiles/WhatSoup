@@ -145,6 +145,6 @@ describe('lookupCredential — flag-injection guards', () => {
     execFileSyncMock.mockReturnValue(Buffer.from('val'));
     lookupCredential('deepseek', { skipEnv: true });
     const call = execFileSyncMock.mock.calls.find((c) => c[0] === 'security');
-    expect(call![1]).toEqual(['find-generic-password', '-s', '--', 'deepseek', '-a', '--', os.userInfo().username, '-w']);
+    expect(call![1]).toEqual(['find-generic-password', '-s', 'deepseek', '-a', os.userInfo().username, '-w']);
   });
 });
