@@ -327,3 +327,88 @@ describe('Menu — plain action', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Keyboard activation — opening from the trigger and activating items via keys
+// ---------------------------------------------------------------------------
+
+describe('Menu — keyboard activation', () => {
+  it('opens from the trigger via ArrowDown, Enter, and Space', () => {
+    render(<MenuHarness />);
+    const trigger = screen.getByRole('button', { name: 'Actions' });
+    for (const key of ['ArrowDown', 'Enter', ' ']) {
+      expect(screen.queryByRole('menu')).toBeNull();
+      fireEvent.keyDown(trigger, { key });
+      expect(screen.getByRole('menu')).toBeDefined();
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+      fireEvent.keyDown(document, { key: 'Escape' });
+    }
+  });
+
+  it('ignores non-activating keys on the trigger', () => {
+    render(<MenuHarness />);
+    const trigger = screen.getByRole('button', { name: 'Actions' });
+    fireEvent.keyDown(trigger, { key: 'a' });
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('activates an item via Enter — fires onSelect and closes the surface', () => {
+    const onRestart = vi.fn();
+    render(<MenuHarness onRestart={onRestart} />);
+    openMenu();
+    const restart = screen.getByText('Restart').closest('[role="menuitem"]')!;
+    fireEvent.keyDown(restart, { key: 'Enter' });
+    expect(onRestart).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('activates an item via Space', () => {
+    const onRestart = vi.fn();
+    render(<MenuHarness onRestart={onRestart} />);
+    openMenu();
+    const restart = screen.getByText('Restart').closest('[role="menuitem"]')!;
+    fireEvent.keyDown(restart, { key: ' ' });
+    expect(onRestart).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Leading icon + default confirm copy (fallbacks)
+// ---------------------------------------------------------------------------
+
+describe('Menu — context guard', () => {
+  it('throws if a MenuItem is rendered outside <Menu>', () => {
+    // The thrown error surfaces through React; silence the expected console noise.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => render(<MenuItem>Orphan</MenuItem>)).toThrow(/must render inside <Menu>/);
+    spy.mockRestore();
+  });
+});
+
+describe('Menu — icon + default confirm copy', () => {
+  it('renders a leading icon when provided', () => {
+    render(
+      <Menu label="x" triggerLabel="Go">
+        <MenuItem icon={<svg data-testid="menu-ic" />}>With icon</MenuItem>
+      </Menu>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Go' }));
+    expect(screen.getByTestId('menu-ic')).toBeDefined();
+  });
+
+  it('falls back to default confirm title/body when none is supplied', () => {
+    const onSelect = vi.fn();
+    render(
+      <Menu label="x" triggerLabel="Go">
+        <MenuItem destructive onSelect={onSelect}>
+          Wipe
+        </MenuItem>
+      </Menu>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Go' }));
+    fireEvent.click(screen.getByText('Wipe').closest('[role="menuitem"]')!);
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Confirm action')).toBeDefined();
+    expect(within(dialog).getByText('This action cannot be undone.')).toBeDefined();
+  });
+});

@@ -141,6 +141,7 @@ export const Menu: FC<MenuProps> = ({
     if (!mounted) return;
     const panel = panelRef.current;
     const anchor = triggerRef.current;
+    /* v8 ignore next -- defensive: panel & anchor refs are set whenever this runs */
     if (!panel || !anchor) return;
     const rect = anchor.getBoundingClientRect();
     panel.style.position = 'absolute';
@@ -153,6 +154,7 @@ export const Menu: FC<MenuProps> = ({
   useLayoutEffect(() => {
     if (!open) return;
     const panel = panelRef.current;
+    /* v8 ignore next -- defensive: panel ref exists while the menu is open */
     if (!panel) return;
     const items = getMenuItems(panel);
     items.forEach((el, i) => el.setAttribute('tabindex', i === 0 ? '0' : '-1'));
@@ -178,8 +180,10 @@ export const Menu: FC<MenuProps> = ({
     const nav = ['ArrowDown', 'ArrowUp', 'Home', 'End'];
     if (!nav.includes(e.key)) return;
     const panel = panelRef.current;
+    /* v8 ignore next -- defensive: panel ref exists while the menu is open */
     if (!panel) return;
     const items = getMenuItems(panel);
+    /* v8 ignore next -- defensive: an open menu always renders items */
     if (items.length === 0) return;
     const current = items.indexOf(document.activeElement as HTMLElement);
     let next = current;
