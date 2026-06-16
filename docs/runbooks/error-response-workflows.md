@@ -21,7 +21,8 @@ consistent with the taxonomy's eligibility functions.
 | Env var | Default | Effect |
 |---|---|---|
 | `WHATSOUP_RESPONSE_REGISTRY_DISPATCH` | off (`!= '1'`) | Route terminal provider failures through the registry dispatcher (`handleProviderFailureResult`) instead of the legacy per-chat / singleton branch ladders. Behaviour-preserving — equivalence-locked against the `provider-fallback` and `fallback-usage-limit-cascade` suites. |
-| `WHATSOUP_DIAGNOSTIC_BUNDLE` | off | On an arming failure (usage-limit / rate-limit / auth-required / model-unavailable) via the dispatcher, run the best-effort diagnostic bundle and emit a findings digest to the alert outbox. Requires the dispatcher flag on (it rides the new path). Fire-and-forget — never blocks or alters the fallback path. |
+| `WHATSOUP_DIAGNOSTIC_BUNDLE` | off | On an arming failure (usage-limit / rate-limit / auth-required / model-unavailable) via the dispatcher, run the best-effort diagnostic bundle and emit a findings digest to the alert outbox. Requires the dispatcher flag on (it rides the new path). Fire-and-forget — never blocks or alters the fallback path. Throttled to once per primary per 60s so a fallback storm cannot fan out probe spawns. |
+| `WHATSOUP_ONE_MESSAGE_HANDOFF` | off | Collapse the fallback notice and the stand-in's reply into one message: when a replay is scheduled, stash the notice in the crash-safe `standby_notice` latch and prepend it to the stand-in's first visible reply, instead of sending a separate notice. Off → the notice is enqueued standalone exactly as before. |
 
 Rollout: enable `WHATSOUP_RESPONSE_REGISTRY_DISPATCH` first and confirm the
 equivalence suites are green in production, then enable
@@ -60,6 +61,22 @@ the existing fallback-window fields:
 
 These are derived and read-only — observability only, no behaviour change.
 
+## One consolidated message (flag-gated)
+
+With `WHATSOUP_ONE_MESSAGE_HANDOFF` on, a fallback that schedules a stand-in
+replay does not send its notice separately. The notice is stashed in the
+crash-safe `standby_notice` latch (`src/runtimes/agent/standby-notice.ts`) and
+prepended to the stand-in's first visible reply — the user sees one message. The
+latch survives a restart and is consumed exactly once (atomic select-and-delete
+under `BEGIN IMMEDIATE`). When there is no continuation (resend / blocked by tool
+activity / missing backup credentials) the notice is sent standalone as before,
+and a stash failure also falls back to standalone — the notice is never lost.
+
+Known limitation (follow-up): if the stand-in's first turn produces no visible
+output (a tool-only or empty turn), the stashed notice is not flushed
+immediately — it prepends to the next visible reply instead. It is deferred, not
+lost. The empty-turn flush is the next increment.
+
 ## Canonical error taxonomy
 
 The matchers recognise canonical structured error tokens from the Anthropic and
@@ -88,8 +105,7 @@ is wired (per the runbook-and-PR co-update rule):
   concurrency + circuit-breaker gate for the warm distiller). The distiller
   loop, the `buildSystemPrompt`/`replayTurnOnFallback` injection seams, and
   schema-ensure at init are pending.
-- **One consolidated message** — `response-templates.ts` (deterministic
-  per-template renderers) and `standby-notice.ts` (the crash-safe SQLite latch,
-  table `standby_notice`, atomic consume-once) for collapsing the fallback
-  notice and the stand-in's reply into a single message. The
-  stash-on-activate / consume-on-first-reply wiring is pending.
+- **Deterministic message templates** — `response-templates.ts` (one renderer
+  per user-template id) are built and unit-tested but not yet used by the live
+  notice path, which still composes its string inline; unifying the two is a
+  follow-up.

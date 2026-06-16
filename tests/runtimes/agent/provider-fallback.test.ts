@@ -108,7 +108,8 @@ import {
   AgentRuntime,
   extractUsageLimitResetTime,
 } from '../../../src/runtimes/agent/runtime.ts';
-import type { Database } from '../../../src/core/database.ts';
+import { Database } from '../../../src/core/database.ts';
+import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-notice.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
 
@@ -196,6 +197,8 @@ type FallbackView = {
   fallbackEntryKey(entry: { provider: string; model?: string }): string;
   kickDiagnosticBundle(wf: unknown, providerText: string): void;
   lastDiagnosticBundleAt: number;
+  stashHandoffNotice(chatJid: string, message: string, now: number): boolean;
+  withHandoffPrefix(chatJid: string, text: string): string;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -1160,5 +1163,61 @@ describe('createSessionManager — custom-endpoint providerConfig scoping', () =
     });
 
     view(runtime).deactivateProviderFallback('test cleanup');
+  });
+});
+
+describe('one-message handoff collapse (real db)', () => {
+  function makeRealDbRuntime(): { runtime: AgentRuntime; db: Database } {
+    const config = mockConfigRef();
+    config['agentProvider'] = 'claude-cli';
+    config['agentProviderConfig'] = undefined;
+    config['agentFallbackProvider'] = 'opencode-cli';
+    config['agentFallbackModel'] = undefined;
+    const db = new Database(':memory:');
+    db.open();
+    // start() ensures this schema in production; mirror it here without the rest
+    // of start()'s heavy setup.
+    ensureStandbyNoticeSchema(db);
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]' });
+    return { runtime, db };
+  }
+
+  function withFlag(value: '1' | undefined, fn: () => void): void {
+    const prev = process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
+    if (value === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
+    else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = value;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'];
+      else process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] = prev;
+    }
+  }
+
+  it('prepends a stashed notice to the stand-in reply exactly once', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'collapse@s.whatsapp.net';
+    withFlag('1', () => {
+      expect(v.stashHandoffNotice(chat, 'Primary model hit a limit. I will continue here.', Date.now())).toBe(true);
+      expect(v.withHandoffPrefix(chat, 'here is the answer')).toBe(
+        'Primary model hit a limit. I will continue here.\n\nhere is the answer',
+      );
+      // Latch consumed — the next reply is unprefixed.
+      expect(v.withHandoffPrefix(chat, 'a later reply')).toBe('a later reply');
+    });
+    db.close();
+  });
+
+  it('leaves the reply unchanged when the flag is off, even with a notice stashed', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'collapse2@s.whatsapp.net';
+    // Stash is unconditional; consume is flag-gated.
+    v.stashHandoffNotice(chat, 'should not appear', Date.now());
+    withFlag(undefined, () => {
+      expect(v.withHandoffPrefix(chat, 'plain reply')).toBe('plain reply');
+    });
+    db.close();
   });
 });

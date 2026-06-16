@@ -17,6 +17,11 @@ import {
 } from './response-registry.ts';
 import { runDiagnosticBundle } from './diagnostic-bundle.ts';
 import { buildDiagnosticProbes } from './diagnostic-probes.ts';
+import {
+  ensureStandbyNoticeSchema,
+  stashStandbyNotice,
+  consumeStandbyNotice,
+} from './standby-notice.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
@@ -209,6 +214,14 @@ function diagnosticBundleEnabled(): boolean {
 // failures — cannot spawn a flurry of CLI auth-status probes, and so we do not
 // re-probe the same primary health redundantly.
 const DIAGNOSTIC_BUNDLE_THROTTLE_MS = 60_000;
+// Opt-in: collapse the fallback notice and the stand-in's reply into ONE
+// user-facing message. When a replay is scheduled the notice is stashed (via the
+// crash-safe standby latch) and prepended to the stand-in's first visible reply
+// instead of being sent on its own. Off → the notice is enqueued standalone
+// exactly as before (byte-identical default path).
+function oneMessageHandoffEnabled(): boolean {
+  return process.env['WHATSOUP_ONE_MESSAGE_HANDOFF'] === '1';
+}
 
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
 type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empty-output';
@@ -2606,6 +2619,9 @@ export class AgentRuntime implements Runtime {
 
   async start(): Promise<void> {
     ensureAgentSchema(this.db);
+    // Crash-safe latch table for the one-message handoff collapse. Idempotent;
+    // created eagerly so an unconsumed notice from a prior process can flush.
+    ensureStandbyNoticeSchema(this.db);
     this.restorePersistedFallbackWindow();
     backfillSessionProvider(this.db, this.agentProvider ?? 'claude-cli');
 
@@ -5084,7 +5100,7 @@ export class AgentRuntime implements Runtime {
               );
               queue.enqueueText(this.providerUnknownTerminalNotice());
             } else {
-              queue.enqueueResultText(event.text);
+              queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, event.text));
               // Accumulate result text for voice reply (SP4)
               if (mapKey !== undefined) {
                 this.perChatTurnText.set(mapKey, (this.perChatTurnText.get(mapKey) ?? '') + event.text);
@@ -7089,7 +7105,49 @@ export class AgentRuntime implements Runtime {
         : replay.replayScheduled
           ? ' I will continue here.'
           : ' Please resend the last message here.';
-    queue.enqueueText(`Primary model ${fallbackReasonForUser(activation.reason, activation.activeUntil)}. Backup: ${card}.${suffix}`);
+    const message = `Primary model ${fallbackReasonForUser(activation.reason, activation.activeUntil)}. Backup: ${card}.${suffix}`;
+    // One-message collapse: when the stand-in will continue (a replay is
+    // scheduled, not blocked, with credentials), stash the notice so it prepends
+    // to the stand-in's first reply instead of being a separate message. Any
+    // other case (resend / blocked / missing creds) has no continuation coming,
+    // so the notice is sent standalone as before. Stash failure falls back to
+    // standalone — the notice is never lost.
+    const collapse = oneMessageHandoffEnabled()
+      && replay.replayScheduled
+      && !replay.blockedByToolActivity
+      && activation.keyPresent !== false;
+    if (collapse && this.stashHandoffNotice(queue.targetChatJid, message, now)) {
+      return;
+    }
+    queue.enqueueText(message);
+  }
+
+  /** Stash the handoff notice for prepend-on-first-reply. Returns false on failure. */
+  private stashHandoffNotice(chatJid: string, message: string, now: number): boolean {
+    try {
+      stashStandbyNotice(this.db, toConversationKey(chatJid), message, now);
+      return true;
+    } catch (err) {
+      log.warn({ err, chatJid }, 'failed to stash handoff notice — sending standalone');
+      return false;
+    }
+  }
+
+  /**
+   * Prepend a pending handoff notice (if any) to a stand-in reply, collapsing the
+   * fallback notice and the reply into one message. No-op when the flag is off or
+   * no notice is pending. Never throws into the reply path.
+   */
+  private withHandoffPrefix(chatJid: string, text: string): string {
+    if (!oneMessageHandoffEnabled()) return text;
+    let prefix: string | null = null;
+    try {
+      prefix = consumeStandbyNotice(this.db, toConversationKey(chatJid));
+    } catch (err) {
+      log.warn({ err, chatJid }, 'failed to consume handoff notice');
+      return text;
+    }
+    return prefix ? `${prefix}\n\n${text}` : text;
   }
 
   private recreatePerChatSessionForFallback(mapKey: string, chatJid: string, actorJid?: string): void {
@@ -8341,7 +8399,7 @@ export class AgentRuntime implements Runtime {
               );
               queue.enqueueText(this.providerUnknownTerminalNotice());
             } else {
-              queue.enqueueResultText(event.text);
+              queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, event.text));
               this.turnHadVisibleOutput = true;
               // Accumulate result text for voice reply (SP4)
               this.currentTurnAssistantText += event.text;
