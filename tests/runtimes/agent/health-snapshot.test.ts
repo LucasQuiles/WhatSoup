@@ -248,6 +248,11 @@ function expectedFallbackDetails(): Record<string, unknown> {
     fallbackChainExhausted: false,
     failedEntryCount: 0,
     turnErrorCounts: {},
+    handoffDistiller: {
+      enabled: false,
+      contextInjection: false,
+      model: null,
+    },
   };
 }
 

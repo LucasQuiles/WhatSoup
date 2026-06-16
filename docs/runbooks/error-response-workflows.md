@@ -99,23 +99,47 @@ Also mapped: `authentication_error` / `invalid_api_key` → auth-required;
 The chat `api-error-classifier` maps HTTP 400/413 → bad_request and 5xx incl. 529
 overloaded → server (retryable).
 
+## Warm handoff distiller (flag-gated)
+
+The cross-harness context handoff is now fully wired behind three opt-in flags
+(default-off — byte-identical when unset):
+
+- **`WHATSOUP_HANDOFF_DISTILLER`** (`1` to enable) — arms the background
+  production sweep that periodically asks the `HandoffDistillRunner` to distill
+  each active conversation. The runner owns the per-conversation token+call
+  budget and the global concurrency + circuit-breaker gate; the timer only sets
+  the sweep cadence. Inert (sweep not armed, one warn log) when set but no model
+  key resolves.
+- **`WHATSOUP_HANDOFF_CONTEXT`** (`1` to enable) — when a fresh or stand-in
+  session is spawned, injects the most recent distilled summary into the session
+  system prompt (`system` seam for all providers per the 2026-06-16 experiment).
+  The callback yields `null` (SessionManager omits it) when no fresh artifact
+  exists, so there is no behaviour change when the distiller has not yet run.
+- **`WHATSOUP_HANDOFF_DISTILL_MODEL`** — the cheap summarizer model id used for
+  distillation. Accepted values: `deepseek-chat`, `MiniMax-M2.7`, `glm-5.2`.
+  When unset (or set to an unrecognised id with no matching API key) the
+  distiller is inert and the sweep is not armed.
+
+The implementation is best-effort and fail-safe: every error at tick or sweep
+level is caught and logged at warn, never propagated to the turn path or the
+process. A structured info-level log (`handoff distill sweep complete` with
+`ticked` count) is emitted on each successful sweep. The `handoffDistiller`
+block in `GET /health` (`instance.handoffDistiller`) reports the live flag+config
+state as read-only telemetry:
+
+```json
+"handoffDistiller": { "enabled": true, "contextInjection": false, "model": "deepseek-chat" }
+```
+
+The verbatim half (last N messages as `[Recent chat context]` on every fresh
+session) ships unconditionally and is unaffected by these flags.
+
 ## Built but not yet wired
 
 The following components exist and are unit-tested but are not yet integrated
 into the live turn path; this section will move into the live sections as each
 is wired (per the runbook-and-PR co-update rule):
 
-- **Cross-harness context handoff** — note that the *verbatim* half already
-  ships: `sendTurnToSession` injects the last N messages as `[Recent chat
-  context]` on every fresh/stand-in session spawn (the line shape is a single
-  helper, `formatContextLines`, which scrubs secret shapes from content while a
-  fallback window is active — content crossing to a different backup provider is
-  redacted; same-provider respawns inject verbatim). What remains is the
-  *distilled summary* path — `handoff-prelude.ts` (composer with the
-  cost-compression / staleness policies), `handoff-artifact.ts` (the
-  `agent_handoff_artifacts` store), and `handoff-distill-gate.ts` (the
-  per-conversation token/call budget + global concurrency + circuit-breaker
-  gate). The warm distiller loop and the system-prompt summary seam are pending.
 - **Deterministic message templates** — `response-templates.ts` (one renderer
   per user-template id) are built and unit-tested but not yet used by the live
   notice path, which still composes its string inline; unifying the two is a

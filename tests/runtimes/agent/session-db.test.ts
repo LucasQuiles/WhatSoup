@@ -20,6 +20,7 @@ import {
   markOrphaned,
   getResumableSessionForChat,
   backfillSessionProvider,
+  listActiveSessionRows,
 } from '../../../src/runtimes/agent/session-db.ts';
 
 vi.mock('../../../src/logger.ts', () => ({
@@ -124,6 +125,19 @@ describe('agent session-db', () => {
       .prepare('SELECT status FROM agent_sessions WHERE id = ?')
       .get(id) as { status: string } | undefined;
     expect(row?.status).toBe('ended');
+  });
+
+  it('listActiveSessionRows returns only active sessions that have a workspace_key', () => {
+    // active + workspace_key → included (drives the handoff distiller sweep)
+    const a = createSession(db, 41111, '/tmp/a', 'a@s.whatsapp.net', 'conv-a', 'claude-cli');
+    // active but NO workspace_key → excluded (can't key a handoff artifact)
+    createSession(db, 42222, '/tmp/b', 'b@s.whatsapp.net', undefined, 'claude-cli');
+    // active + workspace_key but then ended → excluded
+    const c = createSession(db, 43333, '/tmp/c', 'c@s.whatsapp.net', 'conv-c', 'claude-cli');
+    updateSessionStatus(db, c, 'ended');
+
+    const rows = listActiveSessionRows(db);
+    expect(rows).toEqual([{ conversationKey: 'conv-a', rowId: a }]);
   });
 
   it('updateSessionId sets session_id field', () => {

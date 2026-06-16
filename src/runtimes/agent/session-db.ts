@@ -124,6 +124,26 @@ export function getActiveSession(db: Database): {
   return row ?? null;
 }
 
+/**
+ * Enumerate currently-active session rows for the background handoff distiller.
+ * Returns one {conversationKey, rowId} per active row that has a workspace_key
+ * (the canonical conversation_key). Rows without a workspace_key are skipped —
+ * the distiller keys artifacts on conversation_key, so an unkeyed row has no
+ * target. Read-only; safe to call on every sweep tick.
+ */
+export function listActiveSessionRows(
+  db: Database,
+): Array<{ conversationKey: string; rowId: number }> {
+  const rows = db.raw
+    .prepare(
+      `SELECT id, workspace_key
+       FROM agent_sessions
+       WHERE status = 'active' AND workspace_key IS NOT NULL AND workspace_key != ''`,
+    )
+    .all() as Array<{ id: number; workspace_key: string }>;
+  return rows.map((r) => ({ conversationKey: r.workspace_key, rowId: r.id }));
+}
+
 /** Set the Claude session_id on an existing session row. */
 export function updateSessionId(db: Database, rowId: number, sessionId: string): void {
   log.info({ rowId }, 'session: id-assigned');

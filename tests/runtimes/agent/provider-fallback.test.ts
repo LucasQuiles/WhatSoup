@@ -110,6 +110,7 @@ import {
 } from '../../../src/runtimes/agent/runtime.ts';
 import { Database } from '../../../src/core/database.ts';
 import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-notice.ts';
+import { ensureHandoffArtifactSchema, upsertHandoffArtifact } from '../../../src/runtimes/agent/handoff-artifact.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
 
@@ -203,6 +204,11 @@ type FallbackView = {
   withHandoffPrefix(chatJid: string, text: string): string;
   flushPendingHandoffNotice(queue: { targetChatJid: string; enqueueText(text: string): void }): void;
   formatContextLines(messages: ReadonlyArray<{ timestamp: number; senderName: string | null; senderJid: string; content: string | null }>): string;
+  buildHandoffSystemBlock(conversationKey: string, provider: string): (() => string | null) | undefined;
+  // Background handoff distiller seams.
+  startHandoffDistillSweepTimer(): void;
+  handoffDistillTimer: ReturnType<typeof setInterval> | null;
+  handoffDistillRunner: unknown | null;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -1290,6 +1296,185 @@ describe('one-message handoff collapse (real db)', () => {
       expect(v.withHandoffPrefix(chat, 'reply')).toBe('notice\n\nreply');
       v.flushPendingHandoffNotice(queue);
       expect(enqueued).toEqual([]);
+    });
+    db.close();
+  });
+});
+
+describe('handoff context injection (real db)', () => {
+  const CONTEXT_FLAG = 'WHATSOUP_HANDOFF_CONTEXT';
+  // Header emitted by buildHandoffPrelude's system block (handoff-prelude.ts).
+  const SUMMARY_HEADER = '[Handoff context — prior conversation summary]';
+
+  function makeRealDbRuntime(): { runtime: AgentRuntime; db: Database } {
+    const config = mockConfigRef();
+    config['agentProvider'] = 'claude-cli';
+    config['agentProviderConfig'] = undefined;
+    config['agentFallbackProvider'] = 'opencode-cli';
+    config['agentFallbackModel'] = undefined;
+    const db = new Database(':memory:');
+    db.open();
+    // start() ensures this schema in production; mirror it here without the rest
+    // of start()'s heavy setup.
+    ensureHandoffArtifactSchema(db);
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]' });
+    return { runtime, db };
+  }
+
+  function withFlag(value: '1' | undefined, fn: () => void): void {
+    const prev = process.env[CONTEXT_FLAG];
+    if (value === undefined) delete process.env[CONTEXT_FLAG];
+    else process.env[CONTEXT_FLAG] = value;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env[CONTEXT_FLAG];
+      else process.env[CONTEXT_FLAG] = prev;
+    }
+  }
+
+  function seedArtifact(db: Database, conversationKey: string, summary: string): void {
+    upsertHandoffArtifact(db, {
+      conversationKey,
+      summary,
+      seededArtifacts: null,
+      updatedAt: Date.now(), // fresh — within HANDOFF_STALE_MS
+      sourceProvider: 'claude-cli',
+      sourceModel: 'claude-opus-4-8[1m]',
+      tokenBaseline: 0,
+    });
+  }
+
+  it('flag off → no callback (byte-identical: system prompt is untouched)', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'ctx-off@s.whatsapp.net';
+    seedArtifact(db, chat, 'prior summary should NOT appear');
+    withFlag(undefined, () => {
+      expect(v.buildHandoffSystemBlock(chat, 'claude-cli')).toBeUndefined();
+    });
+    db.close();
+  });
+
+  it('flag on + fresh artifact + active fallback window → callback yields the summary block', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'ctx-on@s.whatsapp.net';
+    seedArtifact(db, chat, 'User is migrating their config; open task: finish the cutover.');
+    // The handoff summary seeds a STAND-IN, so it only injects during an active
+    // fallback window.
+    v.activateProviderFallback(new Date(Date.now() + 600_000), 'usage-limit');
+    withFlag('1', () => {
+      const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
+      expect(cb).toBeTypeOf('function');
+      const block = cb!();
+      expect(block).toContain(SUMMARY_HEADER);
+      expect(block).toContain('User is migrating their config');
+    });
+    db.close();
+  });
+
+  it('flag on + fresh artifact but NO fallback window (primary session) → callback yields null', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'ctx-primary@s.whatsapp.net';
+    seedArtifact(db, chat, 'should NOT be injected into a primary session');
+    // No fallback window activated → this is a primary session; the summary of the
+    // SAME conversation must not be re-injected.
+    withFlag('1', () => {
+      const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
+      expect(cb).toBeTypeOf('function');
+      expect(cb!()).toBeNull();
+    });
+    db.close();
+  });
+
+  it('flag on + active window but no artifact → callback yields null (no injection)', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'ctx-empty@s.whatsapp.net';
+    v.activateProviderFallback(new Date(Date.now() + 600_000), 'usage-limit');
+    withFlag('1', () => {
+      const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
+      expect(cb).toBeTypeOf('function');
+      expect(cb!()).toBeNull();
+    });
+    db.close();
+  });
+});
+
+describe('AgentRuntime — background handoff distiller arming (flag-gated)', () => {
+  const DISTILLER_FLAG = 'WHATSOUP_HANDOFF_DISTILLER';
+  const MODEL_FLAG = 'WHATSOUP_HANDOFF_DISTILL_MODEL';
+
+  function makeDistillRuntime(): { runtime: AgentRuntime; db: Database } {
+    const config = mockConfigRef();
+    config['agentProvider'] = 'claude-cli';
+    config['agentProviderConfig'] = undefined;
+    config['agentFallbackProvider'] = undefined;
+    config['agentFallbackModel'] = undefined;
+    const db = new Database(':memory:');
+    db.open();
+    ensureHandoffArtifactSchema(db);
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]' });
+    return { runtime, db };
+  }
+
+  /** Run fn with the distiller flag + model env set, restoring prior values. */
+  function withEnv(env: Record<string, string | undefined>, fn: () => void): void {
+    const prev: Record<string, string | undefined> = {};
+    for (const k of Object.keys(env)) prev[k] = process.env[k];
+    for (const [k, val] of Object.entries(env)) {
+      if (val === undefined) delete process.env[k];
+      else process.env[k] = val;
+    }
+    try {
+      fn();
+    } finally {
+      for (const k of Object.keys(env)) {
+        if (prev[k] === undefined) delete process.env[k];
+        else process.env[k] = prev[k];
+      }
+    }
+  }
+
+  it('flag UNSET → arms no sweep timer and constructs no runner (byte-identical)', () => {
+    const { runtime, db } = makeDistillRuntime();
+    const v = view(runtime);
+    withEnv({ [DISTILLER_FLAG]: undefined, [MODEL_FLAG]: 'deepseek-chat', DEEPSEEK_API_KEY: 'sk' }, () => {
+      v.startHandoffDistillSweepTimer();
+      expect(v.handoffDistillTimer).toBeNull();
+      expect(v.handoffDistillRunner).toBeNull();
+    });
+    db.close();
+  });
+
+  it('flag ON but no model/key resolves → enabled-but-inert (no timer, no runner)', () => {
+    const { runtime, db } = makeDistillRuntime();
+    const v = view(runtime);
+    // Known flag, but unknown model id → resolveDistillModel returns null.
+    withEnv({ [DISTILLER_FLAG]: '1', [MODEL_FLAG]: 'gpt-4o-mini', DEEPSEEK_API_KEY: 'sk' }, () => {
+      v.startHandoffDistillSweepTimer();
+      expect(v.handoffDistillTimer).toBeNull();
+      expect(v.handoffDistillRunner).toBeNull();
+    });
+    db.close();
+  });
+
+  it('flag ON with a resolvable model+key → arms the sweep timer and runner (idempotent)', () => {
+    const { runtime, db } = makeDistillRuntime();
+    const v = view(runtime);
+    withEnv({ [DISTILLER_FLAG]: '1', [MODEL_FLAG]: 'deepseek-chat', DEEPSEEK_API_KEY: 'sk-deep' }, () => {
+      v.startHandoffDistillSweepTimer();
+      expect(v.handoffDistillTimer).not.toBeNull();
+      expect(v.handoffDistillRunner).not.toBeNull();
+      // Idempotent: a second call does not re-arm.
+      const timer = v.handoffDistillTimer;
+      v.startHandoffDistillSweepTimer();
+      expect(v.handoffDistillTimer).toBe(timer);
+      // Clean up the armed interval deterministically (it is unref'd anyway).
+      if (v.handoffDistillTimer) clearInterval(v.handoffDistillTimer);
+      v.handoffDistillTimer = null;
     });
     db.close();
   });
