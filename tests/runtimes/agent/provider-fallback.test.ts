@@ -188,7 +188,12 @@ type FallbackView = {
     fallbackModel: string | null;
     fallbackResetAt: number | null;
     fallbackRecoveryProbeRequired: boolean;
+    fallbackChainExhausted: boolean;
+    failedEntryCount: number;
   };
+  agentFallbacks: Array<{ provider: string; model?: string }>;
+  failedFallbackEntryKeys: Set<string>;
+  fallbackEntryKey(entry: { provider: string; model?: string }): string;
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -322,6 +327,25 @@ describe('AgentRuntime — provider fallback state machine', () => {
     vi.advanceTimersByTime(5 * 60 * 60 * 1000 + 1);
     expect(view(runtime).fallbackActiveUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
+  });
+
+  it('reports the fallback chain exhausted once every configured entry has failed', () => {
+    const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli', agentFallbackModel: 'minimax/MiniMax-M2.7' });
+    const v = view(runtime);
+    expect(v.getFallbackState().fallbackChainExhausted).toBe(false);
+    expect(v.getFallbackState().failedEntryCount).toBe(0);
+
+    for (const entry of v.agentFallbacks) {
+      v.failedFallbackEntryKeys.add(v.fallbackEntryKey(entry));
+    }
+    expect(v.getFallbackState().fallbackChainExhausted).toBe(true);
+    expect(v.getFallbackState().failedEntryCount).toBe(1);
+  });
+
+  it('a runtime with no configured fallbacks is never reported exhausted', () => {
+    const v = view(makeRuntime({}));
+    expect(v.agentFallbacks).toHaveLength(0);
+    expect(v.getFallbackState().fallbackChainExhausted).toBe(false);
   });
 
   it('keeps auth-required fallback armed until a primary recovery probe succeeds', async () => {

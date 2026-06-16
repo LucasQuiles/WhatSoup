@@ -6058,6 +6058,8 @@ export class AgentRuntime implements Runtime {
     turnCapability: RuntimeTurnCapability;
     activeFallbackEntry: AgentFallbackEntry | null;
     fallbackChain: Array<AgentFallbackEntry & { eligible: boolean | null }>;
+    fallbackChainExhausted: boolean;
+    failedEntryCount: number;
   } {
     const active = this.isFallbackWindowActive;
     const fallbackEntry = active ? this.effectiveFallbackEntry : null;
@@ -6081,7 +6083,22 @@ export class AgentRuntime implements Runtime {
       turnCapability: this.getTurnCapability(),
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
       fallbackChain: this.fallbackChainSnapshot(),
+      fallbackChainExhausted: this.isFallbackChainExhausted(),
+      failedEntryCount: this.failedFallbackEntryKeys.size,
     };
+  }
+
+  /**
+   * True when every configured fallback entry has failed during the current
+   * window — the terminal "nothing left to fall back to" condition. Surfaced for
+   * observability (health) and to drive the exhausted user-message template;
+   * read-only and derived, it changes no fallback behaviour.
+   */
+  private isFallbackChainExhausted(): boolean {
+    if (this.agentFallbacks.length === 0) return false;
+    return this.agentFallbacks.every((entry) =>
+      this.failedFallbackEntryKeys.has(this.fallbackEntryKey(entry)),
+    );
   }
 
   private getTurnCapability(): RuntimeTurnCapability {
