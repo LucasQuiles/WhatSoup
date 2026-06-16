@@ -6,6 +6,231 @@ detection, collection, dispatch, and delivery pipeline. Until this import they h
 trees on each fleet host (`~/LAB/WhatSoup/deploy/scripts/` on the Macs, the hub copies
 on the Linux collector host). This README establishes the repo as the source of truth.
 
+## Launchd installer scripts
+
+| Installer | Purpose |
+|-----------|---------|
+| `install-bot-errors-launchd.sh` | Installs the dispatcher, deadman, and health agents on macOS bot/relay hosts (three plists in one run). |
+| `install-bot-errors-health-launchd.sh` | Installs only the daily health timer on a host that does not run the full dispatcher stack. Accepts `BOT_ERRORS_HEALTH_HOUR` / `BOT_ERRORS_HEALTH_MINUTE` overrides. |
+| `install-bot-errors-gui-monitor-launchd.sh` | Installs the external GUI-session monitor on the central hub. OS-aware: writes a systemd service+timer pair on Linux or a launchd plist on macOS. Accepts `--dry-run`. |
+
+### D1 — Env-file hydration (`bot-errors.env`)
+
+All `install-bot-errors-*launchd.sh` scripts read configuration from
+`~/.config/whatsoup/bot-errors.env` (overridable via `BOT_ERRORS_ENV_FILE`).
+The file is **not shell-sourced or eval'd**. Values are extracted by an
+`awk`-based `read_env_value()` helper that finds the first line matching
+`KEY=` at column 1 and returns the remainder verbatim:
+
+```awk
+awk -v key="$key" '
+  /^[[:space:]]*#/ { next }
+  index($0, key "=") == 1 { value=substr($0, length(key) + 2); found=1 }
+  END { if (found) printf "%s", value }
+' "$ENV_FILE"
+```
+
+Consequences for the env file:
+
+- Values are raw strings. Shell syntax in the value (variable references like
+  `$HOME`, command substitutions like `$(...)`, quotes, backslash escapes) is
+  **not interpreted**. What is written is what is used.
+- Inline comments after a value are included in the value. Write one
+  `KEY=value` per line with no trailing content.
+- Shell quoting is not needed and has no effect: `KEY="value"` stores the
+  literal string `"value"` including the double-quote characters.
+- Lines whose first non-space character is `#` are skipped.
+- If a key appears more than once, the last matching line wins (awk overwrites
+  `value` on each match and prints it at END).
+
+Lookup priority: shell environment variable (already set in the caller's
+environment) takes precedence over the env-file value, which takes precedence
+over the hardcoded default. This is handled by `env_or_default()` in each
+installer, which checks `${!key:-}` before calling `read_env_value`.
+
+`deploy/setup.sh` uses the same `awk` pattern (named `read_env_file_value`)
+to read and patch the env file during initial setup.
+
+### D2 — Fail-closed health-profile guard
+
+Every `install-bot-errors-*launchd.sh` installer and the Linux path of
+`deploy/setup.sh` will exit with code 2 if `BOT_ERRORS_HEALTH_PROFILE` is
+missing, not a regular file, or not readable by the current user (`! -r`).
+This check runs **before any plist is written or any service is registered**.
+
+Exact guard in the installer scripts:
+
+```bash
+if [[ -z "$HEALTH_PROFILE" || ! -f "$HEALTH_PROFILE" || ! -r "$HEALTH_PROFILE" ]]; then
+  echo "missing BOT_ERRORS_HEALTH_PROFILE; expected readable profile path" >&2
+  exit 2
+fi
+```
+
+In `deploy/setup.sh` this is enforced by `require_readable_bot_errors_health_profile()`,
+which calls `resolve_bot_errors_health_profile()` (env file, then environment
+variable, then a hostname-derived default under `deploy/health-profiles/`) and
+exits 2 with a descriptive message if the resolved path fails the same three
+conditions.
+
+The installers attempt to auto-detect a host profile at
+`<REPO_ROOT>/deploy/health-profiles/<hostname-lowercase>.json` before
+falling back to the env file, but this auto-detection only populates
+`HEALTH_PROFILE` if the file already exists — it does not suppress the guard.
+
+### D3 — `validate_calendar_integer` (health installer only)
+
+`install-bot-errors-health-launchd.sh` exposes `BOT_ERRORS_HEALTH_HOUR`
+(default `7`) and `BOT_ERRORS_HEALTH_MINUTE` (default `20`) to control when
+the daily health timer fires. Both values are validated before plist
+interpolation by `validate_calendar_integer`:
+
+```bash
+validate_calendar_integer(){
+  local name="$1" value="$2" min="$3" max="$4"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "invalid $name; expected integer $min..$max" >&2
+    exit 2
+  fi
+  local numeric=$((10#$value))
+  if (( numeric < min || numeric > max )); then
+    echo "invalid $name; expected integer $min..$max" >&2
+    exit 2
+  fi
+}
+```
+
+Validation rules:
+
+- `BOT_ERRORS_HEALTH_HOUR` — must match `^[0-9]+$` and be in the range 0–23
+  inclusive. Exit code 2 otherwise.
+- `BOT_ERRORS_HEALTH_MINUTE` — must match `^[0-9]+$` and be in the range
+  0–59 inclusive. Exit code 2 otherwise.
+
+The `10#` prefix forces decimal interpretation so leading zeros (e.g. `09`)
+are not treated as octal in the range check. Both values are passed to the
+launchd `StartCalendarInterval` dict verbatim as integers; the installer exits
+before writing the plist if validation fails.
+
+### D4 — Pinned Node/npm toolchain (`run-with-pinned-npm.sh`)
+
+`scripts/run-with-pinned-npm.sh` resolves npm via the same pinned-Node
+mechanism used by all other WhatSoup scripts: it sources
+`deploy/lib/resolve-node.sh` and calls `whatsoup_resolve_node` to locate the
+`node` binary for the version pinned in `.nvmrc`. It then derives `npm` as the
+binary next to that resolved `node` (or accepts an override via
+`WHATSOUP_NPM`). If the resolved npm is not executable the script exits 1 with
+a FATAL message before passing any arguments to npm.
+
+The `verify:release` npm script routes two sub-package installs and tests
+through this wrapper to ensure they run under the same toolchain as the rest
+of the project:
+
+```
+bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard ci
+bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard run typecheck
+bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard test
+bash scripts/run-with-pinned-npm.sh --prefix console ci
+bash scripts/run-with-pinned-npm.sh --prefix console run lint
+bash scripts/run-with-pinned-npm.sh --prefix console run build
+```
+
+This prevents `npm ci` in either sub-package from silently picking up a
+system-installed Node/npm that differs from the version required by
+`package.json#engines.node`. The wrapper does **not** fall back to a system
+npm if the pinned one is missing; it fails closed with a clear error message
+asking you to install the pinned version or set `WHATSOUP_NODE`.
+
+### D5 — GUI-session monitor (`install-bot-errors-gui-monitor-launchd.sh`)
+
+The GUI-session monitor detects when a bot user's GUI session has ended,
+taking the bot's launchd agents down silently with it. Because the monitored
+bots are per-user macOS GUI LaunchAgents, no in-session watchdog can survive
+a user logout. The monitor must therefore run on a **different, always-on
+host** (the central hub) and probe each bot host over SSH read-only.
+
+#### Installation
+
+```bash
+bash deploy/scripts/install-bot-errors-gui-monitor-launchd.sh [--dry-run]
+```
+
+- `--dry-run` renders the unit/plist to stdout without writing any file or
+  calling `launchctl`/`systemctl`. Use this to inspect the generated
+  configuration before committing to installation.
+- Without `--dry-run`, the script auto-detects the hub's scheduler: it
+  installs a systemd `.service` + `.timer` pair on Linux and a macOS launchd
+  plist on Darwin. If neither `systemctl` nor a Darwin kernel is found, it
+  exits 2.
+- Before installing (non-dry-run), the script calls `--config-check` on the
+  monitor script itself to validate the configuration.
+
+#### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BOT_ERRORS_GUI_MONITOR_LABEL` | `com.bot-errors.gui-session-monitor` | launchd label / systemd unit name. Must match `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$` (enforced by `validate_label`; exit 2 on violation). |
+| `BOT_ERRORS_GUI_MONITOR_INTERVAL_SECONDS` | `300` | Probe interval in seconds. Written into `StartInterval` (launchd) or `OnUnitActiveSec` (systemd). |
+| `BOT_ERRORS_EXPECTED_FLEET` | _(required)_ | Path to a hub-private JSON file listing the expected fleet members. Must point outside the repo root. Read by `bot-errors-gui-session-monitor.py` at runtime. |
+| `BOT_ERRORS_GUI_MONITOR_USERS` | _(optional)_ | Comma-separated `host=user` overrides for SSH login names when the default `$USER` differs on the target host. |
+| `BOT_ERRORS_GUI_MONITOR_SSH_TIMEOUT_SECONDS` | `15` | Per-host SSH connection timeout in seconds. |
+| `BOT_ERRORS_GUI_MONITOR_FAILURE_THRESHOLD` | _(optional)_ | Consecutive-failure count before the monitor emits an alert. Non-positive values are treated as 1. |
+| `BOT_ERRORS_GUI_MONITOR_STATE` | _(optional)_ | Directory for monitor state files (cooldown timestamps, last-seen records). Falls back to `$BOT_ERRORS_STATE_DIR/gui-session-monitor`. |
+| `BOT_ERRORS_STATE_DIR` | `~/.local/state/bot-errors` | Base state directory; used to derive log paths and the default monitor state directory. |
+
+All optional variables are only included in the generated unit/plist when
+non-empty; the monitor script reads them from the process environment at
+runtime using `os.environ.get`.
+
+The monitor script also accepts `--dry-run` and `--config-check` flags when
+invoked directly:
+- `--config-check` — validates config only; does not SSH, write state, or
+  emit events. The installer calls this automatically before a live install.
+- `--once` — runs a single probe cycle (the default mode scheduled by the
+  unit/plist).
+
+#### Relationship to the hub deadman watcher
+
+`docs/runbooks/` contains a separate runbook for the **Hub Deadman Watcher**,
+a complementary monitor that probes the hub's collector/dispatcher health
+from a bot relay host. Its status as of the last update is
+**DESIGN ONLY — not yet installed**.
+
+The two monitors cover orthogonal failure modes:
+
+| Monitor | Runs on | Watches | Failure mode covered |
+|---------|---------|---------|----------------------|
+| GUI-session monitor | Central hub | Bot relay hosts | Bot-user GUI session ends; bot launchd agents go silent |
+| Hub deadman | Bot relay host | Hub collector/dispatcher | Hub itself crashes or stops draining; alerts are swallowed |
+
+The GUI-session monitor (#901) is an independent, installed component.
+The hub deadman remains a design document pending the host-ops batch
+referenced in its OBJECTIVES row.
+
+#### Label safety (`validate_label`)
+
+`validate_label` was added to all three `install-bot-errors-*launchd.sh`
+installers in #904 to prevent path-traversal via the launchd label. It is
+called on the label value before any plist write:
+
+```bash
+validate_label(){
+  local name="$1" value="$2"
+  if [[ ! "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; then
+    echo "invalid $name: label must match ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?\$  (no '/', '..', whitespace or shell metacharacters)" >&2
+    exit 2
+  fi
+}
+```
+
+This applies to:
+- `BOT_ERRORS_LABEL_PREFIX` in `install-bot-errors-launchd.sh`
+- `BOT_ERRORS_HEALTH_LABEL` in `install-bot-errors-health-launchd.sh`
+- `BOT_ERRORS_GUI_MONITOR_LABEL` in `install-bot-errors-gui-monitor-launchd.sh`
+
+Characters permitted: ASCII alphanumeric, `.`, `-`, `_`. The label must start
+and end with an alphanumeric character. Exit code 2 on violation.
+
 ## Scripts
 
 | Script | Role |
