@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import math
@@ -1467,14 +1468,54 @@ def result_requires_attention(result: dict) -> bool:
     return any(host.get("action") in ATTENTION_ACTIONS for host in result.get("hosts", []))
 
 
+def _instance_lock_path() -> Path:
+    return Path(
+        os.environ.get(
+            "BOT_ERRORS_FLEET_SENTINEL_LOCK",
+            str(Path.home() / ".local/state/bot-errors/fleet-sentinel/sentinel-instance.lock"),
+        )
+    )
+
+
+def acquire_instance_lock(lock_path: Path) -> Optional[int]:
+    """Take a non-blocking exclusive advisory lock so two launchd-started copies
+    cannot run concurrently (KeepAlive + StartInterval can overlap a slow cycle).
+    Returns the held fd, or None if another live instance holds the lock.
+    flock releases automatically on process exit, so no stale lock is possible."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     config = default_config(Path(args.hosts).expanduser(), Path(args.state_dir).expanduser())
+    lock_path = _instance_lock_path()
+    lock_fd = acquire_instance_lock(lock_path)
+    if lock_fd is None:
+        # Another instance is mid-cycle. Exit 0 so the SuccessfulExit:false
+        # KeepAlive does NOT restart us; the predecessor finishes uninterrupted.
+        print(json.dumps({"schemaVersion": 1, "checkedAt": now_iso(), "skipped": "already_running"}, sort_keys=True))
+        return 0
     try:
         result = run_once(config)
     except Exception as exc:
         print(json.dumps({"schemaVersion": 1, "healthy": False, "class": "fleet_sentinel_error", "problems": [str(exc)]}, sort_keys=True), file=sys.stderr)
         return 2
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+            lock_path.unlink()
+        except (OSError, FileNotFoundError):
+            pass
     print(json.dumps(result, sort_keys=True))
     if result_requires_attention(result):
         return 1
