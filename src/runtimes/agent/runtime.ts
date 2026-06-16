@@ -2147,6 +2147,8 @@ export class AgentRuntime implements Runtime {
           );
         }
       }
+      // Bound memory: forget gate state for conversations no longer active.
+      runner.prune(seen);
       log.info(
         { instance: this.instanceName, ticked: seen.size },
         'handoff distill sweep complete',
@@ -7577,6 +7579,12 @@ export class AgentRuntime implements Runtime {
     if (!this.handoffContextEnabled()) return undefined;
     if (seamForProvider(provider as AgentProvider) !== 'system') return undefined;
     return () => {
+      // Seed the distilled handoff context only into a STAND-IN session spawned
+      // during an active fallback window — never a primary session (which still
+      // owns its own conversation, so a same-conversation summary is redundant and
+      // wastes context). Checked at prompt-build time so it reflects the live
+      // window state, which can activate after this SessionManager is constructed.
+      if (!this.isFallbackWindowActive) return null;
       const artifact = getHandoffArtifact(this.db, conversationKey);
       if (!artifact) return null;
       return buildHandoffPrelude({

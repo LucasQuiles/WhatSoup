@@ -27,6 +27,20 @@ export class HandoffDistillRunner {
     this.deps = deps;
   }
 
+  /**
+   * Drop retained per-conversation gate state for conversations that are no
+   * longer active, so `states` cannot grow unbounded over a long-running
+   * process. Called by the sweep with the current active-conversation set. An
+   * in-flight conversation is never pruned (its state is about to be written).
+   */
+  prune(activeKeys: Set<string>): void {
+    for (const key of this.states.keys()) {
+      if (!activeKeys.has(key) && !this.inFlight.has(key)) {
+        this.states.delete(key);
+      }
+    }
+  }
+
   async tickConversation(conversationKey: string): Promise<void> {
     if (this.inFlight.has(conversationKey)) return; // per-conversation serialisation
     if (this.deps.tokenGrowth(conversationKey) < this.deps.growthThreshold) return;

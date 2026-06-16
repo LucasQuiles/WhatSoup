@@ -25,6 +25,23 @@ describe('buildHandoffDistill', () => {
     expect(out).toEqual({ summary: 'summary', seededArtifacts: null, tokensUsed: 42 });
   });
 
+  it('redacts the sender name too (WhatsApp names/phones are PII crossing to the model)', async () => {
+    let sentBody = '';
+    const fetchImpl = vi.fn(async (_url: string, init: { body: string }) => {
+      sentBody = init.body;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'summary' } }], usage: { total_tokens: 1 } }) } as Response;
+    });
+    const distill = buildHandoffDistill({
+      ...baseDeps(),
+      // Sender name carries a sensitive token that must be redacted before egress.
+      loadMessages: () => [{ senderName: 'SENSITIVE Caller', isFromMe: false, content: 'hello' }],
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await distill();
+    expect(sentBody).not.toContain('SENSITIVE');
+    expect(sentBody).toContain('[REDACTED]');
+  });
+
   it('rejects on a non-ok HTTP response (folded as a distill failure)', async () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 429, text: async () => 'rate limited' }) as Response);
     const distill = buildHandoffDistill({ ...baseDeps(), fetchImpl: fetchImpl as unknown as typeof fetch });

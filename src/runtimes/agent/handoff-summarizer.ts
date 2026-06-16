@@ -25,9 +25,17 @@ export function buildHandoffDistill(cfg: HandoffDistillConfig): () => Promise<Di
 
   return async (): Promise<DistillOutcome> => {
     const msgs = cfg.loadMessages().slice(-cfg.verbatimN);
-    // REDACT before composing the outbound body (third-party data boundary).
+    // REDACT before composing the outbound body (third-party data boundary). Both
+    // the message content AND the sender name cross to the external model — a
+    // WhatsApp senderName is a real human name / phone, so it must be redacted too
+    // (the literal 'Assistant'/'User' role labels are not user data and are left as-is).
     const corpus = msgs
-      .map((m) => `${m.isFromMe ? 'Assistant' : (m.senderName?.trim() || 'User')}: ${cfg.redact(m.content?.trim() ?? '')}`)
+      .map((m) => {
+        const who = m.isFromMe
+          ? 'Assistant'
+          : (m.senderName?.trim() ? cfg.redact(m.senderName.trim()) : 'User');
+        return `${who}: ${cfg.redact(m.content?.trim() ?? '')}`;
+      })
       .filter((l) => l.split(': ').slice(1).join(': ').trim().length > 0)
       .join('\n');
 

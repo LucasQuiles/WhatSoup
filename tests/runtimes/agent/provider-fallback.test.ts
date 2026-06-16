@@ -1356,11 +1356,14 @@ describe('handoff context injection (real db)', () => {
     db.close();
   });
 
-  it('flag on + fresh artifact → callback yields the summary block with the handoff header', () => {
+  it('flag on + fresh artifact + active fallback window → callback yields the summary block', () => {
     const { runtime, db } = makeRealDbRuntime();
     const v = view(runtime);
     const chat = 'ctx-on@s.whatsapp.net';
     seedArtifact(db, chat, 'User is migrating their config; open task: finish the cutover.');
+    // The handoff summary seeds a STAND-IN, so it only injects during an active
+    // fallback window.
+    v.activateProviderFallback(new Date(Date.now() + 600_000), 'usage-limit');
     withFlag('1', () => {
       const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
       expect(cb).toBeTypeOf('function');
@@ -1371,10 +1374,26 @@ describe('handoff context injection (real db)', () => {
     db.close();
   });
 
-  it('flag on but no artifact → callback yields null (no injection)', () => {
+  it('flag on + fresh artifact but NO fallback window (primary session) → callback yields null', () => {
+    const { runtime, db } = makeRealDbRuntime();
+    const v = view(runtime);
+    const chat = 'ctx-primary@s.whatsapp.net';
+    seedArtifact(db, chat, 'should NOT be injected into a primary session');
+    // No fallback window activated → this is a primary session; the summary of the
+    // SAME conversation must not be re-injected.
+    withFlag('1', () => {
+      const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
+      expect(cb).toBeTypeOf('function');
+      expect(cb!()).toBeNull();
+    });
+    db.close();
+  });
+
+  it('flag on + active window but no artifact → callback yields null (no injection)', () => {
     const { runtime, db } = makeRealDbRuntime();
     const v = view(runtime);
     const chat = 'ctx-empty@s.whatsapp.net';
+    v.activateProviderFallback(new Date(Date.now() + 600_000), 'usage-limit');
     withFlag('1', () => {
       const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
       expect(cb).toBeTypeOf('function');

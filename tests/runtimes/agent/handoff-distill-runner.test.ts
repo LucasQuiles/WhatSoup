@@ -35,6 +35,23 @@ describe('HandoffDistillRunner', () => {
     expect(persisted).toHaveLength(0);
   });
 
+  it('prune() forgets gate state so a no-longer-active conversation distills fresh', async () => {
+    // Budget of 1 call/window: after one distill the conversation is gated off.
+    const { runner, persisted } = harness({ config: { ...config, maxCallsPerWindow: 1 } });
+    await runner.tickConversation('drop'); // distills → 1; per-window call budget now spent
+    await runner.tickConversation('drop'); // gate denies (budget-calls) → still 1
+    expect(persisted).toHaveLength(1);
+
+    runner.prune(new Set()); // 'drop' no longer active → its retained state is forgotten
+    await runner.tickConversation('drop'); // fresh state → distills again → 2
+    expect(persisted).toHaveLength(2);
+  });
+
+  it('prune() on an empty runner is a no-op and never throws', () => {
+    const { runner } = harness();
+    expect(() => runner.prune(new Set(['anything']))).not.toThrow();
+  });
+
   it('caps concurrency with the global semaphore (gate denies global-saturated)', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
