@@ -1,9 +1,12 @@
 /**
- * DD-26: Regression — all 8 --type-* ramp tokens and 3 --r-* radius aliases
- * must be DEFINED in tokens.primitive.css so that var(--type-X, <fallback>)
- * consumers in primitives.css resolve through the token rather than the fallback.
+ * DD-26 bridge regression — the 8 currently consumed --type-* tokens and
+ * 3 --r-* radius aliases must be DEFINED in tokens.primitive.css so that
+ * var(--type-X, <fallback>) consumers in primitives.css resolve through the
+ * token rather than the fallback.
  *
- * Pattern mirrors design-token-classes.test.ts (readFileSync + string assertion).
+ * This is intentionally a consumed-token fallback bridge, not proof that the
+ * final 12-token type-ramp spec is closed. The missing spec tokens and current
+ * size/value mismatch remain tracked by DD-26/DD-37.
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -12,64 +15,90 @@ import { resolve } from 'node:path'
 const repoRoot = resolve(import.meta.dirname, '../..')
 const readPrimitiveTokens = () =>
   readFileSync(resolve(repoRoot, 'console/src/styles/tokens.primitive.css'), 'utf8')
+const readPrimitivesCss = () =>
+  readFileSync(resolve(repoRoot, 'console/src/styles/primitives.css'), 'utf8')
+const stripCssComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, '')
+const readPrimitiveTokenDefinitions = () => {
+  const css = stripCssComments(readPrimitiveTokens())
+  const defs = new Map<string, string>()
+  for (const line of css.split('\n')) {
+    const match = line.match(/^\s*(--[\w-]+)\s*:\s*([^;]+);/)
+    if (match) defs.set(match[1], match[2].trim().replace(/\s+/g, ' '))
+  }
+  return defs
+}
 
 // ---------------------------------------------------------------------------
-// Type-ramp tokens — 8 required definitions (typography.md §2, tokens-v3 §2.6)
+// Type-ramp bridge tokens — 8 consumed definitions. The full spec has 12.
 // ---------------------------------------------------------------------------
 
 describe('design-token type-ramp definitions (DD-26)', () => {
-  const TYPE_TOKENS = [
+  const FULL_SPEC_TYPE_TOKENS = [
+    '--type-display',
+    '--type-title',
+    '--type-heading',
     '--type-body',
     '--type-body-st',
+    '--type-label',
     '--type-caption',
+    '--type-overline',
+    '--type-data-lg',
     '--type-data',
     '--type-data-sm',
-    '--type-heading',
-    '--type-label',
-    '--type-overline',
+    '--type-nameplate',
   ] as const
 
-  it.each(TYPE_TOKENS)('%s is defined in tokens.primitive.css', (token) => {
-    const css = readPrimitiveTokens()
-    // Must appear as a property definition: "  --type-<name>:" (property assignment, not a var() call)
-    const definitionPattern = new RegExp(`${token.replace(/[-]/g, '\\-')}\\s*:`)
-    expect(css).toMatch(definitionPattern)
+  const BRIDGE_TYPE_VALUES = {
+    '--type-body': '400 13px/20px var(--font-sans)',
+    '--type-body-st': '500 13px/20px var(--font-sans)',
+    '--type-caption': '400 11px/16px var(--font-sans)',
+    '--type-data': '400 12px/16px var(--font-mono)',
+    '--type-data-sm': '400 11px/16px var(--font-mono)',
+    '--type-heading': '600 13px/20px var(--font-sans)',
+    '--type-label': '500 11px/16px var(--font-sans)',
+    '--type-overline': '500 10px/16px var(--font-sans)',
+  } as const
+
+  const PENDING_SPEC_TOKENS = [
+    '--type-display',
+    '--type-title',
+    '--type-data-lg',
+    '--type-nameplate',
+  ] as const
+
+  const DIVERGENT_FINAL_SPEC_VALUES = {
+    '--type-heading': '600 15px/20px var(--font-sans)',
+    '--type-data-sm': '400 12px/16px var(--font-mono)',
+    '--type-overline': '600 11px/16px var(--font-sans)',
+  } as const
+
+  it('bridge and pending inventories cover the full 12-token type-ramp spec', () => {
+    const accounted = new Set([...Object.keys(BRIDGE_TYPE_VALUES), ...PENDING_SPEC_TOKENS])
+    expect(accounted).toEqual(new Set(FULL_SPEC_TYPE_TOKENS))
   })
 
-  it('--type-data-sm resolves to mono/400 (canonical, not the buggy 500/sans fallback)', () => {
-    const css = readPrimitiveTokens()
-    // The definition line must contain the canonical value
-    const lines = css.split('\n')
-    const defLine = lines.find((l) => /^\s*--type-data-sm\s*:/.test(l))
-    expect(defLine).toBeDefined()
-    expect(defLine).toContain('400')
-    expect(defLine).toContain('var(--font-mono)')
+  it.each(Object.entries(BRIDGE_TYPE_VALUES))('%s is defined with the exact bridge fallback value', (token, value) => {
+    const defs = readPrimitiveTokenDefinitions()
+    expect(defs.get(token)).toBe(value)
   })
 
-  it('--type-data uses mono font stack', () => {
-    const css = readPrimitiveTokens()
-    const lines = css.split('\n')
-    const defLine = lines.find((l) => /^\s*--type-data\s*:/.test(l))
-    expect(defLine).toBeDefined()
-    expect(defLine).toContain('var(--font-mono)')
+  it('pending spec-only type tokens remain explicit DD-26/DD-37 debt', () => {
+    const defs = readPrimitiveTokenDefinitions()
+    for (const token of PENDING_SPEC_TOKENS) {
+      expect(defs.has(token)).toBe(false)
+    }
   })
 
-  it('--type-heading uses semibold (600)', () => {
-    const css = readPrimitiveTokens()
-    const lines = css.split('\n')
-    const defLine = lines.find((l) => /^\s*--type-heading\s*:/.test(l))
-    expect(defLine).toBeDefined()
-    expect(defLine).toContain('600')
-  })
-
-  it('--type-label uses medium (500) and sans font stack', () => {
-    const css = readPrimitiveTokens()
-    const lines = css.split('\n')
-    const defLine = lines.find((l) => /^\s*--type-label\s*:/.test(l))
-    expect(defLine).toBeDefined()
-    expect(defLine).toContain('500')
-    expect(defLine).toContain('var(--font-sans)')
-  })
+  it.each(Object.entries(DIVERGENT_FINAL_SPEC_VALUES))(
+    '%s bridge value is exact but still differs from the final spec ramp',
+    (token, specValue) => {
+      const defs = readPrimitiveTokenDefinitions()
+      const bridgeToken = token as keyof typeof DIVERGENT_FINAL_SPEC_VALUES
+      const bridgeValue = BRIDGE_TYPE_VALUES[bridgeToken]
+      expect(defs.get(bridgeToken)).toBe(bridgeValue)
+      expect(bridgeValue).not.toBe(specValue)
+    },
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -79,26 +108,24 @@ describe('design-token type-ramp definitions (DD-26)', () => {
 
 describe('design-token radius aliases (DD-26)', () => {
   it('--r-1 is defined and points at --radius-sm', () => {
-    const css = readPrimitiveTokens()
-    const lines = css.split('\n')
-    const defLine = lines.find((l) => /^\s*--r-1\s*:/.test(l))
-    expect(defLine).toBeDefined()
-    expect(defLine).toContain('var(--radius-sm)')
+    const defs = readPrimitiveTokenDefinitions()
+    expect(defs.get('--r-1')).toBe('var(--radius-sm)')
   })
 
   it('--r-2 is defined and points at --radius-md', () => {
-    const css = readPrimitiveTokens()
-    const lines = css.split('\n')
-    const defLine = lines.find((l) => /^\s*--r-2\s*:/.test(l))
-    expect(defLine).toBeDefined()
-    expect(defLine).toContain('var(--radius-md)')
+    const defs = readPrimitiveTokenDefinitions()
+    expect(defs.get('--r-2')).toBe('var(--radius-md)')
   })
 
   it('--r-3 is defined and points at --radius-lg', () => {
-    const css = readPrimitiveTokens()
-    const lines = css.split('\n')
-    const defLine = lines.find((l) => /^\s*--r-3\s*:/.test(l))
-    expect(defLine).toBeDefined()
-    expect(defLine).toContain('var(--radius-lg)')
+    const defs = readPrimitiveTokenDefinitions()
+    expect(defs.get('--r-3')).toBe('var(--radius-lg)')
+  })
+
+  it('radius aliases are consumed by primitives.css fallback chains', () => {
+    const css = stripCssComments(readPrimitivesCss())
+    expect(css).toContain('var(--r-1, var(--radius-sm))')
+    expect(css).toContain('var(--r-2, var(--radius-md))')
+    expect(css).toContain('var(--r-3, var(--radius-lg))')
   })
 })

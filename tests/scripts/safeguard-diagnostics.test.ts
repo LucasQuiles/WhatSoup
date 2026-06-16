@@ -53,6 +53,10 @@ const requiredPackageScripts = {
     'npm --prefix console run design:lint-fixtures',
     'npm run test:design-guards',
   ].join(' && '),
+  'verify:console-browser': [
+    'npm run test:browser',
+    'npm run test:browser:motion',
+  ].join(' && '),
   'verify:push:branch': [
     'npm run guard:repo:staged',
     'npm run guard:repo:branch-diff',
@@ -102,6 +106,7 @@ const requiredPackageScripts = {
     'npm run coverage:check',
     'bash scripts/run-with-pinned-npm.sh --prefix console run build',
     'npm run verify:console-design',
+    'npm run verify:console-browser',
   ].join(' && '),
   'verify:publish': [
     'npm run guard:claude-settings',
@@ -223,6 +228,14 @@ const requiredFiles: Record<string, string> = {
     'name: Console build',
     'name: Console design verification',
     'run: npm run verify:console-design',
+    'name: Install Playwright chromium',
+    'run: npx playwright install chromium --with-deps',
+    'name: Browser test suite',
+    'run: npm run test:browser',
+    'name: Browser motion test suite',
+    'run: npm run test:browser:motion',
+    'tests/browser/__screenshots__',
+    'tests/browser-motion/__screenshots__',
   ].join('\n'),
   '.husky/pre-commit': [
     'npm run guard:repo:staged',
@@ -334,6 +347,17 @@ describe('safeguard diagnostics', () => {
     });
   });
 
+  it('fails when the shared browser verification script is missing', () => {
+    const fixture = makeRepo({ scripts: { 'verify:console-browser': undefined } });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'required-package-scripts')).toMatchObject({
+      status: 'fail',
+      evidence: expect.arrayContaining(['verify:console-browser']),
+    });
+  });
+
   it('fails when a verify chain omits the diagnostic guard', () => {
     const fixture = makeRepo({
       scripts: {
@@ -404,6 +428,34 @@ describe('safeguard diagnostics', () => {
       .toContain('missing npm --prefix console run design:shadow-frozen-inventory');
   });
 
+  it('fails when the shared browser verification chain omits the no-reduce motion proof', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:console-browser': requiredPackageScripts['verify:console-browser']
+          .replace(' && npm run test:browser:motion', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'console-browser-chain')?.evidence)
+      .toContain('missing npm run test:browser:motion');
+  });
+
+  it('fails when release verification omits the browser proof chain', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace(' && npm run verify:console-browser', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('missing npm run verify:console-browser');
+  });
+
   it('fails when a new non-capture console design script is not wired into shared verification', () => {
     const fixture = makeRepo({
       consoleScripts: {
@@ -469,6 +521,26 @@ describe('safeguard diagnostics', () => {
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run test:browser:motion']) });
   });
 
+  it('fails when CI makes a browser proof conditional', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/quality.yml': requiredFiles['.github/workflows/quality.yml']
+          .replace(
+            'run: npm run test:browser',
+            'if: failure()\n        run: npm run test:browser',
+          ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'quality-ci-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['conditional run: npm run test:browser (if: failure())']),
+      });
+  });
+
   it('fails when CI omits design-system hygiene changed-range coverage', () => {
     const fixture = makeRepo({
       files: {
@@ -495,6 +567,40 @@ describe('safeguard diagnostics', () => {
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
       .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run verify:console-design']) });
+  });
+
+  it('fails when tag release CI omits the browser motion proof', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/tag-release-gate.yml': requiredFiles['.github/workflows/tag-release-gate.yml']
+          .replace('run: npm run test:browser:motion', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
+      .toMatchObject({ status: 'fail', evidence: expect.arrayContaining(['run: npm run test:browser:motion']) });
+  });
+
+  it('fails when tag release CI makes a browser proof conditional', () => {
+    const fixture = makeRepo({
+      files: {
+        '.github/workflows/tag-release-gate.yml': requiredFiles['.github/workflows/tag-release-gate.yml']
+          .replace(
+            'run: npm run test:browser:motion',
+            'if: failure()\n        run: npm run test:browser:motion',
+          ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'tag-release-console-design-chain'))
+      .toMatchObject({
+        status: 'fail',
+        evidence: expect.arrayContaining(['conditional run: npm run test:browser:motion (if: failure())']),
+      });
   });
 
   it('fails when a sensitive-surface anchor is removed', () => {

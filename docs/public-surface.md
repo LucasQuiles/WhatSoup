@@ -290,6 +290,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-coverage-headroom` | `npm run guard:coverage-headroom` | `package.json` | internal | active | Manual coverage threshold headroom diagnostic; run after `coverage:check` has generated `coverage/coverage-summary.json` |
 | `cli:npm.work-index-regen` | `npm run work-index:regen` | `package.json` | stable | active | Regenerate `docs/work-index.md` |
 | `cli:npm.verify-console-design` | `npm run verify:console-design` | `package.json` | stable | active | Shared console design-system verification chain used by push and release gates |
+| `cli:npm.verify-console-browser` | `npm run verify:console-browser` | `package.json` | stable | active | Shared browser proof chain (`test:browser` + `test:browser:motion`) used by release/tag gates |
 | `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |
 | `cli:npm.verify-publish` | `npm run verify:publish` | `package.json` | beta | active | Strict public-publication prep gate; expected to fail until `PRIVATE-ARCHIVE` rows are removed, sanitized, or reclassified |

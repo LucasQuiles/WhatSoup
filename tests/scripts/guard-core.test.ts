@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -42,6 +42,35 @@ describe('guard-core helpers', () => {
 
     expect(normalizeRepoPath('./nested/example.md')).toBe('nested/example.md');
     expect(gitList(['ls-files'], repo)).toEqual(['nested/example.md']);
+  });
+
+  it('does not leak stderr for caught git probe failures', () => {
+    const probe = `
+      import { gitList } from './scripts/lib/guard-core.ts';
+      import { mkdtempSync, rmSync } from 'node:fs';
+      import { tmpdir } from 'node:os';
+      import path from 'node:path';
+      const dir = mkdtempSync(path.join(tmpdir(), 'guard-core-quiet-probe-'));
+      try {
+        try {
+          gitList(['status'], dir);
+        } catch {
+          // Expected negative probe: callers may turn this into a fail-closed verdict.
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+      console.log('done');
+    `;
+    const result = spawnSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', probe], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: cleanGitEnv(),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('done');
+    expect(result.stderr).toBe('');
   });
 
   it('classifies shared text candidates without shrinking anonymizer coverage', () => {

@@ -17,14 +17,14 @@
  *
  * Roving tabindex (ARIA 1.2 §3.25 toolbar):
  *   The Toolbar shell manages a single tab stop. Arrow keys (Left/Right) move focus
- *   among direct focusable children; Home/End jump to first/last. Tab/Shift-Tab are
+ *   among focusable controls in DOM order; Home/End jump to first/last. Tab/Shift-Tab are
  *   never intercepted — they exit the toolbar. The implementation mirrors Tabs.tsx's
  *   querySelectorAll + focus() roving approach, extended to handle composite children:
- *   ToolbarSearch text inputs are treated as opaque single stops (their internal
- *   ArrowLeft/ArrowRight for text editing is NOT prevented because we only intercept
+ *   ToolbarSearch text inputs keep their internal
+ *   ArrowLeft/ArrowRight/Home/End text-editing behavior because we only intercept
  *   at the toolbar level when the event target is not inside a text input).
  */
-import { type FC, type ReactNode, type ChangeEventHandler, useRef, useCallback, type KeyboardEvent } from 'react';
+import { type FC, type ReactNode, type ChangeEventHandler, useRef, useCallback, type KeyboardEvent, type FocusEvent } from 'react';
 
 // ---------------------------------------------------------------------------
 // Helpers — focusable item discovery
@@ -32,31 +32,27 @@ import { type FC, type ReactNode, type ChangeEventHandler, useRef, useCallback, 
 
 /**
  * Returns the flat list of focusable toolbar items in DOM order.
- * "Focusable toolbar item" = any interactive element that is a direct descendant
- * of the toolbar's first layer OR is the canonical single-stop of a sub-group.
+ * "Focusable toolbar item" = any enabled interactive element in toolbar DOM order.
  *
- * Strategy (mirrors Tabs.tsx): query for buttons, inputs, and [tabindex] elements
- * that are immediate or shallow focusable targets within the toolbar. We exclude
- * elements that are aria-hidden or already have tabIndex forced to -1 by the toolbar
- * itself (i.e., non-active items). We operate on ALL candidates and let the roving
- * logic track the active index.
+ * Strategy (mirrors Tabs.tsx): query for native controls, links, and explicit
+ * tabbables within the toolbar. Programmatic tabIndex=-1 sentinels are excluded
+ * from discovery so implementation details do not become arrow-key stops.
  *
  * Special handling for ToolbarSearch: the <input type="search"> is the single
  * focusable stop for the whole search section, so it is included directly.
  *
- * We do NOT enter sub-groups recursively — each sub-group (ToolbarFilters,
- * ToolbarTimeRange) is represented by its first button (or the active button),
- * but since those sub-groups manage their own internal focus (pills / seg buttons),
- * the toolbar treats the first focusable in each sub-group as the group's stop.
- *
- * Implementation: query `button, input, [tabindex]` within the toolbar, filter
- * out aria-hidden, disabled, and elements inside a [data-toolbar-opaque] container
- * after the first such item in that container. The ToolbarSearch wraps its input
- * in a <label>; the input itself surfaces as a direct match.
+ * ToolbarFilters and ToolbarTimeRange are role="group" containers, not independent
+ * composite widgets with their own roving handlers, so their child buttons remain
+ * toolbar-level arrow targets. ToolbarSearch wraps its input in a <label>; the
+ * input itself surfaces as the editable target.
  */
 function getToolbarItems(toolbar: HTMLElement): HTMLElement[] {
+  // Query broadly, then filter disabled/hidden candidates in one place. This
+  // keeps native controls and explicit tab stops aligned with browser Tab order.
   const candidates = Array.from(
-    toolbar.querySelectorAll<HTMLElement>('button:not([disabled]), input, [tabindex]:not([aria-hidden="true"])')
+    toolbar.querySelectorAll<HTMLElement>(
+      'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])',
+    )
   );
   // Exclude any element that is itself aria-hidden or inside an aria-hidden container
   // (ToolbarSpring is aria-hidden on the div but has no focusable children, so no
@@ -69,12 +65,16 @@ function getToolbarItems(toolbar: HTMLElement): HTMLElement[] {
 }
 
 /**
- * Returns true when the active element is a text input or textarea —
- * meaning ArrowLeft/ArrowRight should not be intercepted (text cursor movement).
+ * Returns true when the keyboard event target is a text input or textarea —
+ * meaning ArrowLeft/ArrowRight/Home/End should not be intercepted.
  */
-function activeElementIsTextEditable(): boolean {
-  const el = document.activeElement;
-  if (!el) return false;
+function eventTargetIsTextEditable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const el = target;
+  if (
+    el.isContentEditable
+    || el.closest('[contenteditable="true"], [contenteditable="plaintext-only"], [contenteditable=""]')
+  ) return true;
   const tag = el.tagName.toLowerCase();
   if (tag === 'textarea') return true;
   if (tag === 'input') {
@@ -130,19 +130,16 @@ export const Toolbar: FC<ToolbarProps> = ({
    * - End: last item
    * - Tab / Shift-Tab: NOT intercepted — exits toolbar (ARIA 1.2 §3.25)
    *
-   * ArrowLeft/Right are suppressed only when the focused element is NOT a text
-   * input — ToolbarSearch must keep its cursor-movement behavior.
+   * Arrow/Home/End navigation keys are suppressed when the event target is a
+   * text input — ToolbarSearch must keep its cursor-movement behavior.
    */
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLDivElement>) => {
     const { key } = e;
 
-    // For arrow keys: bail out if focused element is a text-editable input
-    if ((key === 'ArrowLeft' || key === 'ArrowRight') && activeElementIsTextEditable()) {
-      return;
-    }
-
     const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
     if (!keys.includes(key)) return;
+
+    if (eventTargetIsTextEditable(e.target)) return;
 
     const toolbar = toolbarRef.current;
     if (!toolbar) return;
@@ -171,12 +168,16 @@ export const Toolbar: FC<ToolbarProps> = ({
    * DOM state is consistent. Preserve the last active index if possible, else
    * default to 0.
    */
-  const handleFocus = useCallback(() => {
+  const handleFocus = useCallback((e: FocusEvent<HTMLDivElement>) => {
     const toolbar = toolbarRef.current;
     if (!toolbar) return;
     const items = getToolbarItems(toolbar);
     if (items.length === 0) return;
-    const idx = Math.min(activeIndexRef.current, items.length - 1);
+    const target = e.target instanceof HTMLElement && toolbar.contains(e.target) ? e.target : null;
+    const current = target ? items.indexOf(target) : -1;
+    const idx = current >= 0 ? current : Math.min(activeIndexRef.current, items.length - 1);
+    // Direct focus/click entry must become the next roving origin.
+    activeIndexRef.current = idx;
     applyRoving(items, idx);
   }, [applyRoving]);
 

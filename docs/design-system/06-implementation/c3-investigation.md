@@ -112,18 +112,25 @@ covers the visible deltas.
 **Rollback:** rounding commits are pure value substitutions; token deletions ride the
 last-consumer commit so any revert restores a self-consistent set (B3W4 §6 pattern).
 
-## Item 3 — DD-26: type ramp — define it
+## Item 3 — DD-26: type ramp — close the bridge
+
+**Current status:** the original finding was correct when this packet was written:
+consumed `--type-*` names had zero primitive definitions and rendered only through
+fallbacks. The closeout bridge has since defined the 8 consumed `--type-*` names in
+`tokens.primitive.css` to their exact fallback-preserving values and added the `--r-1`,
+`--r-2`, and `--r-3` aliases. DD-26 remains open because the final tokens-v3 ramp is 12
+tokens and the bridge values intentionally do not match the final spec values.
 
 **Files inspected / classification**
 
 | File | Class | Evidence |
 |---|---|---|
-| `console/src/styles/tokens.primitive.css` | producer (the gap) | **zero `--type-*` definitions** (verified: `grep -- '--type-[a-z-]*:' styles/` → empty); legacy `--text-*` sizes at 39–51 still feed Tailwind utilities |
-| `console/src/styles/primitives.css` | consumer | **24 `var(--type-…, fallback)` sites** (exact count; register said ~24 — confirmed); zero in composites.css |
-| `console/scripts/design-regression.sh` 549–613 | enforcement | check 19 (tier-boundary dangling refs) carries the burndown note: add the §2.6 ramp + `--r-1/--r-2` to tokens.primitive.css |
+| `console/src/styles/tokens.primitive.css` | producer | closeout bridge defines the 8 consumed `--type-*` names at fallback-preserving values; 4 final spec tokens remain absent until the final ramp pass; legacy `--text-*` sizes at 39–51 still feed Tailwind utilities |
+| `console/src/styles/primitives.css` | consumer | 24 historical `var(--type-..., fallback)` sites drove the bridge inventory; fallbacks remain as the rollback/visual-stability guard until the final ramp pass |
+| `console/scripts/design-regression.sh` 549–613 | enforcement | check 19's original burndown note drove the bridge; the bridge inventory is now pinned by `tests/console/design-token-type-ramp.test.ts`; final primitive type-ramp spec drift remains a DD-26/DD-37 closure item outside semantic token drift |
 | `03-spec/tokens-v3.md` §2.6, `03-spec/typography.md` | spec | the 12-token closed ramp with exact values |
 
-**Consumer inventory (all 24, with current fallback → spec value):**
+**Historical consumer inventory (all 24, pre-bridge fallback → final spec value):**
 
 | Token | Sites (primitives.css) | Fallback today | Spec §2.6 value | Visual delta when defined |
 |---|---|---|---|---|
@@ -138,21 +145,18 @@ last-consumer commit so any revert restores a self-consistent set (B3W4 §6 patt
 | `--type-data-sm` (**sans fallback — mismatched**) | 958 (`.soup-toolbar-seg__btn`, 500 weight), 1179 (`.soup-log__msg`) | `…/16px var(--font-sans)` | mono per ramp | the two sites FLIP TO MONO; both are data lanes (seg range labels, log message text) so mono is spec-correct, but it is a visible change — named delta |
 | `--type-display`, `--type-title`, `--type-data-lg`, `--type-nameplate` | zero CSS consumers today | — | §2.6 values | defined for the C3 screen passes (page titles, KPI values) and the C4 nameplate |
 
-**Current invariant:** rendering is deterministic only because every consumer carries an
-explicit fallback; the live console renders the *fallback* ramp (one step smaller than
-spec nearly everywhere, and below the 12px data floor on five log/table lanes).
+**Current invariant:** rendering is deterministic because the bridge definitions and the
+consumer fallbacks agree exactly. The live console still renders the *fallback* ramp (one
+step smaller than spec nearly everywhere, and below the 12px data floor on five
+log/table lanes), but it no longer has undefined consumed type tokens.
 
-**Intended change:** define **all 12** `--type-*` tokens in `tokens.primitive.css` exactly
-per tokens-v3 §2.6 (this packet deliberately proposes the spec values, not the fallback
-values — the register row says "real ramp values may differ from today's fallbacks" and
-the spec is the authority; any per-site veto at the checkpoint routes to a spec version
-bump, never a divergent definition). In the same commit: define `--r-1: 4px`, `--r-2: 6px`,
-`--r-3: 8px` (same check-19 burndown family; 12+ `var(--r-N, var(--radius-*))` consumers
-exist, e.g. primitives.css 142/250/334/485/680/925/949/1015). Strip the now-redundant
-fallbacks so drift cannot reopen (register expiry: "fallbacks become redundant,
-dangling-ref check stays at zero"); update the check-19 burndown comment
-(design-regression.sh 554–564 — note its `--wizard-accent` line is already stale
-post-B3W4; correct it in the same edit).
+**Remaining intended change:** define **all 12** `--type-*` tokens in
+`tokens.primitive.css` exactly per tokens-v3 §2.6 (the final spec values, not the
+fallback bridge values; any per-site veto at the checkpoint routes to a spec version
+bump, never a divergent definition). Strip the now-redundant fallbacks after the visual
+checkpoint so drift cannot reopen (register expiry: "fallbacks become redundant,
+dangling-ref check stays at zero"). The `--r-1/--r-2/--r-3` alias leg is already landed
+by the closeout bridge.
 
 **Ruling needed (live checkpoint, both themes — C-C3-2):** the ramp lands the whole
 console one type step up on primitive-built surfaces (modal/drawer titles +2px, body/data
@@ -175,11 +179,11 @@ strips ride the same commit as the definitions).
 **Files inspected:** `console/src/hooks/use-dismissable.ts` (FOCUSABLE_SELECTOR 53–61;
 `getFocusableElements` 63–70; `handleTab` 167–187 — recapture branch 182–185 *does*
 `preventDefault()` before `first.focus()`; bubble-phase document listener 189);
-`tests/browser/keyboard-proofs.test.tsx` (mechanism header 338–377; characterization case
-445+ "confirmed gap … written to accept a future strengthened trap"); `d7-evidence.md`
-(falsification record); DD-27 register row.
+`tests/browser/keyboard-proofs.test.tsx` (C-B3W3-7 modal focus-trap block; now
+strengthened to repeated trusted Tab containment); `d7-evidence.md` (falsification
+record); DD-27 register row.
 
-**Current invariant (root cause, from the suite's own header 347–357):** the trap's
+**Historical invariant (root cause, from the original suite header):** the trap's
 focusable set is computed with a selector whose `button:not([disabled])` arm **matches
 `tabIndex=-1` tab buttons** (the `[tabindex]:not([tabindex="-1"])` arm at :59 does not
 exclude them because buttons match the earlier arm). So `last` = an unselected roving-tab
@@ -215,12 +219,10 @@ they should survive (verify at implementation; any pinned identity flips in-comm
 
 **Change-now:** yes — P2, register cleanup phase C3.
 
-**Test plan:** flip `keyboard-proofs.test.tsx` C-B3W3-7 case from the characterization
-("escape confirmed") to the strengthened assertion the suite was pre-written to accept
-(no escape in N presses, focus cycles within the dialog); re-run `test:browser` is the
-proof (NOT runnable in this packet's read-only/mid-merge window — gate 0 of the
-implementation slice runs it; the d7 clean-clone pattern is available if the merge is
-still in flight). jsdom trap suite re-run guards the selector change.
+**Test plan / status:** the `keyboard-proofs.test.tsx` C-B3W3-7 case has been flipped
+from characterization to the strengthened assertion (no escape across repeated trusted
+Tab presses). `npm run test:browser` is the browser proof, and the jsdom trap suite
+guards the selector change.
 
 **Rollback:** single-function revert; the browser case flips back with it.
 
@@ -884,8 +886,11 @@ sub-PR, N4 alias removal sweep, N5 docs prose.
 
 # Strong-claim audit (this packet's own claims)
 
-- **"--type-* has zero definitions"** — verified by definition-pattern grep over
-  `console/src/styles/` (and check 19's own burndown note corroborates). High confidence.
+- **Historical pre-bridge claim: "--type-* has zero definitions"** — at the time
+  of this investigation, verified by definition-pattern grep over `console/src/styles/`
+  (and check 19's own burndown note corroborated). Superseded by the closeout
+  fallback bridge: 8 consumed `--type-*` names are now defined while DD-26 remains
+  open for the final 12-token spec ramp. High confidence for the original packet.
 - **"24 consumers"** — exact `grep -c 'var(--type-'` on primitives.css; composites.css 0.
   High.
 - **DD-30 trace** — read directly from use-exit-presence.ts 90–177; the cleanup-before-

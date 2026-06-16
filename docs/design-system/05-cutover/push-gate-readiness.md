@@ -227,8 +227,9 @@ before the program may declare the cutover complete.
 **Riding as documented debt (register "no"):** DD-5 (theme-toggle treatment,
 rides the C3 nav slice), DD-9 (half-step spacing aliases), DD-22 (log
 virtualization awaits a streaming source), DD-23 (popover collision flip),
-DD-24 (collapse-orphaned contact actions), DD-26 (type ramp has consumers
-with fallbacks but no CSS definitions), DD-28/DD-29 (state-model spec homes),
+DD-24 (collapse-orphaned contact actions), DD-26 (type-ramp fallback bridge
+defined for the 8 consumed tokens, final 12-token spec ramp still open),
+DD-28/DD-29 (state-model spec homes),
 DD-32..34 (dialog/ruling/live-QA residues), DD-36..39 (icon/type/card/color-mix
 enforcement), and DD-43 (toolkit primitive gaps).
 

@@ -13,6 +13,7 @@ is no longer authoritative.
 | Version | Date | Change |
 |---|---|---|
 | 3.0.0-draft | 2026-06-11 | Initial promotion of the G2-locked v2 (Blend) token set out of the mockup into SSOT. Adds the full legacy disposition table, migration aliases, light-theme AA must-fix values, and the utility-class anti-pattern register (G2 open item 3). |
+| 3.0.0-draft | 2026-06-16 | Records the DD-26 closeout bridge: 8 consumed `--type-*` names and the `--r-1/--r-2/--r-3` aliases are now defined in `tokens.primitive.css`, but the final 12-token type ramp below remains the SSOT and still requires the DD-26/DD-37 visual/spec closure pass. |
 
 ## 1. Architecture — three layers with must-not-own boundaries
 
@@ -102,6 +103,16 @@ type utilities, never via raw `font:` declarations.
 | `--type-data` | `400 13px/20px var(--font-mono)` | tabular figures |
 | `--type-data-sm` | `400 12px/16px var(--font-mono)` | tabular figures |
 | `--type-nameplate` | `600 14px/24px var(--font-mono)` | tracking +0.38em, uppercase — **reserved for the SOUP mark**, see `brand.md` |
+
+Implementation status (DD-26/DD-37): `tokens.primitive.css` currently carries a fallback-preserving
+bridge for the 8 consumed type tokens (`--type-heading`, `--type-body`, `--type-body-st`,
+`--type-label`, `--type-caption`, `--type-overline`, `--type-data`, `--type-data-sm`) so existing
+`var(--type-*, fallback)` consumers no longer depend on undefined names. Those bridge values mirror
+today's fallbacks and intentionally differ from this final ramp where a visual/type-floor pass is still
+owed; the 4 unconsumed spec tokens (`--type-display`, `--type-title`, `--type-data-lg`,
+`--type-nameplate`) stay pending until that pass. `tests/console/design-token-type-ramp.test.ts` pins
+the bridge inventory and the pending spec tokens; it does not replace final primitive spec-drift
+enforcement.
 
 ### 2.7 Channel-tint strengths
 

@@ -22,7 +22,8 @@
  *   - Home jumps to first item
  *   - End jumps to last item
  *   - Only the focused item has tabIndex=0; all others have tabIndex=-1
- *   - ToolbarSearch input does NOT have ArrowLeft/Right hijacked during text editing
+ *   - ToolbarSearch input does NOT have ArrowLeft/Right/Home/End hijacked during text editing
+ *   - Programmatic tabIndex=-1 sentinels are not included in arrow-key roving
  *   - Tab key is NOT intercepted (exits toolbar — verified by lack of preventDefault)
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -529,7 +530,7 @@ describe('Toolbar — roving tabindex (WAI-ARIA 1.2 §3.25)', () => {
     expect(event.defaultPrevented).toBe(false);
   });
 
-  it('ToolbarSearch input: ArrowLeft/Right are NOT hijacked during text editing', () => {
+  it('ToolbarSearch input: ArrowLeft/Right/Home/End are NOT hijacked during text editing', () => {
     const { container } = render(
       <Toolbar aria-label="test toolbar">
         <button type="button" id="btnBefore">Before</button>
@@ -537,24 +538,198 @@ describe('Toolbar — roving tabindex (WAI-ARIA 1.2 §3.25)', () => {
         <button type="button" id="btnAfter">After</button>
       </Toolbar>,
     );
-    const toolbar = container.querySelector('[role="toolbar"]') as HTMLElement;
     const input = container.querySelector('input[type="search"]') as HTMLInputElement;
 
     // Focus the search input
     input.focus();
     expect(document.activeElement).toBe(input);
 
-    // Fire ArrowRight — should NOT move focus away from the input
+    for (const key of ['ArrowLeft', 'ArrowRight', 'Home', 'End']) {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      input.dispatchEvent(event);
+
+      // Focus must remain on the input, and the event must not be defaultPrevented.
+      expect(document.activeElement).toBe(input);
+      expect(event.defaultPrevented).toBe(false);
+    }
+  });
+
+  it('focus entry makes the focused item the single tab stop before roving resumes', () => {
+    const { toolbar, btnA, btnC } = renderThreeButton();
+    btnC.focus();
+
+    expect(btnA.tabIndex).toBe(-1);
+    expect(btnC.tabIndex).toBe(0);
+
+    fireEvent.keyDown(toolbar, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(btnA);
+    expect(btnA.tabIndex).toBe(0);
+    expect(btnC.tabIndex).toBe(-1);
+  });
+
+  it('does not include programmatic tabIndex=-1 sentinels in arrow-key roving', () => {
+    const { container } = render(
+      <Toolbar aria-label="test toolbar">
+        <button type="button" id="btnA">A</button>
+        <span id="sentinel" tabIndex={-1}>implementation sentinel</span>
+        <button type="button" id="btnB">B</button>
+      </Toolbar>,
+    );
+    const toolbar = container.querySelector('[role="toolbar"]') as HTMLElement;
+    const btnA = container.querySelector('#btnA') as HTMLButtonElement;
+    const sentinel = container.querySelector('#sentinel') as HTMLSpanElement;
+    const btnB = container.querySelector('#btnB') as HTMLButtonElement;
+
+    btnA.focus();
+    fireEvent.keyDown(toolbar, { key: 'ArrowRight' });
+
+    expect(document.activeElement).toBe(btnB);
+    expect(btnA.tabIndex).toBe(-1);
+    expect(sentinel.tabIndex).toBe(-1);
+    expect(btnB.tabIndex).toBe(0);
+  });
+
+  it('does not include aria-hidden descendants in arrow-key roving', () => {
+    const { container } = render(
+      <Toolbar aria-label="test toolbar">
+        <button type="button" id="btnA">A</button>
+        <div aria-hidden="true">
+          <button type="button" id="hiddenBtn">Hidden</button>
+        </div>
+        <button type="button" id="btnB">B</button>
+      </Toolbar>,
+    );
+    const toolbar = container.querySelector('[role="toolbar"]') as HTMLElement;
+    const btnA = container.querySelector('#btnA') as HTMLButtonElement;
+    const btnB = container.querySelector('#btnB') as HTMLButtonElement;
+
+    btnA.focus();
+    fireEvent.keyDown(toolbar, { key: 'ArrowRight' });
+
+    expect(document.activeElement).toBe(btnB);
+    expect(btnA.tabIndex).toBe(-1);
+    expect(btnB.tabIndex).toBe(0);
+  });
+
+  it('does not include disabled controls in arrow-key roving', () => {
+    const { container } = render(
+      <Toolbar aria-label="test toolbar">
+        <button type="button" id="btnA">A</button>
+        <button type="button" id="disabledBtn" disabled>Disabled</button>
+        <button type="button" id="btnB">B</button>
+      </Toolbar>,
+    );
+    const toolbar = container.querySelector('[role="toolbar"]') as HTMLElement;
+    const btnA = container.querySelector('#btnA') as HTMLButtonElement;
+    const disabledBtn = container.querySelector('#disabledBtn') as HTMLButtonElement;
+    const btnB = container.querySelector('#btnB') as HTMLButtonElement;
+
+    btnA.focus();
+    fireEvent.keyDown(toolbar, { key: 'ArrowRight' });
+
+    expect(document.activeElement).toBe(btnB);
+    expect(disabledBtn.disabled).toBe(true);
+    expect(btnA.tabIndex).toBe(-1);
+    expect(btnB.tabIndex).toBe(0);
+  });
+
+  it('does not hijack navigation keys from contenteditable toolbar items', () => {
+    const { container } = render(
+      <Toolbar aria-label="test toolbar">
+        <button type="button" id="btnBefore">Before</button>
+        <div id="editable" tabIndex={0} contentEditable suppressContentEditableWarning>editable</div>
+        <button type="button" id="btnAfter">After</button>
+      </Toolbar>,
+    );
+    const editable = container.querySelector('#editable') as HTMLElement;
+
+    editable.focus();
     const event = new KeyboardEvent('keydown', {
       key: 'ArrowRight',
       bubbles: true,
       cancelable: true,
     });
+    editable.dispatchEvent(event);
+
+    expect(document.activeElement).toBe(editable);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('does not hijack navigation keys from textarea toolbar items', () => {
+    const { container } = render(
+      <Toolbar aria-label="test toolbar">
+        <button type="button" id="btnBefore">Before</button>
+        <textarea id="notes" aria-label="Notes" />
+        <button type="button" id="btnAfter">After</button>
+      </Toolbar>,
+    );
+    const textarea = container.querySelector('#notes') as HTMLTextAreaElement;
+
+    textarea.focus();
+    const event = new KeyboardEvent('keydown', {
+      key: 'Home',
+      bubbles: true,
+      cancelable: true,
+    });
+    textarea.dispatchEvent(event);
+
+    expect(document.activeElement).toBe(textarea);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('allows non-HTMLElement focus stops to participate without treating them as text editors', () => {
+    const { container } = render(
+      <Toolbar aria-label="test toolbar">
+        <svg id="svgStop" tabIndex={0} aria-label="SVG stop" />
+        <button type="button" id="btnB">B</button>
+      </Toolbar>,
+    );
+    const toolbar = container.querySelector('[role="toolbar"]') as HTMLElement;
+    const svgStop = container.querySelector('#svgStop') as SVGElement & { focus: () => void };
+    const btnB = container.querySelector('#btnB') as HTMLButtonElement;
+
+    svgStop.focus();
+    fireEvent.keyDown(svgStop, { key: 'ArrowRight' });
+
+    expect(document.activeElement).toBe(btnB);
+    expect(toolbar.contains(btnB)).toBe(true);
+    expect(btnB.tabIndex).toBe(0);
+  });
+
+  it('does not prevent navigation keys when there are no focusable toolbar items', () => {
+    const { container } = render(<Toolbar aria-label="empty toolbar"><span>empty</span></Toolbar>);
+    const toolbar = container.querySelector('[role="toolbar"]') as HTMLElement;
+    const event = new KeyboardEvent('keydown', {
+      key: 'ArrowRight',
+      bubbles: true,
+      cancelable: true,
+    });
+
     toolbar.dispatchEvent(event);
 
-    // Focus must remain on the input, and the event must not be defaultPrevented
-    expect(document.activeElement).toBe(input);
     expect(event.defaultPrevented).toBe(false);
+  });
+
+  it('focus entry is a no-op when there are no focusable toolbar items', () => {
+    const { container } = render(<Toolbar aria-label="empty toolbar"><span>empty</span></Toolbar>);
+    const toolbar = container.querySelector('[role="toolbar"]') as HTMLElement;
+
+    fireEvent.focus(toolbar);
+
+    expect(document.activeElement).not.toBe(toolbar);
+  });
+
+  it('uses the first toolbar item as roving origin when activeElement is not tracked', () => {
+    const { toolbar, btnB } = renderThreeButton();
+
+    fireEvent.keyDown(toolbar, { key: 'ArrowRight' });
+
+    expect(document.activeElement).toBe(btnB);
+    expect(btnB.tabIndex).toBe(0);
   });
 
   it('roving tabindex works in a full anatomy toolbar with filters+search+button', () => {
@@ -570,13 +745,15 @@ describe('Toolbar — roving tabindex (WAI-ARIA 1.2 §3.25)', () => {
       </Toolbar>,
     );
     const toolbar = container.querySelector('[role="toolbar"]') as HTMLElement;
+    expect(toolbar.getAttribute('aria-label')).toBe('Fleet toolbar');
 
     // Get all non-disabled focusable items (buttons + search input)
     const items = Array.from(
       toolbar.querySelectorAll<HTMLElement>('button:not([disabled]), input'),
     ).filter((el) => !el.closest('[aria-hidden="true"]'));
 
-    expect(items.length).toBeGreaterThan(1);
+    const expectedFocusableItems = 1 + TIME_OPTIONS.length + 1 + 1; // filter pill + segments + search + primary
+    expect(items).toHaveLength(expectedFocusableItems);
 
     // Focus first item, apply roving via onFocus
     items[0].focus();
@@ -587,7 +764,8 @@ describe('Toolbar — roving tabindex (WAI-ARIA 1.2 §3.25)', () => {
     expect(document.activeElement).toBe(items[1]);
 
     // After ArrowRight, only items[1] should have tabIndex=0
-    expect(items[0].tabIndex).toBe(-1);
-    expect(items[1].tabIndex).toBe(0);
+    items.forEach((item, index) => {
+      expect(item.tabIndex).toBe(index === 1 ? 0 : -1);
+    });
   });
 });

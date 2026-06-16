@@ -524,9 +524,14 @@ packet evidence.
 
 The hook and CI wiring are protected by `scripts/safeguard-diagnostics.ts`: the safeguard diagnostics
 must fail if `.husky/pre-commit` drops repo hygiene, publication, design-system documentation
-hygiene, node-pin, settings, or console lint coverage, or if quality.yml drops the changed-range
+hygiene, node-pin, settings, or console lint coverage; if quality.yml drops the changed-range
 design-system hygiene step, shared console design verification, Playwright install, either browser
-proof suite, or browser screenshot artifacts.
+proof suite, or the browser failure-artifact path list; or if tag-release CI drops shared console
+design verification, Playwright install, either browser proof suite, or the browser failure-artifact
+path list. Playwright browser caching is a runtime-cost optimization, not a correctness guard.
+Failure screenshots are best-effort diagnostics: the workflows keep their artifact paths wired, but
+`if-no-files-found: ignore` means absence of screenshots does not itself fail a run that already
+failed for a primary browser assertion.
 
 ### 17.4 Shared Console Design Verification Chain
 
@@ -558,6 +563,17 @@ This chain is the DRY owner for non-browser console design checks in `verify:pus
 `scripts/safeguard-diagnostics.ts` enforces the shared chain and the fact that push/release
 verification plus CI workflows call it. Removing, reordering, or bypassing this chain is a
 guard-chain failure.
+
+Release verification has an additional browser proof tail:
+
+```bash
+npm run verify:console-browser
+```
+
+That shared script runs `test:browser` and `test:browser:motion`. It is wired into
+`verify:release` and tag-release CI so trusted-keyboard, viewport, target-size, reduced-motion, and
+no-reduce exit-motion proofs cannot be skipped on release/tag paths. Branch-push verification still
+uses the faster non-browser design chain; quality.yml remains the PR/main browser gate.
 
 Report-only audits inside this chain remain report-only. Their presence in the shared chain proves
 that a structured inventory was generated during the verification run; it does not prove the inventory is
