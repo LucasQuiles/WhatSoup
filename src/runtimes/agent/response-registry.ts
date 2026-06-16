@@ -328,6 +328,8 @@ export function providerKindToClass(kind: ProviderFailureKind): AgentFailureClas
       return 'provider_context_overflow';
     case 'server-error':
       return 'provider_server_error';
+    case 'transient-network':
+      return 'provider_network_error';
   }
 }
 

@@ -99,4 +99,32 @@ describe('providerFailureArmsFallback — which kinds activate provider fallback
       expect(providerFailureArmsFallback(k)).toBe(false);
     }
   });
+
+  it('transient-network does NOT arm fallback (recoverable — next message respawns session)', () => {
+    expect(providerFailureArmsFallback('transient-network')).toBe(false);
+  });
+});
+
+describe('classifyProviderFailure — transient-network', () => {
+  it('classifies socket-close text as transient-network', () => {
+    expect(classifyProviderFailure(
+      'API Error: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()',
+    )).toBe('transient-network');
+  });
+
+  it('classifies ECONNRESET as transient-network', () => {
+    expect(classifyProviderFailure('Error: read ECONNRESET')).toBe('transient-network');
+  });
+
+  it('classifies socket hang up as transient-network', () => {
+    expect(classifyProviderFailure('socket hang up')).toBe('transient-network');
+  });
+
+  it('classifies connection reset by peer as transient-network', () => {
+    expect(classifyProviderFailure('connection reset by peer')).toBe('transient-network');
+  });
+
+  it('does NOT classify benign documentation prose about sockets as transient-network', () => {
+    expect(classifyProviderFailure('Please document how socket timeouts and connection resets are handled.')).toBeNull();
+  });
 });
