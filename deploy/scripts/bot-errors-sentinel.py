@@ -826,7 +826,7 @@ def apply_tier1_bounds(results: list[dict], host_state: dict, config: SentinelCo
     frozen_classes = {
         drift_class
         for drift_class, grouped in by_drift_class.items()
-        if len(grouped) > config.correlated_drift_freeze_threshold
+        if len(grouped) >= config.correlated_drift_freeze_threshold
     }
     if frozen_classes:
         for result in candidates:
@@ -1402,6 +1402,16 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
                 host_state[result["host"]]["lastAction"] = result["action"]
     elif mass_out_of_rotation(results):
         fleet_action = "mass_unreachable_confirmed"
+        # Suppress any active tier-1 heal candidate during a fleet-wide outage —
+        # firing a heal here is the worst possible time. Mirror the per-host
+        # mutation that central_connectivity_suspect already performs. Only
+        # active candidates are deferred; hysteresis_wait/escalate/etc. are
+        # untouched. defer_mass_unreachable is not an attention/event action,
+        # so it raises no alert (the fleet event already conveys the outage).
+        for result in results:
+            if result.get("action") == "tier1_heal_candidate":
+                result["action"] = "defer_mass_unreachable"
+                host_state[result["host"]]["lastAction"] = result["action"]
     else:
         tier1_action = apply_tier1_bounds(results, host_state, config)
         if tier1_action is not None:

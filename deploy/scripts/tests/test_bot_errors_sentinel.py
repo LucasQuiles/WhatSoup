@@ -1723,3 +1723,86 @@ def test_stale_probe_prevents_healthy_classification(tmp_path: Path):
         f"stale probe must not yield healthy, got {host_result['class']}"
     )
     assert host_result["probe"]["class"] == "probe_stale"
+
+
+# --- P0-5: correlated-drift freeze off-by-one (`>` vs `>=`) ------------------
+# correlated_drift_freeze_threshold means "freeze when this many or more hosts
+# share a drift class." With `>`, a 2-host fleet at threshold 2 needs THREE
+# hosts before the freeze fires, so two correlated drifters heal concurrently —
+# exactly what the freeze exists to prevent.
+
+
+def test_p05_correlated_drift_freeze_fires_at_threshold(tmp_path: Path):
+    """Two tier1 heal candidates sharing a drift class, threshold==2.
+    Before fix (>): 2 > 2 is False -> no freeze -> returns None. FAILS.
+    After fix (>=): 2 >= 2 is True -> freeze fires. PASSES."""
+    hosts = _hosts_file(tmp_path, [])
+    config = _config(tmp_path, hosts)  # correlated_drift_freeze_threshold default 2
+    host_state = {
+        "host-a": _mod.default_host_record(),
+        "host-b": _mod.default_host_record(),
+    }
+    results = [
+        {"host": "host-a", "action": "tier1_heal_candidate", "probe": {"class": "drift"}, "heartbeat": {"class": "drift"}},
+        {"host": "host-b", "action": "tier1_heal_candidate", "probe": {"class": "drift"}, "heartbeat": {"class": "drift"}},
+    ]
+    fleet_action = _mod.apply_tier1_bounds(results, host_state, config)
+    assert fleet_action == "correlated_runtime_drift_freeze", (
+        f"expected correlated_runtime_drift_freeze, got {fleet_action!r}"
+    )
+    for result in results:
+        assert result["action"] == "freeze_correlated_drift", (
+            f"host {result['host']!r} action={result['action']!r}, expected freeze_correlated_drift"
+        )
+
+
+def test_p05_below_threshold_does_not_freeze(tmp_path: Path):
+    """A single drifter at threshold 2 must NOT freeze (guards the >= edge)."""
+    hosts = _hosts_file(tmp_path, [])
+    config = _config(tmp_path, hosts)
+    host_state = {"host-a": _mod.default_host_record()}
+    results = [
+        {"host": "host-a", "action": "tier1_heal_candidate", "probe": {"class": "drift"}, "heartbeat": {"class": "drift"}},
+    ]
+    assert _mod.apply_tier1_bounds(results, host_state, config) is None
+    assert results[0]["action"] == "tier1_heal_candidate"
+
+
+# --- P0-6: mass_unreachable_confirmed must suppress tier1 heal candidates ----
+# The mass_unreachable_confirmed branch set the fleet action but never mutated
+# per-host actions, so a host that cleared hysteresis into tier1_heal_candidate
+# would still fire a heal during a fleet-wide outage — the worst possible time.
+
+
+def test_p06_mass_unreachable_suppresses_tier1_heal_candidate(tmp_path: Path):
+    """3-host fleet: 2 out_of_rotation (stale hb + unreachable probe) trip
+    mass_out_of_rotation; 1 fresh safe_runtime_drift host clears hysteresis to
+    tier1_heal_candidate. Before fix: that host keeps tier1_heal_candidate during
+    the outage. After fix: it is suppressed to defer_mass_unreachable."""
+    hb_a = _heartbeat(tmp_path / "host-a-hb.json", healthy=True, mtime=100.0)  # stale -> out_of_rotation
+    hb_b = _heartbeat(tmp_path / "host-b-hb.json", healthy=True, mtime=100.0)  # stale -> out_of_rotation
+    hb_c = _heartbeat(tmp_path / "host-c-hb.json", healthy=False, klass="drift", mtime=995.0)  # fresh drift
+    hosts = _hosts_file(
+        tmp_path,
+        [
+            {"host": "host-a", "heartbeatPath": str(hb_a)},
+            {"host": "host-b", "heartbeatPath": str(hb_b)},
+            {"host": "host-c", "heartbeatPath": str(hb_c)},
+        ],
+    )
+    probes = {
+        "host-a": {"reachable": False, "healthy": False, "class": "unreachable"},
+        "host-b": {"reachable": False, "healthy": False, "class": "unreachable"},
+        "host-c": {"reachable": True, "healthy": False, "class": "drift"},
+    }
+    config = _config(tmp_path, hosts, hysteresis_cycles=1, connectivity_hysteresis_cycles=1)
+    result = _mod.run_once(config, _deps(1000.0, probes))
+
+    assert result["fleetAction"] == "mass_unreachable_confirmed"
+    actions = {host["host"]: host["action"] for host in result["hosts"]}
+    # Precondition sanity: without the outage host-c would be a heal candidate.
+    assert actions["host-c"] == "defer_mass_unreachable", (
+        f"host-c must be suppressed during mass outage, got actions={actions}"
+    )
+    assert actions["host-a"] == "escalate", f"host-a unchanged, got {actions}"
+    assert actions["host-b"] == "escalate", f"host-b unchanged, got {actions}"
