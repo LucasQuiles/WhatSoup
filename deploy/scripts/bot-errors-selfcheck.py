@@ -765,6 +765,15 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
         "disabled": disabled_reason,
         "autohealOff": autoheal_reason,
     }
+    lever_stat_errors = [
+        r for r in (disabled_reason, autoheal_reason) if r.startswith("stat_error:")
+    ]
+    if lever_stat_errors:
+        status["class"] = "lever_stat_error"
+        status["action"] = "escalate"
+        status["problems"] = [f"lever stat failed: {r}" for r in lever_stat_errors]
+        status["consecutive"] = update_consecutive(memory, status["class"])
+        return finalize_status(config, deps, memory, status)
     status["centralAck"] = central_ack_inventory(config.central_ack_path, now)
     update_central_ack_watch(memory, status["centralAck"], now)
 
