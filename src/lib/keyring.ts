@@ -228,10 +228,19 @@ export function writeCredential(
 
   if (backend === 'macos-keychain') {
     try {
+      // CRED-1: never put the secret on argv (world-visible via `ps -ww` for the exec
+      // lifetime). `-w` as the LAST option makes `security` prompt for the password on
+      // stdin; it asks twice (enter + retype), so the value is sent twice. Integration-
+      // verified on macOS (readback matches). NOTE: no `--` separators here — `security
+      // add-generic-password` consumes `--` as the value of `-s`/`-a` and fails (rc=2);
+      // execFileSync already passes args as an array, so option-arguments cannot be
+      // reinterpreted as flags and `--` is both unnecessary and breaking. The read
+      // (find-generic-password) and delete paths still carry the broken `--` and are
+      // mock-tested only — tracked as a follow-up (real-`security` integration tests).
       execFileSync(
         'security',
-        ['add-generic-password', '-U', '-s', '--', service, '-a', '--', account, '-w', value],
-        { timeout: 5_000, stdio: ['ignore', 'ignore', 'pipe'] },
+        ['add-generic-password', '-U', '-s', service, '-a', account, '-w'],
+        { timeout: 5_000, input: `${value}\n${value}\n`, stdio: ['pipe', 'ignore', 'pipe'] },
       );
       return { backend };
     } catch (err) {
