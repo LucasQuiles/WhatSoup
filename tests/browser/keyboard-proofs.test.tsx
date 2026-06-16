@@ -54,7 +54,10 @@
  *    holds with trusted events.
  *    (b2-evidence.md §Live-QA disposition)
  *
- * 3. C-B3W3-7: Modal + loading-body edge — repeated trusted Tab presses stay
+ * 3. Toolbar roving tabindex — trusted Arrow/Home/End focus movement, search
+ *    text-editing key preservation, and native Tab/Shift+Tab exit behavior.
+ *
+ * 4. C-B3W3-7: Modal + loading-body edge — repeated trusted Tab presses stay
  *    inside the dialog after DD-27 aligned the trap boundary with native Tab order.
  *    (b3-wave3-investigation §7.2 — "self-healing" disposition REVISED by D7,
  *    then closed by the tabIndex filter in use-dismissable)
@@ -95,7 +98,18 @@ vi.mock('../../console/src/lib/api', () => ({
 // ---------------------------------------------------------------------------
 
 import { ChatPicker } from '../../console/src/components/shared/ChatPicker.tsx';
-import { Modal, ModalBody, ActionButton, Tabs, Tab } from '../../console/src/components/primitives/index.ts';
+import {
+  Modal,
+  ModalBody,
+  ActionButton,
+  Tabs,
+  Tab,
+  Toolbar,
+  ToolbarFilters,
+  ToolbarTimeRange,
+  ToolbarSearch,
+  ToolbarSpring,
+} from '../../console/src/components/primitives/index.ts';
 import type { ChatItem } from '../../console/src/types.ts';
 
 // ---------------------------------------------------------------------------
@@ -323,6 +337,152 @@ describe('B2 deferred: ChatPicker Enter selects active option (trusted events)',
     expect(onSelect).toHaveBeenCalledTimes(0);
     // Panel is closed.
     expect(combobox.element().getAttribute('aria-expanded')).toBe('false');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TOOLBAR: trusted-event roving tabindex proof
+// ---------------------------------------------------------------------------
+
+const TOOLBAR_TIME_OPTIONS = [
+  { label: '24h', value: '24h' },
+  { label: '7d', value: '7d' },
+  { label: '30d', value: '30d' },
+];
+
+function ToolbarTrustedKeyboardFixture() {
+  return (
+    <>
+      <button type="button" id="before-toolbar">Before toolbar</button>
+      <Toolbar aria-label="Fleet toolbar">
+        <ToolbarFilters label="Mode filter">
+          <button type="button">All</button>
+        </ToolbarFilters>
+        <ToolbarTimeRange
+          label="Time range"
+          options={TOOLBAR_TIME_OPTIONS}
+          value="24h"
+          onChange={() => undefined}
+        />
+        <ToolbarSpring />
+        <ToolbarSearch label="Search lines" value="alpha" onChange={() => undefined} />
+        <button type="button" disabled>Disabled action</button>
+        <span tabIndex={-1}>programmatic sentinel</span>
+        <button type="button">Add line</button>
+      </Toolbar>
+      <button type="button" id="after-toolbar">After toolbar</button>
+    </>
+  );
+}
+
+function toolbarItems(toolbar: HTMLElement): HTMLElement[] {
+  return Array.from(
+    toolbar.querySelectorAll<HTMLElement>(
+      'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => {
+    if (el.closest('[aria-hidden="true"]')) return false;
+    if ((el as HTMLButtonElement).disabled) return false;
+    return true;
+  });
+}
+
+function expectSingleToolbarTabStop(items: HTMLElement[], activeIndex: number) {
+  expect(items.length).toBe(6);
+  items.forEach((item, index) => {
+    expect(item.tabIndex).toBe(index === activeIndex ? 0 : -1);
+  });
+}
+
+describe('Toolbar roving tabindex — trusted browser keyboard events', () => {
+  it('Arrow/Home/End move focus through full toolbar anatomy and keep one tab stop', async () => {
+    await render(<ToolbarTrustedKeyboardFixture />);
+
+    const toolbar = document.querySelector('[role="toolbar"]') as HTMLElement | null;
+    expect(toolbar).not.toBeNull();
+    expect(toolbar!.getAttribute('aria-label')).toBe('Fleet toolbar');
+
+    const items = toolbarItems(toolbar!);
+    expect(items.map((item) => item.textContent || item.getAttribute('aria-label'))).toEqual([
+      'All',
+      '24h',
+      '7d',
+      '30d',
+      'Search lines',
+      'Add line',
+    ]);
+
+    items[0].focus();
+    expect(document.activeElement).toBe(items[0]);
+    expectSingleToolbarTabStop(items, 0);
+
+    await userEvent.keyboard('{ArrowRight}');
+    expect(document.activeElement).toBe(items[1]);
+    expectSingleToolbarTabStop(items, 1);
+
+    await userEvent.keyboard('{End}');
+    expect(document.activeElement).toBe(items[5]);
+    expectSingleToolbarTabStop(items, 5);
+
+    await userEvent.keyboard('{ArrowRight}');
+    expect(document.activeElement).toBe(items[0]);
+    expectSingleToolbarTabStop(items, 0);
+
+    await userEvent.keyboard('{ArrowLeft}');
+    expect(document.activeElement).toBe(items[5]);
+    expectSingleToolbarTabStop(items, 5);
+
+    await userEvent.keyboard('{Home}');
+    expect(document.activeElement).toBe(items[0]);
+    expectSingleToolbarTabStop(items, 0);
+  });
+
+  it('ToolbarSearch keeps trusted editing navigation keys inside the input', async () => {
+    await render(<ToolbarTrustedKeyboardFixture />);
+
+    const toolbar = document.querySelector('[role="toolbar"]') as HTMLElement | null;
+    expect(toolbar).not.toBeNull();
+    const items = toolbarItems(toolbar!);
+    const searchInput = toolbar!.querySelector('input[type="search"]') as HTMLInputElement | null;
+    expect(searchInput).not.toBeNull();
+
+    searchInput!.focus();
+    expect(document.activeElement).toBe(searchInput);
+    expectSingleToolbarTabStop(items, 4);
+
+    for (const key of ['{ArrowLeft}', '{ArrowRight}', '{Home}', '{End}']) {
+      await userEvent.keyboard(key);
+      expect(document.activeElement).toBe(searchInput);
+      expectSingleToolbarTabStop(items, 4);
+    }
+  });
+
+  it('native Tab and Shift+Tab leave the toolbar instead of visiting roved items', async () => {
+    await render(<ToolbarTrustedKeyboardFixture />);
+
+    const before = document.getElementById('before-toolbar') as HTMLButtonElement | null;
+    const after = document.getElementById('after-toolbar') as HTMLButtonElement | null;
+    const toolbar = document.querySelector('[role="toolbar"]') as HTMLElement | null;
+    expect(before).not.toBeNull();
+    expect(after).not.toBeNull();
+    expect(toolbar).not.toBeNull();
+
+    const items = toolbarItems(toolbar!);
+
+    before!.focus();
+    await userEvent.tab();
+    expect(document.activeElement).toBe(items[0]);
+    expectSingleToolbarTabStop(items, 0);
+
+    await userEvent.tab();
+    expect(document.activeElement).toBe(after);
+
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(items[0]);
+    expectSingleToolbarTabStop(items, 0);
+
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(before);
   });
 });
 

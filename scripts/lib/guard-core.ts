@@ -38,6 +38,7 @@ export function git(args: string[], cwd: string): string {
     encoding: 'utf8',
     env: cleanGitEnv(),
     maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
@@ -59,6 +60,7 @@ export function readStagedAddedLines(cwd: string, filePath: string): string {
       encoding: 'utf8',
       env: cleanGitEnv(),
       maxBuffer: 20 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch {
     return '';
@@ -90,6 +92,7 @@ function readGitBlob(cwd: string, blob: string): GitBlobReadResult {
         encoding: 'utf8',
         env: cleanGitEnv(),
         maxBuffer: 20 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
       }),
     };
   } catch (error) {

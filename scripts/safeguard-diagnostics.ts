@@ -53,6 +53,7 @@ interface AnchorRequirement {
   category: DiagnosticCategory;
   file: string;
   anchors: string[];
+  requiredUnconditionalRuns?: string[];
   remediation: string;
 }
 
@@ -83,6 +84,7 @@ const REQUIRED_SCRIPTS = [
   'test:browser',
   'test:browser:motion',
   'verify:console-design',
+  'verify:console-browser',
   'verify:push:branch',
   'verify:release',
   'verify:publish',
@@ -137,6 +139,14 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
     ],
   },
   {
+    id: 'console-browser-chain',
+    scriptName: 'verify:console-browser',
+    orderedSteps: [
+      'npm run test:browser',
+      'npm run test:browser:motion',
+    ],
+  },
+  {
     id: 'release-chain',
     scriptName: 'verify:release',
     orderedSteps: [
@@ -166,6 +176,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run coverage:check',
       'bash scripts/run-with-pinned-npm.sh --prefix console run build',
       'npm run verify:console-design',
+      'npm run verify:console-browser',
     ],
     forbiddenSteps: [
       'npm --prefix tools/whatsoup_guard ci',
@@ -339,6 +350,11 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'tests/browser/__screenshots__',
       'tests/browser-motion/__screenshots__',
     ],
+    requiredUnconditionalRuns: [
+      'run: npx playwright install chromium --with-deps',
+      'run: npm run test:browser',
+      'run: npm run test:browser:motion',
+    ],
     remediation: 'Restore the shared console design verification chain in quality.yml CI.',
   },
   {
@@ -350,8 +366,21 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
       'name: Console build',
       'name: Console design verification',
       'run: npm run verify:console-design',
+      'name: Install Playwright chromium',
+      'run: npx playwright install chromium --with-deps',
+      'name: Browser test suite',
+      'run: npm run test:browser',
+      'name: Browser motion test suite',
+      'run: npm run test:browser:motion',
+      'tests/browser/__screenshots__',
+      'tests/browser-motion/__screenshots__',
     ],
-    remediation: 'Restore the shared console design verification chain in tag-release-gate.yml.',
+    requiredUnconditionalRuns: [
+      'run: npx playwright install chromium --with-deps',
+      'run: npm run test:browser',
+      'run: npm run test:browser:motion',
+    ],
+    remediation: 'Restore the shared console design and browser verification chain in tag-release-gate.yml.',
   },
   {
     id: 'pre-commit-design-system-hygiene',
@@ -577,6 +606,25 @@ function checkConsoleDesignScriptCoverage(rootScripts: Record<string, string>, c
   };
 }
 
+function conditionalRunFailures(text: string, runs: string[]): string[] {
+  const lines = text.split(/\r?\n/);
+  const failures: string[] = [];
+  for (const run of runs) {
+    const runLineIndexes = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.trim() === run);
+    for (const { index } of runLineIndexes) {
+      let start = index;
+      while (start > 0 && !/^\s*-\s+name:/.test(lines[start])) start -= 1;
+      let end = index + 1;
+      while (end < lines.length && !/^\s*-\s+name:/.test(lines[end])) end += 1;
+      const conditional = lines.slice(start, end).find((line) => /^\s*if\s*:/.test(line));
+      if (conditional) failures.push(`conditional ${run} (${conditional.trim()})`);
+    }
+  }
+  return failures;
+}
+
 function checkAnchors(cwd: string, requirement: AnchorRequirement): DiagnosticCheck {
   const text = readText(cwd, requirement.file);
   if (text === null) {
@@ -591,14 +639,19 @@ function checkAnchors(cwd: string, requirement: AnchorRequirement): DiagnosticCh
   }
 
   const missing = requirement.anchors.filter((anchor) => !text.includes(anchor));
+  const conditionalRuns = conditionalRunFailures(text, requirement.requiredUnconditionalRuns ?? []);
+  const failures = [
+    ...missing,
+    ...conditionalRuns,
+  ];
   return {
     id: requirement.id,
     category: requirement.category,
-    status: missing.length === 0 ? 'pass' : 'fail',
-    message: missing.length === 0
+    status: failures.length === 0 ? 'pass' : 'fail',
+    message: failures.length === 0
       ? `${requirement.file} contains required safeguard anchors.`
-      : `${requirement.file} is missing ${missing.length} safeguard anchor(s).`,
-    evidence: missing.length === 0 ? requirement.anchors : missing,
+      : `${requirement.file} has ${failures.length} safeguard anchor failure(s).`,
+    evidence: failures.length === 0 ? requirement.anchors : failures,
     remediation: requirement.remediation,
   };
 }

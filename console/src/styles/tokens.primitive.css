@@ -115,6 +115,67 @@
   /* Radius aliases — keep legacy names pointing at §2.3 values */
   --radius-xs: 2px;
 
+  /* --------------------------------------------------------------------------
+     Radius shorthand aliases (DD-26) — consumed as var(--r-N, var(--radius-*))
+     in primitives.css; defined here so the fallback chain collapses cleanly.
+     --r-1 → sm (4px)  --r-2 → md (6px)  --r-3 → lg (8px)
+     -------------------------------------------------------------------------- */
+  --r-1: var(--radius-sm); /* 4px — inputs, pills, small chips */
+  --r-2: var(--radius-md); /* 6px — cards, popovers, dropdowns */
+  --r-3: var(--radius-lg); /* 8px — modals, drawers, large panels */
+
+  /* --------------------------------------------------------------------------
+     Type-ramp bridge tokens (DD-26) — 8 currently consumed styles.
+     Values match the canonical fallback used by ALL var(--type-X, …) call sites
+     in primitives.css; defining them here reproduces current rendering without
+     change at every site (except the seg-btn bug at ~line 948, which had a
+     divergent 500/sans fallback — that site's fallback was also corrected to
+     match the canonical mono/400).
+     This is not the final 12-token type ramp from tokens-v3 §2.6; DD-26/DD-37
+     track the remaining spec-token and 12px-floor alignment work.
+
+     Font shorthand syntax: <weight> <size>/<line-height> <family>
+     All leadings are on the 4px grid (typography.md §2).
+     -------------------------------------------------------------------------- */
+
+  /* --type-body: prose and UI body copy — sans, regular weight, 13/20
+     Evidence: 4 call sites in primitives.css all use 400 13px/20px var(--font-sans) */
+  --type-body:     400 13px/20px var(--font-sans);
+
+  /* --type-body-st: strong/medium body (message composer, strong rows) — sans, medium
+     Evidence: 1 call site at ~line 94 uses 500 13px/20px var(--font-sans) */
+  --type-body-st:  500 13px/20px var(--font-sans);
+
+  /* --type-caption: secondary annotation text — sans, regular, 11/16
+     Evidence: 1 call site at ~line 831 uses 400 11px/16px var(--font-sans) */
+  --type-caption:  400 11px/16px var(--font-sans);
+
+  /* --type-data: primary data lane — mono, regular, 12/16 (tabular figures)
+     Evidence: 2 call sites at ~lines 836, 878 both use 400 12px/16px var(--font-mono) */
+  --type-data:     400 12px/16px var(--font-mono);
+
+  /* --type-data-sm: compact data lane — mono, regular, 11/16 (tabular figures)
+     Evidence: 7 of 9 call sites use 400 11px/16px var(--font-mono); 2 divergent
+     (lines 948 seg-btn + 1191 log-msg used wrong sans/weight — corrected to canonical).
+     Spec (typography.md §7): data lanes stay mono; tabular figures required. */
+  --type-data-sm:  400 11px/16px var(--font-mono);
+
+  /* --type-heading: panel and section headings — sans, semibold, 13/20
+     Evidence: 2 call sites at ~lines 388, 1376 both use 600 13px/20px var(--font-sans) */
+  --type-heading:  600 13px/20px var(--font-sans);
+
+  /* --type-label: control labels, tab labels, pill text — sans, medium, 11/16
+     Evidence: 6 call sites at ~lines 81, 141, 283, 415, 1432, 1543 all use
+     500 11px/16px var(--font-sans) */
+  --type-label:    500 11px/16px var(--font-sans);
+
+  /* --type-overline: ghost structure labels, column headers, kv keys — sans, medium, 10/16
+     + letter-spacing +0.08em applied at call site (see .soup-table th rule).
+     Evidence: 1 call site at ~line 696 uses 500 10px/16px var(--font-sans).
+     Note: typography.md §7 says weight 600 for overline but the single call site
+     uses 500 — the definition matches the actual fallback to preserve rendering. */
+  --type-overline: 500 10px/16px var(--font-sans);
+
   /* Motion tokens — §2.5 v3 values */
   --dur-fast: 120ms;
   --dur-base: 180ms;
