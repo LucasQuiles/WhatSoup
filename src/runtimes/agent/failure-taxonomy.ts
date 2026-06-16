@@ -75,6 +75,72 @@ export type ProviderFailureKind =
   | 'context-overflow';
 
 /**
+ * SSOT registry of the terminal limit-name tokens the agent provider CLI emits.
+ * Its limit-name map covers the 5-hour session cap, the 7-day weekly cap, the
+ * per-model-tier weekly caps, and the usage-credit overage, plus the API/plan
+ * tier caps. Every provider parser and the runtime classifier key off this list,
+ * so onboarding a new provider limit name is a one-line edit here rather than a
+ * scatter of substrings that silently drift (the "session limit" non-rollover class).
+ */
+export const LIMIT_NAME_TOKENS: readonly string[] = [
+  'session limit',
+  'weekly limit',
+  'opus limit',
+  'sonnet limit',
+  'usage credit limit',
+  'usage limit',
+  'usage cap',
+  'plan limit',
+  'fast limit',
+  'monthly spend limit',
+];
+
+/**
+ * Detect the agent provider CLI's assembled TERMINAL limit phrasings
+ * (`You've hit your ${name}` / `${name} reached` / org `$0` allocation). Anchored
+ * on a possessive/terminal verb so a conversational mention of a limit name
+ * ("add a weekly limit to the config") never matches. The non-terminal
+ * `Approaching ${name}` warning is intentionally NOT matched here — arming
+ * fallback on a warning would be a premature-rollover failure mode.
+ */
+function hasTerminalLimitAssembler(lower: string): boolean {
+  for (const name of LIMIT_NAME_TOKENS) {
+    if (
+      lower.includes(`hit your ${name}`) ||
+      lower.includes(`reached your ${name}`) ||
+      lower.includes(`${name} reached`) ||
+      lower.includes(`${name} is set to $0`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Detect the agent provider CLI's NON-terminal limit warnings ("Approaching ${name}",
+ * "You're now using ${name}", "You're close to your ${name}", "You've used N% of
+ * your ${name}"). Anchored on a known limit name so it cannot swallow a genuine
+ * terminal message that merely happens to contain the word "approaching" or
+ * "now using" in another position — those must still classify as terminal via the
+ * reset-cue branch (a false negative here is a silent no-rollover).
+ */
+function hasApproachingLimitWarning(lower: string): boolean {
+  if (lower.includes('% of your')) return true;
+  for (const name of LIMIT_NAME_TOKENS) {
+    if (
+      lower.includes(`approaching ${name}`) ||
+      lower.includes(`approaching your ${name}`) ||
+      lower.includes(`now using ${name}`) ||
+      lower.includes(`close to your ${name}`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Detect provider usage-limit / quota-exceeded messages that should not be
  * forwarded as normal user-visible agent output.
  */
@@ -83,23 +149,24 @@ export function isUsageLimitMessage(text: string): boolean {
 
   const lower = text.toLowerCase();
   if (isProviderCreditBalanceLimitMessage(lower)) return true;
+
   if (
     lower.includes('out of extra usage') ||
-    lower.includes('usage limit reached') ||
-    lower.includes('usage cap reached') ||
-    lower.includes("you've reached your usage limit") ||
-    lower.includes('you have reached your usage limit') ||
-    lower.includes('you have hit your usage limit') ||
-    lower.includes('claude usage limit')
+    lower.includes('claude usage limit') ||
+    hasTerminalLimitAssembler(lower)
   ) {
     return true;
   }
 
+  // Non-terminal warnings ("Approaching <name>", "You're now using <name>",
+  // "You've used N% of your <name>"): the provider can still serve this turn, so
+  // they must not arm fallback. Excluded before the reset-cue branch so that a
+  // warning carrying a reset time does not get classified as terminal.
+  if (hasApproachingLimitWarning(lower)) return false;
+
   const resetPattern = /\b(claude\s+)?(will\s+be\s+available|resets?|come\s+back)\s+(at\s+|in\s+)?\d{1,2}(:\d{2})?\s*(am|pm)\b/i;
   return resetPattern.test(text) && (
-    lower.includes('usage limit') ||
-    lower.includes('usage cap') ||
-    lower.includes('plan limit') ||
+    LIMIT_NAME_TOKENS.some((token) => lower.includes(token)) ||
     lower.includes('quota exceeded')
   );
 }
@@ -116,6 +183,19 @@ function isProviderCreditBalanceLimitMessage(lower: string): boolean {
     // Anthropic 403 billing_error — a quota/billing cap, not a permission issue.
     lower.includes('billing_error') ||
     lower.includes('billing quota exceeded') ||
+    // Subscription credit/overage + org-allocation exhaustion. These are
+    // terminal for the turn but carry no billing co-word, so match them directly.
+    lower.includes('out of usage credits') ||
+    (
+      lower.includes('out of usage') &&
+      (
+        lower.includes('add funds') ||
+        lower.includes('contact your admin') ||
+        lower.includes('your org') ||
+        lower.includes('org is') ||
+        lower.includes('group')
+      )
+    ) ||
     (
       providerBillingContext &&
       (
