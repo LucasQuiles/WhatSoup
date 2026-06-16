@@ -1591,6 +1591,167 @@ button.soup-pill[aria-disabled="true"] {
   text-overflow: ellipsis;
 }
 
+/* ───────────────────────── soup-menu (showcase §22; DD-43) ─────────────────
+   The P0 role="menu" action surface — distinct from soup-popover (role=listbox).
+   Reuses the overlay vocabulary: --surface-overlay fill, 1px --border-subtle,
+   --r-2, --shadow-overlay. Items are roving-focus rows; sections carry a mono
+   uppercase label; the check uses --accent (never a status channel); destructive
+   rows tint with the crit channel and route through ConfirmDialog. Motion mirrors
+   soup-popover (fade+scale enter/exit), removed under prefers-reduced-motion. */
+
+.soup-menu {
+  position: absolute;
+  z-index: var(--z-overlay, 100);
+  background: var(--surface-overlay);
+  border: var(--bw) solid var(--border-subtle);
+  border-radius: var(--r-2, var(--radius-md));
+  box-shadow: var(--shadow-overlay);
+  min-width: var(--popover-min-w, 200px);
+  max-height: var(--popover-max-h, 200px);
+  overflow-y: auto;
+  padding: var(--sp-1);
+  display: flex;
+  flex-direction: column;
+  animation: soup-menu-in var(--dur-fast) var(--ease-enter) forwards;
+}
+
+.soup-menu[data-state="closing"] {
+  animation: soup-menu-out var(--dur-fast) var(--ease-exit) forwards;
+  pointer-events: none;
+}
+
+@keyframes soup-menu-in {
+  from { opacity: 0; transform: scale(0.97) translateY(-4px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes soup-menu-out {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to   { opacity: 0; transform: scale(0.97) translateY(-4px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-menu,
+  .soup-menu[data-state="closing"] {
+    animation: none;
+  }
+}
+
+.soup-menu__section + .soup-menu__section { margin-top: var(--sp-1); }
+
+.soup-menu__label {
+  font: var(--type-overline, 500 10px/16px var(--font-sans));
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-3);
+  padding: var(--sp-2) var(--sp-2) var(--sp-1);
+}
+
+.soup-menu__sep {
+  height: var(--bw);
+  background: var(--border-hairline);
+  margin: var(--sp-1) var(--sp-1);
+}
+
+.soup-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-2);
+  border-radius: var(--r-1, var(--radius-sm));
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.soup-menu__item:hover,
+.soup-menu__item:focus-visible {
+  background: var(--accent-wash);
+  color: var(--text-1);
+}
+
+.soup-menu__item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.soup-menu__item--destructive { color: var(--status-crit-fg); }
+
+.soup-menu__item--destructive:hover,
+.soup-menu__item--destructive:focus-visible {
+  background: var(--status-crit-wash);
+  color: var(--status-crit-fg);
+}
+
+.soup-menu__item--disabled {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+
+.soup-menu__item--disabled:hover,
+.soup-menu__item--disabled:focus-visible {
+  background: none;
+  color: var(--text-3);
+}
+
+.soup-menu__icon,
+.soup-menu__check {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--sp-4);
+  color: var(--accent);
+}
+
+/* Checkable: accent check glyph, shown only when on (the check uses --accent,
+   never a status channel — showcase §22 .mn-ck). */
+.soup-menu__check--on::before {
+  content: '\2713';
+}
+
+.soup-menu__item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.soup-menu__kbd {
+  margin-left: auto;
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  color: var(--text-3);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--r-1, var(--radius-xs));
+  padding: var(--sp-0) var(--sp-1);
+}
+
+/* Disabled reason is visually hidden via the shared .soup-tab__reason sr-only
+   recipe (one idiom) — the Menu TSX applies that class, so no menu-local rule. */
+
+/* Trigger — anchors the surface, carries the focus ring (showcase §22 .mn-trigger). */
+.soup-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-1, var(--radius-sm));
+  border: var(--bw) solid var(--border-hairline);
+  background: var(--surface-raised);
+  color: var(--text-1);
+  font: var(--type-label, 500 11px/16px var(--font-sans));
+  cursor: pointer;
+  user-select: none;
+}
+
+.soup-menu-trigger:hover { border-color: var(--border-strong); }
+.soup-menu-trigger:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 /* --------------------------------------------------------------------------
    INBOX LAYOUT BAND — soup-inbox-layout / soup-inbox-contact (DD-18r)
    Container query root: the Inbox page flex root carries container-type so
