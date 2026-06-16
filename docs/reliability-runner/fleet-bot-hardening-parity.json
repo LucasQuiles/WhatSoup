@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updated": "2026-06-15",
+  "updated": "2026-06-16",
   "standard": "docs/runbooks/fleet-bot-hardening-standard.md",
   "scope": {
     "description": "Redacted source-side tracker for the seven agent-bot provider-resilience cohort.",
@@ -9,8 +9,8 @@
   },
   "summary": {
     "total": 7,
-    "hardened": 1,
-    "pendingRollout": 6,
+    "hardened": 2,
+    "pendingRollout": 5,
     "blocked": 0,
     "acceptedException": 0
   },
@@ -38,17 +38,19 @@
     },
     {
       "id": "peer-agent-bot-1",
-      "status": "pending-rollout",
+      "status": "hardened",
       "capabilities": {
-        "turn-capability-health": "missing-live-proof",
-        "primary-model-usability-probe": "missing-live-proof",
-        "release-drift-check-job": "missing-live-proof",
-        "fallback-chain": "missing-live-proof"
+        "turn-capability-health": "proven",
+        "primary-model-usability-probe": "proven",
+        "release-drift-check-job": "proven",
+        "fallback-chain": "proven"
       },
       "evidence": [
-        "operator-private inventory identifies the live instance"
+        "operator-private parity row captured outside the public repo",
+        "2026-06-15 fleet objective snapshot records the second hardened live bot; private instance label omitted from this public manifest",
+        "source anchors below cover the standard and guard surfaces"
       ],
-      "nextAction": "roll out A-D capability signature after named host and instance approval"
+      "approval": "none-read-only-evidence"
     },
     {
       "id": "peer-agent-bot-2",
