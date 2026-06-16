@@ -90,7 +90,7 @@ describe('keyring', () => {
       expect(lookupCredential('anthropic')).toBe('keychain-value');
       expect(mockedExecFileSync).toHaveBeenCalledWith(
         'security',
-        ['find-generic-password', '-s', 'anthropic', '-a', expect.any(String), '-w'],
+        ['find-generic-password', '-s', '--', 'anthropic', '-a', '--', expect.any(String), '-w'],
         expect.any(Object),
       );
     });

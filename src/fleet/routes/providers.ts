@@ -24,15 +24,20 @@ interface ProviderCatalogMeta {
    * service is checked.
    */
   needsApiKey: boolean;
+  /** Keyring service this provider's key lives under (null = native auth). */
+  credentialService: string | null;
 }
 
 const PROVIDER_META: Record<ProviderId, ProviderCatalogMeta> = {
-  'claude-cli': { displayName: 'Claude CLI', type: 'cli', needsApiKey: false },
-  'codex-cli': { displayName: 'Codex', type: 'cli', needsApiKey: false },
-  'gemini-cli': { displayName: 'Gemini', type: 'cli', needsApiKey: false },
-  'opencode-cli': { displayName: 'OpenCode', type: 'cli', needsApiKey: true },
-  'openai-api': { displayName: 'OpenAI', type: 'api', needsApiKey: true },
-  'anthropic-api': { displayName: 'Anthropic', type: 'api', needsApiKey: true },
+  'claude-cli':    { displayName: 'Claude CLI', type: 'cli', needsApiKey: false, credentialService: null },
+  'codex-cli':     { displayName: 'Codex',      type: 'cli', needsApiKey: false, credentialService: null },
+  'gemini-cli':    { displayName: 'Gemini',     type: 'cli', needsApiKey: false, credentialService: null },
+  // opencode-cli resolves its service from the model prefix at runtime
+  // (deepseek/minimax — see resolveProviderKeyService); the catalog advertises null
+  // and the console offers the full allowlist for opencode fallback models.
+  'opencode-cli':  { displayName: 'OpenCode',   type: 'cli', needsApiKey: true,  credentialService: null },
+  'openai-api':    { displayName: 'OpenAI',     type: 'api', needsApiKey: true,  credentialService: 'openai' },
+  'anthropic-api': { displayName: 'Anthropic',  type: 'api', needsApiKey: true,  credentialService: 'anthropic' },
 };
 
 /** A single provider entry in the catalog response. */
@@ -41,6 +46,8 @@ export interface ProviderCatalogEntry {
   displayName: string;
   type: 'cli' | 'api';
   needsApiKey: boolean;
+  /** Keyring service this provider's key lives under (null = native auth). */
+  credentialService: string | null;
   /** Accepted providerConfig keys an operator may set for this provider. */
   providerConfig: string[];
 }
@@ -68,10 +75,36 @@ export function buildProviderCatalog(): ProviderCatalogEntry[] {
       displayName: meta.displayName,
       type: meta.type,
       needsApiKey: meta.needsApiKey,
+      credentialService: meta.credentialService,
       providerConfig: providerConfigFields(id, meta.type),
     };
   });
 }
+
+/** Typed auth schemes — never interpolated from strings. */
+export type VerifyAuth = 'bearer' | 'x-api-key';
+export interface VerifyDescriptor {
+  /** https literal — never derived from config or request input (no SSRF). */
+  url: string;
+  auth: VerifyAuth;
+  /** Static extra headers some providers require (e.g. anthropic-version). */
+  extraHeaders?: Record<string, string>;
+}
+
+/**
+ * Keyed by KEYRING SERVICE (not provider id) — verify is a fleet-level,
+ * key-centric operation. MiniMax has no stable public list-models endpoint;
+ * its absence here yields verify status 'unsupported'.
+ */
+export const PROVIDER_VERIFY_DESCRIPTORS: Record<string, VerifyDescriptor> = {
+  openai:    { url: 'https://api.openai.com/v1/models', auth: 'bearer' },
+  deepseek:  { url: 'https://api.deepseek.com/models', auth: 'bearer' },
+  anthropic: {
+    url: 'https://api.anthropic.com/v1/models',
+    auth: 'x-api-key',
+    extraHeaders: { 'anthropic-version': '2023-06-01' },
+  },
+};
 
 /** GET /api/providers — return the provider catalog. */
 export function handleGetProviders(_req: IncomingMessage, res: ServerResponse): void {

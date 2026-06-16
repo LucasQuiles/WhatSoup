@@ -8,6 +8,8 @@
  */
 import { execFileSync } from 'node:child_process';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { createChildLogger } from '../logger.ts';
 
 export type KeyringBackend = 'secret-tool' | 'macos-keychain' | 'env-only';
@@ -125,8 +127,12 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           }
         }
       }
+      const fileVal1 = fileStoreRead(service);
+      if (fileVal1) return fileVal1;
       return lookupEnvAfterKeyringMiss();
     } catch {
+      const fileVal2 = fileStoreRead(service);
+      if (fileVal2) return fileVal2;
       return lookupEnvAfterKeyringMiss();
     }
   }
@@ -139,7 +145,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           const account = index === 0 && options.user ? options.user : username;
           const raw = execFileSync(
             'security',
-            ['find-generic-password', '-s', candidate, '-a', account, '-w'],
+            ['find-generic-password', '-s', '--', candidate, '-a', '--', account, '-w'],
             { timeout: 5_000 },
           );
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
@@ -154,17 +160,182 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           }
         }
       }
+      const fileVal3 = fileStoreRead(service);
+      if (fileVal3) return fileVal3;
       return lookupEnvAfterKeyringMiss();
     } catch {
+      const fileVal4 = fileStoreRead(service);
+      if (fileVal4) return fileVal4;
       return lookupEnvAfterKeyringMiss();
     }
   }
 
-  // env-only or scoped keyring miss.
+  // env-only or scoped keyring miss: consult the file store, then env.
+  const fileVal = fileStoreRead(service);
+  if (fileVal) return fileVal;
   return lookupEnvAfterKeyringMiss();
 }
 
 /** Reset cached backend detection (for testing). */
 export function _resetBackendCache(): void {
   _cachedBackend = undefined;
+}
+
+// ─── Write path ───────────────────────────────────────────────────────────────
+
+export type KeyringErrorCode =
+  | 'KEYRING_LOCKED'
+  | 'KEYRING_ACCESS_DENIED'
+  | 'KEYRING_WRITE_FAILED'
+  | 'KEYRING_WRITE_UNSUPPORTED';
+
+/**
+ * Sanitized keyring failure. NEVER constructed from a raw child-process error:
+ * those carry `spawnargs` (may include the secret) and `stderr`, which the
+ * fleet server's global `log.error({ err })` handler would serialize.
+ */
+export class KeyringWriteError extends Error {
+  readonly code: KeyringErrorCode;
+  constructor(code: KeyringErrorCode, message: string) {
+    super(message);
+    this.name = 'KeyringWriteError';
+    this.code = code;
+  }
+}
+
+/** macOS `security` exit statuses / markers that mean "keychain locked". */
+function classifyDarwinWriteError(err: unknown): KeyringErrorCode {
+  const status = (err as { status?: number } | null)?.status;
+  const stderr = String((err as { stderr?: Buffer | string } | null)?.stderr ?? '');
+  if (status === 36 || /interaction is not allowed/i.test(stderr)) return 'KEYRING_LOCKED';
+  if (status === 45 || /errSecAuthFailed|write permissions/i.test(stderr)) return 'KEYRING_ACCESS_DENIED';
+  return 'KEYRING_WRITE_FAILED';
+}
+
+export interface CredentialWriteResult { backend: KeyringBackend }
+
+/**
+ * Store a credential in the platform keyring (create or overwrite).
+ * Throws KeyringWriteError (sanitized — safe to log) on failure.
+ */
+export function writeCredential(
+  service: string,
+  value: string,
+  options: { user?: string } = {},
+): CredentialWriteResult {
+  const backend = detectKeyringBackend();
+  const account = options.user ?? os.userInfo().username;
+
+  if (backend === 'macos-keychain') {
+    try {
+      execFileSync(
+        'security',
+        ['add-generic-password', '-U', '-s', '--', service, '-a', '--', account, '-w', value],
+        { timeout: 5_000, stdio: ['ignore', 'ignore', 'pipe'] },
+      );
+      return { backend };
+    } catch (err) {
+      throw new KeyringWriteError(classifyDarwinWriteError(err), `keychain write failed for service ${service}`);
+    }
+  }
+  if (backend === 'secret-tool') {
+    try {
+      execFileSync('secret-tool', ['store', `--label=whatsoup ${service}`, 'service', service], {
+        timeout: 5_000,
+        input: value,
+        stdio: ['pipe', 'ignore', 'pipe'],
+      });
+      return { backend };
+    } catch {
+      throw new KeyringWriteError('KEYRING_WRITE_FAILED', `secret-tool store failed for service ${service}`);
+    }
+  }
+  // env-only host: per-service 0600 file store (token-storage.ts precedent).
+  try {
+    fileStoreWrite(service, value);
+    return { backend };
+  } catch {
+    throw new KeyringWriteError('KEYRING_WRITE_FAILED', `file-store write failed for service ${service}`);
+  }
+}
+
+// ─── File-store backend (hosts with no OS keyring) ───────────────────────────
+// Per-service 0600 files mirror the OS keyring's per-entry isolation; the
+// directory layout follows the token-storage.ts precedent (0600 under
+// ~/.config/whatsoup/). Used ONLY when detectKeyringBackend() === 'env-only'.
+
+let _fileStoreDirOverride: string | null = null;
+/** Test hook — point the file store at a temp dir (null restores default). */
+export function _setFileStoreDirForTests(dir: string | null): void {
+  _fileStoreDirOverride = dir;
+}
+
+function fileStoreDir(): string {
+  if (_fileStoreDirOverride) return _fileStoreDirOverride;
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  return path.join(base, 'whatsoup', 'credentials');
+}
+
+function fileStorePath(service: string): string {
+  return path.join(fileStoreDir(), `${service}.key`);
+}
+
+function fileStoreRead(service: string): string | null {
+  try {
+    const val = fs.readFileSync(fileStorePath(service), 'utf-8').trim();
+    return val || null;
+  } catch {
+    return null;
+  }
+}
+
+function fileStoreWrite(service: string, value: string): void {
+  const dir = fileStoreDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const target = fileStorePath(service);
+  // Sibling temp file — same directory, so renameSync can never hit EXDEV.
+  const tmp = `${target}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, value, { mode: 0o600 });
+  fs.renameSync(tmp, target);
+}
+
+function fileStoreDelete(service: string): boolean {
+  try {
+    fs.unlinkSync(fileStorePath(service));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface CredentialDeleteResult { deleted: boolean; backend: KeyringBackend }
+
+/** Remove a credential from the platform keyring. Never throws on absence. */
+export function deleteCredential(
+  service: string,
+  options: { user?: string } = {},
+): CredentialDeleteResult {
+  const backend = detectKeyringBackend();
+  const account = options.user ?? os.userInfo().username;
+
+  if (backend === 'macos-keychain') {
+    try {
+      execFileSync('security', ['delete-generic-password', '-s', '--', service, '-a', '--', account], {
+        timeout: 5_000,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      return { deleted: true, backend };
+    } catch {
+      return { deleted: false, backend };
+    }
+  }
+  if (backend === 'secret-tool') {
+    try {
+      execFileSync('secret-tool', ['clear', 'service', service], { timeout: 5_000, stdio: ['ignore', 'ignore', 'pipe'] });
+      return { deleted: true, backend };
+    } catch {
+      return { deleted: false, backend };
+    }
+  }
+  return { deleted: fileStoreDelete(service), backend };
 }

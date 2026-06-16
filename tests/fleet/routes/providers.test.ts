@@ -45,6 +45,7 @@ describe('handleGetProviders', () => {
       displayName: 'OpenAI',
       type: 'api',
       needsApiKey: true,
+      credentialService: 'openai',
       providerConfig: ['model', 'baseUrl', 'apiKeyService'],
     });
   });
