@@ -7,6 +7,19 @@ import type { AgentEvent } from '../stream-parser.ts';
 // Enums / union types
 // ---------------------------------------------------------------------------
 
+/** Canonical provider identifiers — single source of truth for all provider-keyed tables. */
+export const AGENT_PROVIDERS = [
+  'claude-cli',
+  'codex-cli',
+  'gemini-cli',
+  'opencode-cli',
+  'openai-api',
+  'anthropic-api',
+] as const;
+
+/** Union type derived from the runtime array — keeps the set in sync automatically. */
+export type AgentProvider = (typeof AGENT_PROVIDERS)[number];
+
 /** Execution model — the primary abstraction axis. */
 export type ExecutionMode = 'persistent_session' | 'spawn_per_turn' | 'managed_loop';
 
