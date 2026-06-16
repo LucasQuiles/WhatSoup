@@ -111,7 +111,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "6cf38d47a856a14e63577f5b6904758ffa025b9ca5782c8f72d62612dd0a9e86",
+      "sha256": "4fdb7df4bc040f0164527225087ed9574f1f39b5d13ee6a6f82a911ea2781650",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -125,7 +125,8 @@
         "reset_tailscale_cache",
         "_is_ssh_transport_failure",
         "best-effort-remote",
-        "redact_collector_text"
+        "redact_collector_text",
+        "tcp_probe_reachable"
       ]
     },
     {
