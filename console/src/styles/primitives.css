@@ -1356,6 +1356,100 @@ button.soup-pill[aria-disabled="true"] {
   }
 }
 
+/* --------------------------------------------------------------------------
+   BOTTOM-SHEET PLACEMENT — soup-drawer--bottom-sheet (drawer.md, narrow surfaces)
+   The same Drawer surface docked to the bottom edge as a MODAL sheet, giving
+   narrow/phone viewports a reachable action path (resolves the off-screen
+   contact-pane-actions defect). role="dialog" aria-modal in the markup.
+   Enter: translateY(100%→0) at --dur-slow --ease-enter.
+   Exit: translateY(0→100%) at --dur-base --ease-exit.
+   The scrim is always present (modal) and tap-to-dismiss; it dims the surface
+   beneath. Rounds only its TOP corners and takes the lit-from-above edge.
+   -------------------------------------------------------------------------- */
+
+/* Modal scrim — always shown for the bottom-sheet (overrides the right-placement
+   container-query hide). Covers the full layout box; sits below the sheet shell. */
+.soup-drawer-scrim--bottom-sheet {
+  display: block;
+  z-index: calc(var(--z-overlay) - 1);
+}
+
+/* Sheet shell — docked to the bottom edge, full width, top-rounded. */
+.soup-drawer--bottom-sheet {
+  top: auto;
+  right: 0;
+  left: 0;
+  bottom: 0;
+  width: auto;
+  max-height: 86%;
+  border-left: none;
+  border-top: var(--bw) solid var(--border-subtle);
+  border-top-left-radius: var(--r-3);
+  border-top-right-radius: var(--r-3);
+  /* Slide UP from off-screen bottom (translateY) — its spatial move. */
+  animation: soup-drawer-sheet-in var(--dur-slow) var(--ease-enter) forwards;
+}
+
+/* Closing sheet shell: slide back DOWN off the bottom edge. */
+.soup-drawer--bottom-sheet[data-state="closing"] {
+  animation: soup-drawer-sheet-out var(--dur-base) var(--ease-exit) forwards;
+}
+
+/* The bottom-sheet stays bottom-docked even in squeeze mode — the modal sheet
+   is a placement choice, not a width breakpoint, so override the ≥900px flip. */
+@container (min-width: 900px) {
+  .soup-drawer-scrim--bottom-sheet {
+    display: block;
+  }
+
+  .soup-drawer--bottom-sheet {
+    position: absolute;
+    flex: none;
+    box-shadow: var(--shadow-overlay);
+    z-index: var(--z-overlay);
+    border-left: none;
+    border-top: var(--bw) solid var(--border-subtle);
+  }
+}
+
+/* Enter keyframe — translateY 100%→0 (slide up). */
+@keyframes soup-drawer-sheet-in {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+/* Exit keyframe — translateY 0→100% (slide down). */
+@keyframes soup-drawer-sheet-out {
+  from { transform: translateY(0); }
+  to   { transform: translateY(100%); }
+}
+
+/* Reduced motion: appear/disappear instantly — the translateY slide is REMOVED
+   (off-and-instant), not shortened (motion.md §9). */
+@media (prefers-reduced-motion: reduce) {
+  .soup-drawer--bottom-sheet,
+  .soup-drawer--bottom-sheet[data-state="closing"] {
+    animation: none;
+  }
+}
+
+/* Grab handle — a centered top affordance; affordance only, not a dismiss path. */
+.soup-drawer-grab {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: var(--sp-2) 0 var(--sp-1);
+  flex: none;
+  user-select: none;
+}
+
+.soup-drawer-grab__bar {
+  width: var(--sp-8);
+  height: var(--sp-1);
+  border-radius: var(--r-pill, 999px);
+  background: var(--border-subtle);
+}
+
 /* Head — status shape + title + mode badge + spring + close X */
 .soup-drawer-head {
   display: flex;

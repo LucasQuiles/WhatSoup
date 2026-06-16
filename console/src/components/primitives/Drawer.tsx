@@ -41,6 +41,23 @@
  *
  * Squeeze proof: INCONCLUSIVE in jsdom — manual QA + D7 viewport tests are
  * the proof path (investigation §6.9).
+ *
+ * Bottom-sheet placement (placement="bottom-sheet"):
+ *   Narrow/phone surfaces had no reachable action path — the right-anchored
+ *   overlay pushed the contact-pane actions off-screen. The bottom-sheet docks
+ *   the same Drawer surface to the bottom edge over a scrim so those actions
+ *   land on-screen.
+ *     - Modal: role="dialog" + aria-modal="true" (the desktop drawer is
+ *       role="complementary"/non-modal). The narrow variant blocks the surface
+ *       beneath it, so the scrim is tappable-to-dismiss (dismissable=true) and
+ *       Escape + the close X are always available. Focus is trapped (the shared
+ *       useDismissable trap) and restored to the opening row on close.
+ *     - Motion: enter translateY(100%→0) at --dur-slow --ease-enter; exit
+ *       translateY(0→100%) at --dur-base --ease-exit. The global
+ *       prefers-reduced-motion block neutralizes the transform (off-and-instant,
+ *       no shortened slide) — no JS matchMedia check.
+ *     - Grab handle: a top affordance only — never the sole dismiss path
+ *       (Escape / close X / scrim remain the real exits).
  */
 import {
   type FC,
@@ -100,6 +117,17 @@ export const DrawerLayout: FC<DrawerLayoutProps> = ({
 /** CSS animation name for the drawer exit keyframe (B5 §4.2 guard, C-B5-6). */
 const DRAWER_OUT_ANIM = 'soup-drawer-out';
 
+/** CSS animation name for the bottom-sheet exit keyframe (slide-down). */
+const DRAWER_SHEET_OUT_ANIM = 'soup-drawer-sheet-out';
+
+/**
+ * Placement of the drawer surface.
+ *   'right'        — the default right-anchored inspector (squeeze ≥900px, overlay <900px).
+ *   'bottom-sheet' — modal sheet docked to the bottom edge for narrow/phone surfaces,
+ *                    giving the contact-pane actions a reachable on-screen path.
+ */
+export type DrawerPlacement = 'right' | 'bottom-sheet';
+
 export interface DrawerProps {
   /** Controls visibility. */
   open: boolean;
@@ -125,6 +153,14 @@ export interface DrawerProps {
    * first opened the drawer (C2.3 live-QA finding D3).
    */
   restoreFocus?: RefObject<HTMLElement | null>;
+  /**
+   * Surface placement. Defaults to 'right' (the right-anchored squeeze/overlay
+   * inspector). 'bottom-sheet' docks the surface to the bottom edge as a modal
+   * sheet — the reachable action path for narrow/phone surfaces. In bottom-sheet
+   * mode the shell is role="dialog" aria-modal="true", the scrim is
+   * tap-to-dismiss, and a grab handle is rendered above the content.
+   */
+  placement?: DrawerPlacement;
 }
 
 export const Drawer: FC<DrawerProps> = ({
@@ -135,8 +171,10 @@ export const Drawer: FC<DrawerProps> = ({
   children,
   className,
   restoreFocus,
+  placement = 'right',
 }) => {
   const shellRef = useRef<HTMLDivElement>(null);
+  const isBottomSheet = placement === 'bottom-sheet';
 
   // The close button in DrawerHeader receives initial focus on open
   // (drawer.md §Accessibility). We create a shared ref that DrawerHeader
@@ -148,40 +186,69 @@ export const Drawer: FC<DrawerProps> = ({
   useDismissable(shellRef, {
     onClose,
     open,
-    // Outside-click dismissal is NOT enabled by default — squeeze mode keeps
-    // the table live and users interact with both surfaces freely.
-    dismissable: false,
+    // Right placement keeps outside-click OFF — squeeze mode keeps the table
+    // live and users interact with both surfaces freely. The bottom-sheet is
+    // MODAL (it covers the surface beneath), so a scrim tap dismisses it.
+    dismissable: isBottomSheet,
     initialFocus: closeButtonRef as RefObject<HTMLElement | null>,
     restoreFocus,
   });
 
-  // Exit presence: deferred unmount while soup-drawer-out keyframe plays (B5 §4.2).
-  const { mounted, phase } = useExitPresence(open, shellRef, DRAWER_OUT_ANIM);
+  // Exit presence: deferred unmount while the matching -out keyframe plays
+  // (B5 §4.2). The bottom-sheet slides DOWN (translateY) so it watches a
+  // distinct keyframe name from the right placement's slide-out.
+  const { mounted, phase } = useExitPresence(
+    open,
+    shellRef,
+    isBottomSheet ? DRAWER_SHEET_OUT_ANIM : DRAWER_OUT_ANIM,
+  );
 
   if (!mounted) return null;
 
-  const drawerClass = ['soup-drawer', className].filter(Boolean).join(' ');
+  const drawerClass = [
+    'soup-drawer',
+    isBottomSheet && 'soup-drawer--bottom-sheet',
+    className,
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return (
     <>
-      {/* Scrim — only rendered in overlay mode (<900px container).
-          The container query in soup-drawer-layout hides it at ≥900px.
-          Carries data-state so it fades out in parallel with the drawer shell. */}
+      {/* Scrim. Right placement: visible in overlay mode only (<900px), hidden
+          at ≥900px via the container query. Bottom-sheet: always a modal scrim
+          over the covered surface. Carries data-state so it fades in parallel. */}
       <div
-        className="soup-drawer-scrim"
+        className={
+          isBottomSheet
+            ? 'soup-drawer-scrim soup-drawer-scrim--bottom-sheet'
+            : 'soup-drawer-scrim'
+        }
         aria-hidden="true"
         data-state={phase}
       />
 
       <div
         ref={shellRef}
-        role="complementary"
+        // Bottom-sheet is modal (role="dialog" aria-modal) where the desktop
+        // drawer is role="complementary"/non-modal — the narrow variant blocks
+        // the surface beneath it.
+        role={isBottomSheet ? 'dialog' : 'complementary'}
+        aria-modal={isBottomSheet ? true : undefined}
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledBy}
         className={drawerClass}
         data-state={phase}
+        data-placement={placement}
         tabIndex={-1}
       >
+        {/* Grab handle — affordance only; never the sole dismiss path
+            (Escape / close X / scrim remain the real exits). */}
+        {isBottomSheet && (
+          <div className="soup-drawer-grab" aria-hidden="true">
+            <span className="soup-drawer-grab__bar" />
+          </div>
+        )}
         <DrawerCloseRefContext value={closeButtonRef}>
           {children}
         </DrawerCloseRefContext>
