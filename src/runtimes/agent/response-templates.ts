@@ -27,6 +27,8 @@ export interface RenderContext {
   bundle?: DiagnosticBundle | null;
   /** Injected, deterministic clock formatter (epoch ms → short local time). */
   formatClock: (epochMs: number) => string;
+  /** When true, omit the trailing continuation clause (the caller appends its own directive). */
+  suppressContinuation?: boolean;
 }
 
 function etaClause(ctx: RenderContext): string {
@@ -35,6 +37,7 @@ function etaClause(ctx: RenderContext): string {
 }
 
 function continuationClause(ctx: RenderContext): string {
+  if (ctx.suppressContinuation) return '';
   return ctx.hasContinuation ? "I'll continue here." : 'Please resend your last message.';
 }
 

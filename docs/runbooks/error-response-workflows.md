@@ -134,13 +134,20 @@ state as read-only telemetry:
 The verbatim half (last N messages as `[Recent chat context]` on every fresh
 session) ships unconditionally and is unaffected by these flags.
 
-## Built but not yet wired
+## Deterministic message templates (wired)
 
-The following components exist and are unit-tested but are not yet integrated
-into the live turn path; this section will move into the live sections as each
-is wired (per the runbook-and-PR co-update rule):
+The fallback-activation notice (`notifyProviderFallbackActivated` in
+`src/runtimes/agent/runtime.ts`) now renders its user-facing copy through
+`renderUserMessage` in `response-templates.ts` — the renderer is the single
+source of truth for that copy, replacing the previous inline string. The
+activation reason maps 1:1 to a template id (`usage-limit`, `rate-limit`,
+`auth-required`, `model-unavailable`), overridden to `credentials-missing` when
+the backup key is absent; `hasContinuation` carries the continue-vs-resend
+decision and the resolved model card is passed as `backupCard`. The notice
+routing (one-message handoff stash vs standalone enqueue) is unchanged.
 
-- **Deterministic message templates** — `response-templates.ts` (one renderer
-  per user-template id) are built and unit-tested but not yet used by the live
-  notice path, which still composes its string inline; unifying the two is a
-  follow-up.
+- **Known gap** — the templates have no `tool-activity-blocked` variant. When a
+  replay is blocked because the first attempt already started an action, the
+  base template renders normally and the runtime appends the "an action already
+  started — confirm or resend the next step" clause inline. A dedicated template
+  id should eventually own this copy so it is not composed at the call site.

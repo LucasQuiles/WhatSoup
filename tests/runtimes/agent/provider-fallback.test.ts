@@ -762,9 +762,14 @@ describe('AgentRuntime — usage-limit assistant_text/result asymmetry', () => {
     );
 
     expect(v.replayTurnOnFallback).not.toHaveBeenCalled();
-    expect(queue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('already started an action'),
+    const blockedNotice = queue.enqueueText.mock.calls.map((c: unknown[]) => String(c[0])).join('\n');
+    expect(blockedNotice).toContain(
+      'The first attempt already started an action, so I will not replay it automatically. Please confirm or resend the next step.',
     );
+    // The blocked directive is the SOLE resend instruction — the template's
+    // generic "Please resend your last message." continuation is suppressed so
+    // the user does not see two conflicting resend prompts.
+    expect(blockedNotice).not.toContain('Please resend your last message.');
   });
 
   it('assistant_text then result: fallback stays null until the result fires', () => {
@@ -822,13 +827,13 @@ describe('usage-limit user notice', () => {
       'notice-key',
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('Primary model hit a token/quota limit'),
+      expect.stringContaining('Primary model hit a usage/quota limit'),
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('Backup: OpenCode / minimax/minimax-m2'),
+      expect.stringContaining('Switching to OpenCode / minimax/minimax-m2'),
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('I will continue here.'),
+      expect.stringContaining("I'll continue here."),
     );
   });
 
@@ -856,10 +861,13 @@ describe('usage-limit user notice', () => {
       { type: 'result', text: USAGE_LIMIT_TEXT },
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('Primary model hit a token/quota limit'),
+      expect.stringContaining('Primary model hit a usage/quota limit'),
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('Backup: OpenCode / minimax/minimax-m2'),
+      expect.stringContaining('Switching to OpenCode / minimax/minimax-m2'),
+    );
+    expect(queue.enqueueText).toHaveBeenCalledWith(
+      expect.stringContaining('Please resend your last message.'),
     );
   });
 });

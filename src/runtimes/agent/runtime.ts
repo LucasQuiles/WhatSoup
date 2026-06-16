@@ -14,7 +14,9 @@ import {
 import {
   workflowForProviderText,
   type ResponseWorkflow,
+  type UserTemplateId,
 } from './response-registry.ts';
+import { renderUserMessage } from './response-templates.ts';
 import { runDiagnosticBundle } from './diagnostic-bundle.ts';
 import { buildDiagnosticProbes } from './diagnostic-probes.ts';
 import {
@@ -1226,19 +1228,6 @@ function formatClockForUser(epochMs: number): string {
     hour: 'numeric',
     minute: '2-digit',
   });
-}
-
-function fallbackReasonForUser(reason: ProviderFallbackReason, activeUntil: number): string {
-  if (reason === 'usage-limit') {
-    return `hit a token/quota limit; switching until about ${formatClockForUser(activeUntil)}`;
-  }
-  if (reason === 'rate-limit') {
-    return 'is rate limited; switching temporarily';
-  }
-  if (reason === 'model-unavailable') {
-    return 'is unavailable on this host; switching temporarily';
-  }
-  return 'needs re-auth; switching while the primary connection is repaired';
 }
 
 function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
@@ -7299,14 +7288,41 @@ export class AgentRuntime implements Runtime {
     this.recentProviderFallbackNotices.set(noticeKey, now);
 
     const card = modelCardLabel(activation.fallbackProvider, activation.fallbackModel);
-    const suffix = activation.keyPresent === false
-      ? ' Backup credentials look missing; an operator has been notified.'
-      : replay.blockedByToolActivity
-        ? ' The first attempt already started an action, so I will not replay it automatically. Please confirm or resend the next step.'
-        : replay.replayScheduled
-          ? ' I will continue here.'
-          : ' Please resend the last message here.';
-    const message = `Primary model ${fallbackReasonForUser(activation.reason, activation.activeUntil)}. Backup: ${card}.${suffix}`;
+    const credentialsMissing = activation.keyPresent === false;
+    // A stand-in only continues the turn when a replay is scheduled, the first
+    // attempt did not already start an action, and the backup credentials are
+    // present. This is the SAME boolean the inline suffix used to pick
+    // "I will continue here." over "Please resend …".
+    const hasContinuation =
+      replay.replayScheduled && !replay.blockedByToolActivity && !credentialsMissing;
+    // Map the fallback reason to its deterministic template id. The
+    // ProviderFallbackReason union (usage-limit | rate-limit | auth-required |
+    // model-unavailable) is a subset of UserTemplateId with identical names, so
+    // this is a 1:1 mapping; the credentials-missing case overrides it below.
+    const templateId: UserTemplateId = credentialsMissing
+      ? 'credentials-missing'
+      : activation.reason;
+    // The deterministic templates have no "blocked by tool activity" variant
+    // (they only express continue / resend). That variant carries a distinct,
+    // user-facing instruction ("an action already started — confirm or resend
+    // the next step") which would otherwise be LOST. So for the blocked case we
+    // suppress the template's own continuation clause and append this single
+    // directive instead — avoiding a double-"resend". See the DONE_WITH_CONCERNS
+    // note: a dedicated template id should own this copy.
+    const blockedByToolActivity = !credentialsMissing && replay.blockedByToolActivity === true;
+    let message = renderUserMessage(templateId, {
+      hasContinuation,
+      backupCard: credentialsMissing ? null : card,
+      activeUntil: activation.activeUntil,
+      bundle: null,
+      formatClock: formatClockForUser,
+      suppressContinuation: blockedByToolActivity,
+    });
+    if (blockedByToolActivity) {
+      // Suppressing the continuation clause leaves a trailing space after the
+      // backup/digest clause; trim before joining so the directive reads cleanly.
+      message = `${message.trimEnd()} The first attempt already started an action, so I will not replay it automatically. Please confirm or resend the next step.`;
+    }
     // One-message collapse: when the stand-in will continue (a replay is
     // scheduled, not blocked, with credentials), stash the notice so it prepends
     // to the stand-in's first reply instead of being a separate message. Any
