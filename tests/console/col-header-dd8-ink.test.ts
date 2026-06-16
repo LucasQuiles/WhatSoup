@@ -48,13 +48,13 @@ describe('c-col-header DD-8 — essential headers carry secondary ink, not ghost
     const body = cColHeaderBlock()
 
     expect(primitiveTokens).toContain('--color-t4: var(--text-2);')
-    expect(body).toContain('color: var(--color-t4);')
+    expect(body).toContain('color: var(--text-2);')
   })
 
   it('does not default c-col-header to ghost ink', () => {
     const body = cColHeaderBlock()
 
-    expect(body).not.toContain('color: var(--color-t5);')
+    expect(body).not.toContain('color: var(--text-3);')
   })
 
   it('keeps c-col-header consumers from overriding back to text-t5', () => {
