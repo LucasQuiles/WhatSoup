@@ -207,6 +207,14 @@ const CONSOLE_DESIGN_CHAIN_EXEMPTIONS = new Set([
 
 const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
   {
+    id: 'design-regression-rg-preflight',
+    category: 'portability',
+    file: 'console/scripts/design-regression.sh',
+    anchors: ['command -v rg'],
+    remediation:
+      'Restore the fail-closed ripgrep preflight in design-regression.sh; without it a missing rg makes rg_count() silently return 0 and every blocking check FALSE-PASSes.',
+  },
+  {
     id: 'repo-hygiene-sensitive-patterns',
     category: 'secret-surface',
     file: 'scripts/repo-hygiene-guard.ts',

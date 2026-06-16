@@ -23,6 +23,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONSOLE_SRC="$REPO_ROOT/console/src"
 CONSOLE_DIR="$REPO_ROOT/console"
 
+# Fail-closed preflight: every check below counts rg matches via rg_count(); if rg
+# is absent, rg_count() silently returns 0 and all blocking checks FALSE-PASS. Exit 2
+# (env error, distinct from a check FAIL=1) so a missing binary can never read as
+# "clean". (safeguard-diagnostics anchors the `command -v rg` token below.)
+command -v rg >/dev/null 2>&1 || { echo "FATAL: ripgrep (rg) not found on PATH; design-regression cannot run fail-closed." >&2; exit 2; }
+
 # Checks marked EXIT_ON_FAIL will cause a non-zero exit if they find unexpected results.
 # Mature zero-baseline checks are blocking; immature or non-zero baseline checks remain report-only.
 # Promoted checks (D6 packet §10 rollback table, commit 3):
