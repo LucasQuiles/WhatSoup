@@ -51,6 +51,7 @@ export type UserTemplateId =
   | 'rate-limit'
   | 'auth-required'
   | 'model-unavailable'
+  | 'context-overflow'
   | 'transient'
   | 'no-fallback'
   | 'credentials-missing'
@@ -254,7 +255,10 @@ export const RESPONSE_WORKFLOWS: Record<AgentFailureClass, ResponseWorkflow> = {
       markActiveEntryFailedOnTrigger: false,
     },
     retry: 'kill-and-respawn',
-    userTemplate: 'none',
+    // Both runtime result handlers emit a deterministic context-limit notice
+    // before respawning ("Context limit reached — starting fresh session…"),
+    // so this class DOES surface a user message (unlike policy-block).
+    userTemplate: 'context-overflow',
     suppressRawProviderText: true,
   },
   provider_policy_block: {

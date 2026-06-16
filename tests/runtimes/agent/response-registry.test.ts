@@ -166,6 +166,13 @@ describe('response-registry behavior-preserving seed values', () => {
     }
   });
 
+  it('context-overflow surfaces a notice; policy-block stays silent', () => {
+    // Both runtime result handlers enqueue a context-limit notice for overflow,
+    // but emit nothing user-facing for a policy block.
+    expect(RESPONSE_WORKFLOWS.provider_context_overflow.userTemplate).toBe('context-overflow');
+    expect(RESPONSE_WORKFLOWS.provider_policy_block.userTemplate).toBe('none');
+  });
+
   it('internal/config failures are inert (no arm, no retry, no diagnostics, no message)', () => {
     for (const cls of ['provider_binary_missing', 'mcp_transport_failure', 'tool_handler_exception', 'config_or_capability_missing', 'provider_unknown'] as const) {
       const wf = RESPONSE_WORKFLOWS[cls];
