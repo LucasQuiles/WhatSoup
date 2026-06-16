@@ -51,21 +51,21 @@ describe('DD-8 empty and paused state copy carries secondary ink', () => {
   it('keeps HistoryTab load/no-more/jump controls off text-t5', () => {
     const source = read('console/src/components/line-detail/HistoryTab.tsx')
 
-    expect(source).toContain('c-hover text-t2 pt-[var(--sp-3)]')
-    expect(source).toContain('justify-center text-t2 pt-[var(--sp-3)]')
-    expect(source).toContain('c-hover text-t2 left-1/2')
-    expect(source).not.toContain('c-hover text-t5 pt-[var(--sp-3)]')
-    expect(source).not.toContain('justify-center text-t5 pt-[var(--sp-3)]')
-    expect(source).not.toContain('c-hover text-t5 left-1/2')
+    expect(source).toContain('c-hover text-text-2 pt-[var(--sp-3)]')
+    expect(source).toContain('justify-center text-text-2 pt-[var(--sp-3)]')
+    expect(source).toContain('c-hover text-text-2 left-1/2')
+    expect(source).not.toContain('c-hover text-text-3 pt-[var(--sp-3)]')
+    expect(source).not.toContain('justify-center text-text-3 pt-[var(--sp-3)]')
+    expect(source).not.toContain('c-hover text-text-3 left-1/2')
   })
 
   it('keeps AccessTab and ChartPanel empty copy off text-t5', () => {
     const accessTab = read('console/src/components/line-detail/AccessTab.tsx')
     const chartPanel = read('console/src/components/ChartPanel.tsx')
 
-    expect(accessTab).toContain('text-t2 text-center py-6 font-mono text-data')
+    expect(accessTab).toContain('text-text-2 text-center py-6 font-mono text-data')
     expect(chartPanel).toContain('items-center justify-center text-center text-t2')
-    expect(accessTab).not.toContain('text-t5 text-center py-6 font-mono text-data')
+    expect(accessTab).not.toContain('text-text-3 text-center py-6 font-mono text-data')
     expect(chartPanel).not.toContain('items-center justify-center text-center text-t5')
   })
 })

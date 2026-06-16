@@ -93,7 +93,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
             value={subject}
             onChange={e => setSubject(e.target.value)}
             placeholder="Enter group name..."
-            className="text-t2"
+            className="text-text-2"
           />
         </div>
 
@@ -101,7 +101,7 @@ export function CreateGroupModal({ open, lineName, onClose, onCreated }: CreateG
           <label className="c-field-label">
             Participants <span className="text-s-crit">*</span>
             {participants.length > 0 && (
-              <span className="text-t4 ml-[var(--sp-2)]">
+              <span className="text-text-2 ml-[var(--sp-2)]">
                 ({participants.length} selected)
               </span>
             )}

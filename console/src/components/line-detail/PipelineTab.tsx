@@ -23,8 +23,8 @@ function PipelineNode({
   const pillStyle = {
     padding: onClick ? 'var(--sp-0h) var(--sp-3)' : 'var(--pipeline-node-pad-y) var(--sp-3)',
     borderRadius: 'var(--radius-sm)',
-    background: active ? `var(--m-${modeKey}-wash)` : 'var(--color-d4)',
-    color: active ? `var(--color-m-${modeKey})` : 'var(--color-t3)',
+    background: active ? `var(--m-${modeKey}-wash)` : 'var(--btn-neutral-bg)',
+    color: active ? `var(--color-m-${modeKey})` : 'var(--text-2)',
     border: selected
       ? `2px solid var(--color-m-${modeKey})`
       : active
@@ -43,7 +43,7 @@ function PipelineNode({
       >
         <span>{label}</span>
         {value && (
-          <span className="font-mono text-t4 text-xs">
+          <span className="font-mono text-text-2 text-xs">
             {value}
           </span>
         )}
@@ -62,7 +62,7 @@ function PipelineNode({
         {label}
       </span>
       {value && (
-        <span className="font-mono text-t4 text-xs">
+        <span className="font-mono text-text-2 text-xs">
           {value}
         </span>
       )}
@@ -71,7 +71,7 @@ function PipelineNode({
 }
 
 function PipelineArrow() {
-  return <span className="text-t5 font-mono flex-shrink-0 text-sm">→</span>
+  return <span className="text-text-3 font-mono flex-shrink-0 text-sm">→</span>
 }
 
 export { PipelineNode, PipelineArrow }
@@ -150,7 +150,7 @@ function NodeDetailCard({
   const modeKey = modeColor === 'pas' ? 'pas' : modeColor === 'cht' ? 'cht' : 'agt'
   return (
     <div
-      className="mt-[var(--sp-3)] py-[var(--sp-3)] px-[var(--sp-4)] bg-d1 rounded-md"
+      className="mt-[var(--sp-3)] py-[var(--sp-3)] px-[var(--sp-4)] bg-surface-inset rounded-md"
       style={{
         borderWidth: 'var(--bw)',
         borderStyle: 'solid',
@@ -167,12 +167,12 @@ function NodeDetailCard({
         {details.map((d) => (
           <React.Fragment key={d.label}>
             <span
-              className="font-mono text-t4 text-data"
+              className="font-mono text-text-2 text-data"
             >
               {d.label}
             </span>
             <span
-              className="font-mono text-t2 text-data"
+              className="font-mono text-text-2 text-data"
             >
               {d.value}
             </span>

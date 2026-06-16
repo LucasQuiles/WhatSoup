@@ -163,7 +163,7 @@ describe('ModeTab configured-mode empty config', () => {
 
     expect(screen.getByText('No configuration values.')).toBeDefined()
     // The grid container should not be present when there are no entries
-    const grids = container.querySelectorAll('div.bg-d1')
+    const grids = container.querySelectorAll('div.bg-surface-inset')
     expect(grids.length).toBe(0)
   })
 
@@ -229,7 +229,7 @@ describe('ModeTab configured-mode populated grid', () => {
     expect(screen.queryByText('No configuration values.')).toBeNull()
 
     // Grid container should now exist
-    const grid = container.querySelector('div.bg-d1') as HTMLElement | null
+    const grid = container.querySelector('div.bg-surface-inset') as HTMLElement | null
     expect(grid).not.toBeNull()
     expect((grid as HTMLElement).style.display).toBe('grid')
   })
@@ -251,7 +251,7 @@ describe('ModeTab configured-mode populated grid', () => {
       />,
     )
 
-    const grid = container.querySelector('div.bg-d1') as HTMLElement
+    const grid = container.querySelector('div.bg-surface-inset') as HTMLElement
     const valueSpans = Array.from(grid.querySelectorAll(':scope > span'))
     // 3 entries × 2 spans (key + value) = 6
     expect(valueSpans.length).toBe(6)
@@ -294,7 +294,7 @@ describe('ModeTab configured-mode populated grid', () => {
 
     expect(trueDot).not.toBeNull()
     expect(falseDot).not.toBeNull()
-    expect(trueDot?.style.background).toBe('var(--color-s-ok)')
-    expect(falseDot?.style.background).toBe('var(--color-t5)')
+    expect(trueDot?.style.background).toBe('var(--status-ok-solid)')
+    expect(falseDot?.style.background).toBe('var(--text-3)')
   })
 })

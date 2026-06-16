@@ -43,7 +43,7 @@ export function GroupsTab({ lineName, myJid }: { lineName: string; myJid?: strin
       <div className="flex flex-col gap-[var(--sp-2)]">
         {/* Header bar */}
         <div className="flex items-center justify-between py-[var(--sp-2)] px-[var(--sp-4)]">
-          <span className="c-col-header text-t4 font-mono">
+          <span className="c-col-header text-text-2 font-mono">
             {groups.length} group{groups.length !== 1 ? 's' : ''}
           </span>
           <Button

@@ -60,7 +60,7 @@ export function ModeSwitchDialog({
       onCancel={onClose}
     >
       <div className="flex flex-col gap-[var(--sp-3)]">
-        <p className="text-t3 mb-[var(--sp-2)] text-sm">
+        <p className="text-text-2 mb-[var(--sp-2)] text-sm">
           Select the operating mode for this instance. The instance will restart after switching.
         </p>
         <div role="group" aria-label="Operating mode" className="flex flex-col gap-[var(--sp-3)]">
@@ -76,8 +76,8 @@ export function ModeSwitchDialog({
               onClick={() => !switching && setSelected(opt.value)}
               className="flex items-start gap-3 text-left cursor-pointer c-hover rounded-md py-[var(--sp-3)] px-[var(--sp-4)]"
               style={{
-                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: isSelected ? `var(--m-${mk}-soft)` : 'var(--b1)',
-                background: isSelected ? `var(--m-${mk}-wash)` : 'var(--color-d1)',
+                borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: isSelected ? `var(--m-${mk}-soft)` : 'var(--border-hairline)',
+                background: isSelected ? `var(--m-${mk}-wash)` : 'var(--surface-inset)',
                 opacity: switching ? 0.6 : 1,
               }}
             >
@@ -87,23 +87,23 @@ export function ModeSwitchDialog({
                 className="flex-shrink-0 rounded-full w-[var(--feed-col-icon)] h-[var(--feed-col-icon)]"
                 style={{
                   marginTop: 'var(--bw-accent)',
-                  borderWidth: 'var(--bw-accent)', borderStyle: 'solid', borderColor: isSelected ? `var(--color-m-${mk})` : 'var(--b3)',
+                  borderWidth: 'var(--bw-accent)', borderStyle: 'solid', borderColor: isSelected ? `var(--color-m-${mk})` : 'var(--border-strong)',
                   background: isSelected ? `var(--color-m-${mk})` : 'transparent',
-                  boxShadow: isSelected ? `inset 0 0 0 3px var(--color-d2)` : 'none',
+                  boxShadow: isSelected ? `inset 0 0 0 3px var(--surface-raised)` : 'none',
                 }}
               />
               <div>
-                <div className="font-sans font-medium text-body" style={{ color: isSelected ? `var(--color-m-${mk})` : 'var(--color-t2)' }}>
+                <div className="font-sans font-medium text-body" style={{ color: isSelected ? `var(--color-m-${mk})` : 'var(--text-2)' }}>
                   {opt.label}
                   {isCurrent && (
                     <span
-                      className="font-mono ml-[var(--sp-2)] text-t4 text-xs"
+                      className="font-mono ml-[var(--sp-2)] text-text-2 text-xs"
                     >
                       current
                     </span>
                   )}
                 </div>
-                <div className="text-t4 text-sm">
+                <div className="text-text-2 text-sm">
                   {opt.description}
                 </div>
               </div>

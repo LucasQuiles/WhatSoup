@@ -307,7 +307,7 @@ describe('SummaryTab — LINK KPI color branches', () => {
     expect(valueEl.className).toContain('text-s-ok')
     // Confirm it doesn't fall into warn/neutral
     expect(valueEl.className).not.toContain('text-s-warn')
-    expect(valueEl.className).not.toContain('text-t4')
+    expect(valueEl.className).not.toContain('text-text-2')
   })
 
   it('LINK card uses text-s-warn for unlinked status (b[6] true branch)', () => {
@@ -317,7 +317,7 @@ describe('SummaryTab — LINK KPI color branches', () => {
     const valueEl = screen.getByText('unlinked')
     expect(valueEl.className).toContain('text-s-warn')
     expect(valueEl.className).not.toContain('text-s-ok')
-    expect(valueEl.className).not.toContain('text-t4')
+    expect(valueEl.className).not.toContain('text-text-2')
   })
 })
 

@@ -252,7 +252,7 @@ export function ScheduleComposerModal({
               placeholder="Type your message..."
               rows={4}
               minHeight={96}
-              className="text-t2 h-auto"
+              className="text-text-2 h-auto"
             />
           </div>
         ) : (
@@ -270,7 +270,7 @@ export function ScheduleComposerModal({
                 value={mediaPath}
                 onChange={e => setMediaPath(e.target.value)}
                 placeholder="/path/to/file.jpg"
-                className="text-t2"
+                className="text-text-2"
               />
             </div>
             <div>
@@ -286,7 +286,7 @@ export function ScheduleComposerModal({
                 onChange={e => setCaption(e.target.value)}
                 placeholder="Optional caption..."
                 rows={2}
-                className="text-t2 h-auto"
+                className="text-text-2 h-auto"
               />
             </div>
           </div>
@@ -305,7 +305,7 @@ export function ScheduleComposerModal({
             type="datetime-local"
             value={datetimeLocal}
             onChange={e => setDatetimeLocal(e.target.value)}
-            className="text-t2"
+            className="text-text-2"
           />
         </div>
 
@@ -342,7 +342,7 @@ export function ScheduleComposerModal({
                 value={cronExpr}
                 onChange={e => setCronExpr(e.target.value)}
                 placeholder="Cron expression (min hr dom mon dow)"
-                className="text-t2"
+                className="text-text-2"
               />
               {/* Preview */}
               {cronPreview && (

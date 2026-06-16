@@ -221,7 +221,7 @@ export function ConfigEditDialog({
           placeholder={key === 'adminPhones' ? 'Add phone number' : 'Add item'}
           validate={key === 'adminPhones' ? validatePhone : undefined}
           normalizeValue={key === 'adminPhones' ? normalizePhoneInput : undefined}
-          accentColor={values.length > 0 ? 'var(--color-m-agt)' : undefined}
+          accentColor={values.length > 0 ? 'var(--mode-agent-solid)' : undefined}
           displayLabels={key === 'adminPhones' ? adminPhonesDisplay : undefined}
           aria-describedby={describedBy}
           aria-invalid={invalid ? true : undefined}
@@ -236,7 +236,7 @@ export function ConfigEditDialog({
           id={fieldId}
           readOnly
           value={JSON.stringify(val, null, 2)}
-          className="text-t3"
+          className="text-text-2"
           minHeight="calc(var(--sp-10) + var(--sp-5))"
           resize="vertical"
           dimmed

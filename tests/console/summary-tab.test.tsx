@@ -277,7 +277,7 @@ describe('SummaryTab — KPI row structural contract', () => {
     const linkCard = screen.getByText('LINK').closest('div.c-card') as HTMLElement
     const value = within(linkCard).getByText('unknown')
     expect(value).toBeDefined()
-    expect(value.className).toContain('text-t4')
+    expect(value.className).toContain('text-text-2')
   })
 
   it('renders the action buttons (Restart, Change Mode, Stop) on every mode', () => {

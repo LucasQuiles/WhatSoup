@@ -31,7 +31,7 @@ interface ScheduledMessageRowProps {
 }
 
 function ContentTypeIcon({ type, size = 14 }: { type: string; size?: number }) {
-  const props = { size, strokeWidth: 1.75, className: 'text-t4 flex-shrink-0' }
+  const props = { size, strokeWidth: 1.75, className: 'text-text-2 flex-shrink-0' }
   switch (type) {
     case 'text':     return <MessageSquare {...props} />
     case 'image':    return <Image {...props} />
@@ -84,7 +84,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
               title={preview || undefined}
               className="c-data truncate flex-1 min-w-0"
             >
-              {preview || <span className="text-t4 italic">(no preview)</span>}
+              {preview || <span className="text-text-2 italic">(no preview)</span>}
             </span>
             {/* Status badge */}
             <span
@@ -194,7 +194,7 @@ export function ScheduledMessageRow({ message, onCancel, onEdit, onDuplicate, ca
       {expanded && (
         <div
           id={`sched-details-${message.id}`}
-          className="c-label flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-d1 [border-top:var(--bw)_solid_var(--b1)] gap-[var(--sp-3)]"
+          className="c-label flex flex-wrap py-[var(--sp-2)] px-[var(--sp-4)] bg-surface-inset [border-top:var(--bw)_solid_var(--border-hairline)] gap-[var(--sp-3)]"
         >
           {message.nextRunAt && (
             <span>Next run: {formatFullTime(message.nextRunAt)}</span>
