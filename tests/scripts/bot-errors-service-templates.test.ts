@@ -31,6 +31,7 @@ const launchdInstallers = [
 ];
 const unitTemplates = [...serviceTemplates, ...timerTemplates];
 const PRIVATE_SOCKET_SEGMENT = ['instances', 'personal', 'whatsoup.sock'].join('/');
+const PRIVATE_DB_SEGMENT = ['instances', 'personal', 'bot.db'].join('/');
 const routingEnvKeys = [
   'BOT_ERRORS_JID',
   'BOT_ERRORS_EXPECTED_JID',
@@ -106,6 +107,12 @@ describe('BOT ERRORS service templates', () => {
       expect(text).not.toContain('120363');
       expect(text).not.toMatch(/\/home\/[A-Za-z0-9._-]+\//);
       expect(text).not.toContain(PRIVATE_SOCKET_SEGMENT);
+      expect(text).not.toContain(PRIVATE_DB_SEGMENT);
+    }
+    for (const file of launchdInstallers) {
+      const text = readFileSync(file, 'utf8');
+      expect(text).not.toContain(PRIVATE_SOCKET_SEGMENT);
+      expect(text).not.toContain(PRIVATE_DB_SEGMENT);
     }
   });
 
@@ -421,6 +428,108 @@ describe('BOT ERRORS service templates', () => {
       for (const label of labels) {
         expect(existsSync(launchAgentPath(home, label)), `${script} wrote ${label} before validating profile`).toBe(false);
       }
+    }
+  });
+
+  it('fails closed before writing launchd plists when the health profile is unreadable', () => {
+    for (const [script, labels] of [
+      ['deploy/scripts/install-bot-errors-launchd.sh', [
+        'com.bot-errors.dispatcher',
+        'com.bot-errors.deadman',
+        'com.bot-errors.health',
+      ]],
+      ['deploy/scripts/install-bot-errors-health-launchd.sh', ['com.bot-errors.health-only']],
+    ] as const) {
+      const home = makeTempRoot('whatsoup-launchd-home-');
+      const shimDir = makeTempRoot('whatsoup-launchd-shims-');
+      const envFile = path.join(home, 'bot-errors.env');
+      const repoRoot = path.join(home, 'repo');
+      const unreadableProfile = path.join(home, 'health-profile.json');
+      const jid = 'fixture-unreadable-profile@g.us';
+      const socket = path.join(home, 'whatsoup.sock');
+      const db = path.join(home, 'bot.sqlite');
+
+      writeFakeBotErrorsRepo(repoRoot);
+      writeFileSync(unreadableProfile, '{}\n', 'utf8');
+      chmodSync(unreadableProfile, 0o000);
+      writeFileSync(envFile, [
+        `BOT_ERRORS_JID=${jid}`,
+        `BOT_ERRORS_EXPECTED_JID=${jid}`,
+        `BOT_ERRORS_SOCKET_PATH=${socket}`,
+        `BOT_ERRORS_SOCKET=${socket}`,
+        `BOT_ERRORS_DB=${db}`,
+        `BOT_ERRORS_HEALTH_PROFILE=${unreadableProfile}`,
+        '',
+      ].join('\n'), 'utf8');
+      writeLaunchdShims(shimDir);
+
+      const result = spawnSync('bash', [script], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+          BOT_ERRORS_REPO_ROOT: repoRoot,
+          BOT_ERRORS_ENV_FILE: envFile,
+          BOT_ERRORS_HEALTH_LABEL: 'com.bot-errors.health-only',
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status, `${script} unexpectedly succeeded\n${result.stdout}\n${result.stderr}`).toBe(2);
+      expect(result.stderr).toContain('missing BOT_ERRORS_HEALTH_PROFILE; expected readable profile path');
+      expect(existsSync(path.join(home, 'launchctl.log'))).toBe(false);
+      for (const label of labels) {
+        expect(existsSync(launchAgentPath(home, label)), `${script} wrote ${label} before validating profile`).toBe(false);
+      }
+    }
+  });
+
+  it('rejects non-integer health schedule values before writing the health plist', () => {
+    for (const [envKey, value] of [
+      ['BOT_ERRORS_HEALTH_HOUR', '7</integer><key>Injected</key><integer>1'],
+      ['BOT_ERRORS_HEALTH_MINUTE', '20</integer><key>Injected</key><integer>1'],
+    ] as const) {
+      const home = makeTempRoot('whatsoup-launchd-home-');
+      const shimDir = makeTempRoot('whatsoup-launchd-shims-');
+      const profile = path.join(home, 'health-profile.json');
+      const envFile = path.join(home, 'bot-errors.env');
+      const repoRoot = path.join(home, 'repo');
+      const jid = 'fixture-schedule@g.us';
+      const socket = path.join(home, 'whatsoup.sock');
+      const db = path.join(home, 'bot.sqlite');
+
+      writeFileSync(profile, '{}\n', 'utf8');
+      writeFakeBotErrorsRepo(repoRoot);
+      writeFileSync(envFile, [
+        `BOT_ERRORS_JID=${jid}`,
+        `BOT_ERRORS_EXPECTED_JID=${jid}`,
+        `BOT_ERRORS_SOCKET_PATH=${socket}`,
+        `BOT_ERRORS_SOCKET=${socket}`,
+        `BOT_ERRORS_DB=${db}`,
+        `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
+        '',
+      ].join('\n'), 'utf8');
+      writeLaunchdShims(shimDir);
+
+      const result = spawnSync('bash', ['deploy/scripts/install-bot-errors-health-launchd.sh'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+          BOT_ERRORS_REPO_ROOT: repoRoot,
+          BOT_ERRORS_ENV_FILE: envFile,
+          BOT_ERRORS_HEALTH_LABEL: 'com.bot-errors.health-only',
+          [envKey]: value,
+        },
+        encoding: 'utf8',
+      });
+
+      expect(result.status, `${envKey} unexpectedly succeeded\n${result.stdout}\n${result.stderr}`).toBe(2);
+      expect(result.stderr).toContain(`invalid ${envKey}; expected integer`);
+      expect(existsSync(launchAgentPath(home, 'com.bot-errors.health-only'))).toBe(false);
+      expect(existsSync(path.join(home, 'launchctl.log'))).toBe(false);
     }
   });
 });

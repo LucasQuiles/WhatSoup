@@ -205,7 +205,7 @@ const addedLinePatterns: GuardPattern[] = [
   {
     code: 'private-instance-label',
     message: 'Public repo text must not include private instance labels.',
-    regex: /\b(?:BES Bot|Loops-managed|mw-bot|whatsapp:mw-bot|whatsapp-bot@(?:personal|loops|besbot)|whatsoup@(?:q|loops|besbot|personal)|whatsoup-personal|Q's (?:number|WhatsApp number))\b|instances\/personal\/whatsoup\.sock|\/home\/q\//,
+    regex: /\b(?:BES Bot|Loops-managed|mw-bot|whatsapp:mw-bot|whatsapp-bot@(?:personal|loops|besbot)|whatsoup@(?:q|loops|besbot|personal)|whatsoup-personal|Q's (?:number|WhatsApp number))\b|instances\/personal\/(?:whatsoup\.sock|bot\.db)|\/home\/q\//,
   },
   {
     code: 'private-host-label',

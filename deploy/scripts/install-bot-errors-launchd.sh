@@ -65,9 +65,9 @@ if [[ -z "$BOT_ERRORS_SOCKET_PATH_VALUE" && -n "$BOT_ERRORS_SOCKET_VALUE" ]]; th
 elif [[ -z "$BOT_ERRORS_SOCKET_VALUE" && -n "$BOT_ERRORS_SOCKET_PATH_VALUE" ]]; then
   BOT_ERRORS_SOCKET_VALUE="$BOT_ERRORS_SOCKET_PATH_VALUE"
 fi
-BOT_ERRORS_DB_VALUE="$(env_or_default BOT_ERRORS_DB "$HOME/.local/share/whatsoup/instances/personal/bot.db")"
+BOT_ERRORS_DB_VALUE="$(env_or_default BOT_ERRORS_DB "")"
 
-if [[ -z "$HEALTH_PROFILE" || ! -f "$HEALTH_PROFILE" ]]; then
+if [[ -z "$HEALTH_PROFILE" || ! -f "$HEALTH_PROFILE" || ! -r "$HEALTH_PROFILE" ]]; then
   echo "missing BOT_ERRORS_HEALTH_PROFILE; expected readable profile path" >&2
   exit 2
 fi

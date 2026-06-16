@@ -23,6 +23,7 @@ const tempRepos: string[] = [];
 const privateHostLabelFixture = ['nuc', 'les'].join('');
 const privateHostDomainFixture = `${privateHostLabelFixture}.${['qui', 'les'].join('')}.${['stu', 'dio'].join('')}`;
 const privateTailnetIpFixture = ['100', '91', '13', '7'].join('.');
+const privateInstanceDbFixture = ['instances', 'personal', 'bot.db'].join('/');
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore', env: cleanGitEnv() });
@@ -174,9 +175,15 @@ describe('repo hygiene guard', () => {
         line: 2,
         text: "const channel = 'whatsapp:mw-bot';",
       },
+      {
+        filePath: 'deploy/example.sh',
+        line: 3,
+        text: `BOT_ERRORS_DB="$HOME/.local/share/whatsoup/${privateInstanceDbFixture}"`,
+      },
     ]);
 
     expect(issues.map((issue) => issue.code)).toEqual([
+      'private-instance-label',
       'private-instance-label',
       'private-instance-label',
     ]);

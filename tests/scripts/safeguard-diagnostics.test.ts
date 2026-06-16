@@ -348,6 +348,23 @@ describe('safeguard diagnostics', () => {
       .toContain('missing npm run guard:safeguard-diagnostics');
   });
 
+  it('fails when release verification mixes pinned npm with bare nested npm commands', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace(
+            'bash scripts/run-with-pinned-npm.sh --prefix console ci',
+            'npm --prefix console ci && bash scripts/run-with-pinned-npm.sh --prefix console ci',
+          ),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === 'release-chain')?.evidence)
+      .toContain('forbidden npm --prefix console ci');
+  });
+
   it('fails when the shared console design verification chain omits resilience coverage', () => {
     const fixture = makeRepo({
       scripts: {
