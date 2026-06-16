@@ -1464,3 +1464,89 @@ def test_main_error_still_returns_when_status_write_fails(tmp_path: Path, monkey
     monkeypatch.setattr(_mod, "run_selfcheck", lambda cfg, heal_enabled=True: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(_mod, "atomic_write_json", lambda path, payload: (_ for _ in ()).throw(RuntimeError("write failed")))
     assert _mod.main(["--root", str(config.root), "--state-dir", str(config.state_dir)]) == 2
+
+
+# ---------------------------------------------------------------------------
+# P0-8A: lever stat_error must escalate, not silently suppress heals
+# ---------------------------------------------------------------------------
+
+def test_lever_stat_error_on_disabled_path_escalates_not_silent(tmp_path: Path, monkeypatch):
+    """P0-8A: OSError on disabled lever must set class=lever_stat_error + action=escalate.
+
+    Before fix: stat_error returns (True, "stat_error:PermissionError"), which makes
+    `disabled=True` and routes to action=mutation_disabled with no alert.
+    After fix: run_selfcheck detects the stat_error prefix and returns lever_stat_error/escalate.
+    """
+    config, deps, calls, _head = _fixture(tmp_path)
+    original_stat = Path.stat
+
+    def stat_raises(self, **kwargs):
+        if self == config.disabled_path:
+            raise PermissionError("denied")
+        return original_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_raises)
+    status = _mod.run_selfcheck(config, deps)
+    # FAILING before fix: action is "noop" or "mutation_disabled", class is "healthy"
+    assert status["class"] == "lever_stat_error", (
+        f"expected lever_stat_error, got class={status['class']!r} action={status['action']!r}"
+    )
+    assert status["action"] == "escalate", (
+        f"expected action=escalate, got {status['action']!r}"
+    )
+    assert any("lever stat failed" in p for p in status["problems"]), (
+        f"expected 'lever stat failed' in problems, got {status['problems']!r}"
+    )
+    assert status["levers"]["disabled"].startswith("stat_error:"), (
+        f"expected levers.disabled to start with stat_error:, got {status['levers']['disabled']!r}"
+    )
+    assert calls == []
+
+
+def test_lever_stat_error_on_autoheal_off_path_escalates(tmp_path: Path, monkeypatch):
+    """P0-8A: OSError on autoheal_off lever must also escalate with lever_stat_error.
+
+    Before fix: returns (True, "stat_error:OSError"), autoheal_off=True, action=monitor_only.
+    After fix: class=lever_stat_error, action=escalate.
+    """
+    config, deps, calls, _head = _fixture(tmp_path)
+    original_stat = Path.stat
+
+    def stat_raises(self, **kwargs):
+        if self == config.autoheal_off_path:
+            raise OSError("EIO input/output error")
+        return original_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_raises)
+    status = _mod.run_selfcheck(config, deps)
+    # FAILING before fix: action="monitor_only" or "noop", class="healthy" or "drift"
+    assert status["class"] == "lever_stat_error", (
+        f"expected lever_stat_error, got class={status['class']!r} action={status['action']!r}"
+    )
+    assert status["action"] == "escalate", (
+        f"expected action=escalate, got {status['action']!r}"
+    )
+    assert status["levers"]["autohealOff"].startswith("stat_error:"), (
+        f"expected levers.autohealOff to start with stat_error:, got {status['levers']['autohealOff']!r}"
+    )
+    assert calls == []
+
+
+def test_lever_stat_error_existing_lever_engaged_test_still_passes(tmp_path: Path, monkeypatch):
+    """Regression guard: lever_engaged itself still returns (True, 'stat_error:...') unchanged.
+
+    The fix is in run_selfcheck caller, not in lever_engaged. This test proves no regression
+    on the direct lever_engaged function test (mirrors test_lever_stat_error_is_engaged).
+    """
+    lever = tmp_path / "DISABLED"
+    original_stat = Path.stat
+
+    def stat(path: Path, **kwargs):
+        if path == lever:
+            raise PermissionError("denied")
+        return original_stat(path, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    engaged, reason = _mod.lever_engaged(lever)
+    assert engaged is True
+    assert reason == "stat_error:PermissionError"

@@ -31,7 +31,16 @@ FILES=(
   "deploy/scripts/lib/bot_errors_redaction.py:1448da21ae9b598d4cafb342fc1c7aa042141ec3db7fee11c8ff1368cf94812f"
 )
 
-sha() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; else sha256sum "$1" 2>/dev/null | awk '{print $1}'; fi; }
+sha() {
+  local out rc
+  if command -v shasum >/dev/null 2>&1; then
+    out="$(shasum -a 256 "$1" 2>/dev/null)"; rc=$?
+  else
+    out="$(sha256sum "$1" 2>/dev/null)"; rc=$?
+  fi
+  if [[ $rc -ne 0 || -z "$out" ]]; then printf 'SHA_FAILED\n'; return 1; fi
+  printf '%s\n' "${out%% *}"
+}
 
 assert_no_symlink_path() {
   local root="$1" rel="$2" cur i
@@ -53,8 +62,15 @@ do_verify() {
     local path="${entry%%:*}" want="${entry##*:}" f="$r/${entry%%:*}"
     if ! assert_no_symlink_path "$r" "$path"; then fail=1; continue; fi
     if [[ ! -f "$f" ]]; then echo "  MISSING  $path"; fail=1; continue; fi
-    local got; got="$(sha "$f")"
-    if [[ "$got" == "$want" ]]; then echo "  MATCH    $path"; else echo "  DRIFT    $path got=${got:0:12}"; fail=1; fi
+    local got got_rc
+    got="$(sha "$f")"; got_rc=$?
+    if [[ $got_rc -ne 0 || "$got" == "SHA_FAILED" ]]; then
+      echo "  SHA_ERROR $path"; fail=1
+    elif [[ "$got" == "$want" ]]; then
+      echo "  MATCH    $path"
+    else
+      echo "  DRIFT    $path got=${got:0:12}"; fail=1
+    fi
   done
   return $fail
 }
