@@ -134,7 +134,7 @@ describe('DELETE /api/credentials/:service', () => {
   it('flags inUse when a discovered instance resolves this service as primary or fallback', async () => {
     const deps = {
       instances: [
-        { name: 'clanka', agentOptions: { provider: 'claude-cli', fallbackProvider: 'opencode-cli', fallbackModel: 'deepseek/deepseek-chat' } },
+        { name: 'instance-a', agentOptions: { provider: 'claude-cli', fallbackProvider: 'opencode-cli', fallbackModel: 'deepseek/deepseek-chat' } },
       ],
     };
     const { res, json } = fakeRes();

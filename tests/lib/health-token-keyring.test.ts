@@ -145,11 +145,11 @@ describe('health token keyring canonical service', () => {
     mockedExecFileSync.mockImplementationOnce(() => { throw new Error('missing canonical'); });
     mockedExecFileSync.mockReturnValueOnce(Buffer.from('legacy-secret\n'));
 
-    expect(lookupCredential('whatsoup-health-token', { user: 'mwlab' })).toBe('legacy-secret');
+    expect(lookupCredential('whatsoup-health-token', { user: 'test-user' })).toBe('legacy-secret');
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
       1,
       'security',
-      ['find-generic-password', '-s', '--', 'whatsoup-health-token', '-a', '--', 'mwlab', '-w'],
+      ['find-generic-password', '-s', '--', 'whatsoup-health-token', '-a', '--', 'test-user', '-w'],
       expect.any(Object),
     );
     expect(mockedExecFileSync).toHaveBeenNthCalledWith(
