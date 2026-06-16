@@ -2147,6 +2147,10 @@ export class AgentRuntime implements Runtime {
           );
         }
       }
+      log.info(
+        { instance: this.instanceName, ticked: seen.size },
+        'handoff distill sweep complete',
+      );
     } catch (err) {
       // Enumeration itself failed — swallow; next tick retries.
       log.warn(
@@ -6271,6 +6275,7 @@ export class AgentRuntime implements Runtime {
     fallbackChainExhausted: boolean;
     failedEntryCount: number;
     turnErrorCounts: Record<string, number>;
+    handoffDistiller: { enabled: boolean; contextInjection: boolean; model: string | null };
   } {
     const active = this.isFallbackWindowActive;
     const fallbackEntry = active ? this.effectiveFallbackEntry : null;
@@ -6297,6 +6302,11 @@ export class AgentRuntime implements Runtime {
       fallbackChainExhausted: this.isFallbackChainExhausted(),
       failedEntryCount: this.failedFallbackEntryKeys.size,
       turnErrorCounts: Object.fromEntries(this.turnErrorCounts),
+      handoffDistiller: {
+        enabled: this.handoffDistillerEnabled(),
+        contextInjection: this.handoffContextEnabled(),
+        model: this.handoffDistillModel(),
+      },
     };
   }
 
