@@ -15,6 +15,8 @@ import {
   workflowForProviderText,
   type ResponseWorkflow,
 } from './response-registry.ts';
+import { runDiagnosticBundle } from './diagnostic-bundle.ts';
+import { buildDiagnosticProbes } from './diagnostic-probes.ts';
 import { EmitHealResultSchema } from '../../core/heal-protocol.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { sendTracked } from '../../core/durability.ts';
@@ -194,6 +196,12 @@ const PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD = (() => {
 // Read per-call (not memoised) so tests can toggle it without re-importing.
 function responseRegistryDispatchEnabled(): boolean {
   return process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] === '1';
+}
+// Opt-in: on an arming provider failure (via the registry dispatcher), run the
+// best-effort diagnostic bundle and emit its findings to the alert outbox.
+// Fire-and-forget — never blocks, delays, or alters the turn's fallback path.
+function diagnosticBundleEnabled(): boolean {
+  return process.env['WHATSOUP_DIAGNOSTIC_BUNDLE'] === '1';
 }
 
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
@@ -6921,6 +6929,8 @@ export class AgentRuntime implements Runtime {
     // Arming classes: usage-limit / auth-required / rate-limit / model-unavailable.
     const reason = kind as ProviderFallbackReason;
     log.warn({ chatJid: logChatJid, textPreview }, armingFailureLogMessage(reason));
+    // Best-effort diagnostics (opt-in) — fire-and-forget, never blocks the turn.
+    if (diagnosticBundleEnabled()) this.kickDiagnosticBundle(wf, providerText);
     const resetAt = reason === 'usage-limit' ? extractUsageLimitResetTime(providerText) : null;
     const activation = wf.fallback.markActiveEntryFailedOnTrigger
       ? this.activateProviderFallbackAfterTerminalResult(resetAt, reason, session, providerText)
@@ -6945,6 +6955,79 @@ export class AgentRuntime implements Runtime {
       // Only usage-limit emits a standalone notice when no fallback armed.
       if (reason === 'usage-limit' && !activation) queue.enqueueText(this.usageLimitNotice());
       session?.shutdown();
+    }
+  }
+
+  /**
+   * Best-effort diagnostics for an arming provider failure. Builds the probe map
+   * from this runtime's capabilities, runs the bundle, and emits the findings to
+   * the alert outbox as operator observability. Fully fire-and-forget: it never
+   * throws into the turn, never blocks the fallback path, and surfaces only a
+   * redacted digest (probe summaries are pre-redacted by their probes).
+   */
+  private kickDiagnosticBundle(wf: ResponseWorkflow, providerText: string): void {
+    try {
+      const probes = buildDiagnosticProbes({
+        providerText,
+        target: {
+          provider: this.agentProvider,
+          model: this.model ?? undefined,
+          providerConfig: this.agentProviderConfig,
+        },
+        getHealthSnapshot: () => {
+          const s = this.getFallbackState();
+          return {
+            summary: `effective=${s.effectiveProvider} fallbackReason=${s.fallbackReason ?? 'none'}`
+              + ` modelUsable=${s.turnCapability.modelUsable ?? 'unknown'}`,
+            data: {
+              effectiveProvider: s.effectiveProvider,
+              fallbackReason: s.fallbackReason,
+              fallbackActiveUntil: s.fallbackActiveUntil,
+              modelUsabilityStatus: s.turnCapability.modelUsabilityStatus,
+            },
+          };
+        },
+        parseUsageLimitReset: (text) => {
+          const d = extractUsageLimitResetTime(text);
+          return d ? d.getTime() : null;
+        },
+        runPrimaryModelUsability: () => probePrimaryModelUsability(
+          { provider: this.agentProvider, model: this.model ?? null },
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, { cwd: this.cwd ?? homedir() }),
+        ),
+        runPrimaryRecoveryProbe: () => this.probePrimaryProviderRecovered(),
+        accountAuthDeps: {
+          resolveKeyService: resolveProviderKeyService,
+          lookupCredential,
+          getProviderBinary,
+          probeBinaryAuthStatus,
+          isAuthRequiredMessage: isProviderAuthRequiredMessage,
+          // Explicit allowlist — never hand the CLI probe the full process env.
+          env: {
+            HOME: process.env['HOME'],
+            PATH: process.env['PATH'],
+            USER: process.env['USER'],
+          },
+        },
+      });
+      void runDiagnosticBundle({ workflow: wf, probes, now: Date.now() })
+        .then((bundle) => {
+          const digest = bundle.findings
+            .map((f) => `${f.id}:${f.ok ? 'ok' : 'flagged'}/${f.confidence}`)
+            .join(' ');
+          const resetClause = bundle.resetAt ? ` resetAt=${new Date(bundle.resetAt).toISOString()}` : '';
+          emitAlertChecked(
+            this.instanceName,
+            'provider_failure_diagnostics',
+            `Diagnostics for ${wf.providerKind} on ${this.agentProvider}`,
+            `${digest}${resetClause}`,
+          );
+        })
+        .catch((err) => {
+          log.warn({ err, provider: this.agentProvider }, 'diagnostic bundle failed');
+        });
+    } catch (err) {
+      log.warn({ err }, 'failed to kick diagnostic bundle');
     }
   }
 
