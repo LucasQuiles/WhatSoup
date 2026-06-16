@@ -49,7 +49,7 @@ describe('KpiCard root behavior', () => {
     const card = renderCard({ active: true })
 
     expect(card.getAttribute('aria-pressed')).toBe('true')
-    expect(card.style.background).toBe('var(--color-d3)')
+    expect(card.style.background).toBe('var(--surface-raised)')
     expect(card.style.border).toBe(`var(--bw) solid ${KPI_COLOR_TOKENS['text-s-ok']}`)
     expect(card.style.boxShadow).toBe('var(--shadow-inset)')
   })
@@ -58,8 +58,8 @@ describe('KpiCard root behavior', () => {
     const card = renderCard({ active: false })
 
     expect(card.getAttribute('aria-pressed')).toBe('false')
-    expect(card.style.background).toBe('var(--color-d2)')
-    expect(card.style.border).toBe('var(--bw) solid var(--b1)')
+    expect(card.style.background).toBe('var(--surface-raised)')
+    expect(card.style.border).toBe('var(--bw) solid var(--border-hairline)')
     expect(card.style.boxShadow).toBe('none')
   })
 

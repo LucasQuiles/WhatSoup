@@ -334,11 +334,11 @@ describe('CONNECTION_MAP — connection-state taxonomy lives in status-map (DD-1
     expect(CONNECTION_MAP.connected.inkClass).toBe('text-s-ok');
     expect(CONNECTION_MAP.connecting.inkClass).toBe('text-s-warn');
     expect(CONNECTION_MAP.disconnected.inkClass).toBe('text-s-crit');
-    expect(CONNECTION_MAP.unknown.inkClass).toBe('text-t4');
+    expect(CONNECTION_MAP.unknown.inkClass).toBe('text-text-2');
     expect(resolveConnection('connected').label).toBe('connected');
     // Fail-visible: unrecognised state renders its raw value with neutral ink.
     const odd = resolveConnection('half-open');
-    expect(odd.inkClass).toBe('text-t4');
+    expect(odd.inkClass).toBe('text-text-2');
     expect(odd.label).toBe('half-open');
 
   });

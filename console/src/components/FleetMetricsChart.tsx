@@ -21,12 +21,12 @@ export function FleetMetricsChart({ data, range = '24h' }: FleetMetricsChartProp
   return (
     <ResponsiveContainer width="100%" height="100%">
       <AreaChart data={data} margin={CHART_MARGIN}>
-        <CartesianGrid stroke="var(--b1)" vertical={false} />
+        <CartesianGrid stroke="var(--border-hairline)" vertical={false} />
         <XAxis
           dataKey="bucket"
           tick={AXIS_TICK}
           tickLine={false}
-          axisLine={{ stroke: 'var(--b1)' }}
+          axisLine={{ stroke: 'var(--border-hairline)' }}
           minTickGap={40}
           tickFormatter={(v) => formatBucketLabel(v, range)}
         />

@@ -20,7 +20,7 @@ interface FeedIconProps {
 
 const FeedIcon: FC<FeedIconProps> = ({ event }) => {
   const d = event.detail;
-  if (!d) return <CircleDot size={ICON_SIZE} strokeWidth={STROKE} className="text-t5" />;
+  if (!d) return <CircleDot size={ICON_SIZE} strokeWidth={STROKE} className="text-text-3" />;
 
   switch (d.type) {
     case "connection": {
@@ -28,8 +28,8 @@ const FeedIcon: FC<FeedIconProps> = ({ event }) => {
       if (d.state === "disconnected" || (d.statusCode && !d.reconnecting))
         return <WifiOff size={ICON_SIZE} strokeWidth={STROKE} className="text-s-crit" />;
       if (d.reconnecting) return <Plug size={ICON_SIZE} strokeWidth={STROKE} className="text-s-warn" />;
-      if (d.state === "connecting") return <Plug size={ICON_SIZE} strokeWidth={STROKE} className="text-t4" />;
-      return <Plug size={ICON_SIZE} strokeWidth={STROKE} className="text-t4" />;
+      if (d.state === "connecting") return <Plug size={ICON_SIZE} strokeWidth={STROKE} className="text-text-2" />;
+      return <Plug size={ICON_SIZE} strokeWidth={STROKE} className="text-text-2" />;
     }
     case "message":
       return d.direction === "inbound"
@@ -47,10 +47,10 @@ const FeedIcon: FC<FeedIconProps> = ({ event }) => {
       return <HeartPulse size={ICON_SIZE} strokeWidth={STROKE} className={color} />;
     }
     case "import":
-      return <Database size={ICON_SIZE} strokeWidth={STROKE} className="text-t4" />;
+      return <Database size={ICON_SIZE} strokeWidth={STROKE} className="text-text-2" />;
     case "generic":
     default:
-      return <CircleDot size={ICON_SIZE} strokeWidth={STROKE} className="text-t5" />;
+      return <CircleDot size={ICON_SIZE} strokeWidth={STROKE} className="text-text-3" />;
   }
 };
 

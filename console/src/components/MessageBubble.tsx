@@ -50,7 +50,7 @@ const DetailCard: FC<{ msg: Message; placement: ViewportPlacement; rightAnchored
         ].map(({ label, value, muted }) => (
           <div key={label} className="flex justify-between gap-[var(--sp-4)]">
             <span className="c-label flex-shrink-0">{label}</span>
-            <span title={value} className={`c-data truncate max-w-[var(--tooltip-val-max)] ${muted ? 'text-t5' : ''}`}>
+            <span title={value} className={`c-data truncate max-w-[var(--tooltip-val-max)] ${muted ? 'text-text-3' : ''}`}>
               {value}
             </span>
           </div>
@@ -58,7 +58,7 @@ const DetailCard: FC<{ msg: Message; placement: ViewportPlacement; rightAnchored
         <div className="pt-[var(--sp-2)] mt-[var(--sp-1)] c-border-t-b2">
           <div className="flex justify-between">
             <span className="c-label">ID</span>
-            <span className="c-data text-t5">
+            <span className="c-data text-text-3">
               {msg.pk === -1 ? 'failed' : msg.pk < 0 ? 'sending' : `pk:${msg.pk}`}
             </span>
           </div>
@@ -85,7 +85,7 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
             aria-label="Retry send"
             title="Retry send"
           >
-            <RotateCw size={10} strokeWidth={2.5} className="text-t1" />
+            <RotateCw size={10} strokeWidth={2.5} className="text-text-1" />
           </Button>
         )}
       </span>
@@ -94,7 +94,7 @@ const DeliveryStatus: FC<{ msg: Message; onRetry?: (msg: Message) => void }> = (
 
   // Optimistic messages (negative pk) — pending, muted check
   if (msg.pk < 0) {
-    return <Check size={12} strokeWidth={1.75} className="text-t5" style={{ opacity: 'var(--opacity-soft)' }} />
+    return <Check size={12} strokeWidth={1.75} className="text-text-3" style={{ opacity: 'var(--opacity-soft)' }} />
   }
 
   // Persisted messages — confirmed sent, green check
@@ -214,7 +214,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
       >
         {showDetail && <DetailCard msg={msg} placement={placement} rightAnchored={rightAnchored} />}
         <div
-          className={`text-body c-msg-bubble rounded-lg${msg.fromMe ? '' : ' bg-d3'}`}
+          className={`text-body c-msg-bubble rounded-lg${msg.fromMe ? '' : ' bg-surface-raised'}`}
           style={{
             padding: isMedia ? 'var(--sp-2) var(--sp-3)' : 'var(--sp-2h) var(--msg-pad-h)',
             ...(msg.fromMe
@@ -222,7 +222,7 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
               : { borderBottomLeftRadius: 'var(--radius-sm)' }),
           }}
         >
-          <div className="text-t1 leading-relaxed" style={{ overflowWrap: 'break-word' }}>
+          <div className="text-text-1 leading-relaxed" style={{ overflowWrap: 'break-word' }}>
             <MessageContent msg={msg} highlightQuery={highlightQuery} />
           </div>
         </div>
@@ -230,10 +230,10 @@ const MessageBubble: FC<MessageBubbleProps> = ({ msg, outgoingBg = 'var(--m-cht-
 
       {/* Timestamp + delivery status + type badge */}
       <div
-        className={`text-xs flex items-center font-mono text-t2 mt-[var(--bw-accent)] py-0 px-[var(--sp-1)] gap-[var(--sp-2)] ${msg.fromMe ? 'justify-end' : ''}`}
+        className={`text-xs flex items-center font-mono text-text-2 mt-[var(--bw-accent)] py-0 px-[var(--sp-1)] gap-[var(--sp-2)] ${msg.fromMe ? 'justify-end' : ''}`}
       >
         {isMedia && (
-          <span className="text-xs text-t2">
+          <span className="text-xs text-text-2">
             {msg.type}
           </span>
         )}

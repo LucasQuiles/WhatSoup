@@ -281,9 +281,9 @@ describe('HistoryTab — message rendering', () => {
     const incomingBubble = getRenderedBubble(container, 'Hi there')
     const outgoingBubble = getRenderedBubble(container, 'How are you?')
 
-    expect(incomingBubble.className).toContain('bg-d3')
+    expect(incomingBubble.className).toContain('bg-surface-raised')
     expect(incomingBubble.getAttribute('style') ?? '').toContain('border-bottom-left-radius')
-    expect(outgoingBubble.className).not.toContain('bg-d3')
+    expect(outgoingBubble.className).not.toContain('bg-surface-raised')
     expect(outgoingBubble.getAttribute('style') ?? '').toContain('background: var(--m-cht-soft)')
   })
 

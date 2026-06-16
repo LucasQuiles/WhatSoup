@@ -26,7 +26,7 @@ import {
 
 describe('chart style constants', () => {
   it('AXIS_TICK exposes fontSize + fill', () => {
-    expect(AXIS_TICK).toEqual({ fontSize: 'var(--text-xs)', fill: 'var(--color-t4)' });
+    expect(AXIS_TICK).toEqual({ fontSize: 'var(--text-xs)', fill: 'var(--text-2)' });
   });
 
   it('CHART_MARGIN exposes the recharts-style { top, right, left, bottom } shape', () => {

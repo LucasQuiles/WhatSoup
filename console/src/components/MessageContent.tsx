@@ -41,11 +41,11 @@ const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery
   if (type === 'image') {
     return (
       <div>
-        <div className="flex items-center justify-center rounded-md bg-d4 w-full h-[var(--media-thumb-h)] min-w-[var(--media-thumb-w)]">
-          <Image size={32} strokeWidth={1.25} className="text-t5" />
+        <div className="flex items-center justify-center rounded-md bg-surface-raised w-full h-[var(--media-thumb-h)] min-w-[var(--media-thumb-w)]">
+          <Image size={32} strokeWidth={1.25} className="text-text-3" />
         </div>
         {caption && (
-          <div className="text-data text-t2 mt-[var(--sp-1)]">
+          <div className="text-data text-text-2 mt-[var(--sp-1)]">
             {formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}
           </div>
         )}
@@ -55,12 +55,12 @@ const MediaIndicator: FC<{ type: string; caption?: string | null; highlightQuery
 
   return (
     <div className="flex items-center gap-[var(--sp-2)]">
-      {icons[type] ?? <HelpCircle size={16} strokeWidth={1.75} className="text-t4" />}
-      <span className="text-data text-t3 italic">
+      {icons[type] ?? <HelpCircle size={16} strokeWidth={1.75} className="text-text-2" />}
+      <span className="text-data text-text-2 italic">
         {labels[type] ?? type}
       </span>
       {caption && (
-        <span className="text-data text-t2 ml-[var(--sp-1)]">
+        <span className="text-data text-text-2 ml-[var(--sp-1)]">
           {formatWhatsAppText(caption.length > 60 ? caption.slice(0, 57) + '...' : caption, highlightQuery)}
         </span>
       )}
@@ -85,7 +85,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
               style={{ maxHeight: 'var(--media-thumb-h)' }}
             />
             {msg.content && (
-              <div className="text-data text-t2 mt-[var(--sp-1)]">
+              <div className="text-data text-text-2 mt-[var(--sp-1)]">
                 {formatWhatsAppText(msg.content, highlightQuery)}
               </div>
             )}
@@ -107,7 +107,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
       return (
         <div className="flex items-center gap-[var(--sp-2)]">
           <FileAudio size={16} strokeWidth={1.75} className="text-m-agt" />
-          <span className="text-data text-t3 italic">
+          <span className="text-data text-text-2 italic">
             {label}{duration ? ` \u00b7 ${duration}` : ''}
           </span>
         </div>
@@ -129,8 +129,8 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
           <div className="flex items-center gap-[var(--sp-3)] py-[var(--sp-1)] px-0">
             <FileText size={16} strokeWidth={1.75} className="text-s-warn flex-shrink-0" />
             <div className="min-w-0">
-              <div title={fileName} className="text-data text-t1 truncate">{fileName}</div>
-              <div className="text-xs text-t4 font-mono">
+              <div title={fileName} className="text-data text-text-1 truncate">{fileName}</div>
+              <div className="text-xs text-text-2 font-mono">
                 {[ext, fileSize].filter(Boolean).join(' \u00b7 ')}
               </div>
             </div>
@@ -160,7 +160,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
               style={{ maxHeight: 'var(--media-thumb-h)' }}
             />
             {/* Duration badge + play icon overlay */}
-            <div className="text-xs font-mono rounded-sm py-[var(--sp-0h)] px-[var(--sp-2)] bg-[var(--overlay-badge)] text-t1" style={{
+            <div className="text-xs font-mono rounded-sm py-[var(--sp-0h)] px-[var(--sp-2)] bg-[var(--overlay-badge)] text-text-1" style={{
               position: 'absolute',
               bottom: 'var(--sp-2)',
               right: 'var(--sp-2)',
@@ -168,7 +168,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
               {isGif ? 'GIF' : duration || 'Video'}
             </div>
             {msg.content && (
-              <div className="text-data text-t2 mt-[var(--sp-1)]">
+              <div className="text-data text-text-2 mt-[var(--sp-1)]">
                 {formatWhatsAppText(msg.content, highlightQuery)}
               </div>
             )}
@@ -216,7 +216,7 @@ function extractQuotedContext(rawMessage?: string): { participant?: string; text
 /** Quoted message reply bar. */
 const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participant, text }) => (
   <div
-    className="text-sm py-[var(--sp-1)] px-[var(--sp-2)] mb-[var(--sp-2)] bg-d4 rounded-[0_var(--radius-sm)_var(--radius-sm)_0]"
+    className="text-sm py-[var(--sp-1)] px-[var(--sp-2)] mb-[var(--sp-2)] bg-surface-raised rounded-[0_var(--radius-sm)_var(--radius-sm)_0]"
     style={{
       borderLeftWidth: 'var(--bw-accent, 3px)',
       borderLeftStyle: 'solid',
@@ -231,7 +231,7 @@ const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participa
       </div>
     )}
     {text && (
-      <div title={text} className="text-t3 truncate leading-snug">
+      <div title={text} className="text-text-2 truncate leading-snug">
         {text}
       </div>
     )}
@@ -255,7 +255,7 @@ const MessageContent: FC<MessageContentProps> = ({ msg, highlightQuery }) => {
   return (
     <>
       {quoted && <QuotedReplyBar participant={quoted.participant} text={quoted.text} />}
-      {msg.content ? formatWhatsAppText(msg.content, highlightQuery) : <em className="text-t5">—</em>}
+      {msg.content ? formatWhatsAppText(msg.content, highlightQuery) : <em className="text-text-3">—</em>}
     </>
   )
 }

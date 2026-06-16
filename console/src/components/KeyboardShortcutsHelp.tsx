@@ -33,8 +33,8 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
     >
       <ModalBody>
         <div className="flex items-center gap-[var(--sp-2)] mb-[var(--sp-4)]">
-          <Keyboard size={16} strokeWidth={1.75} className="text-t3" />
-          <span id="kbd-shortcuts-title" className="text-body font-sans font-semibold text-t1">
+          <Keyboard size={16} strokeWidth={1.75} className="text-text-2" />
+          <span id="kbd-shortcuts-title" className="text-body font-sans font-semibold text-text-1">
             Keyboard Shortcuts
           </span>
         </div>
@@ -42,7 +42,7 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
         <div className="flex flex-col gap-[var(--sp-2h)] font-mono">
           {SHORTCUTS.map((s) => (
             <div key={s.label} className="flex items-center justify-between">
-              <span className="text-data text-t3">{s.label}</span>
+              <span className="text-data text-text-2">{s.label}</span>
               <div className="flex gap-[var(--sp-1)]">
                 {s.keys.map((k) => (
                   <kbd key={k} className="c-kbd">
@@ -54,7 +54,7 @@ export function KeyboardShortcutsHelp({ open, onClose }: { open: boolean; onClos
           ))}
         </div>
 
-        <div className="text-xs text-t5 text-center mt-[var(--sp-4)]">
+        <div className="text-xs text-text-3 text-center mt-[var(--sp-4)]">
           Press <kbd className="c-kbd">?</kbd> or <kbd className="c-kbd">Esc</kbd> to close
         </div>
       </ModalBody>

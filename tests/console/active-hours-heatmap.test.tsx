@@ -52,10 +52,10 @@ describe('ActiveHoursHeatmap — 24h range', () => {
     const { container } = render(<ActiveHoursHeatmap data={zeroGrid()} range="24h" />);
     expect(container.textContent).toContain('Active Hours');
 
-    // All 24 zero bars: background should be the d4 (no-fill) color, not the accent
+    // All 24 zero bars: background should be the btn-neutral-bg (no-fill) color, not the accent
     const zeroBar = container.querySelector('div[title="12a: 0 messages"]') as HTMLElement;
     expect(zeroBar).not.toBeNull();
-    expect(zeroBar.style.background).toContain('var(--color-d4)');
+    expect(zeroBar.style.background).toContain('var(--btn-neutral-bg)');
     expect(zeroBar.style.height).toBe('0%');
   });
 
@@ -167,7 +167,7 @@ describe('ActiveHoursHeatmap — 30d with byDate', () => {
       <ActiveHoursHeatmap data={zeroGrid()} byDate={twelve} range="30d" />,
     );
     // 12 date header divs total, but only indices 0,3,6,9 carry text (4 labels)
-    const headerRow12 = c12.querySelectorAll('div.text-t5.font-mono.leading-tight.text-center.truncate');
+    const headerRow12 = c12.querySelectorAll('div.text-text-3.font-mono.leading-tight.text-center.truncate');
     const labeled12 = Array.from(headerRow12).filter((el) => el.textContent && el.textContent.trim() !== '');
     expect(labeled12.length).toBe(4);
 
@@ -178,7 +178,7 @@ describe('ActiveHoursHeatmap — 30d with byDate', () => {
     const { container: c25 } = render(
       <ActiveHoursHeatmap data={zeroGrid()} byDate={twentyFive} range="30d" />,
     );
-    const headerRow25 = c25.querySelectorAll('div.text-t5.font-mono.leading-tight.text-center.truncate');
+    const headerRow25 = c25.querySelectorAll('div.text-text-3.font-mono.leading-tight.text-center.truncate');
     const labeled25 = Array.from(headerRow25).filter((el) => el.textContent && el.textContent.trim() !== '');
     expect(labeled25.length).toBe(5);
   });

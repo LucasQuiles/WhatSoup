@@ -145,7 +145,7 @@ export default function LinePicker({
           aria-label={activeLine ? activeLine : 'Select a line'}
           onClick={() => (open ? close() : setOpen(true))}
           onKeyDown={handleKeyDown}
-          className="text-body w-full flex items-center justify-between font-sans text-t1 hover:bg-d4 cursor-pointer bg-d3 c-toolbar c-hover c-border-b min-h-[var(--toolbar-h)]"
+          className="text-body w-full flex items-center justify-between font-sans text-text-1 hover:bg-btn-neutral-bg cursor-pointer bg-surface-raised c-toolbar c-hover c-border-b min-h-[var(--toolbar-h)]"
         >
           <div className="flex items-center gap-[var(--sp-2)]">
             {currentLine && <StatusCell status={currentLine.status} />}
@@ -154,7 +154,7 @@ export default function LinePicker({
           </div>
           <ChevronDown
             size={14}
-            className={`text-t4 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+            className={`text-text-2 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
           />
         </Button>
 
@@ -190,7 +190,7 @@ export default function LinePicker({
         aria-label={activeLine ? displayInstanceName(activeLine) : 'Select line'}
         onClick={() => (open ? close() : setOpen(true))}
         onKeyDown={handleKeyDown}
-        className="text-label flex items-center gap-2 font-mono cursor-pointer c-hover text-t1 bg-d4 tracking-[var(--tracking-pill)] py-[var(--dot-badge)] px-[var(--sp-3)] rounded-sm c-border-b2"
+        className="text-label flex items-center gap-2 font-mono cursor-pointer c-hover text-text-1 bg-btn-neutral-bg tracking-[var(--tracking-pill)] py-[var(--dot-badge)] px-[var(--sp-3)] rounded-sm c-border-b2"
       >
         {currentLine && <StatusCell status={currentLine.status} />}
         <span className="font-medium">
@@ -199,7 +199,7 @@ export default function LinePicker({
         <ChevronDown
           size={11}
           strokeWidth={1.75}
-          className={`text-t4 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+          className={`text-text-2 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
         />
       </Button>
 

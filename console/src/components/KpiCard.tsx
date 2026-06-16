@@ -26,8 +26,8 @@ const KpiCard: FC<KpiCardProps> = ({ value, label, color, onClick, active = fals
       onClick={onClick}
       className="cursor-pointer select-none relative overflow-hidden c-kpi-pad c-kpi-hover rounded-md"
       style={{
-        background: active ? "var(--color-d3)" : "var(--color-d2)",
-        border: active ? `var(--bw) solid ${strokeColor}` : "var(--bw) solid var(--b1)",
+        background: active ? "var(--surface-raised)" : "var(--surface-raised)",
+        border: active ? `var(--bw) solid ${strokeColor}` : "var(--bw) solid var(--border-hairline)",
         boxShadow: active ? "var(--shadow-inset)" : "none",
       }}
     >

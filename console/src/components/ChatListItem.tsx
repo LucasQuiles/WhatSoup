@@ -40,7 +40,7 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabInd
         <div className="flex items-baseline gap-[var(--sp-2)] mb-[var(--sp-0h)]">
           <span
             title={displayName}
-            className="text-t1 font-medium flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-body"
+            className="text-text-1 font-medium flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-body"
           >
             {displayName}
           </span>
@@ -61,7 +61,7 @@ const ChatListItem: FC<ChatListItemProps> = ({ chat, isSelected, onClick, tabInd
           ) : (
           <span
             title={previewText || undefined}
-            className="text-t4 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-data"
+            className="text-text-2 flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-data"
           >
             {previewText}
           </span>

@@ -29,13 +29,13 @@ const Toast: FC<ToastProps> = ({ variant, message, onClose, duration = 4000 }) =
     <div
       role="alert"
       aria-live="polite"
-      className="flex items-center gap-2.5 font-medium rounded-md bg-d3 shadow-[var(--shadow-md)] max-w-[var(--toast-max-w)] py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
+      className="flex items-center gap-2.5 font-medium rounded-md bg-surface-raised shadow-[var(--shadow-md)] max-w-[var(--toast-max-w)] py-[var(--sp-2h)] px-[var(--sp-4)] text-body"
       style={{
         borderWidth: 'var(--bw)', borderStyle: 'solid', borderColor: TOAST_BORDER_COLOR[variant],
       }}
     >
       <Icon size={18} strokeWidth={1.75} className={`flex-shrink-0 ${TOAST_ICON_CLASS[variant]}`} />
-      <span className="flex-1 text-t2">{message}</span>
+      <span className="flex-1 text-text-2">{message}</span>
       <Button
         variant="ghost"
         size="sm"

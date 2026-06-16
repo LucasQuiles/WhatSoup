@@ -23,11 +23,11 @@ function getAccessTag(accessMode: string): TagDef | null {
     case 'allowlist':
       return { label: 'allowlist', icon: Shield, color: 'var(--color-m-cht)', bg: 'var(--m-cht-wash)' }
     case 'self_only':
-      return { label: 'self only', icon: ShieldAlert, color: 'var(--color-t4)', bg: 'var(--color-d4)' }
+      return { label: 'self only', icon: ShieldAlert, color: 'var(--text-2)', bg: 'var(--btn-neutral-bg)' }
     case 'groups_only':
       return { label: 'groups only', icon: Shield, color: 'var(--color-m-agt)', bg: 'var(--m-agt-wash)' }
     case 'denyAll':
-      return { label: 'deny all', icon: ShieldAlert, color: 'var(--color-t4)', bg: 'var(--color-d4)' }
+      return { label: 'deny all', icon: ShieldAlert, color: 'var(--text-2)', bg: 'var(--btn-neutral-bg)' }
     default:
       return null
   }

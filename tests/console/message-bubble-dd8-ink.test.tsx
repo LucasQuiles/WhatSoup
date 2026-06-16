@@ -2,17 +2,17 @@
  * MessageBubble — DD-8 Option B ink-tier evidence.
  * @vitest-environment jsdom
  *
- * Asserts that the timestamp row and media-type badge carry text-t2 (AA ink)
+ * Asserts that the timestamp row and media-type badge carry text-text-2 (AA ink)
  * after the DD-8 essential-text correction. Mirrors the decision-package
  * classification:
  *   - package §2.1 "MessageBubble timestamp + type row" — ESSENTIAL, sole
- *     at-rest rendering of message time; Option B promotes to text-t2.
- *   - Sites: footer div className (text-t2 on the row); media-type span
- *     className (text-t2 on the badge); formatTime span carries no explicit
+ *     at-rest rendering of message time; Option B promotes to text-text-2.
+ *   - Sites: footer div className (text-text-2 on the row); media-type span
+ *     className (text-text-2 on the badge); formatTime span carries no explicit
  *     ink class (inherits from the row).
  *
- * Positive-control pattern for negatives: text-t5 absence assertions are
- * each paired with a text-t2 presence assertion on the same element so a
+ * Positive-control pattern for negatives: text-text-3 absence assertions are
+ * each paired with a text-text-2 presence assertion on the same element so a
  * broken selector cannot produce a vacuous pass.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -58,23 +58,23 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // DD-8 — timestamp row ink tier (package §2.1 "MessageBubble timestamp + type row")
 // Classification: ESSENTIAL — sole at-rest rendering of message time.
-// Option B: text-t5 → text-t2 (7.60:1 dark / 6.03:1 light on every bed).
+// Option B: text-text-3 → text-text-2 (7.60:1 dark / 6.03:1 light on every bed).
 // ---------------------------------------------------------------------------
 
-describe('MessageBubble DD-8 — timestamp row carries text-t2 not text-t5 (Option B)', () => {
-  it('timestamp row has text-t2 class (AA ink — package §2.1)', () => {
+describe('MessageBubble DD-8 — timestamp row carries text-text-2 not text-text-3 (Option B)', () => {
+  it('timestamp row has text-text-2 class (AA ink — package §2.1)', () => {
     render(<MessageBubble msg={msg()} />)
     const footer = document.querySelector('.font-mono') as HTMLElement
-    // Positive control: text-t2 must be present.
-    expect(footer.className).toContain('text-t2')
+    // Positive control: text-text-2 must be present.
+    expect(footer.className).toContain('text-text-2')
   })
 
-  it('timestamp row does NOT carry text-t5 (ghost tier must be absent — DD-8 §2.1)', () => {
+  it('timestamp row does NOT carry text-text-3 (ghost tier must be absent — DD-8 §2.1)', () => {
     render(<MessageBubble msg={msg()} />)
     const footer = document.querySelector('.font-mono') as HTMLElement
     // Positive control above proved the selector found the element.
     // This assertion catches regression to the pre-Option-B ghost tier.
-    expect(footer.className).not.toContain('text-t5')
+    expect(footer.className).not.toContain('text-text-3')
   })
 
   it('timestamp row ink-tier assertion is not vacuous (positive-control guard)', () => {
@@ -89,29 +89,29 @@ describe('MessageBubble DD-8 — timestamp row carries text-t2 not text-t5 (Opti
 // ---------------------------------------------------------------------------
 // DD-8 — media-type badge ink tier (package §2.1 "MessageBubble ... :232 media type")
 // Classification: ESSENTIAL — sole rendering of the media-type label in the footer.
-// Option B: text-t5 → text-t2 on the <span> that holds msg.type.
+// Option B: text-text-3 → text-text-2 on the <span> that holds msg.type.
 // ---------------------------------------------------------------------------
 
-describe('MessageBubble DD-8 — media-type badge carries text-t2 not text-t5 (Option B)', () => {
-  it('media-type span has text-t2 class when message is media type (AA ink)', () => {
+describe('MessageBubble DD-8 — media-type badge carries text-text-2 not text-text-3 (Option B)', () => {
+  it('media-type span has text-text-2 class when message is media type (AA ink)', () => {
     render(<MessageBubble msg={msg({ type: 'image', content: null })} />)
     const footer = document.querySelector('.font-mono') as HTMLElement
-    // The media-type span is inside the footer; look for a child with text-t2.
+    // The media-type span is inside the footer; look for a child with text-text-2.
     const typeSpans = Array.from(footer.querySelectorAll('span'))
-      .filter(s => s.className.includes('text-t2') && s.textContent === 'image')
-    // Positive control: at least one text-t2 span with the type label must exist.
+      .filter(s => s.className.includes('text-text-2') && s.textContent === 'image')
+    // Positive control: at least one text-text-2 span with the type label must exist.
     expect(typeSpans.length).toBeGreaterThan(0)
   })
 
-  it('media-type span does NOT carry text-t5 (ghost tier absent on media badge)', () => {
+  it('media-type span does NOT carry text-text-3 (ghost tier absent on media badge)', () => {
     render(<MessageBubble msg={msg({ type: 'image', content: null })} />)
     const footer = document.querySelector('.font-mono') as HTMLElement
     // Positive control: the type label renders somewhere in the footer.
     const typeSpansAll = Array.from(footer.querySelectorAll('span'))
       .filter(s => s.textContent === 'image')
     expect(typeSpansAll.length).toBeGreaterThan(0)
-    // Ghost-tier absence: none of those spans carries text-t5.
-    const ghostSpans = typeSpansAll.filter(s => s.className.includes('text-t5'))
+    // Ghost-tier absence: none of those spans carries text-text-3.
+    const ghostSpans = typeSpansAll.filter(s => s.className.includes('text-text-3'))
     expect(ghostSpans.length).toBe(0)
   })
 

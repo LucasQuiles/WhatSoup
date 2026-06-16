@@ -20,12 +20,12 @@ export function MetricsChart({ data, range = '24h' }: MetricsChartProps) {
   return (
     <ResponsiveContainer width="100%" height={180}>
       <BarChart data={data} margin={CHART_MARGIN}>
-        <CartesianGrid stroke="var(--b1)" vertical={false} />
+        <CartesianGrid stroke="var(--border-hairline)" vertical={false} />
         <XAxis
           dataKey="bucket"
           tick={AXIS_TICK}
           tickLine={false}
-          axisLine={{ stroke: 'var(--b1)' }}
+          axisLine={{ stroke: 'var(--border-hairline)' }}
           minTickGap={24}
           tickFormatter={(v) => formatBucketLabel(v, range)}
         />
