@@ -341,6 +341,21 @@ describe('Ops page log stream', () => {
     expect(screen.getByText('health')).toBeDefined()
   })
 
+  it('selects a fleet instance via keyboard (Enter) — ISM-06 keyboard access', () => {
+    renderOps({
+      lines: [makeLine({ name: 'alpha' }), makeLine({ name: 'beta', status: 'degraded' })],
+      logsByLine: {},
+    })
+
+    const betaCard = screen.getByText('beta').closest('.c-card') as HTMLElement
+    // ISM-06: the fleet card is now a keyboard-operable button, not a bare div.
+    expect(betaCard.getAttribute('role')).toBe('button')
+    expect(betaCard.tabIndex).toBe(0)
+
+    fireEvent.keyDown(betaCard, { key: 'Enter' })
+    expect(useLogsMock).toHaveBeenLastCalledWith('beta')
+  })
+
   it('switching back to "all" shows all log entries again', () => {
     const line = makeLine({ name: 'alpha' })
     renderOps({
