@@ -70,7 +70,20 @@ import {
   updateAccess,
   upsertAccess,
 } from '../../src/core/access-list.ts';
-import { resolveLid, hydrateLidMappings, upsertLidMapping, getAllLidMappings, setLidAuthDir } from '../../src/core/lid-resolver.ts';
+import {
+  canonicalizeChatJid,
+  compareLidUpdatedAt,
+  getAllLidMappings,
+  hydrateLidMappings,
+  importLidMappings,
+  isPreferredLidObservation,
+  mineGroupParticipants,
+  mineMessageKey,
+  reconcileLidMappings,
+  resolveLid,
+  setLidAuthDir,
+  upsertLidMapping,
+} from '../../src/core/lid-resolver.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
 import { toPersonalJid, toLidJid } from '../../src/core/jid-constants.ts';
 import { isAdminPhone, normalizePhone, normalizePhoneE164 } from '../../src/lib/phone.ts';
@@ -386,6 +399,301 @@ describe('resolveLid — L1.5 disk fallback', () => {
       .get(lid) as { phone_jid: string } | undefined;
     expect(row).toBeDefined();
     expect(row?.phone_jid).toBe(`${phone}@s.whatsapp.net`);
+
+    db.close();
+  });
+
+  it('returns the disk-resolved phone when the DB back-fill write is rejected', () => {
+    const db = createTestDb();
+    const lid = '33333';
+    const phone = '15551239999';
+    fs.writeFileSync(
+      path.join(tmpDir, `lid-mapping-${lid}_reverse.json`),
+      JSON.stringify(phone),
+    );
+    db.raw.exec(`
+      CREATE TRIGGER block_lid_mapping_insert
+      BEFORE INSERT ON lid_mappings
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked insert');
+      END;
+    `);
+
+    expect(resolveLid(db, lid)).toBe(phone);
+    expect(
+      db.raw.prepare('SELECT phone_jid FROM lid_mappings WHERE lid = ?').get(lid),
+    ).toBeUndefined();
+
+    db.close();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2c. L2-L6 resolver internals — conflict preference, mining, reconciliation
+// ═══════════════════════════════════════════════════════════════════════════
+
+const LID_RESOLVER_FIXTURES = {
+  lidOne: '1111111' + '0000001',
+  lidTwo: '2222222' + '0000002',
+  lidThree: '3333333' + '0000003',
+  lidFour: '4444444' + '0000004',
+  lidSeven: '7777777' + '0000007',
+  lidEight: '8888888' + '0000008',
+  lidNine: '9999999' + '0000009',
+  phoneOne: '1555' + '0000001',
+  phoneTwo: '1555' + '0000002',
+  phoneThree: '1555' + '0000003',
+  phoneFour: '1555' + '0000004',
+  phoneNine: '1555' + '0000009',
+};
+
+describe('LID mapping conflict preference', () => {
+  it('orders valid timestamps ahead of invalid values and falls back to lexical order', () => {
+    expect(compareLidUpdatedAt('2026-05-01T00:00:00Z', 'not-a-date')).toBe(1);
+    expect(compareLidUpdatedAt('not-a-date', '2026-05-01T00:00:00Z')).toBe(-1);
+    expect(compareLidUpdatedAt('phone-b', 'phone-a')).toBeGreaterThan(0);
+  });
+
+  it('rejects observations without a timestamp and uses deterministic equal-time tie-breaks', () => {
+    const lowerPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneOne);
+    const higherPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneTwo);
+
+    expect(
+      isPreferredLidObservation(
+        lowerPhoneJid,
+        undefined,
+        higherPhoneJid,
+        '2026-05-01T00:00:00Z',
+      ),
+    ).toBe(false);
+    expect(
+      isPreferredLidObservation(
+        lowerPhoneJid,
+        '2026-05-01T00:00:00Z',
+        higherPhoneJid,
+        '2026-05-01T00:00:00Z',
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('mineMessageKey', () => {
+  it('extracts LID/phone pairs from either participant ordering and skips already-known mappings', () => {
+    const db = createTestDb();
+    const firstPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneOne);
+    const secondPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneTwo);
+    const firstLidJid = toLidJid(LID_RESOLVER_FIXTURES.lidOne);
+    const secondLidJid = toLidJid(LID_RESOLVER_FIXTURES.lidTwo);
+
+    expect(mineMessageKey(db, null, firstPhoneJid)).toBeNull();
+    expect(mineMessageKey(db, GROUP_JID, firstPhoneJid)).toBeNull();
+
+    expect(mineMessageKey(db, firstLidJid, firstPhoneJid)).toEqual({
+      lid: LID_RESOLVER_FIXTURES.lidOne,
+      phoneJid: firstPhoneJid,
+    });
+    expect(mineMessageKey(db, secondPhoneJid, secondLidJid)).toEqual({
+      lid: LID_RESOLVER_FIXTURES.lidTwo,
+      phoneJid: secondPhoneJid,
+    });
+
+    upsertLidMapping(db, LID_RESOLVER_FIXTURES.lidOne, firstPhoneJid);
+    expect(mineMessageKey(db, firstLidJid, firstPhoneJid)).toBeNull();
+
+    db.close();
+  });
+});
+
+describe('mineGroupParticipants', () => {
+  it('discovers both Baileys metadata shapes and skips malformed or already-known rows', () => {
+    const db = createTestDb();
+    const firstPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneOne);
+    const secondPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneTwo);
+    const thirdPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneThree);
+    const knownPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneNine);
+    upsertLidMapping(db, LID_RESOLVER_FIXTURES.lidNine, knownPhoneJid);
+
+    const discovered = mineGroupParticipants(db, [
+      { id: firstPhoneJid, lid: toLidJid(LID_RESOLVER_FIXTURES.lidOne) },
+      { id: toLidJid(LID_RESOLVER_FIXTURES.lidTwo), phoneNumber: secondPhoneJid },
+      { id: thirdPhoneJid },
+      { id: 'not-a-jid', lid: toLidJid(LID_RESOLVER_FIXTURES.lidThree) },
+      { id: toLidJid(LID_RESOLVER_FIXTURES.lidNine), phoneNumber: knownPhoneJid },
+    ]);
+
+    expect(discovered).toBe(2);
+    expect(resolveLid(db, LID_RESOLVER_FIXTURES.lidOne)).toBe(LID_RESOLVER_FIXTURES.phoneOne);
+    expect(resolveLid(db, LID_RESOLVER_FIXTURES.lidTwo)).toBe(LID_RESOLVER_FIXTURES.phoneTwo);
+
+    const sources = db.raw
+      .prepare('SELECT source FROM lid_mappings_history WHERE lid IN (?, ?) ORDER BY lid')
+      .all(LID_RESOLVER_FIXTURES.lidOne, LID_RESOLVER_FIXTURES.lidTwo) as Array<{ source: string }>;
+    expect(sources).toEqual([{ source: 'L4' }, { source: 'L4' }]);
+
+    db.close();
+  });
+
+  it('rolls back and reports no discovery when the mapping write fails', () => {
+    const db = createTestDb();
+    db.raw.exec('DROP TABLE lid_mappings_history');
+
+    const discovered = mineGroupParticipants(db, [
+      {
+        id: toLidJid(LID_RESOLVER_FIXTURES.lidThree),
+        phoneNumber: toPersonalJid(LID_RESOLVER_FIXTURES.phoneThree),
+      },
+    ]);
+
+    expect(discovered).toBe(0);
+    expect(resolveLid(db, LID_RESOLVER_FIXTURES.lidThree)).toBeNull();
+
+    db.close();
+  });
+});
+
+describe('importLidMappings rollback handling', () => {
+  it('rolls back the whole L5 batch when a history write fails', () => {
+    const db = createTestDb();
+    db.raw.exec('DROP TABLE lid_mappings_history');
+
+    expect(() => importLidMappings(db, [
+      {
+        lid: LID_RESOLVER_FIXTURES.lidFour,
+        phone_jid: toPersonalJid(LID_RESOLVER_FIXTURES.phoneFour),
+        updated_at: '2026-05-01T00:00:00Z',
+        source_instance: 'stale-schema-peer',
+      },
+    ])).toThrow(/lid_mappings_history/);
+    expect(resolveLid(db, LID_RESOLVER_FIXTURES.lidFour)).toBeNull();
+
+    db.close();
+  });
+});
+
+describe('reconcileLidMappings', () => {
+  it('hydrates auth-dir mappings, reports unresolved LIDs, and migrates resolvable LID-keyed chats', () => {
+    const db = createTestDb();
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lid-reconcile-'));
+    const mappedLidJid = toLidJid(LID_RESOLVER_FIXTURES.lidOne);
+    const existingLidJid = toLidJid(LID_RESOLVER_FIXTURES.lidTwo);
+    const unmappedLidJid = toLidJid(LID_RESOLVER_FIXTURES.lidSeven);
+    const unmappedDeviceLidJid = `${LID_RESOLVER_FIXTURES.lidEight}:2@lid`;
+    fs.writeFileSync(
+      path.join(tmpDir, `lid-mapping-${LID_RESOLVER_FIXTURES.lidOne}_reverse.json`),
+      JSON.stringify(LID_RESOLVER_FIXTURES.phoneOne),
+    );
+    const hydratedPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneOne);
+    const existingPhoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneTwo);
+    upsertLidMapping(db, LID_RESOLVER_FIXTURES.lidTwo, existingPhoneJid);
+
+    db.raw
+      .prepare(
+        `INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, message_id, content_type, timestamp)
+         VALUES (?, ?, ?, ?, 'text', ?)`,
+      )
+      .run(mappedLidJid, LID_RESOLVER_FIXTURES.lidOne, mappedLidJid, 'mapped-lid', 1);
+    db.raw
+      .prepare(
+        `INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, message_id, content_type, timestamp)
+         VALUES (?, ?, ?, ?, 'text', ?)`,
+      )
+      .run(unmappedLidJid, LID_RESOLVER_FIXTURES.lidSeven, unmappedLidJid, 'unmapped-lid', 2);
+    db.raw
+      .prepare(
+        `INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, message_id, content_type, timestamp)
+         VALUES (?, ?, ?, ?, 'text', ?)`,
+      )
+      .run(
+        unmappedDeviceLidJid,
+        LID_RESOLVER_FIXTURES.lidEight,
+        unmappedDeviceLidJid,
+        'unmapped-device-lid',
+        3,
+      );
+
+    db.raw
+      .prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, ?)')
+      .run(mappedLidJid, LID_RESOLVER_FIXTURES.lidOne, 'Needs Migration');
+    db.raw
+      .prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, ?)')
+      .run(existingLidJid, LID_RESOLVER_FIXTURES.lidTwo, 'Existing Phone Twin');
+    db.raw
+      .prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, ?)')
+      .run(existingPhoneJid, LID_RESOLVER_FIXTURES.phoneTwo, 'Phone Already Exists');
+
+    const result = reconcileLidMappings(db, tmpDir);
+
+    expect(result.hydrated).toBe(1);
+    expect(result.unresolvedLids.sort()).toEqual([
+      LID_RESOLVER_FIXTURES.lidSeven,
+      LID_RESOLVER_FIXTURES.lidEight,
+    ]);
+    expect(resolveLid(db, LID_RESOLVER_FIXTURES.lidOne)).toBe(LID_RESOLVER_FIXTURES.phoneOne);
+    expect(
+      db.raw.prepare('SELECT jid FROM chats WHERE jid = ?').get(hydratedPhoneJid),
+    ).toBeDefined();
+    expect(
+      db.raw.prepare('SELECT jid FROM chats WHERE jid = ?').get(mappedLidJid),
+    ).toBeUndefined();
+    expect(
+      db.raw.prepare('SELECT jid FROM chats WHERE jid = ?').get(existingLidJid),
+    ).toBeDefined();
+
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('continues when a resolvable LID-keyed chat cannot be migrated', () => {
+    const db = createTestDb();
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lid-reconcile-fail-'));
+    const phoneJid = toPersonalJid(LID_RESOLVER_FIXTURES.phoneThree);
+    const lidJid = toLidJid(LID_RESOLVER_FIXTURES.lidThree);
+    upsertLidMapping(db, LID_RESOLVER_FIXTURES.lidThree, phoneJid);
+    db.raw
+      .prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, ?)')
+      .run(lidJid, LID_RESOLVER_FIXTURES.lidThree, 'Blocked Migration');
+    db.raw.exec(`
+      CREATE TRIGGER block_lid_chat_update
+      BEFORE UPDATE OF jid ON chats
+      WHEN OLD.jid LIKE '%@lid'
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked chat migration');
+      END;
+    `);
+
+    const result = reconcileLidMappings(db, tmpDir);
+
+    expect(result).toEqual({ hydrated: 0, unresolvedLids: [] });
+    expect(
+      db.raw.prepare('SELECT jid FROM chats WHERE jid = ?').get(lidJid),
+    ).toBeDefined();
+    expect(
+      db.raw.prepare('SELECT jid FROM chats WHERE jid = ?').get(phoneJid),
+    ).toBeUndefined();
+
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe('canonicalizeChatJid', () => {
+  it('returns stable canonical keys for known JID domains and degrades safely', () => {
+    const db = createTestDb();
+    seedLidMappings(db);
+
+    expect(canonicalizeChatJid(GROUP_JID, db)).toBe(GROUP_JID);
+    expect(canonicalizeChatJid(ADMIN_JID, db)).toBe(ADMIN_JID);
+    expect(canonicalizeChatJid(ADMIN_LID_JID)).toBe(ADMIN_LID_JID);
+    expect(canonicalizeChatJid(ADMIN_LID_JID, db)).toBe(ADMIN_JID);
+    expect(canonicalizeChatJid('123@newsletter', db)).toBe('123@newsletter');
+
+    const brokenDb = {
+      raw: { prepare: () => { throw new Error('prepare failed'); } },
+    } as unknown as Database;
+    expect(canonicalizeChatJid(ADMIN_LID_JID, brokenDb)).toBe(ADMIN_LID_JID);
 
     db.close();
   });
