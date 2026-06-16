@@ -1533,6 +1533,8 @@ def test_default_config_env_and_main_exit_codes(tmp_path: Path, monkeypatch, cap
     hosts = _hosts_file(tmp_path, [{"host": "host-a", "heartbeatPath": str(healthy_hb), "probePath": str(healthy_probe)}])
     monkeypatch.setattr(_mod.time, "time", lambda: 1000.0)
     monkeypatch.setattr(_mod.socket, "gethostname", lambda: "central-main")
+    # Keep the P0-2 instance lock inside tmp_path (not ~/.local/state).
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", str(tmp_path / "sentinel-instance.lock"))
     assert _mod.main(["--hosts", str(hosts), "--state-dir", str(tmp_path / "state-main")]) == 0
     assert '"fleetAction": "none"' in capsys.readouterr().out
 
@@ -1806,3 +1808,55 @@ def test_p06_mass_unreachable_suppresses_tier1_heal_candidate(tmp_path: Path):
     )
     assert actions["host-a"] == "escalate", f"host-a unchanged, got {actions}"
     assert actions["host-b"] == "escalate", f"host-b unchanged, got {actions}"
+
+
+# --- P0-2: sentinel instance lock prevents concurrent launchd copies ---------
+# launchd KeepAlive(SuccessfulExit:false) + StartInterval can start a second
+# copy while a slow cycle is still running; with no mutex both copies write
+# state and emit duplicate action events. main() now takes an flock and a
+# contended copy exits 0 (so KeepAlive does not restart it).
+
+
+def test_instance_lock_prevents_concurrent_run(tmp_path: Path, monkeypatch):
+    """A second main() while the lock is held exits 0 with skipped=already_running
+    and never calls run_once."""
+    import fcntl
+    lock_path = tmp_path / "sentinel-instance.lock"
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", str(lock_path))
+
+    def _boom(*_a, **_k):
+        raise AssertionError("run_once must not be called while another instance holds the lock")
+
+    monkeypatch.setattr(_mod, "run_once", _boom)
+
+    held = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(held, f"{os.getpid()}\n".encode())
+    try:
+        rc = _mod.main(["--hosts", str(tmp_path / "hosts.json"), "--state-dir", str(tmp_path / "state")])
+        assert rc == 0, "a contended instance must exit 0 so KeepAlive does not restart it"
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        os.close(held)
+
+
+def test_instance_lock_released_after_normal_run(tmp_path: Path, monkeypatch):
+    """After main() finishes the lock file is gone and immediately re-acquirable."""
+    import fcntl
+    lock_path = tmp_path / "sentinel-instance.lock"
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_LOCK", str(lock_path))
+    monkeypatch.setattr(
+        _mod,
+        "run_once",
+        lambda config: {"schemaVersion": 1, "checkedAt": "2026-01-01T00:00:00Z", "fleetAction": "none", "hosts": [], "actionEvents": []},
+    )
+    rc = _mod.main(["--hosts", str(tmp_path / "hosts.json"), "--state-dir", str(tmp_path / "state")])
+    assert rc == 0
+    assert not lock_path.exists(), "lock file must be removed after a normal run"
+    # A fresh holder must be able to take the lock immediately.
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)

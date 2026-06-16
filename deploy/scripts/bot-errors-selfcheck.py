@@ -8,6 +8,7 @@ safe drift from the already-distributed immutable bundle.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -432,15 +433,29 @@ def freshness_inventory(now: float) -> tuple[list[dict], list[str]]:
 
 
 def acquire_lock(path: Path) -> Optional[int]:
+    """Acquire the heal lock as an ``flock`` advisory lock keyed on ``path``.
+
+    Unlike the previous O_EXCL lockfile, an ``flock`` is released automatically
+    by the kernel when the holder exits (including SIGKILL). A crashed holder
+    therefore cannot leave a stale lock file that freezes all future heals (the
+    P0-3 bug): a leftover file with no live holder is simply re-acquired here,
+    while a live holder still blocks (returns None) so an in-progress heal is
+    never interrupted. The PID is written for observability only. Returns an open
+    fd the caller must pass to ``release_lock``, or None if the lock is held."""
     ensure_private_dir(path.parent)
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    except FileExistsError:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
         return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
 
 
 def release_lock(path: Path, fd: int) -> None:
-    os.close(fd)
+    os.close(fd)  # closing the fd releases the flock
     try:
         path.unlink()
     except FileNotFoundError:
@@ -885,19 +900,44 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
                         if fresh_bundle != bundle:
                             status["action"] = "current_changed"
                         else:
-                            status["healDiskPreflight"] = heal_disk_preflight(config.root, bundle, pin)
-                            if status["healDiskPreflight"]["ok"] is not True:
-                                status["action"] = "heal_preflight_failed"
-                                status["problems"].append(status["healDiskPreflight"]["status"])
+                            # Re-read and re-verify the pin INSIDE the lock. The
+                            # top-of-cycle pin was loaded many steps earlier; a
+                            # concurrent `pin` update between then and now would
+                            # otherwise let us deploy the stale bundle and still
+                            # report "healed". Abort as current_changed on any
+                            # drift or load failure.
+                            try:
+                                fresh_pin = sp.load_pin(config.manifest_path)
+                                fresh_approved = sp.load_approved_f10(config.ledger_path)
+                                fresh_trusted, _fresh_reason = sp.verify_pin_trust(
+                                    fresh_pin, fresh_approved, deps.commit_exists
+                                )
+                            except sp.PinLoadError as exc:
+                                status["action"] = "current_changed"
+                                status["problems"].append(f"pin_recheck_failed: {exc}")
+                                fresh_pin = None
+                            if fresh_pin is None:
+                                pass  # already marked current_changed above
+                            elif fresh_pin.head_sha != pin.head_sha or fresh_pin.f10_sha != pin.f10_sha or not fresh_trusted:
+                                status["action"] = "current_changed"
+                                status["problems"].append(
+                                    f"pin_changed_during_heal: was={pin.head_sha[:12]} "
+                                    f"now={(fresh_pin.head_sha or 'none')[:12]}"
+                                )
                             else:
-                                rc, output = deps.deploy(config.root, bundle, config.deployer_path)
-                                status["deployerOutput"] = output[-1000:]
-                                if rc == 0:
-                                    record_heal(memory, now)
-                                    status["action"] = "healed"
+                                status["healDiskPreflight"] = heal_disk_preflight(config.root, bundle, fresh_pin)
+                                if status["healDiskPreflight"]["ok"] is not True:
+                                    status["action"] = "heal_preflight_failed"
+                                    status["problems"].append(status["healDiskPreflight"]["status"])
                                 else:
-                                    status["action"] = "heal_failed"
-                                    status["problems"].append(f"deployer_rc={rc}")
+                                    rc, output = deps.deploy(config.root, bundle, config.deployer_path)
+                                    status["deployerOutput"] = output[-1000:]
+                                    if rc == 0:
+                                        record_heal(memory, now)
+                                        status["action"] = "healed"
+                                    else:
+                                        status["action"] = "heal_failed"
+                                        status["problems"].append(f"deployer_rc={rc}")
                 finally:
                     release_lock(config.lock_path, fd)
 

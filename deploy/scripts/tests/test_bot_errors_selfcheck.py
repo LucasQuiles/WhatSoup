@@ -887,12 +887,25 @@ def test_rate_limit_blocks_third_heal_inside_window(tmp_path: Path):
 
 
 def test_existing_lock_blocks_heal(tmp_path: Path):
+    """A live flock holder (this test process, alive PID) blocks the heal.
+
+    Note: the lock is now an flock advisory lock, not an O_EXCL lockfile, so a
+    busy lock is one that is *held* — merely writing a file no longer blocks
+    (that was the stale-lock-freezes-heals-forever bug fixed in P0-3)."""
+    import fcntl
     config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
     _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
-    config.lock_path.write_text("busy", encoding="utf-8")
-    status = _mod.run_selfcheck(config, deps)
-    assert status["action"] == "lock_busy"
-    assert calls == []
+    config.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    holder = os.open(str(config.lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(holder, f"{os.getpid()}\n".encode())  # our PID — alive, fresh
+    try:
+        status = _mod.run_selfcheck(config, deps)
+        assert status["action"] == "lock_busy"
+        assert calls == []
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
 
 
 def test_current_symlink_race_refuses_deploy(tmp_path: Path):
@@ -1550,3 +1563,134 @@ def test_lever_stat_error_existing_lever_engaged_test_still_passes(tmp_path: Pat
     engaged, reason = _mod.lever_engaged(lever)
     assert engaged is True
     assert reason == "stat_error:PermissionError"
+
+
+# --- P0-3: stale selfcheck.lock must not freeze heals forever ----------------
+# The old lock was an O_EXCL lockfile: if the holder was SIGKILLed between open
+# and unlink, the file stayed on disk and every future acquire_lock returned
+# None -> action=lock_busy forever. The fix uses an flock advisory lock, which
+# the kernel releases on holder exit, so a leftover file is simply re-acquired.
+
+
+def test_acquire_lock_ignores_holderless_leftover_file(tmp_path: Path):
+    """A leftover lock file with no live flock holder (e.g. left by a crashed
+    process) is re-acquired, not honored as busy — that was the P0-3 freeze."""
+    lock = tmp_path / "selfcheck.lock"
+    lock.write_text("999999999\n", encoding="utf-8")  # crashed holder's PID, no flock
+    fd = _mod.acquire_lock(lock)
+    assert fd is not None, "a holderless leftover lock file must be re-acquirable"
+    # The PID is rewritten to ours for observability.
+    assert lock.read_text(encoding="utf-8").strip() == str(os.getpid())
+    _mod.release_lock(lock, fd)
+    assert not lock.exists()
+
+
+def test_acquire_lock_respects_live_holder(tmp_path: Path):
+    """When a live process actually holds the flock, acquire_lock returns None."""
+    import fcntl
+    lock = tmp_path / "selfcheck.lock"
+    held = os.open(str(lock), os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(held, f"{os.getpid()}\n".encode())  # our PID — alive, fresh
+    try:
+        assert _mod.acquire_lock(lock) is None, "a live flock holder must block acquisition"
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        os.close(held)
+
+
+def test_release_lock_allows_immediate_reacquire(tmp_path: Path):
+    """release_lock frees the flock and removes the file so the next acquire wins."""
+    lock = tmp_path / "selfcheck.lock"
+    fd = _mod.acquire_lock(lock)
+    assert fd is not None
+    _mod.release_lock(lock, fd)
+    assert not lock.exists()
+    fd2 = _mod.acquire_lock(lock)
+    assert fd2 is not None, "lock must be re-acquirable immediately after release"
+    _mod.release_lock(lock, fd2)
+
+
+def test_stale_lock_file_no_longer_freezes_heal(tmp_path: Path):
+    """End-to-end: a leftover lock file with a dead PID must NOT block the heal.
+
+    Before P0-3 this resolved to lock_busy forever; after the fix the stale file
+    is reclaimed and the heal proceeds."""
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+    config.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    config.lock_path.write_text("999999999\n", encoding="utf-8")  # dead PID leftover
+    status = _mod.run_selfcheck(config, deps)
+    assert status["action"] == "healed", f"stale lock must not block heal, got {status['action']}"
+    assert calls, "deploy must have been called once the stale lock was reclaimed"
+
+
+# --- P0-7: pin-update race during in-flight heal -----------------------------
+# The pin was loaded at the top of run_selfcheck and reused many steps later
+# inside the heal lock. A concurrent `pin` update in that window would deploy
+# the stale bundle and still report "healed". The fix re-reads + re-verifies the
+# pin inside the lock and aborts as current_changed on any drift.
+
+
+def test_concurrent_repin_aborts_heal(tmp_path: Path):
+    """If the pin changes between the top-of-cycle read and the in-lock re-read,
+    the heal aborts as current_changed and deploy is never called."""
+    import unittest.mock as mock
+    from types import SimpleNamespace
+
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+
+    original_load_pin = _mod.sp.load_pin
+    call_count = [0]
+
+    def patched_load_pin(path):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return original_load_pin(path)
+        # Inside the lock: the manifest has been re-pinned to a new head.
+        return SimpleNamespace(head_sha="b" * 40, f10_sha="d" * 64)
+
+    with mock.patch.object(_mod.sp, "load_pin", side_effect=patched_load_pin):
+        status = _mod.run_selfcheck(config, deps)
+
+    assert status["action"] == "current_changed", (
+        f"expected current_changed on concurrent re-pin, got {status['action']}"
+    )
+    assert calls == [], "deploy must not run when the pin changed mid-heal"
+    assert any("pin_changed_during_heal" in p for p in status.get("problems", []))
+
+
+def test_pin_recheck_failure_inside_lock_aborts_heal(tmp_path: Path):
+    """If the in-lock pin re-read raises PinLoadError, abort as current_changed."""
+    import unittest.mock as mock
+
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+
+    original_load_pin = _mod.sp.load_pin
+    call_count = [0]
+
+    def patched_load_pin(path):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return original_load_pin(path)
+        raise _mod.sp.PinLoadError("manifest deleted mid-heal")
+
+    with mock.patch.object(_mod.sp, "load_pin", side_effect=patched_load_pin):
+        status = _mod.run_selfcheck(config, deps)
+
+    assert status["action"] == "current_changed", (
+        f"expected current_changed on pin re-read failure, got {status['action']}"
+    )
+    assert calls == [], "deploy must not run when the pin re-read failed"
+    assert any("pin_recheck_failed" in p for p in status.get("problems", []))
+
+
+def test_stable_pin_still_heals(tmp_path: Path):
+    """Regression guard: when the pin is unchanged on both reads, heal proceeds."""
+    config, deps, calls, _head = _fixture(tmp_path, root_data=b"wrong\n")
+    _seed_memory(config, {"lastClass": "drift", "consecutive": 1, "healHistory": []})
+    status = _mod.run_selfcheck(config, deps)
+    assert status["action"] == "healed", f"stable pin must still heal, got {status['action']}"
+    assert len(calls) == 1
