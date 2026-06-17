@@ -6371,31 +6371,37 @@ export class AgentRuntime implements Runtime {
     if (this.isFallbackWindowActive) return false;
     if (this.agentFallbacks.length === 0) return false;
 
-    // Startup grace: before the bot has proven it can serve a turn, the
-    // boot/recovery sequence emits empties while the usability probe is still
-    // transiently 'unknown'. Don't count or arm on that noise — otherwise the
-    // bot falls over to the backup on every restart and persists the window.
-    if (
-      this.lastSuccessfulTurnAt === null &&
-      Date.now() - this.runtimeBootMs < EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS
-    ) {
-      return false;
-    }
-
     this.consecutivePrimaryEmptyTurns += 1;
     const probeFlagsUnusable = this.primaryModelUsability
       ? this.primaryModelUsabilityRequiresAlert(this.primaryModelUsability)
       : false;
     const reachedThreshold =
       this.consecutivePrimaryEmptyTurns >= EMPTY_OUTPUT_FALLBACK_THRESHOLD;
-    if (!probeFlagsUnusable && !reachedThreshold) return false;
+
+    // Startup grace (anti-flap): during the boot/recovery window the usability
+    // probe is transiently 'unknown', which primaryModelUsabilityRequiresAlert
+    // treats as unusable. That makes the single-empty *probe fast-path* arm on
+    // the very first empty turn and flap the bot onto the backup on every
+    // restart (observed on eh-bot 2026-06-17: 4/4 activations were single-empty
+    // 'probe-unusable' at startup, 0 from the threshold). Suppress ONLY the
+    // probe fast-path during the grace window. We still COUNT the empty and
+    // still honour the consecutive-empty threshold — so a genuinely dead
+    // primary taking real inbound traffic in the first 60s still fails over
+    // (at most one extra turn of latency, no silent blind spot), and the
+    // per-chat empty-output replay that arms via the threshold (#972) is
+    // preserved. The counter resets on any successful turn.
+    const inStartupGrace =
+      this.lastSuccessfulTurnAt === null &&
+      Date.now() - this.runtimeBootMs < EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS;
+    const armViaProbe = probeFlagsUnusable && !inStartupGrace;
+    if (!armViaProbe && !reachedThreshold) return false;
 
     log.warn(
       {
         instanceName: this.instanceName,
         primaryProvider: this.agentProvider,
         consecutivePrimaryEmptyTurns: this.consecutivePrimaryEmptyTurns,
-        trigger: probeFlagsUnusable ? 'probe-unusable' : 'consecutive-empty-output',
+        trigger: armViaProbe ? 'probe-unusable' : 'consecutive-empty-output',
       },
       'primary provider returned empty output — arming provider fallback',
     );
