@@ -3163,3 +3163,196 @@ describe('health.ts lower-branch coverage (74-549)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// health.ts upper-branch coverage (624-1020)
+// ---------------------------------------------------------------------------
+
+describe('health.ts upper-branch coverage (624-1020)', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    // Token is set so requireAuth() runs; each test chooses whether to send
+    // the Authorization header.
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+  });
+
+  afterEach(async () => {
+    if (db) db.close();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  // --- line 624: `if (!requireAuth(req, res)) return;` inside POST /heal.
+  //     Token set, no Authorization header → 401 + no heal report stored.
+  it('POST /heal rejects with 401 and stores nothing when auth is missing (line 624)', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(
+      port,
+      '/heal',
+      'POST',
+      JSON.stringify({ type: 'service_crash' }),
+    );
+
+    expect(status).toBe(401);
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
+    const cnt = db.raw
+      .prepare('SELECT COUNT(*) AS c FROM pending_heal_reports')
+      .get() as { c: number };
+    expect(cnt.c).toBe(0);
+  });
+
+  // --- line 709: `if (!requireAuth(req, res)) return;` inside POST /access.
+  it('POST /access rejects with 401 and writes no access_list row when auth is missing (line 709)', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(
+      port,
+      '/access',
+      'POST',
+      JSON.stringify({ subjectType: 'phone', subjectId: '15550000001@s.whatsapp.net', action: 'allow' }),
+    );
+
+    expect(status).toBe(401);
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
+    const cnt = db.raw
+      .prepare('SELECT COUNT(*) AS c FROM access_list')
+      .get() as { c: number };
+    expect(cnt.c).toBe(0);
+  });
+
+  // --- line 801: `if (!requireAuth(req, res)) return;` inside POST /mark-read.
+  it('POST /mark-read rejects with 401 when auth is missing (line 801)', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(
+      port,
+      '/mark-read',
+      'POST',
+      JSON.stringify({ conversation_key: '15550000001@s.whatsapp.net' }),
+    );
+
+    expect(status).toBe(401);
+    expect(JSON.parse(body)).toMatchObject({ error: 'Unauthorized' });
+  });
+
+  // --- line 772: the `'blocked' as const` arm of
+  //     `action === 'allow' ? 'allowed' as const : 'blocked' as const`.
+  //     Existing tests only exercise `allow`; this hits the `block` path and
+  //     confirms the access_list row is persisted as `blocked`.
+  it('POST /access with action=block stores status "blocked" (line 772 block-branch)', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(
+      port,
+      '/access',
+      'POST',
+      JSON.stringify({ subjectType: 'group', subjectId: '1111111000000000@g.us', action: 'block' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body)).toMatchObject({
+      ok: true,
+      action: 'block',
+      subjectType: 'group',
+      subjectId: '1111111000000000@g.us',
+      result: 'inserted',
+    });
+    const row = db.raw
+      .prepare('SELECT subject_type, subject_id, status FROM access_list WHERE subject_id = ?')
+      .get('1111111000000000@g.us');
+    expect(row).toEqual({
+      subject_type: 'group',
+      subject_id: '1111111000000000@g.us',
+      status: 'blocked',
+    });
+  });
+
+  // --- lines 908 + 910: agent-instance path with a REAL runtime snapshot.
+  //     `deps.instanceType === 'agent'` AND `deps.runtime` is set, so
+  //     runtimeSnapshot is non-null and line 908 reads `runtimeSnapshot.status`
+  //     while line 910 calls normalizeAgentTurnCapability(details) with real
+  //     details. (The lower-coverage block only reaches 908/910 with a null
+  //     snapshot; this exercises the truthy-snapshot branches.)
+  it('GET /health surfaces agentRuntimeStatus and turn_capability from a healthy agent runtime snapshot (lines 908, 910, 1020)', async () => {
+    const deps = makeDeps(db, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: true,
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: 1_700_000_000_000,
+              lastTurnErrorClass: null,
+              lastTurnErrorAt: null,
+            },
+          },
+        }),
+        getFallbackState: () => null,
+      } as any,
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+
+    // Line 908 truthy branch: agentRuntimeStatus === 'healthy' → overall
+    // status stays 'healthy' (not unhealthy).
+    expect(json.status).toBe('healthy');
+    // Line 910 truthy branch: turn_capability was normalized from real details.
+    expect(json.turn_capability).toEqual({
+      model_usable: true,
+      model_usability_status: 'usable',
+      last_successful_turn_at: 1_700_000_000_000,
+      last_turn_error_class: null,
+      last_turn_error_at: null,
+    });
+    // Line 1020 branch: agent runtime block was populated.
+    expect(json.runtime).toMatchObject({
+      agent: {
+        turnCapability: {
+          modelUsable: true,
+          modelUsabilityStatus: 'usable',
+          lastSuccessfulTurnAt: 1_700_000_000_000,
+          lastTurnErrorClass: null,
+          lastTurnErrorAt: null,
+        },
+      },
+    });
+  });
+
+  // --- line 1006: `else if (snap.status === 'degraded' && status === 'healthy')`
+  //     — a degraded runtime snapshot downgrades an otherwise-healthy instance
+  //     to 'degraded'. Requires an agent/passive/chat instance that is connected
+  //     (so the base status computes to 'healthy') plus a runtime reporting
+  //     'degraded'.
+  it('GET /health downgrades a healthy connection to degraded when the runtime snapshot is degraded (line 1006)', async () => {
+    const deps = makeDeps(db, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'degraded',
+          details: {},
+        }),
+        getFallbackState: () => null,
+      } as any,
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    // 'degraded' is a 200, not a 503.
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    // Concrete: agent runtime block still populated via the line-1020 branch.
+    expect(json.runtime).toMatchObject({ agent: {} });
+  });
+});
+
