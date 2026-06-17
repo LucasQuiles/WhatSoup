@@ -202,12 +202,12 @@ describe('REQ-002.AC-01: message storage', () => {
     const messenger = makeMessenger();
     const runtime = makeRuntime();
     const handler = makeIngest(db, messenger, runtime);
-    const msg = makeIncomingMessage({ senderJid: '19995550001@s.whatsapp.net' });
+    const msg = makeIncomingMessage({ senderJid: '15550000003@s.whatsapp.net' });
 
     await runIngest(handler, msg);
 
     // Verify stored in DB
-    const rows = getMessagesBySender(db, '19995550001@s.whatsapp.net');
+    const rows = getMessagesBySender(db, '15550000003@s.whatsapp.net');
     expect(rows).toHaveLength(1);
     expect(rows[0].messageId).toBe(msg.messageId);
     expect(rows[0].content).toBe('hello bot');
@@ -221,7 +221,7 @@ describe('REQ-002.AC-01: message storage', () => {
     const messenger = makeMessenger();
     const runtime = makeRuntime();
     const handler = makeIngest(db, messenger, runtime);
-    const msg = makeIncomingMessage({ senderJid: '19995550002@s.whatsapp.net' });
+    const msg = makeIncomingMessage({ senderJid: '15550000004@s.whatsapp.net' });
 
     // Blocked by access policy
     mockShouldRespond.mockReturnValue({ respond: false, reason: 'blocked', accessStatus: 'blocked' });
@@ -229,7 +229,7 @@ describe('REQ-002.AC-01: message storage', () => {
     await runIngest(handler, msg);
 
     // Message still stored
-    const rows = getMessagesBySender(db, '19995550002@s.whatsapp.net');
+    const rows = getMessagesBySender(db, '15550000004@s.whatsapp.net');
     expect(rows).toHaveLength(1);
     expect(rows[0].messageId).toBe(msg.messageId);
 
@@ -412,15 +412,15 @@ describe('REQ-002.AC-03: dispatch to runtime', () => {
     const handler = makeIngest(db, messenger, runtime);
 
     mockShouldRespond.mockReturnValue({ respond: false, reason: 'unknown', accessStatus: 'unknown' });
-    mockExtractLocal.mockReturnValue('17779990000');
+    mockExtractLocal.mockReturnValue('15550000002');
 
-    const msg = makeIncomingMessage({ senderJid: '17779990000@s.whatsapp.net', senderName: 'Bob', content: 'hi' });
+    const msg = makeIncomingMessage({ senderJid: '15550000002@s.whatsapp.net', senderName: 'Bob', content: 'hi' });
     await runIngest(handler, msg);
 
     expect(mockSendApprovalRequest).toHaveBeenCalledWith(
       db,
       messenger,
-      '17779990000',
+      '15550000002',
       'Bob',
       'hi',
       undefined,
@@ -539,7 +539,7 @@ describe('W3-06: duplicate delivery dedup', () => {
     const messenger = makeMessenger();
     const runtime = makeRuntime();
     const handler = makeIngest(db, messenger, runtime);
-    const msg = makeIncomingMessage({ senderJid: '19995550010@s.whatsapp.net' });
+    const msg = makeIncomingMessage({ senderJid: '15550000005@s.whatsapp.net' });
 
     // First delivery — should store and dispatch
     await runIngest(handler, msg);
@@ -553,7 +553,7 @@ describe('W3-06: duplicate delivery dedup', () => {
     expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
 
     // Only one row in DB
-    const rows = getMessagesBySender(db, '19995550010@s.whatsapp.net');
+    const rows = getMessagesBySender(db, '15550000005@s.whatsapp.net');
     expect(rows).toHaveLength(1);
     expect(rows[0].messageId).toBe(msg.messageId);
   });
@@ -564,15 +564,15 @@ describe('W3-06: duplicate delivery dedup', () => {
     const runtime = makeRuntime();
     const handler = makeIngest(db, messenger, runtime);
 
-    const msg1 = makeIncomingMessage({ senderJid: '19995550011@s.whatsapp.net' });
-    const msg2 = makeIncomingMessage({ senderJid: '19995550011@s.whatsapp.net' });
+    const msg1 = makeIncomingMessage({ senderJid: '15550000006@s.whatsapp.net' });
+    const msg2 = makeIncomingMessage({ senderJid: '15550000006@s.whatsapp.net' });
 
     await runIngest(handler, msg1);
     await runIngest(handler, msg2);
 
     expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(2);
 
-    const rows = getMessagesBySender(db, '19995550011@s.whatsapp.net');
+    const rows = getMessagesBySender(db, '15550000006@s.whatsapp.net');
     expect(rows).toHaveLength(2);
   });
 });
@@ -818,11 +818,11 @@ describe('REQ-010: passive instance short-circuit', () => {
     const messenger = makeMessenger();
     const runtime = makeRuntime();
     const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, undefined, 'passive');
-    const msg = makeIncomingMessage({ senderJid: '19995550020@s.whatsapp.net' });
+    const msg = makeIncomingMessage({ senderJid: '15550000007@s.whatsapp.net' });
 
     await runIngest(handler, msg);
 
-    const rows = getMessagesBySender(db, '19995550020@s.whatsapp.net');
+    const rows = getMessagesBySender(db, '15550000007@s.whatsapp.net');
     expect(rows).toHaveLength(1);
     expect(rows[0].messageId).toBe(msg.messageId);
   });
@@ -939,5 +939,576 @@ describe('REQ-002.AC-02b: fallback admin command routing', () => {
     // Runtime NOT dispatched
     expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
     expect(mockShouldRespond).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// Uncovered-branch coverage for src/core/ingest.ts
+// Targets: acquireSlot slow path (queue/drop), releaseSlot branches,
+// admin-command error tail + dispatch callback, slot transfer on release.
+// ===========================================================================
+
+import { deferred } from '../helpers/deferred.ts';
+import { resolvePhoneFromJid } from '../../src/core/access-list.ts';
+const mockResolvePhoneFromJid = vi.mocked(resolvePhoneFromJid);
+
+describe('ingest.ts uncovered-branch coverage', () => {
+  /**
+   * Override config.ingest for the duration of fn(), restoring the original
+   * property descriptor on exit. Mirrors the pattern used in the backpressure
+   * test suite and the existing maxConcurrent-override test above.
+   */
+  async function withIngestConfig(
+    overrides: { maxConcurrent?: number; maxQueueDepth?: number },
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    const original = Object.getOwnPropertyDescriptor(config, 'ingest');
+    Object.defineProperty(config, 'ingest', {
+      configurable: true,
+      value: { ...(config.ingest ?? {}), ...overrides },
+    });
+    try {
+      await fn();
+    } finally {
+      if (original) {
+        Object.defineProperty(config, 'ingest', original);
+      }
+    }
+  }
+
+  /** Wait for getIngestStats() to satisfy the predicate (vi.waitFor wrapper). */
+  async function waitForStats(
+    pred: (stats: ReturnType<typeof getIngestStats>) => void,
+  ): Promise<void> {
+    await vi.waitFor(() => pred(getIngestStats()), { timeout: 5_000, interval: 5 });
+  }
+
+  // -------------------------------------------------------------------------
+  // acquireSlot: slow path — overflow queue (wait-then-acquire branch)
+  // -------------------------------------------------------------------------
+
+  it('acquireSlot: beyond maxConcurrent, message is queued then dispatched after a slot frees', async () => {
+    await withIngestConfig({ maxConcurrent: 1, maxQueueDepth: 5 }, async () => {
+      const hold = deferred<void>();
+      const dispatchOrder: string[] = [];
+
+      const db = makeTempDb();
+      const messenger = makeMessenger();
+      const runtime = makeRuntime();
+      vi.mocked(runtime.handleMessage).mockImplementation(async (msg: IncomingMessage) => {
+        dispatchOrder.push(msg.messageId);
+        if (msg.messageId === 'first') return hold.promise;
+      });
+      const handler = makeIngest(db, messenger, runtime);
+
+      // Fill the single slot.
+      handler(makeIncomingMessage({ messageId: 'first' }));
+      await waitForStats((s) => { expect(s.active).toBe(1); });
+
+      // Second message must go through the queue (slow path).
+      handler(makeIncomingMessage({ messageId: 'second' }));
+      await waitForStats((s) => { expect(s.queued).toBe(1); });
+      expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(1);
+
+      // Release the slot — queued message drains (releaseSlot next-branch).
+      hold.resolve();
+      await vi.waitFor(() => {
+        expect(dispatchOrder).toEqual(['first', 'second']);
+      });
+      await waitForStats((s) => {
+        expect(s.active).toBe(0);
+        expect(s.queued).toBe(0);
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // acquireSlot: slow path — queue full → drop oldest group message
+  // (exercises findIndex/splice/dropped.resolve + ingestDropped++ path)
+  // -------------------------------------------------------------------------
+
+  it('acquireSlot: when queue is full, oldest group message is dropped (DMs preserved)', async () => {
+    await withIngestConfig({ maxConcurrent: 1, maxQueueDepth: 2 }, async () => {
+      const hold = deferred<void>();
+      const dispatched: string[] = [];
+
+      const db = makeTempDb();
+      const messenger = makeMessenger();
+      const runtime = makeRuntime();
+      vi.mocked(runtime.handleMessage).mockImplementation(async (msg: IncomingMessage) => {
+        dispatched.push(msg.messageId);
+        if (msg.messageId === 'anchor') return hold.promise;
+      });
+      const handler = makeIngest(db, messenger, runtime);
+
+      // anchor takes the only slot.
+      handler(makeIncomingMessage({ messageId: 'anchor' }));
+      await waitForStats((s) => { expect(s.active).toBe(1); });
+
+      // Queue: [dm-1, group-1] (depth = 2 = max).
+      handler(makeIncomingMessage({ messageId: 'dm-1', isGroup: false }));
+      handler(makeIncomingMessage({ messageId: 'group-1', isGroup: true }));
+      await waitForStats((s) => { expect(s.queued).toBe(2); });
+
+      const droppedBefore = getIngestStats().dropped;
+
+      // Next message overflows the queue — group-1 (group) is the preferred drop.
+      handler(makeIncomingMessage({ messageId: 'dm-2', isGroup: false }));
+      await waitForStats((s) => {
+        expect(s.dropped).toBe(droppedBefore + 1);
+        expect(s.queued).toBe(2); // dm-2 replaced group-1
+      });
+
+      // Drain: anchor + dm-1 + dm-2 run; group-1 was dropped.
+      hold.resolve();
+      await vi.waitFor(() => {
+        expect(dispatched).toContain('dm-2');
+      });
+
+      expect(dispatched).toStrictEqual(['anchor', 'dm-1', 'dm-2']);
+      expect(dispatched).not.toContain('group-1');
+      expect(getIngestStats().dropped).toBe(droppedBefore + 1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // acquireSlot: slow path — queue full, no group messages → drop oldest (idx 0)
+  // (exercises the groupIdx === -1 ? 0 fallback)
+  // -------------------------------------------------------------------------
+
+  it('acquireSlot: queue full with only DMs drops the oldest queued DM', async () => {
+    await withIngestConfig({ maxConcurrent: 1, maxQueueDepth: 1 }, async () => {
+      const hold = deferred<void>();
+      const dispatched: string[] = [];
+
+      const db = makeTempDb();
+      const messenger = makeMessenger();
+      const runtime = makeRuntime();
+      vi.mocked(runtime.handleMessage).mockImplementation(async (msg: IncomingMessage) => {
+        dispatched.push(msg.messageId);
+        if (msg.messageId === 'slot') return hold.promise;
+      });
+      const handler = makeIngest(db, messenger, runtime);
+
+      handler(makeIncomingMessage({ messageId: 'slot' }));
+      await waitForStats((s) => { expect(s.active).toBe(1); });
+
+      handler(makeIncomingMessage({ messageId: 'queued-b' }));
+      await waitForStats((s) => { expect(s.queued).toBe(1); });
+
+      const droppedBefore = getIngestStats().dropped;
+
+      // Overflow: no group messages in queue → dropIdx falls back to 0 (queued-b).
+      handler(makeIncomingMessage({ messageId: 'queued-c' }));
+      await waitForStats((s) => {
+        expect(s.dropped).toBe(droppedBefore + 1);
+        expect(s.queued).toBe(1); // queued-c replaced queued-b
+      });
+
+      hold.resolve();
+      await vi.waitFor(() => {
+        expect(dispatched).toContain('queued-c');
+      });
+
+      expect(dispatched).toStrictEqual(['slot', 'queued-c']);
+      expect(dispatched).not.toContain('queued-b');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // releaseSlot: else branch — _activeSlots-- when queue is empty
+  // (covered implicitly by every idle test, asserted explicitly here)
+  // -------------------------------------------------------------------------
+
+  it('releaseSlot: decrements active slot when no queued items are waiting', async () => {
+    await withIngestConfig({ maxConcurrent: 3, maxQueueDepth: 5 }, async () => {
+      const db = makeTempDb();
+      const messenger = makeMessenger();
+      const runtime = makeRuntime();
+      const handler = makeIngest(db, messenger, runtime);
+
+      await runIngest(handler, makeIncomingMessage({ messageId: 'solo' }));
+
+      // After release with empty queue: _activeSlots back to 0, stats clean.
+      const stats = getIngestStats();
+      expect(stats.active).toBe(0);
+      expect(stats.queued).toBe(0);
+
+      // A second message must still acquire a slot (proves _activeSlots was
+      // decremented rather than leaking and forcing the slow path).
+      const droppedBefore = getIngestStats().dropped;
+      await runIngest(handler, makeIncomingMessage({ messageId: 'solo-2' }));
+      expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledTimes(2);
+
+      // active/queued clean; dropped unchanged by this non-dropping test.
+      const finalStats = getIngestStats();
+      expect(finalStats.active).toBe(0);
+      expect(finalStats.queued).toBe(0);
+      expect(finalStats.dropped).toBe(droppedBefore);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getIngestStats: observable transitions while slot is held then released
+  // -------------------------------------------------------------------------
+
+  it('getIngestStats: active increments on acquire and returns to 0 on release', async () => {
+    await withIngestConfig({ maxConcurrent: 2, maxQueueDepth: 5 }, async () => {
+      const hold = deferred<void>();
+      const db = makeTempDb();
+      const messenger = makeMessenger();
+      const runtime = makeRuntime();
+      vi.mocked(runtime.handleMessage).mockImplementation(async (msg: IncomingMessage) => {
+        if (msg.messageId === 'held') return hold.promise;
+      });
+      const handler = makeIngest(db, messenger, runtime);
+
+      const droppedBefore = getIngestStats().dropped;
+      handler(makeIncomingMessage({ messageId: 'held' }));
+      await waitForStats((s) => { expect(s.active).toBe(1); });
+
+      const during = getIngestStats();
+      expect(during.active).toBe(1);
+      expect(during.queued).toBe(0);
+
+      hold.resolve();
+      await waitForStats((s) => { expect(s.active).toBe(0); });
+
+      // active/queued back to 0; dropped is a cumulative module counter so we
+      // only assert it did not change during this no-drop test.
+      const after = getIngestStats();
+      expect(after.active).toBe(0);
+      expect(after.queued).toBe(0);
+      expect(after.dropped).toBe(droppedBefore);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Admin command tail (lines 289-294): handleAdminCommand rejects → error caught
+  // -------------------------------------------------------------------------
+
+  it('admin command: handleAdminCommand rejection is caught and logged (no crash)', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+
+    mockIsAdminMessage.mockReturnValue(true);
+    mockParseAdminCommand.mockReturnValue({
+      action: 'allow', subjectType: 'phone', subjectId: '15551234567',
+    });
+    mockHandleAdminCommand.mockRejectedValue(new Error('admin handler blew up'));
+
+    const msg = makeIncomingMessage({ content: 'allow 15551234567' });
+
+    const droppedBefore = getIngestStats().dropped;
+
+    // Must not throw — the try/catch around handleAdminCommand swallows it.
+    await expect(runIngest(handler, msg)).resolves.toBeUndefined();
+
+    // handleAdminCommand was invoked and the runtime was never dispatched directly.
+    expect(mockHandleAdminCommand).toHaveBeenCalledOnce();
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+    const stats = getIngestStats();
+    expect(stats.active).toBe(0);
+    expect(stats.queued).toBe(0);
+    expect(stats.dropped).toBe(droppedBefore);
+  });
+
+  // -------------------------------------------------------------------------
+  // Admin command tail (line 289): the dispatch callback `(m) => runtime.handleMessage(m)`
+  // is invoked by handleAdminCommand — exercises the arrow body.
+  // -------------------------------------------------------------------------
+
+  it('admin command: handleAdminCommand receives a dispatch callback that routes to runtime', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+
+    // Capture the dispatch callback handleAdminCommand receives, then invoke it
+    // with a synthetic message to exercise the `(m) => runtime.handleMessage(m)` body.
+    let captured: ((m: IncomingMessage) => Promise<void>) | undefined;
+    mockHandleAdminCommand.mockImplementation(
+      async (_db, _ms, _action, _st, _sid, _chat, dispatch: (m: IncomingMessage) => Promise<void>) => {
+        captured = dispatch;
+      },
+    );
+    mockIsAdminMessage.mockReturnValue(true);
+    mockParseAdminCommand.mockReturnValue({
+      action: 'allow', subjectType: 'phone', subjectId: '15551234567',
+    });
+
+    await runIngest(handler, makeIncomingMessage({ content: 'allow 15551234567' }));
+
+    expect(captured).toBeDefined();
+    const probe = makeIncomingMessage({ messageId: 'probe-via-callback' });
+    await captured!(probe);
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledWith(probe);
+  });
+
+  // -------------------------------------------------------------------------
+  // Admin command: handleFallbackCommand rejection → caught (sister branch of 293)
+  // -------------------------------------------------------------------------
+
+  it('admin command: handleFallbackCommand rejection is caught (no crash)', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+
+    mockIsAdminMessage.mockReturnValue(true);
+    mockParseAdminCommand.mockReturnValue({ action: 'fallback', sub: 'status' });
+    mockHandleFallbackCommand.mockRejectedValue(new Error('fallback handler blew up'));
+
+    const droppedBefore = getIngestStats().dropped;
+    await expect(
+      runIngest(handler, makeIncomingMessage({ content: 'fallback status' })),
+    ).resolves.toBeUndefined();
+
+    expect(mockHandleFallbackCommand).toHaveBeenCalledOnce();
+    expect(mockHandleAdminCommand).not.toHaveBeenCalled();
+    const stats = getIngestStats();
+    expect(stats.active).toBe(0);
+    expect(stats.queued).toBe(0);
+    expect(stats.dropped).toBe(droppedBefore);
+  });
+
+  // -------------------------------------------------------------------------
+  // acquireSlot fast path: maxConcurrent default (no config override) covers
+  // the `?? 20` fallback branch in the absence of config.ingest.
+  // -------------------------------------------------------------------------
+
+  it('acquireSlot: uses default maxConcurrent=20 when config.ingest is absent', async () => {
+    // Temporarily make config.ingest undefined to exercise the `?? 20` fallback.
+    const original = Object.getOwnPropertyDescriptor(config, 'ingest');
+    Object.defineProperty(config, 'ingest', { configurable: true, value: undefined });
+
+    try {
+      const db = makeTempDb();
+      const messenger = makeMessenger();
+      const runtime = makeRuntime();
+      const handler = makeIngest(db, messenger, runtime);
+
+      // A single message well under the 20-slot default should take the fast path.
+      const droppedBefore = getIngestStats().dropped;
+      await runIngest(handler, makeIncomingMessage({ messageId: 'fast-default' }));
+
+      expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+      const stats = getIngestStats();
+      expect(stats.active).toBe(0);
+      expect(stats.queued).toBe(0);
+      expect(stats.dropped).toBe(droppedBefore);
+    } finally {
+      if (original) {
+        Object.defineProperty(config, 'ingest', original);
+      }
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Paused-chat short-circuit is gated by getAdminCommand() — verify a paused
+  // chat that also carries an admin command bypasses the pause and is routed.
+  // (Exercises the `&& !getAdminCommand()` false branch.)
+  // -------------------------------------------------------------------------
+
+  it('paused chat: admin command bypasses the pause short-circuit and is routed', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+
+    const originalPaused = Object.getOwnPropertyDescriptor(config, 'pausedChats');
+    Object.defineProperty(config, 'pausedChats', {
+      configurable: true,
+      value: new Set<string>(['15551230008@s.whatsapp.net']),
+    });
+
+    try {
+      mockIsAdminMessage.mockReturnValue(true);
+      mockParseAdminCommand.mockReturnValue({
+        action: 'allow', subjectType: 'phone', subjectId: '15551234567',
+      });
+
+      await runIngest(handler, makeIncomingMessage({ content: 'allow 15551234567' }));
+
+      // Admin handler ran — pause did NOT short-circuit.
+      expect(mockHandleAdminCommand).toHaveBeenCalledOnce();
+      expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+    } finally {
+      if (originalPaused) {
+        Object.defineProperty(config, 'pausedChats', originalPaused);
+      }
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Paused-chat short-circuit: exercises lines 253-259 (both with and without
+  // durability, and both the conversationKey and chatJid lookup arms).
+  // -------------------------------------------------------------------------
+
+  it('paused chat (by conversationKey): message stored, dispatch skipped, journal marks chat_paused', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(77);
+    const skipSpy = vi.spyOn(durability, 'markInboundSkipped');
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+
+    const originalPaused = Object.getOwnPropertyDescriptor(config, 'pausedChats');
+    // conversationKey for '15551230008@s.whatsapp.net' is the phone '15551230008'.
+    Object.defineProperty(config, 'pausedChats', {
+      configurable: true,
+      value: new Set<string>(['15551230008']),
+    });
+
+    try {
+      const msg = makeIncomingMessage({ content: 'hello while paused' });
+      await runIngest(handler, msg);
+
+      expect(journalSpy).toHaveBeenCalledWith(msg.messageId, '15551230008', msg.chatJid, 'none');
+      expect(skipSpy).toHaveBeenCalledWith(77, 'chat_paused');
+      expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+    } finally {
+      if (originalPaused) {
+        Object.defineProperty(config, 'pausedChats', originalPaused);
+      }
+    }
+  });
+
+  it('paused chat (by chatJid): dispatch skipped even without durability', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime); // no durability
+
+    const originalPaused = Object.getOwnPropertyDescriptor(config, 'pausedChats');
+    Object.defineProperty(config, 'pausedChats', {
+      configurable: true,
+      value: new Set<string>(['15551230008@s.whatsapp.net']),
+    });
+
+    try {
+      const msg = makeIncomingMessage({ content: 'paused via chatJid' });
+      await expect(runIngest(handler, msg)).resolves.toBeUndefined();
+
+      // Message WAS stored (storage happens before pause check) but not dispatched.
+      expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+      const rows = db.raw.prepare(
+        `SELECT content FROM messages WHERE message_id = ?`,
+      ).get(msg.messageId) as { content: string } | undefined;
+      expect(rows?.content).toBe('paused via chatJid');
+    } finally {
+      if (originalPaused) {
+        Object.defineProperty(config, 'pausedChats', originalPaused);
+      }
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Unknown-sender approval path: resolvePhoneFromJid is consulted for the
+  // approval phone number (line 312) — assert its call args concretely.
+  // -------------------------------------------------------------------------
+
+  it('unknown sender: approval request uses resolvePhoneFromJid on senderJid', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+
+    mockShouldRespond.mockReturnValue({ respond: false, reason: 'unknown', accessStatus: 'unknown' });
+    mockResolvePhoneFromJid.mockReturnValue('15550000008');
+
+    const msg = makeIncomingMessage({
+      senderJid: '15550000008@s.whatsapp.net',
+      senderName: 'Carol',
+      content: 'ping',
+    });
+    await runIngest(handler, msg);
+
+    expect(mockResolvePhoneFromJid).toHaveBeenCalledWith(msg.senderJid, db);
+    expect(mockSendApprovalRequest).toHaveBeenCalledWith(
+      db, messenger, '15550000008', 'Carol', 'ping', undefined,
+    );
+    expect(vi.mocked(runtime.handleMessage)).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // Control-plane intercept (lines 149-187): a control-peer message is stored
+  // in control_messages (NOT messages), journal marks control_message, never
+  // dispatched to runtime.
+  // -------------------------------------------------------------------------
+
+
+  it('control message with protocol prefix from a NON-peer is treated as a normal message', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const handler = makeIngest(db, messenger, runtime);
+
+    // controlPeers does NOT include this sender's phone → not a control message.
+    const originalPeers = Object.getOwnPropertyDescriptor(config, 'controlPeers');
+    Object.defineProperty(config, 'controlPeers', {
+      configurable: true,
+      value: new Map<string, string>([['q', '9999999999']]),
+    });
+
+    try {
+      const msg = makeIncomingMessage({
+        senderJid: '15550000001@s.whatsapp.net',
+        chatJid: '15550000001@s.whatsapp.net',
+        content: '[LOOPS_HEAL] should-be-ignored-as-control',
+      });
+      await runIngest(handler, msg);
+
+      // Falls through to normal storage + dispatch.
+      expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
+
+      // control_messages table is empty (intercept never ran).
+      const ctrl = db.raw.prepare(
+        `SELECT COUNT(*) AS n FROM control_messages WHERE message_id = ?`,
+      ).get(msg.messageId) as { n: number };
+      expect(ctrl.n).toBe(0);
+    } finally {
+      if (originalPeers) {
+        Object.defineProperty(config, 'controlPeers', originalPeers);
+      }
+    }
+  });
+
+
+
+  // -------------------------------------------------------------------------
+  // LID-DM conversation-key resolution (line 198): non-group DM whose chatJid
+  // is a LID resolves conversationKey via resolvePhoneFromJid.
+  // -------------------------------------------------------------------------
+
+  it('LID DM: conversationKey resolved via resolvePhoneFromJid, not toConversationKey', async () => {
+    const db = makeTempDb();
+    const messenger = makeMessenger();
+    const runtime = makeRuntime();
+    const durability = new DurabilityEngine(db);
+    const journalSpy = vi.spyOn(durability, 'journalInbound').mockReturnValue(33);
+
+    const handler = makeIngest(db, messenger, runtime, BOT_JID, BOT_LID, durability);
+
+    // chatJid is a LID; resolvePhoneFromJid is mocked to return the local part.
+    mockResolvePhoneFromJid.mockReturnValue('15550000009');
+    const lidJid = '15550000009@lid';
+
+    const msg = makeIncomingMessage({
+      chatJid: lidJid,
+      senderJid: '15550000009@s.whatsapp.net',
+      isGroup: false,
+      content: 'lid dm',
+    });
+    await runIngest(handler, msg);
+
+    // journalInbound received the phone-derived conversationKey '15550000009',
+    // proving the LID branch (line 198) ran instead of toConversationKey.
+    expect(journalSpy).toHaveBeenCalledWith(msg.messageId, '15550000009', lidJid, expect.any(String));
+    expect(vi.mocked(runtime.handleMessage)).toHaveBeenCalledOnce();
   });
 });
