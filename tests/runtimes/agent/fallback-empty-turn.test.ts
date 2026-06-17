@@ -181,6 +181,12 @@ type RuntimeView = {
     isSystemResult?: boolean,
   ): void;
   handleEvent(event: unknown): void;
+  recordFallbackTurnOutcome(
+    queue: unknown,
+    hadVisibleOutput: boolean,
+    hadToolWork: boolean,
+    session: unknown,
+  ): void;
 };
 
 function v(runtime: AgentRuntime): RuntimeView {
@@ -481,5 +487,89 @@ describe('fallback_empty_turn alert — per-chat dedup', () => {
     const emptyAlerts = vi.mocked(emitAlert).mock.calls.filter((c) => c[1] === 'fallback_empty_turn');
     expect(emptyAlerts).toHaveLength(2);
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(2);
+  });
+});
+
+// ─── chain advance past a structurally-empty fallback entry ──────────────────
+//
+// A fallback ENTRY that connects but emits no assistant text (the opencode
+// minimax integration: step_start + messageID, zero text — verified 2026-06-17)
+// produces no terminal-failure message, so the text-driven advance path never
+// fires. Without advancing, the bot pins to the dead entry and emits
+// "_backup returned no reply — resend_" every turn while a WORKING entry
+// (deepseek) sits behind it. recordFallbackTurnOutcome must, after
+// EMPTY_OUTPUT_FALLBACK_THRESHOLD (2) consecutive empty turns on the active
+// entry, route it through the same advance path terminal failures use.
+describe('fallback chain advance on structurally-empty entry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-17T10:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  // A two-entry independent chain: dead minimax in front of working deepseek.
+  function makeChainRuntime(): AgentRuntime {
+    mockConfigRef()['agentFallbacks'] = [
+      { provider: 'opencode-cli', model: 'minimax/MiniMax-M2.7' },
+      { provider: 'opencode-cli', model: 'deepseek/deepseek-chat' },
+    ];
+    const runtime = makeRuntime({});
+    delete mockConfigRef()['agentFallbacks'];
+    return runtime;
+  }
+
+  // Session on the opencode fallback provider — markActiveFallbackFailed matches
+  // the active entry's provider against this before failing it.
+  const ocSession = {
+    getProviderId: () => 'opencode-cli',
+    getStatus: () => ({ sessionId: 'opencode-cli-1' }),
+  };
+
+  it('advances to the next entry after the threshold of consecutive empty turns', () => {
+    const runtime = makeChainRuntime();
+    v(runtime).activateProviderFallback(null);
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('minimax/MiniMax-M2.7');
+
+    const queue = makeFakeQueue();
+    // 1st empty turn: counted, below threshold — still on minimax.
+    v(runtime).recordFallbackTurnOutcome(queue, false, false, ocSession);
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('minimax/MiniMax-M2.7');
+
+    // 2nd consecutive empty turn: threshold reached — advance to deepseek.
+    v(runtime).recordFallbackTurnOutcome(queue, false, false, ocSession);
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('deepseek/deepseek-chat');
+    expect(runtime.getFallbackState().failedEntryCount).toBe(1);
+  });
+
+  it('does not advance when a real reply interrupts the empty run', () => {
+    const runtime = makeChainRuntime();
+    v(runtime).activateProviderFallback(null);
+    const queue = makeFakeQueue();
+
+    v(runtime).recordFallbackTurnOutcome(queue, false, false, ocSession); // empty 1
+    v(runtime).recordFallbackTurnOutcome(queue, true, false, ocSession);  // real reply → reset
+    v(runtime).recordFallbackTurnOutcome(queue, false, false, ocSession); // empty 1 again
+
+    // Counter was reset by the real reply, so we are still below threshold.
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('minimax/MiniMax-M2.7');
+    expect(runtime.getFallbackState().failedEntryCount).toBe(0);
+  });
+
+  it('does not advance when session is null (advance requires a session to fail the entry)', () => {
+    const runtime = makeChainRuntime();
+    v(runtime).activateProviderFallback(null);
+    const queue = makeFakeQueue();
+
+    v(runtime).recordFallbackTurnOutcome(queue, false, false, null);
+    v(runtime).recordFallbackTurnOutcome(queue, false, false, null);
+
+    expect(runtime.getFallbackState().activeFallbackEntry?.model).toBe('minimax/MiniMax-M2.7');
+    expect(runtime.getFallbackState().failedEntryCount).toBe(0);
   });
 });

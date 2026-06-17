@@ -264,6 +264,12 @@ function oneMessageHandoffEnabled(): boolean {
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
 type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empty-output';
 
+/** Narrow an arbitrary (possibly null) string to a ProviderFallbackReason. */
+function isProviderFallbackReason(value: unknown): value is ProviderFallbackReason {
+  return value === 'usage-limit' || value === 'rate-limit'
+    || value === 'auth-required' || value === 'model-unavailable';
+}
+
 /**
  * Consecutive empty PRIMARY-provider user turns that force a provider fallback
  * even when the independent usability probe has not (yet) flagged the primary.
@@ -1616,6 +1622,19 @@ export class AgentRuntime implements Runtime {
   private lastFallbackTurnAt: number | null = null;
   private activeFallbackEntry: AgentFallbackEntry | null = null;
   private failedFallbackEntryKeys = new Set<string>();
+  // Consecutive empty (no-text, no-tool) turns served by the CURRENT active
+  // fallback entry. A structurally-dead fallback model (e.g. an opencode
+  // provider integration that connects but emits no assistant text) returns
+  // empty on every turn; once this reaches EMPTY_OUTPUT_FALLBACK_THRESHOLD the
+  // entry is advanced through the SAME path terminal failures use, so the chain
+  // moves on to the next working entry instead of pinning to the dead one.
+  // Reset on any non-empty fallback turn. Mirrors consecutivePrimaryEmptyTurns.
+  private consecutiveFallbackEmptyTurns = 0;
+  // Guards against re-attempting (and re-alerting) the advance for the same
+  // entry every threshold-hit when no alternate exists. Bound to the entry key
+  // the last advance was attempted for; cleared when a non-empty turn proves
+  // the active entry good or when a window arms/reverts.
+  private fallbackEmptyAdvanceAttemptedForKey: string | null = null;
   private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -5500,7 +5519,7 @@ export class AgentRuntime implements Runtime {
             // result through the outbound channel. Only fire the notice and
             // increment the empty counter when neither text nor tool work occurred.
             // turnHadToolWork was captured before clearToolNames above.
-            this.recordFallbackTurnOutcome(queue, hadVisible, turnHadToolWork);
+            this.recordFallbackTurnOutcome(queue, hadVisible, turnHadToolWork, session);
             // Empty/tool-only turn: surface any still-pending handoff notice
             // standalone rather than deferring it to the next reply.
             this.flushPendingHandoffNotice(queue);
@@ -5944,6 +5963,8 @@ export class AgentRuntime implements Runtime {
     this.fallbackArmReason = null;
     this.fallbackResetAt = null;
     this.fallbackRecoveryProbeRequired = false;
+    this.consecutiveFallbackEmptyTurns = 0;
+    this.fallbackEmptyAdvanceAttemptedForKey = null;
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
     }
@@ -6631,6 +6652,8 @@ export class AgentRuntime implements Runtime {
     // original cause, replacing any prior reason (e.g. 'usage-limit').
     this.fallbackArmReason = null;
     this.failedFallbackEntryKeys.clear();
+    this.consecutiveFallbackEmptyTurns = 0;
+    this.fallbackEmptyAdvanceAttemptedForKey = null;
     this.armFallbackWindow(until, 'admin-forced');
     log.info({ activeUntil: new Date(until).toISOString() }, 'fallback window forced by admin');
     return { ok: true, activeUntil: until, clamped: dur !== requested };
@@ -6730,12 +6753,24 @@ export class AgentRuntime implements Runtime {
    * outbound channel. hadToolWork suppresses both the counter and the notice for
    * those turns, preserving the signal for genuinely empty ones.
    */
-  private recordFallbackTurnOutcome(queue: IOutboundQueue, hadVisibleOutput: boolean, hadToolWork: boolean = false): void {
+  private recordFallbackTurnOutcome(
+    queue: IOutboundQueue,
+    hadVisibleOutput: boolean,
+    hadToolWork: boolean = false,
+    session: SessionManager | null = null,
+  ): void {
     if (!this.isFallbackWindowActive) return;
     this.fallbackTurnsServed += 1;
     this.lastFallbackTurnAt = Date.now();
-    if (hadVisibleOutput || hadToolWork) return;
+    if (hadVisibleOutput || hadToolWork) {
+      // The active entry produced a real reply — it is healthy. Clear the
+      // empty-advance accounting so a later isolated empty turn starts fresh.
+      this.consecutiveFallbackEmptyTurns = 0;
+      this.fallbackEmptyAdvanceAttemptedForKey = null;
+      return;
+    }
     this.fallbackTurnsEmpty += 1;
+    this.consecutiveFallbackEmptyTurns += 1;
     const entry = this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
     log.warn({
       chatJid: queue.targetChatJid,
@@ -6758,6 +6793,55 @@ export class AgentRuntime implements Runtime {
         'Fallback turn produced no visible output',
         `provider=${entry?.provider} model=${entry?.model} served=${this.fallbackTurnsServed} empty=${this.fallbackTurnsEmpty} chat=${queue.targetChatJid}`,
       );
+    }
+
+    // Advance the chain when the ACTIVE fallback entry is structurally empty.
+    // An entry that connects but emits no assistant text (e.g. a broken
+    // opencode provider integration) produces no terminal-failure MESSAGE, so
+    // the text-driven advance path (activateProviderFallbackAfterTerminalResult
+    // on a classified failure) never fires and the bot pins to the dead entry,
+    // emitting "_backup returned no reply — resend_" every turn while a working
+    // entry sits behind it. Mirror the PRIMARY empty-output trigger: after
+    // EMPTY_OUTPUT_FALLBACK_THRESHOLD consecutive empty turns on the same entry,
+    // route it through the SAME advance path terminal failures use — mark the
+    // entry failed and re-select the next eligible entry. Preserve the window's
+    // original arm reason so selection keeps skipping same-as-primary entries
+    // (an auth-required window must not advance back onto a dead primary
+    // provider). The attempted-key guard stops re-advancing (and re-alerting)
+    // the same entry when no alternate exists. Reuses the terminal path's
+    // single-fallback preservation: when no alternate remains the window keeps
+    // the current entry rather than reverting to a known-bad primary.
+    const entryKey = entry ? this.fallbackEntryKey(entry) : null;
+    if (
+      session !== null &&
+      entryKey !== null &&
+      this.consecutiveFallbackEmptyTurns >= EMPTY_OUTPUT_FALLBACK_THRESHOLD &&
+      this.fallbackEmptyAdvanceAttemptedForKey !== entryKey
+    ) {
+      this.fallbackEmptyAdvanceAttemptedForKey = entryKey;
+      const advanceReason = isProviderFallbackReason(this.fallbackArmReason)
+        ? this.fallbackArmReason
+        : 'auth-required';
+      const resetAt = this.fallbackResetAt !== null ? new Date(this.fallbackResetAt) : null;
+      const activation = this.activateProviderFallbackAfterTerminalResult(
+        resetAt,
+        advanceReason,
+        session,
+        'fallback entry returned empty output',
+      );
+      if (activation) {
+        // Advanced to a fresh entry — clear the empty run so the new entry
+        // starts from zero (the attempted-key guard now tracks the prior key,
+        // which differs from the newly-selected entry).
+        this.consecutiveFallbackEmptyTurns = 0;
+        log.warn({
+          chatJid: queue.targetChatJid,
+          deadProvider: entry?.provider,
+          deadModel: entry?.model,
+          advancedTo: this.activeFallbackEntry?.provider,
+          advancedModel: this.activeFallbackEntry?.model,
+        }, 'advanced fallback chain past structurally-empty entry');
+      }
     }
   }
 
@@ -7092,6 +7176,8 @@ export class AgentRuntime implements Runtime {
     this.fallbackArmReason = null;
     this.activeFallbackEntry = null;
     this.failedFallbackEntryKeys.clear();
+    this.consecutiveFallbackEmptyTurns = 0;
+    this.fallbackEmptyAdvanceAttemptedForKey = null;
     this.fallbackResetAt = null;
     this.fallbackRecoveryProbeRequired = false;
     // End of the stall episode (covers both successful-probe reverts and
@@ -8980,7 +9066,7 @@ export class AgentRuntime implements Runtime {
         const lastOpId = queue.getLastOpId();
         let armedFallbackNow = false;
         if (!wasSilentCompact && !isSystemResult) {
-          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, turnHadToolWork);
+          this.recordFallbackTurnOutcome(queue, this.turnHadVisibleOutput, turnHadToolWork, this.session);
           // Empty/tool-only turn: surface any still-pending handoff notice
           // standalone rather than deferring it to the next reply.
           this.flushPendingHandoffNotice(queue);

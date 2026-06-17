@@ -145,6 +145,34 @@ The probe fast-path is additionally gated on `!probeInFlight` (mirroring
 `getTurnCapability`) so an unresolved startup probe never reads as
 confirmed-unusable.
 
+### Chain advance past a structurally-empty fallback entry
+
+The same textless-failure blind spot exists one layer down: a fallback *entry*
+can connect but emit no assistant text (observed 2026-06-17 — the opencode
+minimax provider integration returns a session id + `step_start` events with
+zero message text, while deepseek through the identical opencode path replies
+normally and direct minimax completion works, so the key/model are valid and the
+defect is in opencode's minimax adapter). Such a turn produces no terminal
+failure *message*, so the text-driven advance path
+(`activateProviderFallbackAfterTerminalResult` on a classified failure) never
+fires. Without intervention the bot pins to the dead entry and emits
+`_The backup model returned no reply — please resend…_` every turn while a
+working entry sits behind it in the chain.
+
+`recordFallbackTurnOutcome` closes this symmetrically with the primary trigger:
+after `EMPTY_OUTPUT_FALLBACK_THRESHOLD` (2) consecutive empty turns on the
+*active* fallback entry, it routes the entry through the SAME advance path
+terminal failures use — marking it failed and re-selecting the next eligible
+entry. The window's original arm reason is preserved, so an `auth-required`
+window keeps skipping same-as-primary entries (it must not advance back onto a
+dead primary provider) and lands on the next independent entry. An
+attempted-key guard prevents re-advancing (and re-alerting) the same entry every
+threshold-hit when no alternate exists; in that terminal case the existing
+single-fallback preservation keeps the current entry rather than reverting to a
+known-bad primary. The counter resets on any non-empty fallback turn. A
+successful advance emits `fallback_provider_failed` (for the dead entry) plus a
+structured `advanced fallback chain past structurally-empty entry` log.
+
 ## Warm handoff distiller (flag-gated)
 
 The cross-harness context handoff is now fully wired behind three opt-in flags
