@@ -198,6 +198,23 @@ def test_mutation_summary_long_string_is_rejected():
     assert raised, "long-string summary value must raise RawContentInSummaryError"
 
 
+def test_mutation_summary_length_boundary_is_inclusive():
+    # MUTATION TRIAGE: pin `len(value) > _MAX_SUMMARY_STR_LEN` at the EXACT integer boundary so a > -> >=
+    # off-by-one flip is caught. A value of exactly _MAX_SUMMARY_STR_LEN chars is ACCEPTED; one char more
+    # is REJECTED.
+    n = pt._MAX_SUMMARY_STR_LEN
+    ok = pt.record_mutation(step="enrich", plane="enricher", mutation_class="inject",
+                            mutation_summary={"v": "Q" * n})  # == 120: not raw content
+    assert ok["mutation_summary"] == {"v": "Q" * n}
+    raised = False
+    try:
+        pt.record_mutation(step="enrich", plane="enricher", mutation_class="inject",
+                           mutation_summary={"v": "Q" * (n + 1)})  # == 121: rejected
+    except pt.RawContentInSummaryError:
+        raised = True
+    assert raised, "a value one char past the ceiling must be rejected"
+
+
 def test_mutation_summary_newline_is_rejected():
     raised = False
     try:
