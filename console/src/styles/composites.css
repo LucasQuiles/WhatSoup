@@ -1090,3 +1090,83 @@ input, textarea {
   background: var(--border-hairline);
   margin: 0 var(--sp-1);
 }
+
+/* ═══ Command palette — ⌘K launcher content (showcase §17, v1 read-only) ═══
+    The dialog SURFACE (scrim, shell, border, radius, shadow, focus trap, Escape,
+    background-inert, exit presence) is owned by the Modal primitive — soup/no-adhoc-modal.
+    This block styles only the palette CONTENT inside the shell: the mono query input,
+    the scrollable listbox, and accent-wash active rows. Maps showcase .cq/.ci/.ci.on/kbd
+    to v3 tokens (--font-mono, --accent-wash, the --text-* ladder, --sp-* spacing). No raw
+    off-grid px — keeps the burndown floor intact. */
+.soup-cmdk {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: var(--sp-2);
+}
+
+.soup-cmdk__query {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-data);
+}
+
+.soup-cmdk__query::placeholder {
+  color: var(--text-3);
+}
+
+/* Single scroll owner — the list scrolls, the shell never does (scroll-owner-required). */
+.soup-cmdk__list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  max-height: 50dvh;
+  padding: var(--sp-1) 0;
+  min-height: var(--sp-6);
+}
+
+.soup-cmdk__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--row-compressed);
+  padding: 0 var(--sp-3);
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-data);
+  color: var(--text-1);
+  background: transparent;
+}
+
+.soup-cmdk__item--active,
+.soup-cmdk__item:hover {
+  background: var(--accent-wash);
+  color: var(--text-1);
+}
+
+.soup-cmdk__item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.soup-cmdk__kbd {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  background: var(--btn-neutral-bg);
+  border: var(--bw) solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--sp-1);
+  line-height: var(--text-xs--line-height);
+}
+
+.soup-cmdk__empty {
+  padding: var(--sp-3) var(--sp-4);
+  font-family: var(--font-mono);
+  font-size: var(--text-data);
+  color: var(--text-3);
+}

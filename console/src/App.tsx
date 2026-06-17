@@ -5,6 +5,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'
 import Nav from './components/Nav'
 import ConnectionBanner from './components/ConnectionBanner'
+import { CommandPalette } from './components/CommandPalette'
 import { useLines } from './hooks/use-fleet'
 import { useConsoleSession } from './hooks/use-console-session'
 import UnlockScreen from './components/UnlockScreen'
@@ -57,14 +58,16 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
   // Keyboard shortcuts help modal
   const [showShortcuts, setShowShortcuts] = useState(false)
   const toggleShortcuts = useCallback(() => setShowShortcuts(p => !p), [])
-  const focusSearch = useCallback(() => {
-    const target = document.querySelector<HTMLInputElement>('[data-search-shortcut-target="true"]:not(:disabled)')
-    target?.focus()
-    target?.select()
-  }, [])
 
-  // Global keyboard shortcuts (Cmd+K search, 1/2/3 page nav, ? help)
-  useKeyboardShortcuts({ onHelp: toggleShortcuts, onSearch: focusSearch })
+  // ⌘K command palette (showcase §17, v1: nav + jump-to-line, read-only).
+  // Repurposes the existing Cmd/Ctrl+K binding (use-keyboard-shortcuts is
+  // untouched — only what we pass as onSearch changes).
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const openPalette = useCallback(() => setPaletteOpen(true), [])
+  const closePalette = useCallback(() => setPaletteOpen(false), [])
+
+  // Global keyboard shortcuts (Cmd+K palette, 1/2/3 page nav, ? help)
+  useKeyboardShortcuts({ onHelp: toggleShortcuts, onSearch: openPalette })
 
   // Connection-status surface (DD-29). The hook fires onReconnect exactly once
   // per disconnected→connected transition; we raise a success toast there.
@@ -127,6 +130,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
           />
         </Suspense>
         <KeyboardShortcutsHelp open={showShortcuts} onClose={() => setShowShortcuts(false)} />
+        <CommandPalette open={paletteOpen} onClose={closePalette} />
       </div>
     </MotionConfig>
   )
