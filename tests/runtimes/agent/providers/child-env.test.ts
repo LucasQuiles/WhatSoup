@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildBaseChildEnv,
+  CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
 } from '../../../../src/runtimes/agent/providers/child-env.ts';
 
@@ -24,6 +25,7 @@ const MANAGED_ENV_KEYS = [
   'TOKENOMICS_SECRET',
   'ALLOW_M365_MUTATIONS',
   'WHATSOUP_CONNECTOR_FAILCLOSED',
+  'WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION',
   'WHATSOUP_INSTANCE',
   'WHATSOUP_MCP_SOCKET',
   'ENABLE_TOOL_SEARCH',
@@ -198,6 +200,41 @@ describe('buildBaseChildEnv', () => {
       expect(unsetEnv).not.toHaveProperty(key);
     }
   });
+
+  it('keeps parent HOME and XDG roots by default even when configRoot is supplied', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/host/home',
+      XDG_CONFIG_HOME: '/host/config',
+      XDG_DATA_HOME: '/host/data',
+    });
+
+    const env = buildBaseChildEnv({ configRoot: '/workspace/.agent-home' });
+
+    expect(env).toMatchObject({
+      HOME: '/host/home',
+      XDG_CONFIG_HOME: '/host/config',
+      XDG_DATA_HOME: '/host/data',
+    });
+  });
+
+  it('rewrites HOME and XDG roots when config-root isolation is explicitly enabled', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/host/home',
+      XDG_CONFIG_HOME: '/host/config',
+      XDG_DATA_HOME: '/host/data',
+      WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION: '1',
+    });
+
+    const env = buildBaseChildEnv({ configRoot: '/workspace/.agent-home' });
+
+    expect(env).toMatchObject({
+      HOME: '/workspace/.agent-home',
+      XDG_CONFIG_HOME: '/workspace/.agent-home/.config',
+      XDG_DATA_HOME: '/workspace/.agent-home/.local/share',
+    });
+  });
 });
 
 // ─── #411 fail-closed opt-in flag ─────────────────────────────────────────────
@@ -223,6 +260,10 @@ describe('buildBaseChildEnv (#411 WHATSOUP_CONNECTOR_FAILCLOSED gate)', () => {
 
   it('exports the canonical flag name', () => {
     expect(FAILCLOSED_FLAG).toBe('WHATSOUP_CONNECTOR_FAILCLOSED');
+  });
+
+  it('exports the config-root isolation flag name', () => {
+    expect(CONFIG_ROOT_ISOLATION_FLAG).toBe('WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION');
   });
 
   it('flag unset: ALLOW_M365_MUTATIONS propagates unconditionally (current default)', () => {

@@ -7905,6 +7905,7 @@ export class AgentRuntime implements Runtime {
       onCrash: opts.onCrash,
       notifyUser: opts.notifyUser,
       cwd: opts.cwd,
+      configRoot: this.sandboxPerChat && opts.cwd ? join(opts.cwd, '.agent-home') : undefined,
       configSystemPrompt: this.configSystemPrompt,
       instructionsPath: this.instructionsPath,
       model: this.effectiveModel,
