@@ -25,6 +25,7 @@ import { cronToHuman } from '../line-detail/scheduled-utils.js';
 import { Field, TextInput } from './FormControl.js';
 import { Popover } from './Popover.js';
 import { Calendar } from './Calendar.js';
+import { Segmented } from './Segmented.js';
 import { setDateOnly } from './calendar-utils.js';
 import {
   type RecurrenceValue,
@@ -171,19 +172,12 @@ export const DateTimePicker: FC<DateTimePickerProps> = ({
         <Calendar value={value} onSelect={handleDaySelect} />
       </Popover>
 
-      <div role="group" aria-label="Recurrence" className="soup-toolbar-seg">
-        {SEG_KINDS.map((opt) => (
-          <button
-            key={opt.kind}
-            type="button"
-            className="soup-toolbar-seg__btn"
-            aria-pressed={activeKind === opt.kind}
-            onClick={() => handleSegClick(opt.kind)}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </div>
+      <Segmented
+        label="Recurrence"
+        options={SEG_KINDS.map((k) => ({ value: k.kind, label: k.label }))}
+        value={activeKind}
+        onChange={(v) => handleSegClick(v as RecurrenceValue['kind'])}
+      />
 
       {recurrence.kind === 'cron' && (
         <div className="flex flex-col gap-[var(--sp-2)]">
