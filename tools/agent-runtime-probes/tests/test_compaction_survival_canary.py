@@ -504,6 +504,70 @@ def test_risky_claim_without_qualifier_detected_as_unsupported():
     assert "Task alpha is complete" not in rendered, rendered
 
 
+def test_safe_kind_falsy_value_and_validation():
+    from compaction_survival_canary import safe_kind
+    # text = str(value or default): a falsy/absent value falls back to default, not str(None).
+    # (or->and would yield "None".)
+    assert safe_kind(None, "unknown") == "unknown"
+    # return text if SAFE_ID.match(text) AND not SECRET_VALUE.search(text) else default:
+    # a valid id is returned (removing the `not` would reject a clean id back to default) ...
+    assert safe_kind("valid_id", "fallback") == "valid_id"
+    # ... and a value failing SAFE_ID falls back to default (an and->or weakening leaks the raw value).
+    assert safe_kind("bad value with spaces!", "fallback") == "fallback"
+
+
+def test_claim_guard_status_supported_and_invalid_pattern():
+    from compaction_survival_canary import claim_guard_status
+    # unsupported = claim_match AND not qualifier_match: a claim WITH its qualifier present is
+    # SUPPORTED. An and->or weakening would mark a fully-supported claim unsupported.
+    g = ClaimGuard("g", r"\bclaim\b", r"\bqualifier\b")
+    row = claim_guard_status(g, "the claim is present and the qualifier is too")
+    assert row["claim_present"] is True and row["qualifier_present"] is True
+    assert row["unsupported"] is False
+    # invalid_pattern = claim_error OR qualifier_error: the two are DIFFERENT patterns, so an invalid
+    # claim_pattern with a VALID qualifier must still flag invalid_pattern (an and->or weakening misses
+    # it because qualifier_error is None).
+    bad = ClaimGuard("g2", r"[broken(", r"\bok\b")
+    row2 = claim_guard_status(bad, "ok")
+    assert row2["invalid_pattern"] is not None
+
+
+def test_evaluate_case_dropped_anchor_not_counted_as_observed():
+    # observed_required = anchors with source_present AND compacted_present. An anchor present in the
+    # source but DROPPED from the compacted view must NOT count as observed (it is a MISSING anchor).
+    # An and->or weakening would count the dropped anchor as survived.
+    case = CanaryCase(
+        canary_id="c", source_kind="artifact_source", compacted_kind="artifact_compacted",
+        source_text="keep_me and drop_me both here",
+        compacted_text="keep_me here",  # drop_me removed
+        required_anchors=(Anchor("a_keep", "evidence", (r"keep_me",)),
+                          Anchor("a_drop", "evidence", (r"drop_me",))),
+    )
+    row = evaluate_case(case)
+    assert row["observed_required_anchor_count"] == 1   # only keep_me survived
+    assert row["missing_required_anchor_count"] == 1     # drop_me was lost
+
+
+def test_from_dict_id_fallback_chain_preserves_provided_id():
+    from compaction_survival_canary import forbidden_from_dict, case_from_dict
+    # id = str(<specific_id> or data["id"] or f"<kind>_{index}"): an or-chain. An and-chain weakening
+    # collapses a provided id to None -> "None". A provided id must survive verbatim.
+    assert forbidden_from_dict({"forbidden_id": "fid"}, 0).forbidden_id == "fid"
+    assert case_from_dict({"canary_id": "cid", "source_text": "s", "compacted_text": "c"}, 0).canary_id == "cid"
+
+
+def test_anchor_from_dict_out_of_vocab_plane_folds_to_unknown():
+    from compaction_survival_canary import anchor_from_dict
+    # plane is accepted only if it is in VALID_PLANES; an out-of-vocabulary plane (even a clean
+    # SAFE_ID) folds to "unknown" (condition `str(data.get("plane") or "unknown") in VALID_PLANES`).
+    # An or->and weakening of the default inside the condition makes it pass for an invalid plane
+    # (str(plane and "unknown") == "unknown" is in VALID_PLANES), leaking the raw out-of-vocab value.
+    a = anchor_from_dict({"id": "x", "plane": "bogus_plane", "patterns": ["p"]}, 0)
+    assert a.plane == "unknown"
+    b = anchor_from_dict({"id": "y", "plane": "evidence", "patterns": ["p"]}, 0)
+    assert b.plane == "evidence"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
