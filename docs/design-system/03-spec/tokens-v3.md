@@ -310,6 +310,8 @@ promoted from v2 + the legacy census:
 | `--toast-w-min` / `--toast-w-max` | 280px / 380px | Toast |
 | `--log-col-time` / `--log-col-level` / `--log-col-comp` | 72px / 24px / 96px | LogStream |
 | `--container-max` | 1280px | page shell |
+| `--landing-max-w` | 1080px | Landing splash container max inline size |
+| `--landing-hero-measure` / `--landing-prose-measure` | 16ch / 52ch | Landing hero headline + supporting-copy measures (§5 measure law) |
 
 Single-consumer dimensions from the legacy census (`--sk-col-*`, `--feed-*`, `--qr-size`, …) are
 **demoted** to this layer where the component survives, or rejected where it does not — full
