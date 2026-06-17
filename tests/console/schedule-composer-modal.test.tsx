@@ -11,8 +11,10 @@
  *     Tests that need the save path to succeed must supply a far-future datetime.
  *  4. ChatPicker is stubbed to expose a `Select Chat` button and a `Clear Chat` button.
  *  5. contentType toggle is two explicit buttons ("Text"/"Media"), not a checkbox.
- *  6. recurrence is two buttons ("Recurring"/"One-shot") + preset buttons + a text input.
- *  7. cronToHuman preview appears only when recurring=true and cronExpr is non-empty.
+ *  6. recurrence is a 4-segment row ("Once"/"Daily"/"Weekly"/"Cron"); Cron reveals a
+ *     free-text input + cronToHuman preview (Phase A DateTimePicker primitive).
+ *  7. cronToHuman preview appears only when Cron is the active segment and the cron
+ *     expr is non-empty.
  *  8. Backdrop pointerdown does NOT dismiss — dismissable=false (C-B3W2-2 inversion).
  *     Previously backdrop click called onClose; now protected by the Modal primitive.
  *  9. Escape key calls onClose when modal is open (stack-aware capture-phase handler
@@ -248,13 +250,13 @@ describe('ScheduleComposerModal — create mode', () => {
     expect(screen.queryByLabelText(/File path/i)).toBeNull()
   })
 
-  it('recurrence defaults to One-shot (no cron input visible)', () => {
+  it('recurrence defaults to Once (no cron input visible)', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    // Cron input is only visible when recurring=true; One-shot is the default
+    // Cron input is only visible when Cron segment is selected; Once is the default
     expect(screen.queryByPlaceholderText(/Cron expression/i)).toBeNull()
-    // Verify One-shot button is present
-    expect(screen.getByRole('button', { name: /One-shot/i })).toBeDefined()
+    // Verify Once button is present and pressed
+    expect(screen.getByRole('button', { name: 'Once' })).toBeDefined()
   })
 })
 
@@ -301,19 +303,41 @@ describe('ScheduleComposerModal — edit mode (id > 0)', () => {
     expect(selected.textContent).toBe('Alice')
   })
 
-  it('pre-populates recurrence when editMessage.recurrence is set', () => {
+  it('pre-populates recurrence when editMessage.recurrence is the Weekly preset', () => {
     const recurringMsg = makeScheduledMessage({ recurrence: '0 9 * * 1' })
     render(withToast(<ScheduleComposerModal {...defaultProps({ editMessage: recurringMsg })} />))
 
-    // Recurring mode should be active — cron input visible
-    const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
-    expect(cronInput.value).toBe('0 9 * * 1')
+    // Weekly segment should be active
+    const weeklyBtn = screen.getByRole('button', { name: 'Weekly' })
+    expect(weeklyBtn.getAttribute('aria-pressed')).toBe('true')
+    // Cron input is hidden because Cron segment is not active
+    expect(screen.queryByPlaceholderText(/Cron expression/i)).toBeNull()
   })
 
-  it('leaves recurrence in one-shot mode when editMessage.recurrence is undefined', () => {
+  it('pre-populates recurrence when editMessage.recurrence is the Daily preset', () => {
+    const recurringMsg = makeScheduledMessage({ recurrence: '0 9 * * *' })
+    render(withToast(<ScheduleComposerModal {...defaultProps({ editMessage: recurringMsg })} />))
+
+    const dailyBtn = screen.getByRole('button', { name: 'Daily' })
+    expect(dailyBtn.getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('pre-populates the Cron segment when editMessage.recurrence is a non-preset cron', () => {
+    const recurringMsg = makeScheduledMessage({ recurrence: '*/30 * * * *' })
+    render(withToast(<ScheduleComposerModal {...defaultProps({ editMessage: recurringMsg })} />))
+
+    const cronBtn = screen.getByRole('button', { name: 'Cron' })
+    expect(cronBtn.getAttribute('aria-pressed')).toBe('true')
+    const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
+    expect(cronInput.value).toBe('*/30 * * * *')
+  })
+
+  it('leaves recurrence in Once when editMessage.recurrence is undefined', () => {
     const oneShot = makeScheduledMessage({ recurrence: undefined })
     render(withToast(<ScheduleComposerModal {...defaultProps({ editMessage: oneShot })} />))
 
+    const onceBtn = screen.getByRole('button', { name: 'Once' })
+    expect(onceBtn.getAttribute('aria-pressed')).toBe('true')
     expect(screen.queryByPlaceholderText(/Cron expression/i)).toBeNull()
   })
 
@@ -435,7 +459,8 @@ describe('ScheduleComposerModal — field editing', () => {
     expect(caption.className).toContain('c-input')
     expect(caption.className).toContain('font-mono')
 
-    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
+    // Open Cron segment — the free-text cron input routes through TextInput
+    fireEvent.click(screen.getByRole('button', { name: 'Cron' }))
     const cron = screen.getByPlaceholderText(/Cron expression/i)
 
     expect(cron.className).toContain('c-input')
@@ -461,19 +486,19 @@ describe('ScheduleComposerModal — field editing', () => {
     expect(screen.queryByLabelText(/File path/i)).toBeNull()
   })
 
-  it('shows cron input when "Recurring" button is clicked', () => {
+  it('shows cron input when the "Cron" segment is clicked', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cron' }))
 
     expect(screen.getByPlaceholderText(/Cron expression/i)).toBeDefined()
   })
 
-  it('hides cron input when "One-shot" button is clicked after enabling recurring', () => {
+  it('hides cron input when the "Once" segment is clicked after opening Cron', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
-    fireEvent.click(screen.getByRole('button', { name: /One-shot/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cron' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Once' }))
 
     expect(screen.queryByPlaceholderText(/Cron expression/i)).toBeNull()
   })
@@ -481,48 +506,36 @@ describe('ScheduleComposerModal — field editing', () => {
   it('updates cron expression input value', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cron' }))
     const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
     fireEvent.change(cronInput, { target: { value: '*/30 * * * *' } })
     expect(cronInput.value).toBe('*/30 * * * *')
   })
 
-  it('sets cron to preset when a preset button (Daily) is clicked', () => {
+  it('selects Daily preset via the Daily segment (no separate preset button)', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
-    // There are three presets: Daily, Weekly, Monthly
     fireEvent.click(screen.getByRole('button', { name: 'Daily' }))
 
-    const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
-    expect(cronInput.value).toBe('0 9 * * *')
+    // Daily segment is pressed; cron input stays hidden (Daily carries its preset implicitly)
+    expect(screen.getByRole('button', { name: 'Daily' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.queryByPlaceholderText(/Cron expression/i)).toBeNull()
   })
 
-  it('wires Weekly cron preset (0 9 * * 1)', () => {
+  it('selects Weekly preset via the Weekly segment', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Weekly' }))
 
-    const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
-    expect(cronInput.value).toBe('0 9 * * 1')
+    expect(screen.getByRole('button', { name: 'Weekly' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.queryByPlaceholderText(/Cron expression/i)).toBeNull()
   })
 
-  it('wires Monthly cron preset (0 9 1 * *)', () => {
+  it('shows a cron preview when Cron segment is active and expr is non-empty', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
-    fireEvent.click(screen.getByRole('button', { name: 'Monthly' }))
-
-    const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
-    expect(cronInput.value).toBe('0 9 1 * *')
-  })
-
-  it('shows a cron preview when recurring and cronExpr maps to a human string', () => {
-    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
-
-    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
-    // Default cron is '0 9 * * *' (Daily at 09:00)
+    fireEvent.click(screen.getByRole('button', { name: 'Cron' }))
+    // Default seed cron is '0 9 * * *' (Daily at 09:00)
     expect(screen.getByText(/Daily at/i)).toBeDefined()
   })
 
@@ -575,30 +588,30 @@ describe('ScheduleComposerModal — segmented control aria contract', () => {
     expect(screen.getByRole('button', { name: 'Text' }).getAttribute('aria-pressed')).toBe('false')
   })
 
-  it('recurrence-mode seg: role="group" with accessible label "Recurrence mode"', () => {
+  it('recurrence seg: role="group" with accessible label "Recurrence"', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    const recurGroup = screen.getByRole('group', { name: 'Recurrence mode' })
+    const recurGroup = screen.getByRole('group', { name: 'Recurrence' })
     const buttons = within(recurGroup).getAllByRole('button')
-    expect(buttons.map((b) => b.textContent)).toEqual(['Recurring', 'One-shot'])
+    expect(buttons.map((b) => b.textContent)).toEqual(['Once', 'Daily', 'Weekly', 'Cron'])
   })
 
-  it('recurrence-mode seg: One-shot is aria-pressed=true by default', () => {
+  it('recurrence seg: Once is aria-pressed=true by default', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    const oneShotBtn = screen.getByRole('button', { name: 'One-shot' })
-    expect(oneShotBtn.getAttribute('aria-pressed')).toBe('true')
-    const recurBtn = screen.getByRole('button', { name: 'Recurring' })
-    expect(recurBtn.getAttribute('aria-pressed')).toBe('false')
+    const onceBtn = screen.getByRole('button', { name: 'Once' })
+    expect(onceBtn.getAttribute('aria-pressed')).toBe('true')
+    const dailyBtn = screen.getByRole('button', { name: 'Daily' })
+    expect(dailyBtn.getAttribute('aria-pressed')).toBe('false')
   })
 
-  it('recurrence-mode seg: exactly one button pressed after switching to Recurring', () => {
+  it('recurrence seg: exactly one button pressed after switching to Cron', () => {
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Recurring' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cron' }))
 
-    expect(screen.getByRole('button', { name: 'Recurring' }).getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByRole('button', { name: 'One-shot' }).getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByRole('button', { name: 'Cron' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Once' }).getAttribute('aria-pressed')).toBe('false')
   })
 })
 
@@ -754,7 +767,7 @@ describe('ScheduleComposerModal — save success (create)', () => {
     expect(toastValue.success).toHaveBeenCalledWith('Message scheduled')
   })
 
-  it('includes recurrence field in body when recurring mode is enabled', async () => {
+  it('includes recurrence field in body when Daily segment is selected', async () => {
     createScheduledMock.mockResolvedValue({})
     render(withToast(<ScheduleComposerModal {...defaultProps()} />))
 
@@ -763,9 +776,30 @@ describe('ScheduleComposerModal — save success (create)', () => {
     fireEvent.change(textarea, { target: { value: 'recurring test' } })
     const dtInput = screen.getByLabelText(/Scheduled time/i) as HTMLInputElement
     fireEvent.change(dtInput, { target: { value: futureLocalString() } })
-    fireEvent.click(screen.getByRole('button', { name: /Recurring/i }))
-    const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
-    fireEvent.change(cronInput, { target: { value: '0 9 * * 1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Daily' }))
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Schedule'))
+    })
+
+    await waitFor(() => {
+      expect(createScheduledMock).toHaveBeenCalledTimes(1)
+    })
+
+    const [, callBody] = createScheduledMock.mock.calls[0] as [string, Record<string, unknown>]
+    expect(callBody.recurrence).toBe('0 9 * * *')
+  })
+
+  it('includes recurrence field in body when Weekly segment is selected', async () => {
+    createScheduledMock.mockResolvedValue({})
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    fireEvent.click(screen.getByTestId(`select-chat-${CHAT_PERSONAL.conversationKey}`))
+    const textarea = screen.getByRole('textbox', { name: /Message text/i }) as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'weekly test' } })
+    const dtInput = screen.getByLabelText(/Scheduled time/i) as HTMLInputElement
+    fireEvent.change(dtInput, { target: { value: futureLocalString() } })
+    fireEvent.click(screen.getByRole('button', { name: 'Weekly' }))
 
     await act(async () => {
       fireEvent.click(screen.getByText('Schedule'))
@@ -777,6 +811,31 @@ describe('ScheduleComposerModal — save success (create)', () => {
 
     const [, callBody] = createScheduledMock.mock.calls[0] as [string, Record<string, unknown>]
     expect(callBody.recurrence).toBe('0 9 * * 1')
+  })
+
+  it('includes recurrence field in body when Cron segment is selected with custom expr', async () => {
+    createScheduledMock.mockResolvedValue({})
+    render(withToast(<ScheduleComposerModal {...defaultProps()} />))
+
+    fireEvent.click(screen.getByTestId(`select-chat-${CHAT_PERSONAL.conversationKey}`))
+    const textarea = screen.getByRole('textbox', { name: /Message text/i }) as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'cron test' } })
+    const dtInput = screen.getByLabelText(/Scheduled time/i) as HTMLInputElement
+    fireEvent.change(dtInput, { target: { value: futureLocalString() } })
+    fireEvent.click(screen.getByRole('button', { name: 'Cron' }))
+    const cronInput = screen.getByPlaceholderText(/Cron expression/i) as HTMLInputElement
+    fireEvent.change(cronInput, { target: { value: '*/30 * * * *' } })
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Schedule'))
+    })
+
+    await waitFor(() => {
+      expect(createScheduledMock).toHaveBeenCalledTimes(1)
+    })
+
+    const [, callBody] = createScheduledMock.mock.calls[0] as [string, Record<string, unknown>]
+    expect(callBody.recurrence).toBe('*/30 * * * *')
   })
 
   it('does not include recurrence in body when one-shot mode', async () => {
