@@ -368,6 +368,14 @@ type AutoCompactView = {
   silentCompactScopes: Map<string, unknown>;
   waiters: Map<string, unknown>;
 };
+type ImageCoalescerView = {
+  buffers: Map<string, {
+    texts: string[];
+    timer: ReturnType<typeof setTimeout>;
+    msg: IncomingMessage;
+    inboundSeqs: number[];
+  }>;
+};
 import { Database as RealDatabase } from '../../../src/core/database.ts';
 import { getRecentMessages } from '../../../src/core/messages.ts';
 import { tmpdir } from 'node:os';
@@ -547,12 +555,7 @@ type PerChatCleanupRuntimeState = {
   pendingPollQuestions: Map<string, PendingPollQuestion>;
   resumeFailedHandling: Set<string>;
   autoCompact: AutoCompactView;
-  imageCoalesceBuffers: Map<string, {
-    texts: string[];
-    timer: ReturnType<typeof setTimeout>;
-    msg: IncomingMessage;
-    inboundSeqs: number[];
-  }>;
+  imageCoalesce: ImageCoalescerView;
 };
 
 function getPerChatCleanupState(runtime: AgentRuntime): PerChatCleanupRuntimeState {
@@ -2001,7 +2004,7 @@ describe('AgentRuntime', () => {
       state.autoCompact.rapidRearmRecordedForSuccessAt.set(lidKey, 1_700_000_000_000);
       state.autoCompact.consecutiveRapidRearms.set(lidKey, 2);
       state.autoCompact.measureNextTurn.add(lidKey);
-      state.imageCoalesceBuffers.set(lidKey, {
+      state.imageCoalesce.buffers.set(lidKey, {
         texts: ['image-a', 'image-b'],
         timer: imageTimer,
         msg: makeMsg({ chatJid: lidKey, contentType: 'image', inboundSeq: 6 }),
@@ -2052,12 +2055,12 @@ describe('AgentRuntime', () => {
       expect(state.autoCompact.rapidRearmRecordedForSuccessAt.get(canonicalJid)).toBe(1_700_000_000_000);
       expect(state.autoCompact.consecutiveRapidRearms.get(canonicalJid)).toBe(2);
       expect(state.autoCompact.measureNextTurn.has(canonicalJid)).toBe(true);
-      expect(state.imageCoalesceBuffers.get(canonicalJid)).toMatchObject({
+      expect(state.imageCoalesce.buffers.get(canonicalJid)).toMatchObject({
         texts: ['image-a', 'image-b'],
         inboundSeqs: [6, 7],
       });
-      expect(state.imageCoalesceBuffers.get(canonicalJid)?.msg.chatJid).toBe(canonicalJid);
-      expect(state.imageCoalesceBuffers.get(canonicalJid)?.timer).not.toBe(imageTimer);
+      expect(state.imageCoalesce.buffers.get(canonicalJid)?.msg.chatJid).toBe(canonicalJid);
+      expect(state.imageCoalesce.buffers.get(canonicalJid)?.timer).not.toBe(imageTimer);
       const migratedPoll = state.pendingPollQuestions.get(canonicalJid);
       expect(migratedPoll?.chatJid).toBe(canonicalJid);
       expect(migratedPoll?.chatJidAliases.has(lidKey)).toBe(true);
@@ -2081,7 +2084,7 @@ describe('AgentRuntime', () => {
       expect(state.autoCompact.rapidRearmRecordedForSuccessAt.has(lidKey)).toBe(false);
       expect(state.autoCompact.consecutiveRapidRearms.has(lidKey)).toBe(false);
       expect(state.autoCompact.measureNextTurn.has(lidKey)).toBe(false);
-      expect(state.imageCoalesceBuffers.has(lidKey)).toBe(false);
+      expect(state.imageCoalesce.buffers.has(lidKey)).toBe(false);
     } finally {
       vi.useRealTimers();
     }
@@ -2416,7 +2419,7 @@ describe('AgentRuntime', () => {
       const markInboundSkipped = vi.fn();
       state.durability = { markInboundSkipped };
       state.resumeFailedHandling.add('test@s.whatsapp.net');
-      state.imageCoalesceBuffers.set('test@s.whatsapp.net', {
+      state.imageCoalesce.buffers.set('test@s.whatsapp.net', {
         texts: ['image one'],
         timer,
         msg: makeMsg({ content: 'image one', contentType: 'image', inboundSeq: 141 }),
@@ -2426,7 +2429,7 @@ describe('AgentRuntime', () => {
       await state.flushImageCoalesce('test@s.whatsapp.net');
 
       expect(mockSession.sendTurn).not.toHaveBeenCalled();
-      expect(state.imageCoalesceBuffers.has('test@s.whatsapp.net')).toBe(false);
+      expect(state.imageCoalesce.buffers.has('test@s.whatsapp.net')).toBe(false);
       expect(markInboundSkipped).toHaveBeenCalledWith(141, 'resume_failed');
     } finally {
       vi.useRealTimers();
@@ -2462,7 +2465,7 @@ describe('AgentRuntime', () => {
       expect(mockSession.sendTurn).toHaveBeenCalledTimes(1);
       expect(durability.markInboundSkipped).toHaveBeenCalledWith(151, 'coalesced_image');
       expect(durability.markInboundFailed).toHaveBeenCalledWith(152);
-      expect(state.imageCoalesceBuffers.has('test@s.whatsapp.net')).toBe(false);
+      expect(state.imageCoalesce.buffers.has('test@s.whatsapp.net')).toBe(false);
       expect(state.perChatInboundSeqQueue.has('test@s.whatsapp.net')).toBe(false);
       expect(state.pendingTurnText.has('test@s.whatsapp.net')).toBe(false);
       expect(state.perChatTurnContentType.has('test@s.whatsapp.net')).toBe(false);
@@ -3685,13 +3688,13 @@ describe('AgentRuntime', () => {
       const markInboundSkipped = vi.fn();
       state.durability = { markInboundSkipped };
 
-      state.imageCoalesceBuffers.set(targetKey, {
+      state.imageCoalesce.buffers.set(targetKey, {
         texts: ['img-a', 'img-b'],
         timer: targetTimer,
         msg: makeMsg({ chatJid: targetKey, contentType: 'image' }),
         inboundSeqs: [11, 12],
       });
-      state.imageCoalesceBuffers.set(otherKey, {
+      state.imageCoalesce.buffers.set(otherKey, {
         texts: ['other-img'],
         timer: otherTimer,
         msg: makeMsg({ chatJid: otherKey, contentType: 'image' }),
@@ -3700,8 +3703,8 @@ describe('AgentRuntime', () => {
 
       state.cleanupPerChatState(targetKey);
 
-      expect(state.imageCoalesceBuffers.has(targetKey)).toBe(false);
-      expect(state.imageCoalesceBuffers.has(otherKey)).toBe(true);
+      expect(state.imageCoalesce.buffers.has(targetKey)).toBe(false);
+      expect(state.imageCoalesce.buffers.has(otherKey)).toBe(true);
       expect(markInboundSkipped).toHaveBeenCalledWith(11, 'cleanup_aborted');
       expect(markInboundSkipped).toHaveBeenCalledWith(12, 'cleanup_aborted');
       expect(markInboundSkipped).not.toHaveBeenCalledWith(21, 'cleanup_aborted');
@@ -3847,12 +3850,7 @@ describe('AgentRuntime', () => {
         perChatAssistantItemText: Map<string, Map<string, string>>;
         pendingTurnText: Map<string, string>;
         resumeFailedHandling: Set<string>;
-        imageCoalesceBuffers: Map<string, {
-          texts: string[];
-          timer: ReturnType<typeof setTimeout>;
-          msg: IncomingMessage;
-          inboundSeqs: number[];
-        }>;
+        imageCoalesce: ImageCoalescerView;
         durability: { markInboundSkipped: ReturnType<typeof vi.fn> } | null;
       };
 
@@ -3884,7 +3882,7 @@ describe('AgentRuntime', () => {
       runtimeState.perChatAssistantItemText.set('chat-a', new Map([['item-1', 'chunk']]));
       runtimeState.pendingTurnText.set('chat-a', 'hello');
       runtimeState.resumeFailedHandling.add('chat-a');
-      runtimeState.imageCoalesceBuffers.set('chat-a', {
+      runtimeState.imageCoalesce.buffers.set('chat-a', {
         texts: ['image-a'],
         timer: imageTimer,
         msg: makeMsg({ chatJid: 'chat-a@s.whatsapp.net', contentType: 'image' }),
@@ -3913,7 +3911,7 @@ describe('AgentRuntime', () => {
       expect(runtimeState.perChatAssistantItemText.size).toBe(0);
       expect(runtimeState.pendingTurnText.size).toBe(0);
       expect(runtimeState.resumeFailedHandling.size).toBe(0);
-      expect(runtimeState.imageCoalesceBuffers.size).toBe(0);
+      expect(runtimeState.imageCoalesce.buffers.size).toBe(0);
       expect(markInboundSkipped).toHaveBeenCalledWith(31, 'cleanup_aborted');
     } finally {
       vi.useRealTimers();
