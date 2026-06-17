@@ -169,7 +169,7 @@ type RuntimeView = {
   // runtime.autoCompact) holds NodeJS Timeout handles; Map<string, unknown> avoids
   // the ReturnType construct that some grammars cannot parse.
   autoCompact: { silentCompactScopes: Map<string, unknown> };
-  perChatPendingSystemResults: Map<string, number>;
+  pendingSystemResults: { counts: Map<string, number> };
   activateProviderFallback(resetAt: Date | null): void;
   handleEventWithContext(
     event: unknown,
@@ -391,9 +391,9 @@ describe('zero-text fallback turn signal', () => {
 
     const fakeQueue = makeFakeQueue();
     v(runtime).queue = fakeQueue;
-    // isSystemResult derives from perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) > 0.
-    // Setting 1 mirrors what markPendingSystemResult writes before a system turn fires.
-    v(runtime).perChatPendingSystemResults.set(GLOBAL_SCOPE, 1);
+    // isSystemResult derives from pendingSystemResults.counts.get(GLOBAL_TOOL_SCOPE_KEY) > 0.
+    // Setting 1 mirrors what pendingSystemResults.mark writes before a system turn fires.
+    v(runtime).pendingSystemResults.counts.set(GLOBAL_SCOPE, 1);
     v(runtime).turnHadVisibleOutput = false;
 
     v(runtime).handleEvent({ type: 'result', text: null });
