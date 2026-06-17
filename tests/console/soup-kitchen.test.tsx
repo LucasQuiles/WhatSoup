@@ -40,6 +40,18 @@ const useFeedMock = vi.hoisted(() => vi.fn());
 const useFleetMetricsMock = vi.hoisted(() => vi.fn());
 const useLogsMock = vi.hoisted(() => vi.fn());
 const navigateMock = vi.hoisted(() => vi.fn());
+// FleetRowMenu (per-row action kebab) calls useQueryClient on render; the page
+// harness has no QueryClientProvider, so stub the client (same idiom as
+// ops-page.test.tsx). The menu's api wiring is exercised in fleet-row-menu.test.tsx.
+const invalidateQueriesMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@tanstack/react-query', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@tanstack/react-query')>();
+  return {
+    ...actual,
+    useQueryClient: () => ({ invalidateQueries: invalidateQueriesMock }),
+  };
+});
 
 vi.mock('react-router-dom', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-router-dom')>();
@@ -485,6 +497,48 @@ describe('SoupKitchen instance table rendering', () => {
     fireEvent.click(openBtn);
     expect(navigateMock).toHaveBeenCalledTimes(1);
     expect(navigateMock).toHaveBeenCalledWith('/lines/primary-line');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. Per-row action Menu (FleetRowMenu) — kebab wiring on the fleet table
+// ---------------------------------------------------------------------------
+
+describe('SoupKitchen fleet row action menu', () => {
+  const lines: LineInstance[] = [
+    makeLine({ name: 'alpha', mode: 'passive', status: 'online' }),
+    makeLine({ name: 'bravo', mode: 'agent', status: 'online' }),
+  ];
+
+  it('renders an Actions column header', () => {
+    renderPage({ lines });
+    // Header label is screen-reader only ("Actions") — query by columnheader name.
+    expect(screen.getByRole('columnheader', { name: /Actions/ })).toBeDefined();
+  });
+
+  it('renders one kebab action trigger per data row', () => {
+    renderPage({ lines });
+    expect(screen.getByRole('button', { name: 'Actions for alpha' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Actions for bravo' })).toBeDefined();
+  });
+
+  it('opening the kebab menu does NOT open the row drawer (stopPropagation)', () => {
+    renderPage({ lines });
+    expect(screen.queryByRole('complementary')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for alpha' }));
+    // The Menu surface opens…
+    expect(screen.getByRole('menu')).toBeDefined();
+    // …but the drawer (complementary landmark) stays closed.
+    expect(screen.queryByRole('complementary')).toBeNull();
+  });
+
+  it('the kebab menu exposes Restart, Stop, and Delete line items', () => {
+    renderPage({ lines });
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for alpha' }));
+    const menu = screen.getByRole('menu');
+    expect(within(menu).getByText('Restart')).toBeDefined();
+    expect(within(menu).getByText('Stop')).toBeDefined();
+    expect(within(menu).getByText('Delete line')).toBeDefined();
   });
 });
 
