@@ -33,6 +33,7 @@ function waitForExit(child: ChildProcess): Promise<{ code: number | null; signal
 afterEach(() => {
   vi.restoreAllMocks();
   vi.doUnmock('node:fs');
+  vi.doUnmock('node:child_process');
 });
 
 describe('buildMcpLaunchCommand', () => {
@@ -76,6 +77,23 @@ describe('buildMcpLaunchCommand', () => {
     expect(buildMcpLaunchCommand(scriptPath).args).toEqual([scriptPath]);
   });
 
+  it('uses the Windows tsx command shim when imported on win32', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    expect(originalPlatform).toBeDefined();
+    Object.defineProperty(process, 'platform', {
+      ...originalPlatform,
+      value: 'win32',
+    });
+
+    try {
+      const { buildMcpLaunchCommand } = await importLauncher();
+
+      expect(buildMcpLaunchCommand('server.ts').command)
+        .toBe(join(REPO_ROOT, 'node_modules', '.bin', 'tsx.cmd'));
+    } finally {
+      Object.defineProperty(process, 'platform', originalPlatform!);
+    }
+  });
 });
 
 describe('spawnMcpProcess', () => {
@@ -157,6 +175,31 @@ describe('spawnMcpProcess', () => {
       }
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it('uses default stdio when callers do not override it', async () => {
+    vi.resetModules();
+    const child = { pid: 123 } as ChildProcess;
+    const spawnMock = vi.fn(() => child);
+    vi.doMock('node:child_process', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:child_process')>();
+      return {
+        ...actual,
+        spawn: spawnMock,
+      };
+    });
+    const { spawnMcpProcess } = await import(MODULE_PATH);
+
+    expect(spawnMcpProcess('server.ts', { MCP_LAUNCHER_OVERRIDE: 'from-caller' }))
+      .toBe(child);
+    expect(spawnMock).toHaveBeenCalledWith(
+      TSX_RUNNER,
+      ['server.ts'],
+      expect.objectContaining({
+        env: expect.objectContaining({ MCP_LAUNCHER_OVERRIDE: 'from-caller' }),
+        stdio: ['pipe', 'pipe', 'inherit'],
+      }),
+    );
   });
 
   it('passes opts through so callers can pipe stderr and observe child exit', async () => {
