@@ -94,6 +94,7 @@ import { ImageCoalescer } from './image-coalescer.ts';
 import { PendingSystemResultTracker } from './pending-system-result-tracker.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { FallbackWindowMetrics } from './fallback-window-metrics.ts';
+import { FallbackChain } from './fallback-chain-state.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -863,7 +864,11 @@ export class AgentRuntime implements Runtime {
   // arm/deactivate/replay call sites) stays in AgentRuntime.
   private readonly fallbackMetrics = new FallbackWindowMetrics();
   private activeFallbackEntry: AgentFallbackEntry | null = null;
-  private failedFallbackEntryKeys = new Set<string>();
+  // Per-window fallback-chain state (failed-entry keys + last-selection
+  // eligibility + entry-key/snapshot/exhausted queries). The selection DECISION
+  // (selectFallbackEntryForWindow / markActiveFallbackFailed) stays in AgentRuntime
+  // and drives this; agentFallbacks (config) stays here and is passed in.
+  private readonly fallbackChain = new FallbackChain();
   // Consecutive empty (no-text, no-tool) turns served by the CURRENT active
   // fallback entry. A structurally-dead fallback model (e.g. an opencode
   // provider integration that connects but emits no assistant text) returns
@@ -877,7 +882,6 @@ export class AgentRuntime implements Runtime {
   // the last advance was attempted for; cleared when a non-empty turn proves
   // the active entry good or when a window arms/reverts.
   private fallbackEmptyAdvanceAttemptedForKey: string | null = null;
-  private fallbackChainState: Array<AgentFallbackEntry & { eligible: boolean }> = [];
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
@@ -5343,20 +5347,9 @@ export class AgentRuntime implements Runtime {
     return this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
   }
 
-  private fallbackChainSnapshot(): Array<AgentFallbackEntry & { eligible: boolean | null }> {
-    if (this.fallbackChainState.length > 0) {
-      return this.fallbackChainState.map((entry) => ({ ...entry }));
-    }
-    return this.agentFallbacks.map((entry) => ({ ...entry, eligible: null }));
-  }
-
-  private fallbackEntryKey(entry: AgentFallbackEntry): string {
-    return `${entry.provider}\u0000${entry.model ?? ''}`;
-  }
-
   private selectFallbackEntryForWindow(reason?: string): { entry: AgentFallbackEntry; selectedHadMissingCredential: boolean } | null {
     if (this.agentFallbacks.length === 0) {
-      this.fallbackChainState = [];
+      this.fallbackChain.chainState = [];
       return null;
     }
 
@@ -5370,7 +5363,7 @@ export class AgentRuntime implements Runtime {
         state.push({ ...entry, eligible: false });
         continue;
       }
-      if (this.failedFallbackEntryKeys.has(this.fallbackEntryKey(entry))) {
+      if (this.fallbackChain.failedKeys.has(this.fallbackChain.entryKey(entry))) {
         state.push({ ...entry, eligible: false });
         continue;
       }
@@ -5396,7 +5389,7 @@ export class AgentRuntime implements Runtime {
         );
       }
     }
-    this.fallbackChainState = state;
+    this.fallbackChain.chainState = state;
     if (requireIndependentProvider && firstEligibleIndex === -1 && firstIndependentIndex === -1) {
       emitAlertChecked(
         this.instanceName,
@@ -5429,9 +5422,9 @@ export class AgentRuntime implements Runtime {
       if (!sessionId?.startsWith(`${this.activeFallbackEntry.provider}-`)) return null;
     }
 
-    const key = this.fallbackEntryKey(this.activeFallbackEntry);
-    if (!this.failedFallbackEntryKeys.has(key)) {
-      this.failedFallbackEntryKeys.add(key);
+    const key = this.fallbackChain.entryKey(this.activeFallbackEntry);
+    if (!this.fallbackChain.failedKeys.has(key)) {
+      this.fallbackChain.failedKeys.add(key);
       emitAlertChecked(
         this.instanceName,
         'fallback_provider_failed',
@@ -5565,7 +5558,7 @@ export class AgentRuntime implements Runtime {
 
     // Preserve previous single-fallback behavior when no alternate exists:
     // keep the current fallback window instead of reverting to a known-bad primary.
-    this.failedFallbackEntryKeys.delete(failedKey);
+    this.fallbackChain.failedKeys.delete(failedKey);
     return this.activateProviderFallback(resetAt, reason);
   }
 
@@ -5626,9 +5619,9 @@ export class AgentRuntime implements Runtime {
       primaryModelUsability: this.primaryModelUsability ? { ...this.primaryModelUsability } : null,
       turnCapability: this.getTurnCapability(),
       activeFallbackEntry: fallbackEntry ? { ...fallbackEntry } : null,
-      fallbackChain: this.fallbackChainSnapshot(),
-      fallbackChainExhausted: this.isFallbackChainExhausted(),
-      failedEntryCount: this.failedFallbackEntryKeys.size,
+      fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks),
+      fallbackChainExhausted: this.fallbackChain.isExhausted(this.agentFallbacks),
+      failedEntryCount: this.fallbackChain.failedKeys.size,
       turnErrorCounts: Object.fromEntries(this.turnCapabilityTracker.errorCounts),
       handoffDistiller: {
         enabled: this.handoffDistillerEnabled(),
@@ -5636,19 +5629,6 @@ export class AgentRuntime implements Runtime {
         model: this.handoffDistillModel(),
       },
     };
-  }
-
-  /**
-   * True when every configured fallback entry has failed during the current
-   * window — the terminal "nothing left to fall back to" condition. Surfaced for
-   * observability (health) and to drive the exhausted user-message template;
-   * read-only and derived, it changes no fallback behaviour.
-   */
-  private isFallbackChainExhausted(): boolean {
-    if (this.agentFallbacks.length === 0) return false;
-    return this.agentFallbacks.every((entry) =>
-      this.failedFallbackEntryKeys.has(this.fallbackEntryKey(entry)),
-    );
   }
 
   private getTurnCapability(): RuntimeTurnCapability {
@@ -5729,7 +5709,7 @@ export class AgentRuntime implements Runtime {
     // Reset reason so armFallbackWindow stores 'admin-forced' as the new
     // original cause, replacing any prior reason (e.g. 'usage-limit').
     this.fallbackArmReason = null;
-    this.failedFallbackEntryKeys.clear();
+    this.fallbackChain.failedKeys.clear();
     this.consecutiveFallbackEmptyTurns = 0;
     this.fallbackEmptyAdvanceAttemptedForKey = null;
     this.armFallbackWindow(until, 'admin-forced');
@@ -5888,7 +5868,7 @@ export class AgentRuntime implements Runtime {
     // the same entry when no alternate exists. Reuses the terminal path's
     // single-fallback preservation: when no alternate remains the window keeps
     // the current entry rather than reverting to a known-bad primary.
-    const entryKey = entry ? this.fallbackEntryKey(entry) : null;
+    const entryKey = entry ? this.fallbackChain.entryKey(entry) : null;
     if (
       session !== null &&
       entryKey !== null &&
@@ -6207,7 +6187,7 @@ export class AgentRuntime implements Runtime {
       primaryProvider: this.agentProvider,
       fallbackProvider: fallbackEntry.provider,
       fallbackModel: fallbackEntry.model,
-      fallbackChain: this.fallbackChainSnapshot(),
+      fallbackChain: this.fallbackChain.snapshot(this.agentFallbacks),
       resetAt: resetAt ? resetAt.toISOString() : null,
       activeUntil: new Date(until).toISOString(),
       extended: wasActive,
@@ -6250,7 +6230,7 @@ export class AgentRuntime implements Runtime {
     this.fallbackActivatedAt = null;
     this.fallbackArmReason = null;
     this.activeFallbackEntry = null;
-    this.failedFallbackEntryKeys.clear();
+    this.fallbackChain.failedKeys.clear();
     this.consecutiveFallbackEmptyTurns = 0;
     this.fallbackEmptyAdvanceAttemptedForKey = null;
     this.fallbackResetAt = null;

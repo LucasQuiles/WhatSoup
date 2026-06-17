@@ -143,7 +143,7 @@ function makeRuntime(agentFallbacks?: Array<{ provider: string; model?: string }
 type CascadeView = {
   effectiveProvider: string;
   effectiveModel: string | undefined;
-  failedFallbackEntryKeys: Set<string>;
+  fallbackChain: { failedKeys: Set<string> };
   fallbackActiveUntil: number | null;
   activateProviderFallback(
     resetAt: Date | null,
@@ -335,7 +335,7 @@ describe('fallback-provider usage-limit cascade', () => {
 
     expect(cv(runtime).effectiveProvider).toBe('openai-api');
     expect(cv(runtime).effectiveModel).toBe('gpt-5.5');
-    expect(cv(runtime).failedFallbackEntryKeys.has('anthropic-api\u0000claude-opus-4-8')).toBe(true);
+    expect(cv(runtime).fallbackChain.failedKeys.has('anthropic-api\u0000claude-opus-4-8')).toBe(true);
     expect(emitAlertChecked).toHaveBeenCalledWith(
       'test',
       'fallback_provider_failed',
@@ -389,7 +389,7 @@ describe('fallback-provider usage-limit cascade', () => {
 
     expect(cv(runtime).effectiveProvider).toBe('openai-api');
     expect(cv(runtime).effectiveModel).toBe('gpt-5.5');
-    expect(cv(runtime).failedFallbackEntryKeys.has('opencode-cli\u0000minimax/minimax-m2')).toBe(true);
+    expect(cv(runtime).fallbackChain.failedKeys.has('opencode-cli\u0000minimax/minimax-m2')).toBe(true);
     expect(emitAlertChecked).toHaveBeenCalledWith(
       'test',
       'fallback_provider_failed',

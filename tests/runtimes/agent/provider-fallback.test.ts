@@ -196,8 +196,10 @@ type FallbackView = {
   };
   recordTurnCapabilityFailure(isUserTurnResult: boolean, errorClass: string): void;
   agentFallbacks: Array<{ provider: string; model?: string }>;
-  failedFallbackEntryKeys: Set<string>;
-  fallbackEntryKey(entry: { provider: string; model?: string }): string;
+  fallbackChain: {
+    failedKeys: Set<string>;
+    entryKey(entry: { provider: string; model?: string }): string;
+  };
   kickDiagnosticBundle(wf: unknown, providerText: string): void;
   lastDiagnosticBundleAt: number;
   stashHandoffNotice(chatJid: string, message: string, now: number): boolean;
@@ -351,7 +353,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(v.getFallbackState().failedEntryCount).toBe(0);
 
     for (const entry of v.agentFallbacks) {
-      v.failedFallbackEntryKeys.add(v.fallbackEntryKey(entry));
+      v.fallbackChain.failedKeys.add(v.fallbackChain.entryKey(entry));
     }
     expect(v.getFallbackState().fallbackChainExhausted).toBe(true);
     expect(v.getFallbackState().failedEntryCount).toBe(1);
