@@ -3,6 +3,7 @@ import { Link, NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Inbox,
+  BarChart3,
   Terminal,
   CheckCircle2,
   AlertTriangle,
@@ -104,6 +105,14 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
                 )}
               </>
             )}
+          </NavLink>
+
+          <NavLink
+            to="/metrics"
+            className={({ isActive }) => railItemClass(isActive)}
+          >
+            <BarChart3 size={18} strokeWidth={1.75} aria-hidden="true" />
+            <RailLabel>Metrics</RailLabel>
           </NavLink>
 
           <NavLink

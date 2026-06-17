@@ -58,6 +58,7 @@ describe('Nav routing targets', () => {
 
     expect(navLink('Fleet').getAttribute('href')).toBe('/');
     expect(navLink('Inbox').getAttribute('href')).toBe('/inbox');
+    expect(navLink('Metrics').getAttribute('href')).toBe('/metrics');
     expect(navLink('Ops').getAttribute('href')).toBe('/ops');
   });
 });
@@ -80,6 +81,16 @@ describe('Nav route state', () => {
 
     expectCurrentLink('Inbox');
     expect(navLink('Fleet').getAttribute('aria-current')).toBeNull();
+    expect(navLink('Metrics').getAttribute('aria-current')).toBeNull();
+    expect(navLink('Ops').getAttribute('aria-current')).toBeNull();
+  });
+
+  it('marks Metrics current only on the metrics route', () => {
+    renderNav({}, '/metrics');
+
+    expectCurrentLink('Metrics');
+    expect(navLink('Fleet').getAttribute('aria-current')).toBeNull();
+    expect(navLink('Inbox').getAttribute('aria-current')).toBeNull();
     expect(navLink('Ops').getAttribute('aria-current')).toBeNull();
   });
 
@@ -89,6 +100,7 @@ describe('Nav route state', () => {
     expectCurrentLink('Ops');
     expect(navLink('Fleet').getAttribute('aria-current')).toBeNull();
     expect(navLink('Inbox').getAttribute('aria-current')).toBeNull();
+    expect(navLink('Metrics').getAttribute('aria-current')).toBeNull();
   });
 
   it('uses the action accent, not status green, for the active-route full fill', () => {
@@ -131,13 +143,14 @@ describe('Nav rail structure', () => {
     expect(within(head as HTMLElement).getByLabelText('SOUP')).toBeDefined();
   });
 
-  it('stacks the three primary destinations as rail items inside the nav', () => {
+  it('stacks the four primary destinations as rail items inside the nav', () => {
     const { container } = renderNav();
 
     const items = container.querySelectorAll('.soup-rail__nav .soup-rail__item');
-    expect(items).toHaveLength(3);
+    expect(items).toHaveLength(4);
     expect(navLink('Fleet').className).toContain('soup-rail__item');
     expect(navLink('Inbox').className).toContain('soup-rail__item');
+    expect(navLink('Metrics').className).toContain('soup-rail__item');
     expect(navLink('Ops').className).toContain('soup-rail__item');
   });
 
@@ -166,6 +179,7 @@ describe('Nav unread badge placement', () => {
 
     expect(within(navLink(/Inbox/)).getByText('7')).toBeDefined();
     expect(within(navLink('Fleet')).queryByText('7')).toBeNull();
+    expect(within(navLink('Metrics')).queryByText('7')).toBeNull();
     expect(within(navLink('Ops')).queryByText('7')).toBeNull();
   });
 
