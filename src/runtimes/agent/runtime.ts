@@ -9,7 +9,6 @@ import type { AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
   isProviderAuthRequiredMessage,
-  type ProviderFailureKind,
 } from './failure-taxonomy.ts';
 import {
   workflowForProviderText,
@@ -93,6 +92,7 @@ import { CrashTracker } from './crash-tracker.ts';
 import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './auto-compact-controller.ts';
 import { ImageCoalescer } from './image-coalescer.ts';
 import { PendingSystemResultTracker } from './pending-system-result-tracker.ts';
+import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -264,7 +264,6 @@ function oneMessageHandoffEnabled(): boolean {
 }
 
 type ProviderFallbackReason = 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable';
-type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empty-output';
 
 /** Narrow an arbitrary (possibly null) string to a ProviderFallbackReason. */
 function isProviderFallbackReason(value: unknown): value is ProviderFallbackReason {
@@ -922,12 +921,11 @@ export class AgentRuntime implements Runtime {
    *  sleep-wake clock jumps cannot prematurely end or over-extend the grace
    *  window (R1 hardening). */
   private readonly runtimeBootPerfMs = performance.now();
-  private lastSuccessfulTurnAt: number | null = null;
-  private lastTurnErrorClass: TurnCapabilityErrorClass | null = null;
-  private lastTurnErrorAt: number | null = null;
-  // Cumulative count of user-turn failures by class (process lifetime). Telemetry
-  // for which provider-failure classes fire most; surfaced verbatim in /health.
-  private readonly turnErrorCounts = new Map<TurnCapabilityErrorClass, number>();
+  // Turn-outcome telemetry feeding the fallback decision + /health: last successful
+  // user turn, last user-turn error class/time, and cumulative per-class failure
+  // counts. The is-user-turn guard + consecutivePrimaryEmptyTurns reset stay in
+  // recordTurnCapabilitySuccess/Failure; the field mutations live in the tracker.
+  private readonly turnCapabilityTracker = new TurnCapabilityTracker();
   // Silent-compact + auto-compact rearm state machine (cooldown/last-success/
   // rapid-rearm/measure/boundary maps, in-flight waiters, and cumulative health
   // counters). Constructed in the constructor once autoCompactInputTokens is known.
@@ -5529,7 +5527,7 @@ export class AgentRuntime implements Runtime {
     // corrections, host sleep/wake, VM migration — all most likely right after
     // process start) cannot prematurely end or over-extend the grace window.
     const inStartupGrace =
-      this.lastSuccessfulTurnAt === null &&
+      this.turnCapabilityTracker.lastSuccessfulTurnAt === null &&
       performance.now() - this.runtimeBootPerfMs < EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS;
     const armViaProbe = probeFlagsUnusable && !inStartupGrace;
     if (!armViaProbe && !reachedThreshold) return false;
@@ -5649,7 +5647,7 @@ export class AgentRuntime implements Runtime {
       fallbackChain: this.fallbackChainSnapshot(),
       fallbackChainExhausted: this.isFallbackChainExhausted(),
       failedEntryCount: this.failedFallbackEntryKeys.size,
-      turnErrorCounts: Object.fromEntries(this.turnErrorCounts),
+      turnErrorCounts: Object.fromEntries(this.turnCapabilityTracker.errorCounts),
       handoffDistiller: {
         enabled: this.handoffDistillerEnabled(),
         contextInjection: this.handoffContextEnabled(),
@@ -5684,17 +5682,15 @@ export class AgentRuntime implements Runtime {
     return {
       modelUsable,
       modelUsabilityStatus: usability?.status ?? null,
-      lastSuccessfulTurnAt: this.lastSuccessfulTurnAt,
-      lastTurnErrorClass: this.lastTurnErrorClass,
-      lastTurnErrorAt: this.lastTurnErrorAt,
+      lastSuccessfulTurnAt: this.turnCapabilityTracker.lastSuccessfulTurnAt,
+      lastTurnErrorClass: this.turnCapabilityTracker.lastTurnErrorClass,
+      lastTurnErrorAt: this.turnCapabilityTracker.lastTurnErrorAt,
     };
   }
 
   private recordTurnCapabilitySuccess(isUserTurnResult: boolean): void {
     if (!isUserTurnResult) return;
-    this.lastSuccessfulTurnAt = Date.now();
-    this.lastTurnErrorClass = null;
-    this.lastTurnErrorAt = null;
+    this.turnCapabilityTracker.recordSuccess();
     this.consecutivePrimaryEmptyTurns = 0;
   }
 
@@ -5703,9 +5699,7 @@ export class AgentRuntime implements Runtime {
     errorClass: TurnCapabilityErrorClass,
   ): void {
     if (!isUserTurnResult) return;
-    this.lastTurnErrorClass = errorClass;
-    this.lastTurnErrorAt = Date.now();
-    this.turnErrorCounts.set(errorClass, (this.turnErrorCounts.get(errorClass) ?? 0) + 1);
+    this.turnCapabilityTracker.recordFailure(errorClass);
   }
 
   /**
