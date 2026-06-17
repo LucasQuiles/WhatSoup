@@ -65,6 +65,7 @@ import { Database } from '../../src/core/database.ts';
 import type { Messenger } from '../../src/core/types.ts';
 import { sendTracked } from '../../src/core/durability.ts';
 import { emitAlert } from '../../src/lib/emit-alert.ts';
+import { config } from '../../src/config.ts';
 import {
   emitHealReport,
   handleHealComplete,
@@ -612,5 +613,156 @@ describe('parseHealContext', () => {
       chatJid: '123@s.whatsapp.net',
       attempt: 2,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// heal.ts uncovered-branch coverage
+// ---------------------------------------------------------------------------
+
+describe('heal.ts uncovered-branch coverage', () => {
+  it('falls back to the "unknown" error class when crashClass/stderr/recentLogs are all absent', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    // No crashClass, stderr, or recentLogs → normalizeErrorClass uses 'unknown'
+    // and the `?? 'unknown'` final fallback (4th binary-expr operand) is hit.
+    const reportId = emitHealReport(db, messenger, null, {
+      type: 'degraded',
+      chatJid: '15550000001@s.whatsapp.net',
+    });
+
+    expect(reportId).not.toBeNull();
+    const row = db.raw.prepare('SELECT error_class FROM heal_reports WHERE report_id = ?').get(reportId) as { error_class: string };
+    // Type 'degraded' + 'unknown' hint (no stderr/recentLogs/crashClass supplied)
+    expect(row.error_class).toBe('degraded__unknown');
+  });
+
+  it('emits the valve alert with every optional field populated in the detail lines', async () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    // Fill the valve with 5 unique non-queued reports first.
+    for (let i = 0; i < 5; i++) {
+      emitHealReport(db, messenger, null, {
+        type: 'crash',
+        stderr: `ValveFill_${i}_${randomUUID().slice(0, 8)}: padding`,
+      });
+    }
+
+    vi.mocked(emitAlert).mockClear();
+    vi.mocked(sendTracked).mockClear();
+
+    // 6th emit trips the valve. Supply EVERY optional field so every
+    // `data.x ? \`x=${data.x}\` : null` ternary hits its truthy branch.
+    const tripped = emitHealReport(db, messenger, null, {
+      type: 'service_crash',
+      chatJid: '1111111000000000@g.us',
+      exitCode: 137,
+      signal: 'SIGKILL',
+      provider: 'claude-cli',
+      crashClass: 'provider_auth_required',
+      stderr: 'fatal: out of memory',
+      recentLogs: 'line A\nline B',
+    });
+
+    // Valve suppresses the report (no DB row, no send)
+    expect(tripped).toBeNull();
+    expect(vi.mocked(sendTracked)).not.toHaveBeenCalled();
+
+    // Alert fired with all detail lines present (every ternary truthy branch).
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledOnce();
+    const detailArg = vi.mocked(emitAlert).mock.calls[0]![3];
+    expect(detailArg).toMatch(/chat_jid=1111111000000000@g\.us/);
+    expect(detailArg).toMatch(/exit_code=137/);
+    expect(detailArg).toMatch(/signal=SIGKILL/);
+    expect(detailArg).toMatch(/provider=claude-cli/);
+    expect(detailArg).toMatch(/crash_class=provider_auth_required/);
+    expect(detailArg).toMatch(/stderr=fatal: out of memory/);
+    expect(detailArg).toMatch(/recent_logs=line A/);
+  });
+
+  it('omits the stderr detail line in the valve alert when stderr is absent', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    // Fill the valve with 5 unique non-queued reports first.
+    for (let i = 0; i < 5; i++) {
+      emitHealReport(db, messenger, null, {
+        type: 'crash',
+        stderr: `ValveFillB_${i}_${randomUUID().slice(0, 8)}: padding`,
+      });
+    }
+
+    vi.mocked(emitAlert).mockClear();
+    vi.mocked(sendTracked).mockClear();
+
+    // 6th emit trips the valve with NO stderr → the stderr ternary hits its
+    // falsy (null) branch and the detail line is omitted.
+    const tripped = emitHealReport(db, messenger, null, {
+      type: 'service_crash',
+      chatJid: '1111111000000000@g.us',
+      crashClass: 'startup_failed',
+      recentLogs: 'boot loop detected',
+    });
+
+    expect(tripped).toBeNull();
+    expect(vi.mocked(sendTracked)).not.toHaveBeenCalled();
+    expect(vi.mocked(emitAlert)).toHaveBeenCalledOnce();
+    const detailArg = vi.mocked(emitAlert).mock.calls[0]![3];
+    // stderr line absent (falsy branch of the ternary)
+    expect(detailArg).not.toMatch(/stderr=/);
+    // but other present fields are still rendered
+    expect(detailArg).toMatch(/crash_class=startup_failed/);
+    expect(detailArg).toMatch(/recent_logs=boot loop detected/);
+  });
+
+  it('returns the reportId without sending when no Q control peer is configured', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    // Mutate the shared config mock to remove the Q peer, then restore it.
+    config.controlPeers.delete('q');
+    try {
+      const reportId = emitHealReport(db, messenger, null, {
+        type: 'crash',
+        stderr: 'NoQPeer: boom',
+      });
+
+      // Report is still created with state='attempt_1' but no send happens.
+      expect(reportId).not.toBeNull();
+      const row = db.raw.prepare('SELECT state FROM heal_reports WHERE report_id = ?').get(reportId) as { state: string };
+      expect(row.state).toBe('attempt_1');
+      expect(vi.mocked(sendTracked)).not.toHaveBeenCalled();
+    } finally {
+      config.controlPeers.set('q', '15559998888');
+    }
+  });
+
+  it('includes signal and recentLogs lines in the human-readable heal report when present', async () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+
+    emitHealReport(db, messenger, null, {
+      type: 'crash',
+      chatJid: '15550000001@s.whatsapp.net',
+      exitCode: 1,
+      signal: 'SIGTERM',
+      provider: 'claude-cli',
+      crashClass: 'oom_killed',
+      stderr: 'Error: heap out of memory',
+      recentLogs: 'log line 1\nlog line 2\nlog line 3',
+    });
+
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendTracked)).toHaveBeenCalledOnce();
+    });
+
+    const [, , message] = vi.mocked(sendTracked).mock.calls[0]!;
+    // signal truthy branch (formatHealReport line 383)
+    expect(message).toContain('Signal: SIGTERM');
+    // recentLogs truthy branch (formatHealReport line 387)
+    expect(message).toContain('Recent logs:');
+    expect(message).toContain('log line 3');
   });
 });
