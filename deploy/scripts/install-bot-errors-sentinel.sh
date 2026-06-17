@@ -158,6 +158,11 @@ write_launchd() {
   <dict>
     <key>SuccessfulExit</key><false/>
   </dict>
+  <!-- Rate-limit respawns. A non-zero exit (e.g. result_requires_attention -->
+  <!-- returns 1) otherwise drives KeepAlive into a tight respawn+re-probe -->
+  <!-- loop during an incident. The attention signal surfaces via the emitted -->
+  <!-- event/heartbeat, not the process exit code, so throttling is safe. -->
+  <key>ThrottleInterval</key><integer>60</integer>
   <key>StartInterval</key><integer>$INTERVAL_SECONDS</integer>
   <key>StandardOutPath</key><string>$stdout_xml</string>
   <key>StandardErrorPath</key><string>$stderr_xml</string>

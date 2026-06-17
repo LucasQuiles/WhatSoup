@@ -69,6 +69,10 @@ watchdog_plist="$tmp/LaunchAgents/com.bot-errors.sentinel.watchdog.plist"
 [[ -f "$watchdog_plist" ]] || { echo "SENTINEL_INSTALLER_FAIL missing launchd watchdog plist"; cat "$tmp/launchd.err"; exit 1; }
 grep -q '<key>StartInterval</key><integer>1800</integer>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd interval"; cat "$plist"; exit 1; }
 grep -q '<key>SuccessfulExit</key><false/>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd restart-on-failure"; cat "$plist"; exit 1; }
+# KeepAlive{SuccessfulExit:false} respawns on every non-zero exit (e.g. the
+# result_requires_attention exit-1 path). Without ThrottleInterval launchd
+# respawns + re-probes in a tight loop during an incident. Rate-limit it.
+grep -q '<key>ThrottleInterval</key><integer>60</integer>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd throttle interval"; cat "$plist"; exit 1; }
 grep -q '<string>--hosts</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd hosts arg missing"; cat "$plist"; exit 1; }
 grep -q '<string>--state-dir</string>' "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd state arg missing"; cat "$plist"; exit 1; }
 grep -q "$repo/deploy/scripts/bot-errors-sentinel.py" "$plist" || { echo "SENTINEL_INSTALLER_FAIL launchd script path"; cat "$plist"; exit 1; }
