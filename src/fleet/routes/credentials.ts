@@ -278,7 +278,7 @@ export async function handleVerifyCredential(
   const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
   let status: 'valid' | 'invalid' | 'unreachable';
   try {
-    const resp = await fetch(descriptor.url, { method: 'GET', headers, signal: controller.signal });
+    const resp = await fetch(descriptor.url, { method: 'GET', headers, signal: controller.signal, redirect: 'error' });
     status = resp.status >= 200 && resp.status < 300 ? 'valid' : resp.status === 401 || resp.status === 403 ? 'invalid' : 'unreachable';
   } catch {
     status = 'unreachable';
