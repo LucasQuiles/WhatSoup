@@ -732,9 +732,9 @@ const SoupKitchen: FC = () => {
       >
         {/* Connection Table */}
         <div className="c-card flex flex-col overflow-hidden min-h-[var(--fleet-pane-min-h)] lg:basis-0 lg:grow-[3]">
-          {/* Instances heading — layout hierarchy: above the toolbar anatomy */}
+          {/* Lines heading — layout hierarchy: above the toolbar anatomy */}
           <h2 className="c-heading-lg flex-shrink-0 px-[var(--sp-3)] pt-[var(--sp-2)]">
-            Instances
+            Lines
           </h2>
 
           {/* Toolbar — filter group + search + primary action; no time-range (C-2) */}

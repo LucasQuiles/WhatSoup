@@ -147,9 +147,9 @@ describe('KeyboardShortcutsHelp — SHORTCUTS list contract', () => {
       [
         'Close modals',
         'Focus search',
+        'Go to Fleet',
         'Go to Inbox',
         'Go to Ops',
-        'Go to Soup Kitchen',
         'Show this help',
       ].sort()
     );
@@ -177,7 +177,7 @@ describe('KeyboardShortcutsHelp — SHORTCUTS list contract', () => {
       const kbds = Array.from(row.querySelectorAll('kbd')).map((k) => k.textContent!);
       keysByLabel.set(label, kbds);
     }
-    expect(keysByLabel.get('Go to Soup Kitchen')).toEqual(['1']);
+    expect(keysByLabel.get('Go to Fleet')).toEqual(['1']);
     expect(keysByLabel.get('Go to Inbox')).toEqual(['2']);
     expect(keysByLabel.get('Go to Ops')).toEqual(['3']);
     expect(keysByLabel.get('Close modals')).toEqual(['Esc']);

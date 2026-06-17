@@ -15,7 +15,7 @@ const mod = isMac ? '⌘' : 'Ctrl';
 
 const SHORTCUTS = [
   { keys: [`${mod}+K`], label: 'Focus search' },
-  { keys: ['1'], label: 'Go to Soup Kitchen' },
+  { keys: ['1'], label: 'Go to Fleet' },
   { keys: ['2'], label: 'Go to Inbox' },
   { keys: ['3'], label: 'Go to Ops' },
   { keys: ['Esc'], label: 'Close modals' },

@@ -42,11 +42,13 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
     >
       {/* Left cluster: logo + nav items */}
       <div className="flex items-center gap-[var(--sp-2)] sm:gap-[var(--sp-6)] min-w-0">
-        <span
-          className="text-xl font-sans font-black select-none tracking-[var(--tracking-tighter)]"
-        >
-          <span className="text-text-2">What</span>
-          <span className="text-s-ok">Soup</span>
+        {/* SOUP nameplate — engraved instrument label (brand.md §1.1–§1.3).
+            Lockup styled in primitives.css (.soup-nameplate*): teal heritage tick
+            (--mode-passive-solid, NOT the action accent), --sp-3 gap, wordmark in
+            --type-nameplate with tracking/optical-centering corrections. */}
+        <span className="soup-nameplate" aria-label="SOUP">
+          <span aria-hidden="true" className="soup-nameplate__tick" />
+          <span className="soup-nameplate__wm">SOUP</span>
         </span>
 
         <Link
@@ -59,7 +61,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           }`}
         >
           <LayoutDashboard size={18} strokeWidth={1.75} aria-hidden="true" />
-          <span className="max-sm:sr-only">Soup Kitchen</span>
+          <span className="max-sm:sr-only">Fleet</span>
           {isFleetActive && (
             <span
               className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm left-[var(--sp-3)] right-[var(--sp-3)]"

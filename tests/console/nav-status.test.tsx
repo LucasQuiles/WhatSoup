@@ -43,9 +43,9 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('Nav — navigation links', () => {
-  it('renders Soup Kitchen, Inbox, and Ops links', () => {
+  it('renders Fleet, Inbox, and Ops links', () => {
     renderNav();
-    expect(screen.getByText('Soup Kitchen')).toBeDefined();
+    expect(screen.getByText('Fleet')).toBeDefined();
     expect(screen.getByText('Inbox')).toBeDefined();
     expect(screen.getByText('Ops')).toBeDefined();
   });
@@ -56,10 +56,11 @@ describe('Nav — navigation links', () => {
     expect(nav.getAttribute('aria-label')).toBe('Main navigation');
   });
 
-  it('renders WhatSoup brand', () => {
+  it('renders the SOUP nameplate', () => {
     renderNav();
-    expect(screen.getByText('What')).toBeDefined();
-    expect(screen.getByText('Soup')).toBeDefined();
+    // SOUP nameplate lockup (brand.md §1): wordmark text + an aria-label on the lockup.
+    expect(screen.getByText('SOUP')).toBeDefined();
+    expect(screen.getByLabelText('SOUP')).toBeDefined();
   });
 });
 

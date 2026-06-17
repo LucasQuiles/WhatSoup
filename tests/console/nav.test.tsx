@@ -58,30 +58,30 @@ describe('Nav routing targets', () => {
   it('links to the console top-level routes', () => {
     renderNav();
 
-    expect(navLink('Soup Kitchen').getAttribute('href')).toBe('/');
+    expect(navLink('Fleet').getAttribute('href')).toBe('/');
     expect(navLink('Inbox').getAttribute('href')).toBe('/inbox');
     expect(navLink('Ops').getAttribute('href')).toBe('/ops');
   });
 });
 
 describe('Nav route state', () => {
-  it('marks Soup Kitchen current at the fleet root', () => {
+  it('marks Fleet current at the fleet root', () => {
     renderNav({}, '/');
 
-    expectCurrentLink('Soup Kitchen');
+    expectCurrentLink('Fleet');
   });
 
-  it('marks Soup Kitchen current for line detail routes', () => {
+  it('marks Fleet current for line detail routes', () => {
     renderNav({}, '/lines/abc123');
 
-    expectCurrentLink('Soup Kitchen');
+    expectCurrentLink('Fleet');
   });
 
   it('marks Inbox current only on the inbox route', () => {
     renderNav({}, '/inbox');
 
     expectCurrentLink('Inbox');
-    expect(navLink('Soup Kitchen').getAttribute('aria-current')).toBeNull();
+    expect(navLink('Fleet').getAttribute('aria-current')).toBeNull();
     expect(navLink('Ops').getAttribute('aria-current')).toBeNull();
   });
 
@@ -89,7 +89,7 @@ describe('Nav route state', () => {
     renderNav({}, '/ops');
 
     expectCurrentLink('Ops');
-    expect(navLink('Soup Kitchen').getAttribute('aria-current')).toBeNull();
+    expect(navLink('Fleet').getAttribute('aria-current')).toBeNull();
     expect(navLink('Inbox').getAttribute('aria-current')).toBeNull();
   });
 
@@ -107,7 +107,7 @@ describe('Nav unread badge placement', () => {
     renderNav({ unreadCount: 7 });
 
     expect(within(navLink(/Inbox/)).getByText('7')).toBeDefined();
-    expect(within(navLink('Soup Kitchen')).queryByText('7')).toBeNull();
+    expect(within(navLink('Fleet')).queryByText('7')).toBeNull();
     expect(within(navLink('Ops')).queryByText('7')).toBeNull();
   });
 

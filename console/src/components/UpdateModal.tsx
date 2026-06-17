@@ -367,7 +367,7 @@ const UpdateModal: FC<UpdateModalProps> = ({ open, onClose, currentSha, lines })
       dismissable={false}
     >
       <ModalHeader
-        title={phase === 'restart-instances' || phase === 'done' ? 'Update Complete' : 'Update WhatSoup'}
+        title={phase === 'restart-instances' || phase === 'done' ? 'Update Complete' : 'Update SOUP'}
         onClose={handleClose}
       />
 

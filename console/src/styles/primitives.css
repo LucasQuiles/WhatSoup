@@ -2133,3 +2133,44 @@ button.soup-pill[aria-disabled="true"] {
     transform: translateX(-50%);
   }
 }
+
+/* --------------------------------------------------------------------------
+   SOUP NAMEPLATE — the locked engraved instrument label (brand.md §1.1–§1.3).
+   Classes: .soup-nameplate (lockup) · .soup-nameplate__tick · .soup-nameplate__wm
+   The single consumer of --type-nameplate (lint: nameplate-reserved).
+   - Tick: 8px square, 1px corner (declared component literal, tokens-v3 §4 sub-grid),
+     fill --mode-passive-solid (brand heritage teal, NOT the action accent); never
+     animates/glows/recolors.
+   - Wordmark: --type-nameplate (600 14/24 mono), uppercase, tracking +0.38em with a
+     compensating -0.38em margin-inline-end so the lockup centers optically (§1.2 r1).
+   - translateY(0.5px) aligns the all-caps cap-height midpoint to the 56px bar (§1.2 r2).
+   -------------------------------------------------------------------------- */
+
+.soup-nameplate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  white-space: nowrap;
+  user-select: none;
+  transform: translateY(0.5px);
+}
+
+.soup-nameplate__tick {
+  flex-shrink: 0;
+  width: var(--sp-2); /* 8px square — cap-height-scaled tick (brand.md §1.1) */
+  height: var(--sp-2);
+  border-radius: var(--bw); /* 1px corner per brand.md §1.1 (same sub-grid literal as badge.md shapes) */
+  background: var(--mode-passive-solid);
+}
+
+.soup-nameplate__wm {
+  /* --nameplate-tracking is the single source for the +0.38em wordmark tracking and
+     its compensating negative margin (brand.md §1.2 rule 1: the trailing tracking is
+     cancelled so the lockup centers optically). One value drives both so they cannot drift. */
+  --nameplate-tracking: 0.38em;
+  font: var(--type-nameplate);
+  text-transform: uppercase;
+  letter-spacing: var(--nameplate-tracking);
+  margin-inline-end: calc(-1 * var(--nameplate-tracking));
+  color: var(--text-1);
+}
