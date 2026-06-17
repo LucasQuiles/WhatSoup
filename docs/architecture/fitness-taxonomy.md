@@ -26,6 +26,8 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `arch.test-colocation-churn` | mechanical | advisory | guard | Surface test files whose churn suggests an unstable production boundary. |
 | `arch.defense-both-layers` | semantic | advisory | sdlc | Ensure service-layer protections are also threaded through route or caller boundaries. |
 | `arch.import-boundaries` | mechanical | block | guard, ci | Ratchet import direction between src/ layers so known violations can shrink but new cross-layer reach is blocked. |
+| `arch.approved-api-client` | ast | warn | eslint | Console network calls must go through the typed API client in `console/src/lib/api.ts`; direct fetch bypasses auth, timeouts, and the test surface. |
+| `arch.ring-boundaries` | ast | warn | eslint | Backend ring dependency direction is an architectural invariant; lower rings must not import higher rings. |
 
 † `arch.file-size` severity is `block` for the **hook, guard, and ci rings** (enforced via `.claude/fitness/baseline.json` ratchet).
   The **eslint ring** mirrors it at `warn` severity only — an advisory copy per `meta.no-redundant-gates`.
@@ -39,6 +41,7 @@ rules into hooks, and semantic or human rules into the SDLC review flow.
 | `invariant.fail-closed-scanner` | ast | warn | eslint, sdlc | Ensure scanner parse failures raise findings instead of returning clean results. |
 | `invariant.outbox-env-gated` | ast | warn | eslint | Bot-errors outbox writes must derive their path from `resolveBotErrorsOutbox()` so the test-redirect applies; a hardcoded outbox path literal lands in the PROD outbox even under VITEST. |
 | `invariant.fail-closed-gate` | mechanical | block | guard, hook | Prevent shell gates from masking command failures as successful readiness checks. |
+| `invariant.no-unsafe-type-escapes` | ast | warn | eslint | `any` and TypeScript suppressions erase compiler feedback that autonomous agents depend on as operating boundaries. |
 
 ## Process
 
@@ -101,8 +104,11 @@ rules whose `rings` include `eslint`.
 |-------------|-------------|-------|
 | `arch.file-size` | built-in `max-lines` (max 2000) | advisory mirror only |
 | `arch.god-class` | `fitness/god-class` (maxClassLines 1200 **and** maxMethods 80) | composite — both thresholds must trip |
+| `arch.approved-api-client` | `fitness/approved-api-client` | console/src/**; flags direct `fetch()` outside `console/src/lib/api.ts` |
+| `arch.ring-boundaries` | `fitness/ring-boundaries` | src/**; shared→domain→adapter→runtime→composition dependency direction |
 | `invariant.fail-closed-scanner` | `fitness/fail-closed-scanner` | catch returning empty without rethrow/exitCode/emit |
 | `invariant.outbox-env-gated` | `fitness/outbox-direct-write` | fs write whose path literal names the bot-errors outbox/state dir without referencing the resolver |
+| `invariant.no-unsafe-type-escapes` | `fitness/unsafe-type-escape` | src/+scripts/**; `any` and `ts-ignore`/`ts-nocheck`/`ts-expect-error` suppressions |
 | `test.skip-categorization` | `fitness/categorized-skips` | skip/`skipIf` must carry `@skip-env` or `@skip-timing` |
 
 **Every eslint-ring rule reports at `warn` severity, so `guard:lint:src` exits 0
