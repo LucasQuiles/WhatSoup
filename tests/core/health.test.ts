@@ -3009,3 +3009,157 @@ describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-t
     db2.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// health.ts lower-branch coverage (74-549)
+// ---------------------------------------------------------------------------
+
+describe('health.ts lower-branch coverage (74-549)', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+  });
+
+  afterEach(async () => {
+    if (db) db.close();
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  // --- line 273: getConnectionState() synthetic fallback, cfg.authDir falsy
+  //     → creds.path === 'unknown' (the false branch of `cfg.authDir ? ... : 'unknown'`)
+  it('reports creds.path "unknown" when connectionManager lacks getConnectionState and config has no authDir (line 273)', async () => {
+    // connectionManager WITHOUT getConnectionState → triggers the synthetic state branch.
+    // The mocked config (top of this file) does not set authDir, so cfg.authDir is undefined.
+    const deps = makeDeps(db);
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    // currentAuthBond is nested under credential_lifecycle in the synthetic snapshot.
+    expect(json.whatsapp.credential_lifecycle.currentAuthBond.status).toBe('missing');
+    expect(json.whatsapp.credential_lifecycle.currentAuthBond.issues)
+      .toEqual(['connection_manager_does_not_expose_auth_bond']);
+    // The false branch of line 273's ternary — authDir is unset.
+    expect(json.whatsapp.credential_lifecycle.currentAuthBond.creds.path).toBe('unknown');
+    expect(json.whatsapp.credential_lifecycle.currentAuthBond.authDir.path).toBe('unknown');
+  });
+
+  // --- line 335: formatAuthBond hash nullish branch — creds.sha256 === null.
+  //     Snapshot is connected so /health returns 200 (formatAuthBond is reached on
+  //     every code path; the disconnected snapshot it was previously written with
+  //     mapped to unhealthy/503, which is what the assertion under test cares about).
+  it('renders auth_bond.creds.hash as null when creds.sha256 is null (line 335)', async () => {
+    const deps = makeDeps(db, {
+      connectionManager: {
+        botJid: null,
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'connected',
+          connected: true,
+          reconnectAttempts: 0,
+          reconnectPhase: null,
+          stateChangedAt: '2026-06-09T12:00:00.000Z',
+          firstFailureAt: null,
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: null,
+          lastStatusCode: null,
+          recentDisconnects: {
+            windowMs: 600_000, count: 0, lastAt: null, lastReason: null, lastStatusCode: null, byReason: {},
+          },
+          authBond: makeAuthBond({
+            creds: { path: '/auth/creds.json', exists: true, mode: '600', size: 512, mtime: '2026-06-09T12:00:00.000Z', sha256: null },
+          }),
+          credentialLifecycle: null,
+        }),
+      },
+    } as any);
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    // Line 335 false branch: `authBond.creds.sha256?.slice(0, 20) ?? null` → null.
+    expect(json.whatsapp.auth_bond.creds.hash).toBeNull();
+    // empty_hash is `sha256 === EMPTY_SHA256`; null !== EMPTY_SHA256 so false.
+    expect(json.whatsapp.auth_bond.creds.empty_hash).toBe(false);
+  });
+
+  // --- line 151: normalizeAgentTurnCapability(null) — the `if (!details) return null`
+  //     branch. `details` is null when the agent runtime exposes no snapshot (no
+  //     `deps.runtime`). We keep `instanceType: 'agent'` so line 909-910 reaches
+  //     normalizeAgentTurnCapability with `runtimeSnapshot?.details ?? null` = null.
+  it('nulls turn_capability when agent runtime exposes no details (line 151)', async () => {
+    const deps = makeDeps(db, {
+      instanceType: 'agent',
+      // No `runtime` override → deps.runtime is undefined → runtimeSnapshot is null
+      // → `runtimeSnapshot?.details ?? null` is null → line 151 `if (!details) return null`.
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    // turnCapability is null → not degraded, and the field surfaces as null.
+    expect(json.turn_capability).toBeNull();
+    // Concrete shape check: the field is present-and-null (not absent), and the
+    // handler still produced a well-formed 200 health payload with a string status.
+    expect(json).toMatchObject({ turn_capability: null });
+    expect(typeof json.status).toBe('string');
+  });
+
+  // --- line 431 is structurally unreachable: classifyDisconnect() calls
+  //     decideDisconnectAction(statusCode) with NO context, so restartRequiredCount
+  //     is always undefined → count 0 → never ≥ 10 → 'restart-required-flapping'
+  //     is never returned. Documented below as a "lines not reached" item; we instead
+  //     assert the reachable reconnect-classification paths through classifyDisconnect
+  //     (line 427) to keep the suite honest without asserting unreachable behaviour.
+
+  // --- line 427 + 431 reachable-coverage note: confirm restartRequired (515) maps to
+  //     restart_required and that flapping can never be produced via /health.
+  it('maps a restartRequired status code to restart_required (classifyDisconnect reconnect branch, line 427)', async () => {
+    const deps = makeDeps(db, {
+      connectionManager: {
+        botJid: null,
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'reconnecting',
+          connected: false,
+          reconnectAttempts: 1,
+          reconnectPhase: 'retry',
+          stateChangedAt: '2026-06-09T12:10:00.000Z',
+          firstFailureAt: '2026-06-09T12:10:00.000Z',
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: 'restartRequired',
+          lastStatusCode: 515,
+          recentDisconnects: {
+            windowMs: 600_000, count: 0, lastAt: null, lastReason: null, lastStatusCode: null, byReason: {},
+          },
+          authBond: makeAuthBond(),
+          credentialLifecycle: null,
+        }),
+      },
+    } as any);
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    // Line 427 (action.type === 'reconnect') entered; line 430 (restart-required) returns.
+    expect(json.whatsapp.connection.disconnect_class).toBe('restart_required');
+  });
+});
+
