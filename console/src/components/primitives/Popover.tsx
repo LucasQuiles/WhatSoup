@@ -33,6 +33,15 @@
  * (panel-min-w token floor only). Bottom-only; no collision-flip engine
  * (DD-23, C-B2-2 documented non-goal).
  *
+ * Generic-content mode (Phase B addition, datetimepicker.md § Phase B):
+ *   When the `children` prop is supplied, the listbox is NOT rendered — the
+ *   panel root carries `children` directly. Positioning, escape, focus-restore
+ *   and outside-click semantics remain identical. This is how the calendar
+ *   grid (role=grid) and any future non-listbox anchor surfaces reuse the
+ *   same panel infrastructure without hand-rolling positioning. When both
+ *   `children` and `options` are passed, `children` wins (documented; not an
+ *   error — Phase B callers supply children only).
+ *
  * Note: select.md-canonical for picker surfaces — not "the only popover";
  * legacy dialogs still hand-roll overlays until B3.
  */
@@ -75,15 +84,19 @@ export interface PopoverProps {
    * applied in useLayoutEffect to avoid reading ref.current during render.
    */
   anchorRef: RefObject<HTMLElement | null>;
-  /** Options to render in the listbox. */
-  options: PopoverOption[];
+  /**
+   * Options to render in the listbox (legacy select.md path).
+   * Required when no `children` is supplied; ignored when `children` is given.
+   */
+  options?: PopoverOption[];
   /**
    * Value of the currently keyboard-active option (aria-activedescendant).
-   * null when no option is active.
+   * null when no option is active. Required for the listbox path; ignored
+   * when `children` is given (children own their own focus/keyboard state).
    */
-  activeValue: string | null;
-  /** Called when an option is selected (click or Enter). */
-  onSelect: (value: string) => void;
+  activeValue?: string | null;
+  /** Called when an option is selected (click or Enter). Required for the listbox path. */
+  onSelect?: (value: string) => void;
   /**
    * Accessible label for the listbox panel.
    * Typically matches the trigger's accessible name.
@@ -102,6 +115,16 @@ export interface PopoverProps {
   placement?: 'span' | 'start';
   /** Additional class names for the panel root. */
   className?: string;
+  /**
+   * Generic content (Phase B addition, datetimepicker.md § Phase B calendar popover).
+   * When supplied, the listbox is NOT rendered and the panel root carries
+   * `children` directly — positioning, escape, focus-restore and outside-click
+   * semantics are unchanged. This is how the calendar grid (`role="grid"`) and
+   * any future non-listbox anchor surfaces reuse the same panel infrastructure
+   * without hand-rolling positioning. When both `children` and `options` are
+   * passed, `children` wins (documented; Phase B callers supply children only).
+   */
+  children?: ReactNode;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +155,7 @@ export const Popover: FC<PopoverProps> = ({
   listboxId: externalListboxId,
   placement = 'span',
   className,
+  children,
 }) => {
   const panelRef = useRef<HTMLDivElement>(null);
   const autoId = useId();
@@ -181,53 +205,64 @@ export const Popover: FC<PopoverProps> = ({
 
   const panelClass = ['soup-popover', className].filter(Boolean).join(' ');
 
+  // Generic-content mode (children) vs legacy listbox (options). When both
+  // are supplied, children wins — documented in the file header.
+  const isGeneric = children !== undefined;
+  const safeOptions = options ?? [];
+  const safeActiveValue = activeValue ?? null;
+  const safeOnSelect = onSelect ?? (() => {});
+
   const panel = (
     <div
       ref={panelRef}
       className={panelClass}
       data-state={phase}
     >
-      <ul
-        id={listboxId}
-        role="listbox"
-        aria-label={listboxLabel}
-        className="soup-popover__list"
-      >
-        {options.map((opt) => {
-          const optId = popoverOptionId(listboxId, opt.value);
-          const isActive = activeValue === opt.value;
-          const isSelected = opt.selected ?? false;
-          return (
-            <li
-              key={opt.value}
-              id={optId}
-              role="option"
-              aria-selected={isSelected}
-              data-active={isActive ? 'true' : undefined}
-              className={[
-                'soup-popover__option',
-                isSelected ? 'soup-popover__option--selected' : '',
-                isActive ? 'soup-popover__option--active' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              onMouseDown={(e) => {
-                // Use mousedown so the trigger doesn't lose focus on pointerdown
-                // (which would fire the outside-click handler first).
-                e.preventDefault();
-                onSelect(opt.value);
-              }}
-            >
-              {isSelected && (
-                <span className="soup-popover__check" aria-hidden="true" />
-              )}
-              <span className="soup-popover__option-label" title={opt.label}>
-                {opt.renderOption ? opt.renderOption() : opt.label}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
+      {isGeneric ? (
+        children
+      ) : (
+        <ul
+          id={listboxId}
+          role="listbox"
+          aria-label={listboxLabel}
+          className="soup-popover__list"
+        >
+          {safeOptions.map((opt) => {
+            const optId = popoverOptionId(listboxId, opt.value);
+            const isActive = safeActiveValue === opt.value;
+            const isSelected = opt.selected ?? false;
+            return (
+              <li
+                key={opt.value}
+                id={optId}
+                role="option"
+                aria-selected={isSelected}
+                data-active={isActive ? 'true' : undefined}
+                className={[
+                  'soup-popover__option',
+                  isSelected ? 'soup-popover__option--selected' : '',
+                  isActive ? 'soup-popover__option--active' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                onMouseDown={(e) => {
+                  // Use mousedown so the trigger doesn't lose focus on pointerdown
+                  // (which would fire the outside-click handler first).
+                  e.preventDefault();
+                  safeOnSelect(opt.value);
+                }}
+              >
+                {isSelected && (
+                  <span className="soup-popover__check" aria-hidden="true" />
+                )}
+                <span className="soup-popover__option-label" title={opt.label}>
+                  {opt.renderOption ? opt.renderOption() : opt.label}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 

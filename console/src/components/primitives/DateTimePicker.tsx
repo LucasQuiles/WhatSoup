@@ -19,9 +19,13 @@
  *  - Behavior is preserved: emit `recurrence` as a cron string (or none for Once); edit-load maps
  *    an existing `recurrence` value back into the right segment via `cronToRecurrence`.
  */
-import { type ChangeEventHandler, type FC } from 'react';
+import { type ChangeEventHandler, type FC, useRef, useState } from 'react';
+import { CalendarDays } from 'lucide-react';
 import { cronToHuman } from '../line-detail/scheduled-utils.js';
 import { Field, TextInput } from './FormControl.js';
+import { Popover } from './Popover.js';
+import { Calendar } from './Calendar.js';
+import { setDateOnly } from './calendar-utils.js';
 import {
   type RecurrenceValue,
   DAILY_CRON,
@@ -84,8 +88,17 @@ export const DateTimePicker: FC<DateTimePickerProps> = ({
   label = 'Scheduled time (local)',
   minNow = false,
 }) => {
+  const calTriggerRef = useRef<HTMLButtonElement>(null);
+  const [calOpen, setCalOpen] = useState(false);
+
   const handleDateChange: ChangeEventHandler<HTMLInputElement> = (e) => {
     onChange(e.target.value);
+  };
+
+  // Calendar day pick: preserve the existing time, swap the date portion, close.
+  const handleDaySelect = (date: Date) => {
+    onChange(setDateOnly(value, date));
+    setCalOpen(false);
   };
 
   const handleCronChange: ChangeEventHandler<HTMLInputElement> = (e) => {
@@ -122,6 +135,9 @@ export const DateTimePicker: FC<DateTimePickerProps> = ({
 
   return (
     <div className="flex flex-col gap-[var(--sp-3)]">
+      {/* Input stays the Field's sole child so the error contract (aria-invalid +
+          aria-describedby) injects onto the control itself; the calendar trigger
+          is an adjacent affordance that opens the popover anchored to it. */}
       <Field label={label} error={error}>
         {(controlId) => (
           <input
@@ -130,10 +146,30 @@ export const DateTimePicker: FC<DateTimePickerProps> = ({
             value={value}
             onChange={handleDateChange}
             min={minAttr}
-            className="c-input font-mono"
+            className="c-input font-mono w-full"
           />
         )}
       </Field>
+      <button
+        ref={calTriggerRef}
+        type="button"
+        onClick={() => setCalOpen((o) => !o)}
+        aria-label="Open calendar"
+        aria-haspopup="dialog"
+        aria-expanded={calOpen}
+        className="self-start flex items-center gap-[var(--sp-1)] c-hover rounded-sm py-[var(--sp-1)] px-[var(--sp-2)] text-label text-text-2"
+      >
+        <CalendarDays size={14} strokeWidth={1.75} aria-hidden="true" />
+        Pick from calendar
+      </button>
+      <Popover
+        open={calOpen}
+        onClose={() => setCalOpen(false)}
+        anchorRef={calTriggerRef}
+        placement="start"
+      >
+        <Calendar value={value} onSelect={handleDaySelect} />
+      </Popover>
 
       <div role="group" aria-label="Recurrence" className="soup-toolbar-seg">
         {SEG_KINDS.map((opt) => (

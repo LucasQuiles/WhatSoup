@@ -8,8 +8,8 @@ Weekly / Monthly), and a free-text cron box — into a single reusable primitive
 is a **segmented recurrence row (Once · Daily · Weekly · Cron)**.
 
 **Phase A.** This primitive still renders the native `<input type="datetime-local">` for the
-date+time portion. The custom calendar popover is **deferred to Phase B** (see
-[Phase B (deferred)](#phase-b-deferred)).
+date+time portion. The custom calendar popover is implemented in
+[Phase B](#phase-b-calendar-popover--implemented).
 
 ## Anatomy
 
@@ -95,13 +95,27 @@ cadence is reachable via the same free-text entry.
 - Don't: replace the native `<input type="datetime-local">` with a third-party calendar in
   Phase A — the popover is Phase B (see below).
 
-## Phase B (deferred)
+## Phase B (calendar popover) — implemented
 
-The custom calendar popover (4px grid, today/selected/disabled-past states, keyboard nav)
-is **not** part of this primitive. When it ships, it will land here as an additional
-`renderTrigger` / `popover` prop on the same primitive (preserving the Phase A Field-wrapped
-input as the trigger), and it will introduce a new token tier (`--cal-*` for cell size,
-cell-gap, focus halo) so the rest of the token tree stays untouched.
+The custom calendar popover is now part of the primitive. A "Pick from calendar" trigger
+(adjacent to the Field-wrapped native input so Field still owns the input's error contract)
+opens a `Popover` (generic-content mode) carrying the `Calendar` component:
+
+- **Grid:** `role="grid"`, a Monday-first 6×7 month view (fixed height across months). Day
+  cells are `role="gridcell"` buttons; weekday headers are `role="columnheader"`.
+- **States (shape + token, never colour alone):** today → `aria-current="date"` + ring;
+  selected → `aria-selected="true"` + accent fill; past days → `disabled` + `--text-3`;
+  spillover (other-month) days dimmed. The selected/today checks read ONLY the date portion
+  of the datetime-local value; on pick, the parent preserves the time via `setDateOnly`.
+- **Navigation:** prev/next month buttons (labelled with the target month).
+- **Keyboard (WAI-ARIA grid):** roving tabindex; Arrow keys move by day/week, Home/End to
+  week ends, PageUp/PageDown change month, Enter/Space select; Escape closes via the Popover.
+- **Tokens (`--cal-*`, the only Phase B token tier):** `--cal-cell` (`var(--sp-8)`, 32px,
+  on-grid), `--cal-gap` (`var(--sp-1)`, 4px) — both grid-aligned references; colours reuse
+  existing `--accent`/`--text-*`/status tokens so theme-parity stays symmetric.
+
+Date helpers live in `calendar-utils.ts` (kept separate from `Calendar.tsx` so the component
+module stays Fast-Refresh-clean); both are barrel-exported.
 
 ## Migration notes
 
@@ -125,5 +139,6 @@ cell-gap, focus halo) so the rest of the token tree stays untouched.
 ## Enforcement hooks
 
 `datetimepicker-via-primitive` (no raw date+time + ad-hoc recurrence re-rolls in modals),
-`one-dialect rule` (no new segmented BEM — must reuse `.soup-toolbar-seg`), no-new-tokens
-gate for Phase A (the popover in Phase B is the next token addition).
+`one-dialect rule` (no new segmented BEM — must reuse `.soup-toolbar-seg`). Phase B adds the
+`--cal-*` token tier (the only new tokens) and reuses the `Popover` primitive (generic-content
+mode) rather than hand-rolling positioning.

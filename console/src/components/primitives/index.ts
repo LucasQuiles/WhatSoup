@@ -166,3 +166,19 @@ export {
   WEEKLY_CRON,
 } from './datetimepicker-recurrence';
 export type { RecurrenceValue } from './datetimepicker-recurrence';
+export { Calendar } from './Calendar';
+export type { CalendarProps } from './Calendar';
+export {
+  buildMonthGrid,
+  dayKey,
+  initialMonthFor,
+  parseDateOnly,
+  setDateOnly,
+  todayLocalMidnight,
+  ymFromDate,
+  ymNext,
+  ymPrev,
+  WEEKDAY_LABELS_MON_FIRST,
+  MAX_WEEKS_PER_MONTH,
+} from './calendar-utils';
+export type { YearMonth, CalendarDay } from './calendar-utils';
