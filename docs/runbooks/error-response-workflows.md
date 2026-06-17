@@ -121,6 +121,16 @@ revert is gated on a fresh primary probe — so it self-heals once the primary a
 is restored. The counter resets on any successful turn; the path is a no-op while
 already on a fallback window or when no fallback is configured.
 
+**Startup grace (`EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS`, 60s).** The boot/recovery
+sequence (proactive per-chat resume → resume-fail → context-recovery / replayed
+turns) emits empty results while the usability probe is still transiently
+`unknown`. Before the bot has served a turn (`lastSuccessfulTurnAt === null`) and
+within the grace window, empty-output neither counts nor arms — otherwise the bot
+falls over to the backup on *every* restart and persists the window, producing a
+primary/backup flap across restarts (observed on eh-bot 2026-06-17). A
+genuinely-dead primary still fails over once the grace elapses or after the first
+real post-grace empty.
+
 ## Warm handoff distiller (flag-gated)
 
 The cross-harness context handoff is now fully wired behind three opt-in flags

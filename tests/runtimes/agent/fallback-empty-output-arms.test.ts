@@ -208,6 +208,7 @@ describe('empty-output arms provider fallback', () => {
   it('arms after EMPTY_OUTPUT_FALLBACK_THRESHOLD (=2) consecutive empty primary turns', () => {
     const runtime = makeRuntime(FALLBACK);
     const queue = makeFakeQueue();
+    vi.advanceTimersByTime(61_000); // past the empty-output arming startup grace
 
     // First empty: below threshold, no probe signal — must NOT arm yet.
     driveTurn(runtime, queue, null, 1);
@@ -228,6 +229,7 @@ describe('empty-output arms provider fallback', () => {
     const runtime = makeRuntime(FALLBACK);
     v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE };
     const queue = makeFakeQueue();
+    vi.advanceTimersByTime(61_000); // past the empty-output arming startup grace
 
     driveTurn(runtime, queue, null, 1);
     const state = runtime.getFallbackState();
@@ -239,6 +241,7 @@ describe('empty-output arms provider fallback', () => {
   it('does NOT arm on a single empty turn with no adverse probe signal', () => {
     const runtime = makeRuntime(FALLBACK);
     const queue = makeFakeQueue();
+    vi.advanceTimersByTime(61_000); // past the empty-output arming startup grace
 
     driveTurn(runtime, queue, null, 1);
     expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
@@ -248,6 +251,7 @@ describe('empty-output arms provider fallback', () => {
   it('does NOT arm when no fallback is configured (and does not throw)', () => {
     const runtime = makeRuntime({}); // no fallback provider
     const queue = makeFakeQueue();
+    vi.advanceTimersByTime(61_000);
 
     expect(() => {
       driveTurn(runtime, queue, null, 1);
@@ -260,6 +264,7 @@ describe('empty-output arms provider fallback', () => {
   it('resets the consecutive-empty counter on a successful turn', () => {
     const runtime = makeRuntime(FALLBACK);
     const queue = makeFakeQueue();
+    vi.advanceTimersByTime(61_000); // past the empty-output arming startup grace
 
     driveTurn(runtime, queue, null, 1); // empty -> count 1
     expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(1);
@@ -270,5 +275,59 @@ describe('empty-output arms provider fallback', () => {
     driveTurn(runtime, queue, null, 3);
     expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
     expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(1);
+  });
+});
+
+describe('empty-output arming — startup grace (anti-flap)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-17T01:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('does NOT arm during the startup grace even with an unusable probe (boot-recovery noise)', () => {
+    const runtime = makeRuntime(FALLBACK);
+    v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE };
+    const queue = makeFakeQueue();
+
+    // Immediately after boot (within grace, no successful turn yet): the
+    // transient probe + boot-recovery empty must NOT arm — this is the
+    // restart-flap guard. It is not even counted.
+    driveTurn(runtime, queue, null, 1);
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+    expect(runtime.getFallbackState().effectiveProvider).toBe('claude-cli');
+    expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(0);
+  });
+
+  it('arms once the startup grace elapses (genuinely-dead primary still fails over)', () => {
+    const runtime = makeRuntime(FALLBACK);
+    v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE };
+    const queue = makeFakeQueue();
+
+    driveTurn(runtime, queue, null, 1); // within grace -> no arm
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+
+    vi.advanceTimersByTime(61_000); // grace elapses
+    driveTurn(runtime, queue, null, 2); // now arms (probe unusable)
+    expect(runtime.getFallbackState().fallbackActiveUntil).not.toBeNull();
+    expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
+  });
+
+  it('arms within the grace once a turn has already succeeded', () => {
+    const runtime = makeRuntime(FALLBACK);
+    const queue = makeFakeQueue();
+
+    // A real reply proves the bot can serve -> grace no longer applies.
+    driveTurn(runtime, queue, 'hello', 1);
+    v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE };
+    driveTurn(runtime, queue, null, 2); // empty + unusable probe -> arms
+    expect(runtime.getFallbackState().fallbackActiveUntil).not.toBeNull();
+    expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
   });
 });
