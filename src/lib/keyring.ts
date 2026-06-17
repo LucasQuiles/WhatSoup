@@ -56,13 +56,46 @@ export function detectKeyringBackend(): KeyringBackend {
     execFileSync('secret-tool', ['--help'], { timeout: 2_000, stdio: 'ignore' });
     _cachedBackend = 'secret-tool';
   } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // CRED-2: distinguish "no keyring installed" (ENOENT — the expected, benign
+    // fallback) from "the keyring probe ERRORED" (timeout, EACCES, unexpected
+    // exit). A transient/errored probe silently downgrading ALL credential
+    // storage to plaintext 0600 files is alarming and must be operator-visible.
+    const probeErrored = !isProbeAbsentError(err);
+
+    if (probeErrored && process.env.REQUIRE_OS_KEYRING) {
+      // Honor REQUIRE_OS_KEYRING: an errored downgrade is fatal here rather than
+      // silently falling back to plaintext file storage. A genuinely-absent
+      // keyring (ENOENT) is still allowed to fall back below.
+      throw new Error(
+        `keyring backend probe errored and REQUIRE_OS_KEYRING is set — refusing to downgrade to plaintext credential storage: ${errMsg}`,
+      );
+    }
+
     _cachedBackend = 'env-only';
-    getLog().warn(
-      { backend: 'env-only', err: err instanceof Error ? err.message : String(err) },
-      'keyring backend probe failed — falling back to env-only credential lookup',
-    );
+    if (probeErrored) {
+      // Surface the downgrade at ERROR level so it is not buried at debug/warn.
+      getLog().error(
+        { backend: 'env-only', err: errMsg },
+        'keyring backend probe ERRORED — credential storage DOWNGRADED to plaintext file store (not a genuinely-absent keyring)',
+      );
+    } else {
+      getLog().warn(
+        { backend: 'env-only', err: errMsg },
+        'keyring backend probe failed — falling back to env-only credential lookup',
+      );
+    }
   }
   return _cachedBackend;
+}
+
+/**
+ * True when the probe error means the keyring binary is genuinely absent
+ * (expected, benign) rather than present-but-errored (alarming downgrade).
+ * `secret-tool --help` missing surfaces as ENOENT from execFileSync.
+ */
+function isProbeAbsentError(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === 'ENOENT';
 }
 
 /**
