@@ -158,6 +158,25 @@ def test_main_default_pass_and_list():
     assert rc == 0 and rep["overall_verdict"] == "PASS"
 
 
+def test_cliff_caught_is_union_or_single_detector_suffices():
+    # cliff_caught = faith_caught OR gap_caught: a cliff caught by EITHER detector counts.
+    # Disable the gap detector with a threshold no gap can ever exceed (gap = lex - faith is in
+    # [-1, 1], so `gap > 1.0` is never true). Every class whose cliff the FAITHFULNESS detector
+    # catches must STILL be cliff_caught. An AND weakening would demand both detectors fire and
+    # would silently drop these single-detector catches — a hole in the every-cliff-caught proof.
+    classes = cc.canary_classes()
+    faith_only = []
+    for klass in classes:
+        catch = cc._classify_catch(klass, threshold=1.0)  # gap detector disabled
+        if "faithfulness" in catch["caught_by"]:
+            assert "gap" not in catch["caught_by"], "threshold=1.0 should disable the gap detector"
+            assert catch["cliff_caught"] is True, (
+                f"{catch['class_id']}: faithfulness caught the cliff but cliff_caught is False"
+            )
+            faith_only.append(catch["class_id"])
+    assert faith_only, "expected >=1 cliff caught by the faithfulness detector alone at threshold=1.0"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

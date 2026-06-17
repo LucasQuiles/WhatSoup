@@ -182,6 +182,20 @@ def test_main_adopt_reject_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_item"
 
 
+def test_corpus_at_exact_success_floor_adopts_not_rejects():
+    # The success floor is INCLUSIVE: min_success == success_floor must ADOPT, not REJECT
+    # (the guard is the STRICT `min_success < success_floor`). A fully-faithful corpus scores
+    # success_compressed == 1.0, so at success_floor == 1.0 the worst-case success exactly meets
+    # the floor. A <= weakening would reject a corpus that precisely satisfies the required
+    # success rate — a false "quality compromise" on a compression that is in fact lossless.
+    items = [_item("admins are eligible; contractors are not eligible; deadline is June 30.")]
+    rep = fe.evaluate_corpus(items, success_floor=1.0)
+    # Clean corpus: faithfulness delta is 0 and the floor is the ONLY candidate reason, so the
+    # verdict isolates the boundary under test.
+    assert rep["worst_faithfulness_delta"] == 0.0
+    assert rep["overall_verdict"] == "ADOPT"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

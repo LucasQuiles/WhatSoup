@@ -159,6 +159,16 @@ def test_main_pass_fail_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_item"
 
 
+def test_gap_at_exact_threshold_is_not_flagged():
+    # proxy_gaming_flag is the STRICT `gap > threshold`: a gap exactly AT the threshold is not
+    # gaming. An identical compression has gap == 0.0 (lexical_overlap == faithfulness == 1.0),
+    # so at threshold == 0.0 the gap sits exactly on the boundary. A >= weakening would flag a
+    # perfectly-faithful, zero-gap pair as proxy-gaming — a false alarm against lossless output.
+    r = bg.gap_report(ORIGINAL, ORIGINAL, FIX, threshold=0.0)
+    assert r["gap"] == 0.0
+    assert r["proxy_gaming_flag"] is False
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
