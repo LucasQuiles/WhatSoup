@@ -237,6 +237,27 @@ describe('auth CLI restartRequired handling', () => {
     expect(process.exit).toHaveBeenCalledWith(0);
   });
 
+  it('uses unknown identity and still exits when best-effort socket close throws', async () => {
+    await import('../../src/transport/auth.ts');
+    await flushPromises();
+
+    mocks.sockets[0]!.end.mockImplementationOnce(() => {
+      throw new Error('socket already closed');
+    });
+
+    const handler = mocks.connectionHandlers.at(-1);
+    if (!handler) throw new Error('missing connection.update handler');
+    await handler({ connection: 'open' });
+
+    expect(console.error).toHaveBeenCalledWith('\nAuthenticated successfully as unknown');
+    expect(mocks.saveCreds).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
+    expect(console.error).toHaveBeenCalledWith('Done. You can now start the bot.');
+    expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
   it('reports authentication timeout when no connection opens', async () => {
     await import('../../src/transport/auth.ts');
     await flushPromises();
@@ -275,6 +296,22 @@ describe('auth CLI restartRequired handling', () => {
     });
 
     expect(console.error).toHaveBeenCalledWith('Connection closed during auth: connectionClosed — reconnecting...');
+    expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
+    expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs numeric unknown close reasons and reconnects for unmapped status codes', async () => {
+    await import('../../src/transport/auth.ts');
+    await flushPromises();
+
+    const handler = mocks.connectionHandlers.at(-1);
+    if (!handler) throw new Error('missing connection.update handler');
+    await handler({
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode: 499 } } },
+    });
+
+    expect(console.error).toHaveBeenCalledWith('Connection closed during auth: unknown(499) — reconnecting...');
     expect(mocks.sockets[0]!.end).toHaveBeenCalledWith(undefined);
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
   });
