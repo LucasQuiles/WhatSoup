@@ -1230,3 +1230,661 @@ describe('Send retry with exponential backoff (B02)', () => {
     expect(warnCalls).toHaveLength(2);
   });
 });
+
+// ===========================================================================
+// WhatSoupError non-retryable paths (LLM_AUTH_ERROR, LLM_RATE_LIMITED, LLM_BAD_REQUEST)
+// ===========================================================================
+
+import { WhatSoupError } from '../../../src/errors.ts';
+
+vi.mock('../../../src/lib/emit-alert.ts', () => ({
+  emitAlertChecked: vi.fn(),
+  clearAlertSourceChecked: vi.fn(),
+}));
+
+import { emitAlertChecked, clearAlertSourceChecked } from '../../../src/lib/emit-alert.ts';
+
+const mockEmitAlert = vi.mocked(emitAlertChecked);
+const mockClearAlert = vi.mocked(clearAlertSourceChecked);
+
+describe('WhatSoupError non-retryable paths', () => {
+  it('LLM_AUTH_ERROR → no retry, no fallback, fallback message sent, alert emitted', async () => {
+    const { handler, messenger, primary, fallback } = makeHandler();
+    vi.mocked(primary.generate).mockRejectedValueOnce(
+      new WhatSoupError('Unauthorized', 'LLM_AUTH_ERROR'),
+    );
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    // Fallback provider must NOT be attempted for auth errors
+    expect(vi.mocked(fallback.generate)).not.toHaveBeenCalled();
+    // Primary only called once — no retry
+    expect(vi.mocked(primary.generate)).toHaveBeenCalledOnce();
+    // User gets the fallback user-facing message
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      'lol my brain just broke, give me a sec',
+    );
+    // Alert must be emitted
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      expect.any(String),
+      'llm_total_failure',
+      expect.stringContaining('LLM_AUTH_ERROR'),
+      expect.any(String),
+    );
+  });
+
+  it('LLM_RATE_LIMITED → no retry, no fallback, fallback message sent, alert emitted', async () => {
+    const { handler, messenger, primary, fallback } = makeHandler();
+    vi.mocked(primary.generate).mockRejectedValueOnce(
+      new WhatSoupError('Rate limited', 'LLM_RATE_LIMITED'),
+    );
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    expect(vi.mocked(fallback.generate)).not.toHaveBeenCalled();
+    expect(vi.mocked(primary.generate)).toHaveBeenCalledOnce();
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      'lol my brain just broke, give me a sec',
+    );
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      expect.any(String),
+      'llm_total_failure',
+      expect.stringContaining('LLM_RATE_LIMITED'),
+      expect.any(String),
+    );
+  });
+
+  it('LLM_BAD_REQUEST → skips primary retry, tries fallback provider directly', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger, primary, fallback } = makeHandler();
+    vi.mocked(primary.generate).mockRejectedValueOnce(
+      new WhatSoupError('Bad request payload', 'LLM_BAD_REQUEST'),
+    );
+    vi.mocked(fallback.generate).mockResolvedValue({
+      content: 'fallback handled bad request',
+      inputTokens: 80,
+      outputTokens: 8,
+      model: 'gpt-5.4',
+      durationMs: 400,
+    });
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    // Primary only called once (no retry on bad_request)
+    expect(vi.mocked(primary.generate)).toHaveBeenCalledOnce();
+    // Fallback attempted
+    expect(vi.mocked(fallback.generate)).toHaveBeenCalledOnce();
+    // Fallback response sent to user
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      'fallback handled bad request',
+    );
+  });
+
+  it('LLM_BAD_REQUEST + fallback also fails → alert emitted, fallback message sent', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger, primary, fallback } = makeHandler();
+    vi.mocked(primary.generate).mockRejectedValueOnce(
+      new WhatSoupError('Bad request payload', 'LLM_BAD_REQUEST'),
+    );
+    vi.mocked(fallback.generate).mockRejectedValueOnce(new Error('fallback also fails'));
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(vi.mocked(primary.generate)).toHaveBeenCalledOnce();
+    expect(vi.mocked(fallback.generate)).toHaveBeenCalledOnce();
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      'lol my brain just broke, give me a sec',
+    );
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      expect.any(String),
+      'llm_total_failure',
+      expect.stringContaining('bad request'),
+      expect.any(String),
+    );
+  });
+
+  it('primary success → clearAlertSourceChecked called to reset alert state', async () => {
+    const { handler } = makeHandler();
+    await handleAndDrain(handler, makeIncomingMessage());
+    expect(mockClearAlert).toHaveBeenCalledWith(expect.any(String), 'llm_total_failure');
+  });
+});
+
+// ===========================================================================
+// getHealthSnapshot degraded status paths
+// ===========================================================================
+
+describe('getHealthSnapshot degraded paths', () => {
+  it('returns degraded when queue has waiting chats', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+    const pinecone = makePinecone();
+    const primary = makePrimaryProvider();
+    const fallback = makeFallbackProvider();
+    // Inject a custom ChatQueue mock that reports queuedChats > 0
+    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, {
+      enableEnrichment: false,
+    });
+    // Monkey-patch the chatQueue stats to simulate backlog
+    (handler as any).chatQueue = {
+      enqueue: vi.fn(),
+      get stats() {
+        return { activeChats: 1, queuedChats: 3, trackedChats: 4 };
+      },
+    };
+    const snap = handler.getHealthSnapshot();
+    expect(snap.status).toBe('degraded');
+    expect(snap.details.queueDepth).toBe(3);
+  });
+
+  it('returns degraded when enrichment last run is stale (older than ENRICHMENT_STALE_MS)', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+    const pinecone = makePinecone();
+    const primary = makePrimaryProvider();
+    const fallback = makeFallbackProvider();
+    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, {
+      enableEnrichment: true, // poller created
+    });
+    // Set lastRunAt to a time well past the stale threshold (15 minutes ago)
+    const staleTime = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const poller = (handler as any).enrichmentPoller;
+    if (poller) {
+      poller.lastRunAt = staleTime;
+    }
+    const snap = handler.getHealthSnapshot();
+    expect(snap.status).toBe('degraded');
+    expect(snap.details.enrichmentLastRunAt).toBe(staleTime);
+  });
+
+  it('returns healthy when enrichment last run is recent', () => {
+    const db = makeDb();
+    const messenger = makeMessenger();
+    const pinecone = makePinecone();
+    const primary = makePrimaryProvider();
+    const fallback = makeFallbackProvider();
+    const handler = new ConversationHandler(db, messenger, pinecone, primary, fallback, {
+      enableEnrichment: true,
+    });
+    const recentTime = new Date(Date.now() - 30 * 1000).toISOString(); // 30s ago = fresh
+    const poller = (handler as any).enrichmentPoller;
+    if (poller) {
+      poller.lastRunAt = recentTime;
+    }
+    // No queued chats, enrichment is fresh
+    (handler as any).chatQueue = {
+      enqueue: vi.fn(),
+      get stats() {
+        return { activeChats: 0, queuedChats: 0, trackedChats: 0 };
+      },
+    };
+    const snap = handler.getHealthSnapshot();
+    expect(snap.status).toBe('healthy');
+  });
+});
+
+// ===========================================================================
+// Group chat sender label
+// ===========================================================================
+
+describe('Group chat sender label', () => {
+  it('group message with senderName → label includes @phone prefix in content', async () => {
+    const { handler, primary } = makeHandler();
+    const msg = makeIncomingMessage({
+      chatJid: `111111100000000001@g.us`,
+      senderJid: '15551230001@s.whatsapp.net',
+      senderName: 'Charlie',
+      isGroup: true,
+      content: 'group message text',
+    });
+    mockProcessMedia.mockResolvedValue({ content: 'group message text', images: [] });
+
+    await handleAndDrain(handler, msg);
+
+    const request = vi.mocked(primary.generate).mock.calls[0][0];
+    const lastMsg = request.messages[request.messages.length - 1];
+    // Label format for group: [Name (@phone)]:
+    expect(lastMsg.content).toMatch(/^\[Charlie \(@\d+\)\]: group message text$/);
+  });
+
+  it('non-group message with senderName → label uses simple [Name]: prefix', async () => {
+    const { handler, primary } = makeHandler();
+    const msg = makeIncomingMessage({
+      senderName: 'Dave',
+      isGroup: false,
+      content: 'dm text',
+    });
+    mockProcessMedia.mockResolvedValue({ content: 'dm text', images: [] });
+
+    await handleAndDrain(handler, msg);
+
+    const request = vi.mocked(primary.generate).mock.calls[0][0];
+    const lastMsg = request.messages[request.messages.length - 1];
+    expect(lastMsg.content).toBe('[Dave]: dm text');
+  });
+
+  it('message with no senderName → no label prefix in content', async () => {
+    const { handler, primary } = makeHandler();
+    const msg = makeIncomingMessage({
+      senderName: null as unknown as string,
+      isGroup: false,
+      content: 'no name message',
+    });
+    mockProcessMedia.mockResolvedValue({ content: 'no name message', images: [] });
+
+    await handleAndDrain(handler, msg);
+
+    const request = vi.mocked(primary.generate).mock.calls[0][0];
+    const lastMsg = request.messages[request.messages.length - 1];
+    // No label prefix when senderName is falsy
+    expect(lastMsg.content).toBe('no name message');
+  });
+});
+
+// ===========================================================================
+// Token budget trimming
+// ===========================================================================
+
+describe('Token budget trimming', () => {
+  it('large window trimmed to stay within token budget — trimmedMessages logged', async () => {
+    const { handler, primary } = makeHandler();
+
+    // Build a conversation window that exceeds the token budget.
+    // config.tokenBudget is typically 100000 tokens; 4 chars ≈ 1 token.
+    // Use enough content to exceed the budget.
+    const longContent = 'x'.repeat(200_000); // ~50k tokens each
+    const bigWindow = [
+      { role: 'user' as const, content: longContent },
+      { role: 'assistant' as const, content: longContent },
+      { role: 'user' as const, content: longContent },
+      { role: 'assistant' as const, content: longContent },
+    ];
+    mockLoadConversationWindow.mockReturnValue(bigWindow);
+    mockProcessMedia.mockResolvedValue({ content: 'final message', images: [] });
+
+    await handleAndDrain(handler, makeIncomingMessage({ content: 'final message' }));
+
+    // Window must have been trimmed — messages removed from the front
+    const request = vi.mocked(primary.generate).mock.calls[0][0];
+    // Original window had 4 messages + 1 current = 5; after trimming it must be fewer
+    expect(request.messages.length).toBeLessThan(5);
+
+    // Log must show trim occurred with a positive trimmedMessages count
+    const trimLog = mockLogInfo().mock.calls.find(
+      (c: unknown[]) => typeof c[1] === 'string' && c[1].includes('token budget'),
+    );
+    // Confirm the log entry exists and has the right shape before asserting values
+    expect(trimLog).toHaveLength(2); // [meta, message]
+    expect((trimLog![0] as any).trimmedMessages).toBeGreaterThan(0);
+    expect((trimLog![0] as any).estimatedTokens).toBeGreaterThan(0);
+  });
+});
+
+// ===========================================================================
+// DurabilityEngine integration
+// ===========================================================================
+
+function makeDurability() {
+  return {
+    createOutboundOp: vi.fn().mockReturnValue(42),
+    markSending: vi.fn(),
+    markSubmitted: vi.fn(),
+    markMaybeSent: vi.fn(),
+    markInboundSkipped: vi.fn(),
+    markInboundFailed: vi.fn(),
+    completeInbound: vi.fn(),
+  } as unknown as import('../../../src/core/durability.ts').DurabilityEngine;
+}
+
+describe('DurabilityEngine integration', () => {
+  it('setDurability wires engine — createOutboundOp called on happy path', async () => {
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+
+    await handleAndDrain(handler, makeIncomingMessage({ messageId: 'msg-dur-001' }));
+
+    expect(vi.mocked(durability.createOutboundOp)).toHaveBeenCalledOnce();
+    expect(vi.mocked(durability.markSending)).toHaveBeenCalledWith(42);
+    expect(vi.mocked(durability.markSubmitted)).toHaveBeenCalledWith(42, null);
+    expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
+  });
+
+  it('completeInbound called with inboundSeq on successful send', async () => {
+    const { handler } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+
+    const msg = makeIncomingMessage({ inboundSeq: 7 });
+    await handleAndDrain(handler, msg);
+
+    expect(vi.mocked(durability.completeInbound)).toHaveBeenCalledWith(7, 'response_sent');
+  });
+
+  it('completeInbound NOT called when inboundSeq is undefined', async () => {
+    const { handler } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+
+    const msg = makeIncomingMessage({ inboundSeq: undefined });
+    await handleAndDrain(handler, msg);
+
+    expect(vi.mocked(durability.completeInbound)).not.toHaveBeenCalled();
+  });
+
+  it('send failure: markMaybeSent called with error message, markInboundFailed called with inboundSeq', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    messenger.sendMessage.mockRejectedValue(new Error('permanent send failure'));
+
+    const msg = makeIncomingMessage({ inboundSeq: 99 });
+    await handler.handleMessage(msg);
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(42, 'permanent send failure');
+    expect(vi.mocked(durability.markInboundFailed)).toHaveBeenCalledWith(99);
+  });
+
+  it('send failure without inboundSeq → markInboundFailed NOT called', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    messenger.sendMessage.mockRejectedValue(new Error('send fail'));
+
+    const msg = makeIncomingMessage({ inboundSeq: undefined });
+    await handler.handleMessage(msg);
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    expect(vi.mocked(durability.markInboundFailed)).not.toHaveBeenCalled();
+  });
+
+  it('rate-limited message with durability + inboundSeq → markInboundSkipped called', async () => {
+    const { handler } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    mockCheckRateLimit.mockReturnValue({ allowed: false, remaining: 0 });
+
+    const msg = makeIncomingMessage({ inboundSeq: 55 });
+    await handleAndDrain(handler, msg);
+
+    expect(vi.mocked(durability.markInboundSkipped)).toHaveBeenCalledWith(55, 'rate_limited');
+  });
+
+  it('rate-limited message with durability but no inboundSeq → markInboundSkipped NOT called', async () => {
+    const { handler } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    mockCheckRateLimit.mockReturnValue({ allowed: false, remaining: 0 });
+
+    const msg = makeIncomingMessage({ inboundSeq: undefined });
+    await handleAndDrain(handler, msg);
+
+    expect(vi.mocked(durability.markInboundSkipped)).not.toHaveBeenCalled();
+  });
+
+  it('token counts persisted to DB when LLM returns non-zero tokens', async () => {
+    const { handler, db } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+
+    await handleAndDrain(handler, makeIncomingMessage({ messageId: 'tok-001' }));
+
+    // The UPDATE messages SET input_tokens prepare call must have occurred with the right SQL
+    const prepareCalls = vi.mocked(db.raw.prepare).mock.calls;
+    const tokenUpdateCall = prepareCalls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('UPDATE messages SET input_tokens'),
+    );
+    expect(tokenUpdateCall).toHaveLength(1);
+    expect(tokenUpdateCall![0]).toContain('UPDATE messages SET input_tokens');
+  });
+
+  it('token counts NOT persisted when LLM returns zero tokens', async () => {
+    const { handler, db, primary } = makeHandler();
+    vi.mocked(primary.generate).mockResolvedValue({
+      content: 'zero token response',
+      inputTokens: 0,
+      outputTokens: 0,
+      model: 'claude-opus-4-6',
+      durationMs: 200,
+    });
+
+    await handleAndDrain(handler, makeIncomingMessage());
+
+    const prepareCalls = vi.mocked(db.raw.prepare).mock.calls;
+    const tokenUpdateSqls = prepareCalls
+      .map((c) => c[0])
+      .filter((sql): sql is string => typeof sql === 'string' && sql.includes('UPDATE messages SET input_tokens'));
+    expect(tokenUpdateSqls).toHaveLength(0);
+  });
+});
+
+// ===========================================================================
+// rawMessage download function
+// ===========================================================================
+
+describe('rawMessage download function', () => {
+  it('rawMessage present → downloadFn passed to processMedia is a callable function', async () => {
+    const { handler } = makeHandler();
+    const msg = makeIncomingMessage({
+      contentType: 'image',
+      rawMessage: { key: { id: 'msg-raw-001' } } as any,
+    });
+
+    await handleAndDrain(handler, msg);
+
+    // processMedia must have been called with a function (not null) when rawMessage is truthy
+    const processMediaCalls = vi.mocked(mockProcessMedia).mock.calls;
+    expect(processMediaCalls).toHaveLength(1);
+    const downloadFnArg = processMediaCalls[0][1];
+    expect(typeof downloadFnArg).toBe('function');
+    // The download fn must be callable and return a promise
+    const result = (downloadFnArg as () => unknown)();
+    expect(result).toBeInstanceOf(Promise);
+    // Swallow the expected rejection: the mock rawMessage is not a real Baileys
+    // message so the underlying downloadMediaMessage rejects. We only assert the
+    // downloadFn wiring here; not awaiting/catching would leak an unhandled rejection.
+    await (result as Promise<unknown>).catch(() => {});
+  });
+
+  it('no rawMessage → downloadFn passed to processMedia is null', async () => {
+    const { handler, messenger } = makeHandler();
+    const msg = makeIncomingMessage({ rawMessage: undefined });
+
+    await handleAndDrain(handler, msg);
+
+    const processMediaCalls = vi.mocked(mockProcessMedia).mock.calls;
+    expect(processMediaCalls[0][1]).toBeNull();
+    // Pipeline still completes — LLM response was sent
+    expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'hey whats up');
+  });
+});
+
+// ===========================================================================
+// ?? 'unknown' fallback branches — non-Error thrown values
+//
+// The runtime uses `(err as Error)?.message ?? 'unknown'` in warn/error logs
+// at multiple points. When a non-Error value (plain string, plain object, null)
+// is thrown, `.message` is undefined and the `?? 'unknown'` branch fires.
+// These tests cover the 6 uncovered binary-expression branches.
+// ===========================================================================
+
+describe("?? 'unknown' fallback in log calls (non-Error thrown values)", () => {
+  // Branch #28 line 300: primary provider throws a non-Error value on first attempt
+  // — the warn log's `error: (primaryErr as Error)?.message ?? 'unknown'` fallback fires.
+  it('primary throws non-Error on first attempt → warn log uses "unknown" error string, fallback succeeds', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger, primary, fallback } = makeHandler();
+    // Throw a plain string — not an Error instance, so .message is undefined
+    vi.mocked(primary.generate)
+      .mockRejectedValueOnce('plain string rejection')
+      .mockRejectedValueOnce('plain string rejection 2');
+    vi.mocked(fallback.generate).mockResolvedValue({
+      content: 'fallback ok',
+      inputTokens: 80,
+      outputTokens: 8,
+      model: 'gpt-5.4',
+      durationMs: 400,
+    });
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    // Both primary attempts (attempt 1 + retry) should have used the ?? 'unknown' path in warn log
+    const warnCalls = mockLogWarn().mock.calls.filter(
+      (c: unknown[]) => typeof c[1] === 'string' && (c[1] as string).includes('llm_attempt_failed'),
+    );
+    expect(warnCalls.length).toBeGreaterThanOrEqual(1);
+    // The error field in the log object should be 'unknown' (no .message on a string throw)
+    const firstFailLog = warnCalls[0][0] as Record<string, unknown>;
+    expect(firstFailLog.error).toBe('unknown');
+    // Fallback response was delivered
+    expect(messenger.sendMessage).toHaveBeenCalledWith(expect.any(String), 'fallback ok');
+  });
+
+  // Branch #33 line 359: retry attempt throws a non-Error value
+  // — the warn log's `error: (retryErr as Error)?.message ?? 'unknown'` fallback fires.
+  it('retry attempt throws non-Error value → retry warn log uses "unknown" error string', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger, fallback } = makeHandler();
+    const primary = {
+      name: 'anthropic',
+      generate: vi.fn()
+        .mockRejectedValueOnce(new Error('first failure'))   // attempt 1 — normal Error
+        .mockRejectedValueOnce({ code: 42 })                // attempt 2 retry — non-Error object, no .message
+    };
+    const db = makeDb();
+    const messenger2 = makeMessenger();
+    const pinecone = makePinecone();
+    const handler2 = new ConversationHandler(db, messenger2, pinecone, primary as unknown as LLMProvider, fallback, {
+      enableEnrichment: false,
+    });
+    vi.mocked(fallback.generate).mockResolvedValue({
+      content: 'fallback after retry fail',
+      inputTokens: 80,
+      outputTokens: 8,
+      model: 'gpt-5.4',
+      durationMs: 400,
+    });
+
+    await handler2.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    // Retry warn log should show error: 'unknown' since {code: 42} has no .message
+    const warnCalls = mockLogWarn().mock.calls.filter(
+      (c: unknown[]) => typeof c[1] === 'string' && (c[1] as string).includes('llm_attempt_failed'),
+    );
+    const retryFailLog = warnCalls.find(
+      (c: unknown[]) => (c[0] as Record<string, unknown>).step === 'retry',
+    );
+    expect(retryFailLog).toBeDefined();
+    expect((retryFailLog![0] as Record<string, unknown>).error).toBe('unknown');
+    // Fallback succeeded
+    expect(messenger2.sendMessage).toHaveBeenCalledWith(expect.any(String), 'fallback after retry fail');
+  });
+
+  // Branch #34 line 377: fallback provider throws a non-Error value after retry exhaustion
+  // — the warn log's `error: (fallbackErr as Error)?.message ?? 'unknown'` fallback fires.
+  it('fallback throws non-Error value → fallback warn log uses "unknown" error string', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger, primary, fallback } = makeHandler();
+    vi.mocked(primary.generate).mockRejectedValue(new Error('primary down'));
+    // Throw a non-Error object from fallback
+    vi.mocked(fallback.generate).mockRejectedValue({ status: 503 });
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    // Fallback warn log should use 'unknown' since {status: 503} has no .message
+    const warnCalls = mockLogWarn().mock.calls.filter(
+      (c: unknown[]) => typeof c[1] === 'string' && (c[1] as string).includes('llm_attempt_failed'),
+    );
+    const fallbackWarnLog = warnCalls.find(
+      (c: unknown[]) => (c[0] as Record<string, unknown>).step === 'fallback',
+    );
+    expect(fallbackWarnLog).toBeDefined();
+    expect((fallbackWarnLog![0] as Record<string, unknown>).error).toBe('unknown');
+  });
+
+  // Branch #35 line 385: fallback throws a non-Error value → emitAlertChecked receives ?? 'unknown' in detail string
+  it('all providers fail with non-Error throw → alert detail uses "unknown" error string', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger, primary, fallback } = makeHandler();
+    vi.mocked(primary.generate).mockRejectedValue(new Error('primary down'));
+    vi.mocked(fallback.generate).mockRejectedValue(null);  // null has no .message
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    // Alert must have been emitted with 'unknown' in the detail string
+    expect(mockEmitAlert).toHaveBeenCalledWith(
+      expect.any(String),
+      'llm_total_failure',
+      expect.stringContaining('All LLM providers failed'),
+      expect.stringContaining('unknown'),
+    );
+    // Fallback message sent to user
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      'lol my brain just broke, give me a sec',
+    );
+  });
+
+  // Branch #39 line 420: send retry warn log fires when lastSendErr has no .message
+  // — `(lastSendErr as Error)?.message ?? 'unknown'` fallback in send_retry warn log.
+  it('send retry with non-Error rejection → send_retry warn log uses "unknown" error field', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    messenger.sendMessage
+      .mockRejectedValueOnce('string error, no .message')   // attempt 1: non-Error
+      .mockResolvedValueOnce({ waMessageId: null });         // attempt 2: success
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    // The send_retry warn is only logged before attempt ≥ 2
+    const warnCalls = mockLogWarn().mock.calls.filter(
+      (c: unknown[]) => typeof c[1] === 'string' && (c[1] as string) === 'send_retry',
+    );
+    expect(warnCalls).toHaveLength(1);
+    // error field in the log object should be 'unknown' (thrown value was a plain string)
+    const warnMeta = warnCalls[0][0] as Record<string, unknown>;
+    expect(warnMeta.error).toBe('unknown');
+    // Send eventually succeeded on attempt 2
+    expect(mockRecordResponse).toHaveBeenCalledOnce();
+  });
+
+  // Branch #40 line 440: markMaybeSent receives ?? 'send_retry_failed' when lastSendErr has no .message.
+  it('all 3 sends fail with non-Error throw → markMaybeSent called with "send_retry_failed"', async () => {
+    vi.useFakeTimers();
+    const { handler, messenger } = makeHandler();
+    const durability = makeDurability();
+    handler.setDurability(durability);
+    // Throw a plain object with no .message on all three send attempts
+    messenger.sendMessage.mockRejectedValue({ httpStatus: 500 });
+
+    await handler.handleMessage(makeIncomingMessage());
+    await vi.runAllTimersAsync();
+    await drainQueue();
+
+    // markMaybeSent must be called with the fallback string 'send_retry_failed'
+    expect(vi.mocked(durability.markMaybeSent)).toHaveBeenCalledWith(42, 'send_retry_failed');
+  });
+});
