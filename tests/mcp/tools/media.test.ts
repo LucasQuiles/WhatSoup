@@ -10,13 +10,36 @@ import { registerMediaTools, type MediaDeps } from '../../../src/mcp/tools/media
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { Database } from '../../../src/core/database.ts';
 
-const { mockDownloadMediaMessage } = vi.hoisted(() => ({
+const { mockDownloadMediaMessage, mockTranscribeAudio, mockCoreDownloadMedia, realDownloadMediaHolder } = vi.hoisted(() => ({
   mockDownloadMediaMessage: vi.fn(),
+  mockTranscribeAudio: vi.fn(),
+  mockCoreDownloadMedia: vi.fn(),
+  // Holds the real downloadMedia function captured during the vi.mock factory.
+  // Use this to restore the default pass-through without re-importing the mock module.
+  realDownloadMediaHolder: { fn: null as null | ((...args: unknown[]) => unknown) },
 }));
 
 vi.mock('@whiskeysockets/baileys', () => ({
   downloadMediaMessage: mockDownloadMediaMessage,
 }));
+
+vi.mock('../../../src/runtimes/chat/providers/whisper.ts', () => ({
+  transcribeAudio: mockTranscribeAudio,
+}));
+
+// Wrap media-download so individual tests can intercept downloadMedia (coreDownloadMedia).
+// The default delegates to the real module; error-path tests use mockRejectedValueOnce / mockResolvedValueOnce.
+// realDownloadMediaHolder.fn is captured here (from importActual) so beforeEach can safely
+// restore the default without re-importing the mock module (which would cause infinite recursion).
+vi.mock('../../../src/core/media-download.ts', async (importActual) => {
+  const real = await importActual<typeof import('../../../src/core/media-download.ts')>();
+  realDownloadMediaHolder.fn = real.downloadMedia as (...args: unknown[]) => unknown;
+  mockCoreDownloadMedia.mockImplementation(real.downloadMedia);
+  return {
+    writeTempFile: real.writeTempFile,
+    downloadMedia: mockCoreDownloadMedia,
+  };
+});
 
 // Mock config so path confinement checks use tmpdir() as the managed media directory.
 // This allows tests to write files under /tmp and have them treated as within the media base.
@@ -1158,5 +1181,541 @@ describe('download_media — document MIME and extension handling', () => {
     expect(body.mime_type).toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     expect(body.file_path).toMatch(/\.xlsx$/);
     filesToClean.push(body.file_path);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// download_media — download error paths (timeout, expired, null result)
+// These require mocking coreDownloadMedia because the real impl never throws.
+// ---------------------------------------------------------------------------
+
+describe('download_media — coreDownloadMedia error paths', () => {
+  let registry: ToolRegistry;
+  let connection: ReturnType<typeof makeConnection>;
+  let mediaCalls: Array<{ chatJid: string; media: unknown }>;
+  let db: Database;
+  let deps: MediaDeps;
+  let filesToClean: string[] = [];
+
+  beforeEach(async () => {
+    mockDownloadMediaMessage.mockReset();
+    // Restore default pass-through using the real fn captured at mock-factory time.
+    // (Dynamic import in beforeEach would return the mock module, causing infinite recursion.)
+    if (realDownloadMediaHolder.fn) mockCoreDownloadMedia.mockImplementation(realDownloadMediaHolder.fn as typeof import('../../../src/core/media-download.ts').downloadMedia);
+
+    db = new Database(':memory:');
+    db.open();
+    registry = new ToolRegistry();
+    mediaCalls = makeCalls();
+    connection = makeConnection(mediaCalls);
+    deps = { connection, db };
+    registerMediaTools(registry, deps);
+    filesToClean = [];
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const f of filesToClean) {
+      try { unlinkSync(f); } catch { /* ignore */ }
+    }
+  });
+
+  function insertImageMessage(messageId: string, rawMessage: string): void {
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', ?, 'image', 0, 1700000000, ?)
+    `).run(messageId, rawMessage);
+  }
+
+  const fakeRaw = JSON.stringify({ message: { imageMessage: { url: 'https://mmg.whatsapp.net/fake', mimetype: 'image/jpeg' } } });
+
+  it('returns download_timeout when coreDownloadMedia throws a timeout error', async () => {
+    insertImageMessage('msg-timeout', fakeRaw);
+    mockCoreDownloadMedia.mockRejectedValueOnce(new Error('Download timed out after 30s'));
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-timeout' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('download_timeout');
+  });
+
+  it('returns media_expired when coreDownloadMedia throws a 404 error', async () => {
+    insertImageMessage('msg-expired', fakeRaw);
+    mockCoreDownloadMedia.mockRejectedValueOnce(new Error('404 media gone'));
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-expired' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('media_expired');
+  });
+
+  it('returns download_failed when coreDownloadMedia throws an unknown error', async () => {
+    insertImageMessage('msg-err', fakeRaw);
+    mockCoreDownloadMedia.mockRejectedValueOnce(new Error('socket hang up'));
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-err' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('download_failed');
+    expect(body.message).toMatch(/Media download failed/);
+  });
+
+  it('returns download_failed when coreDownloadMedia resolves null (size limit exceeded)', async () => {
+    insertImageMessage('msg-null', fakeRaw);
+    mockCoreDownloadMedia.mockResolvedValueOnce(null);
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-null' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('download_failed');
+    expect(body.message).toMatch(/25MB limit/);
+  });
+
+  it('returns unsupported_type for quoted content type not in mimeMap (e.g. reaction)', async () => {
+    // A message that quotes a reaction — effectiveContentType = 'reaction', not in mimeMap
+    const rawMessage = JSON.stringify({
+      message: {
+        extendedTextMessage: {
+          text: 'reply',
+          contextInfo: {
+            stanzaId: 'q1',
+            quotedMessage: {
+              reactionMessage: { text: '👍' },
+            },
+          },
+        },
+      },
+    });
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', 'msg-quoted-react', 'text', 0, 1700000000, ?)
+    `).run(rawMessage);
+
+    // quoted=true but the extractQuotedMedia will return null for a reactionMessage (no media)
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-quoted-react', quoted: true },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    // extractQuotedMedia returns null → no_quoted_media
+    expect(body.error).toBe('no_quoted_media');
+  });
+
+  it('returns download_failed with non-Error thrown by coreDownloadMedia', async () => {
+    insertImageMessage('msg-string-err', fakeRaw);
+    mockCoreDownloadMedia.mockRejectedValueOnce('unexpected string error');
+
+    const result = await registry.call(
+      'download_media',
+      { message_id: 'msg-string-err' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('download_failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// transcribe_audio — full execution paths (media_path + raw_message download)
+// ---------------------------------------------------------------------------
+
+describe('transcribe_audio — execution paths', () => {
+  let registry: ToolRegistry;
+  let connection: ReturnType<typeof makeConnection>;
+  let mediaCalls: Array<{ chatJid: string; media: unknown }>;
+  let db: Database;
+  let deps: MediaDeps;
+  let workspace: string;
+  let filesToClean: string[] = [];
+  let dirsToClean: string[] = [];
+
+  beforeEach(() => {
+    mockTranscribeAudio.mockReset();
+    mockDownloadMediaMessage.mockReset();
+    mockDownloadMediaMessage.mockResolvedValue(Buffer.from('audio-data'));
+    // Restore coreDownloadMedia default pass-through using the real fn captured at mock-factory time.
+    if (realDownloadMediaHolder.fn) mockCoreDownloadMedia.mockImplementation(realDownloadMediaHolder.fn as typeof import('../../../src/core/media-download.ts').downloadMedia);
+
+    db = new Database(':memory:');
+    db.open();
+    registry = new ToolRegistry();
+    mediaCalls = makeCalls();
+    connection = makeConnection(mediaCalls);
+    deps = { connection, db };
+    registerMediaTools(registry, deps);
+    workspace = tempDir();
+    dirsToClean.push(workspace);
+    filesToClean = [];
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const f of filesToClean) {
+      try { unlinkSync(f); } catch { /* ignore */ }
+    }
+    for (const d of [...dirsToClean].reverse()) {
+      try { rmdirSync(d, { recursive: true } as any); } catch { /* ignore */ }
+    }
+    dirsToClean = [];
+  });
+
+  function insertAudioRow(
+    messageId: string,
+    opts: {
+      mediaPath?: string | null;
+      rawMessage?: string | null;
+      contentText?: string | null;
+      content?: string | null;
+    } = {},
+  ): void {
+    db.raw.prepare(`
+      INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type,
+        content, content_text, is_from_me, timestamp, media_path, raw_message)
+      VALUES ('chat@g.us', 'chat_at_g.us', 'sender@s.whatsapp.net', ?, 'audio', ?, ?, 0, 1700000000, ?, ?)
+    `).run(
+      messageId,
+      opts.content ?? null,
+      opts.contentText ?? null,
+      opts.mediaPath ?? null,
+      opts.rawMessage ?? null,
+    );
+  }
+
+  // ── cached transcription paths ─────────────────────────────────────────────
+
+  it('returns cached transcription from content_text (content_text path)', async () => {
+    insertAudioRow('msg-ct', { contentText: 'hello world' });
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-ct' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('hello world');
+    expect(body.cached).toBe(true);
+    // transcribeAudio should NOT be called when using cache
+    expect(mockTranscribeAudio).not.toHaveBeenCalled();
+  });
+
+  it('skips content_text containing "transcription unavailable" and proceeds', async () => {
+    // content_text has "unavailable" marker → skip cache, but no other source → no_audio_data
+    insertAudioRow('msg-unavail', { contentText: 'transcription unavailable' });
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-unavail' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('no_audio_data');
+  });
+
+  it('returns cached transcription from structured content JSON (content path)', async () => {
+    insertAudioRow('msg-content-json', {
+      content: JSON.stringify({ transcription: 'from json content', duration: 7 }),
+    });
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-content-json' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('from json content');
+    expect(body.cached).toBe(true);
+    expect(mockTranscribeAudio).not.toHaveBeenCalled();
+  });
+
+  it('skips content JSON with "transcription unavailable" and proceeds', async () => {
+    insertAudioRow('msg-json-unavail', {
+      content: JSON.stringify({ transcription: 'transcription unavailable' }),
+    });
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-json-unavail' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('no_audio_data');
+  });
+
+  // ── media_path branch — different audio extensions ─────────────────────────
+
+  it('reads from media_path (.mp3) and transcribes', async () => {
+    const audioFile = join(workspace, 'voice.mp3');
+    writeFileSync(audioFile, Buffer.from('fake-mp3-data'));
+    filesToClean.push(audioFile);
+    insertAudioRow('msg-mp3', { mediaPath: audioFile });
+    mockTranscribeAudio.mockResolvedValueOnce('mp3 transcript');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-mp3' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('mp3 transcript');
+    expect(body.cached).toBe(false);
+    expect(mockTranscribeAudio).toHaveBeenCalledWith(expect.any(Buffer), 'audio/mpeg');
+  });
+
+  it('reads from media_path (.m4a) and uses correct MIME', async () => {
+    const audioFile = join(workspace, 'voice.m4a');
+    writeFileSync(audioFile, Buffer.from('fake-m4a-data'));
+    filesToClean.push(audioFile);
+    insertAudioRow('msg-m4a', { mediaPath: audioFile });
+    mockTranscribeAudio.mockResolvedValueOnce('m4a transcript');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-m4a' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('m4a transcript');
+    expect(mockTranscribeAudio).toHaveBeenCalledWith(expect.any(Buffer), 'audio/mp4');
+  });
+
+  it('reads from media_path (.wav) and uses correct MIME', async () => {
+    const audioFile = join(workspace, 'voice.wav');
+    writeFileSync(audioFile, Buffer.from('fake-wav-data'));
+    filesToClean.push(audioFile);
+    insertAudioRow('msg-wav', { mediaPath: audioFile });
+    mockTranscribeAudio.mockResolvedValueOnce('wav transcript');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-wav' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('wav transcript');
+    expect(mockTranscribeAudio).toHaveBeenCalledWith(expect.any(Buffer), 'audio/wav');
+  });
+
+  it('reads from media_path (.webm) and uses correct MIME', async () => {
+    const audioFile = join(workspace, 'voice.webm');
+    writeFileSync(audioFile, Buffer.from('fake-webm-data'));
+    filesToClean.push(audioFile);
+    insertAudioRow('msg-webm', { mediaPath: audioFile });
+    mockTranscribeAudio.mockResolvedValueOnce('webm transcript');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-webm' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('webm transcript');
+    expect(mockTranscribeAudio).toHaveBeenCalledWith(expect.any(Buffer), 'audio/webm');
+  });
+
+  it('reads from media_path (.ogg) and uses default audio/ogg MIME', async () => {
+    const audioFile = join(workspace, 'voice.ogg');
+    writeFileSync(audioFile, Buffer.from('fake-ogg-data'));
+    filesToClean.push(audioFile);
+    insertAudioRow('msg-ogg', { mediaPath: audioFile });
+    mockTranscribeAudio.mockResolvedValueOnce('ogg transcript');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-ogg' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('ogg transcript');
+    expect(mockTranscribeAudio).toHaveBeenCalledWith(expect.any(Buffer), 'audio/ogg');
+  });
+
+  // ── transcription_failed path ──────────────────────────────────────────────
+
+  it('returns transcription_failed when transcribeAudio returns null', async () => {
+    const audioFile = join(workspace, 'voice.ogg');
+    writeFileSync(audioFile, Buffer.from('fake-ogg-data'));
+    filesToClean.push(audioFile);
+    insertAudioRow('msg-fail-null', { mediaPath: audioFile });
+    mockTranscribeAudio.mockResolvedValueOnce(null);
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-fail-null' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('transcription_failed');
+  });
+
+  it('returns transcription_failed when transcribeAudio returns "transcription unavailable"', async () => {
+    const audioFile = join(workspace, 'voice.ogg');
+    writeFileSync(audioFile, Buffer.from('fake-ogg-data'));
+    filesToClean.push(audioFile);
+    insertAudioRow('msg-fail-unavail', { mediaPath: audioFile });
+    mockTranscribeAudio.mockResolvedValueOnce('transcription unavailable');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-fail-unavail' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('transcription_failed');
+  });
+
+  // ── successful transcription with duration ─────────────────────────────────
+
+  it('returns transcription with duration from structured content', async () => {
+    const audioFile = join(workspace, 'voice.ogg');
+    writeFileSync(audioFile, Buffer.from('audio'));
+    filesToClean.push(audioFile);
+    insertAudioRow('msg-with-dur', {
+      mediaPath: audioFile,
+      content: JSON.stringify({ duration: 42 }),
+    });
+    mockTranscribeAudio.mockResolvedValueOnce('great transcript');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-with-dur' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('great transcript');
+    expect(body.duration).toBe(42);
+    expect(body.cached).toBe(false);
+  });
+
+  it('returns null duration when content has no duration field', async () => {
+    const audioFile = join(workspace, 'voice.ogg');
+    writeFileSync(audioFile, Buffer.from('audio'));
+    filesToClean.push(audioFile);
+    insertAudioRow('msg-no-dur', { mediaPath: audioFile });
+    mockTranscribeAudio.mockResolvedValueOnce('no duration transcript');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-no-dur' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('no duration transcript');
+    expect(body.duration).toStrictEqual(null);
+  });
+
+  // ── raw_message download fallback ──────────────────────────────────────────
+
+  it('downloads audio from raw_message when media_path is absent', async () => {
+    const rawMessage = JSON.stringify({
+      message: {
+        audioMessage: {
+          url: 'https://mmg.whatsapp.net/audio',
+          mimetype: 'audio/ogg; codecs=opus',
+          mediaKey: Buffer.from('fake-key').toString('base64'),
+          fileEncSha256: Buffer.from('fake-hash').toString('base64'),
+          fileSha256: Buffer.from('fake-sha').toString('base64'),
+          fileLength: 1024,
+        },
+      },
+    });
+    insertAudioRow('msg-raw-dl', { rawMessage });
+    mockTranscribeAudio.mockResolvedValueOnce('raw download transcript');
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-raw-dl' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.transcription).toBe('raw download transcript');
+    expect(body.cached).toBe(false);
+    // DB should be updated with the new media_path
+    const row = db.raw.prepare('SELECT media_path FROM messages WHERE message_id = ?')
+      .get('msg-raw-dl') as { media_path: string | null };
+    expect(row.media_path).toBeTruthy();
+    if (row.media_path) filesToClean.push(row.media_path);
+  });
+
+  it('returns no_audio_data when raw_message is invalid JSON', async () => {
+    insertAudioRow('msg-bad-json', { rawMessage: 'not valid json {{' });
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-bad-json' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('no_audio_data');
+    expect(body.message).toMatch(/Cannot parse raw message/);
+  });
+
+  it('returns media_expired when coreDownloadMedia throws a 404-style error during transcription', async () => {
+    const rawMessage = JSON.stringify({
+      message: { audioMessage: { url: 'https://mmg.whatsapp.net/audio', mimetype: 'audio/ogg' } },
+    });
+    insertAudioRow('msg-expired-audio', { rawMessage });
+    // coreDownloadMedia must throw directly — its real impl swallows errors and returns null.
+    mockCoreDownloadMedia.mockRejectedValueOnce(new Error('410 media gone expired'));
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-expired-audio' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('media_expired');
+  });
+
+  it('returns download_failed when coreDownloadMedia throws a generic error during transcription', async () => {
+    const rawMessage = JSON.stringify({
+      message: { audioMessage: { url: 'https://mmg.whatsapp.net/audio', mimetype: 'audio/ogg' } },
+    });
+    insertAudioRow('msg-dl-fail', { rawMessage });
+    // coreDownloadMedia must throw directly — its real impl swallows errors and returns null.
+    mockCoreDownloadMedia.mockRejectedValueOnce(new Error('network error'));
+
+    const result = await registry.call(
+      'transcribe_audio',
+      { message_id: 'msg-dl-fail' },
+      { tier: 'global' } as SessionContext,
+    );
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe('download_failed');
   });
 });

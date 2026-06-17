@@ -2329,3 +2329,683 @@ describe('HEALTH_BIND_ADDRESS env var', () => {
     expect(typeof addr === 'object' && addr !== null ? addr.address : '').toBe('0.0.0.0');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Additional branch coverage — uncovered paths
+// ---------------------------------------------------------------------------
+
+describe('GET /health — branch coverage: empty-body safeDbQuery fallbacks and null guards', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+  });
+
+  afterEach(async () => {
+    if (db) db.close();
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('safeDbQuery returns fallback when the callback throws', async () => {
+    // Drop schema_migrations so the COALESCE query still works but messages table breaks
+    db.raw.exec('DROP TABLE messages');
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    // Doesn't crash — returns fallback 0 for messages_total
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.sqlite.messages_total).toBe(0);
+  });
+
+  it('returns zero messages_total when messages table returns null row', async () => {
+    // db is intact, just no messages
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    expect(JSON.parse(body).sqlite.messages_total).toBe(0);
+  });
+
+  it('classifies "cooldown" connection state as recovering (degraded not unhealthy)', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      connectionManager: {
+        botJid: null,
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'cooldown',
+          connected: false,
+          reconnectAttempts: 5,
+          reconnectPhase: 'cooldown',
+          stateChangedAt: '2026-06-09T12:00:00.000Z',
+          firstFailureAt: '2026-06-09T12:00:00.000Z',
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: null,
+          lastStatusCode: null,
+          recentDisconnects: {
+            windowMs: 600_000,
+            count: 0,
+            lastAt: null,
+            lastReason: null,
+            lastStatusCode: null,
+            byReason: {},
+          },
+          credentialLifecycle: null,
+        }),
+      },
+    } as any);
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    expect(JSON.parse(body).status).toBe('degraded');
+    expect(JSON.parse(body).whatsapp.connection.state).toBe('cooldown');
+    db2.close();
+  });
+
+  it('classifies device_removed reason as serverside_logout_irreversible', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      connectionManager: {
+        botJid: null,
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'disconnected',
+          connected: false,
+          reconnectAttempts: 0,
+          reconnectPhase: null,
+          stateChangedAt: '2026-06-09T12:00:00.000Z',
+          firstFailureAt: '2026-06-09T12:00:00.000Z',
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: 'device_removed_all',
+          lastStatusCode: null,
+          recentDisconnects: {
+            windowMs: 600_000,
+            count: 0,
+            lastAt: null,
+            lastReason: null,
+            lastStatusCode: null,
+            byReason: {},
+          },
+          credentialLifecycle: null,
+        }),
+      },
+    } as any);
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(503);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('unhealthy');
+    expect(json.whatsapp.connection.auth_failure_class).toBe('serverside_logout_irreversible');
+    db2.close();
+  });
+
+  it('classifies multidevice_mismatch disconnect when status code indicates it', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      connectionManager: {
+        botJid: null,
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'reconnecting',
+          connected: false,
+          reconnectAttempts: 1,
+          reconnectPhase: 'retry',
+          stateChangedAt: '2026-06-09T12:00:00.000Z',
+          firstFailureAt: '2026-06-09T12:00:00.000Z',
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: 'deviceReplaced',
+          lastStatusCode: 411,
+          authBond: makeAuthBond(),
+          credentialLifecycle: {
+            lastQrAt: null,
+            lastOpenAt: '2026-06-09T11:00:00.000Z',
+          },
+        }),
+      },
+    } as any);
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.status).toBe('degraded');
+    expect(json.whatsapp.connection.disconnect_class).toBe('multidevice_mismatch');
+    db2.close();
+  });
+
+  it('exposes empty_hash true when auth bond creds sha256 matches the empty-file SHA', async () => {
+    db.close();
+    const db2 = makeDb();
+    const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    const deps = makeDeps(db2, {
+      connectionManager: {
+        botJid: '15550199000@s.whatsapp.net',
+        botLid: null,
+        sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+        sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getConnectionState: vi.fn().mockReturnValue({
+          state: 'connected',
+          connected: true,
+          reconnectAttempts: 0,
+          reconnectPhase: null,
+          stateChangedAt: '2026-06-09T12:00:00.000Z',
+          firstFailureAt: null,
+          lastPingAt: null,
+          lastPongAt: null,
+          lastDisconnectReason: null,
+          lastStatusCode: null,
+          authBond: makeAuthBond({
+            creds: {
+              path: '/auth/creds.json',
+              exists: true,
+              mode: '600',
+              size: 0,
+              mtime: '2026-06-09T12:00:00.000Z',
+              sha256: EMPTY_SHA256,
+            },
+          }),
+          credentialLifecycle: { lastQrAt: null, lastOpenAt: '2026-06-09T12:00:00.000Z' },
+        }),
+      },
+    } as any);
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.whatsapp.auth_bond.creds.empty_hash).toBe(true);
+    db2.close();
+  });
+
+  it('isFreshInvalidCredentialWriteInFlight returns false when creds have no mtime', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-09T12:00:05Z'));
+    try {
+      db.close();
+      const db2 = makeDb();
+      const deps = makeDeps(db2, {
+        connectionManager: {
+          botJid: '15550199000@s.whatsapp.net',
+          botLid: null,
+          sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+          sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+          connect: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getConnectionState: vi.fn().mockReturnValue({
+            state: 'connected',
+            connected: true,
+            reconnectAttempts: 0,
+            reconnectPhase: null,
+            stateChangedAt: '2026-06-09T12:00:00.000Z',
+            firstFailureAt: null,
+            lastPingAt: null,
+            lastPongAt: null,
+            lastDisconnectReason: null,
+            lastStatusCode: null,
+            authBond: makeAuthBond({
+              status: 'invalid',
+              issues: ['creds_json_empty'],
+              creds: {
+                path: '/auth/creds.json',
+                exists: true,
+                mode: '600',
+                size: 0,
+                mtime: null, // no mtime — grace window cannot apply
+                sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+              },
+            }),
+          }),
+        },
+      } as any);
+      ({ server, port } = await buildTestServer(deps));
+
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      const json = JSON.parse(body);
+      // Not in grace window → classified as local_corruption (backup present → restorable)
+      expect(status).toBe(200);
+      expect(json.whatsapp.connection.auth_failure_class).toBe('local_corruption_restorable');
+      db2.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('isFreshInvalidCredentialWriteInFlight returns false when mtime is non-parseable', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-09T12:00:05Z'));
+    try {
+      db.close();
+      const db2 = makeDb();
+      const deps = makeDeps(db2, {
+        connectionManager: {
+          botJid: '15550199000@s.whatsapp.net',
+          botLid: null,
+          sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }),
+          sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
+          connect: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getConnectionState: vi.fn().mockReturnValue({
+            state: 'connected',
+            connected: true,
+            reconnectAttempts: 0,
+            reconnectPhase: null,
+            stateChangedAt: '2026-06-09T12:00:00.000Z',
+            firstFailureAt: null,
+            lastPingAt: null,
+            lastPongAt: null,
+            lastDisconnectReason: null,
+            lastStatusCode: null,
+            authBond: makeAuthBond({
+              status: 'invalid',
+              issues: ['creds_json_invalid_json'],
+              creds: {
+                path: '/auth/creds.json',
+                exists: true,
+                mode: '600',
+                size: 2,
+                mtime: 'not-a-date', // NaN from Date.parse
+                sha256: 'a'.repeat(64),
+              },
+            }),
+          }),
+        },
+      } as any);
+      ({ server, port } = await buildTestServer(deps));
+
+      const { status, body } = await httpReq(port, '/health', 'GET');
+      const json = JSON.parse(body);
+      // Non-finite mtime → not in grace window → local_corruption
+      expect(status).toBe(200);
+      expect(json.whatsapp.connection.auth_failure_class).toBe('local_corruption_restorable');
+      db2.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('normalizeAgentTurnCapability returns null when details has no turnCapability key', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            // No turnCapability field
+            activeSessions: 2,
+          },
+        }),
+        getFallbackState: () => null,
+      } as any,
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    // No turnCapability → null
+    expect(json.turn_capability).toBeNull();
+    db2.close();
+  });
+
+  it('agentRuntimeDetailsForHealth passes through details unchanged when turnCapability is null', async () => {
+    db.close();
+    const db2 = makeDb();
+    // Provide a runtime snapshot with a turnCapability key but non-record value
+    // so normalizeAgentTurnCapability returns null, then agentRuntimeDetailsForHealth
+    // substitutes null (the turnCapability: null branch)
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: 'not-a-record', // passes !isRecord → normalizeAgentTurnCapability returns null
+            activeSessions: 1,
+          },
+        }),
+        getFallbackState: () => null,
+      } as any,
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.turn_capability).toBeNull();
+    // turnCapability key present in details but non-record → substituted with null
+    expect(json.runtime.agent.turnCapability).toBeNull();
+    db2.close();
+  });
+
+  it('runtime snapshot degraded does NOT override an already-degraded status', async () => {
+    // The snap.status === 'degraded' && status === 'healthy' branch:
+    // if status is already 'degraded' (not 'healthy'), that branch is skipped
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      getEnrichmentStats: vi.fn().mockReturnValue({
+        lastRun: '2000-01-01T00:00:00.000Z', // stale → status becomes 'degraded' before runtimeBlock
+        unprocessed: 0,
+        runtimeDegraded: false,
+      }),
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'degraded',
+          details: { turnCapability: null, activeSessions: 1 },
+        }),
+        getFallbackState: () => null,
+      } as any,
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    expect(JSON.parse(body).status).toBe('degraded');
+    db2.close();
+  });
+
+  it('chat runtime runtimeBlock uses zero when queue fields are absent', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'chat',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          // No queue key in details → activeChats/queuedChats both undefined
+          details: {},
+        }),
+        getFallbackState: () => null,
+      } as any,
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.runtime.chat.queueDepth).toBe(0);
+    db2.close();
+  });
+
+  it('fallbackState null fields resolve to null/false in instance block', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: { activeSessions: 1 },
+        }),
+        getFallbackState: () => ({
+          effectiveProvider: 'claude',
+          fallbackActiveUntil: null,
+          fallbackReason: null,    // → null branch
+          fallbackModel: null,     // → null branch
+          fallbackResetAt: null,   // → null branch
+          fallbackRecoveryProbeRequired: null, // → false branch
+        }),
+      } as any,
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.instance.effectiveProvider).toBe('claude');
+    expect(json.instance.fallbackReason).toBeNull();
+    expect(json.instance.fallbackModel).toBeNull();
+    expect(json.instance.fallbackResetAt).toBeNull();
+    expect(json.instance.fallbackRecoveryProbeRequired).toBe(false);
+    db2.close();
+  });
+});
+
+describe('server on("error") handler', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+
+  afterEach(async () => {
+    if (db) db.close();
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('emits EADDRINUSE without crashing when the port is already bound', async () => {
+    db = makeDb();
+    // Bind a server on port 0 to hold an ephemeral port
+    const blocker = await new Promise<ReturnType<typeof createServer>>((resolve) => {
+      const s = createServer();
+      s.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const blockerAddr = blocker.address() as { port: number };
+
+    const { startHealthServer } = await import('../../src/core/health.ts');
+    server = startHealthServer(makeDeps(db));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    // Re-listen on the already-occupied port — should emit 'error' with code EADDRINUSE
+    let emittedError: Error | null = null;
+    server.once('error', (err) => { emittedError = err; });
+    await new Promise<void>((resolve) => {
+      server.listen(blockerAddr.port, '127.0.0.1', () => resolve());
+      // The error may fire before the listen callback
+      server.once('error', () => resolve());
+    });
+
+    // Cleanup blocker
+    await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    expect(emittedError).not.toBeNull();
+    expect((emittedError as unknown as NodeJS.ErrnoException).code).toBe('EADDRINUSE');
+  });
+
+  it('emits non-EADDRINUSE error events without crashing', async () => {
+    db = makeDb();
+    const { startHealthServer } = await import('../../src/core/health.ts');
+    server = startHealthServer(makeDeps(db));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    // Emit a synthetic non-EADDRINUSE error through the server's event system
+    let caught: Error | null = null;
+    server.once('error', (err) => { caught = err; });
+    const syntheticErr = Object.assign(new Error('synthetic network error'), { code: 'ECONNRESET' });
+    server.emit('error', syntheticErr);
+
+    expect(caught).toBe(syntheticErr);
+  });
+});
+
+describe('POST /agent/compact — empty body treated as {}', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+  });
+
+  afterEach(async () => {
+    db.close();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('treats an empty body as {} and dispatches compact with default options', async () => {
+    const handleAgentCommand = vi.fn().mockResolvedValue({ ok: true, command: 'compact' });
+    ({ server, port } = await buildTestServer(makeDeps(db, {
+      instanceType: 'agent',
+      runtime: { handleAgentCommand } as any,
+    })));
+
+    // Send a truly empty body (no bytes)
+    const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = request({
+        hostname: '127.0.0.1',
+        port,
+        path: '/agent/compact',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'authorization': 'Bearer secret-token',
+          'Content-Length': '0',
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    expect(result.status).toBe(200);
+    expect(handleAgentCommand).toHaveBeenCalledWith({ command: 'compact', silent: true });
+  });
+});
+
+describe('POST /heal — readBody error path', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    process.env.WHATSOUP_HEALTH_TOKEN = 'secret-token';
+  });
+
+  afterEach(async () => {
+    db.close();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('returns 413 when /heal body exceeds the size limit via readBody', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(
+      port,
+      '/heal',
+      'POST',
+      JSON.stringify({ type: 'service_crash', pad: 'x'.repeat(70_000) }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(413);
+    expect(JSON.parse(body)).toMatchObject({ error: 'request body too large' });
+  });
+
+  it('uses context field as fallback when errorHint is absent', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(
+      port,
+      '/heal',
+      'POST',
+      JSON.stringify({ type: 'service_crash', context: 'systemd-restart' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(202);
+    const json = JSON.parse(body);
+    expect(typeof json.reportId).toBe('string');
+    expect(typeof json.errorClass).toBe('string');
+  });
+
+  it('generates a fresh UUID when reportId is absent', async () => {
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+
+    const { status, body } = await httpReq(
+      port,
+      '/heal',
+      'POST',
+      JSON.stringify({ type: 'service_crash' }),
+      { authorization: 'Bearer secret-token' },
+    );
+
+    expect(status).toBe(202);
+    const json = JSON.parse(body);
+    // UUID v4 format
+    expect(json.reportId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  });
+});
+
+describe('GET /health — normalizeBooleanOrNull and normalizeNumberOrNull non-type paths', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    db = makeDb();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+  });
+
+  afterEach(async () => {
+    if (db) db.close();
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('normalizes non-boolean modelUsable and non-finite lastSuccessfulTurnAt to null', async () => {
+    db.close();
+    const db2 = makeDb();
+    const deps = makeDeps(db2, {
+      instanceType: 'agent',
+      runtime: {
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            turnCapability: {
+              modelUsable: 'yes',        // non-boolean → null
+              modelUsabilityStatus: 'usable',
+              lastSuccessfulTurnAt: Infinity, // non-finite → null
+              lastTurnErrorClass: null,
+              lastTurnErrorAt: NaN,      // non-finite → null
+            },
+          },
+        }),
+        getFallbackState: () => null,
+      } as any,
+    });
+    ({ server, port } = await buildTestServer(deps));
+
+    const { status, body } = await httpReq(port, '/health', 'GET');
+    expect(status).toBe(200);
+    const json = JSON.parse(body);
+    expect(json.turn_capability).toEqual({
+      model_usable: null,
+      model_usability_status: 'usable',
+      last_successful_turn_at: null,
+      last_turn_error_class: null,
+      last_turn_error_at: null,
+    });
+    db2.close();
+  });
+});
