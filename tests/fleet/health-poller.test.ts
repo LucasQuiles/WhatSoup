@@ -3807,3 +3807,394 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 });
+
+describe('health-poller.ts uncovered-branch coverage', () => {
+  let mockFetch: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    logger.info.mockClear();
+    logger.warn.mockClear();
+    logger.error.mockClear();
+    logger.debug.mockClear();
+    alertFns.emitAlert.mockReset();
+    alertFns.emitAlert.mockReturnValue(true);
+    alertFns.clearAlertSource.mockReset();
+    alertFns.clearAlertSource.mockReturnValue(true);
+    alertThrottleStore.loadAlertThrottle.mockReset();
+    alertThrottleStore.loadAlertThrottle.mockReturnValue(new Map());
+    alertThrottleStore.loadAlertThrottleDetailed.mockReset();
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({ entries: new Map(), loadError: null });
+    alertThrottleStore.recordAlertThrottle.mockReset();
+    silenceManager.isInstanceSilenced.mockReset();
+    silenceManager.isInstanceSilenced.mockReturnValue(false);
+    vi.stubGlobal('fetch', mockFetch);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-20T12:00:00.000Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // Branch: lastAlertAtFor — persisted throttle entry whose key does NOT start
+  // with the instance-name prefix must be skipped during the scan, while a
+  // matching prefixed entry is still selected (line 309 true branch / continue).
+  it('lastAlertAtFor skips non-matching persisted throttle keys and selects the latest matching one', async () => {
+    const matching = '2026-05-20T11:55:00.000Z';
+    const olderMatching = '2026-05-20T11:40:00.000Z';
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map<string, string>([
+        ['other-instance:instance_unreachable', '2026-05-20T11:59:00.000Z'],
+        ['remote-1:instance_logged_out', olderMatching],
+        ['remote-1:instance_unreachable', matching],
+      ]),
+      loadError: null,
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ status: 'healthy' }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The latest of the two remote-1 prefixed entries wins; the unrelated key
+    // is skipped despite being the newest overall.
+    expect(poller.getStatus('remote-1')!.lastAlertAt).toBe(matching);
+
+    poller.stop();
+  });
+
+  // Branch: trackTargetPid → readNumber parses a numeric STRING pid (line 744
+  // true branch) and stores it as a floor-trimmed integer.
+  it('trackTargetPid accepts a numeric-string pid and surfaces it in target pid evidence', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'healthy', instance: { pid: '4242' } }),
+      })
+      .mockRejectedValueOnce(new Error('The operation was aborted'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0); // first poll seeds pid
+    await vi.advanceTimersByTimeAsync(5_000); // second poll aborts → probe starved
+
+    const status = poller.getStatus('remote-1')!;
+    expect(status.status).toBe('degraded');
+    // String pid was parsed + floor-trimmed and threaded into the starved-probe evidence.
+    expect(status.error).toContain('target_pid=4242');
+
+    poller.stop();
+  });
+
+  // Branch: updateProbeStarved does NOT emit a statusChange when the previous
+  // status was already 'degraded' (line 909 false branch — no transition).
+  it('updateProbeStarved skips statusChange emission when already degraded', async () => {
+    mockFetch.mockRejectedValue(new Error('The operation was aborted'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    const changes: Array<{ name: string; next: string; prev: string }> = [];
+    poller.on('statusChange', (name, next, prev) => changes.push({ name, next, prev }));
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0); // first abort → degraded (transition online→degraded)
+
+    expect(changes).toEqual([{ name: 'remote-1', next: 'degraded', prev: 'online' }]);
+
+    await vi.advanceTimersByTimeAsync(1_000); // second abort → still degraded (no transition)
+    expect(changes).toEqual([{ name: 'remote-1', next: 'degraded', prev: 'online' }]);
+    expect(poller.getStatus('remote-1')!.status).toBe('degraded');
+
+    poller.stop();
+  });
+
+  // Branches: appendLifecycleEvidence (recentEvents) + appendAuthBondEvidence
+  // (backup snake/camel fallbacks, issues, auth_dir) reached through the
+  // logged-out evidence path. Asserts concrete redacted evidence substrings.
+  it('logged-out evidence includes credential_lifecycle events and full auth_bond backup fields', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        uptime_seconds: 9999,
+        whatsapp: {
+          connected: false,
+          connection: {
+            state: 'disconnected',
+            auth_failure_class: 'serverside_logout_irreversible',
+            last_status_code: 401,
+            last_disconnect_reason: 'loggedOut',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+          credential_lifecycle: {
+            latestBaileysVersion: '6.7.0',
+            connectStartedAt: '2026-05-20T10:00:00.000Z',
+            lastOpenAt: '2026-05-20T10:00:01.000Z',
+            lastCloseAt: '2026-05-20T11:00:00.000Z',
+            lastQrAt: '2026-05-20T10:05:00.000Z',
+            lastCredsUpdateAt: '2026-05-20T10:10:00.000Z',
+            lastCredsUpdateFailedAt: '2026-05-20T11:30:00.000Z',
+            lastAuthSnapshotAt: '2026-05-20T10:15:00.000Z',
+            lastAuthSnapshotFailedAt: '2026-05-20T11:45:00.000Z',
+            credsUpdateCount: 7,
+            authSnapshotCaptureCount: 3,
+            authSnapshotFailureCount: 1,
+            environment: {
+              host: 'worker-1',
+              pid: 1234,
+              nodeVersion: 'v24.15.0',
+              platform: 'linux',
+              arch: 'x64',
+              processUptimeSeconds: 600,
+              osUptimeSeconds: 86400,
+              memory: { freeBytes: 1024, totalBytes: 4096 },
+            },
+            lastDisconnectDiagnostic: {
+              statusCode: 401,
+              reason: 'loggedOut',
+              message: 'session revoked',
+            },
+            recentEvents: [
+              { event: 'connection.update', at: '2026-05-20T11:50:00.000Z' },
+              { event: 'creds.update', at: '2026-05-20T11:55:00.000Z', statusCode: 200, reason: 'ok' },
+              'not-a-record',
+            ],
+          },
+          auth_bond: {
+            status: 'revoked',
+            issues: ['creds_missing', 'session_revoked'],
+            tree_hash: 'abcdef',
+            auth_dir: { exists: false, mode: 0o755, mtime: '2026-05-20T09:00:00.000Z' },
+            creds: {
+              exists: false,
+              mode: 0o600,
+              size: 0,
+              mtime: '2026-05-20T09:30:00.000Z',
+              hash: 'deadbeef',
+              identityHash: 'idhash123',
+              empty_hash: true,
+              tree_hash: 'abcdef',
+            },
+            backup: {
+              latest: 'snap-2026-05-20',
+              latest_at: '2026-05-20T09:00:00.000Z',
+              latest_reason: 'scheduled',
+              latest_tree_hash: 'snap-tree',
+              last_capture_at: '2026-05-20T09:00:00.000Z',
+              last_capture_reason: 'scheduled',
+              last_capture_error: 'none',
+              last_capture_deferred_at: '2026-05-20T09:05:00.000Z',
+              last_capture_deferred_reason: 'cooldown',
+              last_capture_deferred_age_ms: 5000,
+              last_restore_at: '2026-05-19T09:00:00.000Z',
+              last_restore_source: 'manual-restore',
+              last_restore_error: 'none',
+            },
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    const emitCall = (alertFns.emitAlert.mock.calls as unknown as Array<[string, string, string, string, ...unknown[]]>)
+      .find(([_, source]) => source === 'instance_logged_out');
+    expect(emitCall).toBeDefined();
+    const evidence = emitCall![3];
+
+    // credential_lifecycle recentEvents evidence
+    expect(evidence).toContain('credential_lifecycle_event_count=3');
+    expect(evidence).toContain('credential_lifecycle_events=connection.update,creds.update');
+    expect(evidence).toContain('credential_lifecycle_last_event=creds.update');
+    expect(evidence).toContain('baileys_version=6.7.0');
+    expect(evidence).toContain('lifecycle_host=worker-1');
+    expect(evidence).toContain('lifecycle_node_version=v24.15.0');
+    expect(evidence).toContain('lifecycle_memory_free_bytes=1024');
+    expect(evidence).toContain('lifecycle_disconnect_status_code=401');
+
+    // auth_bond issues + auth_dir + creds + backup evidence
+    expect(evidence).toContain('auth_bond_status=revoked');
+    expect(evidence).toContain('auth_bond_issues=creds_missing,session_revoked');
+    expect(evidence).toContain('auth_bond_auth_dir_exists=false');
+    expect(evidence).toContain('auth_bond_auth_dir_mode=493'); // 0o755 decimal
+    expect(evidence).toContain('auth_bond_creds_hash=deadbeef');
+    expect(evidence).toContain('auth_bond_identity_hash=idhash123');
+    expect(evidence).toContain('auth_bond_creds_empty_hash=true');
+    expect(evidence).toContain('auth_bond_tree_hash=abcdef');
+
+    // backup evidence
+    expect(evidence).toContain('auth_bond_backup_latest_present=true');
+    expect(evidence).toContain('auth_bond_backup_latest_at=2026-05-20T09:00:00.000Z');
+    expect(evidence).toContain('auth_bond_backup_latest_tree_hash=snap-tree');
+    expect(evidence).toContain('auth_bond_backup_last_capture_deferred_age_ms=5000');
+    expect(evidence).toContain('auth_bond_backup_last_restore_source_present=true');
+    expect(evidence).toContain('auth_bond_backup_last_restore_error=none');
+
+    poller.stop();
+  });
+
+  // Branch: appendAuthBondEvidence backup camelCase key fallbacks (the
+  // `?? backup['latestAt']` etc. paths) and an empty/missing latest backup.
+  it('auth_bond backup evidence falls back to camelCase keys and flags missing latest', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          connection: {
+            state: 'disconnected',
+            auth_failure_class: 'serverside_logout_irreversible',
+            last_status_code: 401,
+            last_disconnect_reason: 'loggedOut',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+          auth_bond: {
+            status: 'revoked',
+            backup: {
+              latest: '',
+              latestAt: '2026-05-20T08:00:00.000Z',
+              latestReason: 'manual',
+              latestTreeHash: 'camel-tree',
+              lastCaptureAt: '2026-05-20T08:01:00.000Z',
+              lastCaptureReason: 'manual',
+              lastCaptureError: 'oops',
+              lastCaptureDeferredAt: '2026-05-20T08:02:00.000Z',
+              lastCaptureDeferredReason: 'busy',
+              lastCaptureDeferredAgeMs: 1234,
+              lastRestoreAt: '2026-05-19T08:00:00.000Z',
+              lastRestoreSource: '',
+              lastRestoreError: 'fail',
+            },
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    const emitCall = (alertFns.emitAlert.mock.calls as unknown as Array<[string, string, string, string, ...unknown[]]>)
+      .find(([_, source]) => source === 'instance_logged_out');
+    expect(emitCall).toBeDefined();
+    const evidence = emitCall![3];
+
+    // camelCase fallbacks picked up
+    expect(evidence).toContain('auth_bond_backup_latest_present=false'); // latest === '' → present=false
+    expect(evidence).toContain('auth_bond_backup_latest_at=2026-05-20T08:00:00.000Z');
+    expect(evidence).toContain('auth_bond_backup_latest_reason=manual');
+    expect(evidence).toContain('auth_bond_backup_latest_tree_hash=camel-tree');
+    expect(evidence).toContain('auth_bond_backup_last_capture_at=2026-05-20T08:01:00.000Z');
+    expect(evidence).toContain('auth_bond_backup_last_capture_reason=manual');
+    expect(evidence).toContain('auth_bond_backup_last_capture_error=oops');
+    expect(evidence).toContain('auth_bond_backup_last_capture_deferred_at=2026-05-20T08:02:00.000Z');
+    expect(evidence).toContain('auth_bond_backup_last_capture_deferred_reason=busy');
+    expect(evidence).toContain('auth_bond_backup_last_capture_deferred_age_ms=1234');
+    expect(evidence).toContain('auth_bond_backup_last_restore_at=2026-05-19T08:00:00.000Z');
+    expect(evidence).toContain('auth_bond_backup_last_restore_source_present=false'); // empty string
+    expect(evidence).toContain('auth_bond_backup_last_restore_error=fail');
+
+    poller.stop();
+  });
+
+  // Branches: appendLifecycleEvidence recentEvents with no string event names
+  // (line 642 false branch — `names.length === 0`, no credential_lifecycle_events
+  // emitted but count still recorded) and appendAuthBondEvidence issues that all
+  // redact away (line 659 false branch — no auth_bond_issues emitted). Also
+  // exercises non-finite number redaction (formatEvidenceValue, line 704 false).
+  it('omits credential_lifecycle_events and auth_bond_issues when all entries are non-string', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          connection: {
+            state: 'disconnected',
+            auth_failure_class: 'serverside_logout_irreversible',
+            last_status_code: 401,
+            last_disconnect_reason: 'loggedOut',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+          credential_lifecycle: {
+            recentEvents: [
+              { event: 12345, at: '2026-05-20T11:50:00.000Z' },
+              { event: null, at: '2026-05-20T11:51:00.000Z' },
+            ],
+          },
+          auth_bond: {
+            status: 'revoked',
+            issues: [null, { nested: 'object' }],
+            creds: { mtime: '2026-05-20T09:30:00.000Z' },
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    const emitCall = (alertFns.emitAlert.mock.calls as unknown as Array<[string, string, string, string, ...unknown[]]>)
+      .find(([_, source]) => source === 'instance_logged_out');
+    expect(emitCall).toBeDefined();
+    const evidence = emitCall![3];
+
+    // Event count is still recorded, but the names list (all non-string) is empty
+    // so the credential_lifecycle_events=… substring is NOT emitted.
+    expect(evidence).toContain('credential_lifecycle_event_count=2');
+    expect(evidence).not.toMatch(/credential_lifecycle_events=/);
+
+    // auth_bond_status still emitted, but issues (all non-string/null) produce
+    // no auth_bond_issues=… entry.
+    expect(evidence).toContain('auth_bond_status=revoked');
+    expect(evidence).not.toMatch(/auth_bond_issues=/);
+
+    poller.stop();
+  });
+});
