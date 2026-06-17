@@ -124,12 +124,19 @@ already on a fallback window or when no fallback is configured.
 **Startup grace (`EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS`, 60s).** The boot/recovery
 sequence (proactive per-chat resume → resume-fail → context-recovery / replayed
 turns) emits empty results while the usability probe is still transiently
-`unknown`. Before the bot has served a turn (`lastSuccessfulTurnAt === null`) and
-within the grace window, empty-output neither counts nor arms — otherwise the bot
-falls over to the backup on *every* restart and persists the window, producing a
-primary/backup flap across restarts (observed on eh-bot 2026-06-17). A
-genuinely-dead primary still fails over once the grace elapses or after the first
-real post-grace empty.
+`unknown`. That transient `unknown` is what `primaryModelUsabilityRequiresAlert`
+reads as unusable, so the **single-empty probe fast-path** would arm on the very
+first empty turn and flap the bot onto the backup on *every* restart (observed on
+eh-bot 2026-06-17: 4/4 activations were single-empty `probe-unusable` at startup,
+0 from the threshold). So before the bot has served a turn
+(`lastSuccessfulTurnAt === null`) and within the grace window, **only the probe
+fast-path is suppressed** — the empty is still **counted**, and the
+consecutive-empty threshold still arms. This is deliberately narrow: a genuinely
+dead primary taking *real* inbound traffic in the first 60s still fails over via
+the threshold (at most one extra turn of latency — no silent blind spot), and the
+per-chat empty-output replay that arms through the threshold is preserved. The
+counter resets on any successful turn, after which the probe fast-path is live
+again immediately.
 
 ## Warm handoff distiller (flag-gated)
 

@@ -291,18 +291,40 @@ describe('empty-output arming — startup grace (anti-flap)', () => {
     vi.useRealTimers();
   });
 
-  it('does NOT arm during the startup grace even with an unusable probe (boot-recovery noise)', () => {
+  it('does NOT arm on a SINGLE empty during the startup grace even with an unusable probe (boot-recovery noise)', () => {
     const runtime = makeRuntime(FALLBACK);
     v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE };
     const queue = makeFakeQueue();
 
     // Immediately after boot (within grace, no successful turn yet): the
-    // transient probe + boot-recovery empty must NOT arm — this is the
-    // restart-flap guard. It is not even counted.
+    // transient probe + boot-recovery empty must NOT arm via the single-empty
+    // probe fast-path — this is the restart-flap guard. The empty is still
+    // COUNTED (so the consecutive-empty threshold can accumulate and a real
+    // dead primary still fails over), it just does not arm on its own.
     driveTurn(runtime, queue, null, 1);
     expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
     expect(runtime.getFallbackState().effectiveProvider).toBe('claude-cli');
-    expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(0);
+    expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(1);
+  });
+
+  it('arms during the startup grace via the consecutive-empty threshold (dead primary on early real traffic — blind spot closed; mirrors #972 replay)', () => {
+    const runtime = makeRuntime(FALLBACK);
+    v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE };
+    const queue = makeFakeQueue();
+
+    // Two genuine empty inbound turns inside the first 60s against a dead
+    // primary. The probe fast-path is suppressed during grace, but the empties
+    // still COUNT — so the second reaches EMPTY_OUTPUT_FALLBACK_THRESHOLD and
+    // fails over even within the grace window. Without this, an early
+    // dead-primary turn would be silent (the blind spot). This is also the
+    // path the per-chat empty-output replay (#972) arms through.
+    driveTurn(runtime, queue, null, 1); // grace -> fast-path suppressed, counted
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+    expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(1);
+
+    driveTurn(runtime, queue, null, 2); // threshold reached even within grace
+    expect(runtime.getFallbackState().fallbackActiveUntil).not.toBeNull();
+    expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
   });
 
   it('arms once the startup grace elapses (genuinely-dead primary still fails over)', () => {
