@@ -1,24 +1,24 @@
 /**
  * FleetTokenChart — rendered behavior through a semantic Recharts boundary.
+ *
+ * The token-spend panel is a provider-palette DONUT (ring): one segment per
+ * provider sized by total token spend in multi-provider mode, and an input-vs-output
+ * ring in the single-provider fallback. The recharts mock below surfaces the Pie
+ * segments, their fills, the legend, the tooltip, and the center total so the tests
+ * can assert the donut's behaviour without a real SVG renderer.
+ *
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, within } from '@testing-library/react';
-import type { TokenUsageBucket, MetricsRange } from '../../console/src/types.js';
+import type { TokenUsageBucket } from '../../console/src/types.js';
 import { FleetTokenChart } from '../../console/src/components/FleetTokenChart';
 
 vi.mock('recharts', async () => {
   const React = await import('react');
 
-  type ChartDatum = Record<string, string | number>;
-  type Formatter = (value: string | number) => string;
-
-  const ChartDataContext = React.createContext<ChartDatum[]>([]);
-
-  function valueFor(data: ChartDatum[], key: string | undefined): string[] {
-    if (!key) return [];
-    return data.map((datum) => String(datum[key] ?? ''));
-  }
+  type Segment = { key?: string; name: string; value: number; fill: string };
+  type PieChild = React.ReactElement<{ fill?: string }>;
 
   return {
     ResponsiveContainer({ children }: { children?: React.ReactNode }) {
@@ -28,73 +28,58 @@ vi.mock('recharts', async () => {
         </section>
       );
     },
-    AreaChart({ data = [], children }: { data?: ChartDatum[]; children?: React.ReactNode }) {
+    PieChart({ children }: { children?: React.ReactNode }) {
       return (
-        <ChartDataContext.Provider value={data}>
-          <div aria-label="Stacked token usage" role="group">
-            {children}
-          </div>
-        </ChartDataContext.Provider>
-      );
-    },
-    CartesianGrid() {
-      return <div aria-label="Chart grid" role="presentation" />;
-    },
-    XAxis({ dataKey, tickFormatter }: { dataKey?: string; tickFormatter?: Formatter }) {
-      const data = React.useContext(ChartDataContext);
-      const labels = valueFor(data, dataKey).map((value) => tickFormatter?.(value) ?? value);
-      return (
-        <div aria-label="Time axis" role="group">
-          {labels.map((label, index) => (
-            <span key={`${label}-${index}`}>{label}</span>
-          ))}
+        <div aria-label="Token spend donut" role="group">
+          {children}
         </div>
       );
     },
-    YAxis({ tickFormatter }: { tickFormatter?: Formatter }) {
+    Pie({
+      data = [],
+      children,
+    }: {
+      data?: Segment[];
+      dataKey?: string;
+      nameKey?: string;
+      innerRadius?: number | string;
+      outerRadius?: number | string;
+      children?: React.ReactNode;
+    }) {
+      // <Cell> children carry the per-segment fill, positionally matched to data.
+      const cells = React.Children.toArray(children) as PieChild[];
       return (
-        <div aria-label="Token count axis" role="group">
-          {tickFormatter ? tickFormatter(1000) : 'Tokens'}
+        <div aria-label="Donut ring" role="group">
+          {data.map((segment, index) => {
+            const cellFill = cells[index]?.props?.fill ?? segment.fill;
+            return (
+              <section
+                key={segment.key ?? segment.name}
+                aria-label={`${segment.name} segment`}
+                data-fill={cellFill}
+                data-value={segment.value}
+                role="region"
+              >
+                <h3>{segment.name}</h3>
+                <span>{segment.value} tokens</span>
+              </section>
+            );
+          })}
         </div>
       );
     },
-    Tooltip({ labelFormatter }: { labelFormatter?: (value: string | number) => string }) {
-      const [first] = React.useContext(ChartDataContext);
-      if (!first) return null;
-      const label = labelFormatter?.(first.bucket) ?? String(first.bucket);
-      return <output aria-label="Active bucket label">{label}</output>;
+    Cell() {
+      // Rendered structurally via Pie's children; nothing to emit standalone.
+      return null;
+    },
+    Tooltip() {
+      return <output aria-label="Segment tooltip" />;
     },
     Legend() {
       return (
         <div aria-label="Chart legend" role="group">
           Legend
         </div>
-      );
-    },
-    Area({
-      dataKey,
-      name,
-      stroke,
-      fill,
-    }: {
-      dataKey?: string;
-      name?: string;
-      stroke?: string;
-      fill?: string;
-    }) {
-      const data = React.useContext(ChartDataContext);
-      const seriesName = name ?? dataKey ?? 'Series';
-      return (
-        <section aria-label={`${seriesName} series`} data-fill={fill} data-stroke={stroke} role="region">
-          <h3>{seriesName}</h3>
-          <ul aria-label={`${seriesName} data points`}>
-            {data.map((datum) => (
-              <li key={`${seriesName}-${datum.bucket}`}>
-                {seriesName}: {String(datum.bucket)} - {String(datum[dataKey ?? ''])} tokens
-              </li>
-            ))}
-          </ul>
-        </section>
       );
     },
   };
@@ -111,91 +96,55 @@ function chart() {
   return screen.getByRole('region', { name: 'Fleet token usage chart' });
 }
 
-function series(name: string) {
-  return within(chart()).getByRole('region', { name: `${name} series` });
+function segment(name: string) {
+  return within(chart()).getByRole('region', { name: `${name} segment` });
 }
 
-describe('FleetTokenChart single-provider rendering', () => {
-  it('renders the chart frame, axes, tooltip label, and stacked token series', () => {
+describe('FleetTokenChart single-provider fallback', () => {
+  it('renders an input-vs-output donut with no legend', () => {
     render(<FleetTokenChart data={SAMPLE} />);
 
     expect(chart()).toBeDefined();
-    expect(within(chart()).getByRole('group', { name: 'Stacked token usage' })).toBeDefined();
-    expect(within(chart()).getByRole('group', { name: 'Time axis' })).toBeDefined();
-    expect(within(chart()).getByRole('group', { name: 'Token count axis' })).toBeDefined();
+    expect(within(chart()).getByRole('group', { name: 'Token spend donut' })).toBeDefined();
+    expect(within(chart()).getByRole('group', { name: 'Donut ring' })).toBeDefined();
     // single-provider has no legend
     expect(within(chart()).queryByRole('group', { name: 'Chart legend' })).toBeNull();
 
-    const activeLabel = within(chart()).getByLabelText('Active bucket label').textContent;
-    expect(activeLabel).toBeTruthy();
-    // should not be raw ISO bucket — formatter should transform it
-    expect(activeLabel).not.toBe('2026-04-05T18:00:00.000Z');
+    expect(within(segment('Output Tokens')).getByRole('heading', { name: 'Output Tokens' })).toBeDefined();
+    expect(within(segment('Input Tokens')).getByRole('heading', { name: 'Input Tokens' })).toBeDefined();
   });
 
-  it('renders output and input token series with correct values', () => {
+  it('aggregates input and output totals across all buckets', () => {
     render(<FleetTokenChart data={SAMPLE} />);
 
-    expect(within(series('Output Tokens')).getByRole('heading', { name: 'Output Tokens' })).toBeDefined();
-    expect(within(series('Input Tokens')).getByRole('heading', { name: 'Input Tokens' })).toBeDefined();
-
-    expect(within(series('Output Tokens')).getByText(/Output Tokens: 2026-04-05T18:00:00.000Z - 800 tokens/)).toBeDefined();
-    expect(within(series('Output Tokens')).getByText(/Output Tokens: 2026-04-05T19:00:00.000Z - 600 tokens/)).toBeDefined();
-    expect(within(series('Input Tokens')).getByText(/Input Tokens: 2026-04-05T18:00:00.000Z - 1200 tokens/)).toBeDefined();
-    expect(within(series('Input Tokens')).getByText(/Input Tokens: 2026-04-05T19:00:00.000Z - 1500 tokens/)).toBeDefined();
-
-    expect(series('Output Tokens').dataset.stroke).toBe('var(--data-token-output-solid)');
-    expect(series('Output Tokens').dataset.fill).toBe('var(--data-token-output-solid)');
-    expect(series('Input Tokens').dataset.stroke).toBe('var(--data-token-input-solid)');
-    expect(series('Input Tokens').dataset.fill).toBe('var(--data-token-input-solid)');
+    // output: 800 + 600 = 1400; input: 1200 + 1500 = 2700
+    expect(segment('Output Tokens').dataset.value).toBe('1400');
+    expect(segment('Input Tokens').dataset.value).toBe('2700');
   });
 
-  it('uses range-aware labels for the visible time axis and active tooltip bucket', () => {
-    const { rerender } = render(<FleetTokenChart data={SAMPLE} />);
-
-    const defaultAxis = within(chart()).getByRole('group', { name: 'Time axis' }).textContent;
-    const defaultTooltip = within(chart()).getByLabelText('Active bucket label').textContent;
-
-    rerender(<FleetTokenChart data={SAMPLE} range="7d" />);
-    const weeklyAxis = within(chart()).getByRole('group', { name: 'Time axis' }).textContent;
-    const weeklyTooltip = within(chart()).getByLabelText('Active bucket label').textContent;
-
-    rerender(<FleetTokenChart data={SAMPLE} range="30d" />);
-    const monthlyAxis = within(chart()).getByRole('group', { name: 'Time axis' }).textContent;
-    const monthlyTooltip = within(chart()).getByLabelText('Active bucket label').textContent;
-
-    expect(defaultAxis).toBeTruthy();
-    expect(defaultTooltip).toBeTruthy();
-    expect(weeklyAxis).toBeTruthy();
-    expect(weeklyTooltip).toBeTruthy();
-    expect(monthlyAxis).toBeTruthy();
-    expect(monthlyTooltip).toBeTruthy();
-
-    expect(defaultAxis).not.toBe(weeklyAxis);
-    expect(weeklyAxis).not.toBe(monthlyAxis);
-    expect(defaultTooltip).not.toBe(weeklyTooltip);
-    expect(weeklyTooltip).not.toBe(monthlyTooltip);
-  });
-
-  it('renders compact-formatted y-axis tick values', () => {
+  it('colors the fallback segments with the sanctioned data-series token palette', () => {
     render(<FleetTokenChart data={SAMPLE} />);
 
-    // YAxis tickFormatter applies formatCompact; 1000 → "1.0K" (toFixed(1) for values < 10_000)
-    const axisText = within(chart()).getByRole('group', { name: 'Token count axis' }).textContent;
-    expect(axisText).toBe('1.0K');
+    expect(segment('Output Tokens').dataset.fill).toBe('var(--data-token-output-solid)');
+    expect(segment('Input Tokens').dataset.fill).toBe('var(--data-token-input-solid)');
   });
 
-  it('keeps the chart semantics and series labels when there are no token buckets', () => {
+  it('shows the center total of all tokens', () => {
+    render(<FleetTokenChart data={SAMPLE} />);
+
+    // grand total 1400 + 2700 = 4100 → formatCompact → "4.1K"
+    expect(within(chart()).getByLabelText('Total tokens').textContent).toContain('4.1K');
+    expect(within(chart()).getByLabelText('Total tokens').textContent).toContain('TOKENS');
+  });
+
+  it('preserves the chart frame and a zero total when there are no token buckets', () => {
     render(<FleetTokenChart data={[]} range="30d" />);
 
     expect(chart()).toBeDefined();
-    expect(within(chart()).getByRole('group', { name: 'Time axis' })).toBeDefined();
-    expect(within(chart()).queryByLabelText('Active bucket label')).toBeNull();
-
-    for (const name of ['Output Tokens', 'Input Tokens']) {
-      expect(within(series(name)).getByRole('heading', { name })).toBeDefined();
-      expect(within(series(name)).queryAllByRole('listitem')).toHaveLength(0);
-    }
-
+    expect(within(chart()).getByRole('group', { name: 'Donut ring' })).toBeDefined();
+    expect(segment('Output Tokens').dataset.value).toBe('0');
+    expect(segment('Input Tokens').dataset.value).toBe('0');
+    expect(within(chart()).getByLabelText('Total tokens').textContent).toContain('0');
     // single-provider still has no legend even when empty
     expect(within(chart()).queryByRole('group', { name: 'Chart legend' })).toBeNull();
   });
@@ -209,28 +158,23 @@ describe('FleetTokenChart single-provider rendering', () => {
       />,
     );
 
-    expect(within(series('Output Tokens')).getByRole('heading', { name: 'Output Tokens' })).toBeDefined();
-    expect(within(series('Input Tokens')).getByRole('heading', { name: 'Input Tokens' })).toBeDefined();
+    expect(within(segment('Output Tokens')).getByRole('heading', { name: 'Output Tokens' })).toBeDefined();
+    expect(within(segment('Input Tokens')).getByRole('heading', { name: 'Input Tokens' })).toBeDefined();
     expect(within(chart()).queryByRole('group', { name: 'Chart legend' })).toBeNull();
-    // no provider-prefixed series expected in single-provider mode
-    expect(within(chart()).queryByRole('region', { name: /Claude Out series/ })).toBeNull();
+    // no provider-named segment expected in single-provider mode
+    expect(within(chart()).queryByRole('region', { name: /Claude segment/ })).toBeNull();
   });
 
   it('stays in single-provider mode when providers are listed but byProvider is absent', () => {
-    render(
-      <FleetTokenChart
-        data={SAMPLE}
-        providers={['claude-cli', 'codex-cli']}
-      />,
-    );
+    render(<FleetTokenChart data={SAMPLE} providers={['claude-cli', 'codex-cli']} />);
 
-    expect(within(series('Output Tokens')).getByRole('heading', { name: 'Output Tokens' })).toBeDefined();
-    expect(within(series('Input Tokens')).getByRole('heading', { name: 'Input Tokens' })).toBeDefined();
+    expect(within(segment('Output Tokens')).getByRole('heading', { name: 'Output Tokens' })).toBeDefined();
+    expect(within(segment('Input Tokens')).getByRole('heading', { name: 'Input Tokens' })).toBeDefined();
     expect(within(chart()).queryByRole('group', { name: 'Chart legend' })).toBeNull();
   });
 });
 
-describe('FleetTokenChart multi-provider rendering', () => {
+describe('FleetTokenChart multi-provider donut', () => {
   const providers = ['claude-cli', 'codex-cli'];
 
   const byProvider: Record<string, TokenUsageBucket[]> = {
@@ -244,45 +188,39 @@ describe('FleetTokenChart multi-provider rendering', () => {
     ],
   };
 
-  it('shows a legend and one output and input series per provider', () => {
+  it('shows a legend and one ring segment per provider', () => {
     render(<FleetTokenChart data={SAMPLE} providers={providers} byProvider={byProvider} />);
 
     expect(within(chart()).getByRole('group', { name: 'Chart legend' })).toBeDefined();
-
-    expect(within(series('Claude Out')).getByRole('heading', { name: 'Claude Out' })).toBeDefined();
-    expect(within(series('Claude In')).getByRole('heading', { name: 'Claude In' })).toBeDefined();
-    expect(within(series('CDX Out')).getByRole('heading', { name: 'CDX Out' })).toBeDefined();
-    expect(within(series('CDX In')).getByRole('heading', { name: 'CDX In' })).toBeDefined();
+    expect(within(segment('Claude')).getByRole('heading', { name: 'Claude' })).toBeDefined();
+    expect(within(segment('CDX')).getByRole('heading', { name: 'CDX' })).toBeDefined();
   });
 
-  it('maps provider bucket values into merged series rows correctly', () => {
+  it('sizes each provider segment by total token spend (input + output across buckets)', () => {
     render(<FleetTokenChart data={SAMPLE} providers={providers} byProvider={byProvider} />);
 
-    // claude-cli output series
-    expect(
-      within(series('Claude Out')).getByText(/Claude Out: 2026-04-05T18:00:00.000Z - 800 tokens/),
-    ).toBeDefined();
-    expect(
-      within(series('Claude Out')).getByText(/Claude Out: 2026-04-05T19:00:00.000Z - 600 tokens/),
-    ).toBeDefined();
-
-    // claude-cli input series
-    expect(
-      within(series('Claude In')).getByText(/Claude In: 2026-04-05T18:00:00.000Z - 1200 tokens/),
-    ).toBeDefined();
-
-    // codex-cli output series
-    expect(
-      within(series('CDX Out')).getByText(/CDX Out: 2026-04-05T18:00:00.000Z - 200 tokens/),
-    ).toBeDefined();
-
-    // codex-cli input series
-    expect(
-      within(series('CDX In')).getByText(/CDX In: 2026-04-05T19:00:00.000Z - 600 tokens/),
-    ).toBeDefined();
+    // claude: (1200+800) + (1500+600) = 4100
+    expect(segment('Claude').dataset.value).toBe('4100');
+    // codex: (400+200) + (600+300) = 1500
+    expect(segment('CDX').dataset.value).toBe('1500');
   });
 
-  it('uses raw provider id as label when provider is not in the registry', () => {
+  it('colors each provider segment from the locked provider palette', () => {
+    render(<FleetTokenChart data={SAMPLE} providers={providers} byProvider={byProvider} />);
+
+    // provider colors live in the --provider-* namespace
+    expect(segment('Claude').dataset.fill).toBe('var(--provider-claude-fg)');
+    expect(segment('CDX').dataset.fill).toBe('var(--provider-codex-fg)');
+  });
+
+  it('shows the center total across all providers', () => {
+    render(<FleetTokenChart data={SAMPLE} providers={providers} byProvider={byProvider} />);
+
+    // 4100 + 1500 = 5600 → "5.6K"
+    expect(within(chart()).getByLabelText('Total tokens').textContent).toContain('5.6K');
+  });
+
+  it('uses the raw provider id as label when the provider is not in the registry', () => {
     render(
       <FleetTokenChart
         data={SAMPLE}
@@ -291,53 +229,24 @@ describe('FleetTokenChart multi-provider rendering', () => {
       />,
     );
 
-    expect(within(series('Claude Out')).getByRole('heading', { name: 'Claude Out' })).toBeDefined();
-    expect(within(series('bogus-provider Out')).getByRole('heading', { name: 'bogus-provider Out' })).toBeDefined();
-    expect(within(series('bogus-provider In')).getByRole('heading', { name: 'bogus-provider In' })).toBeDefined();
+    expect(within(segment('Claude')).getByRole('heading', { name: 'Claude' })).toBeDefined();
+    expect(within(segment('bogus-provider')).getByRole('heading', { name: 'bogus-provider' })).toBeDefined();
+    // unknown provider falls back to the unknown-provider palette token
+    expect(segment('bogus-provider').dataset.fill).toBe('var(--text-3)');
   });
 
-  it('fills missing provider buckets with zero values', () => {
+  it('renders the multi-provider donut with empty per-provider data as zero segments', () => {
     render(
       <FleetTokenChart
-        data={[
-          { bucket: '2026-04-05T18:00:00.000Z', input: 0, output: 0 },
-          { bucket: '2026-04-05T19:00:00.000Z', input: 0, output: 0 },
-        ]}
+        data={[]}
         providers={providers}
-        byProvider={{
-          'claude-cli': [{ bucket: '2026-04-05T18:00:00.000Z', input: 100, output: 50 }],
-          'codex-cli': [],
-        }}
+        byProvider={{ 'claude-cli': [], 'codex-cli': [] }}
       />,
     );
 
-    // claude-cli first bucket present
-    expect(
-      within(series('Claude Out')).getByText(/Claude Out: 2026-04-05T18:00:00.000Z - 50 tokens/),
-    ).toBeDefined();
-    // claude-cli second bucket absent from byProvider — falls back to 0
-    expect(
-      within(series('Claude Out')).getByText(/Claude Out: 2026-04-05T19:00:00.000Z - 0 tokens/),
-    ).toBeDefined();
-    // codex-cli is entirely empty — all zeros
-    expect(
-      within(series('CDX Out')).getByText(/CDX Out: 2026-04-05T18:00:00.000Z - 0 tokens/),
-    ).toBeDefined();
-    expect(
-      within(series('CDX In')).getByText(/CDX In: 2026-04-05T19:00:00.000Z - 0 tokens/),
-    ).toBeDefined();
-  });
-
-  it('renders the multi-provider chart with an empty data array without throwing', () => {
-    render(
-      <FleetTokenChart data={[]} providers={providers} byProvider={byProvider} />,
-    );
-
-    expect(within(chart()).queryByLabelText('Active bucket label')).toBeNull();
     expect(within(chart()).getByRole('group', { name: 'Chart legend' })).toBeDefined();
-
-    for (const name of ['Claude Out', 'Claude In', 'CDX Out', 'CDX In']) {
-      expect(within(series(name)).queryAllByRole('listitem')).toHaveLength(0);
-    }
+    expect(segment('Claude').dataset.value).toBe('0');
+    expect(segment('CDX').dataset.value).toBe('0');
+    expect(within(chart()).getByLabelText('Total tokens').textContent).toContain('0');
   });
 });
