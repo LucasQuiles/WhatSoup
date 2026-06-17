@@ -937,9 +937,9 @@ describe('SoupKitchen sparkline integration', () => {
 // ---------------------------------------------------------------------------
 
 describe('SoupKitchen structural composition', () => {
-  it('renders the Instances heading', () => {
+  it('renders the Lines heading', () => {
     renderPage({ lines: [] });
-    expect(screen.getByRole('heading', { name: 'Instances' })).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'Lines' })).toBeDefined();
   });
 
   it('renders the Metrics heading', () => {

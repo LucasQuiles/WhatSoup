@@ -23,51 +23,11 @@
   "totals": {
     "by_category": {
       "base-wall": 0,
-      "brand-regression": 2
+      "brand-regression": 0
     },
-    "files": 2,
-    "total": 2
+    "files": 0,
+    "total": 0
   },
-  "by_file": [
-    {
-      "by_category": {
-        "base-wall": 0,
-        "brand-regression": 1
-      },
-      "file": "console/src/components/Nav.tsx",
-      "lines": [
-        48
-      ],
-      "total": 1
-    },
-    {
-      "by_category": {
-        "base-wall": 0,
-        "brand-regression": 1
-      },
-      "file": "console/src/components/UpdateModal.tsx",
-      "lines": [
-        370
-      ],
-      "total": 1
-    }
-  ],
-  "hits": [
-    {
-      "category": "brand-regression",
-      "column": 11,
-      "file": "console/src/components/Nav.tsx",
-      "line": 48,
-      "message": "[soup/no-brand-regression] Split wordmark detected: adjacent JSX spans render \"What\"+\"Soup\". These two spans must flip together at P4 (Nav.tsx:39-40).",
-      "rule": "soup/no-brand-regression"
-    },
-    {
-      "category": "brand-regression",
-      "column": 88,
-      "file": "console/src/components/UpdateModal.tsx",
-      "line": 370,
-      "message": "[soup/no-brand-regression] \"WhatSoup\" in JSX text — replace with the locked brand name. See lint-plan section 3 for P4 copy dispositions.",
-      "rule": "soup/no-brand-regression"
-    }
-  ]
+  "by_file": [],
+  "hits": []
 }

@@ -344,12 +344,12 @@ describe('App — nav counts and update check integration', () => {
     });
   });
 
-  it('line detail route keeps Soup Kitchen active in Nav', async () => {
+  it('line detail route keeps Fleet active in Nav', async () => {
     await act(async () => { renderApp('/lines/primary-line'); });
 
     await waitFor(() => screen.getByTestId('page-line-detail'));
-    const soupLink = screen.getByText('Soup Kitchen').closest('a');
-    expect(soupLink?.getAttribute('aria-current')).toBe('page');
+    const fleetLink = screen.getByText('Fleet').closest('a');
+    expect(fleetLink?.getAttribute('aria-current')).toBe('page');
   });
 
   it('static version is shown in Nav when update data has not loaded', async () => {

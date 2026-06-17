@@ -2,7 +2,6 @@
   "generated": "design burndown per-category ceiling (fall-only ratchet)",
   "categories": {
     "accent-law": 0,
-    "brand-regression": 2,
     "half-step": 63,
     "legacy-var-css": 0,
     "raw-color-css": 0,

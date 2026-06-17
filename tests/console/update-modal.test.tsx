@@ -191,12 +191,12 @@ describe('UpdateModal — confirm phase', () => {
     expect(labelledById).toBeTruthy()
     const titleEl = document.getElementById(labelledById!)
     expect(titleEl).not.toBeNull()
-    expect(titleEl!.textContent).toBe('Update WhatSoup')
+    expect(titleEl!.textContent).toBe('Update SOUP')
   })
 
-  it('shows "Update WhatSoup" title in confirm phase', () => {
+  it('shows "Update SOUP" title in confirm phase', () => {
     render(<UpdateModal {...defaultProps()} />)
-    const title = screen.getByText('Update WhatSoup')
+    const title = screen.getByText('Update SOUP')
     // Resolution assertion: the title element's id is the aria-labelledby target
     const dialog = screen.getByRole('dialog')
     const labelledById = dialog.getAttribute('aria-labelledby')!

@@ -105,12 +105,15 @@ type utilities, never via raw `font:` declarations.
 | `--type-nameplate` | `600 14px/24px var(--font-mono)` | tracking +0.38em, uppercase — **reserved for the SOUP mark**, see `brand.md` |
 
 Implementation status (DD-26/DD-37): `tokens.primitive.css` currently carries a fallback-preserving
-bridge for the 8 consumed type tokens (`--type-heading`, `--type-body`, `--type-body-st`,
-`--type-label`, `--type-caption`, `--type-overline`, `--type-data`, `--type-data-sm`) so existing
-`var(--type-*, fallback)` consumers no longer depend on undefined names. Those bridge values mirror
-today's fallbacks and intentionally differ from this final ramp where a visual/type-floor pass is still
-owed; the 4 unconsumed spec tokens (`--type-display`, `--type-title`, `--type-data-lg`,
-`--type-nameplate`) stay pending until that pass. `tests/console/design-token-type-ramp.test.ts` pins
+bridge for the 9 consumed type tokens (`--type-heading`, `--type-body`, `--type-body-st`,
+`--type-label`, `--type-caption`, `--type-overline`, `--type-data`, `--type-data-sm`, and
+`--type-nameplate`) so existing `var(--type-*, fallback)` consumers no longer depend on undefined
+names. Those bridge values mirror today's fallbacks and intentionally differ from this final ramp
+where a visual/type-floor pass is still owed — except `--type-nameplate`, whose bridge value already
+equals this final ramp (`600 14px/24px var(--font-mono)`); it was promoted from pending to consumed
+when the SOUP nameplate landed (Nav lockup, `brand.md` §1) and remains reserved to the single
+`.soup-nameplate__wm` consumer. The 3 unconsumed spec tokens (`--type-display`, `--type-title`,
+`--type-data-lg`) stay pending until that pass. `tests/console/design-token-type-ramp.test.ts` pins
 the bridge inventory and the pending spec tokens; it does not replace final primitive spec-drift
 enforcement.
 
