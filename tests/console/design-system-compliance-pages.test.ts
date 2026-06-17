@@ -144,8 +144,8 @@ describe('design system compliance — Shannon slice', () => {
   it('uses design tokens for Nav hardcoded pixel values', () => {
     const source = read('console/src/components/Nav.tsx')
 
-    expect(source).toMatch(/left:\s*["']var\(--sp-3\)["']/)
-    expect(source).toMatch(/right:\s*["']var\(--sp-3\)["']/)
+    expect(source).toContain('left-[var(--sp-3)]')
+    expect(source).toContain('right-[var(--sp-3)]')
     expect(source).toContain('h-[var(--bw-accent)]')
     expect(source).toContain('min-w-[var(--sp-4)]')
     expect(source).toContain('py-[var(--sp-0h)] px-[var(--sp-1)]')

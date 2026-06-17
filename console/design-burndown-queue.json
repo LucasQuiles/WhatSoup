@@ -2,16 +2,16 @@
   "generated": "design burndown queue — canonical machine-readable burndown; regenerate via: npm --prefix console run design:burndown -- --update",
   "schema_version": 1,
   "summary": {
-    "total": 116,
-    "blocking": 52,
+    "total": 89,
+    "blocking": 25,
     "byCategory": {
       "accent-law": 0,
-      "base-wall": 18,
+      "base-wall": 5,
       "brand-regression": 2,
       "half-step": 63,
       "legacy-var-css": 0,
       "raw-color-css": 0,
-      "raw-dimension-css": 32,
+      "raw-dimension-css": 18,
       "raw-font-size-css": 0,
       "transition-all-css": 0,
       "utility-smell": 1
@@ -31,28 +31,8 @@
       "id": "burndown:base-wall",
       "category": "base-wall",
       "severity": "blocking",
-      "count": 18,
+      "count": 5,
       "files": [
-        {
-          "path": "src/components/line-detail/ModeTab.tsx",
-          "count": 1,
-          "lines": null
-        },
-        {
-          "path": "src/components/line-detail/PipelineTab.tsx",
-          "count": 1,
-          "lines": null
-        },
-        {
-          "path": "src/components/MessageContent.tsx",
-          "count": 5,
-          "lines": null
-        },
-        {
-          "path": "src/components/Nav.tsx",
-          "count": 6,
-          "lines": null
-        },
         {
           "path": "src/mock-data.ts",
           "count": 5,
@@ -95,44 +75,31 @@
       "id": "burndown:raw-dimension-css",
       "category": "raw-dimension-css",
       "severity": "blocking",
-      "count": 32,
+      "count": 18,
       "files": [
         {
           "path": "src/styles/composites.css",
-          "count": 8,
+          "count": 5,
           "lines": [
-            73,
             105,
             106,
             789,
             814,
-            951,
-            952
+            951
           ]
         },
         {
           "path": "src/styles/primitives.css",
-          "count": 24,
+          "count": 13,
           "lines": [
             325,
-            481,
-            493,
-            501,
-            572,
-            573,
-            692,
             885,
-            946,
             994,
             995,
-            1003,
             1139,
-            1140,
             1540,
             1541,
             1548,
-            1662,
-            1663,
             1670,
             1671,
             1672,
@@ -269,11 +236,11 @@
           "count": 9,
           "lines": [
             55,
-            78,
-            93,
-            117,
-            181,
-            200
+            76,
+            91,
+            113,
+            175,
+            194
           ]
         },
         {

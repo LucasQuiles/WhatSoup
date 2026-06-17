@@ -70,7 +70,7 @@ body::before {
 }
 
 /* Thin scrollbar — visible on panels when needed */
-::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar { width: var(--sp-1); height: var(--sp-1); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: var(--radius-xs); }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
@@ -949,7 +949,7 @@ body::before {
   position: relative;
   display: inline-block;
   width: 36px;
-  height: 20px;
+  height: var(--sp-5);
   cursor: pointer;
 }
 

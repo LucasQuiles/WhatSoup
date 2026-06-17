@@ -62,11 +62,9 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           <span className="max-sm:sr-only">Soup Kitchen</span>
           {isFleetActive && (
             <span
-              className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm"
+              className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm left-[var(--sp-3)] right-[var(--sp-3)]"
               style={{
                 bottom: "-1px",
-                left: "var(--sp-3)",
-                right: "var(--sp-3)",
               }}
             />
           )}
@@ -99,11 +97,9 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               )}
               {isActive && (
                 <span
-                  className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm"
+                  className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm left-[var(--sp-3)] right-[var(--sp-3)]"
                   style={{
                     bottom: "-1px",
-                    left: "var(--sp-3)",
-                    right: "var(--sp-3)",
                   }}
                 />
               )}
@@ -127,11 +123,9 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
               <span className="max-sm:sr-only">Ops</span>
               {isActive && (
                 <span
-                  className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm"
+                  className="absolute h-[var(--bw-accent)] bg-[var(--accent)] rounded-sm left-[var(--sp-3)] right-[var(--sp-3)]"
                   style={{
                     bottom: "-1px",
-                    left: "var(--sp-3)",
-                    right: "var(--sp-3)",
                   }}
                 />
               )}
