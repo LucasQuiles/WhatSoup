@@ -185,6 +185,11 @@ describe('fleet silence routes', () => {
       JSON.stringify({ instance: 'q', duration_minutes: 0 }),
       'duration_minutes must be a positive number',
     ],
+    [
+      'nonnumeric duration',
+      JSON.stringify({ instance: 'q', duration_minutes: '15' }),
+      'duration_minutes must be a positive number',
+    ],
   ])('rejects %s', async (_name, body, expectedError) => {
     const { handleAddSilence } = await importRoutes();
     const res = mockRes();
@@ -206,6 +211,17 @@ describe('fleet silence routes', () => {
 
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'socket reset while reading' });
+    expect(() => readFileSync(silencesFile(), 'utf8')).toThrow();
+  });
+
+  it('rejects a request body that exceeds the size limit without persisting', async () => {
+    const { handleAddSilence } = await importRoutes();
+    const res = mockRes();
+
+    await handleAddSilence(mockReq({ method: 'POST', url: '/api/fleet/silence', body: 'x'.repeat(64 * 1024 + 1) }), res);
+
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body)).toEqual({ error: 'request body too large' });
     expect(() => readFileSync(silencesFile(), 'utf8')).toThrow();
   });
 
