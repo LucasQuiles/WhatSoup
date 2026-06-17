@@ -51,12 +51,7 @@ describe('AgentRuntime structural policy', () => {
       'this.pendingTurnActorJid.delete(mapKey);',
       'this.resumeFailedHandling.delete(mapKey);',
       'this.postTurnGate.delete(mapKey);',
-      'this.compactBoundaryScopes.delete(mapKey);',
-      'this.autoCompactCooldownUntil.delete(mapKey);',
-      'this.autoCompactLastSuccessAt.delete(mapKey);',
-      'this.autoCompactRapidRearmRecordedForSuccessAt.delete(mapKey);',
-      'this.autoCompactConsecutiveRapidRearms.delete(mapKey);',
-      'this.autoCompactMeasureNextTurn.delete(mapKey);',
+      'this.autoCompact.cleanupScope(mapKey);',
       'this.operationTrackers.delete(mapKey);',
       'this.deletePendingPollQuestions(mapKey);',
     ];
@@ -65,10 +60,13 @@ describe('AgentRuntime structural policy', () => {
       expect(methodBody).toContain(expectedDelete);
     }
 
-    // Two listed entries are not raw `.delete(mapKey)` calls: the crash count now
-    // routes through this.crashes.forget(mapKey) (extracted CrashTracker) and the
-    // pending-poll cleanup goes through this.deletePendingPollQuestions(mapKey).
-    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length - 2);
+    // Three listed entries are not raw `.delete(mapKey)` calls: the crash count
+    // routes through this.crashes.forget(mapKey) (extracted CrashTracker), the
+    // auto-compact bookkeeping (cooldown/last-success/rapid-rearm/measure/boundary
+    // + waiter + silent timer) routes through this.autoCompact.cleanupScope(mapKey)
+    // (extracted AutoCompactController), and the pending-poll cleanup goes through
+    // this.deletePendingPollQuestions(mapKey).
+    expect(methodBody.match(/\.delete\(mapKey\)/g)).toHaveLength(expectedDeletes.length - 3);
 
     const pendingHelper = source.match(/private deletePendingPollQuestions\(mapKey: string\): void \{([\s\S]*?)\n  \}/);
     expect(pendingHelper).toBeTruthy();

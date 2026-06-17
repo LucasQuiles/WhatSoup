@@ -164,10 +164,11 @@ type RuntimeView = {
   lastFallbackTurnAt: number | null;
   turnHadVisibleOutput: boolean;
   queue: unknown;
-  // Private state maps used by isSilentCompact / isSystemResult in handleEvent.
-  // silentCompactScopes values are NodeJS Timeout handles; Map<string, unknown>
-  // avoids the ReturnType construct that some grammars cannot parse.
-  silentCompactScopes: Map<string, unknown>;
+  // Private state used by isSilentCompact / isSystemResult in handleEvent.
+  // silentCompactScopes (now on the extracted AutoCompactController, reached via
+  // runtime.autoCompact) holds NodeJS Timeout handles; Map<string, unknown> avoids
+  // the ReturnType construct that some grammars cannot parse.
+  autoCompact: { silentCompactScopes: Map<string, unknown> };
   perChatPendingSystemResults: Map<string, number>;
   activateProviderFallback(resetAt: Date | null): void;
   handleEventWithContext(
@@ -370,7 +371,7 @@ describe('zero-text fallback turn signal', () => {
     // isSilentCompact(GLOBAL_TOOL_SCOPE_KEY) checks silentCompactScopes.has(key).
     // Inject a sentinel value (0) so the presence check is satisfied without
     // creating a real timer — the value is never used, only the key matters.
-    v(runtime).silentCompactScopes.set(GLOBAL_SCOPE, 0);
+    v(runtime).autoCompact.silentCompactScopes.set(GLOBAL_SCOPE, 0);
     v(runtime).turnHadVisibleOutput = false;
 
     v(runtime).handleEvent({ type: 'result', text: null });
