@@ -200,6 +200,31 @@ def test_main_pass_fail_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_measurement"
 
 
+def test_tolerance_exact_boundary_is_inclusive_backed():
+    # The backing tolerance is INCLUSIVE: abs(claim - measured) == tolerance is BACKED (the guard is
+    # the STRICT `> tolerance`). The existing 0.40-vs-0.45 case lands just INSIDE the boundary in
+    # float (0.45 - 0.40 == 0.04999...), so it cannot exercise the exact edge. Integer-valued
+    # leak_count hits it exactly: |2.0 - 5.0| == 3.0 == tolerance (float-exact). A >= weakening would
+    # reject a claim that differs by exactly the allowed tolerance.
+    recs = _chain()  # step 0 claims leak_count 2.0
+    rep = bbg.verify_backing(recs, [_m(0, "leak_count", 5.0, "local_measured"),
+                                    _m(1, "token_fraction", 0.4, "provider_truth")], tolerance=3.0)
+    assert rep["steps"][0]["backed"] is True
+    assert rep["overall_verdict"] == "PASS"
+
+
+def test_report_measured_count_and_recommended_action_labels():
+    # measured_claim_count counts the `measured` proof_class steps (== "measured"); a != weakening
+    # counts the complement. recommended_action mirrors the unbacked state via `if not unbacked`;
+    # dropping the not would label a fully-backed chain "treat_unbacked_as_unknown".
+    recs = _chain()  # both steps measured
+    rep = bbg.verify_backing(recs, [_m(0, "leak_count", 2.0, "local_measured"),
+                                    _m(1, "token_fraction", 0.4, "provider_truth")])
+    assert rep["measured_claim_count"] == 2
+    assert rep["unbacked_count"] == 0
+    assert rep["recommended_action"] == "trust_backed_benefits"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

@@ -504,6 +504,23 @@ def test_identity_passthrough_is_baseline_trusted_lossless():
     assert report["summary"]["forbidden_checked_count"] == 0
 
 
+def test_lossless_handle_backed_reducer_survived_via_handle_is_false():
+    # survived_via_handle means "anchors were LOST from the reduced view but RECOVERED via the
+    # handle": reduced_anchor_loss > 0 AND handle_restored_ok. A LOSSLESS reducer that ALSO stores a
+    # recoverable handle loses nothing, so survived_via_handle must be False. An or-weakening, or
+    # relaxing `loss > 0` to `loss >= 0` (always true for a count), would mislabel every lossless row
+    # as "survived via handle". Existing tests don't cover lossless+handle: identity has no handle;
+    # the handle_backed reducer is deliberately lossy.
+    with TemporaryDirectory() as d:
+        def lossless_handle_reducer(raw):
+            return {"reduced": raw, "handle": b1.store(raw, Path(d))}
+        report = probe.build_report(lossless_handle_reducer, "lossless_handle", store_dir=Path(d))
+    assert report["summary"]["pass_count"] == report["summary"]["fixture_count"]  # lossless passes all
+    assert report["summary"]["survived_via_handle_count"] == 0
+    for row in report["fixtures"]:
+        assert row["survived_via_handle"] is False, row  # nothing lost -> not "survived via handle"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
