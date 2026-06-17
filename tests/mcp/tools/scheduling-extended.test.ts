@@ -4,8 +4,16 @@ import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerSchedulingTools } from '../../../src/mcp/tools/scheduling.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 
+const SCHEDULE_CHAT_KEY = 'schedule-chat';
+const SCHEDULE_CHAT_JID = `${SCHEDULE_CHAT_KEY}@s.whatsapp.net`;
+const OTHER_CHAT_KEY = 'other-schedule-chat';
+const OTHER_CHAT_JID = `${OTHER_CHAT_KEY}@s.whatsapp.net`;
+
 function makeDb(): Database { const db = new Database(':memory:'); db.open(); return db; }
 function globalSession(): SessionContext { return { tier: 'global' }; }
+function chatSession(conversationKey: string): SessionContext {
+  return { tier: 'chat-scoped', conversationKey, deliveryJid: `${conversationKey}@s.whatsapp.net` };
+}
 
 describe('extended scheduling tools', () => {
   let registry: ToolRegistry;
@@ -24,13 +32,13 @@ describe('extended scheduling tools', () => {
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, status)
          VALUES (?, ?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'Test', 'text', '{"text":"hi"}', 1700000000, 'pending');
+      ).run(SCHEDULE_CHAT_JID, 'Test', 'text', '{"text":"hi"}', 1700000000, 'pending');
 
       const result = await registry.call('get_scheduled', { id: 1 }, globalSession());
       expect(result.isError).toBeUndefined();
       const body = JSON.parse(result.content[0].text);
       expect(body.id).toBe(1);
-      expect(body.chatJid).toBe('123@s.whatsapp.net');
+      expect(body.chatJid).toBe(SCHEDULE_CHAT_JID);
       expect(body.chatName).toBe('Test');
     });
 
@@ -38,7 +46,7 @@ describe('extended scheduling tools', () => {
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, status, error)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'Test', 'text', '{"text":"hi"}', 1700000000, 'failed', 'send failed');
+      ).run(SCHEDULE_CHAT_JID, 'Test', 'text', '{"text":"hi"}', 1700000000, 'failed', 'send failed');
 
       const result = await registry.call('get_scheduled', { id: 1 }, globalSession());
 
@@ -52,6 +60,41 @@ describe('extended scheduling tools', () => {
       const result = await registry.call('get_scheduled', { id: 999 }, globalSession());
       expect(result.isError).toBe(true);
     });
+
+    it('rejects chat-scoped reads with no conversation key', async () => {
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"hi"}', 1700000000, 'pending');
+
+      const result = await registry.call(
+        'get_scheduled',
+        { id: 1 },
+        { tier: 'chat-scoped' } as SessionContext,
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/no conversation key/);
+    });
+
+    it('rejects chat-scoped reads for invalid or different chat targets', async () => {
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run('invalid-target', 'text', '{"text":"bad"}', 1700000000, 'pending');
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(OTHER_CHAT_JID, 'text', '{"text":"other"}', 1700000100, 'pending');
+
+      const invalid = await registry.call('get_scheduled', { id: 1 }, chatSession(SCHEDULE_CHAT_KEY));
+      expect(invalid.isError).toBe(true);
+      expect(invalid.content[0].text).toMatch(/invalid chat target/);
+
+      const denied = await registry.call('get_scheduled', { id: 2 }, chatSession(SCHEDULE_CHAT_KEY));
+      expect(denied.isError).toBe(true);
+      expect(denied.content[0].text).toMatch(/different conversation/);
+    });
   });
 
   describe('update_scheduled', () => {
@@ -60,7 +103,7 @@ describe('extended scheduling tools', () => {
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'text', '{"text":"hi"}', future, 'pending');
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"hi"}', future, 'pending');
 
       const newTime = future + 3600;
       const result = await registry.call('update_scheduled', { id: 1, scheduled_at: newTime }, globalSession());
@@ -70,11 +113,60 @@ describe('extended scheduling tools', () => {
       expect(row.scheduled_at).toBe(newTime);
     });
 
+    it('returns error for non-existent scheduled messages', async () => {
+      const result = await registry.call('update_scheduled', { id: 999, text: 'missing' }, globalSession());
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/Scheduled message 999 not found/);
+    });
+
+    it('rejects past scheduled_at updates', async () => {
+      const future = Math.floor(Date.now() / 1000) + 7200;
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"hi"}', future, 'pending');
+
+      const result = await registry.call(
+        'update_scheduled',
+        { id: 1, scheduled_at: Math.floor(Date.now() / 1000) - 60 },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/future UTC unix timestamp/);
+    });
+
+    it('updates text payload and content type on a pending message', async () => {
+      const future = Math.floor(Date.now() / 1000) + 7200;
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(SCHEDULE_CHAT_JID, 'image', '{"type":"image"}', future, 'pending');
+
+      const result = await registry.call('update_scheduled', { id: 1, text: 'new text' }, globalSession());
+      expect(result.isError).toBeUndefined();
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.contentType).toBe('text');
+      expect(body.payload).toEqual({ text: 'new text' });
+    });
+
+    it('rejects no-op updates', async () => {
+      const future = Math.floor(Date.now() / 1000) + 7200;
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"hi"}', future, 'pending');
+
+      const result = await registry.call('update_scheduled', { id: 1 }, globalSession());
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/No fields to update/);
+    });
+
     it('rejects update on a sent message', async () => {
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'text', '{"text":"hi"}', 1700000000, 'sent');
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"hi"}', 1700000000, 'sent');
 
       const result = await registry.call('update_scheduled', { id: 1, scheduled_at: 1800000000 }, globalSession());
       expect(result.isError).toBe(true);
@@ -85,7 +177,7 @@ describe('extended scheduling tools', () => {
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'text', '{"text":"hi"}', future, 'pending');
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"hi"}', future, 'pending');
 
       const result = await registry.call('update_scheduled', { id: 1, recurrence: '0 9 * * *' }, globalSession());
       expect(result.isError).toBeUndefined();
@@ -95,12 +187,37 @@ describe('extended scheduling tools', () => {
       expect(row.next_run_at).toBeGreaterThan(0);
     });
 
+    it('uses the supplied scheduled_at as the recurrence base when both change', async () => {
+      const future = Math.floor(Date.now() / 1000) + 7200;
+      db.raw.prepare(
+        `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"hi"}', future, 'pending');
+
+      const newTime = future + 86400;
+      const result = await registry.call(
+        'update_scheduled',
+        { id: 1, scheduled_at: newTime, recurrence: '0 9 * * *' },
+        globalSession(),
+      );
+      expect(result.isError).toBeUndefined();
+
+      const row = db.raw.prepare('SELECT scheduled_at, recurrence, next_run_at FROM scheduled_messages WHERE id = 1').get() as {
+        scheduled_at: number;
+        recurrence: string;
+        next_run_at: number;
+      };
+      expect(row.scheduled_at).toBe(newTime);
+      expect(row.recurrence).toBe('0 9 * * *');
+      expect(row.next_run_at).toBeGreaterThanOrEqual(newTime);
+    });
+
     it('syncs next_run_at when scheduled_at changes on a recurring row', async () => {
       const future = Math.floor(Date.now() / 1000) + 7200;
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status, recurrence, next_run_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'text', '{"text":"hi"}', future, 'pending', '0 9 * * *', future);
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"hi"}', future, 'pending', '0 9 * * *', future);
 
       const oldRow = db.raw.prepare('SELECT next_run_at FROM scheduled_messages WHERE id = 1').get() as { next_run_at: number };
       expect(oldRow.next_run_at).toBe(future);
@@ -119,7 +236,7 @@ describe('extended scheduling tools', () => {
       const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
       const result = await registry.call(
         'schedule_message',
-        { chatJid: '123@s.whatsapp.net', scheduled_at: scheduledAt, text: 'bad', recurrence: 'not a cron' },
+        { chatJid: SCHEDULE_CHAT_JID, scheduled_at: scheduledAt, text: 'bad', recurrence: 'not a cron' },
         globalSession(),
       );
       expect(result.isError).toBe(true);
@@ -130,7 +247,7 @@ describe('extended scheduling tools', () => {
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'text', '{"text":"hi"}', future, 'pending');
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"hi"}', future, 'pending');
 
       const result = await registry.call('update_scheduled', { id: 1, recurrence: '99 99 99 99 99' }, globalSession());
       expect(result.isError).toBe(true);
@@ -142,7 +259,7 @@ describe('extended scheduling tools', () => {
       const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
       const result = await registry.call(
         'schedule_message',
-        { chatJid: '123@s.whatsapp.net', scheduled_at: scheduledAt, text: 'weekly', recurrence: '0 9 * * 1' },
+        { chatJid: SCHEDULE_CHAT_JID, scheduled_at: scheduledAt, text: 'weekly', recurrence: '0 9 * * 1' },
         globalSession(),
       );
 
@@ -160,11 +277,11 @@ describe('extended scheduling tools', () => {
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'text', '{broken json', 1700000000, 'pending');
+      ).run(SCHEDULE_CHAT_JID, 'text', '{broken json', 1700000000, 'pending');
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'text', '{"text":"fine"}', 1700000100, 'pending');
+      ).run(SCHEDULE_CHAT_JID, 'text', '{"text":"fine"}', 1700000100, 'pending');
 
       const result = await registry.call('list_scheduled', {}, globalSession());
       expect(result.isError).toBeUndefined();
@@ -180,7 +297,7 @@ describe('extended scheduling tools', () => {
       db.raw.prepare(
         `INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status)
          VALUES (?, ?, ?, ?, ?)`,
-      ).run('123@s.whatsapp.net', 'text', 'not json at all', 1700000000, 'pending');
+      ).run(SCHEDULE_CHAT_JID, 'text', 'not json at all', 1700000000, 'pending');
 
       const result = await registry.call('get_scheduled', { id: 1 }, globalSession());
       expect(result.isError).toBeUndefined();
