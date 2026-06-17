@@ -4,12 +4,13 @@ import { mkdirSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
-// Mock logger
+// Mock logger (shared error spy so cleanup-failure logging can be asserted)
+const logError = vi.hoisted(() => vi.fn());
 vi.mock('../../src/logger.ts', () => ({
   createChildLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
+    error: logError,
     debug: vi.fn(),
   }),
 }));
@@ -380,10 +381,16 @@ describe('MediaRetentionTimer', () => {
     const timer = new MediaRetentionTimer(baseDir, db);
     const runSpy = vi.spyOn(timer, 'runCleanup').mockRejectedValueOnce(new Error('boom'));
 
+    logError.mockClear();
     timer.start(1000);
-    await vi.runAllTicks();
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(runSpy).toHaveBeenCalledTimes(1);
+    // suppresses: the rejection did not crash start(); logs: the failure was recorded
+    expect(logError).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.anything() }),
+      'media retention: immediate cleanup failed',
+    );
     timer.stop();
   });
 
@@ -395,10 +402,16 @@ describe('MediaRetentionTimer', () => {
       .mockResolvedValueOnce(emptyResult)
       .mockRejectedValueOnce(new Error('tick failed'));
 
+    logError.mockClear();
     timer.start(1000);
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(runSpy).toHaveBeenCalledTimes(2);
+    // suppresses: timer kept scheduling past the rejection; logs: the failure was recorded
+    expect(logError).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.anything() }),
+      'media retention: periodic cleanup failed',
+    );
     timer.stop();
   });
 });
