@@ -609,7 +609,16 @@ const scheduledGroupsDesignSystemRestrictions = [
   // Stricter rules for newer UI surfaces. These augment the global rules above.
 
   {
-    selector: 'Literal[value=/#[0-9a-fA-F]{3,8}/]',
+    // Match raw hex COLORS embedded in strings while excluding decimal
+    // order/build numbers like "#4921" / "#512" that share the "#NNNN" shape.
+    // A valid CSS hex color is exactly 3, 6, or 8 hex digits at a word boundary:
+    //   - 6 or 8 hex digits  → always a color (incl. all-decimal like #11223344)
+    //   - exactly 3 hex digits → only a color when it contains an a-f letter,
+    //     so #fff/#abc match but pure-decimal #512 (an order number) does not.
+    // 4- and 5-digit "#NNNN" sequences are not valid color lengths and never match.
+    // (Standalone literals whose ENTIRE value is a hex color are still caught by
+    //  the anchored /^#[0-9a-fA-F]{3,8}$/ global selector above.)
+    selector: 'Literal[value=/#(?:[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?\\b|(?=[0-9a-fA-F]{3}\\b)[0-9a-fA-F]*[a-fA-F][0-9a-fA-F]*\\b)/]',
     message: '⛔ Hardcoded hex color in string. FIX: replace with CSS variable. Backgrounds: var(--color-d0..d6). Text: var(--color-t1..t5). Status: var(--color-s-ok/warn/crit).',
   },
 
