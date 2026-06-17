@@ -266,3 +266,20 @@ reconnecting. The hook owns the one-shot recovery edge (`justReconnected` / `onR
 
 Scope guard: this surfaces connection status; it does not change the realtime/polling transport or
 any line's status badge. Operator and LineDetail offline wiring is a tracked follow-up.
+
+## Toolkit primitives — DD-43 P0 set complete + Stepper P1 — 2026-06-17
+
+The DD-43 P0 reusable-primitive set is now COMPLETE and barrel-exported: Card (DD-38), Menu,
+Avatar, and **Accordion** (landed #1014 — native `<details>`/`<summary>`, the one focus recipe,
+chevron rotation removed under reduced-motion, aria-wired body). The progressive-disclosure
+principle the system was missing now has a primitive.
+
+P1 progress: **Stepper** extracted from the inline `WizardStepper` into a reusable primitive
+(#1015) — behavior-preserving (same `.soup-wiz-steps` anatomy, tokens, and a11y; AddLineWizard's
+rendered step strip unchanged). The active-step mode-identity coloring (showcase §23) remains a
+deferred enhancement.
+
+Remaining DD-43 gaps: DateTimePicker (§25, in progress — replaces the bare `datetime-local` +
+free-text cron in ScheduleComposerModal with a date+time field, calendar popover, and a segmented
+recurrence row; the free-text cron is demoted behind a "Cron" segment, not removed, so existing
+cron-scheduled messages still edit) and Bottom-sheet (Drawer mobile placement, partially addressed).
