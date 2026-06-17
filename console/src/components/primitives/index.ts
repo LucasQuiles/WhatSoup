@@ -157,6 +157,9 @@ export type { TooltipProps } from './Tooltip';
 export { Stepper } from './Stepper';
 export type { StepperProps } from './Stepper';
 
+export { Segmented } from './Segmented';
+export type { SegmentedProps, SegmentedOption } from './Segmented';
+
 export { DateTimePicker } from './DateTimePicker';
 export type { DateTimePickerProps } from './DateTimePicker';
 export {

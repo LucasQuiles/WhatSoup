@@ -25,6 +25,7 @@
  *   at the toolbar level when the event target is not inside a text input).
  */
 import { type FC, type ReactNode, type ChangeEventHandler, useRef, useCallback, type KeyboardEvent, type FocusEvent } from 'react';
+import { Segmented } from './Segmented.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — focusable item discovery
@@ -216,7 +217,13 @@ export const ToolbarFilters: FC<ToolbarFiltersProps> = ({ label, children }) => 
 );
 
 // ---------------------------------------------------------------------------
-// ToolbarTimeRange — segmented time-range control
+// ToolbarTimeRange — thin alias of Segmented (DD-32 "extract" ruling).
+//
+// The canonical segmented-control primitive lives in `Segmented.tsx`
+// (segmented.md). This re-export preserves the wave-2 ToolbarTimeRange
+// signature so every existing consumer (toolbar.md anatomy, GroupDetailModal,
+// ScheduleComposerModal, MetricsTab, primitives-toolbar tests) is unaffected.
+// The rendered DOM is byte-identical to the pre-extraction body.
 // ---------------------------------------------------------------------------
 
 export interface TimeRangeOption {
@@ -242,27 +249,8 @@ export interface ToolbarTimeRangeProps {
   disabled?: boolean;
 }
 
-export const ToolbarTimeRange: FC<ToolbarTimeRangeProps> = ({
-  label,
-  options,
-  value,
-  onChange,
-  disabled,
-}) => (
-  <div role="group" aria-label={label} className="soup-toolbar-seg">
-    {options.map((opt) => (
-      <button
-        key={opt.value}
-        type="button"
-        className="soup-toolbar-seg__btn"
-        aria-pressed={value === opt.value}
-        disabled={disabled}
-        onClick={() => { if (!disabled) onChange(opt.value); }}
-      >
-        {opt.label}
-      </button>
-    ))}
-  </div>
+export const ToolbarTimeRange: FC<ToolbarTimeRangeProps> = (props) => (
+  <Segmented {...props} />
 );
 
 // ---------------------------------------------------------------------------
