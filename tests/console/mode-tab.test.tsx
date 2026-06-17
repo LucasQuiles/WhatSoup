@@ -231,7 +231,7 @@ describe('ModeTab configured-mode populated grid', () => {
     // Grid container should now exist
     const grid = container.querySelector('div.bg-surface-inset') as HTMLElement | null
     expect(grid).not.toBeNull()
-    expect((grid as HTMLElement).style.display).toBe('grid')
+    expect((grid as HTMLElement).classList.contains('grid')).toBe(true)
   })
 
   it('color-codes string vs number vs path entries via TYPE_COLOR', () => {

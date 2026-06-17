@@ -22,65 +22,23 @@
   ],
   "totals": {
     "by_category": {
-      "base-wall": 18,
+      "base-wall": 5,
       "brand-regression": 2
     },
-    "files": 6,
-    "total": 20
+    "files": 3,
+    "total": 7
   },
   "by_file": [
     {
       "by_category": {
-        "base-wall": 1,
-        "brand-regression": 0
-      },
-      "file": "console/src/components/line-detail/ModeTab.tsx",
-      "lines": [
-        77
-      ],
-      "total": 1
-    },
-    {
-      "by_category": {
-        "base-wall": 1,
-        "brand-regression": 0
-      },
-      "file": "console/src/components/line-detail/PipelineTab.tsx",
-      "lines": [
-        163
-      ],
-      "total": 1
-    },
-    {
-      "by_category": {
-        "base-wall": 5,
-        "brand-regression": 0
-      },
-      "file": "console/src/components/MessageContent.tsx",
-      "lines": [
-        155,
-        164,
-        166,
-        225
-      ],
-      "total": 5
-    },
-    {
-      "by_category": {
-        "base-wall": 6,
+        "base-wall": 0,
         "brand-regression": 1
       },
       "file": "console/src/components/Nav.tsx",
       "lines": [
-        48,
-        68,
-        69,
-        105,
-        106,
-        133,
-        134
+        48
       ],
-      "total": 7
+      "total": 1
     },
     {
       "by_category": {
@@ -110,110 +68,6 @@
     }
   ],
   "hits": [
-    {
-      "category": "base-wall",
-      "column": 13,
-      "file": "console/src/components/line-detail/ModeTab.tsx",
-      "line": 77,
-      "message": "⛔ Inline display in style. FIX: remove from style, add to className. flex→\"flex\" inline-flex→\"inline-flex\" block→\"block\" inline-block→\"inline-block\" grid→\"grid\" none→\"hidden\".",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 11,
-      "file": "console/src/components/line-detail/PipelineTab.tsx",
-      "line": 163,
-      "message": "⛔ Inline display in style. FIX: remove from style, add to className. flex→\"flex\" inline-flex→\"inline-flex\" block→\"block\" inline-block→\"inline-block\" grid→\"grid\" none→\"hidden\".",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 25,
-      "file": "console/src/components/MessageContent.tsx",
-      "line": 155,
-      "message": "⛔ Inline position in style. FIX: remove from style, add to className. relative→\"relative\" absolute→\"absolute\" fixed→\"fixed\" sticky→\"sticky\".",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 47,
-      "file": "console/src/components/MessageContent.tsx",
-      "line": 155,
-      "message": "⛔ Inline display in style. FIX: remove from style, add to className. flex→\"flex\" inline-flex→\"inline-flex\" block→\"block\" inline-block→\"inline-block\" grid→\"grid\" none→\"hidden\".",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 15,
-      "file": "console/src/components/MessageContent.tsx",
-      "line": 164,
-      "message": "⛔ Inline position in style. FIX: remove from style, add to className. relative→\"relative\" absolute→\"absolute\" fixed→\"fixed\" sticky→\"sticky\".",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 15,
-      "file": "console/src/components/MessageContent.tsx",
-      "line": 166,
-      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 7,
-      "file": "console/src/components/MessageContent.tsx",
-      "line": 225,
-      "message": "⛔ Inline overflow in style. FIX: remove from style, add to className. hidden→\"overflow-hidden\" auto→\"overflow-auto\" scroll→\"overflow-scroll\". For single axis: \"overflow-y-auto\" etc.",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 17,
-      "file": "console/src/components/Nav.tsx",
-      "line": 68,
-      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 17,
-      "file": "console/src/components/Nav.tsx",
-      "line": 69,
-      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 21,
-      "file": "console/src/components/Nav.tsx",
-      "line": 105,
-      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 21,
-      "file": "console/src/components/Nav.tsx",
-      "line": 106,
-      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 21,
-      "file": "console/src/components/Nav.tsx",
-      "line": 133,
-      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
-      "rule": "no-restricted-syntax"
-    },
-    {
-      "category": "base-wall",
-      "column": 21,
-      "file": "console/src/components/Nav.tsx",
-      "line": 134,
-      "message": "⛔ Inline left/right with token. FIX: remove from style, add left-[var(--TOKEN)] or right-[var(--TOKEN)] to className.",
-      "rule": "no-restricted-syntax"
-    },
     {
       "category": "base-wall",
       "column": 36,

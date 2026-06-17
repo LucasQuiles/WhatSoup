@@ -152,7 +152,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
 
       if (thumb) {
         return (
-          <div style={{ position: 'relative', display: 'inline-block' }}>
+          <div className="relative inline-block">
             <img
               src={`data:image/jpeg;base64,${thumb}`}
               alt={msg.content || (isGif ? 'GIF' : 'Video')}
@@ -160,11 +160,7 @@ const RichMedia: FC<{ msg: Message; highlightQuery?: string }> = ({ msg, highlig
               style={{ maxHeight: 'var(--media-thumb-h)' }}
             />
             {/* Duration badge + play icon overlay */}
-            <div className="text-xs font-mono rounded-sm py-[var(--sp-0h)] px-[var(--sp-2)] bg-[var(--overlay-badge)] text-text-1" style={{
-              position: 'absolute',
-              bottom: 'var(--sp-2)',
-              right: 'var(--sp-2)',
-            }}>
+            <div className="absolute bottom-[var(--sp-2)] right-[var(--sp-2)] text-xs font-mono rounded-sm py-[var(--sp-0h)] px-[var(--sp-2)] bg-[var(--overlay-badge)] text-text-1">
               {isGif ? 'GIF' : duration || 'Video'}
             </div>
             {msg.content && (
@@ -216,13 +212,12 @@ function extractQuotedContext(rawMessage?: string): { participant?: string; text
 /** Quoted message reply bar. */
 const QuotedReplyBar: FC<{ participant?: string; text?: string }> = ({ participant, text }) => (
   <div
-    className="text-sm py-[var(--sp-1)] px-[var(--sp-2)] mb-[var(--sp-2)] bg-surface-raised rounded-[0_var(--radius-sm)_var(--radius-sm)_0]"
+    className="overflow-hidden text-sm py-[var(--sp-1)] px-[var(--sp-2)] mb-[var(--sp-2)] bg-surface-raised rounded-[0_var(--radius-sm)_var(--radius-sm)_0]"
     style={{
       borderLeftWidth: 'var(--bw-accent, 3px)',
       borderLeftStyle: 'solid',
       borderLeftColor: 'var(--color-m-cht)',
       maxHeight: 'var(--sp-12)',
-      overflow: 'hidden',
     }}
   >
     {participant && (

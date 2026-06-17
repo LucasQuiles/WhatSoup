@@ -158,9 +158,8 @@ function NodeDetailCard({
       }}
     >
       <div
-        className="gap-x-[var(--sp-3)] gap-y-[var(--sp-1)]"
+        className="grid gap-x-[var(--sp-3)] gap-y-[var(--sp-1)]"
         style={{
-          display: 'grid',
           gridTemplateColumns: 'auto 1fr',
         }}
       >

@@ -478,7 +478,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
-  height: 20px;
+  height: var(--sp-5);
   padding: 0 var(--sp-2);
   font: 500 11px/16px var(--font-sans);
   letter-spacing: var(--tracking-pill, 0.01em);
@@ -490,7 +490,7 @@
 
 /* Size modifier: sm — 16px height */
 .soup-pill--sm {
-  height: 16px;
+  height: var(--sp-4);
   padding: 0 var(--sp-1);
   font: 500 10px/14px var(--font-sans);
 }
@@ -498,7 +498,7 @@
 /* Interactive: must be a <button> with 24px height target floor (pill.md §Anatomy) */
 button.soup-pill,
 .soup-pill--interactive {
-  height: 24px;
+  height: var(--sp-6);
   cursor: pointer;
   transition:
     border-color var(--dur-fast) var(--ease-enter),
@@ -569,8 +569,8 @@ button.soup-pill[aria-disabled="true"] {
    the pseudo-element below. jsdom cannot prove the computed box — the DD-10
    browser suite measures it in real Chromium. */
 .soup-pill__remove.soup-actbtn {
-  min-height: 16px;
-  min-width: 16px;
+  min-height: var(--sp-4);
+  min-width: var(--sp-4);
   padding: 0;
   margin: 0 calc(-1 * var(--sp-1));
   opacity: 0.7;
@@ -689,7 +689,7 @@ button.soup-pill[aria-disabled="true"] {
 
 /* th — overline style header, 28px height, surface-raised fill */
 .soup-table-th {
-  height: 28px;
+  height: var(--sp-7);
   padding: 0 var(--sp-3);
   background: var(--surface-raised);
   border-bottom: var(--bw) solid var(--border-subtle);
@@ -943,7 +943,7 @@ button.soup-pill[aria-disabled="true"] {
 
 /* Seg button — 24px height, data-sm type, pressed = accent fill */
 .soup-toolbar-seg__btn {
-  height: 24px;
+  height: var(--sp-6);
   padding: 0 var(--sp-2);
   font: var(--type-data-sm, 400 11px/16px var(--font-mono));
   color: var(--text-2);
@@ -1000,7 +1000,7 @@ button.soup-pill[aria-disabled="true"] {
 
 /* Search input — 28px height, width from component token */
 .soup-toolbar-search {
-  height: 28px;
+  height: var(--sp-7);
   width: var(--toolbar-search-w, 200px);
   padding: 0 var(--sp-2);
   font: var(--type-body, 400 13px/20px var(--font-sans));
@@ -1137,7 +1137,7 @@ button.soup-pill[aria-disabled="true"] {
   align-items: center;
   justify-content: center;
   width: 18px;
-  height: 16px;
+  height: var(--sp-4);
   font: 600 9px/1 var(--font-mono);
   border: var(--bw) solid;
   border-radius: var(--radius-xs);
@@ -1659,8 +1659,8 @@ button.soup-pill[aria-disabled="true"] {
 .soup-popover__check {
   display: inline-block;
   flex: none;
-  width: 16px;
-  height: 16px;
+  width: var(--sp-4);
+  height: var(--sp-4);
   position: relative;
 }
 

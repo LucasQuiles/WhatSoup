@@ -72,9 +72,8 @@ export function ModeTab({
         </div>
       ) : (
         <div
-          className="bg-surface-inset rounded-md border-[var(--border-hairline)] py-[var(--sp-3)] px-[var(--sp-4)] gap-x-[var(--sp-4)] gap-y-[var(--sp-1)]"
+          className="grid bg-surface-inset rounded-md border-[var(--border-hairline)] py-[var(--sp-3)] px-[var(--sp-4)] gap-x-[var(--sp-4)] gap-y-[var(--sp-1)]"
           style={{
-            display: 'grid',
             gridTemplateColumns: 'minmax(var(--config-key-col), auto) 1fr',
             borderWidth: 'var(--bw)',
             borderStyle: 'solid',

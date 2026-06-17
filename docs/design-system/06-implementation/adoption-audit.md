@@ -216,18 +216,18 @@ was not decomposed).
 | M13 | Hand-rolled mode radio-cards in ModeSwitchDialog duplicate the CardSelector pattern with inline legacy mode-color styles | ModeSwitchDialog.tsx:70-92 | CardSelector (DD-14 radiogroup) exists and is unused here | Migrate to CardSelector in the C3 LineDetail pass |
 | M14 | Local SearchInput recipe parallel to ToolbarSearch | shared/SearchInput.tsx | toolbar.md owns search-in-toolbar; standalone search input has no primitive | Promote into the form kit (or absorb into ToolbarSearch) during B-residue work |
 
-## 5. Shadow-baseline rollup (ground truth: console/lint-shadow-baseline.json, total 21)
+## 5. Shadow-baseline rollup (ground truth: console/lint-shadow-baseline.json, total 8)
 
 | Rule | Falls | Files | Top files |
 |---|---|---|---|
 | ~~soup/no-legacy-tokens~~ | 0 | 0 | closed: Nav and UpdateModal migrated to v3 semantic tokens; pages + wizard + shared + App surfaces fully migrated |
-| no-restricted-syntax (base wall) | 18 | 5 | Nav 6 · mock-data 5 · MessageContent 5 · PipelineTab 1 · ModeTab 1 |
+| no-restricted-syntax (base wall) | 5 | 1 | mock-data 5 (`#NNNN` order/build numbers in mock message text — false-positive hex match, not colors; left for rule-scope review). Nav, MessageContent, PipelineTab, ModeTab inline-style falls migrated to className utilities (value-identical). |
 | soup/no-brand-regression | 2 | 2 | Nav (split wordmark) · UpdateModal ("Update WhatSoup") — both flip at the P4/C4 brand slice by design |
 | ~~soup/no-raw-form-control~~ | 0 | 0 | closed: `ConfigStep` file uploads route through `FileInput`; generated raw-form inventory is empty |
 | ~~soup/no-focus-suppression~~ | 0 | 0 | closed: zero TSX `outline-none` sites; former Inbox and HistoryTab composer carve-outs retired |
 | soup/no-utility-smell | 1 | 1 | GroupCard |
 
-Reconciliation: the live shadow baseline is 21 (= 18 + 2 + 1) and the live
+Reconciliation: the live shadow baseline is 8 (= 5 + 2 + 1) and the live
 burndown queue is 657/592 with `focus-suppression` and `raw-form-control` absent. Focus
 suppression now reads zero in two independent checks: `design-regression` check 12 and
 whole-tree `outline-none` grep over `console/src`; both former chat composers route
@@ -310,7 +310,8 @@ Blocking items (14 tracked; B12 now closed):
    `accent-color`, Nav active underlines, and unread badges now use `--accent`; the
    remaining green wordmark is C4 brand/nameplate work.
 5. **B5 — Nav/brand slice (C4)**: nameplate + teal tick, split-wordmark + UpdateModal title
-   flips, theme toggle (DD-5), Nav's 3 raw buttons + 15 token refs + 6 base-wall falls.
+   flips, theme toggle (DD-5), Nav's 3 raw buttons + 15 token refs (Nav's 6 base-wall
+   inline-style falls migrated to `left-[var(--sp-3)]`/`right-[var(--sp-3)]` className utilities).
 6. **B6 — Inbox completion**: composer (textarea+send), header band → Toolbar, 8 raw buttons,
    25 token refs, DD-24 narrow-width action path, DD-8 meta-lane tiering.
 7. ~~**B7 — HistoryTab composer (C-B4-6)**~~ — **DONE / RE-NARROWED**: HistoryTab
