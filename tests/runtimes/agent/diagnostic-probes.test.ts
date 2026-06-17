@@ -51,6 +51,57 @@ describe('buildDiagnosticProbes', () => {
     expect(r.data).toEqual({ effectiveProvider: 'opencode-cli' });
   });
 
+  it('health-snapshot returns ok:true when snapshot shows no active fallback and no unusable model status', async () => {
+    const map = buildDiagnosticProbes(deps({
+      getHealthSnapshot: () => ({
+        summary: 'effective=claude-cli fallbackReason=none modelUsable=true',
+        data: {
+          effectiveProvider: 'claude-cli',
+          fallbackReason: null,
+          fallbackActiveUntil: null,
+          modelUsabilityStatus: 'usable',
+        },
+      }),
+    }));
+    const r = await map['health-snapshot']!(signal());
+    expect(r).toMatchObject({ ok: true, confidence: 'confirmed' });
+  });
+
+  it('health-snapshot returns ok:false when snapshot has a non-null fallbackReason (fallback active = degraded)', async () => {
+    const map = buildDiagnosticProbes(deps({
+      getHealthSnapshot: () => ({
+        summary: 'effective=opencode-cli fallbackReason=usage-limit modelUsable=unknown',
+        data: {
+          effectiveProvider: 'opencode-cli',
+          fallbackReason: 'usage-limit',
+          fallbackActiveUntil: NOW + 3_600_000,
+          modelUsabilityStatus: null,
+        },
+      }),
+    }));
+    const r = await map['health-snapshot']!(signal());
+    expect(r).toMatchObject({ ok: false, confidence: 'confirmed' });
+  });
+
+  it('health-snapshot returns ok:false for each unusable modelUsabilityStatus', async () => {
+    const unusableStatuses = ['model-unavailable', 'credential-unavailable', 'provider-unavailable'] as const;
+    for (const status of unusableStatuses) {
+      const map = buildDiagnosticProbes(deps({
+        getHealthSnapshot: () => ({
+          summary: `effective=claude-cli fallbackReason=none modelUsable=false`,
+          data: {
+            effectiveProvider: 'claude-cli',
+            fallbackReason: null,
+            fallbackActiveUntil: null,
+            modelUsabilityStatus: status,
+          },
+        }),
+      }));
+      const r = await map['health-snapshot']!(signal());
+      expect(r, `modelUsabilityStatus=${status}`).toMatchObject({ ok: false, confidence: 'confirmed' });
+    }
+  });
+
   it('usage-limit-reset-parse lifts a parsed reset time; degrades when unparseable', async () => {
     const parsed = await buildDiagnosticProbes(deps())['usage-limit-reset-parse']!(signal());
     expect(parsed).toMatchObject({ ok: true, confidence: 'confirmed' });

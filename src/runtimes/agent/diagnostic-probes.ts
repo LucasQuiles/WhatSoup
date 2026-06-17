@@ -57,10 +57,26 @@ function mapPrimaryModelUsability(r: PrimaryModelUsabilityResult): DiagnosticPro
   }
 }
 
+/** Model usability statuses that definitively indicate the primary model cannot serve turns. */
+const UNUSABLE_MODEL_STATUSES = new Set(['model-unavailable', 'credential-unavailable', 'provider-unavailable']);
+
+/**
+ * Derive the health verdict from a curated snapshot's data fields.
+ * Returns false (degraded) when the snapshot shows an active fallback window
+ * (`fallbackReason` non-null) or a confirmed-unusable model status.
+ * Returns true otherwise (no degraded signal present).
+ */
+function isSnapshotHealthy(data: Record<string, unknown>): boolean {
+  if (data['fallbackReason'] != null) return false;
+  if (typeof data['modelUsabilityStatus'] === 'string' && UNUSABLE_MODEL_STATUSES.has(data['modelUsabilityStatus'])) return false;
+  return true;
+}
+
 export function buildDiagnosticProbes(deps: DiagnosticProbeBuilderDeps): DiagnosticProbeMap {
   const healthSnapshot: DiagnosticProbe = async () => {
     const snap = deps.getHealthSnapshot();
-    return { ok: true, confidence: 'confirmed', summary: snap.summary, data: snap.data };
+    const ok = isSnapshotHealthy(snap.data);
+    return { ok, confidence: 'confirmed', summary: snap.summary, data: snap.data };
   };
 
   const usageLimitResetParse: DiagnosticProbe = async () => {
