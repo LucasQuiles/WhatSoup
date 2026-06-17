@@ -666,6 +666,36 @@ def test_f2_ambiguous_intervention_reducer_id_is_none_fail_closed():
     assert report["metrics"]["canary"]["reason"] == "canary_reducer_mismatch"
 
 
+def test_pass_rate_regression_with_equal_score_still_blocks_adoption():
+    # quality_not_worse = `pass_rate_delta >= 0 AND score_delta-ok`: a pass-rate regression must veto
+    # adoption EVEN IF the mean score holds. An and->or weakening would let a lower pass rate slip
+    # through on score alone — a fail-open of the core "no quality compromise" gate. The same split
+    # also exercises no_per_fixture_quality_regression (a per-fixture pass drop with no score drop).
+    # Baseline passes both fixtures at score 1.0; the intervention fails fx2 at the SAME score 1.0,
+    # so pass_rate_delta < 0 while score_delta == 0 — the existing regression test fails BOTH
+    # conjuncts and cannot discriminate the and.
+    interv = [
+        _event("fx1", quality_pass=True, quality_score=1.0),
+        _event("fx2", quality_pass=False, quality_score=1.0),
+    ]
+    with TemporaryDirectory() as d:
+        report = _build(d, _baseline_events(), interv,
+                        _canary_pass_report(), _handle_present_report())
+    assert report["adoption_eligible"] is False
+    assert "quality_not_worse" in report["failed_predicates"]
+    assert "no_per_fixture_quality_regression" in report["failed_predicates"]
+
+
+def test_cache_not_worse_zero_deltas_is_not_worse():
+    # _cache_not_worse: a ZERO delta on any cache metric is "not worse" (INCLUSIVE boundaries — read
+    # must not FALL `< 0`, write must not RISE `> 0`, ratio must not FALL `< 0`). Weakening any of
+    # these to <= / >= would treat a no-change cache as worse and block an otherwise-clean adoption.
+    # (cache_metrics_present gates the fail-closed absence path, proven elsewhere.)
+    cache = {"cache_metrics_present": True, "cache_read_delta": 0,
+             "cache_write_delta": 0, "cache_read_to_input_ratio_delta": 0}
+    assert probe._cache_not_worse(cache) is True
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
