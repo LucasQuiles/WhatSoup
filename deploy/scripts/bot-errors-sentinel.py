@@ -38,6 +38,7 @@ DEFAULT_MAX_CLOCK_SKEW_SECONDS = 5 * 60
 DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS = 6 * 60 * 60
 DEFAULT_MAX_CRITICAL_WHATSAPP_PER_DAY = 8
 DEFAULT_TIER2_TOKEN_TTL_SECONDS = 30 * 60
+DEFAULT_ACTION_OUTBOX_RETENTION = 500
 DEFAULT_Q_HOST = "q-agent-host"
 SAFE_HEAL_CLASSES = {"drift", "manifest_missing"}
 ACTION_EVENT_ACTIONS = {
@@ -133,6 +134,7 @@ class SentinelConfig:
     action_event_cooldown_seconds: int = DEFAULT_ACTION_EVENT_COOLDOWN_SECONDS
     max_critical_whatsapp_per_day: int = DEFAULT_MAX_CRITICAL_WHATSAPP_PER_DAY
     tier2_token_ttl_seconds: int = DEFAULT_TIER2_TOKEN_TTL_SECONDS
+    action_outbox_retention: int = DEFAULT_ACTION_OUTBOX_RETENTION
     q_host: str = DEFAULT_Q_HOST
 
 
@@ -232,6 +234,11 @@ def default_config(hosts_path: Optional[Path] = None, state_dir: Optional[Path] 
             "BOT_ERRORS_FLEET_SENTINEL_TIER2_TOKEN_TTL_SECONDS",
             DEFAULT_TIER2_TOKEN_TTL_SECONDS,
             60,
+        ),
+        action_outbox_retention=positive_int_env(
+            "BOT_ERRORS_FLEET_SENTINEL_ACTION_OUTBOX_RETENTION",
+            DEFAULT_ACTION_OUTBOX_RETENTION,
+            1,
         ),
         q_host=os.environ.get("BOT_ERRORS_FLEET_SENTINEL_Q_HOST", DEFAULT_Q_HOST).strip() or DEFAULT_Q_HOST,
     )
@@ -383,6 +390,38 @@ def heartbeat_path(config: SentinelConfig) -> Path:
 
 def action_outbox_dir(config: SentinelConfig) -> Path:
     return config.action_outbox_dir or config.state_dir / "actions"
+
+
+def prune_action_outbox(config: SentinelConfig) -> int:
+    """Bound the action outbox: keep the newest ``action_outbox_retention``
+    files by mtime and delete the rest. The outbox has no consumer, so without
+    this sweep it grows without bound (inode/disk exhaustion). Returns the
+    outbox depth after pruning."""
+    outbox = action_outbox_dir(config)
+    retention = max(0, config.action_outbox_retention)
+    try:
+        with os.scandir(outbox) as scan:
+            files = [Path(entry.path) for entry in scan if entry.is_file()]
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return 0
+    # Sort newest-first so the kept slice is the freshest by mtime; the path
+    # name breaks ties deterministically.
+    def sort_key(entry: Path) -> tuple:
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        return (mtime, entry.name)
+
+    files.sort(key=sort_key, reverse=True)
+    for stale in files[retention:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    return min(len(files), retention)
 
 
 def load_state(config: SentinelConfig) -> dict:
@@ -1432,6 +1471,9 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
     # Advance a generation counter so workers can detect stale events.
     state["cycleSeq"] = int_or_zero(state.get("cycleSeq")) + 1
     action_events = emit_action_events(results, state, config, now, controller_host, fleet_action, oracle)
+    # Bound the outbox at cycle end: it has no consumer, so prune to the newest
+    # N files and surface the resulting depth for observability.
+    action_outbox_depth = prune_action_outbox(config)
     try:
         result = {
             "schemaVersion": 1,
@@ -1441,6 +1483,7 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
             "reachabilityOracle": oracle,
             "hosts": results,
             "actionEvents": action_events,
+            "actionOutboxDepth": action_outbox_depth,
             "statePath": str(state_path(config)),
             "cycleSeq": state["cycleSeq"],
         }
