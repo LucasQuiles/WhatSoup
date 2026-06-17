@@ -45,8 +45,12 @@ vi.mock('../../console/src/hooks/use-update-check', () => ({
 }));
 
 // Nav renders inside the test tree and calls useRealtime
+// Mutable realtime flag. Defaults to connected so the ConnectionBanner
+// (DD-29) stays hidden for the routing/nav suites, preserving their DOM;
+// the transport suite below flips it to drive the recovery toast.
+let wsConnected = true;
 vi.mock('../../console/src/hooks/use-websocket', () => ({
-  useRealtime: () => ({ connected: false }),
+  useRealtime: () => ({ connected: wsConnected }),
   RealtimeProvider: ({ children }: { children: ReactNode }) => createElement('div', null, children),
 }));
 
@@ -121,6 +125,7 @@ beforeEach(() => {
   mockStaticVersion = 'unknown';
   mockOpenUpdateModal.mockClear();
   mockCloseUpdateModal.mockClear();
+  wsConnected = true;
 });
 
 afterEach(() => {
@@ -396,6 +401,74 @@ describe('App — nav counts and update check integration', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('update-modal').textContent).toBe('UpdateModal live-sha lines:2');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Connection-status surface (DD-29)
+// ---------------------------------------------------------------------------
+
+describe('App — connection-status surface', () => {
+  it('hides the ConnectionBanner while the realtime socket is connected', async () => {
+    wsConnected = true;
+    await act(async () => { renderApp('/'); });
+    await waitFor(() => screen.getByTestId('page-soup-kitchen'));
+    // No live status region is rendered when connected.
+    expect(
+      screen.queryByText(/showing the last known data|you're offline/i),
+    ).toBeNull();
+  });
+
+  it('shows the reconnecting banner when the realtime socket is down', async () => {
+    wsConnected = false;
+    await act(async () => { renderApp('/'); });
+    await waitFor(() => {
+      expect(screen.getByText(/showing the last known data/i)).toBeDefined();
+    });
+  });
+
+  it('raises a "Connection restored" toast on a disconnected→connected transition', async () => {
+    wsConnected = false;
+    // Stable tree: a single client/router/provider structure we re-render in
+    // place so App stays MOUNTED across the transition (a remount would re-seed
+    // the transport hook's previous-status and swallow the recovery edge).
+    const client = makeClient();
+    const tree = createElement(
+      QueryClientProvider,
+      { client },
+      createElement(
+        MemoryRouter,
+        { initialEntries: ['/'] },
+        createElement(ToastProvider, null, createElement(App)),
+      ),
+    );
+    let rerender: (ui: React.ReactElement) => void;
+    await act(async () => {
+      const r = render(tree);
+      rerender = r.rerender;
+    });
+    await waitFor(() => screen.getByText(/showing the last known data/i));
+    expect(screen.queryByText('Connection restored')).toBeNull();
+
+    // Recover the socket; re-render the SAME element so App updates, not remounts.
+    wsConnected = true;
+    await act(async () => {
+      rerender!(
+        createElement(
+          QueryClientProvider,
+          { client },
+          createElement(
+            MemoryRouter,
+            { initialEntries: ['/'] },
+            createElement(ToastProvider, null, createElement(App)),
+          ),
+        ),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Connection restored')).toBeDefined();
     });
   });
 });

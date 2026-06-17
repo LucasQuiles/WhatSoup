@@ -114,6 +114,8 @@ Use `/frontend-design` for this review and record the verdict.
 
 **Harness note (Operator destination):** the browser/visual harnesses (`tests/browser/viewport-matrix.test.tsx`, `tests/browser/a11y-contracts.test.tsx`) target the operational console page by import; that page was renamed `Ops` → `Operator` (route `/operator`, rail label "Operator"), so the harness imports now resolve `console/src/pages/Operator.tsx`. No visual/contrast contract changed — path-only update accompanying the rename + rebrand-copy fix.
 
+**Harness note (connection-status surface):** the connection-status feature wires a shell-level `useToast()` into `App.tsx` (the reconnect toast), so the app-shell browser harness `tests/browser/a11y-contracts.test.tsx` now wraps its `AppRoute` render in `ToastProvider` — matching production, where `main.tsx` nests `ToastProvider` above `<App/>`. The new `App → use-transport-status → use-websocket → lib/api` import edge also reaches `isProductionConsole`, so `tests/browser/viewport-matrix.test.tsx`'s explicit-shape `vi.mock('lib/api')` now enumerates that export. No visual/contrast/landmark contract changed — provider-scaffold + mock-shape completions that keep the existing assertions intact (full browser suite green, 106 tests).
+
 ## 6. Coverage Matrix
 
 Maintain one coverage row per slice-surface combination:

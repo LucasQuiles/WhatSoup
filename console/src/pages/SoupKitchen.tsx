@@ -14,6 +14,8 @@ import { Plus, RotateCw } from "lucide-react";
 const AddLineWizard = lazy(() => import("../components/AddLineWizard"));
 import { motion } from "framer-motion";
 import { useLines, useFeed, useLogs } from "../hooks/use-fleet";
+import { useTransportStatus } from "../hooks/use-transport-status";
+import EmptyState from "../components/EmptyState";
 import { useDrawerPlacement } from "../hooks/useViewportPlacement";
 import { useFleetMetrics } from "../hooks/use-metrics";
 import { computeKpis } from "../lib/compute-kpis";
@@ -346,6 +348,7 @@ const SoupKitchen: FC = () => {
     refetch: refetchFeed,
   } = useFeed();
   const navigate = useNavigate();
+  const transport = useTransportStatus();
 
   const lines = lineData ?? EMPTY_LINES;
   const feed = feedData ?? EMPTY_FEED;
@@ -898,7 +901,20 @@ const SoupKitchen: FC = () => {
                 </TableHeader>
 
                 <TableBody>
-                  {fleetLoadError ? (
+                  {fleetLoadError && transport.isDisconnected ? (
+                    // Transport drop: read as offline-with-cache, not a hard
+                    // failure (DD-29). The error branch below still owns genuine
+                    // errors while connected.
+                    <tr className="soup-table-row soup-table-row--state">
+                      <td className="soup-table-td soup-table-td--state" colSpan={COL_COUNT}>
+                        <EmptyState
+                          variant="offline"
+                          title="Showing cached data"
+                          description="Reconnecting…"
+                        />
+                      </td>
+                    </tr>
+                  ) : fleetLoadError ? (
                     <TableError
                       colSpan={COL_COUNT}
                       message={`Unable to load fleet data: ${fleetLoadErrorMessage}`}

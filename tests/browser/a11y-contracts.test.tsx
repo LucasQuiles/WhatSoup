@@ -82,6 +82,7 @@ vi.mock('../../console/src/lib/api', () => ({
 }));
 
 import App from '../../console/src/App';
+import { ToastProvider } from '../../console/src/hooks/use-toast';
 import { ChatPicker } from '../../console/src/components/shared/ChatPicker';
 import ChatList from '../../console/src/components/ChatList';
 import { Button, Modal, ModalBody, ModalFooter, ModalHeader } from '../../console/src/components/primitives';
@@ -119,9 +120,13 @@ const CHATS: ChatItem[] = [
 ];
 
 function AppRoute({ path }: { path: string }) {
+  // App calls useToast at the shell level (connection-status reconnect toast),
+  // mirroring production where main.tsx nests ToastProvider above <App />.
   return (
     <MemoryRouter initialEntries={[path]}>
-      <App />
+      <ToastProvider>
+        <App />
+      </ToastProvider>
     </MemoryRouter>
   );
 }

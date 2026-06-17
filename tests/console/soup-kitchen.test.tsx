@@ -79,6 +79,16 @@ vi.mock('../../console/src/hooks/use-metrics', async (importOriginal) => {
   };
 });
 
+// Transport status (DD-29). Default connected so the genuine-error branch
+// behaves as before; the offline-branch suite flips this to disconnected.
+const transportMock = vi.hoisted(() => ({
+  status: 'connected' as 'connected' | 'reconnecting' | 'offline',
+  isDisconnected: false,
+}));
+vi.mock('../../console/src/hooks/use-transport-status', () => ({
+  useTransportStatus: () => transportMock,
+}));
+
 // `framer-motion` issues a `prefers-reduced-motion` MediaQueryList probe that
 // jsdom doesn't implement. Stub it so motion.div renders without warnings.
 beforeEach(() => {
@@ -102,6 +112,9 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  // Restore the default connected transport for the next test.
+  transportMock.status = 'connected';
+  transportMock.isDisconnected = false;
 });
 
 import SoupKitchen from '../../console/src/pages/SoupKitchen';
@@ -685,6 +698,32 @@ describe('SoupKitchen error state handling', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry activity' }));
 
     expect(feedRefetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders the offline cached-data state instead of the hard error when the fleet load fails AND transport is disconnected (DD-29)', () => {
+    transportMock.status = 'reconnecting';
+    transportMock.isDisconnected = true;
+    renderPage({
+      lines: [],
+      linesError: new Error('upstream 502'),
+    });
+    // Offline-with-cache reading, not a failure.
+    expect(screen.getByText('Showing cached data')).toBeDefined();
+    expect(screen.getByText('Reconnecting…')).toBeDefined();
+    // The hard error message and its Retry button are NOT shown.
+    expect(screen.queryByText(/Unable to load fleet data/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('still renders the hard error when the fleet load fails while transport is connected', () => {
+    transportMock.status = 'connected';
+    transportMock.isDisconnected = false;
+    renderPage({
+      lines: [],
+      linesError: new Error('upstream 502'),
+    });
+    expect(screen.getByText(/Unable to load fleet data: upstream 502/)).toBeDefined();
+    expect(screen.queryByText('Showing cached data')).toBeNull();
   });
 });
 
