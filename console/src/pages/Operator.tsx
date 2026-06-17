@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, lazy, Suspense } from 'react'
+import { useState, useMemo, lazy, Suspense } from 'react'
 import { motion } from 'framer-motion'
 import { useLines, useLogs, useFeed } from '../hooks/use-fleet'
 import { formatTimeWithSeconds } from '../lib/format-time'
@@ -7,20 +7,19 @@ import ModeBadge from '../components/ModeBadge'
 import LineTags from '../components/LineTags'
 import HeartbeatStrip from '../components/HeartbeatStrip'
 import LinePicker from '../components/LinePicker'
-import { LogStream, Toolbar, ToolbarFilters, Pill, Button } from '../components/primitives'
+import FleetRowMenu from '../components/FleetRowMenu'
+import { Card, LogStream, Toolbar, ToolbarFilters, Pill, Button, type CardEdge } from '../components/primitives'
 import type { LogEntry } from '../types'
 import {
-  Terminal, Power,
+  Terminal,
   AlertTriangle, CheckCircle2,
-  Trash2, Link2, Loader2, RotateCw,
+  Link2, RotateCw,
 } from 'lucide-react'
 
-import { api } from '../lib/api'
 import { useToast } from '../hooks/toast-context'
 import { useQueryClient } from '@tanstack/react-query'
 import { displayInstanceName } from '../lib/text-utils'
-import { statusWashClass } from '../lib/status-severity'
-import ConfirmDialog from '../components/ConfirmDialog'
+import { statusWashClass, statusSeverity } from '../lib/status-severity'
 const RelinkModal = lazy(() => import('../components/RelinkModal'))
 
 type LevelFilter = 'all' | 'error' | 'warn' | 'info' | 'debug'
@@ -37,12 +36,25 @@ function logLevelTone(level: LevelFilter) {
   return 'neutral' as const
 }
 
+// status-edge channel for a line card: online lines carry no edge (the card stays
+// neutral); non-online lines surface a warn/crit inset channel keyed to severity.
+// This is an ADDITIONAL signal alongside the StatusDot + status text + wash — never
+// the sole one (color.md §6).
+function lineCardEdge(status: string): CardEdge | undefined {
+  const severity = statusSeverity(status)
+  return severity === 'ok' ? undefined : severity
+}
+
 export default function Operator() {
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
-  const [deleting, setDeleting] = useState(false)
   const [relinkTarget, setRelinkTarget] = useState<string | null>(null)
+  // Capability gate for per-line lifecycle actions (Restart / Stop / Delete),
+  // mirroring SoupKitchen.tsx: the console is already gated behind the
+  // session-unlock screen, so any reachable operator may manage lines. Surfaced
+  // as one boolean so the FleetRowMenu hides wholesale when withheld and the gate
+  // has one obvious place to tighten.
+  const canManageLines = true
   const { data: lines = [], isLoading: linesLoading, error: linesError, refetch: refetchLines } = useLines()
   const { data: feed = [], error: feedError, refetch: refetchFeed } = useFeed()
   const [logFilter, setLogFilter] = useState<LevelFilter>('all')
@@ -72,21 +84,6 @@ export default function Operator() {
 
   const alerts = useMemo(() => feed.filter(e => e.isError), [feed])
 
-  const handleDelete = useCallback(async () => {
-    if (!deleteTarget) return
-    setDeleting(true)
-    try {
-      await api.deleteLine(deleteTarget)
-      toast.success(`${deleteTarget} deleted`)
-      queryClient.invalidateQueries({ queryKey: ['lines'] })
-    } catch (err) {
-      toast.error(`Delete failed: ${err instanceof Error ? err.message : String(err)}`)
-    } finally {
-      setDeleting(false)
-      setDeleteTarget(null)
-    }
-  }, [deleteTarget, toast, queryClient])
-
   const ease = [0.22, 1, 0.36, 1] as const
 
   return (
@@ -98,8 +95,9 @@ export default function Operator() {
     >
 
       {/* ═══ LEFT: Fleet Status (swapped from right) ═══ */}
-      <div
-        className="c-card flex flex-col min-h-0 overflow-hidden flex-1"
+      <Card
+        variant="base"
+        className="flex flex-col min-h-0 overflow-hidden flex-1"
       >
         {/* Row 1: Header — matches toolbar pattern */}
         <div
@@ -179,111 +177,109 @@ export default function Operator() {
               <div className="text-text-2 text-center py-8 font-mono text-data">
                 No Lines discovered. Create one from the Fleet.
               </div>
-            ) : lines.map(line => (
-              <div
-                key={line.name}
-                className={`c-card c-hover cursor-pointer py-[var(--sp-3)] px-[var(--sp-4)] ${
-                  line.name === activeLine ? 'ring-1 ring-m-cht/30' : ''
-                } ${statusWashClass(line.status) || 'bg-surface-raised'}`}
-                role="button"
-                tabIndex={0}
-                aria-label={`Select ${displayInstanceName(line.name)}`}
-                aria-pressed={line.name === activeLine}
-                onClick={() => setSelectedLine(line.name)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setSelectedLine(line.name)
+            ) : lines.map(line => {
+              const isActive = line.name === activeLine
+              const isUnlinked = line.linkedStatus === 'unlinked'
+              const edge = lineCardEdge(line.status)
+              // status-edge channel applied via the SAME tokens the Card primitive's
+              // status-edge variant uses (a --bw-accent inset left border keyed to the
+              // status-solid token). The interactive Card can't take the `edge` prop
+              // (status-edge and interactive are distinct variants), so the channel is
+              // composed here — it remains an ADDITIONAL signal alongside the wash +
+              // StatusDot shape, never the sole one (color.md §6).
+              const edgeStyle = edge
+                ? {
+                    borderLeftStyle: 'solid' as const,
+                    borderLeftWidth: 'var(--bw-accent)',
+                    borderLeftColor:
+                      edge === 'crit' ? 'var(--status-crit-solid)' : 'var(--status-warn-solid)',
                   }
-                }}
-              >
-                {/* Row 1: Name + mode + phone */}
-                <div className="flex items-center justify-between mb-[var(--sp-2)]">
-                  <div className="flex items-center gap-[var(--sp-2)]">
-                    <StatusDot status={line.status} size="sm" />
-                    <span className="font-sans font-medium text-text-1 text-body">
-                      {displayInstanceName(line.name)}
-                    </span>
-                    <ModeBadge mode={line.mode} />
-                    <LineTags line={line} />
-                  </div>
-                  <span className="c-label">{line.phone}</span>
-                </div>
-
-                {/* Row 2: Heartbeat + runtime stats */}
-                <div className="flex items-center justify-between">
-                  <HeartbeatStrip beats={line.heartbeat} />
-                  <div className="flex items-center font-mono text-text-2 gap-[var(--sp-3)] text-sm">
-                    <span>{line.messagesToday ?? 0} msgs</span>
-                    {line.mode === 'passive' && (
-                      <span className={(line.unread ?? 0) > 0 ? 'text-s-warn' : ''}>
-                        {line.unread ?? 0} unread
-                      </span>
-                    )}
-                    {line.mode === 'chat' && (
-                      <>
-                        <span className={(line.queueDepth ?? 0) > 0 ? 'text-s-warn' : ''}>
-                          q:{line.queueDepth ?? 0}
-                        </span>
-                        <span>enrich:{line.enrichmentUnprocessed ?? 0}</span>
-                      </>
-                    )}
-                    {line.mode === 'agent' && (
-                      <span style={{ color: "var(--text-2)" }}>
-                        {line.activeSessions ?? 0} session{(line.activeSessions ?? 0) !== 1 ? 's' : ''}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Row 3: Actions for unhealthy lines */}
-                {line.status !== 'online' && (
-                  <div className="flex gap-[var(--sp-2)] mt-[var(--sp-3)] pt-[var(--sp-3)] c-border-t">
-                    {line.linkedStatus === 'unlinked' ? (
+                : undefined
+              return (
+                // A plain relative LAYOUT wrapper (not a card, not interactive): it lets
+                // the kebab cluster sit as a SIBLING of the selection card, so the
+                // FleetRowMenu's own <button> is never nested inside the selection
+                // <button> (button-in-button is invalid HTML).
+                <div key={line.name} className="relative">
+                  {/* Top-right action cluster — sibling of the selection card. */}
+                  <div className="absolute top-[var(--sp-2)] right-[var(--sp-3)] flex items-center gap-[var(--sp-1)] z-[var(--z-float)]">
+                    {isUnlinked && (
                       <Button
                         variant="neutral"
-                        className="py-[var(--sp-1)] px-[var(--sp-3)] text-label"
+                        size="sm"
                         icon={<Link2 size={15} strokeWidth={1.75} />}
-                        onClick={e => { e.stopPropagation(); setRelinkTarget(line.name) }}
+                        onClick={() => setRelinkTarget(line.name)}
                       >
                         Re-link
                       </Button>
-                    ) : (
-                      <Button
-                        variant="neutral"
-                        className="py-[var(--sp-1)] px-[var(--sp-3)] text-label"
-                        icon={<Power size={15} strokeWidth={1.75} />}
-                        onClick={e => {
-                          e.stopPropagation()
-                          toast.info(`Restarting ${line.name}...`)
-                          api.restart(line.name)
-                            .then(() => toast.success(`${line.name} restart requested`))
-                            .catch(err => toast.error(`Failed: ${err instanceof Error ? err.message : String(err)}`))
-                        }}
-                      >
-                        Restart
-                      </Button>
                     )}
-                    <Button
-                      variant="danger"
-                      className="py-[var(--sp-1)] px-[var(--sp-3)] text-label"
-                      icon={<Trash2 size={15} strokeWidth={1.75} />}
-                      onClick={e => { e.stopPropagation(); setDeleteTarget(line.name) }}
-                    >
-                      Delete
-                    </Button>
+                    <FleetRowMenu name={line.name} canAct={canManageLines} />
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {/* Selection affordance — the sanctioned interactive Card (renders a
+                      real <button> through the primitive, so no raw <button>). Sets the
+                      active line for the log stream; aria-pressed mirrors the selection. */}
+                  <Card
+                    variant="interactive"
+                    aria-label={`Select ${displayInstanceName(line.name)}`}
+                    aria-pressed={isActive}
+                    onClick={() => setSelectedLine(line.name)}
+                    style={edgeStyle}
+                    className={`py-[var(--sp-3)] px-[var(--sp-4)] ${
+                      isActive ? 'ring-1 ring-m-cht/30' : ''
+                    } ${statusWashClass(line.status) || 'bg-surface-raised'}`}
+                  >
+                    {/* Row 1: Name + mode + phone */}
+                    <div className="flex items-center justify-between mb-[var(--sp-2)] pr-[var(--sp-8)]">
+                      <div className="flex items-center gap-[var(--sp-2)]">
+                        <StatusDot status={line.status} size="sm" />
+                        <span className="font-sans font-medium text-text-1 text-body">
+                          {displayInstanceName(line.name)}
+                        </span>
+                        <ModeBadge mode={line.mode} />
+                        <LineTags line={line} />
+                      </div>
+                      <span className="c-label">{line.phone}</span>
+                    </div>
+
+                    {/* Row 2: Heartbeat + runtime stats */}
+                    <div className="flex items-center justify-between">
+                      <HeartbeatStrip beats={line.heartbeat} />
+                      <div className="flex items-center font-mono text-text-2 gap-[var(--sp-3)] text-sm">
+                        <span>{line.messagesToday ?? 0} msgs</span>
+                        {line.mode === 'passive' && (
+                          <span className={(line.unread ?? 0) > 0 ? 'text-s-warn' : ''}>
+                            {line.unread ?? 0} unread
+                          </span>
+                        )}
+                        {line.mode === 'chat' && (
+                          <>
+                            <span className={(line.queueDepth ?? 0) > 0 ? 'text-s-warn' : ''}>
+                              q:{line.queueDepth ?? 0}
+                            </span>
+                            <span>enrich:{line.enrichmentUnprocessed ?? 0}</span>
+                          </>
+                        )}
+                        {line.mode === 'agent' && (
+                          <span style={{ color: "var(--text-2)" }}>
+                            {line.activeSessions ?? 0} session{(line.activeSessions ?? 0) !== 1 ? 's' : ''}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </Card>
+                </div>
+              )
+            })}
           </div>
         </div>
 
-      </div>
+      </Card>
 
       {/* ═══ RIGHT: Log stream (swapped from left) ═══ */}
-      <div
-        className="c-card flex flex-col min-h-0 overflow-hidden"
+      <Card
+        variant="base"
+        className="flex flex-col min-h-0 overflow-hidden"
         style={{ flex: "1.6" }}
       >
         {/* Row 1: Line picker toolbar — not a Toolbar primitive; heading + picker stay here */}
@@ -347,21 +343,9 @@ export default function Operator() {
           <span>{filteredLogs.length} entries</span>
           <span>{activeLine} — {currentLine?.mode ?? '—'}</span>
         </div>
-      </div>
+      </Card>
 
       {/* Modals */}
-      <ConfirmDialog
-        open={!!deleteTarget}
-        title={`Delete ${deleteTarget}?`}
-        confirmLabel={deleting ? 'Deleting...' : 'Delete permanently'}
-        confirmVariant="danger"
-        confirmIcon={deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-        onConfirm={handleDelete}
-        onCancel={() => setDeleteTarget(null)}
-      >
-        This will stop the process, remove all configuration, data, and message history for <strong>{deleteTarget}</strong>. This cannot be undone.
-      </ConfirmDialog>
-
       <Suspense fallback={null}>
         <RelinkModal
           lineName={relinkTarget ?? ''}

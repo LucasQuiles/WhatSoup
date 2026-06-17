@@ -5,10 +5,16 @@
  * Asserts on DOM text, aria state, and className — not internals. framer-motion is
  * stubbed so motion.div renders without animation machinery.
  *
- * The Ops page is a pending Card-migration consumer: instance cards use the c-card
- * recipe and statusWashClass design tokens. These suites cover both the behavioral
- * contract (fleet states, log filtering, instance actions) and the design-class
- * contract (status-first washes, neutral traffic ink, statusWashClass unit cases).
+ * The Operator page is migrated onto the <Card> primitive: the two outer panels are
+ * `<Card variant="base">` and each line card is a non-interactive
+ * `<Card variant="status-edge">` carrying a wash + the severity edge channel. The
+ * per-line selection affordance is an explicit inner <button> (so the FleetRowMenu
+ * kebab's own <button> is never nested), and Restart/Stop/Delete route through that
+ * kebab menu (FleetRowMenu → Menu primitive → ConfirmDialog for destructive items),
+ * while Re-link stays a dedicated button for unlinked lines. These suites cover both
+ * the behavioral contract (fleet states, log filtering, line selection, kebab
+ * actions) and the design-class contract (status-first washes, neutral traffic ink,
+ * statusWashClass unit cases).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -21,6 +27,7 @@ const useLinesMock = vi.hoisted(() => vi.fn())
 const useFeedMock = vi.hoisted(() => vi.fn())
 const useLogsMock = vi.hoisted(() => vi.fn())
 const restartMock = vi.hoisted(() => vi.fn())
+const stopInstanceMock = vi.hoisted(() => vi.fn())
 const deleteLineMock = vi.hoisted(() => vi.fn())
 const invalidateQueriesMock = vi.hoisted(() => vi.fn())
 
@@ -55,6 +62,7 @@ vi.mock('../../console/src/hooks/use-fleet', async (importOriginal) => {
 vi.mock('../../console/src/lib/api', () => ({
   api: {
     restart: restartMock,
+    stopInstance: stopInstanceMock,
     deleteLine: deleteLineMock,
   },
 }))
@@ -332,7 +340,7 @@ describe('Ops page log stream', () => {
     expect(screen.getByText('alpha failed')).toBeDefined()
     expect(screen.getAllByText('1 entries')).toHaveLength(2)
 
-    fireEvent.click(screen.getByText('beta').closest('.c-card') as HTMLElement)
+    fireEvent.click(screen.getByRole('button', { name: 'Select beta' }))
     expect(useLogsMock).toHaveBeenLastCalledWith('beta')
     expect(screen.getByText('No error logs for beta.')).toBeDefined()
 
@@ -347,12 +355,18 @@ describe('Ops page log stream', () => {
       logsByLine: {},
     })
 
-    const betaCard = screen.getByText('beta').closest('.c-card') as HTMLElement
-    // ISM-06: the fleet card is now a keyboard-operable button, not a bare div.
-    expect(betaCard.getAttribute('role')).toBe('button')
-    expect(betaCard.tabIndex).toBe(0)
+    // ISM-06: the selection affordance is the sanctioned interactive <Card>, which
+    // renders a real, keyboard-operable <button> through the primitive (a native
+    // button activates on Enter/Space without custom key handling).
+    const betaSelect = screen.getByRole('button', { name: 'Select beta' })
+    expect(betaSelect.tagName).toBe('BUTTON')
+    // No button-in-button: the FleetRowMenu kebab trigger is a SIBLING of the
+    // selection button, never a descendant of it.
+    const kebab = screen.getByRole('button', { name: 'Actions for beta' })
+    expect(betaSelect.contains(kebab)).toBe(false)
 
-    fireEvent.keyDown(betaCard, { key: 'Enter' })
+    // A native button click is the keyboard-equivalent activation path.
+    fireEvent.click(betaSelect)
     expect(useLogsMock).toHaveBeenLastCalledWith('beta')
   })
 
@@ -376,6 +390,18 @@ describe('Ops page log stream', () => {
   })
 })
 
+// Locate a line card (the <Card variant="status-edge"> container) by its line
+// name. The card hosts the named selection <button>; its closest `.c-card`
+// ancestor is the line card itself (the outer panels are <Card variant="base">
+// which also render `.c-card`, so we must anchor on the per-line selection
+// button rather than blindly indexing all `.c-card` nodes).
+function lineCard(name: string): HTMLElement {
+  const selectBtn = screen.getByRole('button', { name: `Select ${name}` })
+  const card = selectBtn.closest('.c-card') as HTMLElement | null
+  if (!card) throw new Error(`line card for ${name} not found`)
+  return card
+}
+
 describe('Ops page — statusWashClass applied to instance cards (status-first color)', () => {
   it('renders agent session counts as neutral traffic ink', () => {
     const line = makeLine({ name: 'agent-line', mode: 'agent', activeSessions: 2 })
@@ -386,52 +412,51 @@ describe('Ops page — statusWashClass applied to instance cards (status-first c
     expect(sessionCount.className).not.toContain('text-m-agt')
   })
 
-  it('online line card has no warn/crit wash class (clean background)', () => {
-    const line = makeLine({ name: 'alpha', status: 'online' })
-    const { container } = renderOps({ lines: [line] })
+  it('online line card has no warn/crit wash and no status edge (clean, no sole edge signal)', () => {
+    renderOps({ lines: [makeLine({ name: 'alpha', status: 'online' })] })
 
-    const cards = container.querySelectorAll('[class*="c-card c-hover"]')
-    expect(cards.length).toBeGreaterThanOrEqual(1)
-    const card = cards[0] as HTMLElement
+    const card = lineCard('alpha')
     expect(card.className).not.toContain('s-warn-wash')
     expect(card.className).not.toContain('s-crit-wash')
+    // status-edge container, but online lines carry no edge channel.
+    expect(card.style.borderLeftColor).toBe('')
   })
 
-  it('degraded line card carries the warn wash class', () => {
-    const line = makeLine({ name: 'bravo', phone: '+15550002222', status: 'degraded' })
-    const { container } = renderOps({ lines: [line] })
+  it('degraded line card carries the warn wash AND a warn status edge (edge is an extra signal)', () => {
+    renderOps({ lines: [makeLine({ name: 'bravo', phone: '+15550002222', status: 'degraded' })] })
 
     // statusWashClass('degraded') === 'bg-[var(--s-warn-wash)]'
     expect(statusWashClass('degraded')).toBe('bg-[var(--s-warn-wash)]')
 
-    const cards = container.querySelectorAll('[class*="c-card c-hover"]')
-    expect(cards.length).toBeGreaterThanOrEqual(1)
-    const card = cards[0] as HTMLElement
+    const card = lineCard('bravo')
+    // Wash co-signal (carried on the card itself).
     expect(card.className).toContain('s-warn-wash')
+    // The status-edge channel is keyed to the warn-solid token — an ADDITIONAL
+    // signal alongside the wash + StatusDot shape, never the sole one.
+    expect(card.style.borderLeftColor).toBe('var(--status-warn-solid)')
+    // Shape co-signal: the StatusDot renders a role="img" status shape inside the
+    // card, so severity survives forced-colors / colour-blindness without the edge.
+    expect(card.querySelector('[role="img"]')).not.toBeNull()
   })
 
-  it('unreachable line card carries the crit wash class', () => {
-    const line = makeLine({ name: 'charlie', phone: '+15550003333', status: 'unreachable', linkedStatus: 'linked' })
-    const { container } = renderOps({ lines: [line] })
+  it('unreachable line card carries the crit wash AND a crit status edge', () => {
+    renderOps({ lines: [makeLine({ name: 'charlie', phone: '+15550003333', status: 'unreachable', linkedStatus: 'linked' })] })
 
     expect(statusWashClass('unreachable')).toBe('bg-[var(--s-crit-wash)]')
 
-    const cards = container.querySelectorAll('[class*="c-card c-hover"]')
-    expect(cards.length).toBeGreaterThanOrEqual(1)
-    const card = cards[0] as HTMLElement
+    const card = lineCard('charlie')
     expect(card.className).toContain('s-crit-wash')
+    expect(card.style.borderLeftColor).toBe('var(--status-crit-solid)')
   })
 
-  it('logged_out line card carries the crit wash class', () => {
-    const line = makeLine({ name: 'delta', phone: '+15550004444', status: 'logged_out', linkedStatus: 'unlinked' })
-    const { container } = renderOps({ lines: [line] })
+  it('logged_out line card carries the crit wash AND a crit status edge', () => {
+    renderOps({ lines: [makeLine({ name: 'delta', phone: '+15550004444', status: 'logged_out', linkedStatus: 'unlinked' })] })
 
     expect(statusWashClass('logged_out')).toBe('bg-[var(--s-crit-wash)]')
 
-    const cards = container.querySelectorAll('[class*="c-card c-hover"]')
-    expect(cards.length).toBeGreaterThanOrEqual(1)
-    const card = cards[0] as HTMLElement
+    const card = lineCard('delta')
     expect(card.className).toContain('s-crit-wash')
+    expect(card.style.borderLeftColor).toBe('var(--status-crit-solid)')
   })
 })
 
@@ -514,45 +539,76 @@ describe('Ops page — retryable error states', () => {
   })
 })
 
-describe('Ops page instance actions', () => {
-  it('requests restart for unhealthy linked instances and reports success or failure', async () => {
+// Open the per-line kebab (FleetRowMenu trigger) and return the menu item by
+// accessible name. The Menu primitive portals its surface to document.body, so
+// the items are queryable from `screen` after the trigger is clicked.
+function openKebab(name: string): void {
+  fireEvent.click(screen.getByRole('button', { name: `Actions for ${name}` }))
+}
+
+describe('Ops page instance actions (per-line kebab — FleetRowMenu)', () => {
+  it('exposes a kebab menu on EVERY line card (not just unhealthy ones)', () => {
+    renderOps({
+      lines: [
+        makeLine({ name: 'alpha', status: 'online' }),
+        makeLine({ name: 'beta', phone: '+15550002222', status: 'degraded' }),
+      ],
+    })
+
+    // Both the healthy and unhealthy line expose the lifecycle kebab — the old
+    // unhealthy-only inline Restart/Delete row is gone; the kebab owns those now.
+    expect(screen.getByRole('button', { name: 'Actions for alpha' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Actions for beta' })).toBeDefined()
+    // No standalone inline Restart/Delete buttons remain on the page.
+    expect(screen.queryByRole('button', { name: /^Restart$/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Delete$/ })).toBeNull()
+  })
+
+  it('requests restart via the kebab and reports success or failure', async () => {
     restartMock.mockResolvedValueOnce({ status: 'ok', instance: 'beta' })
     const { toast } = renderOps({
       lines: [makeLine({ name: 'beta', status: 'degraded', mode: 'agent', linkedStatus: 'linked' })],
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Restart/ }))
+    openKebab('beta')
+    fireEvent.click(screen.getByRole('menuitem', { name: /Restart/ }))
 
     expect(toast.info).toHaveBeenCalledWith('Restarting beta...')
     await waitFor(() => expect(restartMock).toHaveBeenCalledWith('beta'))
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('beta restart requested'))
 
     restartMock.mockRejectedValueOnce(new Error('systemd timeout'))
-    fireEvent.click(screen.getByRole('button', { name: /Restart/ }))
+    openKebab('beta')
+    fireEvent.click(screen.getByRole('menuitem', { name: /Restart/ }))
 
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed: systemd timeout'))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Restart failed: systemd timeout'))
   })
 
-  it('restart failure reports non-Error rejection text to the operator', async () => {
-    restartMock.mockRejectedValueOnce('supervisor refused restart')
+  it('stops a line via the kebab only after confirming (destructive route)', async () => {
+    stopInstanceMock.mockResolvedValueOnce({ status: 'ok' })
     const { toast } = renderOps({
-      lines: [makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })],
+      lines: [makeLine({ name: 'beta', status: 'online', linkedStatus: 'linked' })],
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Restart/ }))
+    openKebab('beta')
+    fireEvent.click(screen.getByRole('menuitem', { name: /Stop/ }))
 
-    expect(restartMock).toHaveBeenCalledWith('alpha')
-    expect(toast.info).toHaveBeenCalledWith('Restarting alpha...')
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith('Failed: supervisor refused restart')
-    })
+    // Confirm gate: api.stopInstance must NOT fire on the menu click alone.
+    expect(stopInstanceMock).not.toHaveBeenCalled()
+    expect(screen.getByText('Stop beta?')).toBeDefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop line' }))
+
+    await waitFor(() => expect(stopInstanceMock).toHaveBeenCalledWith('beta'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('beta stop requested'))
   })
 
-  it('opens the relink modal for unhealthy unlinked instances and invalidates lines after relink', async () => {
+  it('opens the relink modal for unlinked instances and invalidates lines after relink', async () => {
     const { toast } = renderOps({
       lines: [makeLine({ name: 'beta', status: 'logged_out', linkedStatus: 'unlinked' })],
     })
 
+    // Re-link stays a dedicated button (FleetRowMenu does not cover re-link).
     fireEvent.click(screen.getByRole('button', { name: /Re-link/ }))
 
     expect(await screen.findByRole('dialog', { name: 'Relink beta' })).toBeDefined()
@@ -566,15 +622,26 @@ describe('Ops page instance actions', () => {
     expect(screen.queryByRole('dialog', { name: 'Relink beta' })).toBeNull()
   })
 
-  it('confirms deletion, clears the dialog, and reports success or API errors', async () => {
+  it('does not render a Re-link button for linked instances', () => {
+    renderOps({
+      lines: [makeLine({ name: 'beta', status: 'degraded', linkedStatus: 'linked' })],
+    })
+
+    expect(screen.queryByRole('button', { name: /Re-link/ })).toBeNull()
+  })
+
+  it('confirms deletion via the kebab, clears the dialog, and reports success or API errors', async () => {
     deleteLineMock.mockResolvedValueOnce({ deleted: 'beta' })
     const { toast } = renderOps({
       lines: [makeLine({ name: 'beta', status: 'degraded', linkedStatus: 'linked' })],
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Delete/ }))
+    openKebab('beta')
+    fireEvent.click(screen.getByRole('menuitem', { name: /Delete line/ }))
     expect(screen.getByRole('dialog')).toBeDefined()
     expect(screen.getByText('Delete beta?')).toBeDefined()
+    // Confirm gate: deleteLine must not fire on the menu click.
+    expect(deleteLineMock).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
 
@@ -584,19 +651,21 @@ describe('Ops page instance actions', () => {
     expect(screen.queryByText('Delete beta?')).toBeNull()
 
     deleteLineMock.mockRejectedValueOnce(new Error('permission denied'))
-    fireEvent.click(screen.getByRole('button', { name: /Delete/ }))
+    openKebab('beta')
+    fireEvent.click(screen.getByRole('menuitem', { name: /Delete line/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Delete failed: permission denied'))
     expect(screen.queryByText('Delete beta?')).toBeNull()
   })
 
-  it('cancelling the ConfirmDialog does not call api.deleteLine', () => {
+  it('cancelling the delete ConfirmDialog does not call api.deleteLine', () => {
     renderOps({
       lines: [makeLine({ name: 'beta', status: 'unreachable', linkedStatus: 'linked' })],
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Delete/ }))
+    openKebab('beta')
+    fireEvent.click(screen.getByRole('menuitem', { name: /Delete line/ }))
 
     const dialog = screen.getByRole('dialog')
     const cancelBtn = within(dialog).getByRole('button', { name: /Cancel/i })
@@ -611,7 +680,8 @@ describe('Ops page instance actions', () => {
       lines: [makeLine({ name: 'alpha', status: 'unreachable', linkedStatus: 'linked' })],
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Delete/ }))
+    openKebab('alpha')
+    fireEvent.click(screen.getByRole('menuitem', { name: /Delete line/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
 
     await waitFor(() => {

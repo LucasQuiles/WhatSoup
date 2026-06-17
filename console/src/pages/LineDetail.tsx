@@ -107,7 +107,7 @@ export default function LineDetail() {
     try {
       await api.deleteLine(lineName)
       toast.success(`${lineName} deleted`)
-      navigate('/ops')
+      navigate('/operator')
     } catch (err) {
       toast.error(`Delete failed: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
