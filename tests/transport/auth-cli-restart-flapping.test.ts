@@ -170,6 +170,29 @@ describe('auth CLI restartRequired handling', () => {
     expect(mocks.makeWASocket).not.toHaveBeenCalled();
   });
 
+  it('uses the default lock path when config provides no lockPath', async () => {
+    vi.resetModules();
+    vi.doMock('../../src/config.ts', () => ({
+      config: { authDir: '/tmp/wa-test-auth' },
+    }));
+    const checkedPaths: unknown[] = [];
+    mocks.existsSync.mockImplementation((lockPath: unknown) => {
+      checkedPaths.push(lockPath);
+      return true;
+    });
+    vi.mocked(process.exit).mockImplementationOnce(((code?: string | number | null) => {
+      throw new Error(`exit:${code}`);
+    }) as never);
+
+    try {
+      await expect(import('../../src/transport/auth.ts')).rejects.toThrow('exit:1');
+      expect(checkedPaths).toContain('/var/run/whatsoup.lock');
+      expect(mocks.makeWASocket).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock('../../src/config.ts');
+    }
+  });
+
   it('emits QR events on stdout while rendering terminal QR on stderr', async () => {
     mocks.qrcodeGenerate.mockImplementation((_qr: string, _opts: unknown, render: (asciiArt: string) => void) => {
       render('ASCII-QR');
