@@ -795,14 +795,25 @@ def run_selfcheck(config: SelfcheckConfig, deps: Optional[SelfcheckDeps] = None,
     try:
         pin = sp.load_pin(config.manifest_path)
         approved = sp.load_approved_f10(config.ledger_path)
-        trusted, trust_reason = sp.verify_pin_trust(pin, approved, deps.commit_exists)
+        approved_heads = sp.load_approved_heads(config.ledger_path)
+        trusted, trust_reason = sp.verify_pin_trust(
+            pin,
+            approved,
+            deps.commit_exists,
+            approved_heads=approved_heads,
+        )
     except sp.PinLoadError as exc:
         status["class"] = "pin_untrusted"
         status["problems"] = [str(exc)]
         status["consecutive"] = update_consecutive(memory, status["class"])
         return finalize_status(config, deps, memory, status)
 
-    status["pin"] = {"headSha": pin.head_sha, "f10Sha": pin.f10_sha, "trust": trust_reason}
+    status["pin"] = {
+        "headSha": pin.head_sha,
+        "f10Sha": pin.f10_sha,
+        "trust": trust_reason,
+        "headApproved": str(pin.head_sha in approved_heads).lower(),
+    }
     if not trusted:
         status["class"] = "pin_untrusted"
         status["problems"] = [trust_reason]

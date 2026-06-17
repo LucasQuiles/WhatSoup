@@ -75,32 +75,57 @@ def load_pin(manifest_path) -> Pin:
     return Pin(head_sha=head_sha, files=files, f10_sha=files.get(F10_PATH))
 
 
-def load_approved_f10(ledger_path) -> set:
+def _checked_head_sha(value, field: str) -> str:
+    if not _is_lower_hex(value, 40):
+        raise PinLoadError(f"{field} must be a lowercase 40-char git sha")
+    return value
+
+
+def _load_approval_ledger(ledger_path) -> dict:
     data = _load_json_object(ledger_path, "approved-F10 ledger")
+    return data
+
+
+def load_approved_f10(ledger_path) -> set:
+    data = _load_approval_ledger(ledger_path)
     approved = data.get("approved_f10")
     if not isinstance(approved, list):
         raise PinLoadError("approved-F10 ledger approved_f10 must be a list")
     return {_checked_sha256(value, "approved-F10 ledger entry") for value in approved}
 
 
-def verify_pin_trust(pin: Pin, approved_f10: set, commit_exists) -> tuple[bool, str]:
+def load_approved_heads(ledger_path) -> set:
+    data = _load_approval_ledger(ledger_path)
+    approved = data.get("approved_heads", [])
+    if not isinstance(approved, list):
+        raise PinLoadError("approved-F10 ledger approved_heads must be a list")
+    return {_checked_head_sha(value, "approved-F10 ledger approved_heads entry") for value in approved}
+
+
+def verify_pin_trust(pin: Pin, approved_f10: set, commit_exists, approved_heads: Optional[set] = None) -> tuple[bool, str]:
     """A pin is trusted only if stamped, its commit is real, and its F10 is owner-approved.
-    commit_exists(sha)->bool is injected (e.g. git cat-file -e <sha>^{commit} on origin/main)."""
+    commit_exists(sha)->bool is injected (e.g. git cat-file -e <sha>^{commit} on origin/main).
+    Non-git runtime trees may use deployer-stamped approved_heads as a fail-closed fallback."""
     if not pin.head_sha:
         return False, "unstamped: expected_head_sha absent"
     if not _is_lower_hex(pin.head_sha, 40):
         return False, "invalid expected_head_sha"
+    head_approved = approved_heads is not None and pin.head_sha in approved_heads
     try:
         exists = bool(commit_exists(pin.head_sha))
     except Exception as e:
-        return False, f"commit check failed: {type(e).__name__}"
-    if not exists:
+        if not head_approved:
+            return False, f"commit check failed: {type(e).__name__}"
+        exists = False
+    if not exists and not head_approved:
         return False, f"commit {pin.head_sha[:12]} not on origin/main"
     if pin.f10_sha is not None and not _is_lower_hex(pin.f10_sha, 64):
         return False, "invalid f10 sha"
     if pin.f10_sha not in approved_f10:
         return False, f"f10 {(pin.f10_sha or 'none')[:12]} not in approved ledger"
-    return True, "ok"
+    if exists:
+        return True, "ok"
+    return True, "ok: approved head ledger"
 
 
 def _sha256_file(path) -> str:

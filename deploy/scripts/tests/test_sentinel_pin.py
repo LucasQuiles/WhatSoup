@@ -99,11 +99,29 @@ def test_load_approved_f10_reads_ledger(tmp_path):
     assert sp.load_approved_f10(led) == {"1448da21"+"0"*56}
 
 
+def test_load_approved_heads_reads_optional_ledger_floor(tmp_path):
+    led = tmp_path / "ledger.json"
+    led.write_text(json.dumps({"approved_f10": ["1448da21"+"0"*56], "approved_heads": ["a"*40]}))
+    assert sp.load_approved_heads(led) == {"a"*40}
+
+
+def test_load_approved_heads_missing_field_defaults_empty(tmp_path):
+    led = tmp_path / "ledger.json"; led.write_text(json.dumps({"approved_f10": ["1448da21"+"0"*56]}))
+    assert sp.load_approved_heads(led) == set()
+
+
 @pytest.mark.parametrize("payload", [{"approved_f10": "bad"}, {"approved_f10": ["not-a-sha"]}, []])
 def test_load_approved_f10_rejects_bad_ledger(tmp_path, payload):
     led = tmp_path / "ledger.json"; led.write_text(json.dumps(payload))
     with pytest.raises(sp.PinLoadError):
         sp.load_approved_f10(led)
+
+
+@pytest.mark.parametrize("payload", [{"approved_f10": ["1448da21"+"0"*56], "approved_heads": "bad"}, {"approved_f10": ["1448da21"+"0"*56], "approved_heads": ["not-a-sha"]}])
+def test_load_approved_heads_rejects_bad_ledger(tmp_path, payload):
+    led = tmp_path / "ledger.json"; led.write_text(json.dumps(payload))
+    with pytest.raises(sp.PinLoadError):
+        sp.load_approved_heads(led)
 
 
 def test_trust_rejects_invalid_head_shape_without_calling_git():
@@ -125,6 +143,19 @@ def test_trust_rejects_commit_probe_exception():
 
     ok, reason = sp.verify_pin_trust(_pin(), approved_f10={"1448da21"+"0"*56}, commit_exists=commit_exists)
     assert ok is False and "commit check failed" in reason
+
+
+def test_trust_allows_deploy_approved_head_when_git_unavailable():
+    def commit_exists(_sha):
+        raise RuntimeError("not a git repository")
+
+    ok, reason = sp.verify_pin_trust(
+        _pin(),
+        approved_f10={"1448da21"+"0"*56},
+        commit_exists=commit_exists,
+        approved_heads={"a"*40},
+    )
+    assert ok is True and reason == "ok: approved head ledger"
 
 
 def test_trust_rejects_invalid_f10_shape():
