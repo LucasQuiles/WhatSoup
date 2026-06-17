@@ -273,6 +273,18 @@ type TurnCapabilityErrorClass = ProviderFailureKind | 'unknown-terminal' | 'empt
  * {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
  */
 const EMPTY_OUTPUT_FALLBACK_THRESHOLD = 2;
+
+/**
+ * Startup grace for empty-output fallback arming. The boot/recovery sequence
+ * (proactive per-chat resume → resume-fail → context-recovery / replayed turns)
+ * emits empty results while the usability probe is still transiently `unknown`.
+ * Arming on that noise falsely fails the bot over to the backup on every restart
+ * (and persists the window, so it reloads on the next restart — an opus/sonnet
+ * flap). Within this window, before the bot has proven it can serve a turn,
+ * empty-output neither counts nor arms. A genuinely-dead primary still fails
+ * over once the window elapses (or on the first real post-grace empty).
+ */
+const EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS = 60_000;
 type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
   modelUsabilityStatus: PrimaryModelUsabilityResult['status'] | null;
   lastTurnErrorClass: TurnCapabilityErrorClass | null;
@@ -1625,6 +1637,9 @@ export class AgentRuntime implements Runtime {
    *  or when an empty-output fallback is armed. Drives the empty-output fallback
    *  trigger — see maybeArmFallbackAfterEmptyPrimaryTurn. */
   private consecutivePrimaryEmptyTurns = 0;
+  /** Wall-clock construction time, used for the empty-output arming startup
+   *  grace — see EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS. */
+  private readonly runtimeBootMs = Date.now();
   private lastSuccessfulTurnAt: number | null = null;
   private lastTurnErrorClass: TurnCapabilityErrorClass | null = null;
   private lastTurnErrorAt: number | null = null;
@@ -6355,6 +6370,17 @@ export class AgentRuntime implements Runtime {
   ): boolean {
     if (this.isFallbackWindowActive) return false;
     if (this.agentFallbacks.length === 0) return false;
+
+    // Startup grace: before the bot has proven it can serve a turn, the
+    // boot/recovery sequence emits empties while the usability probe is still
+    // transiently 'unknown'. Don't count or arm on that noise — otherwise the
+    // bot falls over to the backup on every restart and persists the window.
+    if (
+      this.lastSuccessfulTurnAt === null &&
+      Date.now() - this.runtimeBootMs < EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS
+    ) {
+      return false;
+    }
 
     this.consecutivePrimaryEmptyTurns += 1;
     const probeFlagsUnusable = this.primaryModelUsability
