@@ -157,6 +157,9 @@ vi.mock('../../console/src/lib/api', () => ({
     getMessages: vi.fn(() => Promise.resolve([])),
     sendMessage: vi.fn(() => Promise.resolve()),
   },
+  // App now reaches use-websocket (via the connection-status hook), which imports
+  // isProductionConsole from lib/api — expose it on the explicit-shape mock.
+  isProductionConsole: () => false,
 }));
 
 // Lazy modal stubs (prevent dynamic import races in browser mode).
