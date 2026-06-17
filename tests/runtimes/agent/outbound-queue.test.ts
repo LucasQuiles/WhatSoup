@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   OutboundQueue,
   TOOL_BATCH_DELAY_MS,
+  TOOL_BATCH_MAX_AGE_MS,
   MIN_SEND_GAP_MS,
   TYPING_REFRESH_MS,
   TEXT_AGGREGATE_DELAY_MS,
   TERMINAL_TEXT_DEDUPE_WINDOW_MS,
+  SEND_TIMEOUT_MS,
 } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { ProgressEvent } from '../../../src/runtimes/agent/operation-tracker.ts';
@@ -1375,4 +1377,747 @@ describe('OutboundQueue', () => {
       expect(calls).toHaveLength(2);
     });
   });
+
+  // ─── formatElapsed: exact-minute branch ──────────────────────────────────
+
+  it('formatElapsed returns "Nm" (no seconds) when elapsed is an exact minute multiple', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('full');
+
+    // 120 000 ms = 2m exactly → formatElapsed returns "2m" not "2m 0s"
+    const event: ProgressEvent = {
+      type: 'operation_progress',
+      toolId: 'tool-exact-min',
+      toolName: 'Bash',
+      category: 'running',
+      elapsedMs: 120_000,
+      state: 'running',
+    };
+    queue.enqueueProgressUpdate(event, 'Bot');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('2m');
+    expect(calls[0]).not.toMatch(/2m \d+s/);
+  });
+
+  // ─── enqueueStreamingText: empty string guard ─────────────────────────────
+
+  it('enqueueStreamingText ignores an empty string without starting typing', async () => {
+    const { messenger, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueStreamingText('');
+
+    // Empty string → early return → no typing indicator, no timer to clean up
+    expect(typingCalls).toHaveLength(0);
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    queue.abortTurn();
+  });
+
+  // ─── enqueueResultText branches ───────────────────────────────────────────
+
+  it('enqueueResultText drops empty string', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueResultText('');
+    await vi.runAllTimersAsync();
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('enqueueResultText drops whitespace-only string', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueResultText('   ');
+    await vi.runAllTimersAsync();
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('enqueueResultText passes through in minimal mode when no visible text yet in turn', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    // No turnHasVisibleText yet → should pass through
+    queue.enqueueResultText('Summary for the user');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toEqual(['Summary for the user']);
+  });
+
+  it('enqueueResultText suppresses in minimal mode when visible text already sent', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    // Send visible text first (marks turnHasVisibleText)
+    queue.enqueueText('Real response to user');
+    await vi.runAllTimersAsync();
+
+    const callCountBefore = calls.length;
+    queue.enqueueResultText('Internal summary that should be suppressed');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toHaveLength(callCountBefore); // no new message added
+  });
+
+  // ─── shouldShowMinimal: all switch branches ───────────────────────────────
+
+  it('shouldShowMinimal: searching with "Checking my notes" prefix passes through in minimal mode', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueToolUpdate({ category: 'searching', detail: 'Checking my notes on TypeScript' });
+    await vi.advanceTimersByTimeAsync(1_500 + 100); // minimal mode uses 1500ms idle delay
+    await queue.flush();
+
+    expect(calls.some((c) => c.includes('Checking my notes on TypeScript'))).toBe(true);
+  });
+
+  it('shouldShowMinimal: searching without "Checking my notes" prefix is suppressed in minimal mode', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueToolUpdate({ category: 'searching', detail: 'Pinecone semantic search' });
+    await vi.advanceTimersByTimeAsync(1_500 + 100);
+    await queue.flush();
+
+    // Suppressed — only typing was activated, no message sent
+    expect(calls).toHaveLength(0);
+  });
+
+  it('shouldShowMinimal: fetching category passes through in minimal mode', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    queue.enqueueToolUpdate({ category: 'fetching', detail: 'fetch-detail-marker' });
+    await vi.advanceTimersByTimeAsync(1_500 + 100);
+    await queue.flush();
+
+    expect(calls.some((c) => c.includes('fetch-detail-marker'))).toBe(true);
+  });
+
+  it('shouldShowMinimal: skill, planning, blocked, cancelled, reading, modifying suppressed in minimal mode', async () => {
+    const suppressedCategories: ToolUpdate['category'][] = [
+      'skill', 'planning', 'blocked', 'cancelled', 'reading', 'modifying',
+    ];
+    for (const category of suppressedCategories) {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('minimal');
+
+      queue.enqueueToolUpdate({ category, detail: `testing ${category}` });
+      await vi.advanceTimersByTimeAsync(1_500 + 100);
+      await queue.flush();
+
+      expect(calls, `category '${category}' should be suppressed in minimal mode`).toHaveLength(0);
+    }
+  });
+
+  it('shouldShowMinimal: error, agent, running, other suppressed in minimal mode', async () => {
+    const suppressedCategories: ToolUpdate['category'][] = ['error', 'agent', 'running', 'other'];
+    for (const category of suppressedCategories) {
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+      queue.setToolUpdateMode('minimal');
+
+      queue.enqueueToolUpdate({ category, detail: `testing ${category}` });
+      await vi.advanceTimersByTimeAsync(1_500 + 100);
+      await queue.flush();
+
+      expect(calls, `category '${category}' should be suppressed in minimal mode`).toHaveLength(0);
+    }
+  });
+
+  // ─── enqueueToolUpdate: friendly mode skip for skill/cancelled ────────────
+
+  it('friendly mode: skill updates are suppressed (only typing activated)', async () => {
+    const { messenger, calls, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('friendly');
+
+    queue.enqueueToolUpdate({ category: 'skill', detail: 'Loading skill context' });
+    await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+    await queue.flush();
+
+    expect(calls).toHaveLength(0);
+    expect(typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('friendly mode: cancelled updates are suppressed (only typing activated)', async () => {
+    const { messenger, calls, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('friendly');
+
+    queue.enqueueToolUpdate({ category: 'cancelled', detail: 'Cancelled operation' });
+    await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
+    await queue.flush();
+
+    expect(calls).toHaveLength(0);
+    expect(typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('friendly mode: non-suppressed categories use FRIENDLY_CATEGORY_META labels', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('friendly');
+
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'src/app.ts' });
+    const flushPromise = queue.flush();
+    await vi.runAllTimersAsync();
+    await flushPromise;
+
+    // Friendly mode uses different label: "Looking at" not "Reading"
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('Looking at');
+    expect(calls[0]).not.toContain('📖 Reading:');
+  });
+
+  // ─── enqueueToolUpdate: minimal mode uses 1500ms delay ──────────────────
+
+  it('minimal mode uses 1500ms idle timer (not 5000ms)', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('minimal');
+
+    // fetching passes through in minimal mode
+    queue.enqueueToolUpdate({ category: 'fetching', detail: 'api.example.com' });
+
+    // Should NOT have fired after 1400ms
+    await vi.advanceTimersByTimeAsync(1_400);
+    expect(calls).toHaveLength(0);
+
+    // Should fire after 1500ms
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toHaveLength(1);
+    await queue.flush();
+  });
+
+  // ─── TOOL_BATCH_MAX_AGE_MS fires even when idle timer keeps resetting ────
+
+  it('max-age timer fires after TOOL_BATCH_MAX_AGE_MS even when idle timer resets', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    // Keep sending updates to reset the idle timer every 4s
+    queue.enqueueToolUpdate({ category: 'running', detail: 'step 1' });
+    await vi.advanceTimersByTimeAsync(4_000);
+    queue.enqueueToolUpdate({ category: 'running', detail: 'step 2' });
+    await vi.advanceTimersByTimeAsync(4_000);
+    queue.enqueueToolUpdate({ category: 'running', detail: 'step 3' });
+    await vi.advanceTimersByTimeAsync(4_000);
+    queue.enqueueToolUpdate({ category: 'running', detail: 'step 4' });
+    await vi.advanceTimersByTimeAsync(4_000);
+    queue.enqueueToolUpdate({ category: 'running', detail: 'step 5' });
+    // At this point 16s have elapsed total — max-age (30s) has not fired yet
+    expect(calls).toHaveLength(0);
+
+    // Advance to just past 30s total — max-age fires
+    await vi.advanceTimersByTimeAsync(TOOL_BATCH_MAX_AGE_MS - 16_000 + 100);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('step 1');
+    expect(calls[0]).toContain('step 5');
+
+    await queue.flush();
+  });
+
+  // ─── flushToolBuffer: detail deduplication within a category ─────────────
+
+  it('deduplicates identical detail strings within the same category', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'src/config.ts' });
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'src/config.ts' }); // duplicate
+    queue.enqueueToolUpdate({ category: 'reading', detail: 'src/main.ts' });
+
+    const flushPromise = queue.flush();
+    await vi.runAllTimersAsync();
+    await flushPromise;
+
+    expect(calls).toHaveLength(1);
+    // src/config.ts appears only once despite being added twice
+    const matches = (calls[0].match(/src\/config\.ts/g) ?? []).length;
+    expect(matches).toBe(1);
+    expect(calls[0]).toContain('src/main.ts');
+  });
+
+  // ─── markLastTerminal: skipDurabilityMark option ─────────────────────────
+
+  it('markLastTerminal with skipDurabilityMark:true does not call durability.markTerminal', async () => {
+    const { messenger } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('Hello');
+    await vi.runAllTimersAsync();
+
+    queue.markLastTerminal({ skipDurabilityMark: true });
+
+    expect(durability.markTerminal).not.toHaveBeenCalled();
+  });
+
+  it('markLastTerminal without skipDurabilityMark calls durability.markTerminal', async () => {
+    const { messenger } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('Hello');
+    await vi.runAllTimersAsync();
+
+    queue.markLastTerminal();
+
+    expect(durability.markTerminal).toHaveBeenCalledOnce();
+  });
+
+  // ─── markLastTerminal: dedupeText=true but no lastSubmittedTextDedupeKey ──
+
+  it('markLastTerminal with dedupeText:true is a no-op when no text has been submitted yet', async () => {
+    const { messenger } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    // Call markLastTerminal before any text is sent → lastSubmittedTextDedupeKey is undefined
+    queue.markLastTerminal({ dedupeText: true });
+
+    // No errors, queue still functional
+    queue.enqueueText('Subsequent text');
+    await vi.runAllTimersAsync();
+
+    expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text');
+  });
+
+  // ─── durability: markMaybeSent after retry exhaustion ────────────────────
+
+  it('markMaybeSent called with error message when all retries fail and opId is set', async () => {
+    const durability = makeDurabilityStub();
+    let callNum = 0;
+    const failMessenger: Messenger = {
+      sendMessage: vi.fn(async () => {
+        callNum += 1;
+        if (callNum <= 3) throw new Error('socket_error');
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(failMessenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('durability retry test');
+    await vi.runAllTimersAsync();
+
+    expect(durability.markMaybeSent).toHaveBeenCalledOnce();
+    const [opIdArg, msgArg] = (durability.markMaybeSent as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(typeof opIdArg).toBe('number');
+    expect(typeof msgArg).toBe('string');
+    expect(msgArg).toBe('socket_error');
+  });
+
+  // ─── retryAfterMs: boundary conditions ───────────────────────────────────
+
+  it('retryAfterMs: non-numeric retryAfterMs in payload falls back to jitter delay', async () => {
+    mockLog.warn.mockClear();
+    let callCount = 0;
+    const nonNumericPayloadMessenger: Messenger = {
+      sendMessage: vi.fn(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          // payload.retryAfterMs is a string — should NOT be used, falls back to jitter
+          const err: Error & { payload?: unknown } = new Error('bad_format');
+          err.payload = { retryAfterMs: 'not-a-number' };
+          throw err;
+        }
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(nonNumericPayloadMessenger, CHAT_JID);
+    queue.enqueueText('retryAfterMs string test');
+    await vi.runAllTimersAsync();
+
+    // Succeeded on second attempt — warn logged once
+    expect(mockLog.warn).toHaveBeenCalledOnce();
+    const [warnArg] = mockLog.warn.mock.calls[0];
+    // No retryAfterMs field in warn log because the value was non-numeric
+    expect(warnArg).not.toHaveProperty('retryAfterMs');
+  });
+
+  it('retryAfterMs: negative retryAfterMs in payload falls back to jitter delay', async () => {
+    mockLog.warn.mockClear();
+    let callCount = 0;
+    const negativePayloadMessenger: Messenger = {
+      sendMessage: vi.fn(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          const err: Error & { payload?: unknown } = new Error('rate_limited');
+          err.payload = { retryAfterMs: -500 };
+          throw err;
+        }
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(negativePayloadMessenger, CHAT_JID);
+    queue.enqueueText('negative retryAfterMs test');
+    await vi.runAllTimersAsync();
+
+    expect(mockLog.warn).toHaveBeenCalledOnce();
+    const [warnArg] = mockLog.warn.mock.calls[0];
+    expect(warnArg).not.toHaveProperty('retryAfterMs');
+  });
+
+  it('retryAfterMs: retryAfterMs exceeding SEND_RETRY_MAX_MS is clamped to 8000ms', async () => {
+    mockLog.warn.mockClear();
+    let callCount = 0;
+    const clampedRetryMessenger: Messenger = {
+      sendMessage: vi.fn(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          const err: Error & { payload?: unknown } = new Error('rate_limit_huge');
+          err.payload = { retryAfterMs: 999_999 }; // well above SEND_RETRY_MAX_MS (8000)
+          throw err;
+        }
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(clampedRetryMessenger, CHAT_JID);
+    queue.enqueueText('clamped retryAfterMs test');
+    // Advance past the clamped delay (8000ms max) but not more
+    await vi.advanceTimersByTimeAsync(8_001);
+    await queue.flush();
+
+    expect(clampedRetryMessenger.sendMessage).toHaveBeenCalledTimes(2);
+    const [warnArg] = mockLog.warn.mock.calls[0];
+    // retryAfterMs logged should equal SEND_RETRY_MAX_MS (8000), not 999_999
+    expect(warnArg.retryAfterMs).toBe(8_000);
+  });
+
+  // ─── SEND_TIMEOUT logged as timeout:true on retry ────────────────────────
+
+  it('timeout flag set in warn log when send times out', async () => {
+    mockLog.warn.mockClear();
+    let callCount = 0;
+    const timeoutMessenger: Messenger = {
+      sendMessage: vi.fn(async () => {
+        callCount += 1;
+        if (callCount <= 2) {
+          // Never resolve → timeout fires after SEND_TIMEOUT_MS
+          return new Promise<never>(() => {});
+        }
+        return { waMessageId: null };
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(timeoutMessenger, CHAT_JID);
+    queue.enqueueText('timeout test');
+    // Advance past first SEND_TIMEOUT_MS → first attempt times out
+    await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS + 1);
+    // Advance past retry delay + second SEND_TIMEOUT_MS → second attempt times out
+    await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS + 2_000);
+    // Third attempt succeeds
+    await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS);
+    await queue.flush();
+
+    expect(mockLog.warn).toHaveBeenCalled();
+    const timeoutLogs = mockLog.warn.mock.calls.filter(([arg]) => arg.timeout === true);
+    expect(timeoutLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ─── enqueuePoll ──────────────────────────────────────────────────────────
+
+  it('enqueuePoll executes sendFn after flushing stream and tool buffers', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueStreamingText('streaming chunk');
+    queue.enqueueToolUpdate({ category: 'running', detail: 'some task' });
+
+    const sendFn = vi.fn(async () => {});
+
+    const pollPromise = queue.enqueuePoll(sendFn);
+    await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS + MIN_SEND_GAP_MS + 100);
+    await pollPromise;
+
+    // streaming text and tool batch flushed before the poll sendFn ran
+    expect(calls.some((c) => c.includes('streaming chunk'))).toBe(true);
+    expect(sendFn).toHaveBeenCalledOnce();
+
+    await queue.flush(); // clears typing heartbeat
+  });
+
+  // ─── hasPendingPoll / setPollPending ─────────────────────────────────────
+
+  it('hasPendingPoll returns false by default and true after setPollPending(true)', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    expect(queue.hasPendingPoll()).toBe(false);
+    queue.setPollPending(true);
+    expect(queue.hasPendingPoll()).toBe(true);
+    queue.setPollPending(false);
+    expect(queue.hasPendingPoll()).toBe(false);
+
+    queue.abortTurn();
+  });
+
+  // ─── operation_progress / operation_slow / operation_stalled: pollPending ─
+
+  it('operation_progress with pollPending=true only triggers typing (no message)', async () => {
+    const { messenger, calls, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('full');
+    queue.setPollPending(true);
+
+    const event: ProgressEvent = {
+      type: 'operation_progress',
+      toolId: 'tool-poll',
+      toolName: 'Bash',
+      category: 'running',
+      elapsedMs: 10_000,
+      state: 'running',
+    };
+    queue.enqueueProgressUpdate(event, 'Bot');
+
+    expect(calls).toHaveLength(0);
+    expect(typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+
+    queue.abortTurn();
+  });
+
+  it('operation_slow with pollPending=true only triggers typing (no message)', async () => {
+    const { messenger, calls, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('full');
+    queue.setPollPending(true);
+
+    const event: ProgressEvent = {
+      type: 'operation_slow',
+      toolId: 'tool-poll-slow',
+      toolName: 'Bash',
+      category: 'running',
+      elapsedMs: 30_000,
+      expectedMs: 10_000,
+    };
+    queue.enqueueProgressUpdate(event, 'Bot');
+
+    expect(calls).toHaveLength(0);
+    expect(typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+
+    queue.abortTurn();
+  });
+
+  it('operation_stalled with pollPending=true only triggers typing (no message)', async () => {
+    const { messenger, calls, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('full');
+    queue.setPollPending(true);
+
+    const event: ProgressEvent = {
+      type: 'operation_stalled',
+      toolId: 'tool-poll-stalled',
+      toolName: 'Bash',
+      category: 'running',
+      elapsedMs: 60_000,
+    };
+    queue.enqueueProgressUpdate(event, 'Bot');
+
+    expect(calls).toHaveLength(0);
+    expect(typingCalls.filter((v) => v === true).length).toBeGreaterThanOrEqual(1);
+
+    queue.abortTurn();
+  });
+
+  // ─── indicateTyping ───────────────────────────────────────────────────────
+
+  it('indicateTyping activates the composing indicator immediately', async () => {
+    const { messenger, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.indicateTyping();
+
+    expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
+    expect(messenger.setTyping).toHaveBeenCalledWith(CHAT_JID, true);
+
+    queue.abortTurn();
+  });
+
+  it('indicateTyping is idempotent (second call does not add a second setTyping call)', async () => {
+    const { messenger, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.indicateTyping();
+    queue.indicateTyping();
+
+    expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
+
+    queue.abortTurn();
+  });
+
+  // ─── stopTyping: called when not typing (no-op) ───────────────────────────
+
+  it('flush() is idempotent when called without any pending work', async () => {
+    const { messenger, typingCalls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    // Never started typing — stopTyping is a no-op
+    await queue.flush();
+    await queue.flush();
+
+    expect(typingCalls).toHaveLength(0);
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  // ─── shutdown: toolTimer is null after flush ──────────────────────────────
+
+  it('shutdown does not fail when no toolTimer is active', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    await queue.shutdown();
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  // ─── hasPendingWork: various state combinations ───────────────────────────
+
+  it('hasPendingWork returns true when tool buffer has items', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueToolUpdate({ category: 'running', detail: 'pending' });
+    expect(queue.hasPendingWork?.()).toBe(true);
+
+    queue.abortTurn();
+  });
+
+  it('hasPendingWork returns true while sending is in-progress', async () => {
+    const sendStarted = deferred<void>();
+    const sendAllowed = deferred<{ waMessageId: null }>();
+    const slowMessenger: Messenger = {
+      sendMessage: vi.fn(async () => {
+        sendStarted.resolve();
+        return sendAllowed.promise;
+      }),
+      sendMedia: vi.fn(async () => ({ waMessageId: null })),
+    };
+
+    const queue = new OutboundQueue(slowMessenger, CHAT_JID);
+    queue.enqueueText('slow message');
+
+    // Wait until send has started
+    await sendStarted.promise;
+    expect(queue.hasPendingWork?.()).toBe(true);
+
+    sendAllowed.resolve({ waMessageId: null });
+    await queue.flush();
+    expect(queue.hasPendingWork?.()).toBe(false);
+  });
+
+  // ─── targetChatJid getter ─────────────────────────────────────────────────
+
+  it('targetChatJid returns the JID provided at construction', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    expect(queue.targetChatJid).toBe(CHAT_JID);
+
+    queue.abortTurn();
+  });
+
+  it('targetChatJid reflects the updated JID after updateDeliveryJid', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.updateDeliveryJid('newjid@s.whatsapp.net');
+    expect(queue.targetChatJid).toBe('newjid@s.whatsapp.net');
+
+    queue.abortTurn();
+  });
+
+  // ─── setInboundSeq / getLastOpId / clearLastOpId ─────────────────────────
+
+  it('getLastOpId returns undefined before any sends', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    expect(queue.getLastOpId()).toBeUndefined();
+
+    queue.abortTurn();
+  });
+
+  it('clearLastOpId resets lastOpId to undefined', async () => {
+    const { messenger } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+
+    queue.enqueueText('something');
+    await vi.runAllTimersAsync();
+
+    expect(queue.getLastOpId()).toBeDefined();
+    queue.clearLastOpId();
+    expect(queue.getLastOpId()).toBeUndefined();
+  });
+
+  it('setInboundSeq propagates seq to outbound ops via durability', async () => {
+    const { messenger } = makeMessenger();
+    const durability = makeDurabilityStub();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setDurability(durability);
+    queue.setInboundSeq(42);
+
+    queue.enqueueText('with seq');
+    await vi.runAllTimersAsync();
+
+    expect(durability.createOutboundOp).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceInboundSeq: 42 }),
+    );
+  });
+
+  // ─── abortTurn: clears streamTimer when streaming is in progress ──────────
+
+  it('abortTurn clears streamTimer and discards buffered streaming text', async () => {
+    const { messenger } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+
+    queue.enqueueStreamingText('partial stream');
+    // streamTimer is now set; abort before it fires
+    queue.abortTurn();
+
+    // Advance time — should fire nothing (abortTurn cleared the timer)
+    await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS + 1_000);
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+  });
+
+  // ─── thinking_long: friendly mode passes through ─────────────────────────
+
+  it('thinking_long in friendly mode sends a message (not suppressed)', async () => {
+    const { messenger, calls } = makeMessenger();
+    const queue = new OutboundQueue(messenger, CHAT_JID);
+    queue.setToolUpdateMode('friendly');
+
+    queue.enqueueProgressUpdate({ type: 'thinking_long', gapMs: 10_000 }, 'Bot');
+    await vi.runAllTimersAsync();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('thinking');
+  });
 });
+

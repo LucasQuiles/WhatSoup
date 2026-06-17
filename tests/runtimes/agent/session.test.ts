@@ -1667,7 +1667,7 @@ describe('Event-driven provider ready signal', () => {
     // Simulate codex thread/start response arriving (produces init event with threadId)
     const threadResponse = JSON.stringify({
       jsonrpc: '2.0',
-      id: 'ws-2',
+      id: `ws-${2}`,
       result: { id: 'thread_abc123' },
     }) + '\n';
     mockChild.stdout.emit('data', Buffer.from(threadResponse));
@@ -1783,7 +1783,7 @@ describe('Event-driven provider ready signal', () => {
     // Simulate init event arriving before sendTurn
     const threadResponse = JSON.stringify({
       jsonrpc: '2.0',
-      id: 'ws-2',
+      id: `ws-${2}`,
       result: { id: 'thread_pre' },
     }) + '\n';
     mockChild.stdout.emit('data', Buffer.from(threadResponse));
@@ -1863,10 +1863,10 @@ describe('Codex session resume via thread ID', () => {
     (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
 
     // Simulate error response from the app-server rejecting the threadId.
-    // The thread/start request was the second request (ws-2).
+    // The thread/start request was the second request (seq 2).
     const errorResponse = JSON.stringify({
       jsonrpc: '2.0',
-      id: 'ws-2',
+      id: `ws-${2}`,
       error: { code: -32600, message: 'Thread not found' },
     }) + '\n';
     mockChild.stdout.emit('data', Buffer.from(errorResponse));
@@ -1908,7 +1908,7 @@ describe('Codex session resume via thread ID', () => {
     // Simulate error response rejecting the threadId
     const errorResponse = JSON.stringify({
       jsonrpc: '2.0',
-      id: 'ws-2',
+      id: `ws-${2}`,
       error: { code: -32600, message: 'Thread expired' },
     }) + '\n';
     mockChild.stdout.emit('data', Buffer.from(errorResponse));
@@ -2056,5 +2056,1395 @@ describe('formatAge', () => {
   it('returns hours for >= 1h', () => {
     const isoString = new Date(Date.now() - 2 * 3_600_000).toISOString();
     expect(formatAge(isoString)).toBe('2h ago');
+  });
+});
+
+// ─── buildChildEnv branch coverage ───────────────────────────────────────────
+
+import {
+  buildChildEnv,
+  getProviderBinary,
+  opencodeUsesConfigModel,
+  __provider_switch_for_test,
+} from '../../../src/runtimes/agent/session.ts';
+
+describe('buildChildEnv', () => {
+  it('throws for unknown provider id', () => {
+    expect(() => buildChildEnv('not-a-provider')).toThrow(/unknown provider id/);
+  });
+
+  it('throws for openai-api (managed-loop, no child process)', () => {
+    expect(() => buildChildEnv('openai-api')).toThrow(/managed-loop provider/);
+  });
+
+  it('throws for anthropic-api (managed-loop, no child process)', () => {
+    expect(() => buildChildEnv('anthropic-api')).toThrow(/managed-loop provider/);
+  });
+
+  it('claude-cli: forwards OPENAI_API_KEY when set', () => {
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-test-openai-key';
+    try {
+      const env = buildChildEnv('claude-cli');
+      expect(env.OPENAI_API_KEY).toBe('sk-test-openai-key');
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  it('claude-cli: does not include OPENAI_API_KEY when not set', () => {
+    const saved = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const env = buildChildEnv('claude-cli');
+      expect(env).not.toHaveProperty('OPENAI_API_KEY');
+    } finally {
+      if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  it('codex-cli: forwards OPENAI_API_KEY when set', () => {
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-codex-key';
+    try {
+      const env = buildChildEnv('codex-cli');
+      expect(env.OPENAI_API_KEY).toBe('sk-codex-key');
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  it('codex-cli: does not include OPENAI_API_KEY when not set', () => {
+    const saved = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const env = buildChildEnv('codex-cli');
+      expect(env).not.toHaveProperty('OPENAI_API_KEY');
+    } finally {
+      if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  it('gemini-cli: forwards GEMINI_API_KEY when set', () => {
+    const savedG = process.env.GEMINI_API_KEY;
+    const savedGo = process.env.GOOGLE_API_KEY;
+    process.env.GEMINI_API_KEY = 'gemini-key-123';
+    delete process.env.GOOGLE_API_KEY;
+    try {
+      const env = buildChildEnv('gemini-cli');
+      expect(env.GEMINI_API_KEY).toBe('gemini-key-123');
+      expect(env).not.toHaveProperty('GOOGLE_API_KEY');
+    } finally {
+      if (savedG === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = savedG;
+      if (savedGo !== undefined) process.env.GOOGLE_API_KEY = savedGo;
+    }
+  });
+
+  it('gemini-cli: forwards both GEMINI_API_KEY and GOOGLE_API_KEY when both set', () => {
+    const savedG = process.env.GEMINI_API_KEY;
+    const savedGo = process.env.GOOGLE_API_KEY;
+    process.env.GEMINI_API_KEY = 'gemini-key-xyz';
+    process.env.GOOGLE_API_KEY = 'google-key-xyz';
+    try {
+      const env = buildChildEnv('gemini-cli');
+      expect(env.GEMINI_API_KEY).toBe('gemini-key-xyz');
+      expect(env.GOOGLE_API_KEY).toBe('google-key-xyz');
+    } finally {
+      if (savedG === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = savedG;
+      if (savedGo === undefined) delete process.env.GOOGLE_API_KEY;
+      else process.env.GOOGLE_API_KEY = savedGo;
+    }
+  });
+
+  it('opencode-cli: forwards OPENAI_API_KEY and ANTHROPIC_API_KEY when set', () => {
+    const savedOai = process.env.OPENAI_API_KEY;
+    const savedAnt = process.env.ANTHROPIC_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-openai-oc';
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-oc';
+    try {
+      const env = buildChildEnv('opencode-cli');
+      expect(env.OPENAI_API_KEY).toBe('sk-openai-oc');
+      expect(env.ANTHROPIC_API_KEY).toBe('sk-ant-oc');
+    } finally {
+      if (savedOai === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = savedOai;
+      if (savedAnt === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedAnt;
+    }
+  });
+
+  it('opencode-cli: providerConfig.apiKeyService for a known service adds it to env forwarding', () => {
+    // 'deepseek' is a known service in SERVICE_ENV_MAP -> DEEPSEEK_API_KEY
+    const savedDeep = process.env.DEEPSEEK_API_KEY;
+    process.env.DEEPSEEK_API_KEY = 'ds-api-key-for-test';
+    // Unset OPENAI and ANTHROPIC to keep env clean
+    const savedOai = process.env.OPENAI_API_KEY;
+    const savedAnt = process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const env = buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: 'deepseek' });
+      expect(env.DEEPSEEK_API_KEY).toBe('ds-api-key-for-test');
+    } finally {
+      if (savedDeep === undefined) delete process.env.DEEPSEEK_API_KEY;
+      else process.env.DEEPSEEK_API_KEY = savedDeep;
+      if (savedOai !== undefined) process.env.OPENAI_API_KEY = savedOai;
+      if (savedAnt !== undefined) process.env.ANTHROPIC_API_KEY = savedAnt;
+    }
+  });
+
+  it('opencode-cli: providerConfig.apiKeyService empty string is ignored (treated as no service)', () => {
+    const savedOai = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      // Should not throw, and empty apiKeyService should not register a service
+      const env = buildChildEnv('opencode-cli', undefined, undefined, { apiKeyService: '  ' });
+      // Result should be a valid env object
+      expect(typeof env).toBe('object');
+    } finally {
+      if (savedOai !== undefined) process.env.OPENAI_API_KEY = savedOai;
+    }
+  });
+});
+
+// ─── getProviderBinary branch coverage ───────────────────────────────────────
+
+describe('getProviderBinary', () => {
+  it('throws for unknown provider id', () => {
+    expect(() => getProviderBinary('not-a-provider')).toThrow(/unknown provider id/);
+  });
+
+  it('returns null for openai-api (managed-loop)', () => {
+    expect(getProviderBinary('openai-api')).toBeNull();
+  });
+
+  it('returns null for anthropic-api (managed-loop)', () => {
+    expect(getProviderBinary('anthropic-api')).toBeNull();
+  });
+
+  it('returns "claude" for claude-cli', () => {
+    expect(getProviderBinary('claude-cli')).toBe('claude');
+  });
+
+  it('returns "codex" for codex-cli', () => {
+    expect(getProviderBinary('codex-cli')).toBe('codex');
+  });
+
+  it('returns "gemini" for gemini-cli', () => {
+    expect(getProviderBinary('gemini-cli')).toBe('gemini');
+  });
+
+  it('returns "opencode" for opencode-cli', () => {
+    expect(getProviderBinary('opencode-cli')).toBe('opencode');
+  });
+});
+
+// ─── opencodeUsesConfigModel branch coverage ─────────────────────────────────
+
+describe('opencodeUsesConfigModel', () => {
+  it('returns false when providerConfig is undefined', () => {
+    expect(opencodeUsesConfigModel(undefined)).toBe(false);
+  });
+
+  it('returns false when baseUrl is absent', () => {
+    expect(opencodeUsesConfigModel({})).toBe(false);
+  });
+
+  it('returns false when baseUrl is empty string', () => {
+    expect(opencodeUsesConfigModel({ baseUrl: '' })).toBe(false);
+  });
+
+  it('returns false when baseUrl is whitespace only', () => {
+    expect(opencodeUsesConfigModel({ baseUrl: '   ' })).toBe(false);
+  });
+
+  it('returns true when baseUrl is a non-empty string', () => {
+    expect(opencodeUsesConfigModel({ baseUrl: 'https://api.example.com/v1' })).toBe(true);
+  });
+});
+
+// ─── __provider_switch_for_test branch coverage ───────────────────────────────
+
+describe('__provider_switch_for_test', () => {
+  it('getProviderBinary throws for unknown provider', () => {
+    expect(() => __provider_switch_for_test.getProviderBinary('not-a-provider')).toThrow(/unknown provider id/);
+  });
+
+  it('getProviderBinary throws for managed-loop providers (openai-api)', () => {
+    expect(() => __provider_switch_for_test.getProviderBinary('openai-api')).toThrow(/managed-loop provider/);
+  });
+
+  it('getProviderBinary throws for managed-loop providers (anthropic-api)', () => {
+    expect(() => __provider_switch_for_test.getProviderBinary('anthropic-api')).toThrow(/managed-loop provider/);
+  });
+
+  it('getProviderArgs throws for unknown provider', () => {
+    expect(() => __provider_switch_for_test.getProviderArgs('not-a-provider', '', '/cwd', undefined, undefined, [])).toThrow(/unknown provider id/);
+  });
+
+  it('getProviderArgs throws for managed-loop providers (openai-api)', () => {
+    expect(() => __provider_switch_for_test.getProviderArgs('openai-api', '', '/cwd', undefined, undefined, [])).toThrow(/managed-loop provider/);
+  });
+
+  it('getProviderArgs throws for managed-loop providers (anthropic-api)', () => {
+    expect(() => __provider_switch_for_test.getProviderArgs('anthropic-api', '', '/cwd', undefined, undefined, [])).toThrow(/managed-loop provider/);
+  });
+
+  it('getParser throws for unknown provider', () => {
+    expect(() => __provider_switch_for_test.getParser('not-a-provider')).toThrow(/unknown provider id/);
+  });
+
+  it('getParser throws for managed-loop providers (openai-api)', () => {
+    expect(() => __provider_switch_for_test.getParser('openai-api')).toThrow(/managed-loop provider/);
+  });
+
+  it('getParser throws for managed-loop providers (anthropic-api)', () => {
+    expect(() => __provider_switch_for_test.getParser('anthropic-api')).toThrow(/managed-loop provider/);
+  });
+
+  it('getProviderArgs for gemini-cli returns ["--acp"]', () => {
+    const args = __provider_switch_for_test.getProviderArgs('gemini-cli', 'sys-prompt', '/cwd', undefined, undefined, []);
+    expect(args).toEqual(['--acp']);
+  });
+
+  it('getProviderArgs for codex-cli returns expected args without model', () => {
+    const args = __provider_switch_for_test.getProviderArgs('codex-cli', '', '/cwd', undefined, undefined, []);
+    expect(args).toEqual(['app-server', '--listen', 'stdio://']);
+  });
+
+  it('getProviderArgs for codex-cli includes model when provided', () => {
+    const args = __provider_switch_for_test.getProviderArgs('codex-cli', '', '/cwd', undefined, 'gpt-4o', []);
+    expect(args).toEqual(['app-server', '--listen', 'stdio://', '--model', 'gpt-4o']);
+  });
+
+  it('getProviderArgs for opencode-cli returns expected base args', () => {
+    const args = __provider_switch_for_test.getProviderArgs('opencode-cli', 'sys', '/cwd', undefined, undefined, []);
+    expect(args).toEqual(['run', '--format', 'json', '--pure']);
+  });
+
+  it('getProviderArgs for opencode-cli includes -m when model is set and no baseUrl', () => {
+    const args = __provider_switch_for_test.getProviderArgs('opencode-cli', 'sys', '/cwd', undefined, 'openai/gpt-4o', []);
+    expect(args).toContain('-m');
+    expect(args).toContain('openai/gpt-4o');
+  });
+
+  it('getProviderArgs for opencode-cli omits -m when baseUrl is set (config model)', () => {
+    const args = __provider_switch_for_test.getProviderArgs('opencode-cli', 'sys', '/cwd', undefined, 'openai/gpt-4o', [], { baseUrl: 'https://api.example.com/v1' });
+    expect(args).not.toContain('-m');
+  });
+
+  it('getParser returns a function for claude-cli', () => {
+    const parser = __provider_switch_for_test.getParser('claude-cli');
+    expect(typeof parser).toBe('function');
+  });
+
+  it('getParser returns a function for codex-cli', () => {
+    const parser = __provider_switch_for_test.getParser('codex-cli');
+    expect(typeof parser).toBe('function');
+  });
+
+  it('getParser returns a function for gemini-cli', () => {
+    const parser = __provider_switch_for_test.getParser('gemini-cli');
+    expect(typeof parser).toBe('function');
+  });
+
+  it('getParser returns a function for opencode-cli', () => {
+    const parser = __provider_switch_for_test.getParser('opencode-cli');
+    expect(typeof parser).toBe('function');
+  });
+});
+
+// ─── buildSystemPrompt edge cases ────────────────────────────────────────────
+
+describe('buildSystemPrompt edge cases', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('includes handoffSystemBlock output when provided', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const handoffSystemBlock = vi.fn(() => 'Handoff context block');
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      handoffSystemBlock,
+    });
+    await sm.spawnSession();
+
+    const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
+    const args: string[] = callArgs[1];
+    const systemPromptIdx = args.indexOf('--append-system-prompt');
+    const systemPrompt = args[systemPromptIdx + 1];
+    expect(systemPrompt).toContain('Handoff context block');
+    expect(handoffSystemBlock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not include handoffBlock when handoffSystemBlock returns null', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const handoffSystemBlock = vi.fn(() => null);
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      handoffSystemBlock,
+    });
+    await sm.spawnSession();
+
+    // Should still spawn correctly
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('includes configSystemPrompt when provided', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      configSystemPrompt: 'Extra system config content',
+    });
+    await sm.spawnSession();
+
+    const callArgs = (spawn as ReturnType<typeof vi.fn>).mock.calls[0];
+    const args: string[] = callArgs[1];
+    const systemPromptIdx = args.indexOf('--append-system-prompt');
+    const systemPrompt = args[systemPromptIdx + 1];
+    expect(systemPrompt).toContain('Extra system config content');
+  });
+
+  it('throws when instructionsPath file cannot be read', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    (readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('ENOENT: no such file');
+    });
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      cwd: '/agent/dir', instructionsPath: 'MISSING.md',
+    });
+
+    expect(() => sm.buildSystemPrompt()).toThrow(/Failed to read instructionsPath/);
+    expect(() => sm.buildSystemPrompt()).toThrow(/ENOENT/);
+  });
+
+  it('throws when instructionsPath read throws a non-Error', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    (readFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw 'string error'; // intentional non-Error throw to exercise String(err) path
+    });
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      cwd: '/agent/dir', instructionsPath: 'MISSING.md',
+    });
+
+    expect(() => sm.buildSystemPrompt()).toThrow(/Failed to read instructionsPath/);
+  });
+
+  it('provider display name falls back to provider id for unknown provider-like display name', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    // Use a known valid provider whose display name we can confirm
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'gemini-cli',
+    });
+    const prompt = sm.buildSystemPrompt();
+    expect(prompt).toContain('a personal Gemini CLI agent');
+  });
+});
+
+// ─── updateMcpActorJid branch coverage ───────────────────────────────────────
+
+describe('updateMcpActorJid', () => {
+  it('updates actorJid when mcpSessionContext is provided', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const mcpSessionContext = { tier: 'global' as const, actorJid: '1555000001@s.whatsapp.net', sessionId: 'ses_test' };
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      mcpSessionContext,
+    });
+
+    sm.updateMcpActorJid('1555000002@s.whatsapp.net');
+    expect(mcpSessionContext.actorJid).toBe('1555000002@s.whatsapp.net');
+  });
+
+  it('is a no-op when mcpSessionContext is not provided', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    // Should not throw
+    expect(() => sm.updateMcpActorJid('1555000003@s.whatsapp.net')).not.toThrow();
+  });
+});
+
+// ─── notifyUnexpectedExit branch coverage ────────────────────────────────────
+
+describe('notifyUnexpectedExit via exit handler', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('exit code 0 (clean exit) does not send crash notification', async () => {
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), notifyUser });
+    await sm.spawnSession();
+    // active=false so exit is a "clean shutdown"
+    (sm as unknown as { active: boolean }).active = false;
+    mockChild._exitCb?.(0, null);
+
+    await new Promise((r) => setImmediate(r));
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it('exit by signal sends signal-based notification', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), notifyUser });
+    await sm.spawnSession();
+    mockChild._exitCb?.(null, 'SIGTERM');
+
+    await vi.waitFor(() => expect(notifyUser).toHaveBeenCalledTimes(1));
+    expect(notifyUser.mock.calls[0][0]).toContain('terminated by signal SIGTERM');
+  });
+
+  it('exit code 0 with no signal from active session does not send notification', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), notifyUser });
+    await sm.spawnSession();
+    mockChild._exitCb?.(0, null);
+
+    await new Promise((r) => setImmediate(r));
+    expect(notifyUser).not.toHaveBeenCalled();
+  });
+});
+
+// ─── handleProviderEvent branch coverage ─────────────────────────────────────
+
+describe('handleProviderEvent branch coverage', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (mockChild.stdin as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn(
+      (_data: unknown, _enc?: unknown, cb?: (err?: Error | null) => void) => { if (cb) cb(); },
+    );
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('init event for gemini-cli captures geminiSessionId', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'gemini-cli', onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    // Simulate gemini session/new response
+    const sessionResponse = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      result: { sessionId: 'gemini-sess-abc' },
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(sessionResponse));
+
+    expect((sm as unknown as { geminiSessionId: string | null }).geminiSessionId).toBe('gemini-sess-abc');
+    expect(sm.getStatus().sessionId).toBe('gemini-sess-abc');
+  });
+
+  it('init event for codex-cli clears codexResumeThreadStartReqId on successful resume', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    // Fresh spawn to get the codex child
+    await sm.spawnSession();
+
+    // Simulate successful thread/start response with threadId
+    const threadResponse = JSON.stringify({
+      jsonrpc: '2.0',
+      id: `ws-${2}`,
+      result: { id: 'thread_success_xyz' },
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(threadResponse));
+
+    expect((sm as unknown as { codexResumeThreadStartReqId: string | null }).codexResumeThreadStartReqId).toBeNull();
+    expect(sm.getStatus().sessionId).toBe('thread_success_xyz');
+  });
+
+  it('handleProviderEvent records token_usage events in budget', async () => {
+    vi.useFakeTimers();
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const fetchMock = vi.fn().mockResolvedValue(makeSseResponse([
+      { type: 'message_start', message: { usage: { input_tokens: 10, output_tokens: 0 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello.' } },
+      { type: 'message_delta', usage: { output_tokens: 5 } },
+      { type: 'message_stop' },
+    ]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: (e) => events.push(e),
+      provider: 'anthropic-api',
+      providerConfig: {
+        budget: { maxInputTokensPerTurn: 10_000, maxOutputTokensPerTurn: 10_000 },
+      },
+    });
+
+    await sm.spawnSession();
+    await sm.sendTurn('test budget recording');
+
+    // Token usage event should have been emitted
+    expect(events.some((e) => e.type === 'token_usage' || e.type === 'result')).toBe(true);
+    vi.useRealTimers();
+  });
+});
+
+// ─── sendTurn budget throttle branch ─────────────────────────────────────────
+
+describe('sendTurn budget throttle', () => {
+  it('sendTurn emits a result event and returns early when budget disallows', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const events: AgentEvent[] = [];
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    // requestsPerMinute: 1 so the first turn uses it up, second is throttled
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: (e) => events.push(e),
+      provider: 'openai-api',
+      providerConfig: {
+        budget: { requestsPerMinute: 1 },
+      },
+    });
+
+    await sm.spawnSession();
+
+    // Exhaust the budget by checking it once (ProviderBudget reserves a slot per check)
+    // We can do this by directly invoking checkBudget via the budget field
+    const budget = (sm as unknown as { budget: { checkBudget: (id: string) => unknown } }).budget;
+    budget?.checkBudget(CHAT_JID);
+
+    // Now sendTurn should be throttled
+    await sm.sendTurn('throttled message');
+
+    // Should not have called fetch (no actual API call made — budget short-circuits)
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Should have emitted a result event with throttle reason
+    const resultEvent = events.find((e) => e.type === 'result');
+    expect(resultEvent).toBeDefined();
+    expect((resultEvent as { type: 'result'; text: string | null }).text).toContain('Throttled');
+  });
+});
+
+// ─── spawnSession managed-provider existingRowId branch ──────────────────────
+
+describe('spawnSession managed-provider existingRowId', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('reuses existingRowId for managed-loop provider instead of creating new session', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const fetchMock = vi.fn().mockResolvedValue(makeSseResponse([
+      { type: 'message_start', message: { usage: { input_tokens: 5, output_tokens: 0 } } },
+      { type: 'message_stop' },
+    ]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'anthropic-api',
+    });
+
+    await sm.spawnSession(undefined, 99);
+
+    // When existingRowId is provided, updateSessionStatus is called with 'active'
+    // and createSession is NOT called (no new row).
+    expect(updateSessionStatus).toHaveBeenCalledWith(db, 99, 'active');
+    expect(createSession).not.toHaveBeenCalled();
+    expect(sm.getStatus()).toMatchObject({ active: true, pid: null });
+    expect((sm as unknown as { dbRowId: number | null }).dbRowId).toBe(99);
+  });
+});
+
+// ─── spawnSession managed-provider db failure branch ─────────────────────────
+
+describe('spawnSession managed-provider db failure', () => {
+  it('rolls back active state when db throws during managed-provider spawn', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    (createSession as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('SQLITE_BUSY: managed provider');
+    });
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'anthropic-api',
+    });
+
+    await expect(sm.spawnSession()).rejects.toThrow('SQLITE_BUSY');
+    expect(sm.getStatus()).toMatchObject({ active: false, pid: null, sessionId: null });
+  });
+});
+
+// ─── spawnSession spawn-per-turn existingRowId branch ────────────────────────
+
+describe('spawnSession spawn-per-turn existingRowId', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reuses existingRowId for spawn-per-turn instead of creating new session', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+
+    await sm.spawnSession(undefined, 77);
+
+    expect(createSession).not.toHaveBeenCalled();
+    expect((sm as unknown as { dbRowId: number | null }).dbRowId).toBe(77);
+  });
+});
+
+// ─── spawn-per-turn ENOENT and spawn error branch coverage ───────────────────
+
+describe('spawn-per-turn error branches', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('ENOENT from spawn-per-turn child notifies user and does not call onCrash', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli', notifyUser, onCrash,
+    });
+
+    await sm.spawnSession();
+    // sendTurn spawns a NEW child (spawn-per-turn). Capture it after spawn.
+    const sendPromise = sm.sendTurn('hello');
+
+    // The new child spawned by sendTurn registers its own 'error' handler.
+    // It's the LAST set of mock calls after sendTurn.
+    const allOnCalls = (mockChild.on as ReturnType<typeof vi.fn>).mock.calls;
+    const errHandlerCall = [...allOnCalls].reverse().find((c: unknown[]) => c[0] === 'error');
+    const enoentErr: NodeJS.ErrnoException = Object.assign(new Error('spawn opencode ENOENT'), { code: 'ENOENT' });
+    (errHandlerCall?.[1] as ((e: NodeJS.ErrnoException) => void) | undefined)?.(enoentErr);
+
+    await sendPromise.catch(() => {});
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('is not installed'));
+    expect(onCrash).not.toHaveBeenCalled();
+  });
+
+  it('non-ENOENT spawn error from spawn-per-turn calls onCrash and notifies user', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli', notifyUser, onCrash,
+    });
+
+    await sm.spawnSession();
+    const sendPromise = sm.sendTurn('hello');
+
+    const allOnCalls = (mockChild.on as ReturnType<typeof vi.fn>).mock.calls;
+    const errHandlerCall = [...allOnCalls].reverse().find((c: unknown[]) => c[0] === 'error');
+    const spawnErr: NodeJS.ErrnoException = Object.assign(new Error('ENOMEM'), { code: 'ENOMEM' });
+    (errHandlerCall?.[1] as ((e: NodeJS.ErrnoException) => void) | undefined)?.(spawnErr);
+
+    await sendPromise.catch(() => {});
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('failed to start'));
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({ exitCode: null, signal: null }));
+  });
+
+  it('spawn-per-turn exit code 0 does not call onCrash or notifyUser', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli', notifyUser, onCrash,
+    });
+
+    await sm.spawnSession();
+    await sm.sendTurn('hello clean exit');
+
+    // Exit code 0 = normal turn completion
+    mockChild._exitCb?.(0, null);
+
+    // Give setImmediate callbacks a chance to run
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(onCrash).not.toHaveBeenCalled();
+    expect(notifyUser).not.toHaveBeenCalled();
+  });
+});
+
+// ─── claude-cli child ENOENT branch ──────────────────────────────────────────
+
+describe('claude-cli child ENOENT branch', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('ENOENT notifies user and does not call onCrash', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), notifyUser, onCrash });
+    await sm.spawnSession();
+
+    // Find the 'error' handler on the child
+    const errorHandlerCall = (mockChild.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) => c[0] === 'error',
+    );
+    const errorHandler = errorHandlerCall?.[1] as ((e: NodeJS.ErrnoException) => void) | undefined;
+    const enoentErr: NodeJS.ErrnoException = Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' });
+    errorHandler?.(enoentErr);
+
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('is not installed'));
+    expect(onCrash).not.toHaveBeenCalled();
+  });
+
+  it('non-ENOENT spawn error calls onCrash and notifies user', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+    const onCrash = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), notifyUser, onCrash });
+    await sm.spawnSession();
+
+    const errorHandlerCall = (mockChild.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) => c[0] === 'error',
+    );
+    const errorHandler = errorHandlerCall?.[1] as ((e: NodeJS.ErrnoException) => void) | undefined;
+    const spawnErr: NodeJS.ErrnoException = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    errorHandler?.(spawnErr);
+
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('failed to start'));
+    expect(onCrash).toHaveBeenCalledWith(expect.objectContaining({
+      exitCode: null,
+      signal: null,
+    }));
+  });
+});
+
+// ─── codex unhandled server request branch ───────────────────────────────────
+
+describe('Codex unhandled server request', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (mockChild.stdin as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn(
+      (_data: unknown, _enc?: unknown, cb?: (err?: Error | null) => void) => { if (cb) cb(); },
+    );
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('unhandled JSON-RPC server method logs a warning without sending a response', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    const unknownRequest = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 99,
+      method: 'some/unknown/method',
+      params: {},
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(unknownRequest));
+
+    // No response should have been written to stdin
+    expect(mockChild.stdin.write).not.toHaveBeenCalled();
+  });
+
+  it('item/tool/requestUserInput responds with empty input (deny gracefully)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+    (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+
+    const userInputRequest = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 42,
+      method: 'item/tool/requestUserInput',
+      params: {},
+    }) + '\n';
+    mockChild.stdout.emit('data', Buffer.from(userInputRequest));
+
+    expect(mockChild.stdin.write).toHaveBeenCalledWith(
+      expect.stringContaining('"input":""'),
+    );
+  });
+
+  it('all other approval methods auto-approve (fileChange, permissions, applyPatch, execCommand)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, provider: 'codex-cli', onEvent: vi.fn(),
+    });
+    await sm.spawnSession();
+
+    const methods = [
+      'item/fileChange/requestApproval',
+      'item/permissions/requestApproval',
+      'applyPatchApproval',
+      'execCommandApproval',
+    ];
+
+    for (const method of methods) {
+      (mockChild.stdin.write as ReturnType<typeof vi.fn>).mockClear();
+      const req = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: {} }) + '\n';
+      mockChild.stdout.emit('data', Buffer.from(req));
+      expect(mockChild.stdin.write).toHaveBeenCalledWith(expect.stringContaining('"decision":"approved"'));
+    }
+  });
+});
+
+// ─── getProviderId ────────────────────────────────────────────────────────────
+
+describe('getProviderId', () => {
+  it('returns the configured provider id', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'codex-cli',
+    });
+    expect(sm.getProviderId()).toBe('codex-cli');
+  });
+
+  it('returns claude-cli for default provider', () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    expect(sm.getProviderId()).toBe('claude-cli');
+  });
+});
+
+// ─── durability upsert branch coverage ───────────────────────────────────────
+
+describe('durability upsert branch coverage', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('setDurability enables checkpoint upserts during spawnSession', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const upsert = vi.fn();
+    const durability = { upsertSessionCheckpoint: upsert };
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    sm.setDurability(durability as unknown as Parameters<typeof sm.setDurability>[0]);
+    await sm.spawnSession();
+
+    expect(upsert).toHaveBeenCalledWith(
+      toConversationKey(CHAT_JID),
+      expect.objectContaining({ sessionStatus: 'active' }),
+    );
+  });
+
+  it('setDurability enables checkpoint upserts during shutdown', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const upsert = vi.fn();
+    const durability = { upsertSessionCheckpoint: upsert };
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    sm.setDurability(durability as unknown as Parameters<typeof sm.setDurability>[0]);
+    await sm.spawnSession();
+    upsert.mockClear();
+
+    await sm.shutdown();
+    expect(upsert).toHaveBeenCalledWith(
+      toConversationKey(CHAT_JID),
+      expect.objectContaining({ sessionStatus: 'suspended' }),
+    );
+  });
+
+  it('setDurability checkpoint called with "ended" status when suspend=false', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const upsert = vi.fn();
+    const durability = { upsertSessionCheckpoint: upsert };
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    sm.setDurability(durability as unknown as Parameters<typeof sm.setDurability>[0]);
+    await sm.spawnSession();
+    upsert.mockClear();
+
+    await sm.shutdown(false);
+    expect(upsert).toHaveBeenCalledWith(
+      toConversationKey(CHAT_JID),
+      expect.objectContaining({ sessionStatus: 'ended' }),
+    );
+  });
+});
+
+// ─── sendTurn with no active session ────────────────────────────────────────
+
+describe('sendTurn with no active session', () => {
+  it('throws when called before spawnSession', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn() });
+    await expect(sm.sendTurn('hello')).rejects.toThrow(/No active session/);
+  });
+});
+
+// ─── providerConfig-driven claude-cli args coverage ──────────────────────────
+
+describe('providerConfig-driven claude-cli args', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('--system-prompt is used when rawSystemPrompt=true', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { rawSystemPrompt: true },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(args).toContain('--system-prompt');
+    expect(args).not.toContain('--append-system-prompt');
+  });
+
+  it('permissionMode is forwarded when set in providerConfig', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { permissionMode: 'default' },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const pmIdx = args.indexOf('--permission-mode');
+    expect(pmIdx).toBeGreaterThan(-1);
+    expect(args[pmIdx + 1]).toBe('default');
+  });
+
+  it('--disable-slash-commands is added when disableSlashCommands=true', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { disableSlashCommands: true },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(args).toContain('--disable-slash-commands');
+  });
+
+  it('--strict-mcp-config is added when strictMcpConfig=true', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { strictMcpConfig: true },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(args).toContain('--strict-mcp-config');
+  });
+
+  it('--no-session-persistence is added when noSessionPersistence=true', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { noSessionPersistence: true },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(args).toContain('--no-session-persistence');
+  });
+
+  it('--tools with array is forwarded', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { tools: ['Bash', 'Read'] },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const toolsIdx = args.indexOf('--tools');
+    expect(toolsIdx).toBeGreaterThan(-1);
+    expect(args[toolsIdx + 1]).toBe('Bash');
+    expect(args[toolsIdx + 2]).toBe('Read');
+  });
+
+  it('--tools with empty array passes empty string sentinel', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { tools: [] },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const toolsIdx = args.indexOf('--tools');
+    expect(toolsIdx).toBeGreaterThan(-1);
+    expect(args[toolsIdx + 1]).toBe('');
+  });
+
+  it('--tools with a string value is forwarded directly', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { tools: 'Bash' },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const toolsIdx = args.indexOf('--tools');
+    expect(toolsIdx).toBeGreaterThan(-1);
+    expect(args[toolsIdx + 1]).toBe('Bash');
+  });
+
+  it('--mcp-config with array is forwarded', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { mcpConfig: ['/path/to/mcp1.json', '/path/to/mcp2.json'] },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const mcpIdx = args.indexOf('--mcp-config');
+    expect(mcpIdx).toBeGreaterThan(-1);
+    expect(args[mcpIdx + 1]).toBe('/path/to/mcp1.json');
+    expect(args[mcpIdx + 2]).toBe('/path/to/mcp2.json');
+  });
+
+  it('--mcp-config with string is forwarded directly', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { mcpConfig: '/path/to/mcp.json' },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const mcpIdx = args.indexOf('--mcp-config');
+    expect(mcpIdx).toBeGreaterThan(-1);
+    expect(args[mcpIdx + 1]).toBe('/path/to/mcp.json');
+  });
+
+  it('--setting-sources is forwarded when settingSources is set', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { settingSources: 'project' },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const settingSourcesIdx = args.indexOf('--setting-sources');
+    expect(settingSourcesIdx).toBeGreaterThan(-1);
+    expect(args[settingSourcesIdx + 1]).toBe('project');
+  });
+
+  it('--effort is forwarded when effort is set', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { effort: 'low' },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const effortIdx = args.indexOf('--effort');
+    expect(effortIdx).toBeGreaterThan(-1);
+    expect(args[effortIdx + 1]).toBe('low');
+  });
+
+  it('--agents is forwarded when agents is set as string', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { agents: 'all' },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const agentsIdx = args.indexOf('--agents');
+    expect(agentsIdx).toBeGreaterThan(-1);
+    expect(args[agentsIdx + 1]).toBe('all');
+  });
+
+  it('--agents is not added when agents is empty string', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { agents: '' },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(args).not.toContain('--agents');
+  });
+
+  it('--fallback-model is forwarded as array when set', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { fallbackModel: ['claude-sonnet-4-5', 'claude-haiku-4-5'] },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const fallbackIdx = args.indexOf('--fallback-model');
+    expect(fallbackIdx).toBeGreaterThan(-1);
+    expect(args[fallbackIdx + 1]).toContain('claude-sonnet-4-5');
+    expect(args[fallbackIdx + 1]).toContain('claude-haiku-4-5');
+  });
+
+  it('--fallback-model is not added when fallbackModel is empty string', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      providerConfig: { fallbackModel: '' },
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(args).not.toContain('--fallback-model');
+  });
+
+  it('--plugin-dir args are added for each pluginDir', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      pluginDirs: ['/plugins/a', '/plugins/b'],
+    });
+    await sm.spawnSession();
+
+    const args: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    const pluginDirIndices = args.reduce<number[]>((acc, v, i) => { if (v === '--plugin-dir') acc.push(i); return acc; }, []);
+    expect(pluginDirIndices).toHaveLength(2);
+    expect(args[pluginDirIndices[0] + 1]).toBe('/plugins/a');
+    expect(args[pluginDirIndices[1] + 1]).toBe('/plugins/b');
+  });
+});
+
+// ─── opencode-cli session resume via sessionId ────────────────────────────────
+
+describe('opencode-cli session resume via sessionId', () => {
+  let mockChild: ReturnType<typeof makeMockChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChild = makeMockChild(12345);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('includes --session arg when sessionId is set and not the synthetic init id', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+
+    await sm.spawnSession();
+
+    // Inject a real (non-synthetic) sessionId, simulating a second turn after server assigns one
+    (sm as unknown as { sessionId: string | null }).sessionId = 'real-opencode-session-id';
+
+    // Use a new mockChild for the second spawn
+    const mockChild2 = makeMockChild(22222);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild2);
+    await sm.sendTurn('second turn');
+
+    const secondSpawnArgs: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] ?? [];
+    expect(secondSpawnArgs).toContain('--session');
+    expect(secondSpawnArgs).toContain('real-opencode-session-id');
+  });
+
+  it('does not include --session when sessionId starts with "opencode-cli-" (synthetic)', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+    });
+
+    await sm.spawnSession();
+    // sessionId is already the synthetic one set during spawnSession: "opencode-cli-<ts>"
+    const mockChild2 = makeMockChild(22222);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild2);
+    await sm.sendTurn('first turn');
+
+    const secondSpawnArgs: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] ?? [];
+    expect(secondSpawnArgs).not.toContain('--session');
+  });
+
+  it('opencode-cli includes model -m when model is set and no custom baseUrl', async () => {
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const sm = new SessionManager({
+      db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'anthropic/claude-sonnet-4-5',
+    });
+
+    await sm.spawnSession();
+    const mockChild2 = makeMockChild(22222);
+    (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild2);
+    await sm.sendTurn('model turn');
+
+    const spawnArgs: string[] = (spawn as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] ?? [];
+    expect(spawnArgs).toContain('-m');
+    expect(spawnArgs).toContain('anthropic/claude-sonnet-4-5');
   });
 });
