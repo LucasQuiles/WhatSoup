@@ -229,3 +229,40 @@ Decision, locked:
 Scope guard: the destinations are unchanged (Fleet / Inbox / Ops + line-detail) — no new Metrics or
 Operator pages were added (the showcase shows them as future candidates; they remain out of scope).
 The `/welcome` Landing route stays full-screen, outside the rail shell.
+
+## Transport-loss / connection-status surface — DD-29 — APPROVED
+
+User-approved ruling for DD-29 (state-taxonomy finding #3 / debt-register DD-29): the
+console-transport-loss state — the console losing its **own** backend (realtime socket down, or
+the browser offline), as opposed to a single line's `unreachable`/`unlinked` badge status — is
+**not** adequately covered by the existing error-with-remedy composites plus the activity feed. A
+hard error reads as "this failed", but a transport drop should read as "still here, on cached data,
+reconnecting". The showcase depicts exactly this (an offline surface card with the ⦵ glyph,
+"Disconnected" / "Showing cached data · reconnecting…" on the WARN channel, a "Reconnected" recovery
+toast, and line rows reading "degraded · reconnecting"). The ruling: **build a dedicated
+connection-status surface.** Three pieces, locked:
+
+1. **App-level connection banner (`ConnectionBanner`).** A slim, persistent, non-blocking status bar
+   on the WARN channel, rendered above `<main>` in the shell (the rail stays full-height beside the
+   content column) and shown **only** while disconnected. Shape + text co-signal (color.md §6): a
+   `WifiOff` glyph plus copy — offline → "You're offline — changes will sync when your connection
+   returns"; reconnecting → "Reconnecting… showing the last known data". `role="status"` +
+   `aria-live="polite"`, tokenized spacing/edges, reduced-motion safe (no infinite motion), and never
+   dismissable — it is a live status that auto-hides on reconnect, not a notification.
+2. **Offline surface-state variant (`EmptyState variant="offline"`).** A WARN-channel variant of the
+   existing EmptyState (default `WifiOff` icon) that a page renders on a failed **primary** data load
+   **while disconnected** — "Showing cached data" / "Reconnecting…" — instead of the hard crit error.
+   The crit error branch is retained for genuine errors while connected. Wired on SoupKitchen (fleet
+   table) and Inbox (chat list) in this pass; Operator and LineDetail are a deliberate follow-up
+   (out of scope here to avoid an in-flight-PR conflict).
+3. **Recovery toast.** On a disconnected→connected transition, a single success toast ("Connection
+   restored") fires via the existing toast context — exactly once per recovery, never on every render.
+
+Derivation: a pure `useTransportStatus` hook reads `useRealtime().connected` (the same realtime flag
+use-fleet.ts already uses to gate polling fallback — not a new socket) plus `navigator.onLine` and
+the window `online`/`offline` events, yielding `connected` | `reconnecting` (browser online but
+socket down → polling fallback) | `offline` (`navigator.onLine === false`). Offline wins over
+reconnecting. The hook owns the one-shot recovery edge (`justReconnected` / `onReconnect`).
+
+Scope guard: this surfaces connection status; it does not change the realtime/polling transport or
+any line's status badge. Operator and LineDetail offline wiring is a tracked follow-up.

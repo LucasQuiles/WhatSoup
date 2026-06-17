@@ -4,11 +4,14 @@ import { MotionConfig } from 'framer-motion'
 import ErrorBoundary from './components/ErrorBoundary'
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'
 import Nav from './components/Nav'
+import ConnectionBanner from './components/ConnectionBanner'
 import { useLines } from './hooks/use-fleet'
 import { useConsoleSession } from './hooks/use-console-session'
 import UnlockScreen from './components/UnlockScreen'
 import { useUpdateCheck, getStaticVersion } from './hooks/use-update-check'
 import { useKeyboardShortcuts } from './hooks/use-keyboard-shortcuts'
+import { useTransportStatus } from './hooks/use-transport-status'
+import { useToast } from './hooks/toast-context'
 
 // Route-level code splitting — each page loads its own chunk on navigation
 const SoupKitchen = lazy(() => import('./pages/SoupKitchen'))
@@ -63,6 +66,14 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
   // Global keyboard shortcuts (Cmd+K search, 1/2/3 page nav, ? help)
   useKeyboardShortcuts({ onHelp: toggleShortcuts, onSearch: focusSearch })
 
+  // Connection-status surface (DD-29). The hook fires onReconnect exactly once
+  // per disconnected→connected transition; we raise a success toast there.
+  const toast = useToast()
+  const onReconnect = useCallback(() => {
+    toast.success('Connection restored')
+  }, [toast])
+  const transport = useTransportStatus({ onReconnect })
+
   // Dedicated splash/landing route — rendered full-screen, outside the Nav shell, so
   // it carries its own <main> landmark (no nested-main). Additive and non-breaking:
   // the console chrome (Nav + Fleet at "/") and every other route are untouched.
@@ -88,20 +99,25 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
           onUpdateClick={update.openUpdateModal}
           onLogout={showLogout ? onLogout : undefined}
         />
-        <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
-          <Suspense fallback={<PageLoader />}>
-            <Routes>
-              <Route path="/" element={<ErrorBoundary><SoupKitchen /></ErrorBoundary>} />
-              <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
-              <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
-              <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
-              <Route path="/metrics" element={<ErrorBoundary><Metrics /></ErrorBoundary>} />
-              <Route path="/operator" element={<ErrorBoundary><Operator /></ErrorBoundary>} />
-              <Route path="/ops" element={<Navigate to="/operator" replace />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </Suspense>
-        </main>
+        {/* Content column — the ConnectionBanner sits above <main> so the rail
+            (Nav) stays full-height beside the whole column (DD-29). */}
+        <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
+          <ConnectionBanner status={transport.status} isDisconnected={transport.isDisconnected} />
+          <main className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            <Suspense fallback={<PageLoader />}>
+              <Routes>
+                <Route path="/" element={<ErrorBoundary><SoupKitchen /></ErrorBoundary>} />
+                <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
+                <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
+                <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
+                <Route path="/metrics" element={<ErrorBoundary><Metrics /></ErrorBoundary>} />
+                <Route path="/operator" element={<ErrorBoundary><Operator /></ErrorBoundary>} />
+                <Route path="/ops" element={<Navigate to="/operator" replace />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </Suspense>
+          </main>
+        </div>
         <Suspense fallback={null}>
           <UpdateModal
             open={update.showUpdateModal}

@@ -83,6 +83,54 @@ describe('EmptyState error variant', () => {
   })
 })
 
+describe('EmptyState offline variant', () => {
+  it('applies the warn channel ink to the title (not crit, not default)', () => {
+    render(<EmptyState title="Showing cached data" variant="offline" />)
+
+    const title = screen.getByText('Showing cached data')
+    expect(title.className).toContain('text-s-warn')
+    expect(title.className).not.toContain('text-s-crit')
+    expect(title.className).not.toContain('text-text-2')
+  })
+
+  it('falls back to the WifiOff lucide icon with the warn icon wrapper when no icon prop is supplied', () => {
+    const { container } = render(<EmptyState title="Showing cached data" variant="offline" />)
+
+    const svg = container.querySelector('svg')
+    expect(svg).not.toBeNull()
+    expect(svg?.getAttribute('class') ?? '').toMatch(/lucide-wifi-off/)
+    // The icon wrapper carries the warn ink (co-signal with the title), not crit/default.
+    const wrapper = svg?.parentElement
+    expect(wrapper?.className ?? '').toContain('text-s-warn')
+    expect(wrapper?.className ?? '').not.toContain('text-s-crit')
+  })
+
+  it('renders the offline description copy when provided', () => {
+    render(
+      <EmptyState
+        title="Showing cached data"
+        description="Reconnecting…"
+        variant="offline"
+      />,
+    )
+
+    const description = screen.getByText('Reconnecting…')
+    expect(description.className).toContain('text-body')
+  })
+
+  it('prefers the caller-supplied icon over the WifiOff fallback in offline variant', () => {
+    render(
+      <EmptyState
+        title="Showing cached data"
+        variant="offline"
+        icon={<svg data-testid="override-offline-icon" />}
+      />,
+    )
+
+    expect(screen.getByTestId('override-offline-icon')).toBeDefined()
+  })
+})
+
 describe('EmptyState retry button', () => {
   it('does not render a retry button when onRetry is not supplied', () => {
     render(<EmptyState title="Empty" />)

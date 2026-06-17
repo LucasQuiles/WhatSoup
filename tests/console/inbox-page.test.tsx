@@ -59,12 +59,20 @@ let mockChats: Array<{
 }> = []
 let mockMessages: Array<unknown> = []
 let mockTyping: Array<unknown> = []
+let mockChatsError = false
 
 vi.mock('../../console/src/hooks/use-fleet', () => ({
   useLines: () => ({ data: mockLines }),
-  useChats: () => ({ data: mockChats }),
+  useChats: () => ({ data: mockChats, isError: mockChatsError }),
   useMessages: () => ({ data: mockMessages }),
   useTyping: () => ({ data: mockTyping }),
+}))
+
+// Transport status (DD-29). Mutable so the offline-branch test can flip it;
+// defaults to connected so all other layout tests are unaffected.
+const transportState = { status: 'connected' as 'connected' | 'reconnecting' | 'offline', isDisconnected: false }
+vi.mock('../../console/src/hooks/use-transport-status', () => ({
+  useTransportStatus: () => transportState,
 }))
 
 // use-virtual-messages: surface all messages as virtual items (jsdom has no scroll).
@@ -163,6 +171,9 @@ beforeEach(() => {
   mockChats = []
   mockMessages = []
   mockTyping = []
+  mockChatsError = false
+  transportState.status = 'connected'
+  transportState.isDisconnected = false
   searchMessagesMock.mockReset()
   searchMessagesMock.mockResolvedValue({ results: [], total: 0 })
 })
@@ -286,6 +297,35 @@ describe('Inbox — listbox renders chats from the hook', () => {
     const opt = screen.getByRole('option', { name: 'Open conversation with Fixture Contact' })
     expect(opt.getAttribute('data-conv-key')).toBe('conv-x')
     expect(opt.textContent).toContain('Fixture Contact')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Offline-with-cache branch for the chat list (DD-29)
+// ---------------------------------------------------------------------------
+
+describe('Inbox — offline chat-list state', () => {
+  it('shows the offline cached-data state instead of the chat list when chats fail to load AND transport is disconnected', () => {
+    mockChatsError = true
+    transportState.status = 'reconnecting'
+    transportState.isDisconnected = true
+    renderInbox()
+
+    expect(screen.getByText('Showing cached data')).toBeDefined()
+    expect(screen.getByText('Reconnecting…')).toBeDefined()
+    // The chat listbox is replaced by the offline surface.
+    expect(screen.queryByRole('listbox', { name: 'Chat conversations' })).toBeNull()
+  })
+
+  it('renders the normal chat list (no offline surface) when chats fail while transport is connected', () => {
+    mockChatsError = true
+    transportState.status = 'connected'
+    transportState.isDisconnected = false
+    mockChats = [makeChat('conv-1')]
+    renderInbox()
+
+    expect(screen.queryByText('Showing cached data')).toBeNull()
+    expect(screen.getByRole('listbox', { name: 'Chat conversations' })).toBeDefined()
   })
 })
 

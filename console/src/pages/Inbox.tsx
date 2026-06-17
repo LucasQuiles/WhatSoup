@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useLines, useChats, useMessages, useTyping } from '../hooks/use-fleet'
+import { useTransportStatus } from '../hooks/use-transport-status'
 import { useToast } from '../hooks/toast-context'
 import { useStickyScroll } from '../hooks/use-sticky-scroll'
 import { useVirtualMessages } from '../hooks/use-virtual-messages'
@@ -24,6 +25,7 @@ import { resolveDisplayName } from '../lib/text-utils'
 
 export default function Inbox() {
   const { data: lines } = useLines()
+  const transport = useTransportStatus()
   const toast = useToast()
   const [selectedLine, setSelectedLine] = useState<string>('')
   const [selectedChat, setSelectedChat] = useState<string | null>(null)
@@ -88,7 +90,7 @@ export default function Inbox() {
   }, [searchInput])
 
   const activeLine = selectedLine || (lines?.[0]?.name ?? '')
-  const { data: chats } = useChats(activeLine)
+  const { data: chats, isError: chatsError } = useChats(activeLine)
   const { data: messages } = useMessages(activeLine, selectedChat || '')
   const { data: typingData } = useTyping()
   const typingJids = useMemo(() =>
@@ -229,13 +231,25 @@ export default function Inbox() {
           variant="toolbar"
         />
 
-        {/* Chat list */}
-        <ChatList
-          chats={chats ?? []}
-          selectedChat={selectedChat}
-          onSelect={setSelectedChat}
-          typingKeys={typingJids}
-        />
+        {/* Chat list — a transport drop reads as offline-with-cache (DD-29)
+            instead of a hard failure; genuine errors while connected fall
+            through to ChatList's own empty/loaded rendering. */}
+        {chatsError && transport.isDisconnected ? (
+          <div className="flex-1 min-h-0 flex items-center justify-center">
+            <EmptyState
+              variant="offline"
+              title="Showing cached data"
+              description="Reconnecting…"
+            />
+          </div>
+        ) : (
+          <ChatList
+            chats={chats ?? []}
+            selectedChat={selectedChat}
+            onSelect={setSelectedChat}
+            typingKeys={typingJids}
+          />
+        )}
       </div>
 
       {/* ═══ Center: Messages ═══ */}
