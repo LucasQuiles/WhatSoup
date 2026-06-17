@@ -95,6 +95,7 @@ import { PendingSystemResultTracker } from './pending-system-result-tracker.ts';
 import { TurnCapabilityTracker, type TurnCapabilityErrorClass } from './turn-capability-tracker.ts';
 import { FallbackWindowMetrics } from './fallback-window-metrics.ts';
 import { FallbackChain } from './fallback-chain-state.ts';
+import { FallbackEmptyAdvance } from './fallback-empty-advance.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -869,19 +870,14 @@ export class AgentRuntime implements Runtime {
   // (selectFallbackEntryForWindow / markActiveFallbackFailed) stays in AgentRuntime
   // and drives this; agentFallbacks (config) stays here and is passed in.
   private readonly fallbackChain = new FallbackChain();
-  // Consecutive empty (no-text, no-tool) turns served by the CURRENT active
-  // fallback entry. A structurally-dead fallback model (e.g. an opencode
-  // provider integration that connects but emits no assistant text) returns
-  // empty on every turn; once this reaches EMPTY_OUTPUT_FALLBACK_THRESHOLD the
-  // entry is advanced through the SAME path terminal failures use, so the chain
-  // moves on to the next working entry instead of pinning to the dead one.
-  // Reset on any non-empty fallback turn. Mirrors consecutivePrimaryEmptyTurns.
-  private consecutiveFallbackEmptyTurns = 0;
-  // Guards against re-attempting (and re-alerting) the advance for the same
-  // entry every threshold-hit when no alternate exists. Bound to the entry key
-  // the last advance was attempted for; cleared when a non-empty turn proves
-  // the active entry good or when a window arms/reverts.
-  private fallbackEmptyAdvanceAttemptedForKey: string | null = null;
+  // Empty-output advance accounting for the CURRENT active fallback entry: the
+  // consecutive-empty-turn run + the attempted-key guard. A structurally-dead
+  // fallback model (connects but emits no assistant text) returns empty every turn;
+  // once the run reaches EMPTY_OUTPUT_FALLBACK_THRESHOLD the entry is advanced
+  // through the SAME path terminal failures use. The advance ACTION (re-select +
+  // alert) stays in recordFallbackTurnOutcome; the collaborator owns the state +
+  // the should-advance predicate.
+  private readonly fallbackEmptyAdvance = new FallbackEmptyAdvance();
   private revertTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null = null;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
@@ -5061,8 +5057,7 @@ export class AgentRuntime implements Runtime {
     this.fallbackArmReason = null;
     this.fallbackResetAt = null;
     this.fallbackRecoveryProbeRequired = false;
-    this.consecutiveFallbackEmptyTurns = 0;
-    this.fallbackEmptyAdvanceAttemptedForKey = null;
+    this.fallbackEmptyAdvance.reset();
     for (const timer of this.pendingRespawnTimers) {
       clearTimeout(timer);
     }
@@ -5710,8 +5705,7 @@ export class AgentRuntime implements Runtime {
     // original cause, replacing any prior reason (e.g. 'usage-limit').
     this.fallbackArmReason = null;
     this.fallbackChain.failedKeys.clear();
-    this.consecutiveFallbackEmptyTurns = 0;
-    this.fallbackEmptyAdvanceAttemptedForKey = null;
+    this.fallbackEmptyAdvance.reset();
     this.armFallbackWindow(until, 'admin-forced');
     log.info({ activeUntil: new Date(until).toISOString() }, 'fallback window forced by admin');
     return { ok: true, activeUntil: until, clamped: dur !== requested };
@@ -5822,12 +5816,11 @@ export class AgentRuntime implements Runtime {
     if (hadVisibleOutput || hadToolWork) {
       // The active entry produced a real reply — it is healthy. Clear the
       // empty-advance accounting so a later isolated empty turn starts fresh.
-      this.consecutiveFallbackEmptyTurns = 0;
-      this.fallbackEmptyAdvanceAttemptedForKey = null;
+      this.fallbackEmptyAdvance.reset();
       return;
     }
     this.fallbackMetrics.recordEmptyTurn();
-    this.consecutiveFallbackEmptyTurns += 1;
+    this.fallbackEmptyAdvance.recordEmpty();
     const entry = this.activeFallbackEntry ?? this.agentFallbacks[0] ?? null;
     log.warn({
       chatJid: queue.targetChatJid,
@@ -5872,10 +5865,8 @@ export class AgentRuntime implements Runtime {
     if (
       session !== null &&
       entryKey !== null &&
-      this.consecutiveFallbackEmptyTurns >= EMPTY_OUTPUT_FALLBACK_THRESHOLD &&
-      this.fallbackEmptyAdvanceAttemptedForKey !== entryKey
+      this.fallbackEmptyAdvance.shouldAttemptAdvance(entryKey, EMPTY_OUTPUT_FALLBACK_THRESHOLD)
     ) {
-      this.fallbackEmptyAdvanceAttemptedForKey = entryKey;
       const advanceReason = isProviderFallbackReason(this.fallbackArmReason)
         ? this.fallbackArmReason
         : 'auth-required';
@@ -5890,7 +5881,7 @@ export class AgentRuntime implements Runtime {
         // Advanced to a fresh entry — clear the empty run so the new entry
         // starts from zero (the attempted-key guard now tracks the prior key,
         // which differs from the newly-selected entry).
-        this.consecutiveFallbackEmptyTurns = 0;
+        this.fallbackEmptyAdvance.clearConsecutive();
         log.warn({
           chatJid: queue.targetChatJid,
           deadProvider: entry?.provider,
@@ -6231,8 +6222,7 @@ export class AgentRuntime implements Runtime {
     this.fallbackArmReason = null;
     this.activeFallbackEntry = null;
     this.fallbackChain.failedKeys.clear();
-    this.consecutiveFallbackEmptyTurns = 0;
-    this.fallbackEmptyAdvanceAttemptedForKey = null;
+    this.fallbackEmptyAdvance.reset();
     this.fallbackResetAt = null;
     this.fallbackRecoveryProbeRequired = false;
     // End of the stall episode (covers both successful-probe reverts and
