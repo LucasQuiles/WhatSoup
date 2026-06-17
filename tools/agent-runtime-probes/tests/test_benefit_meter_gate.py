@@ -191,6 +191,22 @@ def test_main_pass_fail_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_meter_status"
 
 
+def test_meter_measured_count_and_recommended_action():
+    # measured_step_count counts atts whose benefit.proof_class == "measured"; a != weakening counts
+    # the complement. With both steps measured the matching count is 2 while the complement is 0.
+    # recommended_action mirrors `if not downgraded` (dropping the not mislabels a clean chain).
+    recs = _chain("measured", "measured")
+    meters = [{"step_index": 0, "status": "operational", "meter_id": "m0"},
+              {"step_index": 1, "status": "operational", "meter_id": "m1"}]
+    rep = bmg.verify_benefit_meters(recs, meters)
+    assert rep["measured_step_count"] == 2
+    assert rep["downgrade_count"] == 0
+    assert rep["overall_verdict"] == "PASS" and rep["recommended_action"] == "trust_measured_benefits"
+    # a downgraded chain takes the other label
+    bad = bmg.verify_benefit_meters(_chain("measured", "unknown"), [])
+    assert bad["overall_verdict"] == "FAIL" and bad["recommended_action"] == "treat_downgraded_as_unknown"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

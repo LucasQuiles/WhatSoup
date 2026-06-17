@@ -165,6 +165,15 @@ def test_main_emit_and_verify():
         assert rc == 1 and rep["error_type"] == "malformed_fingerprint"
 
 
+def test_env_recommended_action_mirrors_verdict():
+    # recommended_action is "reproducible_env" iff verdict == "PASS" (else "reject_env_mismatch");
+    # flipping the == inverts the label on both a self-match and an env drift.
+    ok = cef.verify_fingerprint(cef.compute_fingerprint())
+    assert ok["overall_verdict"] == "PASS" and ok["recommended_action"] == "reproducible_env"
+    bad = cef.verify_fingerprint("00" * 32)  # bare-hash mismatch -> env_drift -> FAIL
+    assert bad["overall_verdict"] == "FAIL" and bad["recommended_action"] == "reject_env_mismatch"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

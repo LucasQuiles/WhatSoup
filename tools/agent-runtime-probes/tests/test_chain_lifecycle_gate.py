@@ -278,6 +278,17 @@ def test_accepts_attestation_objects_directly():
     assert clg.verify_lifecycle(atts, seal)["overall_verdict"] == "PASS"
 
 
+def test_lifecycle_recommended_action_mirrors_verdict():
+    # recommended_action is "accept" iff overall == "PASS" (else "reject"); flipping the == inverts
+    # the label on both a sealed-and-matching chain and a truncated one.
+    recs = _mask_compress()
+    seal = clg.seal_chain(recs)
+    ok = clg.verify_lifecycle(recs, seal)
+    assert ok["overall_verdict"] == "PASS" and ok["recommended_action"] == "accept"
+    bad = clg.verify_lifecycle(recs[:1], seal)  # truncation -> seal mismatch -> FAIL
+    assert bad["overall_verdict"] == "FAIL" and bad["recommended_action"] == "reject"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
