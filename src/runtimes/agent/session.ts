@@ -48,6 +48,10 @@ export const WATCHDOG_SOFT_MS  = 600_000;   // 10 min — first soft probe
 export const WATCHDOG_WARN_MS  = 1_200_000; // 20 min — second soft probe
 export const WATCHDOG_HARD_MS  = 1_800_000; // 30 min — SIGKILL
 
+// Grace after a tool stalls before we SIGKILL the hung stream-json provider. Unlike
+// WATCHDOG_HARD_MS this is NOT reset by inbound messages (see recoverStalledOperation).
+export const STALLED_OP_KILL_GRACE_MS = 180_000; // 3 min after a tool stalls
+
 /** Human-readable display name for each supported provider. */
 export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   'claude-cli': 'Claude Code',
@@ -483,6 +487,8 @@ export class SessionManager {
   private watchdogSoft: ReturnType<typeof setTimeout> | null = null;
   private watchdogWarn: ReturnType<typeof setTimeout> | null = null;
   private watchdogHard: ReturnType<typeof setTimeout> | null = null;
+  /** Bounded kill timer for a stalled tool; armed by recoverStalledOperation. */
+  private stalledOpKill: ReturnType<typeof setTimeout> | null = null;
   private pendingToolIds: Set<string> = new Set();
   /** Codex app-server thread ID for persistent sessions. */
   private codexThreadId: string | null = null;
@@ -1294,6 +1300,7 @@ export class SessionManager {
     // Handle unexpected exit
     child.on('exit', (code, signal) => {
       this.clearShutdownKillTimer();
+      this.clearStalledOpKill();
 
       // Ignore exit events from superseded child processes.
       // This prevents a race where /new kills P1 and spawns P2, then P1's
@@ -1426,36 +1433,50 @@ export class SessionManager {
    */
   tickWatchdog(): void {
     if (!this.active || (this.child === null && this.managedProviderSession === null)) return;
+    this.clearStalledOpKill(); // provider progress cancels the stalled-op kill (NOT cleared by inbound nudges)
     this.clearTurnWatchdog();
     this.armWatchdog();
   }
 
   /**
-   * Soft notification that an individual tool has exceeded its stall threshold.
-   * Called by the operation tracker.
-   *
-   * Historical note: this used to write `\x03` (Ctrl-C / ETX) to the child's stdin
-   * as a "soft interrupt." That approach is fundamentally incompatible with every
-   * provider currently shipped — claude-cli, codex-cli, gemini-cli, and opencode-cli
-   * all consume stdin as NDJSON (one JSON message per line) and are not run as TTYs.
-   * `\x03` is not a valid JSON token and is not interpreted as SIGINT outside a TTY,
-   * so the byte simply prepended onto the next user message line, which crashed the
-   * provider with `SyntaxError: Unrecognized token '\u0003'` and exit code 1.
-   *
-   * The OperationTracker already emits an `operation_stalled` progress event to the
-   * outbound queue (user-facing notification), and the hard watchdog backstop
-   * (`WATCHDOG_HARD_MS`, 30 min) still SIGKILLs genuinely hung sessions. So this
-   * method is now a structured no-op that records the stall for telemetry without
-   * touching stdin. If a future TTY-based provider lands, gate any interrupt write
-   * on a `provider.acceptsTtyInterrupts` capability rather than reintroducing an
-   * unconditional stdin byte.
+   * Called by the operation tracker when a tool exceeds its stall threshold. Interrupts
+   * are impossible for stream-json providers, so the only recovery is to kill the hung
+   * process. We arm a bounded kill timer rather than rely on the 30-min hard watchdog
+   * alone, because that timer is reset by every inbound message (writeToSession) — so
+   * re-prompting a hung session would postpone the kill indefinitely. This timer ignores
+   * inbound messages; provider progress (tickWatchdog) cancels it.
    */
   recoverStalledOperation(toolId: string, toolName: string): void {
     if (!this.active || this.child === null) return;
+    const ctx = { toolId, toolName, pid: this.child.pid, sessionId: this.sessionId };
+    if (this.stalledOpKill !== null) {
+      log.warn({ ...ctx, action: 'already-armed' }, 'operation stalled — kill already armed');
+      return;
+    }
+    log.warn({ ...ctx, graceMs: STALLED_OP_KILL_GRACE_MS, action: 'arm-kill' }, 'operation stalled — arming stalled-operation kill');
+    this.stalledOpKill = setTimeout(() => this.handleStalledOpKill(toolId, toolName), STALLED_OP_KILL_GRACE_MS);
+  }
+
+  private clearStalledOpKill(): void {
+    if (this.stalledOpKill !== null) {
+      clearTimeout(this.stalledOpKill);
+      this.stalledOpKill = null;
+    }
+  }
+
+  /**
+   * SIGKILL a provider whose tool stalled past STALLED_OP_KILL_GRACE_MS. The exit handler
+   * then emits the crash notice and the runtime auto-respawns on the next message.
+   */
+  private handleStalledOpKill(toolId: string, toolName: string): void {
+    this.stalledOpKill = null;
+    if (!this.active || this.child === null) return;
     log.warn(
-      { toolId, toolName, pid: this.child.pid, sessionId: this.sessionId, action: 'noop' },
-      'operation stalled — soft recovery is a no-op for stream-json providers; relying on hard watchdog backstop',
+      { sessionId: this.sessionId, pid: this.child.pid, toolId, toolName, reason: 'stalled_operation' },
+      'stalled-operation kill fired — SIGKILL hung provider',
     );
+    this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
+    this.child.kill('SIGKILL');
   }
 
   /**
@@ -1719,6 +1740,7 @@ export class SessionManager {
       // Use setImmediate to let pending stdout data chunks drain before we process.
       child.on('exit', (code, signal) => {
         this.clearShutdownKillTimer();
+        this.clearStalledOpKill();
 
         if (this.child !== child) return; // superseded
 
@@ -1903,6 +1925,7 @@ export class SessionManager {
    */
   async shutdown(suspend = true): Promise<void> {
     this.clearTurnWatchdog();
+    this.clearStalledOpKill();
     this.active = false; // Suppress crash notification for clean shutdown
 
     const currentPid = this.child?.pid ?? null;
