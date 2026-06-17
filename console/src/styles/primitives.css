@@ -1506,6 +1506,80 @@ button.soup-pill[aria-disabled="true"] {
   flex: none;
 }
 
+/* --------------------------------------------------------------------------
+   DRAWER CONTENT — kv block · remedy actions · scoped log (drawer.md §Anatomy)
+   Body sections sit inside .soup-drawer-body, which owns the inter-section
+   --sp-4 rhythm. These styles own only the INTERNALS of each section.
+   -------------------------------------------------------------------------- */
+
+/* KV block — definition list of key/value rows; parent owns row rhythm via gap
+   (no sibling margins). Renders the same whether <dl> (detail) or <div> (empty). */
+.soup-drawer-kv {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+}
+
+/* KV row — key left, value right, baseline-aligned so labels and figures sit
+   on one optical line (showcase contact-pane treatment: justify-between). */
+.soup-drawer-kv__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+/* Key — muted label tier, mono with label tracking (typography.md §7 data lanes
+   stay mono); tabular figures so numeric keys never reflow. */
+.soup-drawer-kv__key {
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+  letter-spacing: var(--tracking-label, 0.06em);
+  color: var(--text-3);
+  white-space: nowrap;
+  flex: none;
+}
+
+/* Value — primary text tier; tabular-nums so numeric stats scan in a column.
+   text-align:right pins values to the row's trailing edge. */
+.soup-drawer-kv__val {
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  font-feature-settings: "tnum" 1;
+  color: var(--text-1);
+  text-align: right;
+  min-width: 0;
+}
+
+/* Empty state — muted copy when the line has no detail to show. */
+.soup-drawer-kv__empty {
+  font: var(--type-body, 400 13px/20px var(--font-sans));
+  color: var(--text-3);
+  margin: 0;
+}
+
+/* Remedy actions — horizontal action cluster at the drawer foot; wraps on
+   narrow widths so buttons never clip (gap token, no sibling margins). */
+.soup-drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* Scoped log — monospace log block on an inset surface; readable line-height,
+   own scroll valve. min-height:0 lets it shrink inside the flex body so the
+   inner LogStream owns the scroll rather than overflowing the drawer. */
+.soup-drawer-log {
+  background: var(--surface-inset);
+  border: var(--bw) solid var(--border-hairline);
+  border-radius: var(--r-2, var(--radius-md));
+  padding: var(--sp-2);
+  font: var(--type-data-sm, 400 11px/16px var(--font-mono));
+  min-height: 0;
+  overflow: hidden;
+}
+
 /* ───────────────────────── soup-tabs (tabs.md) ─────────────────────────
    Tablist with hairline baseline rule; selected = 2px accent underline flush
    to the rule. Switches are instant — no indicator transition by design. */
