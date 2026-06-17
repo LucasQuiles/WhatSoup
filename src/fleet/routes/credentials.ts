@@ -71,6 +71,44 @@ export const CREDENTIAL_WRITE_BLOCKLIST: ReadonlySet<string> = new Set([
 
 const MAX_VALUE_BYTES = 4096;
 
+/**
+ * Per-process, per-service cooldown shared by the mutating handlers (PUT/DELETE).
+ * `writeCredential`/`deleteCredential` shell out via `execFileSync` (see
+ * lib/keyring.ts) — a synchronous, blocking call on the request path. A caller
+ * that hammers these endpoints can starve the event loop (sync-DoS), so we bound
+ * how often the sync-exec path is entered. The cooldown arms UNCONDITIONALLY once
+ * the request passes validation, before the keyring is touched.
+ */
+const MUTATION_COOLDOWN_MS = 1_000;
+const mutationLastCall = new Map<string, number>();
+
+/** Test hook — clear mutation cooldowns between cases. */
+export function _resetMutationCooldownsForTests(): void {
+  mutationLastCall.clear();
+}
+
+/**
+ * Returns true and writes a 429 if `service` is still cooling down; otherwise
+ * arms the cooldown and returns false. Arming is unconditional on the accepted
+ * path so even no-op outcomes (absent key, failed write) are throttled.
+ */
+function throttle(
+  res: ServerResponse,
+  store: Map<string, number>,
+  cooldownMs: number,
+  service: string,
+  errorLabel: string,
+): boolean {
+  const last = store.get(service);
+  const now = Date.now();
+  if (last !== undefined && now - last < cooldownMs) {
+    jsonResponse(res, 429, { error: errorLabel, retryAfter: Math.ceil((cooldownMs - (now - last)) / 1000) });
+    return true;
+  }
+  store.set(service, now);
+  return false;
+}
+
 interface ServiceCheck { ok: true; service: string }
 interface ServiceCheckFail { ok: false }
 
@@ -110,6 +148,8 @@ export async function handlePutCredential(
   const check = checkService(res, params.name);
   if (!check.ok) return;
   const { service } = check;
+
+  if (throttle(res, mutationLastCall, MUTATION_COOLDOWN_MS, service, 'mutation cooldown')) return;
 
   let value: unknown;
   try {
@@ -178,6 +218,7 @@ export async function handleDeleteCredential(
   const check = checkService(res, params.name);
   if (!check.ok) return;
   const { service } = check;
+  if (throttle(res, mutationLastCall, MUTATION_COOLDOWN_MS, service, 'mutation cooldown')) return;
   const { deleted } = deleteCredential(service);
   const body = { ok: deleted, service, envShadowed: envShadowed(service), inUse: serviceInUse(deps, service) };
   jsonResponse(res, deleted ? 200 : 404, body);
@@ -211,12 +252,10 @@ export async function handleVerifyCredential(
   if (!check.ok) return;
   const { service } = check;
 
-  const last = verifyLastCall.get(service);
-  const now = Date.now();
-  if (last !== undefined && now - last < VERIFY_COOLDOWN_MS) {
-    jsonResponse(res, 429, { error: 'verify cooldown', retryAfter: Math.ceil((VERIFY_COOLDOWN_MS - (now - last)) / 1000) });
-    return;
-  }
+  // Arm the cooldown UNCONDITIONALLY, before the keyring lookup. The absent-key
+  // (404) and unsupported-descriptor (200) paths must throttle too, otherwise
+  // verify is a key-presence oracle a caller can probe at unlimited rate.
+  if (throttle(res, verifyLastCall, VERIFY_COOLDOWN_MS, service, 'verify cooldown')) return;
 
   const key = lookupCredential(service);
   if (key === null) {
@@ -230,7 +269,6 @@ export async function handleVerifyCredential(
     return;
   }
 
-  verifyLastCall.set(service, now);
   // Typed auth scheme — header construction never interpolates free-form config.
   const headers: Record<string, string> = { ...descriptor.extraHeaders };
   if (descriptor.auth === 'bearer') headers.Authorization = `Bearer ${key}`;

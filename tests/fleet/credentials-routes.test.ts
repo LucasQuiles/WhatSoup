@@ -21,6 +21,7 @@ import {
   CREDENTIAL_ALLOWLIST,
   CREDENTIAL_WRITE_BLOCKLIST,
   _resetVerifyCooldownsForTests,
+  _resetMutationCooldownsForTests,
 } from '../../src/fleet/routes/credentials.ts';
 
 /** Minimal req/res doubles matching the node:http handler contract. */
@@ -48,6 +49,7 @@ beforeEach(() => {
   keyringMock.deleteCredential.mockReset().mockReturnValue({ deleted: true, backend: 'macos-keychain' });
   keyringMock.lookupCredential.mockReset().mockReturnValue('resolved-key');
   _resetVerifyCooldownsForTests();
+  _resetMutationCooldownsForTests();
   delete process.env.DEEPSEEK_API_KEY;
 });
 
@@ -209,5 +211,47 @@ describe('POST /api/credentials/:service/verify', () => {
     expect(b.status()).toBe(429);
     expect(typeof b.json().retryAfter).toBe('number');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('arms the cooldown on the absent-key path so the presence oracle is throttled', async () => {
+    // First call: no key stored → 404. The oracle leak is that a caller can
+    // probe presence at unlimited rate. The cooldown must arm UNCONDITIONALLY,
+    // including on this null return path.
+    keyringMock.lookupCredential.mockReturnValue(null);
+    const a = fakeRes();
+    await handleVerifyCredential(fakeReq(), a.res, { name: 'deepseek' });
+    expect(a.status()).toBe(404);
+
+    // Second rapid call for the same service must be throttled, not re-probe.
+    const b = fakeRes();
+    await handleVerifyCredential(fakeReq(), b.res, { name: 'deepseek' });
+    expect(b.status()).toBe(429);
+    expect(typeof b.json().retryAfter).toBe('number');
+    // lookupCredential must NOT have run a second time — the oracle is closed.
+    expect(keyringMock.lookupCredential).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('credential mutations are throttled (sync-DoS guard)', () => {
+  it('throttles a rapid second PUT to the same service with 429', async () => {
+    const a = fakeRes();
+    await handlePutCredential(fakeReq({ value: 'sk-one' }), a.res, { name: 'deepseek' });
+    expect(a.status()).toBe(200);
+    const b = fakeRes();
+    await handlePutCredential(fakeReq({ value: 'sk-two' }), b.res, { name: 'deepseek' });
+    expect(b.status()).toBe(429);
+    expect(typeof b.json().retryAfter).toBe('number');
+    // The synchronous keyring write must not run a second time on the throttled path.
+    expect(keyringMock.writeCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it('throttles a rapid second DELETE to the same service with 429', async () => {
+    const a = fakeRes();
+    await handleDeleteCredential(fakeReq(), a.res, { name: 'deepseek' }, { instances: [] });
+    expect(a.status()).toBe(200);
+    const b = fakeRes();
+    await handleDeleteCredential(fakeReq(), b.res, { name: 'deepseek' }, { instances: [] });
+    expect(b.status()).toBe(429);
+    expect(keyringMock.deleteCredential).toHaveBeenCalledTimes(1);
   });
 });
