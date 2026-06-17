@@ -92,6 +92,7 @@ import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { CrashTracker } from './crash-tracker.ts';
 import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './auto-compact-controller.ts';
 import { ImageCoalescer } from './image-coalescer.ts';
+import { PendingSystemResultTracker } from './pending-system-result-tracker.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -1253,13 +1254,13 @@ export class AgentRuntime implements Runtime {
       threshold: this.autoCompactInputTokens,
     }, 'auto compact triggered');
 
-    this.markPendingSystemResult(scopeKey);
+    this.pendingSystemResults.mark(scopeKey);
     void session.sendTurn('/compact').catch((err) => {
       log.warn({ err, scopeKey, rowId }, 'auto compact send failed');
       this.clearSilentCompact(scopeKey);
       this.finishAutoCompact(scopeKey);
       // No result event will arrive for a failed send.
-      this.unmarkPendingSystemResult(scopeKey);
+      this.pendingSystemResults.unmark(scopeKey);
     });
   }
 
@@ -1548,8 +1549,10 @@ export class AgentRuntime implements Runtime {
   // FIFO queue: push on dispatch, shift on result to prevent race when turns overlap.
   private perChatInboundSeqQueue: Map<string, number[]> = new Map();
   // Counts pending system-turn results (context injection, continuation) that should
-  // not consume from perChatInboundSeqQueue when their result event arrives.
-  private perChatPendingSystemResults: Map<string, number> = new Map();
+  // not consume from perChatInboundSeqQueue when their result event arrives. The
+  // counter invariants (mark / unmark / consumeIfPending / count) live in the
+  // collaborator; the raw map is reachable via .counts for per-chat cleanup/shutdown.
+  private readonly pendingSystemResults = new PendingSystemResultTracker();
 
   // Startup notification deferred until after WA connects
   private pendingStartupMessage: { chatJid: string; text: string } | null = null;
@@ -1616,7 +1619,7 @@ export class AgentRuntime implements Runtime {
   private cleanupPerChatState(mapKey: string): void {
     this.crashes.forget(mapKey);
     this.perChatInboundSeqQueue.delete(mapKey);
-    this.perChatPendingSystemResults.delete(mapKey);
+    this.pendingSystemResults.counts.delete(mapKey);
     this.perChatTurnContentType.delete(mapKey);
     this.perChatTurnText.delete(mapKey);
     this.perChatAssistantItemText.delete(mapKey);
@@ -2311,15 +2314,15 @@ export class AgentRuntime implements Runtime {
             // awareness of messages sent during the downtime window.
             if (checkpointUpdatedAt) {
               const injected = await this.injectMissedMessages(session, chatJid, checkpointUpdatedAt);
-              if (injected) this.markPendingSystemResult(initialMapKey);
+              if (injected) this.pendingSystemResults.mark(initialMapKey);
             }
-            this.markPendingSystemResult(initialMapKey);
+            this.pendingSystemResults.mark(initialMapKey);
             await session.sendTurn('[System: session resumed after service restart — continue where you left off]');
             log.info({ chatJid }, 'sent continuation turn after proactive resume');
           } catch (err) {
             log.warn({ err, chatJid }, 'failed to send continuation turn after resume');
             // Continuation send failed — no result will arrive for its mark.
-            this.unmarkPendingSystemResult(initialMapKey);
+            this.pendingSystemResults.unmark(initialMapKey);
           }
         }).catch((err) => {
           log.warn({ err, chatJid, sessionId: full.session_id }, 'proactive resume failed — will retry on next message');
@@ -3114,13 +3117,13 @@ export class AgentRuntime implements Runtime {
           const recent = getRecentMessages(this.db, convKey, 20);
           if (recent.length > 0) {
             const lines = this.formatContextLines(recent.reverse());
-            this.markPendingSystemResult(mapKey);
+            this.pendingSystemResults.mark(mapKey);
             await session.sendTurn(`[Recent chat context — read before responding]\n${lines}`);
           }
         } catch (err) {
           log.warn({ err, chatJid }, 'chat context injection failed — proceeding without context');
           // Context-injection send failed — no result will arrive for its mark.
-          this.unmarkPendingSystemResult(mapKey);
+          this.pendingSystemResults.unmark(mapKey);
         }
       }
     }
@@ -3296,11 +3299,9 @@ export class AgentRuntime implements Runtime {
     const inboundSeq = seqQueue[0]; // peek — don't shift yet
     let isSystemResult = false;
     if (event.type === 'result') {
-      const pendingSystem = this.perChatPendingSystemResults.get(mapKey) ?? 0;
-      if (pendingSystem > 0) {
+      if (this.pendingSystemResults.consumeIfPending(mapKey)) {
         // This result belongs to a system turn (context injection, continuation) — don't consume user seq
         isSystemResult = true;
-        this.perChatPendingSystemResults.set(mapKey, pendingSystem - 1);
       } else {
         // Consume the seq for this completed user turn
         seqQueue.shift();
@@ -3356,24 +3357,6 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingPollQuestions.delete(mapKey);
     this.removePendingPoll(mapKey);
-  }
-
-  private markPendingSystemResult(mapKey: string | undefined): void {
-    if (mapKey === undefined) return;
-    this.perChatPendingSystemResults.set(mapKey, (this.perChatPendingSystemResults.get(mapKey) ?? 0) + 1);
-  }
-
-  /**
-   * Reverse a markPendingSystemResult when the system turn's sendTurn fails and
-   * no result event will arrive. Without this, the stranded +1 would later
-   * misclassify a genuine user-turn result as a system turn (the same class of
-   * bug as the post-turn gate suppression). Guarded so the counter never goes
-   * negative.
-   */
-  private unmarkPendingSystemResult(mapKey: string | undefined): void {
-    if (mapKey === undefined) return;
-    const pending = this.perChatPendingSystemResults.get(mapKey) ?? 0;
-    if (pending > 0) this.perChatPendingSystemResults.set(mapKey, pending - 1);
   }
 
   private completeConsumedPerChatInbound(mapKey: string, terminalReason: string): void {
@@ -4698,7 +4681,7 @@ export class AgentRuntime implements Runtime {
           mapKey !== undefined &&
           !this.isSilentCompact(mapKey) &&
           !isSystemResult &&
-          (this.perChatPendingSystemResults.get(mapKey) ?? 0) === 0
+          this.pendingSystemResults.count(mapKey) === 0
         ) {
           this.recordAutoCompactNextTurnIfNeeded(mapKey, event.inputTokens, false);
         }
@@ -4980,13 +4963,13 @@ export class AgentRuntime implements Runtime {
       if (silent) this.beginSilentCompact(mapKey);
       // A manual /compact is a system turn: its result must not consume a user
       // inbound seq or arm the post-turn gate. Mirror the auto-compact path.
-      this.markPendingSystemResult(mapKey);
+      this.pendingSystemResults.mark(mapKey);
       try {
         await session.sendTurn('/compact');
       } catch (err) {
         if (silent) this.clearSilentCompact(mapKey);
         // No result will arrive for a failed send.
-        this.unmarkPendingSystemResult(mapKey);
+        this.pendingSystemResults.unmark(mapKey);
         throw err;
       }
 
@@ -5021,14 +5004,14 @@ export class AgentRuntime implements Runtime {
     // A manual /compact is a system turn: its result must not arm the post-turn
     // gate. Mirror the auto-compact path (single/shared discriminate on this in
     // handleEvent's result case).
-    this.markPendingSystemResult(GLOBAL_TOOL_SCOPE_KEY);
+    this.pendingSystemResults.mark(GLOBAL_TOOL_SCOPE_KEY);
     try {
       await session.sendTurn('/compact');
     } catch (err) {
       if (silent) this.clearSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
       this.currentTurnChatJid = null;
       // No result will arrive for a failed send.
-      this.unmarkPendingSystemResult(GLOBAL_TOOL_SCOPE_KEY);
+      this.pendingSystemResults.unmark(GLOBAL_TOOL_SCOPE_KEY);
       throw err;
     }
 
@@ -5222,7 +5205,7 @@ export class AgentRuntime implements Runtime {
     this.activeToolNames.clear();
     this.turnHadToolActivity.clear();
     this.perChatInboundSeqQueue.clear();
-    this.perChatPendingSystemResults.clear();
+    this.pendingSystemResults.counts.clear();
     this.currentTurnInboundContentType = null;
     this.currentTurnAssistantText = '';
     this.currentTurnAssistantItemText.clear();
@@ -7496,15 +7479,15 @@ export class AgentRuntime implements Runtime {
               // Inject messages that arrived during the crash window
               if (chatJid) {
                 const injected = await this.injectMissedMessages(session, chatJid, crashedAtSec);
-                if (injected) this.markPendingSystemResult(mapKey);
+                if (injected) this.pendingSystemResults.mark(mapKey);
               }
-              this.markPendingSystemResult(mapKey);
+              this.pendingSystemResults.mark(mapKey);
               await session.sendTurn('[System: session resumed after crash ��� continue where you left off]');
               log.info({ mapKey }, 'sent continuation turn after auto-respawn');
             } catch (err) {
               log.warn({ err, mapKey }, 'failed to send continuation turn after auto-respawn');
               // Continuation send failed — no result will arrive for its mark.
-              this.unmarkPendingSystemResult(mapKey);
+              this.pendingSystemResults.unmark(mapKey);
             }
           }).catch((err) => {
             log.warn({ err, mapKey, sessionId }, 'auto-respawn resume failed — will retry on next message');
@@ -7741,13 +7724,13 @@ export class AgentRuntime implements Runtime {
             const recent = getRecentMessages(this.db, toConversationKey(chatJid), 30);
             if (recent.length > 0) {
               const lines = this.formatContextLines(recent.reverse());
-              this.markPendingSystemResult(mapKey);
+              this.pendingSystemResults.mark(mapKey);
               await session.sendTurn(`[CONTEXT RECOVERY — prior session expired]\n${lines}`);
             }
           } catch (err) {
             log.warn({ err, chatJid }, 'context recovery failed — starting blank session');
             // Context-recovery send failed — no result will arrive for its mark.
-            this.unmarkPendingSystemResult(mapKey);
+            this.pendingSystemResults.unmark(mapKey);
           }
 
           // Replay the pending turn that was lost during the failed resume
@@ -7954,11 +7937,7 @@ export class AgentRuntime implements Runtime {
         // incremented by maybeStartAutoCompact / handleAgentCommand. Shared mode
         // never increments GLOBAL (auto-compact early-returns), so this is a
         // no-op there.
-        const pendingSystem = this.perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) ?? 0;
-        const isSystemResult = pendingSystem > 0;
-        if (isSystemResult) {
-          this.perChatPendingSystemResults.set(GLOBAL_TOOL_SCOPE_KEY, pendingSystem - 1);
-        }
+        const isSystemResult = this.pendingSystemResults.consumeIfPending(GLOBAL_TOOL_SCOPE_KEY);
 
         // AskUserQuestion poll bridge is per_chat only — no pending-poll
         // suppression in shared mode. Normal result lifecycle applies.
@@ -8313,7 +8292,7 @@ export class AgentRuntime implements Runtime {
         // Record token usage without triggering turn completion (non-per-chat path).
         if (
           !this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY) &&
-          (this.perChatPendingSystemResults.get(GLOBAL_TOOL_SCOPE_KEY) ?? 0) === 0
+          this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0
         ) {
           this.recordAutoCompactNextTurnIfNeeded(GLOBAL_TOOL_SCOPE_KEY, event.inputTokens, false);
         }

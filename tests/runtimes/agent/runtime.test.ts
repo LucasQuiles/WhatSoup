@@ -1350,7 +1350,7 @@ describe('AgentRuntime', () => {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { autoCompactInputTokens: 100 });
       const state = runtime as unknown as {
-        perChatPendingSystemResults: Map<string, number>;
+        pendingSystemResults: { counts: Map<string, number> };
         autoCompact: AutoCompactView;
       };
       const globalKey = '__global__';
@@ -1362,12 +1362,12 @@ describe('AgentRuntime', () => {
       await emitAgentResult(150);
       await emitSuccessfulCompactResult();
 
-      state.perChatPendingSystemResults.set(globalKey, 1);
+      state.pendingSystemResults.counts.set(globalKey, 1);
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
       expect(state.autoCompact.measureNextTurn.has(globalKey)).toBe(true);
 
-      state.perChatPendingSystemResults.delete(globalKey);
+      state.pendingSystemResults.counts.delete(globalKey);
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
     } finally {
@@ -1386,7 +1386,7 @@ describe('AgentRuntime', () => {
       });
       const chatJid = 'chat-a@s.whatsapp.net';
       const state = runtime as unknown as {
-        perChatPendingSystemResults: Map<string, number>;
+        pendingSystemResults: { counts: Map<string, number> };
         autoCompact: AutoCompactView;
       };
       mockActiveAgentSession();
@@ -1397,12 +1397,12 @@ describe('AgentRuntime', () => {
       await emitAgentResult(150);
       await emitSuccessfulCompactResult();
 
-      state.perChatPendingSystemResults.set(chatJid, 1);
+      state.pendingSystemResults.counts.set(chatJid, 1);
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(0);
       expect(state.autoCompact.measureNextTurn.has(chatJid)).toBe(true);
 
-      state.perChatPendingSystemResults.delete(chatJid);
+      state.pendingSystemResults.counts.delete(chatJid);
       await emitTokenUsage(250);
       expect(runtime.getHealthSnapshot().details.autoCompactNextTurnOverThreshold).toBe(1);
     } finally {
@@ -2689,7 +2689,7 @@ describe('AgentRuntime', () => {
 
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     const state = runtime as unknown as {
-      perChatPendingSystemResults: Map<string, number>;
+      pendingSystemResults: { counts: Map<string, number> };
       postTurnGate: Set<string>;
     };
     await runtime.start();
@@ -2700,7 +2700,7 @@ describe('AgentRuntime', () => {
     await runtime.handleAgentCommand({ command: 'compact', chatJid: groupJid, silent: false });
     expect(mockSession.sendTurn).toHaveBeenCalledWith('/compact');
     // The manual /compact registered a pending system result for this chat.
-    expect(state.perChatPendingSystemResults.get(groupJid)).toBe(1);
+    expect(state.pendingSystemResults.counts.get(groupJid)).toBe(1);
 
     // Its result must not arm the gate, and a real reply after it is delivered.
     capturedOnEventRef.current!({ type: 'result', text: null });
@@ -3288,7 +3288,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     const state = runtime as unknown as {
-      perChatPendingSystemResults: Map<string, number>;
+      pendingSystemResults: { counts: Map<string, number> };
       postTurnGate: Set<string>;
     };
     const chatJid = '15550001111@s.whatsapp.net';
@@ -3300,7 +3300,7 @@ describe('AgentRuntime', () => {
     // A system turn is in flight (context injection on respawn, resume
     // continuation, or auto-compact /compact). Its result must NOT arm the
     // post-turn gate, otherwise the real user turn that follows is suppressed.
-    state.perChatPendingSystemResults.set(chatJid, 1);
+    state.pendingSystemResults.counts.set(chatJid, 1);
     capturedOnEventRef.current!({ type: 'result', text: null });
 
     expect(state.postTurnGate.has(chatJid)).toBe(false);
@@ -3337,7 +3337,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
     const state = runtime as unknown as {
-      perChatPendingSystemResults: Map<string, number>;
+      pendingSystemResults: { counts: Map<string, number> };
       postTurnGate: Set<string>;
     };
 
@@ -3346,7 +3346,7 @@ describe('AgentRuntime', () => {
 
     // A system turn is in flight (single-mode auto-compact /compact is keyed by
     // the global scope). Its result must NOT arm the post-turn gate.
-    state.perChatPendingSystemResults.set('__global__', 1);
+    state.pendingSystemResults.counts.set('__global__', 1);
     capturedOnEventRef.current!({ type: 'result', text: null });
 
     expect(state.postTurnGate.has('__global__')).toBe(false);
@@ -3361,7 +3361,7 @@ describe('AgentRuntime', () => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
-    const state = runtime as unknown as { perChatPendingSystemResults: Map<string, number> };
+    const state = runtime as unknown as { pendingSystemResults: { counts: Map<string, number> } };
     const chatJid = '15550004444@s.whatsapp.net';
 
     // Recent messages exist, so a fresh (inactive) session triggers context
@@ -3396,7 +3396,7 @@ describe('AgentRuntime', () => {
 
     // No stranded +1 — otherwise the next real user-turn result would be
     // misclassified as a system turn.
-    expect(state.perChatPendingSystemResults.get(chatJid) ?? 0).toBe(0);
+    expect(state.pendingSystemResults.counts.get(chatJid) ?? 0).toBe(0);
   });
 
   it('shared-session: assistant_text after result is suppressed (post-turn gate)', () => {

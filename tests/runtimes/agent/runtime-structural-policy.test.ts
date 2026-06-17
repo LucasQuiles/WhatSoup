@@ -43,7 +43,7 @@ describe('AgentRuntime structural policy', () => {
     const expectedDeletes = [
       'this.crashes.forget(mapKey);',
       'this.perChatInboundSeqQueue.delete(mapKey);',
-      'this.perChatPendingSystemResults.delete(mapKey);',
+      'this.pendingSystemResults.counts.delete(mapKey);',
       'this.perChatTurnContentType.delete(mapKey);',
       'this.perChatTurnText.delete(mapKey);',
       'this.perChatAssistantItemText.delete(mapKey);',

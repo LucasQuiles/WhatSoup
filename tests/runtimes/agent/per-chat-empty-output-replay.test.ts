@@ -156,7 +156,7 @@ type RuntimeView = {
   chatQueues: Map<string, unknown>;
   chatSessions: Map<string, unknown>;
   perChatInboundSeqQueue: Map<string, number[]>;
-  perChatPendingSystemResults: Map<string, number>;
+  pendingSystemResults: { counts: Map<string, number> };
   pendingTurnText: Map<string, string>;
   pendingTurnActorJid: Map<string, string | undefined>;
   // Singleton replay state
