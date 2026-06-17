@@ -95,6 +95,19 @@ INCIDENT_STALE_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_SECONDS", I
 INCIDENT_STALE_RENOTIFY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_RENOTIFY_SECONDS", 24 * 60 * 60)
 INCIDENT_STALE_FAILURE_RETRY_SECONDS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_FAILURE_RETRY_SECONDS", 15 * 60)
 INCIDENT_STALE_SWEEP_MAX_EVENTS = positive_env_int("BOT_ERRORS_INCIDENT_STALE_SWEEP_MAX_EVENTS", 3)
+# Pattern A — suppress non-actionable (self-healed / no-op) stale renotify.
+# Default-on; fail-open (any classifier error falls through to send).
+SUPPRESS_STALE_INFO_RENOTIFY = env_flag("BOT_ERRORS_SUPPRESS_STALE_INFO_RENOTIFY", True)
+# Explicit extra sources to force-suppress on stale renotify (CSV), beyond the
+# built-in recovery/no-op pattern set and the SSOT action==none signal.
+STALE_RENOTIFY_SUPPRESS_SOURCES = {
+    part.strip()
+    for part in os.environ.get("BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES", "").split(",")
+    if part.strip()
+}
+# Recovery / no-op source signatures: definitionally non-actionable once stale.
+STALE_RENOTIFY_SUPPRESS_SUFFIXES = ("_restored", "_recovered", "_reverted", "_unknown", "_cleared")
+STALE_RENOTIFY_SUPPRESS_PREFIXES = ("provider_fallback_",)
 AWAITING_PHYSICAL_CONFIRMATIONS = positive_env_int("BOT_ERRORS_AWAITING_PHYSICAL_CONFIRMATIONS", 2)
 AWAITING_PHYSICAL_RENOTIFY_SECONDS = positive_env_int(
     "BOT_ERRORS_AWAITING_PHYSICAL_RENOTIFY_SECONDS",
@@ -1186,6 +1199,39 @@ def event_line(label: str, value: Any, limit: int = 700) -> str | None:
     return f"  > {label}: {truncate(rendered, limit)}"
 
 
+# Pattern E SSOT / Pattern A: the single "no remediation" action sentinel.
+# format_event renders it for non-actionable info events, and Pattern A keys on
+# it (the incident-level SSOT field, per §10 C4) to decide a stale renotify is
+# non-actionable and may be suppressed.
+NONACTIONABLE_ACTION = "none — informational event; no Q remediation required."
+INVESTIGATE_ACTION = "Q investigate, remediate, and report disposition in BOT ERRORS."
+
+
+def requested_action_text(event: dict[str, Any]) -> str:
+    """Single source of truth for an event's requested_action (Pattern E).
+
+    Precedence derives the action from the event's real state. A real action
+    (physical / operator) wins over the informational "none" fallback EVEN on
+    info severity — otherwise an info-severity awaiting_physical digest renders
+    "none" and loses its action (false negative). "none" is honest only for an
+    info event with no real standing action (e.g. a self-healed stale digest).
+    Returned WITHOUT the "  > requested_action: " line prefix.
+    """
+    severity = str(event.get("severity") or "").lower()
+    if event_has_awaiting_physical_context(event) or is_verified_device_bond_lost_signal(event):
+        return physical_action_text()
+    if is_physical_intervention_signal(event):
+        return physical_candidate_action_text()
+    operator_action = critical_operator_action(event)
+    if operator_action:
+        return redact(operator_action).replace("@", " at ")
+    if severity == "info":
+        return NONACTIONABLE_ACTION
+    if event_has_stale_context(event):
+        return stale_action_text()
+    return INVESTIGATE_ACTION
+
+
 def format_event(event: dict[str, Any]) -> str:
     event_type = str(event.get("eventType") or "alert")
     severity = str(event.get("severity") or "").lower()
@@ -1260,20 +1306,8 @@ def format_event(event: dict[str, Any]) -> str:
     ]
     for idx, hint in enumerate(log_hints[:5], start=1):
         lines.append(event_line(f"log_{idx}", hint, 900))
-    operator_action = critical_operator_action(event)
     clear_requirement = critical_clear_requirement(event)
-    if severity == "info":
-        requested_action = "  > requested_action: none — informational event; no Q remediation required."
-    elif operator_action:
-        requested_action = f"  > requested_action: {redact(operator_action).replace('@', ' at ')}"
-    elif event_has_awaiting_physical_context(event) or is_verified_device_bond_lost_signal(event):
-        requested_action = f"  > requested_action: {physical_action_text()}"
-    elif is_physical_intervention_signal(event):
-        requested_action = f"  > requested_action: {physical_candidate_action_text()}"
-    elif event_has_stale_context(event):
-        requested_action = f"  > requested_action: {stale_action_text()}"
-    else:
-        requested_action = "  > requested_action: Q investigate, remediate, and report disposition in BOT ERRORS."
+    requested_action = f"  > requested_action: {requested_action_text(event)}"
     lines.extend([
         event_line("queue", diagnostics.get("queue")),
         event_line("dispatch_log", diagnostics.get("dispatchLog")),
@@ -1798,6 +1832,83 @@ def incident_event_fields_from_key(key: str) -> dict[str, str]:
     return fields
 
 
+def stale_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
+    """Pattern A: is this stale renotify safe to suppress (non-actionable)?
+
+    Suppress a self-healed / no-op stale incident when ANY of:
+    - explicit configured suppress source (BOT_ERRORS_STALE_RENOTIFY_SUPPRESS_SOURCES);
+    - a recovery / no-op source signature (*_restored/_recovered/_reverted/_unknown/
+      _cleared, provider_fallback_*) — definitionally non-actionable once stale;
+    - the SSOT requested_action (Pattern E) resolves to the non-actionable sentinel,
+      i.e. format_event would render "none — informational" (§10 C4).
+
+    flap_storm incidents are EXEMPT (§10 C4) — they always renotify on their own
+    cadence. Callers wrap this fail-open: any exception => do not suppress (send).
+    """
+    source = str(event.get("source") or "")
+    alert_source = str(event.get("alertSource") or "")
+    if source == "flap_storm" or "flap_storm" in str(key):
+        return False
+    if source in STALE_RENOTIFY_SUPPRESS_SOURCES or alert_source in STALE_RENOTIFY_SUPPRESS_SOURCES:
+        return True
+    for cand in (source.lower(), alert_source.lower()):
+        if not cand:
+            continue
+        if cand.endswith(STALE_RENOTIFY_SUPPRESS_SUFFIXES) or cand.startswith(STALE_RENOTIFY_SUPPRESS_PREFIXES):
+            return True
+    return requested_action_text(event) == NONACTIONABLE_ACTION
+
+
+def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
+    """Pattern A: record a suppressed (non-sent) stale renotify for audit.
+
+    The incident stays in state (audit trail preserved); only the WhatsApp push
+    is gated. lastStaleRenotifiedAt is intentionally NOT advanced — we did not
+    notify — so the existing renotify cadence still governs if it later becomes
+    actionable.
+    """
+    if not record.get("staleAt"):
+        record["staleAt"] = current
+        record["staleIso"] = now_iso()
+    record["staleSuppressed"] = True
+    record["lastStaleSuppressedAt"] = current
+    record["lastStaleSuppressedIso"] = now_iso()
+    record["lastStaleSuppressedEventId"] = event.get("id")
+    record["staleSuppressedCount"] = int_field(record, "staleSuppressedCount") + 1
+
+
+def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, Any]:
+    """One consolidated digest for a batch of auto-closed non-actionable stale
+    incidents (Pattern A safety valve + §10 C5). Recoveries are summarized and
+    consolidated — never 200 individual alerts."""
+    preview = ", ".join(keys[:10])
+    if len(keys) > 10:
+        preview += f", +{len(keys) - 10} more"
+    additions = [
+        "stale_autoclose=true",
+        f"closed_count={len(keys)}",
+        f"closed_keys={preview}",
+        "reason=non-actionable self-healed incidents past escalate horizon; removed from open state",
+    ]
+    return {
+        "schemaVersion": 1,
+        "id": f"stale-autoclose-{current}",
+        "eventType": "alert",
+        "severity": "info",
+        "createdAt": now_iso(),
+        "machine": "bot-errors",
+        "instance": "dispatcher",
+        "source": "stale-autoclose",
+        "summary": f"Auto-closed {len(keys)} non-actionable stale incident(s)",
+        "evidence": "\n".join(additions),
+        "diagnostics": {
+            "dispatchLog": str(state_paths()["logs"] / "dispatch.jsonl"),
+            "queue": str(state_root()),
+        },
+        "delivery": {"attempts": 1, "status": "stale-autoclose", "nextAttemptAtEpoch": 0, "lastError": None},
+    }
+
+
 def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict[str, Any] | None:
     previous_status = str(record.get("status") or "open")
     opened = int_field(record, "openedAt", current)
@@ -1912,8 +2023,10 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
     current = int(time.time())
     sent = 0
     failed = 0
+    suppressed = 0
     last_error = None
     changed = False
+    auto_closed: list[str] = []
     for key, record in sorted(open_incidents.items()):
         if skip_keys and str(key) in skip_keys:
             continue
@@ -1922,6 +2035,37 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
         event = stale_incident_event(str(key), record, current)
         if event is None:
             continue
+        # Pattern A — suppress non-actionable (self-healed / no-op) stale renotify.
+        if SUPPRESS_STALE_INFO_RENOTIFY:
+            try:
+                nonactionable = stale_renotify_is_nonactionable(event, str(key))
+            except Exception as exc:  # fail-open: never lose a real alert to the filter
+                nonactionable = False
+                append_dispatch_log(paths, {
+                    "type": "stale_suppress_classify_error",
+                    "incidentKey": key,
+                    "error": str(exc),
+                })
+            if nonactionable:
+                mark_stale_incident_suppressed(record, event, current)
+                suppressed += 1
+                changed = True
+                opened = int_field(record, "openedAt", current)
+                age = max(0, current - opened)
+                # Safety valve / §10 C5 terminal removal: a non-actionable stale
+                # incident past the escalate horizon is auto-closed (removed from
+                # open state) and reported ONCE in a consolidated summary below.
+                if age >= INCIDENT_ESCALATE_SECONDS:
+                    auto_closed.append(str(key))
+                append_dispatch_log(paths, {
+                    "type": "stale_renotify_suppressed",
+                    "incidentKey": key,
+                    "reason": "nonactionable_self_healed",
+                    "staleSuppressedCount": record.get("staleSuppressedCount"),
+                    "ageSeconds": age,
+                    "willAutoClose": age >= INCIDENT_ESCALATE_SECONDS,
+                })
+                continue
         if sent + failed >= INCIDENT_STALE_SWEEP_MAX_EVENTS:
             append_dispatch_log(paths, {
                 "type": "stale_renotify_batch_cap_reached",
@@ -1955,6 +2099,34 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
             "status": record.get("status"),
             "staleRenotifyCount": record.get("staleRenotifyCount"),
         })
+    # Terminal removal + ONE consolidated auto-close summary (§10 C5 + Pattern A
+    # safety valve): non-actionable stale incidents past the escalate horizon are
+    # removed from open state so openIncidents cannot grow unbounded, and the
+    # batch is reported once rather than as N individual messages.
+    if auto_closed:
+        summary_event = stale_autoclose_summary_event(auto_closed, current)
+        try:
+            send_whatsapp(format_event(summary_event))
+            append_dispatch_log(paths, {
+                "type": "stale_autoclosed",
+                "count": len(auto_closed),
+                "keys": auto_closed,
+            })
+        except Exception as exc:
+            last_error = str(exc)
+            append_dispatch_log(paths, {
+                "type": "stale_autoclose_summary_failed",
+                "count": len(auto_closed),
+                "error": str(exc),
+            })
+        last_sent_at = incident_state.get("lastSentAt")
+        for closed_key in auto_closed:
+            open_incidents.pop(closed_key, None)
+            if isinstance(last_sent_at, dict):
+                last_sent_at.pop(closed_key, None)
+        changed = True
+    if suppressed:
+        append_dispatch_log(paths, {"type": "stale_renotify_suppressed_total", "suppressed": suppressed})
     if changed:
         save_incident_state(paths, incident_state)
     return sent, failed, last_error
