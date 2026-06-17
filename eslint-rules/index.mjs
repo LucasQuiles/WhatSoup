@@ -11,6 +11,9 @@ import godClass from './god-class.mjs';
 import categorizedSkips from './categorized-skips.mjs';
 import failClosedScanner from './fail-closed-scanner.mjs';
 import outboxDirectWrite from './outbox-direct-write.mjs';
+import approvedApiClient from './approved-api-client.mjs';
+import ringBoundaries from './ring-boundaries.mjs';
+import unsafeTypeEscape from './unsafe-type-escape.mjs';
 
 /** @type {import('eslint').ESLint.Plugin} */
 const plugin = {
@@ -20,6 +23,9 @@ const plugin = {
     'categorized-skips': categorizedSkips,
     'fail-closed-scanner': failClosedScanner,
     'outbox-direct-write': outboxDirectWrite,
+    'approved-api-client': approvedApiClient,
+    'ring-boundaries': ringBoundaries,
+    'unsafe-type-escape': unsafeTypeEscape,
   },
 };
 

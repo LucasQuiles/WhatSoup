@@ -47,6 +47,12 @@ function ruleEntriesFor(id) {
       return { 'fitness/outbox-direct-write': 'warn' };
     case 'test.skip-categorization':
       return { 'fitness/categorized-skips': 'warn' };
+    case 'arch.approved-api-client':
+      return { 'fitness/approved-api-client': 'warn' };
+    case 'arch.ring-boundaries':
+      return { 'fitness/ring-boundaries': 'warn' };
+    case 'invariant.no-unsafe-type-escapes':
+      return { 'fitness/unsafe-type-escape': 'warn' };
     default:
       return {};
   }
@@ -76,7 +82,8 @@ const linterOptions = { reportUnusedDisableDirectives: 'off' };
 
 export default [
   {
-    // src + scripts: file-size, god-class, fail-closed-scanner, outbox-direct-write.
+    // src + scripts: file-size, god-class, fail-closed-scanner, outbox-direct-write,
+    // ring-boundaries, unsafe-type-escape.
     files: ['src/**/*.ts', 'scripts/**/*.ts'],
     linterOptions,
     languageOptions: {
@@ -89,6 +96,8 @@ export default [
       ...ruleEntriesFor('arch.god-class'),
       ...ruleEntriesFor('invariant.fail-closed-scanner'),
       ...ruleEntriesFor('invariant.outbox-env-gated'),
+      ...ruleEntriesFor('arch.ring-boundaries'),
+      ...ruleEntriesFor('invariant.no-unsafe-type-escapes'),
     },
   },
   {
@@ -103,6 +112,19 @@ export default [
     rules: {
       ...ruleEntriesFor('arch.file-size'),
       ...ruleEntriesFor('test.skip-categorization'),
+    },
+  },
+  {
+    // console/src: approved-api-client (direct fetch bypass guard).
+    files: ['console/src/**/*.{ts,tsx}'],
+    linterOptions,
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: { ecmaVersion: 2024, sourceType: 'module', ecmaFeatures: { jsx: true } },
+    },
+    plugins,
+    rules: {
+      ...ruleEntriesFor('arch.approved-api-client'),
     },
   },
 ];
