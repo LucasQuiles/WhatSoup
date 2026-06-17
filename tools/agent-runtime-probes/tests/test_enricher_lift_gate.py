@@ -880,6 +880,31 @@ def test_unstable_ci_is_inconclusive_unstable_ci():
     assert rep["ci_divergence"] > gate.CI_DIVERGENCE_THRESHOLD
 
 
+# --------------------------------------------------------------------------- #
+# MUTATION-SURVIVOR TRIAGE: pin the threshold comparisons whose boundary is REACHABLE so a
+# comparison-operator flip (>= -> >, < -> <=) is caught by a failing test. The judge-noise
+# float thresholds (mad/sd <= 0.15/0.25) are NOT pinned here: an exact-equality on a non-
+# binary-clean float (0.15) is measure-zero/unreachable through the score arithmetic (e.g.
+# 0.35/0.65 yields 0.15000000000000002, never 0.15), so the <=/< flip is an EQUIVALENT mutant.
+# --------------------------------------------------------------------------- #
+def test_mutation_pin_lift_efficiency_tau_boundary_is_inclusive():
+    # efficiency exactly == tau must PASS the tau predicate (`>= tau` inclusive); just below must fail.
+    eff = gate.lift_efficiency(3.0, 1000)  # 3.0 / (1000/1000) = 3.0 == TAU_SEED
+    assert eff == gate.TAU_SEED
+    assert gate.tau_sensitivity(eff)["tau_3.0"] is True
+    assert gate.tau_sensitivity(gate.TAU_SEED - 0.0001)["tau_3.0"] is False
+
+
+def test_mutation_pin_sample_size_boundary_n50_passes_n49_fails():
+    # `n_paired < MIN_PAIRED_N`: n == 50 must NOT be a sample-size failure; n == 49 must be.
+    rep50 = gate.evaluate(*strong_lift_inputs(n=gate.MIN_PAIRED_N), tau=3.0)
+    assert "sample_size" not in rep50["failed_predicates"]
+    assert rep50["verdict_status"] != "inconclusive_sample_size"
+    rep49 = gate.evaluate(*strong_lift_inputs(n=gate.MIN_PAIRED_N - 1), tau=3.0)
+    assert "sample_size" in rep49["failed_predicates"]
+    assert rep49["verdict_status"] == "inconclusive_sample_size"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
