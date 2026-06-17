@@ -55,7 +55,7 @@ vi.mock('../../../../src/logger.ts', () => ({
 }));
 
 import { Pinecone } from '@pinecone-database/pinecone';
-import { PineconeMemory, MemoryRecord } from '../../../../src/runtimes/chat/providers/pinecone.ts';
+import { PineconeMemory, MemoryRecord, decayScore, applyDecay, getPineconeReadiness } from '../../../../src/runtimes/chat/providers/pinecone.ts';
 import * as configModule from '../../../../src/config.ts';
 
 let dateNowSpy: ReturnType<typeof vi.spyOn>;
@@ -1232,5 +1232,638 @@ describe('entity mode', () => {
     const results = await memory.searchEntities('nothing');
 
     expect(results).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// decayScore — unit tests for uncovered branches
+// ---------------------------------------------------------------------------
+
+describe('decayScore', () => {
+  it('returns 0 when similarity is 0', () => {
+    expect(decayScore(0, 5, 30)).toBe(0);
+  });
+
+  it('returns 0 when similarity is negative', () => {
+    expect(decayScore(-0.5, 5, 30)).toBe(0);
+  });
+
+  it('returns 0 when ageDays exceeds maxAgeDays', () => {
+    expect(decayScore(0.9, 100, 30, 90)).toBe(0);
+  });
+
+  it('does not return 0 when ageDays equals maxAgeDays exactly', () => {
+    // ageDays === maxAgeDays: NOT strictly greater, so decay is applied
+    const result = decayScore(0.9, 90, 30, 90);
+    expect(result).toBeGreaterThan(0);
+    expect(result).toBeLessThan(0.9);
+  });
+
+  it('returns 0 when halfLifeDays <= 0 and ageDays > 0', () => {
+    expect(decayScore(0.8, 1, 0)).toBe(0);
+    expect(decayScore(0.8, 5, -1)).toBe(0);
+  });
+
+  it('returns similarity unchanged when halfLifeDays <= 0 and ageDays === 0', () => {
+    expect(decayScore(0.8, 0, 0)).toBe(0.8);
+  });
+
+  it('applies exponential decay for positive halfLife and age', () => {
+    const result = decayScore(1.0, 30, 30);
+    // After one half-life, score should be ~0.5
+    expect(result).toBeCloseTo(0.5, 2);
+  });
+
+  it('returns similarity when ageDays === 0', () => {
+    expect(decayScore(0.75, 0, 14)).toBeCloseTo(0.75, 10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applyDecay — NaN createdAt branch
+// ---------------------------------------------------------------------------
+
+describe('applyDecay', () => {
+  it('preserves original score when createdAt is invalid (NaN branch)', () => {
+    const results = [
+      {
+        id: 'bad-date',
+        score: 0.77,
+        record: {
+          id: 'bad-date',
+          text: 'sample',
+          chatJid: `1111111000000000${1}@g.us`,
+          senderJid: '15550000001@s.whatsapp.net',
+          senderName: 'Tester',
+          memoryType: 'user_fact' as const,
+          confidence: 0.9,
+          createdAt: 'not-a-date',
+          updatedAt: '2026-01-01T00:00:00Z',
+          superseded: '',
+          sourceMessagePks: '1',
+        },
+      },
+    ];
+    const out = applyDecay(results, 30, 90);
+    // NaN branch: score preserved, no filtering — score=0.77>0 so included
+    expect(out).toHaveLength(1);
+    expect(out[0].score).toBe(0.77);
+  });
+
+  it('filters out zero-score results after decay', () => {
+    const vi_dateNow = vi.spyOn(Date, 'now').mockReturnValue(FIXED_NOW_MS);
+    try {
+      const veryOldDate = new Date(FIXED_NOW_MS - 200 * MS_PER_DAY).toISOString();
+      const results = [
+        {
+          id: 'old-rec',
+          score: 0.8,
+          record: {
+            id: 'old-rec',
+            text: 'old',
+            chatJid: `1111111000000000${2}@g.us`,
+            senderJid: '15550000002@s.whatsapp.net',
+            senderName: 'Tester',
+            memoryType: 'user_fact' as const,
+            confidence: 0.9,
+            createdAt: veryOldDate,
+            updatedAt: veryOldDate,
+            superseded: '',
+            sourceMessagePks: '2',
+          },
+        },
+      ];
+      // maxAgeDays=100, ageDays=200 → score becomes 0 → filtered
+      const out = applyDecay(results, 30, 100);
+      expect(out).toHaveLength(0);
+    } finally {
+      vi_dateNow.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upsert retry success (lines 655-660): first attempt fails, retry succeeds
+// ---------------------------------------------------------------------------
+
+describe('upsert retry success', () => {
+  let memory: PineconeMemory;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+    } as unknown as () => InstanceType<typeof Pinecone>);
+    memory = new PineconeMemory();
+  });
+
+  it('succeeds on retry when first upsert attempt fails transiently', async () => {
+    mockUpsertRecords
+      .mockRejectedValueOnce(new Error('transient write error'))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(memory.upsert([{
+      id: 'upsert-retry-rec',
+      text: 'retry text',
+      chatJid: `1111111000000000${5}@g.us`,
+      senderJid: '15550000005@s.whatsapp.net',
+      senderName: 'Tester',
+      memoryType: 'user_fact',
+      confidence: 0.9,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+      superseded: '',
+      sourceMessagePks: '1',
+    }])).resolves.toBeUndefined();
+
+    expect(mockUpsertRecords).toHaveBeenCalledTimes(2);
+    // Verify the retry success log was emitted
+    expect(mockPineconeLogger.info.mock.calls.some(
+      (args: unknown[]) => {
+        const msg = args[1];
+        return typeof msg === 'string' && msg.includes('after retry');
+      },
+    )).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkDuplicate — empty senderJid skips sender_jid filter
+// ---------------------------------------------------------------------------
+
+describe('checkDuplicate with empty senderJid', () => {
+  let memory: PineconeMemory;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+    } as unknown as () => InstanceType<typeof Pinecone>);
+    memory = new PineconeMemory();
+  });
+
+  it('omits sender_jid filter when senderJid is empty string', async () => {
+    mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
+
+    const result = await memory.checkDuplicate(`1111111000000000${6}@g.us`, '', 'some text');
+
+    expect(result).toEqual({ isDuplicate: false });
+    // Verify filter does NOT contain sender_jid
+    const callArg = mockSearchRecords.mock.calls[0][0] as { query: { filter: Record<string, unknown> } };
+    expect(callArg.query.filter).not.toHaveProperty('sender_jid');
+    expect(callArg.query.filter).toHaveProperty('chat_jid');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// searchClaims — empty senderJid skips sender_jid filter
+// ---------------------------------------------------------------------------
+
+describe('searchClaims with empty senderJid', () => {
+  let memory: PineconeMemory;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+    } as unknown as () => InstanceType<typeof Pinecone>);
+    memory = new PineconeMemory();
+  });
+
+  it('omits sender_jid filter when senderJid is empty string', async () => {
+    mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
+
+    const results = await memory.searchClaims(`1111111000000000${7}@g.us`, '', 'claim text', 5);
+
+    expect(results).toEqual([]);
+    const callArg = mockSearchRecords.mock.calls[0][0] as { query: { filter: Record<string, unknown> } };
+    expect(callArg.query.filter).not.toHaveProperty('sender_jid');
+    expect(callArg.query.filter).toHaveProperty('chat_jid');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getPineconeReadiness — all branches
+// ---------------------------------------------------------------------------
+
+describe('getPineconeReadiness', () => {
+  const mockListIndexes = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+      this.listIndexes = mockListIndexes;
+    } as unknown as () => InstanceType<typeof Pinecone>);
+  });
+
+  it('returns disabled when indexName is empty string', async () => {
+    const result = await getPineconeReadiness('   ');
+    expect(result).toEqual({ state: 'disabled', index: '' });
+  });
+
+  it('returns disabled when PINECONE_API_KEY env is not set', async () => {
+    const prev = process.env['PINECONE_API_KEY'];
+    delete process.env['PINECONE_API_KEY'];
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'disabled', index: 'test-index' });
+    } finally {
+      if (prev !== undefined) process.env['PINECONE_API_KEY'] = prev;
+    }
+  });
+
+  it('returns ready when index found and guard matches', async () => {
+    process.env['PINECONE_API_KEY'] = 'test-key-ready';
+    mockListIndexes.mockResolvedValueOnce({
+      indexes: [{ name: 'test-index', host: 'test-index.svc.pinecone.io' }],
+    });
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'ready', index: 'test-index' });
+    } finally {
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns index_missing when index not found in list', async () => {
+    process.env['PINECONE_API_KEY'] = 'test-key-missing';
+    mockListIndexes.mockResolvedValueOnce({ indexes: [] });
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'index_missing', index: 'test-index' });
+    } finally {
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns project_mismatch when missingRequiredProjectGuardError fires', async () => {
+    const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+    mutableConfig.botName = 'mini-bot';
+    // No projectId or expectedHostSuffix on config.memory.pinecone
+    process.env['PINECONE_API_KEY'] = 'test-key-guard';
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'project_mismatch', index: 'test-index' });
+    } finally {
+      delete mutableConfig.botName;
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns project_mismatch when index found but host does not match guard', async () => {
+    process.env['PINECONE_API_KEY'] = 'test-key-mismatch';
+    const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+    const prevMemory = mutableConfig.memory;
+    mutableConfig.memory = { pinecone: { apiKeyEnv: 'PINECONE_API_KEY', expectedHostSuffix: '.expected-project.pinecone.io' } };
+    mockListIndexes.mockResolvedValueOnce({
+      indexes: [{ name: 'test-index', host: 'test-index.svc.different-project.pinecone.io' }],
+    });
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'project_mismatch', index: 'test-index' });
+    } finally {
+      mutableConfig.memory = prevMemory;
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns auth_failed when listIndexes throws a 401 error', async () => {
+    process.env['PINECONE_API_KEY'] = 'bad-key';
+    const authErr = Object.assign(new Error('Unauthorized'), { status: 401 });
+    mockListIndexes.mockRejectedValueOnce(authErr);
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'auth_failed', index: 'test-index' });
+    } finally {
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns auth_failed when listIndexes throws a 403 error', async () => {
+    process.env['PINECONE_API_KEY'] = 'forbidden-key';
+    const authErr = Object.assign(new Error('Forbidden'), { status: 403 });
+    mockListIndexes.mockRejectedValueOnce(authErr);
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'auth_failed', index: 'test-index' });
+    } finally {
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns network_error when listIndexes throws with ECONNREFUSED cause code', async () => {
+    process.env['PINECONE_API_KEY'] = 'test-key-econnrefused';
+    const netErr = Object.assign(new Error('Connection refused'), {
+      cause: { code: 'ECONNREFUSED' },
+    });
+    mockListIndexes.mockRejectedValueOnce(netErr);
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'network_error', index: 'test-index' });
+    } finally {
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns network_error when listIndexes throws with ETIMEDOUT cause code', async () => {
+    process.env['PINECONE_API_KEY'] = 'test-key-etimedout';
+    const netErr = Object.assign(new Error('Timed out'), {
+      cause: { code: 'ETIMEDOUT' },
+    });
+    mockListIndexes.mockRejectedValueOnce(netErr);
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'network_error', index: 'test-index' });
+    } finally {
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns network_error when listIndexes throws an AbortError', async () => {
+    process.env['PINECONE_API_KEY'] = 'test-key-abort';
+    const abortErr = new Error('The operation was aborted');
+    abortErr.name = 'AbortError';
+    mockListIndexes.mockRejectedValueOnce(abortErr);
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'network_error', index: 'test-index' });
+    } finally {
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns network_error when listIndexes throws a TypeError', async () => {
+    process.env['PINECONE_API_KEY'] = 'test-key-typeerror';
+    const typeErr = new TypeError('Failed to fetch');
+    mockListIndexes.mockRejectedValueOnce(typeErr);
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'network_error', index: 'test-index' });
+    } finally {
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('returns auth_failed for generic unknown error (fallback branch)', async () => {
+    process.env['PINECONE_API_KEY'] = 'test-key-generic';
+    mockListIndexes.mockRejectedValueOnce(new Error('some unknown error'));
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'auth_failed', index: 'test-index' });
+    } finally {
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+
+  it('uses custom apiKeyEnv from config.memory.pinecone.apiKeyEnv', async () => {
+    const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+    const prevMemory = mutableConfig.memory;
+    mutableConfig.memory = { pinecone: { apiKeyEnv: 'CUSTOM_PINECONE_KEY' } };
+    process.env['CUSTOM_PINECONE_KEY'] = 'custom-key-value';
+    mockListIndexes.mockResolvedValueOnce({ indexes: [{ name: 'test-index', host: 'host.svc.pinecone.io' }] });
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'ready', index: 'test-index' });
+    } finally {
+      mutableConfig.memory = prevMemory;
+      delete process.env['CUSTOM_PINECONE_KEY'];
+    }
+  });
+
+  it('falls back to PINECONE_API_KEY when apiKeyEnv is empty string', async () => {
+    const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+    const prevMemory = mutableConfig.memory;
+    mutableConfig.memory = { pinecone: { apiKeyEnv: '   ' } };
+    process.env['PINECONE_API_KEY'] = 'fallback-key';
+    mockListIndexes.mockResolvedValueOnce({ indexes: [] });
+    try {
+      const result = await getPineconeReadiness('test-index');
+      expect(result).toEqual({ state: 'index_missing', index: 'test-index' });
+    } finally {
+      mutableConfig.memory = prevMemory;
+      delete process.env['PINECONE_API_KEY'];
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Alert clearing — trackSuccess clears alerted operations
+// ---------------------------------------------------------------------------
+
+describe('alert clearing on recovery', () => {
+  let memory: PineconeMemory;
+  const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mutableConfig.botName = 'q'; // q never requires guard
+    mutableConfig.pineconeTopK = 20;
+    mutableConfig.pineconeRerank = false;
+    mutableConfig.pineconeRerankTopN = 6;
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+    } as unknown as () => InstanceType<typeof Pinecone>);
+    memory = new PineconeMemory();
+  });
+
+  afterEach(() => {
+    delete mutableConfig.botName;
+    delete mutableConfig.pineconeTopK;
+    delete mutableConfig.pineconeRerank;
+    delete mutableConfig.pineconeRerankTopN;
+  });
+
+  it('a successful search after 2 prior failures hits trackSuccess (does not trip breaker at 2/3)', async () => {
+    // With threshold=3, two double-failures (4 rejects total) record 2 failures.
+    // Breaker stays closed. A third search with no failures hits trackSuccess.
+    mockSearchRecords
+      .mockRejectedValueOnce(new Error('first fail'))
+      .mockRejectedValueOnce(new Error('retry fail'))
+      .mockRejectedValueOnce(new Error('second first fail'))
+      .mockRejectedValueOnce(new Error('second retry fail'))
+      .mockResolvedValueOnce({ result: { hits: [] } });
+
+    // Two failures (breaker still closed at 2/3)
+    await memory.searchDetailed('trip-1', {}, 1);
+    await memory.searchDetailed('trip-2', {}, 1);
+
+    // Third call succeeds — calls trackSuccess (recordSuccess on the breaker)
+    const details = await memory.searchDetailed('recover', {}, 1);
+    expect(details.status).toBe('ok');
+    expect(details.results).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// searchEntities — rerank error fallback (line 577-578)
+// ---------------------------------------------------------------------------
+
+describe('searchEntities rerank error fallback', () => {
+  let memory: PineconeMemory;
+  const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mutableConfig.pineconeTopK = 20;
+    mutableConfig.pineconeRerank = true;
+    mutableConfig.pineconeRerankTopN = 6;
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+    } as unknown as () => InstanceType<typeof Pinecone>);
+    memory = new PineconeMemory();
+  });
+
+  afterEach(() => {
+    delete mutableConfig.pineconeTopK;
+    delete mutableConfig.pineconeRerank;
+    delete mutableConfig.pineconeRerankTopN;
+  });
+
+  it('falls back to vector scores when rerank call throws', async () => {
+    mockSearchRecords.mockResolvedValueOnce({
+      result: {
+        hits: [
+          { _id: 'e1', _score: 0.88, fields: { text: 'entity one', entity_type: 'building', source: 'crm' } },
+          { _id: 'e2', _score: 0.75, fields: { text: 'entity two', entity_type: 'contact', source: 'crm' } },
+        ],
+      },
+    });
+    mockRerank.mockRejectedValueOnce(new Error('rerank service unavailable'));
+
+    const results = await memory.searchEntities('query');
+
+    // Should return vector-order results despite rerank failure
+    expect(results.map((r) => r.id)).toEqual(['e1', 'e2']);
+    expect(results[0].score).toBe(0.88);
+    expect(results[1].score).toBe(0.75);
+    // Warn log should have been emitted for rerank failure
+    expect(mockPineconeLogger.warn.mock.calls.some(
+      (args: unknown[]) => {
+        const msg = args[1];
+        return typeof msg === 'string' && msg.includes('rerank failed');
+      },
+    )).toBe(true);
+  });
+
+  it('searchEntities skips rerank call when hits is empty (mapped.length === 0)', async () => {
+    mockSearchRecords.mockResolvedValueOnce({ result: { hits: [] } });
+
+    await memory.searchEntities('empty query');
+
+    // pineconeRerank=true but mapped.length===0 — rerank must not be called
+    expect(mockRerank).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Circuit breaker open paths — search, searchEntities, upsert
+// NOTE: These tests intentionally trip breakers. They MUST run LAST in this
+// file because the breakers object is module-level state that persists for the
+// entire test run. Any tests after this block will see open breakers.
+// ---------------------------------------------------------------------------
+
+describe('circuit breaker open — must run last', () => {
+  let memory: PineconeMemory;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const MockPinecone = vi.mocked(Pinecone);
+    MockPinecone.mockImplementation(function (this: Record<string, unknown>) {
+      this.index = vi.fn().mockReturnValue(mockIndex);
+      this.inference = { rerank: mockRerank };
+    } as unknown as () => InstanceType<typeof Pinecone>);
+    memory = new PineconeMemory();
+  });
+
+  it('searchDetailed returns breaker_open status when search breaker trips after 3 failures', async () => {
+    // Trip the breaker: threshold=3. Each _searchCoreDetailed: first fail + retry fail = 1 recorded failure.
+    // After 3 such calls the 'search' breaker trips to open.
+    for (let i = 0; i < 3; i++) {
+      mockSearchRecords
+        .mockRejectedValueOnce(new Error('fail'))
+        .mockRejectedValueOnce(new Error('fail'));
+      await memory.searchDetailed(`trip-${i}`, {}, 1);
+    }
+
+    // Now breaker is open — next call should short-circuit
+    const details = await memory.searchDetailed('blocked', {}, 5);
+    expect(details.status).toBe('breaker_open');
+    expect(details.results).toEqual([]);
+  });
+
+  it('searchEntitiesDetailed returns breaker_open when entity search breaker trips', async () => {
+    const mutableConfig = configModule.config as unknown as Record<string, unknown>;
+    mutableConfig.pineconeTopK = 20;
+    mutableConfig.pineconeRerank = false;
+    mutableConfig.pineconeRerankTopN = 6;
+    try {
+      // Trip the searchEntities breaker (threshold=3)
+      for (let i = 0; i < 3; i++) {
+        mockSearchRecords
+          .mockRejectedValueOnce(new Error('entity fail'))
+          .mockRejectedValueOnce(new Error('entity fail retry'));
+        await memory.searchEntitiesDetailed(`trip-entity-${i}`);
+      }
+
+      const details = await memory.searchEntitiesDetailed('blocked');
+      expect(details.status).toBe('breaker_open');
+      expect(details.results).toEqual([]);
+    } finally {
+      delete mutableConfig.pineconeTopK;
+      delete mutableConfig.pineconeRerank;
+      delete mutableConfig.pineconeRerankTopN;
+    }
+  });
+
+  it('upsert throws PINECONE_UNAVAILABLE when upsert breaker is open', async () => {
+    // Trip the upsert breaker (threshold=3)
+    for (let i = 0; i < 3; i++) {
+      mockUpsertRecords
+        .mockRejectedValueOnce(new Error('upsert fail'))
+        .mockRejectedValueOnce(new Error('upsert fail retry'));
+      await memory.upsert([{
+        id: `trip-${i}`,
+        text: 'text',
+        chatJid: `1111111000000000${3}@g.us`,
+        senderJid: '15550000003@s.whatsapp.net',
+        senderName: 'Tester',
+        memoryType: 'user_fact',
+        confidence: 0.9,
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        superseded: '',
+        sourceMessagePks: '1',
+      }]).catch(() => {});
+    }
+
+    // Breaker open — next upsert should throw immediately without calling upsertRecords
+    const callsBefore = mockUpsertRecords.mock.calls.length;
+    await expect(memory.upsert([{
+      id: 'blocked',
+      text: 'text',
+      chatJid: `1111111000000000${4}@g.us`,
+      senderJid: '15550000004@s.whatsapp.net',
+      senderName: 'Tester',
+      memoryType: 'user_fact',
+      confidence: 0.9,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+      superseded: '',
+      sourceMessagePks: '1',
+    }])).rejects.toMatchObject({ code: 'PINECONE_UNAVAILABLE' });
+    expect(mockUpsertRecords.mock.calls.length).toBe(callsBefore);
   });
 });
