@@ -4,8 +4,10 @@
  * Migration details:
  *   - Modal open size="lg" dismissable={false} (role-on-backdrop defect dies by construction)
  *   - open prop added (C-B3W4-3 mount contract: latched mount + reset-on-open)
- *   - ModalHeader + wizard step strip (option c, wizard-local composite) + ModalBody + conditional ModalFooter
- *   - Step strip rebuilt to locked v2 anatomy via soup-wiz-steps CSS (composites.css)
+ *   - ModalHeader + wizard step strip (Stepper primitive, extracted from inline
+ *     WizardStepper per DD-43 P1) + ModalBody + conditional ModalFooter
+ *   - Step strip rendered by Stepper primitive; CSS lives in composites.css
+ *     (soup-wiz-steps block); markup is byte-faithful to the legacy inline strip
  *   - framer-motion removed; step transitions are instant (motion.md §1, C-B3W4-4)
  *   - TYPE_ACCENT map + inline --wizard-accent injection removed (WVR-014 retired)
  *   - accent delivered via data-line-type attribute on wizard-accent-scope wrapper
@@ -25,6 +27,7 @@ import LinkStep from './wizard/LinkStep'
 import ConfirmDialog from './ConfirmDialog'
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './primitives/Modal'
 import { Button } from './primitives/Button'
+import { Stepper } from './primitives'
 import { api } from '../lib/api'
 import { withDefaultAgentWorkspace } from '../lib/agent-cwd'
 import { DEFAULT_PROVIDER_ID } from '../lib/providers'
@@ -45,54 +48,6 @@ interface AddLineWizardProps {
  * 0 = Identity, 1 = Link, 2 = Model, 3 = Config, 4 = Review
  */
 const STEPS = ['Identity', 'Link', 'Model', 'Config', 'Review'] as const
-
-/* ── Wizard progress strip (option c: wizard-local composite, C-B3W4-1) ──
- *
- * Non-interactive status strip rebuilt to the locked v2 .wiz-steps anatomy:
- * numbered 18px mono circles, accent active ring, ok-colored done state,
- * 16×1px hairline separators. CSS lives in composites.css (soup-wiz-steps block).
- *
- * A11y: aria-label="Wizard progress" on container, aria-current="step" on active
- * step, aria-hidden on separators. Non-interactive by construction (spans, not
- * buttons) — gated linear flow semantics, not tab semantics (see §7 in packet).
- */
-const WizardStepper: FC<{ steps: readonly string[]; currentStep: number }> = ({
-  steps,
-  currentStep,
-}) => (
-  <div
-    className="soup-wiz-steps"
-    aria-label="Wizard progress"
-  >
-    {steps.map((label, i) => {
-      const completed = i < currentStep
-      const active = i === currentStep
-      return (
-        <div key={label} className="soup-wiz-steps__item">
-          {i > 0 && (
-            <div
-              className="soup-wiz-steps__sep"
-              aria-hidden="true"
-            />
-          )}
-          <div
-            className={[
-              'soup-wiz-steps__step',
-              active ? 'soup-wiz-steps__step--active' : '',
-              completed ? 'soup-wiz-steps__step--done' : '',
-            ].filter(Boolean).join(' ')}
-            aria-current={active ? 'step' : undefined}
-          >
-            <span className="soup-wiz-steps__circle">
-              {i + 1}
-            </span>
-            <span className="soup-wiz-steps__label">{label}</span>
-          </div>
-        </div>
-      )
-    })}
-  </div>
-)
 
 /* ── Step validation ──
  * Principle: normalize first, then validate the normalized value.
@@ -315,8 +270,8 @@ const AddLineWizard: FC<AddLineWizardProps> = ({ open, onClose }) => {
       >
         <ModalHeader title="Add New Line" onClose={handleClose} />
 
-        {/* Step strip — wizard-local composite (option c, C-B3W4-1) */}
-        <WizardStepper steps={STEPS} currentStep={currentStep} />
+        {/* Step strip — Stepper primitive (DD-43 P1 extraction) */}
+        <Stepper steps={STEPS} currentStep={currentStep} ariaLabel="Wizard progress" />
 
         <ModalBody>
           {/* wizard-accent-scope carries data-line-type for static CSS accent resolution */}
