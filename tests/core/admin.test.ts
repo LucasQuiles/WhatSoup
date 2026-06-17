@@ -40,9 +40,11 @@ import { storeMessageIfNew, type StoredMessage } from '../../src/core/messages.t
 import { insertPending, lookupAccess } from '../../src/core/access-list.ts';
 import {
   handleAdminCommand,
+  handleFallbackCommand,
   sendApprovalRequest,
 } from '../../src/core/admin.ts';
 import * as adminModule from '../../src/core/admin.ts';
+import type { Runtime } from '../../src/runtimes/types.ts';
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -676,5 +678,457 @@ describe('handleAdminCommand ALLOW — admin notice wording', () => {
     expect(sentText).toContain('replaying 1 of 1 queued messages');
     // Must NOT include the group suffix
     expect(sentText).not.toContain('group message');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// admin.ts uncovered-branch coverage
+// ---------------------------------------------------------------------------
+
+describe('admin.ts uncovered-branch coverage', () => {
+  // Helper: minimal Runtime stub with only the surface area handleFallbackCommand touches.
+  function makeRuntime(overrides: Partial<Runtime> = {}): Runtime {
+    return {
+      start: vi.fn().mockResolvedValue(undefined),
+      handleMessage: vi.fn().mockResolvedValue(undefined),
+      getHealthSnapshot: vi.fn().mockReturnValue({ ok: true, checks: {} } as any),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      setDurability: vi.fn(),
+      ...overrides,
+    } as Runtime;
+  }
+
+  // ----- handleAdminCommand — normalize-mismatch path (10-digit subject) -----
+
+  it('ALLOW with 10-digit subject flips the full-digit access row (normalize mismatch path)', async () => {
+    const { config } = await import('../../src/config.ts');
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 0;
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+    // Pending row stored under the FULL E.164 key the resolver produces.
+    insertPending(db, 'phone', '15551230010', 'MismatchUser');
+
+    // Admin types the 10-digit form — normalizePhoneE164 !== subjectId.
+    await handleAdminCommand(
+      db, messenger, 'allow', 'phone', '5551230010',
+      ADMIN_CHAT_JID, vi.fn().mockResolvedValue(undefined),
+    );
+
+    const entry = lookupAccess(db, 'phone', '15551230010');
+    expect(entry!.status).toBe('allowed');
+  });
+
+  // ----- handleAdminCommand — LID reverse-lookup path -----
+
+  it('ALLOW replays messages stored under a LID JID that maps to the allowed phone', async () => {
+    const { config } = await import('../../src/config.ts');
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 0;
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    // Seed a LID→phone mapping directly into lid_mappings.
+    db.raw.prepare(
+      "INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))",
+    ).run('1555999001', '15557770010@s.whatsapp.net');
+
+    // Queue an inbound message whose sender_jid is the LID JID.
+    storeMessageIfNew(db, {
+      chatJid: '1555999001@lid',
+      conversationKey: '1555999001',
+      senderJid: '1555999001@lid',
+      senderName: 'LidUser',
+      messageId: 'lid-replay-001',
+      content: 'via lid',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700040000,
+    });
+
+    const handleMessageFn = vi.fn().mockResolvedValue(undefined);
+    await handleAdminCommand(
+      db, messenger, 'allow', 'phone', '15557770010',
+      ADMIN_CHAT_JID, handleMessageFn,
+    );
+
+    const replayed = handleMessageFn.mock.calls.map((c: any[]) => c[0].messageId as string);
+    expect(replayed).toContain('lid-replay-001');
+  });
+
+  // ----- handleAdminCommand — SMS-stored queued message path -----
+
+  it('ALLOW replays messages stored under the +<digits>@sms sender form', async () => {
+    const { config } = await import('../../src/config.ts');
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 0;
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    // Queue an inbound whose sender_jid is the SMS form.
+    storeMessageIfNew(db, {
+      chatJid: '+15556660010@s.whatsapp.net',
+      conversationKey: '15556660010',
+      senderJid: '+15556660010@sms',
+      senderName: 'SmsUser',
+      messageId: 'sms-replay-001',
+      content: 'via sms',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700050000,
+    });
+
+    const handleMessageFn = vi.fn().mockResolvedValue(undefined);
+    await handleAdminCommand(
+      db, messenger, 'allow', 'phone', '15556660010',
+      ADMIN_CHAT_JID, handleMessageFn,
+    );
+
+    const replayed = handleMessageFn.mock.calls.map((c: any[]) => c[0].messageId as string);
+    expect(replayed).toContain('sms-replay-001');
+  });
+
+  // ----- resolveAdminChatJid — SMS-row path (via sendApprovalRequest) -----
+
+  it('sendApprovalRequest resolves the admin JID from an SMS sender row', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    // Store an inbound message whose chat_jid/sender_jid is the admin's SMS JID.
+    storeMessageIfNew(db, {
+      chatJid: '+15550100001@s.whatsapp.net',
+      conversationKey: '15550100001',
+      senderJid: '+15550100001@sms',
+      senderName: 'AdminSms',
+      messageId: 'admin-sms-row-001',
+      content: 'hi',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700060000,
+    });
+
+    await sendApprovalRequest(db, messenger, '15550000999', 'SmsResolved', 'hello');
+
+    // Admin JID must be the SMS row's chat_jid.
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      '+15550100001@s.whatsapp.net',
+      expect.stringContaining('SmsResolved'),
+    );
+  });
+
+  // ----- resolveAdminChatJid — WhatsApp LIKE-prefix path -----
+
+  it('sendApprovalRequest resolves the admin JID from a WhatsApp sender LIKE match', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    storeMessageIfNew(db, {
+      chatJid: '15550100001@s.whatsapp.net',
+      conversationKey: '15550100001',
+      senderJid: '15550100001@s.whatsapp.net',
+      senderName: 'AdminWa',
+      messageId: 'admin-wa-row-001',
+      content: 'hi',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700060001,
+    });
+
+    await sendApprovalRequest(db, messenger, '15550000888', 'WaResolved', 'hi');
+
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      '15550100001@s.whatsapp.net',
+      expect.stringContaining('WaResolved'),
+    );
+  });
+
+  // ----- resolveAdminChatJid — LID-row path -----
+
+  it('sendApprovalRequest resolves the admin JID via a LID that maps to an admin phone', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    // Map a LID to the admin phone.
+    db.raw.prepare(
+      "INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))",
+    ).run('1555777001', '15550100001@s.whatsapp.net');
+
+    // Store a message whose sender_jid is the LID JID form.
+    storeMessageIfNew(db, {
+      chatJid: '1555777001@lid',
+      conversationKey: '1555777001',
+      senderJid: '1555777001@lid',
+      senderName: 'AdminLid',
+      messageId: 'admin-lid-row-001',
+      content: 'hi',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700060002,
+    });
+
+    await sendApprovalRequest(db, messenger, '15550000777', 'LidResolved', 'hi');
+
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      '1555777001@lid',
+      expect.stringContaining('LidResolved'),
+    );
+  });
+
+  // ----- resolveAdminChatJid — no admin phones → returns null → no send -----
+
+  it('sendApprovalRequest does not send when config.adminPhones is empty', async () => {
+    const { config } = await import('../../src/config.ts');
+    const original = (config as any).adminPhones;
+    (config as any).adminPhones = new Set<string>();
+    try {
+      const db = openDb();
+      const messenger = makeMockMessenger();
+
+      await sendApprovalRequest(db, messenger, '15550000666', 'NoAdmin', 'hi');
+
+      expect(messenger.sendMessage).not.toHaveBeenCalled();
+      // The pending row IS still inserted — assert that concretely.
+      const entry = lookupAccess(db, 'phone', '15550000666');
+      expect(entry!.status).toBe('pending');
+    } finally {
+      (config as any).adminPhones = original;
+    }
+  });
+
+  // ----- resolveAdminChatJid — twilio fallback synthesis -----
+
+  it('sendApprovalRequest synthesises a +<digits>@sms admin JID on the twilio transport', async () => {
+    const { config } = await import('../../src/config.ts');
+    const originalTransport = (config as any).transport;
+    (config as any).transport = 'twilio';
+    try {
+      const db = openDb();
+      const messenger = makeMockMessenger();
+
+      await sendApprovalRequest(db, messenger, '15550000555', 'TwilioResolved', 'hi');
+
+      // Synthesized JID is the @sms form of the first admin phone.
+      const sentTarget = messenger.sendMessage.mock.calls[0][0] as string;
+      expect(sentTarget).toBe('+15550100001@sms');
+      expect(messenger.sendMessage).toHaveBeenCalledWith(
+        '+15550100001@sms',
+        expect.stringContaining('TwilioResolved'),
+      );
+    } finally {
+      (config as any).transport = originalTransport;
+    }
+  });
+
+  // ----- resolveAdminChatJid — personal JID fallback (default transport) -----
+
+  it('sendApprovalRequest synthesises a personal @s.whatsapp.net admin JID by default', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    await sendApprovalRequest(db, messenger, '15550000444', 'PersonalResolved', 'hi');
+
+    expect(messenger.sendMessage).toHaveBeenCalledWith(
+      '15550100001@s.whatsapp.net',
+      expect.stringContaining('PersonalResolved'),
+    );
+  });
+
+  // ----- handleFallbackCommand — help -----
+
+  it('handleFallbackCommand help replies with the fallback command summary', async () => {
+    const runtime = makeRuntime();
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'help' }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('FALLBACK ON');
+    expect(sentText).toContain('FALLBACK OFF');
+  });
+
+  // ----- handleFallbackCommand — status (unsupported) -----
+
+  it('handleFallbackCommand status on a runtime without getFallbackState replies "not supported"', async () => {
+    const runtime = makeRuntime(); // no getFallbackState
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'status' }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('not supported');
+  });
+
+  // ----- handleFallbackCommand — status (supported, with chain + probes + activations + cost) -----
+
+  it('handleFallbackCommand status reports provider, window, chain, probes, activations and cost', async () => {
+    const runtime = makeRuntime({
+      getFallbackState: () => ({
+        effectiveProvider: 'fallback-provider',
+        fallbackActiveUntil: Date.now() + 120 * 60_000, // 2h → hours branch of formatRelativeWindow
+        fallbackTurnsServed: 3,
+        fallbackTurnsEmpty: 1,
+        lastFallbackTurnAt: null,
+        probeAttempts: 2,
+        fallbackActivations: 4,
+        fallbackReverts: 2,
+        fallbackWindowCostUsd: 1.5,
+        fallbackChain: [
+          { provider: 'openai', model: 'gpt-4', eligible: true },
+          { provider: 'anthropic', model: null as any, eligible: false },
+          { provider: 'google', model: 'gemini', eligible: null as any },
+        ] as any,
+      }),
+    });
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'status' }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('Provider: fallback-provider');
+    expect(sentText).toContain('chain:');
+    expect(sentText).toContain('openai gpt-4 (ready)');
+    expect(sentText).toContain('anthropic (unavailable)');
+    expect(sentText).toContain('google gemini (unknown)');
+    expect(sentText).toContain('probes: 2');
+    expect(sentText).toContain('activations: 4');
+    expect(sentText).toContain('reverts: 2');
+    expect(sentText).toContain('window cost: $1.50');
+    // hours branch: 120 minutes rounds to ≈2h
+    expect(sentText).toMatch(/≈2h/);
+  });
+
+  // ----- handleFallbackCommand — status (supported, minutes window, no chain, no probes/activations/cost) -----
+
+  it('handleFallbackCommand status uses minutes window and omits absent counters', async () => {
+    const runtime = makeRuntime({
+      getFallbackState: () => ({
+        effectiveProvider: 'primary',
+        fallbackActiveUntil: Date.now() + 10 * 60_000, // 10min → minutes branch
+        fallbackTurnsServed: 0,
+        fallbackTurnsEmpty: 0,
+        lastFallbackTurnAt: null,
+        fallbackChain: [] as any,
+      }),
+    });
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'status' }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('Provider: primary');
+    expect(sentText).toMatch(/≈10m/);
+    expect(sentText).not.toContain('probes:');
+    expect(sentText).not.toContain('activations:');
+    expect(sentText).not.toContain('window cost:');
+  });
+
+  // ----- handleFallbackCommand — status with no active window → window: none -----
+
+  it('handleFallbackCommand status reports window "none" when no fallback is active', async () => {
+    const runtime = makeRuntime({
+      getFallbackState: () => ({
+        effectiveProvider: 'primary',
+        fallbackActiveUntil: null,
+        fallbackTurnsServed: 0,
+        fallbackTurnsEmpty: 0,
+        lastFallbackTurnAt: null,
+      }),
+    });
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'status' }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('window: none');
+  });
+
+  // ----- handleFallbackCommand — on (unsupported) -----
+
+  it('handleFallbackCommand ON on a runtime without forceFallback replies "not supported"', async () => {
+    const runtime = makeRuntime(); // no forceFallback
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'on' }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('not supported');
+  });
+
+  // ----- handleFallbackCommand — on (failed) -----
+
+  it('handleFallbackCommand ON forwards the failure reason when forceFallback returns !ok', async () => {
+    const runtime = makeRuntime({
+      forceFallback: vi.fn().mockReturnValue({ ok: false, reason: 'cooldown active' }),
+    });
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'on', durationMs: 60_000 }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('Cannot force fallback');
+    expect(sentText).toContain('cooldown active');
+    expect(runtime.forceFallback).toHaveBeenCalledWith(60_000);
+  });
+
+  // ----- handleFallbackCommand — on (ok, clamped) -----
+
+  it('handleFallbackCommand ON reports clamping when forceFallback clamps the duration', async () => {
+    const until = Date.now() + 3_600_000;
+    const runtime = makeRuntime({
+      forceFallback: vi.fn().mockReturnValue({ ok: true, activeUntil: until, clamped: true }),
+    });
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'on' }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('Fallback forced until');
+    expect(sentText).toContain('duration clamped');
+  });
+
+  // ----- handleFallbackCommand — on (ok, not clamped) -----
+
+  it('handleFallbackCommand ON does not mention clamping when forceFallback is not clamped', async () => {
+    const until = Date.now() + 1_800_000;
+    const runtime = makeRuntime({
+      forceFallback: vi.fn().mockReturnValue({ ok: true, activeUntil: until, clamped: false }),
+    });
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'on', durationMs: 1_800_000 }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('Fallback forced until');
+    expect(sentText).not.toContain('clamped');
+  });
+
+  // ----- handleFallbackCommand — off (unsupported) -----
+
+  it('handleFallbackCommand OFF on a runtime without disableFallback replies "not supported"', async () => {
+    const runtime = makeRuntime(); // no disableFallback
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'off' }, ADMIN_CHAT_JID,
+    );
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('not supported');
+  });
+
+  // ----- handleFallbackCommand — off (ok) -----
+
+  it('handleFallbackCommand OFF disables fallback and confirms to the admin', async () => {
+    const disableFallback = vi.fn().mockReturnValue({ ok: true });
+    const runtime = makeRuntime({ disableFallback });
+    const messenger = makeMockMessenger();
+    await handleFallbackCommand(
+      runtime, messenger, { action: 'fallback', sub: 'off' }, ADMIN_CHAT_JID,
+    );
+    expect(disableFallback).toHaveBeenCalledOnce();
+    const sentText = messenger.sendMessage.mock.calls[0][1] as string;
+    expect(sentText).toContain('Fallback disabled');
+    expect(sentText).toContain('primary provider active');
   });
 });
