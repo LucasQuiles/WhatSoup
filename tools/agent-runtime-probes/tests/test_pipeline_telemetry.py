@@ -355,6 +355,24 @@ def test_summarize_aggregates_tokens_and_flags_unbacked():
     assert report["proof_class_rollup"]["heuristic"] == 1
     assert report["proof_class_rollup"]["unknown"] == 1
 
+    # I2: the "opaque" step has unknown tokens, so the totals are a PARTIAL sum and must self-label it.
+    assert report["token_totals_complete"] is False
+
+
+def test_summarize_token_totals_complete_when_every_step_known():
+    # all steps carry numeric token counts -> the totals cover every step
+    recs = [
+        pt.record_mutation(step="mask", plane="enricher", mutation_class="sanitize",
+                           usage_before={"input_tokens": 100}, usage_after={"input_tokens": 90}),
+        pt.record_mutation(step="compress", plane="reducer", mutation_class="compression",
+                           usage_before={"input_tokens": 90}, usage_after={"input_tokens": 50}),
+    ]
+    report = pt.summarize(recs)
+    assert report["unknown_token_steps"] == 0
+    assert report["token_totals_complete"] is True
+    # and an empty pipeline is NOT complete (no data to total)
+    assert pt.summarize([])["token_totals_complete"] is False
+
 
 def test_summarize_all_unknown_tokens_reports_unknown_not_zero():
     # UNHAPPY: a pipeline of only unknown-token steps must not sum to a misleading 0.

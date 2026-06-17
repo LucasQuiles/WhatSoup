@@ -353,7 +353,9 @@ def summarize(records: list[dict]) -> dict:
     as an unknown step, never silently treated as 0). Computes per-plane token deltas, a
     compact per-step view, the list of UNBACKED claims (steps asserting a claim with no
     evidence_ref — the audit signal), reversibility coverage, the heuristic-token
-    fraction, the count of unknown-token steps, and a proof-class rollup.
+    fraction, the count of unknown-token steps, and a proof-class rollup. The token totals sum ONLY the
+    known-token steps, so `token_totals_complete` self-labels whether they cover every step (false when any
+    step's tokens were unknown — the totals are then a partial sum, count in `unknown_token_steps`).
     """
     step_count = len(records)
     total_tokens_in = 0
@@ -453,6 +455,10 @@ def summarize(records: list[dict]) -> dict:
         "total_tokens_in": total_tokens_in if in_known else PROOF_UNKNOWN,
         "total_tokens_out": total_tokens_out if out_known else PROOF_UNKNOWN,
         "net_token_delta": net_delta if net_known else PROOF_UNKNOWN,
+        # I2: the totals SUM ONLY the steps with known token counts; when any step's tokens are unknown the
+        # totals are a PARTIAL sum over the known subset. Self-label that so a consumer never mistakes a
+        # partial sum for a complete one (the count of skipped steps is `unknown_token_steps`).
+        "token_totals_complete": step_count > 0 and unknown_token_steps == 0,
         "per_plane": per_plane,
         "per_step": per_step,
         "unbacked_claims": unbacked_claims,
