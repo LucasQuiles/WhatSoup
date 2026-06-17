@@ -91,6 +91,7 @@ import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { TurnQueue, type QueuedTurn } from './turn-queue.ts';
 import { CrashTracker } from './crash-tracker.ts';
 import { AutoCompactController, AUTO_COMPACT_RAPID_REARM_WINDOW_MS } from './auto-compact-controller.ts';
+import { ImageCoalescer } from './image-coalescer.ts';
 import { config } from '../../config.ts';
 import { resolvePhoneFromJid } from '../../core/access-list.ts';
 import { isAdminPhone } from '../../lib/phone.ts';
@@ -1577,12 +1578,14 @@ export class AgentRuntime implements Runtime {
   // per-image dimension limits in multi-image sessions.
   private static readonly IMAGE_COALESCE_MS = 3_000;
   private static readonly MAX_COALESCE_BATCH = 20;
-  private imageCoalesceBuffers: Map<string, {
-    texts: string[];
-    timer: ReturnType<typeof setTimeout>;
-    msg: IncomingMessage;
-    inboundSeqs: number[];
-  }> = new Map();
+  // Owns the per-chat image coalesce buffer map + durability marking / abort.
+  // The turn-pipeline methods (coalesceImageTurn / flushImageCoalesce / LID rekey)
+  // stay here and drive this.imageCoalesce.buffers directly. durability and
+  // replyGuarantee are late-bound, so they are read through getter thunks.
+  private readonly imageCoalesce = new ImageCoalescer(
+    () => this.durability,
+    () => this.replyGuarantee,
+  );
 
   // Set of mapKeys for which handleResumeFailed is currently managing context
   // injection + pending-turn replay. Used to suppress context injection in any
@@ -1602,35 +1605,8 @@ export class AgentRuntime implements Runtime {
     return created;
   }
 
-  private markImageCoalesceSeqsSkipped(mapKey: string, inboundSeqs: number[], reason: string): void {
-    if (!this.durability) return;
-    for (const seq of inboundSeqs) {
-      try {
-        this.replyGuarantee?.disarm(seq);
-        this.durability.markInboundSkipped(seq, reason);
-      } catch (err) {
-        log.warn({ err, mapKey, seq, reason }, 'failed to mark image coalesce seq skipped');
-      }
-    }
-  }
-
-  private markImageCoalesceSeqFailed(mapKey: string, seq: number): void {
-    if (!this.durability) return;
-    try {
-      this.replyGuarantee?.disarm(seq);
-      this.durability.markInboundFailed(seq);
-    } catch (err) {
-      log.warn({ err, mapKey, seq }, 'failed to mark image coalesce representative seq failed');
-    }
-  }
-
   private abortImageCoalesceBuffer(mapKey: string, reason: string): boolean {
-    const imgBuf = this.imageCoalesceBuffers.get(mapKey);
-    if (!imgBuf) return false;
-    clearTimeout(imgBuf.timer);
-    this.imageCoalesceBuffers.delete(mapKey);
-    this.markImageCoalesceSeqsSkipped(mapKey, imgBuf.inboundSeqs, reason);
-    return true;
+    return this.imageCoalesce.abort(mapKey, reason);
   }
 
   /**
@@ -1681,7 +1657,7 @@ export class AgentRuntime implements Runtime {
    * logic in handleEventPerChat.
    */
   private async coalesceImageTurn(mapKey: string, chatJid: string, text: string, msg: IncomingMessage): Promise<void> {
-    const existing = this.imageCoalesceBuffers.get(mapKey);
+    const existing = this.imageCoalesce.buffers.get(mapKey);
     if (existing) {
       // More images arriving — append and reset timer
       existing.texts.push(text);
@@ -1701,7 +1677,7 @@ export class AgentRuntime implements Runtime {
     } else {
       // First image — start the coalesce window
       const timer = setTimeout(() => void this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
-      this.imageCoalesceBuffers.set(mapKey, {
+      this.imageCoalesce.buffers.set(mapKey, {
         texts: [text],
         timer,
         msg,
@@ -1729,11 +1705,11 @@ export class AgentRuntime implements Runtime {
       return;
     }
 
-    const entry = this.imageCoalesceBuffers.get(mapKey);
+    const entry = this.imageCoalesce.buffers.get(mapKey);
     if (!entry) return;
 
     clearTimeout(entry.timer);
-    this.imageCoalesceBuffers.delete(mapKey);
+    this.imageCoalesce.buffers.delete(mapKey);
 
     const { texts, msg, inboundSeqs } = entry;
     const chatJid = msg.chatJid;
@@ -1744,7 +1720,7 @@ export class AgentRuntime implements Runtime {
     try {
       // Mark all-but-last inbound seqs as coalesced (they won't get their own turn)
       if (inboundSeqs.length > 1) {
-        this.markImageCoalesceSeqsSkipped(mapKey, inboundSeqs.slice(0, -1), 'coalesced_image');
+        this.imageCoalesce.markSeqsSkipped(mapKey, inboundSeqs.slice(0, -1), 'coalesced_image');
       }
 
       // Push only the representative (last) seq onto the per-chat queue
@@ -1779,7 +1755,7 @@ export class AgentRuntime implements Runtime {
           if (seqQueue && idx >= 0) seqQueue.splice(idx, 1);
           if (seqQueue?.length === 0) this.perChatInboundSeqQueue.delete(mapKey);
         }
-        this.markImageCoalesceSeqFailed(mapKey, representativeSeq);
+        this.imageCoalesce.markSeqFailed(mapKey, representativeSeq);
       }
       this.pendingTurnText.delete(mapKey);
       this.pendingTurnActorJid.delete(mapKey);
@@ -2044,7 +2020,7 @@ export class AgentRuntime implements Runtime {
             this.persistPendingPoll(canonical, pendingPoll);
             this.startPendingPollExpiry(canonical, pendingPoll);
           }
-          const imageBuffer = this.imageCoalesceBuffers.get(lidKey);
+          const imageBuffer = this.imageCoalesce.buffers.get(lidKey);
           if (imageBuffer) {
             clearTimeout(imageBuffer.timer);
             imageBuffer.timer = setTimeout(
@@ -2052,8 +2028,8 @@ export class AgentRuntime implements Runtime {
               AgentRuntime.IMAGE_COALESCE_MS,
             );
             imageBuffer.msg = { ...imageBuffer.msg, chatJid: newJid };
-            this.imageCoalesceBuffers.delete(lidKey);
-            this.imageCoalesceBuffers.set(canonical, imageBuffer);
+            this.imageCoalesce.buffers.delete(lidKey);
+            this.imageCoalesce.buffers.set(canonical, imageBuffer);
           }
           this.cleanupPerChatState(lidKey);
           log.info({ lidKey, canonical, newJid }, 'per_chat: re-keyed session and all maps after LID resolution');
@@ -5139,7 +5115,7 @@ export class AgentRuntime implements Runtime {
       const perChatKeys = new Set<string>([
         ...this.chatSessions.keys(),
         ...this.chatQueues.keys(),
-        ...this.imageCoalesceBuffers.keys(),
+        ...this.imageCoalesce.buffers.keys(),
       ]);
       for (const [chatJid, session] of this.chatSessions) {
         try { await session.shutdown(); } catch (err) { log.warn({ err, chatJid }, 'per_chat session shutdown failed'); }
@@ -5235,7 +5211,7 @@ export class AgentRuntime implements Runtime {
     }, 'workspace resources stopped in shutdown');
     this.workspaceResources.clear();
 
-    for (const mapKey of [...this.imageCoalesceBuffers.keys()]) {
+    for (const mapKey of [...this.imageCoalesce.buffers.keys()]) {
       this.abortImageCoalesceBuffer(mapKey, 'cleanup_aborted');
     }
 
@@ -5258,7 +5234,7 @@ export class AgentRuntime implements Runtime {
     this.currentTurnReplayText = null;
     this.currentTurnReplayActorJid = undefined;
     this.resumeFailedHandling.clear();
-    this.imageCoalesceBuffers.clear();
+    this.imageCoalesce.buffers.clear();
 
     log.info({
       instanceName: this.instanceName,
