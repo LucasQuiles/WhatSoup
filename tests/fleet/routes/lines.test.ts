@@ -1,6 +1,14 @@
 /**
  * Tests for src/fleet/routes/lines.ts
  */
+vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/lib/keyring.ts')>();
+  return {
+    ...actual,
+    lookupCredential: vi.fn(),
+  };
+});
+
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -10,8 +18,10 @@ import {
   _resetLineCaches,
   handleGetLines,
   handleGetLine,
+  handleGetLineProviderStatus,
 } from '../../../src/fleet/routes/lines.ts';
 import type { LinesDeps } from '../../../src/fleet/routes/lines.ts';
+import { lookupCredential } from '../../../src/lib/keyring.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import type { InstanceStatus } from '../../../src/fleet/health-poller.ts';
 import { mockReq, mockRes } from '../../helpers/http-mocks.ts';
@@ -77,8 +87,11 @@ function makeDeps(overrides: Partial<LinesDeps> = {}): LinesDeps {
   };
 }
 
+const mockedLookup = vi.mocked(lookupCredential);
+
 beforeEach(() => {
   _resetLineCaches();
+  mockedLookup.mockReset();
 });
 
 // ---------------------------------------------------------------------------
@@ -1326,6 +1339,329 @@ describe('handleGetLine config and adminPhones', () => {
       await handleGetLine(mockReq(), res, deps, { name: 'shortph' });
       expect(res._status).toBe(200);
       expect(JSON.parse(res._body).adminPhonesDisplay).toBeUndefined();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleGetLineProviderStatus — uncovered-branch coverage
+// ---------------------------------------------------------------------------
+
+describe('lines.ts uncovered-branch coverage', () => {
+  function providerConfig(
+    configPath: string,
+    agentOptions: Record<string, unknown>,
+  ): { inst: DiscoveredInstance; deps: LinesDeps } {
+    fs.writeFileSync(configPath, JSON.stringify({ agentOptions }));
+    const inst = fakeInstance({ name: 'ps-line', type: 'agent', configPath });
+    const deps = makeDeps({
+      discovery: {
+        getInstance: vi.fn(() => inst),
+        getInstances: vi.fn(() => new Map([['ps-line', inst]])),
+      } as any,
+      healthPoller: { getStatus: vi.fn(), getStatuses: vi.fn() } as any,
+    });
+    return { inst, deps };
+  }
+
+  it('returns 404 for an unknown instance in provider-status', async () => {
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => undefined), getInstances: vi.fn() } as any,
+      healthPoller: { getStatus: vi.fn(), getStatuses: vi.fn() } as any,
+    });
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ghost' });
+    expect(res._status).toBe(404);
+    expect(JSON.parse(res._body).error).toMatch(/not found/);
+  });
+
+  it('reports keyPresent:null for a native-auth claude-cli primary provider', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { deps } = providerConfig(configPath, { provider: 'claude-cli' });
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.primary).toMatchObject({ provider: 'claude-cli', keyPresent: null });
+      expect(body.fallback).toMatchObject({ provider: null, keyPresent: null, active: false });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports keyPresent:true for openai-api primary when keyring resolves the key', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { deps } = providerConfig(configPath, {
+        provider: 'openai-api',
+        providerConfig: { model: 'gpt-4o' },
+      });
+      mockedLookup.mockImplementation((service: string) =>
+        service === 'openai' ? 'openai-key-present-stub' : null,
+      );
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.primary).toMatchObject({ provider: 'openai-api', model: 'gpt-4o', keyPresent: true });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports keyPresent:false for anthropic-api when keyring has no key', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { deps } = providerConfig(configPath, {
+        provider: 'anthropic-api',
+        model: 'claude-x',
+      });
+      mockedLookup.mockReturnValue(null);
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.primary).toMatchObject({ provider: 'anthropic-api', model: 'claude-x', keyPresent: false });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to defaults when the config file is unreadable (catch branch)', async () => {
+    const inst = fakeInstance({
+      name: 'ps-broken',
+      type: 'agent',
+      configPath: path.join(os.tmpdir(), 'definitely-missing-config-xyz.json'),
+    });
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
+      healthPoller: { getStatus: vi.fn(), getStatuses: vi.fn() } as any,
+    });
+    const res = mockRes();
+    await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-broken' });
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    // agent type with no readable config → defaults to claude-cli (native-auth → null)
+    expect(body.primary).toMatchObject({ provider: 'claude-cli', keyPresent: null });
+  });
+
+  it('exposes a configured fallback chain with eligibility inherited from config (no health chain)', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          agentOptions: {
+            provider: 'openai-api',
+            providerConfig: { model: 'gpt-4o' },
+            fallbacks: [
+              { provider: 'anthropic-api', model: 'claude-x' },
+              { provider: 'claude-cli' },
+            ],
+          },
+        }),
+      );
+      const inst = fakeInstance({ name: 'ps-fb', type: 'agent', configPath });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
+        healthPoller: { getStatus: vi.fn(), getStatuses: vi.fn() } as any,
+      });
+      mockedLookup.mockReturnValue('openai-key-present-stub');
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-fb' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.fallback).toMatchObject({
+        provider: 'anthropic-api',
+        model: 'claude-x',
+        keyPresent: true,
+        chain: [
+          { provider: 'anthropic-api', model: 'claude-x', eligible: null },
+          { provider: 'claude-cli', model: null, eligible: null },
+        ],
+      });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reflects an active fallback window from the health snapshot and activeFallbackEntry', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { inst, deps } = providerConfig(configPath, { provider: 'claude-cli' });
+      const future = Date.now() + 60_000;
+      (deps.healthPoller.getStatus as any) = vi.fn(() =>
+        fakeStatus({
+          name: 'ps-line',
+          status: 'online',
+          health: {
+            uptime: 1,
+            instance: {
+              fallbackActiveUntil: future,
+              effectiveProvider: 'openai-api',
+              fallbackReason: 'primary_key_missing',
+              fallbackResetAt: future + 3_600_000,
+              fallbackRecoveryProbeRequired: true,
+              fallbackTurnsServed: 7,
+              fallbackTurnsEmpty: 2,
+              lastFallbackTurnAt: 1_700_000_000_000,
+              probeAttempts: 3,
+              lastProbeAt: 1_700_000_001_000,
+              fallbackWindowCostUsd: 0.42,
+              fallbackActivations: 5,
+              fallbackReverts: 1,
+              fallbackReplays: 2,
+              activeFallbackEntry: { provider: 'openai-api', model: 'gpt-4o' },
+              fallbackChain: [
+                { provider: 'openai-api', model: 'gpt-4o', eligible: true },
+                { provider: 'claude-cli', model: null, eligible: false },
+              ],
+            },
+          },
+        }),
+      );
+      void inst;
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      expect(body.fallback).toMatchObject({
+        active: true,
+        effectiveProvider: 'openai-api',
+        reason: 'primary_key_missing',
+        recoveryProbeRequired: true,
+        turnsServed: 7,
+        turnsEmpty: 2,
+        probeAttempts: 3,
+        windowCostUsd: 0.42,
+        activations: 5,
+        reverts: 1,
+        replays: 2,
+        activeEntry: { provider: 'openai-api', model: 'gpt-4o' },
+        chain: [
+          { provider: 'openai-api', model: 'gpt-4o', eligible: true },
+          { provider: 'claude-cli', model: null, eligible: false },
+        ],
+      });
+      expect(body.signal).toMatchObject({
+        status: 'online',
+        confidence: 'confirmed',
+        reason: 'health_body_ok',
+        evidence: ['health_status=healthy'],
+      });
+      expect(body.lineReachable).toBe(true);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports lineReachable:false for a degraded instance with an error', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { deps } = providerConfig(configPath, { provider: 'claude-cli' });
+      (deps.healthPoller.getStatus as any) = vi.fn(() =>
+        fakeStatus({
+          name: 'ps-line',
+          status: 'degraded',
+          error: 'upstream 503',
+          health: null,
+        }),
+      );
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      const body = JSON.parse(res._body);
+      expect(body.lineReachable).toBe(false);
+      expect(body.signal).toMatchObject({ status: 'degraded', reason: 'health_body_ok' });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports lineReachable:true for a degraded instance with no error and a health body', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { deps } = providerConfig(configPath, { provider: 'claude-cli' });
+      (deps.healthPoller.getStatus as any) = vi.fn(() =>
+        fakeStatus({
+          name: 'ps-line',
+          status: 'degraded',
+          error: null,
+          health: { uptime: 5 },
+        }),
+      );
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      const body = JSON.parse(res._body);
+      expect(body.lineReachable).toBe(true);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports lineReachable:false for an offline status (terminal return-false arm)', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { deps } = providerConfig(configPath, { provider: 'claude-cli' });
+      (deps.healthPoller.getStatus as any) = vi.fn(() =>
+        fakeStatus({
+          name: 'ps-line',
+          status: 'unreachable',
+          health: { uptime: 1 },
+        }),
+      );
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      const body = JSON.parse(res._body);
+      expect(body.lineReachable).toBe(false);
+      expect(body.signal).toMatchObject({ status: 'unreachable' });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports not_polled signal when the poller has no status for the line', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      const { deps } = providerConfig(configPath, { provider: 'claude-cli' });
+      // getStatus already returns undefined by default from makeDeps
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-line' });
+      const body = JSON.parse(res._body);
+      expect(body.signal).toEqual({ status: null, confidence: null, reason: 'not_polled', evidence: [] });
+      expect(body.lineReachable).toBe(false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a config that parses to a non-object (array) as empty (line 673 branch)', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-ps-'));
+    try {
+      const configPath = path.join(tmp, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify(['not-an-object']));
+      const inst = fakeInstance({ name: 'ps-arr', type: 'chat', configPath });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
+        healthPoller: { getStatus: vi.fn(), getStatuses: vi.fn() } as any,
+      });
+      const res = mockRes();
+      await handleGetLineProviderStatus(mockReq(), res, deps, { name: 'ps-arr' });
+      expect(res._status).toBe(200);
+      const body = JSON.parse(res._body);
+      // non-agent type with no readable object config → provider null (line 680 false branch)
+      expect(body.primary).toMatchObject({ provider: null, keyPresent: null });
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
