@@ -77,11 +77,31 @@ def _ordered_atts(records: list):
     return atts, report
 
 
-def _signed_message(atts: list) -> bytes:
-    """The exact bytes the MAC is taken over: domain tag + canonical (chain_id, count, ordered hashes).
+def _canonical_outcome(outcome) -> dict:
+    """Normalize a terminal-outcome marker to the fixed-key form bound by the MAC. Fail-closed on a
+    marker with no string status. Only the three semantic fields are bound (status / failed_at_step /
+    failure_class) — that is the full semantic content `chain_outcome_gate` validates."""
+    if not isinstance(outcome, dict):
+        raise AuthenticityError("malformed_outcome", "outcome must be a dict")
+    status = outcome.get("status")
+    if not isinstance(status, str) or not status:
+        raise AuthenticityError("malformed_outcome", "outcome.status must be a non-empty string")
+    return {
+        "status": status,
+        "failed_at_step": outcome.get("failed_at_step"),
+        "failure_class": outcome.get("failure_class"),
+    }
+
+
+def _signed_message(atts: list, outcome_canonical: dict | None = None) -> bytes:
+    """The exact bytes the MAC is taken over: domain tag + canonical (chain_id, count, ordered hashes),
+    plus the terminal-outcome marker when one is bound.
 
     Binding EVERY record hash in order (not just the terminal hash) makes truncation, extension, and
-    reorder all detectable independently of the hash-chain's own continuity checks."""
+    reorder all detectable independently of the hash-chain's own continuity checks. When an outcome
+    marker is bound, an outcome RELABEL (completed<->failed, status swap, stripped marker) also breaks
+    the MAC — closing the gap that `chain_outcome_gate` (structural-consistency only) cannot. When NO
+    outcome is bound the body is byte-identical to the original (older signatures still verify)."""
     body = {
         "schema": SCHEMA,
         "alg": ALG,
@@ -89,20 +109,25 @@ def _signed_message(atts: list) -> bytes:
         "record_count": len(atts),
         "record_hashes": [a.record_hash for a in atts],
     }
+    if outcome_canonical is not None:
+        body["outcome"] = outcome_canonical
     return SIG_DOMAIN_TAG + mpc.canonical_bytes(body)
 
 
-def sign_chain(records: list, key, signer_label: str = "") -> dict:
+def sign_chain(records: list, key, signer_label: str = "", outcome: dict | None = None) -> dict:
     """Produce a DETACHED authenticity signature over a verified chain. Fail-closed.
 
     Refuses to sign an empty/unverified chain or an empty key. `signer_label` is a NON-SECRET rotation
-    hint only (never derived from the key). The returned object carries NO key material.
-    (Field is `signer_label`, not `key_label`, to avoid the shared redactor blanking it as a secret.)"""
+    hint only (never derived from the key). When `outcome` is supplied, its terminal-outcome marker is
+    bound into the MAC so a later relabel breaks the signature (the marker's authenticity layer over
+    `chain_outcome_gate`'s structural check); when omitted the signature is byte-identical to the
+    pre-outcome scheme. The returned object carries NO key material."""
     kb = _key_bytes(key)
     atts, report = _ordered_atts(records)
     if report["overall_verdict"] != "PASS":
         raise AuthenticityError("unverified_chain", "refusing to sign a chain that does not verify")
-    signature = hmac.new(kb, _signed_message(atts), sha256).hexdigest()
+    oc = _canonical_outcome(outcome) if outcome is not None else None
+    signature = hmac.new(kb, _signed_message(atts, oc), sha256).hexdigest()
     return {
         "schema": SCHEMA, "schema_version": SCHEMA_VERSION, "redaction": REDACTION,
         "alg": ALG, "sig_domain": "CAPE-MPC-SIG-v0",
@@ -110,6 +135,8 @@ def sign_chain(records: list, key, signer_label: str = "") -> dict:
         "record_count": len(atts),
         "terminal_record_hash_16": sha256_16(atts[-1].record_hash),
         "signer_label": signer_label,
+        "outcome_bound": oc is not None,
+        "outcome_status": oc["status"] if oc is not None else None,
         "signature": signature,
     }
 
@@ -120,13 +147,15 @@ _SIG_KEYS = frozenset({
 })
 
 
-def verify_signed_chain(records: list, signature_obj: dict, key) -> dict:
+def verify_signed_chain(records: list, signature_obj: dict, key, outcome: dict | None = None) -> dict:
     """Verify chain integrity AND producer authenticity. Metadata-only, fail-closed.
 
     `authentic` is True only if ALL hold: the chain verifies, the recomputed MAC matches the supplied
-    signature (constant-time), and the signature's bound metadata (alg, record_count, chain_id) agrees
-    with the chain. A tampered chain and a wrong key both yield authentic=False with no oracle as to
-    which (deliberate)."""
+    signature (constant-time), and the signature's bound metadata (alg, record_count, chain_id, and — when
+    an outcome was bound — the outcome marker) agrees with the chain. The caller must present the SAME
+    `outcome` that was signed; presenting a different/absent/relabeled outcome breaks the MAC (the explicit
+    binding checks make that diagnosable rather than a bare signature_mismatch). A tampered chain and a
+    wrong key both yield authentic=False with no oracle as to which (deliberate)."""
     if not isinstance(signature_obj, dict):
         raise AuthenticityError("malformed_signature", "signature_obj must be a dict")
     missing = _SIG_KEYS - set(signature_obj)
@@ -135,6 +164,7 @@ def verify_signed_chain(records: list, signature_obj: dict, key) -> dict:
     kb = _key_bytes(key)
     atts, chain_report = _ordered_atts(records)
     chain_ok = chain_report["overall_verdict"] == "PASS"
+    oc = _canonical_outcome(outcome) if outcome is not None else None
 
     reasons: list = []
     if not chain_ok:
@@ -146,7 +176,14 @@ def verify_signed_chain(records: list, signature_obj: dict, key) -> dict:
     if signature_obj["chain_id_16"] != sha256_16(atts[0].chain_id):
         reasons.append("chain_id_mismatch")
 
-    expected = hmac.new(kb, _signed_message(atts), sha256).hexdigest()
+    # outcome-binding agreement (additive: older signatures have no outcome_bound key -> treated as False)
+    sig_outcome_bound = bool(signature_obj.get("outcome_bound", False))
+    if sig_outcome_bound != (oc is not None):
+        reasons.append("outcome_binding_mismatch")
+    elif oc is not None and signature_obj.get("outcome_status") != oc["status"]:
+        reasons.append("outcome_status_mismatch")
+
+    expected = hmac.new(kb, _signed_message(atts, oc), sha256).hexdigest()
     sig_match = hmac.compare_digest(expected, str(signature_obj["signature"]))
     if not sig_match:
         reasons.append("signature_mismatch")
@@ -154,13 +191,16 @@ def verify_signed_chain(records: list, signature_obj: dict, key) -> dict:
     # authentic requires chain_ok AND a matching MAC AND agreement of the signature's bound metadata.
     # (A metadata mismatch would already have broken sig_match, since the same fields feed the MAC
     # message; the explicit checks make the failure diagnosable rather than a bare signature_mismatch.)
-    meta_ok = not ({"alg_mismatch", "record_count_mismatch", "chain_id_mismatch"} & set(reasons))
+    meta_ok = not ({"alg_mismatch", "record_count_mismatch", "chain_id_mismatch",
+                    "outcome_binding_mismatch", "outcome_status_mismatch"} & set(reasons))
     authentic = chain_ok and sig_match and meta_ok
     return {
         "schema": SCHEMA, "schema_version": SCHEMA_VERSION, "redaction": REDACTION,
         "chain_verdict": chain_report["overall_verdict"],
         "chain_id_16": sha256_16(atts[0].chain_id),
         "record_count": len(atts),
+        "outcome_bound": sig_outcome_bound,
+        "outcome_status": signature_obj.get("outcome_status"),
         "sig_match": sig_match,
         "mac_verified": authentic,  # the producer-authenticity verdict (named to dodge the redactor)
         "reasons": reasons,
@@ -175,6 +215,7 @@ def main() -> int:
     ap.add_argument("--key-file", required=True, help="file whose RAW bytes are the producer secret key")
     ap.add_argument("--signature", help="signature JSON file (required for --mode verify)")
     ap.add_argument("--signer-label", default="", help="non-secret rotation hint stamped into the signature")
+    ap.add_argument("--outcome", help="optional JSON file: terminal-outcome marker to bind into the MAC")
     ap.add_argument("--pretty", action="store_true")
     args = ap.parse_args()
 
@@ -196,14 +237,26 @@ def main() -> int:
                       "_error": f"JSONDecodeError: {exc}", "overall_verdict": "FAIL"}, 1)
     key = kp.read_bytes()
 
+    outcome = None
+    if args.outcome:
+        op = Path(args.outcome)
+        if not op.exists():
+            return _emit({"schema": SCHEMA, "error_type": "missing_outcome",
+                          "_error": "--outcome file not found", "overall_verdict": "FAIL"}, 1)
+        try:
+            outcome = json.loads(op.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return _emit({"schema": SCHEMA, "error_type": "malformed_outcome_json",
+                          "_error": f"JSONDecodeError: {exc}", "overall_verdict": "FAIL"}, 1)
+
     try:
         if args.mode == "sign":
-            return _emit(sign_chain(records, key, signer_label=args.signer_label), 0)
+            return _emit(sign_chain(records, key, signer_label=args.signer_label, outcome=outcome), 0)
         if not args.signature or not Path(args.signature).exists():
             return _emit({"schema": SCHEMA, "error_type": "missing_signature",
                           "_error": "--signature file required for verify", "overall_verdict": "FAIL"}, 1)
         sig = json.loads(Path(args.signature).read_text(encoding="utf-8"))
-        report = verify_signed_chain(records, sig, key)
+        report = verify_signed_chain(records, sig, key, outcome=outcome)
         return _emit(report, 0 if report["overall_verdict"] == "PASS" else 1)
     except AuthenticityError as exc:
         return _emit({"schema": SCHEMA, "error_type": exc.error_type, "_error": exc.message,

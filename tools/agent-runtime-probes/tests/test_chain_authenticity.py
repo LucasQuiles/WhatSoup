@@ -111,6 +111,64 @@ def test_sign_refuses_empty_and_unverified_chains():
 
 # --- verify_signed_chain (the authenticity proof) ------------------------------
 
+def _independent_mac_with_outcome(records, key, outcome):
+    atts = [mpc._record_from_dict(r) for r in records]
+    body = {
+        "schema": ca.SCHEMA, "alg": ca.ALG, "chain_id": atts[0].chain_id,
+        "record_count": len(atts), "record_hashes": [a.record_hash for a in atts],
+        "outcome": {"status": outcome["status"], "failed_at_step": outcome.get("failed_at_step"),
+                    "failure_class": outcome.get("failure_class")},
+    }
+    return hmac.new(key, ca.SIG_DOMAIN_TAG + mpc.canonical_bytes(body), sha256).hexdigest()
+
+
+# --- outcome-marker authentication (closes the chain_outcome_gate relabel gap) -------------------
+
+_FAILED = {"status": "failed", "failed_at_step": 2, "failure_class": "anchor_loss"}
+
+
+def test_outcome_bound_signature_verifies_and_matches_independent_mac():
+    chain = _build_chain()
+    sig = ca.sign_chain(chain, KEY, outcome=_FAILED)
+    assert sig["outcome_bound"] is True and sig["outcome_status"] == "failed"
+    assert sig["signature"] == _independent_mac_with_outcome(chain, KEY, _FAILED)
+    # the no-outcome MAC must DIFFER (binding actually changed the signed bytes)
+    assert sig["signature"] != _independent_mac(chain, KEY)
+    rep = ca.verify_signed_chain(chain, sig, KEY, outcome=_FAILED)
+    assert rep["mac_verified"] is True and rep["reasons"] == [] and rep["outcome_bound"] is True
+
+
+def test_outcome_relabel_breaks_the_mac():
+    chain = _build_chain()
+    sig = ca.sign_chain(chain, KEY, outcome=_FAILED)
+    # an attacker relabels the outcome completed<-failed and presents the original signature
+    rep = ca.verify_signed_chain(chain, sig, KEY, outcome={"status": "completed"})
+    assert rep["mac_verified"] is False
+    assert "outcome_status_mismatch" in rep["reasons"] and "signature_mismatch" in rep["reasons"]
+
+
+def test_stripping_a_bound_outcome_breaks_the_mac():
+    chain = _build_chain()
+    sig = ca.sign_chain(chain, KEY, outcome=_FAILED)
+    rep = ca.verify_signed_chain(chain, sig, KEY)  # verify with NO outcome (marker stripped)
+    assert rep["mac_verified"] is False and "outcome_binding_mismatch" in rep["reasons"]
+
+
+def test_attaching_outcome_to_unbound_signature_breaks_the_mac():
+    chain = _build_chain()
+    sig = ca.sign_chain(chain, KEY)  # signed WITHOUT an outcome (outcome_bound False)
+    rep = ca.verify_signed_chain(chain, sig, KEY, outcome=_FAILED)  # attacker attaches one
+    assert rep["mac_verified"] is False and "outcome_binding_mismatch" in rep["reasons"]
+
+
+def test_malformed_outcome_is_rejected_on_sign_and_verify():
+    chain = _build_chain()
+    assert _err(ca.sign_chain, chain, KEY, "", {}) == "malformed_outcome"          # no status
+    assert _err(ca.sign_chain, chain, KEY, "", {"status": 5}) == "malformed_outcome"
+    sig = ca.sign_chain(chain, KEY, outcome=_FAILED)
+    assert _err(ca.verify_signed_chain, chain, sig, KEY, {"status": ""}) == "malformed_outcome"
+
+
 def test_genuine_signature_is_authentic():
     chain = _build_chain()
     sig = ca.sign_chain(chain, KEY)
@@ -235,6 +293,56 @@ def test_main_sign_then_verify_roundtrip_and_errors():
         bf.write_text(json.dumps(broken), encoding="utf-8")
         rc, rep = _run_main(["--chain", str(bf), "--mode", "sign", "--key-file", str(key_f)])
         assert rc == 1 and rep["error_type"] == "unverified_chain"
+
+
+def test_verify_unverified_chain_reports_reason():
+    # a broken chain still parses but does not verify -> the reason surfaces (not just signature_mismatch)
+    chain = _build_chain()
+    sig = ca.sign_chain(chain, KEY)
+    broken = [dict(r) for r in chain]
+    broken[1]["prev_record_hash"] = "00" * 32
+    rep = ca.verify_signed_chain(broken, sig, KEY)
+    assert rep["mac_verified"] is False and "unverified_chain" in rep["reasons"]
+
+
+def test_main_outcome_bound_roundtrip_and_errors():
+    with tempfile.TemporaryDirectory() as d:
+        dp = Path(d)
+        chain_f = dp / "chain.json"
+        chain_f.write_text(json.dumps(_build_chain()), encoding="utf-8")
+        key_f = dp / "key.bin"
+        key_f.write_bytes(KEY)
+        out_f = dp / "outcome.json"
+        out_f.write_text(json.dumps(_FAILED), encoding="utf-8")
+
+        # sign WITH outcome
+        rc, sig = _run_main(["--chain", str(chain_f), "--mode", "sign", "--key-file", str(key_f),
+                             "--outcome", str(out_f)])
+        assert rc == 0 and sig["outcome_bound"] is True and sig["outcome_status"] == "failed"
+        sig_f = dp / "sig.json"
+        sig_f.write_text(json.dumps(sig), encoding="utf-8")
+
+        # verify WITH the same outcome -> authentic
+        rc, rep = _run_main(["--chain", str(chain_f), "--mode", "verify", "--key-file", str(key_f),
+                             "--signature", str(sig_f), "--outcome", str(out_f)])
+        assert rc == 0 and rep["mac_verified"] is True
+
+        # verify WITHOUT the outcome (stripped) -> FAIL
+        rc, rep = _run_main(["--chain", str(chain_f), "--mode", "verify", "--key-file", str(key_f),
+                             "--signature", str(sig_f)])
+        assert rc == 1 and "outcome_binding_mismatch" in rep["reasons"]
+
+        # --outcome file missing
+        rc, rep = _run_main(["--chain", str(chain_f), "--mode", "sign", "--key-file", str(key_f),
+                             "--outcome", str(dp / "no.json")])
+        assert rc == 1 and rep["error_type"] == "missing_outcome"
+
+        # --outcome malformed JSON
+        bad = dp / "bad.json"
+        bad.write_text("{nope", encoding="utf-8")
+        rc, rep = _run_main(["--chain", str(chain_f), "--mode", "sign", "--key-file", str(key_f),
+                             "--outcome", str(bad)])
+        assert rc == 1 and rep["error_type"] == "malformed_outcome_json"
 
 
 if __name__ == "__main__":
