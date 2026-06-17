@@ -52,7 +52,7 @@ function seedMessage(
     conversation_key?: string;
     sender_jid?: string;
     is_from_me?: number;
-    content?: string;
+    content?: string | null;
   } = {},
 ): string {
   const messageId = overrides.message_id ?? 'msg-001';
@@ -60,11 +60,11 @@ function seedMessage(
     INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content, is_from_me, timestamp)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
-    overrides.chat_jid ?? '1234567890@s.whatsapp.net',
-    overrides.conversation_key ?? '1234567890',
-    overrides.sender_jid ?? '1234567890@s.whatsapp.net',
+    overrides.chat_jid ?? 'main-chat@s.whatsapp.net',
+    overrides.conversation_key ?? 'main-chat',
+    overrides.sender_jid ?? 'main-chat@s.whatsapp.net',
     messageId,
-    overrides.content ?? 'hello',
+    overrides.content === undefined ? 'hello' : overrides.content,
     overrides.is_from_me ?? 0,
     1_700_000_000,
   );
@@ -188,18 +188,18 @@ describe('registerMessagingTools', () => {
 
   describe('send_message', () => {
     it('calls sock.sendMessage with plain text', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call('send_message', { text: 'Hello world' }, session);
 
       expect(result.isError).toBeUndefined();
       expect(calls).toHaveLength(1);
       const call = JSON.parse(calls[0]);
-      expect(call.jid).toBe('1234567890@s.whatsapp.net');
+      expect(call.jid).toBe('main-chat@s.whatsapp.net');
       expect(call.content.text).toBe('Hello world');
     });
 
     it('resolves to alias in a global session and sends to the aliased JID', async () => {
-      seedAlias(db, 'ops', '19876543210@s.whatsapp.net');
+      seedAlias(db, 'ops', 'ops-chat@s.whatsapp.net');
 
       const result = await registry.call(
         'send_message',
@@ -210,7 +210,7 @@ describe('registerMessagingTools', () => {
       expect(result.isError).toBeUndefined();
       expect(calls).toHaveLength(1);
       const call = JSON.parse(calls[0]);
-      expect(call.jid).toBe('19876543210@s.whatsapp.net');
+      expect(call.jid).toBe('ops-chat@s.whatsapp.net');
       expect(call.content.text).toBe('Alias hello');
     });
 
@@ -228,12 +228,12 @@ describe('registerMessagingTools', () => {
     });
 
     it('returns a target error and does not send when chatJid and to are both provided', async () => {
-      seedAlias(db, 'ops', '19876543210@s.whatsapp.net');
+      seedAlias(db, 'ops', 'ops-chat@s.whatsapp.net');
 
       const result = await registry.call(
         'send_message',
         {
-          chatJid: '1234567890@s.whatsapp.net',
+          chatJid: 'main-chat@s.whatsapp.net',
           to: 'ops',
           text: 'Alias hello',
         },
@@ -247,12 +247,12 @@ describe('registerMessagingTools', () => {
     });
 
     it('rejects alias resolution that crosses a bound global conversation', async () => {
-      seedAlias(db, 'bob', '19995551234@s.whatsapp.net');
+      seedAlias(db, 'bob', 'bob-chat@s.whatsapp.net');
 
       const result = await registry.call(
         'send_message',
         { to: 'bob', text: 'wrong chat' },
-        { tier: 'global', conversationKey: '1234567890' },
+        { tier: 'global', conversationKey: 'main-chat' },
       );
 
       expect(result.isError).toBe(true);
@@ -262,9 +262,9 @@ describe('registerMessagingTools', () => {
     });
 
     it('ignores caller-supplied to in a chat-scoped session and sends to deliveryJid', async () => {
-      seedAlias(db, 'bob', '19995551234@s.whatsapp.net');
+      seedAlias(db, 'bob', 'bob-chat@s.whatsapp.net');
 
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call(
         'send_message',
         { to: 'bob', text: 'Current chat only' },
@@ -274,22 +274,23 @@ describe('registerMessagingTools', () => {
       expect(result.isError).toBeUndefined();
       expect(calls).toHaveLength(1);
       const call = JSON.parse(calls[0]);
-      expect(call.jid).toBe('1234567890@s.whatsapp.net');
-      expect(call.jid).not.toBe('19995551234@s.whatsapp.net');
+      expect(call.jid).toBe('main-chat@s.whatsapp.net');
+      expect(call.jid).not.toBe('bob-chat@s.whatsapp.net');
     });
 
     it('applies mention formatting for @name patterns', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const alicePhone = '15555550001';
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call('send_message', { text: 'Hi @alice!' }, session);
 
       expect(calls).toHaveLength(1);
       const call = JSON.parse(calls[0]);
-      expect(call.content.text).toBe('Hi @15555550001!');
-      expect(call.content.mentions).toContain('15555550001@s.whatsapp.net');
+      expect(call.content.text).toBe(`Hi @${alicePhone}!`);
+      expect(call.content.mentions).toContain(`${alicePhone}@s.whatsapp.net`);
     });
 
     it('sends plain text without mentions field when no @mentions present', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call('send_message', { text: 'No mentions here' }, session);
 
       const call = JSON.parse(calls[0]);
@@ -311,9 +312,45 @@ describe('registerMessagingTools', () => {
       expect(body.error).toMatch(/temporarily disconnected/);
     });
 
+    it.each([
+      ['timeout transport error', new Error('ETIMEDOUT while writing'), 'The request timed out. Try again.'],
+      ['rate limit transport error', new Error('429 too many requests'), 'Too many requests. Wait a moment and try again.'],
+      ['missing resource transport error', new Error('404 not found from upstream'), 'The requested resource was not found.'],
+      ['authorization transport error', new Error('401 unauthorized'), 'Permission denied for this operation.'],
+      ['opaque non-Error transport error', 'opaque internal failure', 'Operation failed. Try again.'],
+    ])('sanitizes %s without leaking raw transport details', async (_label, thrown, expected) => {
+      (connection as any).sendRaw = async () => {
+        throw thrown;
+      };
+
+      const result = await registry.call(
+        'send_message',
+        { text: 'test' },
+        chatSession('x', 'x@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe(expected);
+      expect(body.error).not.toContain(String(thrown));
+    });
+
+    it('rejects an alias that resolves to an invalid JID before audit or send', async () => {
+      seedAlias(db, 'bad-target', 'not-a-jid');
+
+      const result = await registry.call(
+        'send_message',
+        { to: 'bad-target', text: 'bad alias' },
+        { tier: 'global', conversationKey: 'main-chat' },
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Invalid chatJid "not-a-jid": must be a valid JID');
+      expect(calls).toHaveLength(0);
+    });
+
     // Gap #13: viewOnce flag passes through to the Baileys sendRaw call
     it('passes viewOnce flag through to sendRaw when set to true', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call(
         'send_message',
         { text: 'secret message', viewOnce: true },
@@ -327,7 +364,7 @@ describe('registerMessagingTools', () => {
     });
 
     it('does not include viewOnce in sendRaw content when not set', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call('send_message', { text: 'normal message' }, session);
 
       const call = JSON.parse(calls[0]);
@@ -336,7 +373,7 @@ describe('registerMessagingTools', () => {
 
     // SP6: link_preview opt-out
     it('does not set linkPreview when link_preview is omitted (auto default)', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call('send_message', { text: 'https://example.com' }, session);
 
       const call = JSON.parse(calls[0]);
@@ -344,7 +381,7 @@ describe('registerMessagingTools', () => {
     });
 
     it('does not set linkPreview when link_preview is "auto"', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call('send_message', { text: 'https://example.com', link_preview: 'auto' }, session);
 
       const call = JSON.parse(calls[0]);
@@ -352,7 +389,7 @@ describe('registerMessagingTools', () => {
     });
 
     it('sets linkPreview to null when link_preview is "off"', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call('send_message', { text: 'https://example.com', link_preview: 'off' }, session);
 
       const call = JSON.parse(calls[0]);
@@ -362,14 +399,14 @@ describe('registerMessagingTools', () => {
     it('applies a named profile before sending', async () => {
       const result = await registry.call(
         'send_message',
-        { chatJid: '15555550101@s.whatsapp.net', text: 'Hello', profile: 'satellite' },
+        { chatJid: 'audit-chat@s.whatsapp.net', text: 'Hello', profile: 'satellite' },
         { tier: 'global' },
       );
 
       expect(result.isError).toBeUndefined();
       expect(calls).toHaveLength(1);
       const call = JSON.parse(calls[0]);
-      expect(call.jid).toBe('15555550101@s.whatsapp.net');
+      expect(call.jid).toBe('audit-chat@s.whatsapp.net');
       expect(call.content.text).toBe('[SAT] Hello #satellite');
       expect(call.content).toHaveProperty('linkPreview', null);
     });
@@ -377,7 +414,7 @@ describe('registerMessagingTools', () => {
     it('returns unknown profile without sending', async () => {
       const result = await registry.call(
         'send_message',
-        { chatJid: '15555550101@s.whatsapp.net', text: 'Hello', profile: 'missing' },
+        { chatJid: 'audit-chat@s.whatsapp.net', text: 'Hello', profile: 'missing' },
         { tier: 'global' },
       );
 
@@ -390,7 +427,7 @@ describe('registerMessagingTools', () => {
       const result = await registry.call(
         'send_message',
         {
-          chatJid: '15555550101@s.whatsapp.net',
+          chatJid: 'audit-chat@s.whatsapp.net',
           text: 'https://example.com',
           profile: 'satellite',
           link_preview: 'auto',
@@ -420,7 +457,7 @@ describe('registerMessagingTools', () => {
 
         const result = await auditRegistry.call(
           'send_message',
-          { chatJid: '15555550101@s.whatsapp.net', text: 'Hello audit' },
+          { chatJid: 'audit-chat@s.whatsapp.net', text: 'Hello audit' },
           { tier: 'global' },
         );
 
@@ -431,7 +468,7 @@ describe('registerMessagingTools', () => {
         expect(rows).toEqual([{
           line: 'test-line',
           caller: 'mcp',
-          chat_jid: '15555550101@s.whatsapp.net',
+          chat_jid: 'audit-chat@s.whatsapp.net',
           target_kind: 'chatJid',
           status: 'sent',
           text_length: 'Hello audit'.length,
@@ -459,7 +496,7 @@ describe('registerMessagingTools', () => {
 
         const result = await auditRegistry.call(
           'send_message',
-          { chatJid: '15555550101@s.whatsapp.net', text: 'will fail' },
+          { chatJid: 'audit-chat@s.whatsapp.net', text: 'will fail' },
           { tier: 'global' },
         );
 
@@ -470,7 +507,7 @@ describe('registerMessagingTools', () => {
           .all() as Array<Record<string, unknown>>;
         expect(rows).toEqual([{
           caller: 'mcp',
-          chat_jid: '15555550101@s.whatsapp.net',
+          chat_jid: 'audit-chat@s.whatsapp.net',
           target_kind: 'chatJid',
           status: 'failed',
           error: 'socket closed',
@@ -486,13 +523,13 @@ describe('registerMessagingTools', () => {
   describe('reply_message', () => {
     it('sends a quoted reply to the correct message', async () => {
       const messageId = seedMessage(db, {
-        chat_jid: '1234567890@s.whatsapp.net',
-        conversation_key: '1234567890',
+        chat_jid: 'main-chat@s.whatsapp.net',
+        conversation_key: 'main-chat',
         sender_jid: 'bob@s.whatsapp.net',
         is_from_me: 0,
       });
 
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call('reply_message', { messageId, text: 'Replying!' }, session);
 
       expect(result.isError).toBeUndefined();
@@ -504,7 +541,7 @@ describe('registerMessagingTools', () => {
     });
 
     it('returns error for unknown message ID', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call('reply_message', { messageId: 'nonexistent', text: 'hi' }, session);
 
       const body = JSON.parse(result.content[0].text);
@@ -514,7 +551,7 @@ describe('registerMessagingTools', () => {
     it('rejects cross-conversation access in chat-scoped session', async () => {
       seedMessage(db, { message_id: 'msg-other', conversation_key: 'other' });
 
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call('reply_message', { messageId: 'msg-other', text: 'sneaky' }, session);
 
       const body = JSON.parse(result.content[0].text);
@@ -548,8 +585,8 @@ describe('registerMessagingTools', () => {
 
     // SP6: link_preview opt-out for reply_message
     it('does not set linkPreview when link_preview is omitted (auto default)', async () => {
-      const messageId = seedMessage(db, { conversation_key: '1234567890' });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const messageId = seedMessage(db, { conversation_key: 'main-chat' });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call('reply_message', { messageId, text: 'https://example.com' }, session);
 
       const call = JSON.parse(calls[0]);
@@ -557,8 +594,8 @@ describe('registerMessagingTools', () => {
     });
 
     it('sets linkPreview to null when link_preview is "off"', async () => {
-      const messageId = seedMessage(db, { conversation_key: '1234567890' });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const messageId = seedMessage(db, { conversation_key: 'main-chat' });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       await registry.call('reply_message', { messageId, text: 'https://example.com', link_preview: 'off' }, session);
 
       const call = JSON.parse(calls[0]);
@@ -568,8 +605,8 @@ describe('registerMessagingTools', () => {
     it('rejects foreign message IDs in bound global sessions', async () => {
       seedMessage(db, {
         message_id: 'msg-foreign-reply',
-        chat_jid: '222@s.whatsapp.net',
-        conversation_key: '222',
+        chat_jid: 'reply-chat@s.whatsapp.net',
+        conversation_key: 'reply-chat',
         sender_jid: 'bob@s.whatsapp.net',
         content: 'foreign reply body',
       });
@@ -577,11 +614,11 @@ describe('registerMessagingTools', () => {
       const result = await registry.call(
         'reply_message',
         {
-          chatJid: '111@s.whatsapp.net',
+          chatJid: 'foreign-chat@s.whatsapp.net',
           messageId: 'msg-foreign-reply',
           text: 'no leak',
         },
-        { tier: 'global', conversationKey: '111' },
+        { tier: 'global', conversationKey: 'foreign-chat' },
       );
 
       const body = JSON.parse(result.content[0].text);
@@ -589,14 +626,82 @@ describe('registerMessagingTools', () => {
       expect(JSON.stringify(result)).not.toContain('foreign reply body');
       expect(calls).toHaveLength(0);
     });
+
+    it('replies from an unbound global session and defaults null quoted content to empty text', async () => {
+      const messageId = seedMessage(db, {
+        message_id: 'msg-global-reply',
+        chat_jid: 'reply-chat@s.whatsapp.net',
+        conversation_key: 'reply-chat',
+        sender_jid: 'bob@s.whatsapp.net',
+        content: null,
+      });
+
+      const result = await registry.call(
+        'reply_message',
+        { chatJid: 'reply-chat@s.whatsapp.net', messageId, text: 'global reply' },
+        { tier: 'global' },
+      );
+
+      expect(result.isError).toBeUndefined();
+      const call = JSON.parse(calls[0]);
+      expect(call.content.contextInfo.quotedMessage.conversation).toBe('');
+    });
+
+    it('returns a scoped miss for unknown message IDs in unbound global sessions', async () => {
+      const result = await registry.call(
+        'reply_message',
+        { chatJid: 'reply-chat@s.whatsapp.net', messageId: 'missing-global-message', text: 'global reply' },
+        { tier: 'global' },
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Message not found');
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects malformed chat-scoped ownership context without leaking message data', async () => {
+      seedMessage(db, {
+        message_id: 'msg-no-conversation-key',
+        chat_jid: 'main-chat@s.whatsapp.net',
+        conversation_key: 'main-chat',
+        content: 'private body',
+      });
+
+      const result = await registry.call(
+        'reply_message',
+        { messageId: 'msg-no-conversation-key', text: 'reply' },
+        { tier: 'chat-scoped', deliveryJid: 'main-chat@s.whatsapp.net' } as SessionContext,
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Chat-scoped session has no conversation key');
+      expect(JSON.stringify(result)).not.toContain('private body');
+      expect(calls).toHaveLength(0);
+    });
+
+    it('sanitizes reply transport failures', async () => {
+      const messageId = seedMessage(db, { conversation_key: 'main-chat' });
+      (connection as any).sendRaw = async () => {
+        throw new Error('ETIMEDOUT while replying');
+      };
+
+      const result = await registry.call(
+        'reply_message',
+        { messageId, text: 'reply' },
+        chatSession('main-chat', 'main-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('The request timed out. Try again.');
+    });
   });
 
   // ── react_message ─────────────────────────────────────────────────────────
 
   describe('react_message', () => {
     it('sends a reaction with the correct emoji and message key', async () => {
-      const messageId = seedMessage(db, { conversation_key: '1234567890', is_from_me: 0 });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 0 });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       const result = await registry.call('react_message', { messageId, emoji: '👍' }, session);
 
@@ -607,8 +712,8 @@ describe('registerMessagingTools', () => {
     });
 
     it('allows removing a reaction with empty string emoji', async () => {
-      const messageId = seedMessage(db, { conversation_key: '1234567890' });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const messageId = seedMessage(db, { conversation_key: 'main-chat' });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       await registry.call('react_message', { messageId, emoji: '' }, session);
 
@@ -618,7 +723,7 @@ describe('registerMessagingTools', () => {
 
     it('rejects cross-conversation message for react', async () => {
       seedMessage(db, { message_id: 'msg-x', conversation_key: 'other' });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       const result = await registry.call('react_message', { messageId: 'msg-x', emoji: '❤️' }, session);
 
@@ -629,19 +734,97 @@ describe('registerMessagingTools', () => {
     it('rejects foreign message IDs in bound global sessions', async () => {
       seedMessage(db, {
         message_id: 'msg-foreign-react',
-        chat_jid: '222@s.whatsapp.net',
-        conversation_key: '222',
+        chat_jid: 'reply-chat@s.whatsapp.net',
+        conversation_key: 'reply-chat',
       });
 
       const result = await registry.call(
         'react_message',
-        { chatJid: '111@s.whatsapp.net', messageId: 'msg-foreign-react', emoji: '👍' },
-        { tier: 'global', conversationKey: '111' },
+        { chatJid: 'foreign-chat@s.whatsapp.net', messageId: 'msg-foreign-react', emoji: '👍' },
+        { tier: 'global', conversationKey: 'foreign-chat' },
       );
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('Message not found');
       expect(calls).toHaveLength(0);
+    });
+
+    it('reacts to the latest inbound message when messageId is omitted', async () => {
+      seedMessage(db, {
+        message_id: 'old-inbound',
+        chat_jid: 'main-chat@s.whatsapp.net',
+        conversation_key: 'main-chat',
+        is_from_me: 0,
+        content: 'older',
+      });
+      seedMessage(db, {
+        message_id: 'latest-inbound',
+        chat_jid: 'main-chat@s.whatsapp.net',
+        conversation_key: 'main-chat',
+        is_from_me: 0,
+        content: 'newer',
+      });
+      db.prepare('UPDATE messages SET timestamp = ? WHERE message_id = ?').run(1_700_000_001, 'latest-inbound');
+
+      const result = await registry.call(
+        'react_message',
+        { emoji: '✅' },
+        chatSession('main-chat', 'main-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body).toMatchObject({ sent: true, emoji: '✅', messageId: 'latest-inbound', resolved: 'last_inbound' });
+      const call = JSON.parse(calls[0]);
+      expect(call.content.react.key.id).toBe('latest-inbound');
+    });
+
+    it('returns an operator error when no inbound message can be inferred for reaction', async () => {
+      const result = await registry.call(
+        'react_message',
+        { emoji: '✅' },
+        chatSession('empty-chat', 'empty-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('No recent inbound message found in this chat to react to');
+      expect(calls).toHaveLength(0);
+    });
+
+    it('sanitizes inferred reaction send failures', async () => {
+      seedMessage(db, {
+        message_id: 'latest-inbound-fail',
+        chat_jid: 'main-chat@s.whatsapp.net',
+        conversation_key: 'main-chat',
+        is_from_me: 0,
+      });
+      (connection as any).sendRaw = async () => {
+        throw new Error('socket hang up');
+      };
+
+      const result = await registry.call(
+        'react_message',
+        { emoji: '✅' },
+        chatSession('main-chat', 'main-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('WhatsApp is temporarily disconnected. Try again in a moment.');
+    });
+
+    it('sanitizes explicit reaction send failures', async () => {
+      const messageId = seedMessage(db, { conversation_key: 'main-chat' });
+      (connection as any).sendRaw = async () => {
+        throw new Error('429 too many requests');
+      };
+
+      const result = await registry.call(
+        'react_message',
+        { messageId, emoji: '✅' },
+        chatSession('main-chat', 'main-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Too many requests. Wait a moment and try again.');
     });
   });
 
@@ -649,8 +832,8 @@ describe('registerMessagingTools', () => {
 
   describe('edit_message', () => {
     it('sends edit for a message sent by me', async () => {
-      const messageId = seedMessage(db, { conversation_key: '1234567890', is_from_me: 1 });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 1 });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       const result = await registry.call('edit_message', { messageId, newText: 'corrected text' }, session);
 
@@ -661,8 +844,8 @@ describe('registerMessagingTools', () => {
     });
 
     it('rejects editing a message not sent by me', async () => {
-      const messageId = seedMessage(db, { conversation_key: '1234567890', is_from_me: 0 });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 0 });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       const result = await registry.call('edit_message', { messageId, newText: 'try to edit' }, session);
 
@@ -672,7 +855,7 @@ describe('registerMessagingTools', () => {
 
     it('rejects cross-conversation message for edit', async () => {
       seedMessage(db, { message_id: 'msg-y', conversation_key: 'other', is_from_me: 1 });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       const result = await registry.call('edit_message', { messageId: 'msg-y', newText: 'hack' }, session);
 
@@ -683,20 +866,36 @@ describe('registerMessagingTools', () => {
     it('rejects foreign message IDs in bound global sessions', async () => {
       seedMessage(db, {
         message_id: 'msg-foreign-edit',
-        chat_jid: '222@s.whatsapp.net',
-        conversation_key: '222',
+        chat_jid: 'reply-chat@s.whatsapp.net',
+        conversation_key: 'reply-chat',
         is_from_me: 1,
       });
 
       const result = await registry.call(
         'edit_message',
-        { chatJid: '111@s.whatsapp.net', messageId: 'msg-foreign-edit', newText: 'no leak' },
-        { tier: 'global', conversationKey: '111' },
+        { chatJid: 'foreign-chat@s.whatsapp.net', messageId: 'msg-foreign-edit', newText: 'no leak' },
+        { tier: 'global', conversationKey: 'foreign-chat' },
       );
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('Message not found');
       expect(calls).toHaveLength(0);
+    });
+
+    it('sanitizes edit transport failures', async () => {
+      const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 1 });
+      (connection as any).sendRaw = async () => {
+        throw 'opaque edit failure';
+      };
+
+      const result = await registry.call(
+        'edit_message',
+        { messageId, newText: 'corrected text' },
+        chatSession('main-chat', 'main-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Operation failed. Try again.');
     });
   });
 
@@ -704,8 +903,8 @@ describe('registerMessagingTools', () => {
 
   describe('delete_message', () => {
     it('sends delete for an existing message', async () => {
-      const messageId = seedMessage(db, { conversation_key: '1234567890', is_from_me: 1 });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 1 });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       const result = await registry.call('delete_message', { messageId }, session);
 
@@ -715,7 +914,7 @@ describe('registerMessagingTools', () => {
     });
 
     it('rejects delete for nonexistent message', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call('delete_message', { messageId: 'ghost' }, session);
 
       const body = JSON.parse(result.content[0].text);
@@ -724,7 +923,7 @@ describe('registerMessagingTools', () => {
 
     it('rejects cross-conversation message for delete', async () => {
       seedMessage(db, { message_id: 'msg-z', conversation_key: 'other', is_from_me: 1 });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       const result = await registry.call('delete_message', { messageId: 'msg-z' }, session);
 
@@ -735,20 +934,36 @@ describe('registerMessagingTools', () => {
     it('rejects foreign message IDs in bound global sessions', async () => {
       seedMessage(db, {
         message_id: 'msg-foreign-delete',
-        chat_jid: '222@s.whatsapp.net',
-        conversation_key: '222',
+        chat_jid: 'reply-chat@s.whatsapp.net',
+        conversation_key: 'reply-chat',
         is_from_me: 1,
       });
 
       const result = await registry.call(
         'delete_message',
-        { chatJid: '111@s.whatsapp.net', messageId: 'msg-foreign-delete' },
-        { tier: 'global', conversationKey: '111' },
+        { chatJid: 'foreign-chat@s.whatsapp.net', messageId: 'msg-foreign-delete' },
+        { tier: 'global', conversationKey: 'foreign-chat' },
       );
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('Message not found');
       expect(calls).toHaveLength(0);
+    });
+
+    it('sanitizes delete transport failures', async () => {
+      const messageId = seedMessage(db, { conversation_key: 'main-chat', is_from_me: 1 });
+      (connection as any).sendRaw = async () => {
+        throw new Error('404 not found while deleting');
+      };
+
+      const result = await registry.call(
+        'delete_message',
+        { messageId },
+        chatSession('main-chat', 'main-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('The requested resource was not found.');
     });
   });
 
@@ -756,7 +971,7 @@ describe('registerMessagingTools', () => {
 
   describe('send_location', () => {
     it('sends location with lat/lon', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call(
         'send_location',
         { latitude: 40.7128, longitude: -74.006, name: 'NYC' },
@@ -769,13 +984,40 @@ describe('registerMessagingTools', () => {
       expect(call.content.location.degreesLongitude).toBe(-74.006);
       expect(call.content.location.name).toBe('NYC');
     });
+
+    it('passes viewOnce through for location sends', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'send_location',
+        { latitude: 40.7128, longitude: -74.006, viewOnce: true },
+        session,
+      );
+
+      const call = JSON.parse(calls[0]);
+      expect(call.content.viewOnce).toBe(true);
+    });
+
+    it('sanitizes location transport failures', async () => {
+      (connection as any).sendRaw = async () => {
+        throw new Error('403 forbidden');
+      };
+
+      const result = await registry.call(
+        'send_location',
+        { latitude: 40.7128, longitude: -74.006 },
+        chatSession('main-chat', 'main-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Permission denied for this operation.');
+    });
   });
 
   // ── send_contact ──────────────────────────────────────────────────────────
 
   describe('send_contact', () => {
     it('sends a vCard contact via contacts array (single)', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call(
         'send_contact',
         { contacts: [{ displayName: 'John Doe', phone: '15551234567' }] },
@@ -790,7 +1032,7 @@ describe('registerMessagingTools', () => {
     });
 
     it('sends multiple contacts in a single message', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call(
         'send_contact',
         {
@@ -813,9 +1055,36 @@ describe('registerMessagingTools', () => {
     });
 
     it('rejects empty contacts array', async () => {
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
       const result = await registry.call('send_contact', { contacts: [] }, session);
       expect(result.isError).toBe(true);
+    });
+
+    it('passes viewOnce through for contact sends', async () => {
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
+      await registry.call(
+        'send_contact',
+        { contacts: [{ displayName: 'Jane Doe', phone: '+1 (555) 222-3333' }], viewOnce: true },
+        session,
+      );
+
+      const call = JSON.parse(calls[0]);
+      expect(call.content.viewOnce).toBe(true);
+    });
+
+    it('sanitizes contact transport failures', async () => {
+      (connection as any).sendRaw = async () => {
+        throw new Error('connection closed while sending contact');
+      };
+
+      const result = await registry.call(
+        'send_contact',
+        { contacts: [{ displayName: 'Jane Doe', phone: '+1 (555) 222-3333' }] },
+        chatSession('main-chat', 'main-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('WhatsApp is temporarily disconnected. Try again in a moment.');
     });
   });
 
@@ -920,6 +1189,12 @@ describe('registerMessagingTools', () => {
       const blank = await registry.call('send_poll', { question: '  ', options: ['A', 'B'] }, session);
       expect(JSON.parse(blank.content[0].text).error).toMatch(/question is required/);
 
+      const longQuestion = await registry.call('send_poll', { question: 'Q'.repeat(901), options: ['A', 'B'] }, session);
+      expect(JSON.parse(longQuestion.content[0].text).error).toMatch(/900 characters or fewer/);
+
+      const blankOption = await registry.call('send_poll', { question: 'Pick', options: ['A', '  '] }, session);
+      expect(JSON.parse(blankOption.content[0].text).error).toBe('Poll option 2 is blank');
+
       const duplicate = await registry.call('send_poll', { question: 'Pick', options: ['A', ' a '] }, session);
       expect(JSON.parse(duplicate.content[0].text).error).toMatch(/unique/);
 
@@ -927,6 +1202,21 @@ describe('registerMessagingTools', () => {
       expect(JSON.parse(longOption.content[0].text).error).toMatch(/95 characters or fewer/);
 
       expect(calls).toHaveLength(0);
+    });
+
+    it('sanitizes poll send failures', async () => {
+      (connection as any).sendPollMessage = async () => {
+        throw new Error('404 not found while sending poll');
+      };
+
+      const result = await registry.call(
+        'send_poll',
+        { question: 'Pick', options: ['A', 'B'] },
+        chatSession('poll-chat', 'poll-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('The requested resource was not found.');
     });
 
     it('C6a — awaitResult:true awaits the registrar and returns the resolved answer with exact register args', async () => {
@@ -1098,20 +1388,21 @@ describe('registerMessagingTools', () => {
 
   describe('pin_message', () => {
     it('pins a message', async () => {
-      const messageId = seedMessage(db, { conversation_key: '1234567890' });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const messageId = seedMessage(db, { conversation_key: 'main-chat' });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
-      const result = await registry.call('pin_message', { messageId, pin: true }, session);
+      const result = await registry.call('pin_message', { messageId, pin: true, duration: '24h' }, session);
 
       expect(result.isError).toBeUndefined();
       const call = JSON.parse(calls[0]);
       expect(call.content.pin.id).toBe(messageId);
       expect(call.content.type).toBe(1);
+      expect(call.content.time).toBe(86400);
     });
 
     it('unpins a message', async () => {
-      const messageId = seedMessage(db, { conversation_key: '1234567890' });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const messageId = seedMessage(db, { conversation_key: 'main-chat' });
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       const result = await registry.call('pin_message', { messageId, pin: false }, session);
 
@@ -1122,7 +1413,7 @@ describe('registerMessagingTools', () => {
 
     it('rejects cross-conversation message for pin', async () => {
       seedMessage(db, { message_id: 'msg-p', conversation_key: 'other' });
-      const session = chatSession('1234567890', '1234567890@s.whatsapp.net');
+      const session = chatSession('main-chat', 'main-chat@s.whatsapp.net');
 
       const result = await registry.call('pin_message', { messageId: 'msg-p', pin: true }, session);
 
@@ -1133,19 +1424,35 @@ describe('registerMessagingTools', () => {
     it('rejects foreign message IDs in bound global sessions', async () => {
       seedMessage(db, {
         message_id: 'msg-foreign-pin',
-        chat_jid: '222@s.whatsapp.net',
-        conversation_key: '222',
+        chat_jid: 'reply-chat@s.whatsapp.net',
+        conversation_key: 'reply-chat',
       });
 
       const result = await registry.call(
         'pin_message',
-        { chatJid: '111@s.whatsapp.net', messageId: 'msg-foreign-pin', pin: true },
-        { tier: 'global', conversationKey: '111' },
+        { chatJid: 'foreign-chat@s.whatsapp.net', messageId: 'msg-foreign-pin', pin: true },
+        { tier: 'global', conversationKey: 'foreign-chat' },
       );
 
       const body = JSON.parse(result.content[0].text);
       expect(body.error).toBe('Message not found');
       expect(calls).toHaveLength(0);
+    });
+
+    it('sanitizes pin transport failures', async () => {
+      const messageId = seedMessage(db, { conversation_key: 'main-chat' });
+      (connection as any).sendRaw = async () => {
+        throw new Error('401 unauthorized while pinning');
+      };
+
+      const result = await registry.call(
+        'pin_message',
+        { messageId, pin: true },
+        chatSession('main-chat', 'main-chat@s.whatsapp.net'),
+      );
+
+      const body = JSON.parse(result.content[0].text);
+      expect(body.error).toBe('Permission denied for this operation.');
     });
   });
 });

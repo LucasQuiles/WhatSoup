@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -7,6 +7,12 @@ import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { registerSchedulingTools } from '../../../src/mcp/tools/scheduling.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
+
+const CHAT_ALPHA_KEY = 'alpha-chat';
+const CHAT_ALPHA_JID = `${CHAT_ALPHA_KEY}@s.whatsapp.net`;
+const CHAT_BETA_KEY = 'beta-chat';
+const CHAT_BETA_JID = `${CHAT_BETA_KEY}@s.whatsapp.net`;
+const CHAT_GAMMA_KEY = 'gamma-chat';
 
 function makeDb(): Database {
   const db = new Database(':memory:');
@@ -51,7 +57,7 @@ describe('scheduling tools', () => {
     const result = await registry.call(
       'schedule_message',
       { scheduled_at: scheduledAt, text: 'later tonight' },
-      chatSession('111'),
+      chatSession(CHAT_ALPHA_KEY),
     );
 
     expect(result.isError).toBeUndefined();
@@ -66,7 +72,7 @@ describe('scheduling tools', () => {
       retry_count: number;
     };
 
-    expect(row.chat_jid).toBe('111@s.whatsapp.net');
+    expect(row.chat_jid).toBe(CHAT_ALPHA_JID);
     expect(row.content_type).toBe('text');
     expect(JSON.parse(row.payload)).toEqual({ text: 'later tonight' });
     expect(row.scheduled_at).toBe(scheduledAt);
@@ -93,7 +99,7 @@ describe('scheduling tools', () => {
 
     const result = await registry.call(
       'schedule_message',
-      { chatJid: '222@s.whatsapp.net', scheduled_at: scheduledAt, filePath, caption: 'launch poster' },
+      { chatJid: CHAT_BETA_JID, scheduled_at: scheduledAt, filePath, caption: 'launch poster' },
       globalSession(),
     );
 
@@ -106,7 +112,7 @@ describe('scheduling tools', () => {
       payload: string;
     };
 
-    expect(row.chat_jid).toBe('222@s.whatsapp.net');
+    expect(row.chat_jid).toBe(CHAT_BETA_JID);
     expect(row.content_type).toBe('image');
     const payload = JSON.parse(row.payload) as { type: string; caption: string; mimetype: string };
     expect(payload.type).toBe('image');
@@ -128,7 +134,7 @@ describe('scheduling tools', () => {
     await registry.call(
       'schedule_message',
       { scheduled_at: scheduledAt, text: 'just text' },
-      chatSession('333'),
+      chatSession(CHAT_GAMMA_KEY),
     );
 
     const row = db.raw.prepare(
@@ -141,21 +147,179 @@ describe('scheduling tools', () => {
     });
   });
 
+  it('schedule_message rejects past times and empty content', async () => {
+    const past = Math.floor(Date.now() / 1000) - 60;
+    const pastResult = await registry.call(
+      'schedule_message',
+      { chatJid: CHAT_ALPHA_JID, scheduled_at: past, text: 'too late' },
+      globalSession(),
+    );
+    expect(pastResult.isError).toBe(true);
+    expect(pastResult.content[0].text).toMatch(/future UTC unix timestamp/);
+
+    const emptyResult = await registry.call(
+      'schedule_message',
+      { chatJid: CHAT_ALPHA_JID, scheduled_at: Math.floor(Date.now() / 1000) + 3600 },
+      globalSession(),
+    );
+    expect(emptyResult.isError).toBe(true);
+    expect(emptyResult.content[0].text).toMatch(/Provide text/);
+  });
+
+  it('schedule_message validates local media paths and size', async () => {
+    const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
+    const missing = await registry.call(
+      'schedule_message',
+      { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: join(scratchDir, 'missing.png') },
+      globalSession(),
+    );
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toMatch(/File not found/);
+
+    const unsupportedPath = join(scratchDir, 'payload.exe');
+    writeFileSync(unsupportedPath, 'bin');
+    const unsupported = await registry.call(
+      'schedule_message',
+      { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: unsupportedPath },
+      globalSession(),
+    );
+    expect(unsupported.isError).toBe(true);
+    expect(unsupported.content[0].text).toMatch(/Unsupported file extension/);
+
+    const largePath = join(scratchDir, 'large.pdf');
+    writeFileSync(largePath, '');
+    truncateSync(largePath, 26 * 1024 * 1024);
+    const large = await registry.call(
+      'schedule_message',
+      { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: largePath },
+      globalSession(),
+    );
+    expect(large.isError).toBe(true);
+    expect(large.content[0].text).toMatch(/File too large/);
+  });
+
+  it('schedule_message enforces allowedRoot for media paths', async () => {
+    const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
+    const outsideDir = tempDir();
+    try {
+      const outsidePath = join(outsideDir, 'outside.png');
+      writeFileSync(outsidePath, 'image');
+      const result = await registry.call(
+        'schedule_message',
+        { chatJid: CHAT_ALPHA_JID, scheduled_at: scheduledAt, filePath: outsidePath },
+        { ...globalSession(), allowedRoot: scratchDir },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/Path outside workspace/);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('schedule_message stores document, audio, video, and sticker media payloads', async () => {
+    const scheduledAt = Math.floor(Date.now() / 1000) + 3600;
+    const docPath = join(scratchDir, 'report.pdf');
+    const audioPath = join(scratchDir, 'voice.ogg');
+    const videoPath = join(scratchDir, 'clip.mp4');
+    const stickerPath = join(scratchDir, 'sticker.webp');
+    writeFileSync(docPath, 'doc');
+    writeFileSync(audioPath, 'audio');
+    writeFileSync(videoPath, 'video');
+    writeFileSync(stickerPath, 'sticker');
+
+    await registry.call(
+      'schedule_message',
+      {
+        chatJid: CHAT_ALPHA_JID,
+        scheduled_at: scheduledAt,
+        filePath: docPath,
+        filename: 'custom.pdf',
+        text: 'doc fallback caption',
+      },
+      globalSession(),
+    );
+    await registry.call(
+      'schedule_message',
+      {
+        chatJid: CHAT_ALPHA_JID,
+        scheduled_at: scheduledAt + 1,
+        filePath: audioPath,
+        ptt: true,
+        seconds: 9,
+      },
+      globalSession(),
+    );
+    await registry.call(
+      'schedule_message',
+      {
+        chatJid: CHAT_ALPHA_JID,
+        scheduled_at: scheduledAt + 2,
+        filePath: videoPath,
+        text: 'video caption',
+        ptv: true,
+        gifPlayback: true,
+        viewOnce: true,
+      },
+      globalSession(),
+    );
+    await registry.call(
+      'schedule_message',
+      {
+        chatJid: CHAT_ALPHA_JID,
+        scheduled_at: scheduledAt + 3,
+        filePath: stickerPath,
+        isAnimated: true,
+      },
+      globalSession(),
+    );
+
+    const rows = db.raw.prepare(
+      'SELECT content_type, payload FROM scheduled_messages ORDER BY id ASC',
+    ).all() as Array<{ content_type: string; payload: string }>;
+    expect(rows.map((row) => row.content_type)).toEqual(['document', 'audio', 'video', 'sticker']);
+    expect(JSON.parse(rows[0].payload)).toMatchObject({
+      type: 'document',
+      filename: 'custom.pdf',
+      caption: 'doc fallback caption',
+      mimetype: 'application/pdf',
+    });
+    expect(JSON.parse(rows[1].payload)).toMatchObject({
+      type: 'audio',
+      mimetype: 'audio/ogg; codecs=opus',
+      ptt: true,
+      seconds: 9,
+    });
+    expect(JSON.parse(rows[2].payload)).toMatchObject({
+      type: 'video',
+      caption: 'video caption',
+      mimetype: 'video/mp4',
+      ptv: true,
+      gifPlayback: true,
+      viewOnce: true,
+    });
+    expect(JSON.parse(rows[3].payload)).toMatchObject({
+      type: 'sticker',
+      mimetype: 'image/webp',
+      isAnimated: true,
+    });
+  });
+
   it('list_scheduled shows pending and processing rows for the current chat only', async () => {
     db.raw.prepare(
       'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
-    ).run('111@s.whatsapp.net', 'text', JSON.stringify({ text: 'a' }), 1700000100, 'pending');
+    ).run(CHAT_ALPHA_JID, 'text', JSON.stringify({ text: 'a' }), 1700000100, 'pending');
     db.raw.prepare(
       'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
-    ).run('111@s.whatsapp.net', 'text', JSON.stringify({ text: 'b' }), 1700000200, 'processing');
+    ).run(CHAT_ALPHA_JID, 'text', JSON.stringify({ text: 'b' }), 1700000200, 'processing');
     db.raw.prepare(
       'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
-    ).run('111@s.whatsapp.net', 'text', JSON.stringify({ text: 'c' }), 1700000300, 'sent');
+    ).run(CHAT_ALPHA_JID, 'text', JSON.stringify({ text: 'c' }), 1700000300, 'sent');
     db.raw.prepare(
       'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
-    ).run('222@s.whatsapp.net', 'text', JSON.stringify({ text: 'd' }), 1700000400, 'pending');
+    ).run(CHAT_BETA_JID, 'text', JSON.stringify({ text: 'd' }), 1700000400, 'pending');
 
-    const result = await registry.call('list_scheduled', {}, chatSession('111'));
+    const result = await registry.call('list_scheduled', {}, chatSession(CHAT_ALPHA_KEY));
     expect(result.isError).toBeUndefined();
 
     const body = JSON.parse(result.content[0].text) as {
@@ -165,24 +329,80 @@ describe('scheduling tools', () => {
 
     expect(body.count).toBe(2);
     expect(body.messages.map((msg) => msg.status)).toEqual(['pending', 'processing']);
-    expect(body.messages.every((msg) => msg.chatJid === '111@s.whatsapp.net')).toBe(true);
+    expect(body.messages.every((msg) => msg.chatJid === CHAT_ALPHA_JID)).toBe(true);
+  });
+
+  it('list_scheduled filters by status and requested chat while ignoring invalid row targets', async () => {
+    db.raw.prepare(
+      'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
+    ).run(CHAT_ALPHA_JID, 'text', JSON.stringify({ text: 'failed alpha' }), 1700000100, 'failed');
+    db.raw.prepare(
+      'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
+    ).run(CHAT_BETA_JID, 'text', JSON.stringify({ text: 'failed beta' }), 1700000200, 'failed');
+    db.raw.prepare(
+      'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
+    ).run('invalid-target', 'text', JSON.stringify({ text: 'bad' }), 1700000300, 'failed');
+
+    const result = await registry.call(
+      'list_scheduled',
+      { chatJid: CHAT_ALPHA_JID, status: 'failed', limit: 10 },
+      globalSession(),
+    );
+    expect(result.isError).toBeUndefined();
+
+    const body = JSON.parse(result.content[0].text) as {
+      count: number;
+      messages: Array<{ chatJid: string; status: string; payload: { text: string } }>;
+    };
+    expect(body.count).toBe(1);
+    expect(body.messages).toEqual([
+      {
+        id: 1,
+        chatJid: CHAT_ALPHA_JID,
+        chatName: null,
+        contentType: 'text',
+        payload: { text: 'failed alpha' },
+        scheduledAt: 1700000100,
+        recurrence: null,
+        nextRunAt: null,
+        runCount: 0,
+        status: 'failed',
+        createdAt: expect.any(Number),
+        sentAt: null,
+        error: null,
+        retryCount: 0,
+      },
+    ]);
   });
 
   it('cancel_scheduled cancels a pending row and blocks cross-chat cancellation', async () => {
     db.raw.prepare(
       'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
-    ).run('111@s.whatsapp.net', 'text', JSON.stringify({ text: 'mine' }), 1700000100, 'pending');
+    ).run(CHAT_ALPHA_JID, 'text', JSON.stringify({ text: 'mine' }), 1700000100, 'pending');
     db.raw.prepare(
       'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
-    ).run('222@s.whatsapp.net', 'text', JSON.stringify({ text: 'theirs' }), 1700000200, 'pending');
+    ).run(CHAT_BETA_JID, 'text', JSON.stringify({ text: 'theirs' }), 1700000200, 'pending');
 
-    const blocked = await registry.call('cancel_scheduled', { id: 2 }, chatSession('111'));
+    const blocked = await registry.call('cancel_scheduled', { id: 2 }, chatSession(CHAT_ALPHA_KEY));
     expect(blocked.isError).toBe(true);
 
-    const result = await registry.call('cancel_scheduled', { id: 1 }, chatSession('111'));
+    const result = await registry.call('cancel_scheduled', { id: 1 }, chatSession(CHAT_ALPHA_KEY));
     expect(result.isError).toBeUndefined();
 
     const row = db.raw.prepare('SELECT status FROM scheduled_messages WHERE id = 1').get() as { status: string };
     expect(row.status).toBe('cancelled');
+  });
+
+  it('cancel_scheduled reports missing and non-pending rows', async () => {
+    const missing = await registry.call('cancel_scheduled', { id: 99 }, globalSession());
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toMatch(/Scheduled message 99 not found/);
+
+    db.raw.prepare(
+      'INSERT INTO scheduled_messages (chat_jid, content_type, payload, scheduled_at, status) VALUES (?, ?, ?, ?, ?)',
+    ).run(CHAT_ALPHA_JID, 'text', JSON.stringify({ text: 'sent' }), 1700000100, 'sent');
+    const sent = await registry.call('cancel_scheduled', { id: 1 }, globalSession());
+    expect(sent.isError).toBe(true);
+    expect(sent.content[0].text).toMatch(/is sent and cannot be cancelled/);
   });
 });
