@@ -156,3 +156,13 @@ export type { TooltipProps } from './Tooltip';
 
 export { Stepper } from './Stepper';
 export type { StepperProps } from './Stepper';
+
+export { DateTimePicker } from './DateTimePicker';
+export type { DateTimePickerProps } from './DateTimePicker';
+export {
+  recurrenceToCron,
+  cronToRecurrence,
+  DAILY_CRON,
+  WEEKLY_CRON,
+} from './datetimepicker-recurrence';
+export type { RecurrenceValue } from './datetimepicker-recurrence';

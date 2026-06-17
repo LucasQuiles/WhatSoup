@@ -20,15 +20,31 @@
  *   - GAINS: stacking-aware Escape (replaces hand-rolled bubble-phase handler),
  *     pointerdown outside-click semantics, focus trap, focus restoration.
  *   - Public prop interface, reset-on-open, submit pipeline, toasts unchanged.
+ *   - Phase A datetime primitive: the prior `<input type="datetime-local">` +
+ *     recurring toggle + preset buttons + free-text cron box is replaced with
+ *     `<DateTimePicker>` from `primitives/DateTimePicker.tsx`. The `recurring`
+ *     boolean + `cronExpr` state collapse to a single `RecurrenceValue` state,
+ *     with `recurrenceToCron`/`cronToRecurrence` making submit/edit-load a
+ *     one-liner.
  */
 import { useState, useEffect, useCallback } from 'react'
 import { Clock } from 'lucide-react'
 import { api } from '../../lib/api.js'
 import { useToast } from '../../hooks/toast-context.js'
 import { ChatPicker } from '../shared/ChatPicker.js'
-import { cronToHuman } from './scheduled-utils.js'
 import type { ChatItem, ScheduledMessage } from '../../types.js'
-import { Modal, ModalHeader, ModalBody, ModalFooter, TextArea, TextInput } from '../primitives'
+import {
+  Modal,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+  TextArea,
+  TextInput,
+  DateTimePicker,
+  type RecurrenceValue,
+  recurrenceToCron,
+  cronToRecurrence,
+} from '../primitives'
 import { Button } from '../primitives/Button'
 import { ToolbarTimeRange } from '../primitives/Toolbar'
 
@@ -43,20 +59,9 @@ export interface ScheduleComposerModalProps {
 
 type ContentType = 'text' | 'media'
 
-const RECURRENCE_PRESETS = [
-  { label: 'Daily',   cron: '0 9 * * *' },
-  { label: 'Weekly',  cron: '0 9 * * 1' },
-  { label: 'Monthly', cron: '0 9 1 * *' },
-]
-
 const CONTENT_TYPE_OPTIONS = [
   { label: 'Text',  value: 'text' },
   { label: 'Media', value: 'media' },
-]
-
-const RECURRENCE_OPTIONS = [
-  { label: 'Recurring', value: 'true' },
-  { label: 'One-shot',  value: 'false' },
 ]
 
 /** Convert a unix timestamp (seconds) to datetime-local input value (local time) */
@@ -101,8 +106,7 @@ export function ScheduleComposerModal({
   const [mediaPath, setMediaPath] = useState('')
   const [caption, setCaption] = useState('')
   const [datetimeLocal, setDatetimeLocal] = useState(defaultDatetimeLocal)
-  const [recurring, setRecurring] = useState(false)
-  const [cronExpr, setCronExpr] = useState('0 9 * * *')
+  const [recurrence, setRecurrence] = useState<RecurrenceValue>({ kind: 'once' })
   const [submitting, setSubmitting] = useState(false)
 
   // Populate from editMessage when opening
@@ -117,8 +121,7 @@ export function ScheduleComposerModal({
       setMediaPath((editMessage.payload.path as string) ?? '')
       setCaption((editMessage.payload.caption as string) ?? '')
       setDatetimeLocal(tsToDatetimeLocal(editMessage.scheduledAt))
-      setRecurring(!!editMessage.recurrence)
-      setCronExpr(editMessage.recurrence ?? '0 9 * * *')
+      setRecurrence(cronToRecurrence(editMessage.recurrence))
     } else {
       // Reset for new message
       setSelectedChat(null)
@@ -127,8 +130,7 @@ export function ScheduleComposerModal({
       setMediaPath('')
       setCaption('')
       setDatetimeLocal(defaultDatetimeLocal())
-      setRecurring(false)
-      setCronExpr('0 9 * * *')
+      setRecurrence({ kind: 'once' })
     }
   }, [open, editMessage, chats])
 
@@ -168,8 +170,9 @@ export function ScheduleComposerModal({
       if (caption.trim()) body.caption = caption.trim()
     }
 
-    if (recurring && cronExpr.trim()) {
-      body.recurrence = cronExpr.trim()
+    const cron = recurrenceToCron(recurrence)
+    if (cron) {
+      body.recurrence = cron
     }
 
     setSubmitting(true)
@@ -190,11 +193,8 @@ export function ScheduleComposerModal({
     }
   }, [
     selectedChat, datetimeLocal, contentType, text, mediaPath, caption,
-    recurring, cronExpr, lineName, isEditing, editMessage, toast, onCreated, onClose,
+    recurrence, lineName, isEditing, editMessage, toast, onCreated, onClose,
   ])
-
-  // cronPreview is computed unconditionally (cronToHuman is pure — safe while closed).
-  const cronPreview = recurring ? cronToHuman(cronExpr) : ''
 
   return (
     <Modal
@@ -292,67 +292,13 @@ export function ScheduleComposerModal({
           </div>
         )}
 
-        {/* DateTime picker */}
-        <div>
-          <label
-            htmlFor="composer-datetime"
-            className="c-field-label"
-          >
-            Scheduled time (local)
-          </label>
-          <TextInput
-            id="composer-datetime"
-            type="datetime-local"
-            value={datetimeLocal}
-            onChange={e => setDatetimeLocal(e.target.value)}
-            className="text-text-2"
-          />
-        </div>
-
-        {/* Recurrence toggle — ToolbarTimeRange seg (DD-15, C-B3W2-4) */}
-        <div>
-          <div className={recurring ? 'mb-[var(--sp-3)]' : ''}>
-            <ToolbarTimeRange
-              label="Recurrence mode"
-              options={RECURRENCE_OPTIONS}
-              value={String(recurring)}
-              onChange={(v) => setRecurring(v === 'true')}
-            />
-          </div>
-
-          {recurring && (
-            <div className="flex flex-col gap-[var(--sp-2)]">
-              {/* Preset buttons */}
-              <div className="flex gap-2 flex-wrap">
-                {RECURRENCE_PRESETS.map(preset => (
-                  <Button
-                    key={preset.label}
-                    size="xs"
-                    variant={cronExpr === preset.cron ? 'primary' : 'ghost'}
-                    onClick={() => setCronExpr(preset.cron)}
-                    className="font-mono"
-                  >
-                    {preset.label}
-                  </Button>
-                ))}
-              </div>
-              {/* Custom cron input */}
-              <TextInput
-                type="text"
-                value={cronExpr}
-                onChange={e => setCronExpr(e.target.value)}
-                placeholder="Cron expression (min hr dom mon dow)"
-                className="text-text-2"
-              />
-              {/* Preview */}
-              {cronPreview && (
-                <div className="c-meta mt-[var(--sp-1)]">
-                  {cronPreview}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+        {/* DateTime picker + segmented recurrence row (Phase A primitive) */}
+        <DateTimePicker
+          value={datetimeLocal}
+          onChange={setDatetimeLocal}
+          recurrence={recurrence}
+          onRecurrenceChange={setRecurrence}
+        />
 
       </ModalBody>
 
