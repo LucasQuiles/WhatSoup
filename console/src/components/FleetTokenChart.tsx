@@ -1,15 +1,13 @@
 import {
-  Area,
-  AreaChart,
-  CartesianGrid,
+  Cell,
   Legend,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
-  XAxis,
-  YAxis,
 } from 'recharts';
 import type { TokenUsageBucket, MetricsRange } from '../types';
-import { AXIS_TICK, CHART_MARGIN, LEGEND_STYLE, TOOLTIP_STYLE, formatBucketLabel, formatTooltipLabel } from '../lib/chart-utils.js';
+import { LEGEND_STYLE, TOOLTIP_STYLE } from '../lib/chart-utils.js';
 import { formatCompact, formatCount } from '../lib/text-utils';
 import { getProvider, getProviderColor } from '../lib/providers';
 
@@ -20,132 +18,114 @@ interface FleetTokenChartProps {
   range?: MetricsRange;
 }
 
-/** Area chart showing fleet-wide token consumption (input + output). */
-export function FleetTokenChart({ data, byProvider, providers, range = '24h' }: FleetTokenChartProps) {
+interface DonutSegment {
+  /** Stable key — provider id, or 'input'/'output' in the single-provider fallback. */
+  key: string;
+  /** Legend / tooltip label. */
+  name: string;
+  /** Total token count for this segment. */
+  value: number;
+  /** Segment colour — a v3 design-token CSS variable, never a raw hex. */
+  fill: string;
+}
+
+/** Sum input + output tokens across every bucket. */
+function totalTokens(buckets: TokenUsageBucket[] | undefined): number {
+  if (!buckets) return 0;
+  let sum = 0;
+  for (const b of buckets) sum += (b.input ?? 0) + (b.output ?? 0);
+  return sum;
+}
+
+/**
+ * Donut (ring) chart of fleet token spend.
+ *
+ * Multi-provider (more than one provider with a `byProvider` breakdown): one ring
+ * segment per provider, sized by that provider's total token spend and coloured
+ * from the locked `--provider-*` palette via {@link getProviderColor}.
+ *
+ * Single provider / no breakdown: a two-segment ring of total input vs output
+ * tokens, so the ring still carries meaning rather than collapsing to a degenerate
+ * single arc. These two segments use the sanctioned data-series token palette
+ * (`--data-token-input-solid` / `--data-token-output-solid`).
+ */
+export function FleetTokenChart({ data, byProvider, providers }: FleetTokenChartProps) {
   const multiProvider = providers && providers.length > 1 && byProvider;
 
-  if (multiProvider) {
-    const merged = data.map((bucket, i) => {
-      const row: Record<string, unknown> = { bucket: bucket.bucket };
-      for (const provider of providers) {
-        const pb = byProvider[provider]?.[i];
-        row[`${provider}:output`] = pb?.output ?? 0;
-        row[`${provider}:input`] = pb?.input ?? 0;
-      }
-      return row;
-    });
+  let segments: DonutSegment[];
+  let showLegend: boolean;
 
-    return (
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={merged} margin={CHART_MARGIN}>
-          <CartesianGrid stroke="var(--border-hairline)" vertical={false} />
-          <XAxis
-            dataKey="bucket"
-            tick={AXIS_TICK}
-            tickLine={false}
-            axisLine={{ stroke: 'var(--border-hairline)' }}
-            minTickGap={40}
-            tickFormatter={(v) => formatBucketLabel(v, range)}
-          />
-          <YAxis
-            tick={AXIS_TICK}
-            tickLine={false}
-            axisLine={false}
-            width={32}
-            allowDecimals={false}
-            tickFormatter={(v) => formatCompact(Number(v) || 0)}
-          />
-          <Tooltip
-            contentStyle={TOOLTIP_STYLE}
-            labelFormatter={(v) => formatTooltipLabel(String(v), range)}
-            formatter={(value, name) => [
-              formatCount(Number(value) || 0),
-              String(name),
-            ]}
-          />
-          <Legend wrapperStyle={LEGEND_STYLE} />
-          {providers.flatMap((provider) => {
-            const color = getProviderColor(provider);
-            const prov = getProvider(provider);
-            const label = prov?.shortName ?? provider;
-            return [
-              <Area
-                key={`${provider}:output`}
-                type="monotone"
-                dataKey={`${provider}:output`}
-                name={`${label} Out`}
-                stackId="output"
-                stroke={color.stroke}
-                fill={color.fill}
-                fillOpacity={0.3}
-              />,
-              <Area
-                key={`${provider}:input`}
-                type="monotone"
-                dataKey={`${provider}:input`}
-                name={`${label} In`}
-                stackId="input"
-                stroke={color.stroke}
-                strokeDasharray="4 2"
-                fill={color.fill}
-                fillOpacity={0.15}
-              />,
-            ];
-          })}
-        </AreaChart>
-      </ResponsiveContainer>
-    );
+  if (multiProvider) {
+    segments = providers.map((provider) => {
+      const prov = getProvider(provider);
+      return {
+        key: provider,
+        name: prov?.shortName ?? provider,
+        value: totalTokens(byProvider[provider]),
+        fill: getProviderColor(provider).fill,
+      };
+    });
+    showLegend = true;
+  } else {
+    // Single provider / no breakdown — input vs output of the merged series.
+    let input = 0;
+    let output = 0;
+    for (const b of data) {
+      input += b.input ?? 0;
+      output += b.output ?? 0;
+    }
+    segments = [
+      { key: 'output', name: 'Output Tokens', value: output, fill: 'var(--data-token-output-solid)' },
+      { key: 'input', name: 'Input Tokens', value: input, fill: 'var(--data-token-input-solid)' },
+    ];
+    showLegend = false;
   }
 
-  // Single provider — same as current
+  const grandTotal = segments.reduce((sum, s) => sum + s.value, 0);
+
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <AreaChart data={data} margin={CHART_MARGIN}>
-        <CartesianGrid stroke="var(--border-hairline)" vertical={false} />
-        <XAxis
-          dataKey="bucket"
-          tick={AXIS_TICK}
-          tickLine={false}
-          axisLine={{ stroke: 'var(--border-hairline)' }}
-          minTickGap={40}
-          tickFormatter={(v) => formatBucketLabel(v, range)}
-        />
-        <YAxis
-          tick={AXIS_TICK}
-          tickLine={false}
-          axisLine={false}
-          width={32}
-          allowDecimals={false}
-          tickFormatter={(v) => formatCompact(Number(v) || 0)}
-        />
+      <PieChart>
         <Tooltip
           contentStyle={TOOLTIP_STYLE}
-          labelFormatter={(v) => formatTooltipLabel(String(v), range)}
-          formatter={(value, name) => [
-            formatCount(Number(value) || 0),
-            String(name),
-          ]}
+          formatter={(value, name) => [formatCount(Number(value) || 0), String(name)]}
         />
-        <Area
-          type="monotone"
-          dataKey="output"
-          name="Output Tokens"
-          stackId="tokens"
-          stroke="var(--data-token-output-solid)"
-          fill="var(--data-token-output-solid)"
-          fillOpacity={0.3}
-        />
-        <Area
-          type="monotone"
-          dataKey="input"
-          name="Input Tokens"
-          stackId="tokens"
-          stroke="var(--data-token-input-solid)"
-          strokeDasharray="4 2"
-          fill="var(--data-token-input-solid)"
-          fillOpacity={0.15}
-        />
-      </AreaChart>
+        {showLegend ? <Legend wrapperStyle={LEGEND_STYLE} /> : null}
+        <Pie
+          data={segments}
+          dataKey="value"
+          nameKey="name"
+          cx="50%"
+          cy="50%"
+          innerRadius="58%"
+          outerRadius="82%"
+          paddingAngle={2}
+          stroke="var(--border-hairline)"
+          isAnimationActive={false}
+        >
+          {segments.map((segment) => (
+            <Cell key={segment.key} fill={segment.fill} />
+          ))}
+        </Pie>
+        {/* Center total — sum of all token spend, mirroring the showcase ring label. */}
+        <text
+          x="50%"
+          y="50%"
+          textAnchor="middle"
+          dominantBaseline="central"
+          fill="var(--text-1)"
+          fontSize="var(--text-lg)"
+          fontFamily="var(--font-mono)"
+          aria-label="Total tokens"
+        >
+          <tspan x="50%" dy="-0.2em" fontWeight={700}>
+            {formatCompact(grandTotal)}
+          </tspan>
+          <tspan x="50%" dy="1.3em" fill="var(--text-3)" fontSize="var(--text-xs)">
+            TOKENS
+          </tspan>
+        </text>
+      </PieChart>
     </ResponsiveContainer>
   );
 }
