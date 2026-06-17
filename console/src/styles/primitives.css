@@ -2281,7 +2281,7 @@ button.soup-pill[aria-disabled="true"] {
    below content (research-digest §5: chrome recedes); hairline right edge via
    c-border-r. Nameplate docks TOP, nav items stack as icon+label rows, a flex
    spacer pushes the secondary controls (theme/status/logout) to the BOTTOM.
-   Classes: .soup-rail · .soup-rail__nav · .soup-rail__item · .soup-rail__bar
+   Classes: .soup-rail · .soup-rail__nav · .soup-rail__item
             · .soup-rail__spacer · .soup-rail__dock
    At the --bp-rail-collapse narrow breakpoint the rail collapses to an
    icon-only column (labels go sr-only in TSX; width drops to --rail-w-collapsed)
@@ -2316,9 +2316,10 @@ button.soup-pill[aria-disabled="true"] {
   min-width: 0;
 }
 
-/* A single nav row: icon + label, full rail width, left-edge accent reserved. */
+/* A single nav row: icon + label, full rail width. The active row is marked by a
+   full accent fill (bg --accent + --accent-fg text, applied in TSX) — showcase-
+   accurate, replacing the prior left-edge accent bar. */
 .soup-rail__item {
-  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -2326,19 +2327,6 @@ button.soup-pill[aria-disabled="true"] {
   border-radius: var(--r-2);
   min-width: 0;
   white-space: nowrap;
-}
-
-/* Left-edge vertical accent bar marking the active item (replaces the legacy
-   bottom underline). Width --bw-accent, full item height inset by the row
-   radius, action accent colour. Rendered as an absolutely-positioned child. */
-.soup-rail__bar {
-  position: absolute;
-  left: 0;
-  top: var(--sp-1);
-  bottom: var(--sp-1);
-  width: var(--bw-accent);
-  border-radius: var(--bw-accent);
-  background: var(--accent);
 }
 
 /* Flex spacer — pushes the dock to the bottom of the rail. */

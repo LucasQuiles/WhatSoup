@@ -29,21 +29,15 @@ interface NavProps {
   onLogout?: () => void;
 }
 
-/** A single stacked rail row: icon + label, with a left-edge accent bar when active. */
+/** A single stacked rail row: icon + label. The active row is a full accent fill
+ *  (bg --accent, dark --accent-fg text); its icon inherits accent-fg via currentColor.
+ *  (Showcase-accurate; arbitrated green by the accent-law + accent-fg-on-accent contrast guards.) */
 function railItemClass(isActive: boolean): string {
   return `text-data soup-rail__item c-nav-link font-sans font-medium ${
-    isActive ? "text-text-1 bg-btn-neutral-bg" : "text-text-2 hover:text-text-2"
+    isActive
+      ? "bg-[var(--accent)] text-[var(--accent-fg)]"
+      : "text-text-2 hover:text-text-2"
   }`;
-}
-
-/** Left-edge vertical accent bar — the active-item indicator (replaces the legacy bottom underline). */
-function ActiveBar() {
-  return (
-    <span
-      aria-hidden="true"
-      className="soup-rail__bar absolute w-[var(--bw-accent)] bg-[var(--accent)] rounded-sm"
-    />
-  );
 }
 
 function RailLabel({ children }: { children: ReactNode }) {
@@ -59,7 +53,7 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
     <nav
       role="navigation"
       aria-label="Main navigation"
-      className="soup-rail bg-surface-inset c-border-r min-w-0"
+      className="soup-rail bg-surface-raised c-border-r min-w-0"
     >
       {/* SOUP nameplate — engraved instrument label, docked at the top of the rail
           (brand.md §1.1–§1.3). Lockup styled in primitives.css (.soup-nameplate*):
@@ -83,7 +77,6 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
           >
             <LayoutDashboard size={18} strokeWidth={1.75} aria-hidden="true" />
             <RailLabel>Fleet</RailLabel>
-            {isFleetActive && <ActiveBar />}
           </Link>
 
           <NavLink
@@ -98,14 +91,17 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
                   <>
                     <span
                       aria-hidden="true"
-                      className="text-xs font-mono font-semibold rounded-md min-w-[var(--sp-4)] text-center ml-auto bg-[var(--accent)] text-[var(--accent-fg)] py-[var(--sp-0h)] px-[var(--sp-1)]"
+                      className={`text-xs font-mono font-semibold rounded-md min-w-[var(--sp-4)] text-center ml-auto py-[var(--sp-0h)] px-[var(--sp-1)] ${
+                        isActive
+                          ? "bg-[var(--accent-fg)] text-[var(--accent)]"
+                          : "bg-[var(--accent)] text-[var(--accent-fg)]"
+                      }`}
                     >
                       {unreadCount > 99 ? "99+" : unreadCount}
                     </span>
                     <span className="sr-only">{unreadCount} unread</span>
                   </>
                 )}
-                {isActive && <ActiveBar />}
               </>
             )}
           </NavLink>
@@ -114,13 +110,8 @@ const Nav: FC<NavProps> = ({ alertCount = 0, unreadCount = 0, version, updateAva
             to="/ops"
             className={({ isActive }) => railItemClass(isActive)}
           >
-            {({ isActive }) => (
-              <>
-                <Terminal size={18} strokeWidth={1.75} aria-hidden="true" />
-                <RailLabel>Ops</RailLabel>
-                {isActive && <ActiveBar />}
-              </>
-            )}
+            <Terminal size={18} strokeWidth={1.75} aria-hidden="true" />
+            <RailLabel>Ops</RailLabel>
           </NavLink>
         </div>
       </div>
