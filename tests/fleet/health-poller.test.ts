@@ -2719,4 +2719,1091 @@ describe('HealthPoller', () => {
 
     poller.stop();
   });
+
+  // ── NEW: branch-coverage extensions ───────────────────────────────────────
+
+  // Branch: loadAlertThrottleDetailed returns loadError without a code field.
+  // The constructor should fall back to 'UNKNOWN' as the error code.
+  it('uses UNKNOWN error code when throttle loadError has no code field', async () => {
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map(),
+      loadError: { file: '/some/file.json', error: 'unexpected format' },
+    });
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_never_reachable',
+      expect.any(String),
+      expect.stringContaining('alert_throttle_load_error_code=UNKNOWN'),
+      'warning',
+      undefined,
+    );
+
+    poller.stop();
+  });
+
+  // Branch: lastAlertAtFor picks the most-recent entry among multiple throttle keys
+  // for the same instance when no existing status is in-memory yet.
+  it('lastAlertAtFor returns the most recent entry among multiple persisted throttle keys', async () => {
+    alertThrottleStore.loadAlertThrottleDetailed.mockReturnValue({
+      entries: new Map([
+        ['remote-1:instance_degraded', '2026-05-20T11:50:00.000Z'],
+        ['remote-1:instance_unreachable', '2026-05-20T11:58:00.000Z'],
+        ['remote-1:health_body_degraded', '2026-05-20T11:45:00.000Z'],
+      ]),
+      loadError: null,
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ status: 'healthy' }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The most recent entry across all keys is instance_unreachable at 11:58:00
+    expect(poller.getStatus('remote-1')!.lastAlertAt).toBe('2026-05-20T11:58:00.000Z');
+
+    poller.stop();
+  });
+
+  // Branch: loggedOutHeuristic but no disconnectedCorroboration and no explicitAuthLossSignal
+  // (backoff+zero attempts, but still says connected=true WITHOUT the 'present' account_jid check)
+  it('classifies backoff-zero-attempts as ambiguous-degraded when no disconnect corroboration', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'healthy',
+        whatsapp: {
+          connected: true,
+          // no account_jid → accountJidStatus = 'missing', but staleReconnectHint requires all 3
+          connection: {
+            state: 'connecting',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('remote-1');
+    expect(status).toMatchObject({
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      statusReason: 'whatsapp_backoff_zero_attempts_without_disconnect_corroboration',
+      error: null,
+    });
+    expectEmitAlertSourceNotCalled('remote-1', 'instance_logged_out');
+  });
+
+  // Branch: HTTP 200, health['status'] is not a string → healthStatus === ''
+  // so it falls through to classification.status === 'degraded' path.
+  it('handles health body with non-string status field gracefully', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 42, // non-string
+        whatsapp: {
+          connected: true,
+          account_jid: '15550001111@s.whatsapp.net',
+          connection: { state: 'connected', reconnect_phase: null, reconnect_attempts: 0 },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    // status=42 is not 'unhealthy'/'degraded'; classifyHealthSnapshot sees healthStatus=unknown
+    // connected=true+account_jid present+state=connected → health_body_ok
+    const status = poller.getStatus('remote-1');
+    expect(status).toMatchObject({
+      status: 'online',
+      statusReason: 'health_body_ok',
+      error: null,
+    });
+  });
+
+  // Branch: HTTP 200, classifyHealthSnapshot returns logged_out (explicit whatsapp fields)
+  // but classifyLoggedOutSignal returns loggedOut=false.
+  // This exercises the `classification.status === 'logged_out'` branch on line 419.
+  it('routes to updateFromHealthSnapshot when classifyHealthSnapshot returns logged_out', async () => {
+    // classifyHealthSnapshot returns 'logged_out' when loggedOutHeuristic AND disconnectedCorroboration AND explicitAuthLossSignal
+    // but classifyLoggedOutSignal does NOT return loggedOut=true (auth_failure_class not in TERMINAL set)
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'unhealthy',
+        whatsapp: {
+          connected: false,
+          account_jid: 'not connected',
+          connection: {
+            state: 'disconnected',
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+            last_disconnect_reason: 'loggedOut', // triggers explicitAuthLossSignal
+            last_status_code: 401,               // also triggers explicitAuthLossSignal
+            auth_failure_class: '',              // NOT in TERMINAL_AUTH_FAILURE_CLASSES
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('remote-1');
+    // classifyLoggedOutSignal triggers (last_status_code=401), so status is logged_out via that path
+    expect(status).toMatchObject({
+      status: 'logged_out',
+      error: null,
+    });
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      'whatsoup@remote-1 appears logged out',
+      expect.stringContaining('last_status_code=401'),
+      'critical',
+      serverRevokedAssetMatcher(),
+    );
+  });
+
+  // Branch: HTTP 200, non-'unhealthy'/'degraded' healthStatus string but classifyHealthSnapshot
+  // returns 'degraded' (loggedOutHeuristic path). Exercises line 445.
+  it('routes to updateFromHealthSnapshot for degraded classification when healthStatus is not unhealthy/degraded', async () => {
+    // classifyHealthSnapshot returns 'degraded' with ambiguous confidence when
+    // loggedOutHeuristic is true but no disconnectedCorroboration
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'healthy', // not 'unhealthy' or 'degraded'
+        whatsapp: {
+          connected: false, // connected=false → staleReconnectHint=false
+          connection: {
+            state: 'connecting', // not 'disconnected' → no disconnectedCorroboration
+            reconnect_phase: 'backoff',
+            reconnect_attempts: 0,
+            // no auth_failure_class, no last_status_code, no last_disconnect_reason
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('remote-1');
+    // loggedOutHeuristic=true, disconnectedCorroboration=false (state='connecting', connected=false
+    // but healthStatus='healthy' not 'unhealthy'), explicitAuthLossSignal=false
+    // → reaches loggedOutHeuristic branch → 'degraded' confidence='ambiguous'
+    expect(status).toMatchObject({
+      status: 'degraded',
+      statusConfidence: 'ambiguous',
+      error: null,
+    });
+  });
+
+  // Branch: updateDegraded - prevStatus='unreachable', newStatus='degraded'.
+  // Exercises line 953: `newStatus !== 'logged_out' && prevStatus === 'unreachable'`.
+  it('clears unreachable alert when instance transitions from unreachable to degraded', async () => {
+    // Use a large interval so dwell advance does not trigger extra polls.
+    let phase: 'healthy' | 'failing' | 'degraded' = 'healthy';
+    mockFetch.mockImplementation(async () => {
+      if (phase === 'failing') throw new Error('connection refused');
+      if (phase === 'degraded') {
+        return {
+          ok: true,
+          json: () => Promise.resolve({
+            status: 'degraded',
+            whatsapp: { connected: true, connection: { state: null } },
+          }),
+        };
+      }
+      return { ok: true, json: () => Promise.resolve({ status: 'healthy' }) };
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0); // healthy
+
+    phase = 'failing';
+    await vi.advanceTimersByTimeAsync(1_000); // fail 1
+    await vi.advanceTimersByTimeAsync(1_000); // fail 2
+    await vi.advanceTimersByTimeAsync(1_000); // fail 3 → unreachable
+
+    expect(poller.getStatus('remote-1')!.status).toBe('unreachable');
+    expect(poller.getStatus('remote-1')!.everReachable).toBe(true);
+
+    // Keep failing so dwell accumulates (30s advance + 30 extra fail polls)
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_unreachable',
+      expect.any(String),
+      expect.any(String),
+      'critical',
+      undefined,
+    );
+
+    // Now instance returns degraded body → transitions unreachable → degraded
+    phase = 'degraded';
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('degraded');
+    // clearRecoveredAlert should be called for unreachable sources
+    expectClearAlertSourceCalled('remote-1', 'instance_unreachable');
+
+    poller.stop();
+  });
+
+  // Branch: clearAlertSourceChecked returns false → source is retained in activeAlertSources.
+  it('retains active alert source when clearAlertSourceChecked returns false', async () => {
+    alertFns.clearAlertSource.mockReturnValue(false);
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth()),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    // clearAlertSourceChecked returned false → source is retained
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+
+    poller.stop();
+  });
+
+  // Branch: clearAlertSourceChecked throws → source is retained in activeAlertSources and warn logged.
+  it('logs warning and retains source when clearAlertSourceChecked throws', async () => {
+    const clearError = new Error('alert service unavailable');
+    alertFns.clearAlertSource.mockImplementationOnce(() => { throw clearError; });
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth()),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: clearError, name: 'remote-1', source: 'instance_logged_out' }),
+      'failed to emit alert clear',
+    );
+
+    poller.stop();
+  });
+
+  // Branch: hasVerifiedRelinkRecovery - no whatsapp field in health.
+  it('hasVerifiedRelinkRecovery returns false when health has no whatsapp field', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'healthy',
+          // no whatsapp field at all
+        }),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    // No whatsapp → relink not verified → alert source retained
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  // Branch: hasVerifiedRelinkRecovery - whatsapp present but connected !== true.
+  it('hasVerifiedRelinkRecovery returns false when whatsapp.connected is false', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth({
+          whatsapp: { connected: false },
+        })),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    // connected=false → relink not verified → stays online but retains logged_out alert
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  // Branch: hasVerifiedRelinkRecovery - connection.state !== 'connected'.
+  it('hasVerifiedRelinkRecovery returns false when connection.state is not connected', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth({
+          connection: { state: 'reconnecting' },
+        })),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  // Branch: hasVerifiedRelinkRecovery - authBond missing entirely.
+  it('hasVerifiedRelinkRecovery returns false when auth_bond is absent', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'healthy',
+          whatsapp: {
+            connected: true,
+            connection: { state: 'connected' },
+            // no auth_bond field
+          },
+          outbound_sends: { latest_successful_send_at: '2026-05-20T12:00:10.000Z' },
+        }),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  // Branch: hasVerifiedRelinkRecovery - authBond.status !== 'present'.
+  it('hasVerifiedRelinkRecovery returns false when auth_bond.status is not present', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth({
+          authBond: { status: 'missing' },
+        })),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  // Branch: hasVerifiedRelinkRecovery - creds.exists !== true.
+  it('hasVerifiedRelinkRecovery returns false when creds.exists is false', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth({
+          creds: { exists: false, size: 512 },
+        })),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  // Branch: hasVerifiedRelinkRecovery - creds.empty_hash is not false, hash is present and non-empty
+  // but hash starts with EMPTY_SHA256 prefix → rejected.
+  it('hasVerifiedRelinkRecovery returns false when creds hash prefix matches empty-sha256', async () => {
+    const emptyHashPrefix = 'e3b0c44298fc1c149af'; // first 19 chars of EMPTY_SHA256
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth({
+          creds: {
+            exists: true,
+            size: 512,
+            mtime: '2026-05-20T12:00:05.000Z',
+            hash: emptyHashPrefix,
+            empty_hash: undefined, // not false → triggers the hash check
+          },
+        })),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  // Branch: hasVerifiedRelinkRecovery - creds mtime is null (not a valid timestamp string).
+  it('hasVerifiedRelinkRecovery returns false when creds.mtime is not a valid timestamp', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth({
+          creds: {
+            exists: true,
+            size: 512,
+            mtime: null, // not a string → readTimestampMs returns null
+            hash: 'a'.repeat(20),
+            empty_hash: false,
+          },
+        })),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  // Branch: hasVerifiedRelinkRecovery - latest_successful_send_at is null.
+  it('hasVerifiedRelinkRecovery returns false when outbound send timestamp is absent', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth({
+          outboundSends: { latest_successful_send_at: null },
+        })),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['instance_logged_out']);
+    expectClearAlertSourceNotCalled('remote-1', 'instance_logged_out');
+
+    poller.stop();
+  });
+
+  // Branch: readTimestampMs - space-delimited date format (normalized to ISO with T+Z).
+  it('clears instance_logged_out when creds mtime uses space-delimited timestamp format', async () => {
+    // 2026-05-20 12:00:05 space-delimited → normalized to 2026-05-20T12:00:05Z
+    // Send is at 12:00:10, so send > creds mtime → recovery verified
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(makeVerifiedRelinkHealth({
+          creds: {
+            exists: true,
+            size: 512,
+            mtime: '2026-05-20 12:00:05', // space-delimited, no Z suffix
+            hash: 'a'.repeat(20),
+            empty_hash: false,
+          },
+        })),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    // Space-delimited mtime parsed correctly → recovery verified → alert cleared
+    expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      expect.stringContaining('clear_code=WA_AUTH_BOND_RELINK_VERIFIED'),
+      relinkVerifiedAssetMatcher(),
+    );
+    expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual([]);
+
+    poller.stop();
+  });
+
+  // Branch: HTTP 403 response → health_probe_auth_failed (same path as 401).
+  it('classifies HTTP 403 as health probe auth failure', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: () => Promise.resolve({ error: 'forbidden' }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100, healthToken: 'bad-token' })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')!.status).toBe('degraded');
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_probe_auth_failed',
+      'whatsoup@remote-1 health probe auth failed',
+      'health_probe_auth_failed http_status=403 health_port=9100',
+      'critical',
+      undefined,
+    );
+
+    poller.stop();
+  });
+
+  // Branch: non-ok response without parseable body AND auth-loss evidence.
+  // readHealthBody returns null (JSON parse fails) → falls through to updateFailure.
+  it('treats non-ok response with null body as generic HTTP failure', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: () => Promise.reject(new Error('not json')),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'degraded',
+      consecutiveFailures: 1,
+      error: 'HTTP 500',
+    });
+  });
+
+  // Branch: non-ok response with parseable body that classifies as non-online but not logged-out.
+  // Exercises the `isNonOnlineClassification` path within the non-ok response handler.
+  it('routes non-ok response with parseable non-logged-out body to updateFromHealthSnapshot', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({
+        status: 'unhealthy', // healthStatus=unhealthy but no backoff/auth_failure signals
+        whatsapp: {
+          connected: false,
+          account_jid: 'not connected',
+          connection: {
+            state: 'disconnected',
+            reconnect_phase: 'active', // NOT 'backoff' → loggedOutHeuristic=false
+            reconnect_attempts: 5,
+          },
+        },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}));
+
+    await (poller as any).poll();
+
+    const status = poller.getStatus('remote-1');
+    // classifyHealthSnapshot: unhealthy status → 'degraded' confidence='confirmed'
+    // classifyLoggedOutSignal: not explicit, not connected, not backoff+0 → loggedOut=false
+    // → goes to isNonOnlineClassification branch → updateFromHealthSnapshot
+    expect(status).toMatchObject({
+      status: 'degraded',
+      statusConfidence: 'confirmed',
+      statusReason: 'health_body_unhealthy',
+      consecutiveFailures: 0,
+      error: null,
+    });
+    expectEmitAlertSourceNotCalled('remote-1', 'instance_logged_out');
+  });
+
+  // Branch: self-instance getSelfHealth throws → updateFailure called.
+  it('self-instance poll failure is handled gracefully when getSelfHealth throws', async () => {
+    const selfError = new Error('health callback crashed');
+    const getSelfHealth = vi.fn().mockImplementation(() => { throw selfError; });
+    const instances = makeInstances(['self', makeInstance({ name: 'self' })]);
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const status = poller.getStatus('self');
+    expect(status).toBeDefined();
+    expect(status!.status).toBe('degraded');
+    expect(status!.consecutiveFailures).toBe(1);
+    expect(status!.error).toBe('health callback crashed');
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  // Branch: readTimestampMs with an invalid (non-parseable) string → returns null.
+  // Uses camelCase outboundSends to exercise the readLatestSuccessfulSendAt camelCase fallback.
+  it('hasVerifiedRelinkRecovery handles camelCase outboundSends field', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'unhealthy',
+          whatsapp: {
+            connected: false,
+            connection: {
+              state: 'disconnected',
+              last_status_code: 401,
+              last_disconnect_reason: 'loggedOut',
+              reconnect_phase: 'backoff',
+              reconnect_attempts: 0,
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'healthy',
+          whatsapp: {
+            connected: true,
+            connection: { state: 'connected' },
+            auth_bond: {
+              status: 'present',
+              creds: {
+                exists: true,
+                size: 512,
+                mtime: '2026-05-20T12:00:05.000Z',
+                hash: 'a'.repeat(20),
+                empty_hash: false,
+              },
+            },
+          },
+          outboundSends: { // camelCase variant
+            latestSuccessfulSendAt: '2026-05-20T12:00:10.000Z',
+          },
+        }),
+      });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(poller.getStatus('remote-1')!.status).toBe('logged_out');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.status).toBe('online');
+    // camelCase field should be recognized → recovery verified → alert cleared
+    expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+      'remote-1',
+      'instance_logged_out',
+      expect.stringContaining('clear_code=WA_AUTH_BOND_RELINK_VERIFIED'),
+      relinkVerifiedAssetMatcher(),
+    );
+
+    poller.stop();
+  });
+
+  // Branch: stop() called when pollInterval is null (already stopped or never started).
+  it('stop() is safe when polling was never started', () => {
+    const poller = new HealthPoller(
+      () => new Map(),
+      'self',
+      vi.fn().mockReturnValue({}),
+    );
+    // Should not throw even though pollInterval is null
+    expect(() => poller.stop()).not.toThrow();
+  });
+
+  // Branch: on() called with an event other than 'statusChange' is a no-op (defensive guard).
+  it('on() ignores unrecognized event types without error', async () => {
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth);
+    const cb = vi.fn();
+
+    // TypeScript guard: cast to any to test the JS guard inside on()
+    (poller as any).on('unknownEvent', cb);
+
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The unknown-event listener was NOT registered; only real statusChange listeners fire
+    expect(cb).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  // Branch: lastAlertAtFor - existing.lastAlertAt is set (early-return path).
+  it('lastAlertAtFor returns in-memory lastAlertAt when already set on existing status', async () => {
+    // First poll: goes unreachable and fires an alert (sets lastAlertAt)
+    mockFetch.mockRejectedValue(new Error('connection refused'));
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const getSelfHealth = vi.fn().mockReturnValue({});
+
+    const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const statusAfterAlert = poller.getStatus('remote-1')!;
+    expect(statusAfterAlert.lastAlertAt).toBe('2026-05-20T12:00:02.000Z');
+
+    // Fourth poll: still failing — existing.lastAlertAt is already set, takes early return
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')!.lastAlertAt).toBe('2026-05-20T12:00:02.000Z');
+
+    poller.stop();
+  });
 });
