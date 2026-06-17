@@ -2,7 +2,7 @@
  * primitives/index.ts — barrel export for SOUP v3 primitive components.
  *
  * Badge (StatusCell + ModeBadge), Button, ActionButton, Card, Accordion, FormControl, Modal,
- * Pill, Table, Toolbar, LogStream, Drawer, Tabs, Popover, Menu.
+ * Pill, Table, Toolbar, LogStream, Drawer, Tabs, Popover, Menu, Stepper.
  * All consumers import from this barrel; never import from individual files.
  */
 export { StatusCell, ModeBadge } from './Badge';
@@ -153,3 +153,6 @@ export type { SwitchProps } from './Switch';
 
 export { Tooltip } from './Tooltip';
 export type { TooltipProps } from './Tooltip';
+
+export { Stepper } from './Stepper';
+export type { StepperProps } from './Stepper';
