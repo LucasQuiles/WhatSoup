@@ -123,6 +123,7 @@ async function startSocket(): Promise<void> {
         clearTimeout(timeoutHandle);
         console.error('Logged out — delete the auth directory and re-run this script.');
         process.exit(1);
+        return;
       }
 
       if (action.type === 'reconnect' && action.reason === 'restart-required-flapping') {
