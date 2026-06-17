@@ -219,6 +219,39 @@ def test_main_pass_fail_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_lineage"
 
 
+def test_lineage_empty_record_hash_is_malformed():
+    # parent_fork_record_hash must be a NON-EMPTY string (guard `not isinstance(rh,str) or not rh`).
+    # An and-weakening would accept an empty hash (isinstance is True, so the conjunction is False),
+    # admitting a lineage declaration with no real fork anchor.
+    parent = _parent()
+    child = _build("child-fork", [("compress", T_FORK)], start=T_MASK)
+    bad = _lineage(parent, 0, record_hash="")
+    assert _err(clg.verify_lineage, parent, child, bad) == "malformed_lineage"
+
+
+def test_fork_at_last_parent_step_is_not_divergent():
+    # is_divergent_fork = `in_range AND fork_step < len(parent) - 1`: a fork at the LAST parent step
+    # means the parent did NOT continue past the fork point, so it is NOT divergent. An or-weakening
+    # or a <= weakening (true at the last step) would mislabel it divergent.
+    parent = _parent()  # 2 records -> last step index 1 == len(parent)-1
+    child = _build("child-late", [("canonicalize", T_COMPRESS)], start=T_COMPRESS)
+    rep = clg.verify_lineage(parent, child, _lineage(parent, 1))
+    assert rep["overall_verdict"] == "PASS"
+    assert rep["is_divergent_fork"] is False
+
+
+def test_lineage_recommended_action_mirrors_verdict():
+    # recommended_action is "accept_lineage" iff overall == "PASS" (else "reject_lineage"). Flipping
+    # the == would invert the label on both a clean fork and a discontinuity.
+    parent = _parent()
+    child = _build("child-fork", [("compress", T_FORK)], start=T_MASK)
+    ok = clg.verify_lineage(parent, child, _lineage(parent, 0))
+    assert ok["overall_verdict"] == "PASS" and ok["recommended_action"] == "accept_lineage"
+    fake = _build("child-fake", [("mask", T_MASK)], start=START)  # text discontinuity -> FAIL
+    bad = clg.verify_lineage(parent, fake, _lineage(parent, 0))
+    assert bad["overall_verdict"] == "FAIL" and bad["recommended_action"] == "reject_lineage"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

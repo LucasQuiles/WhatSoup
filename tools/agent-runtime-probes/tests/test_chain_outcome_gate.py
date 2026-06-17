@@ -186,6 +186,32 @@ def test_main_pass_fail_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_outcome"
 
 
+def test_empty_records_failure_at_nonzero_step_is_invalid():
+    # With ZERO records, the ONLY valid outcome is a failure at the very first step (guard
+    # `not (status in _FAILURE_STATES and failed_at_step == 0)`). A failure at a NONZERO step takes
+    # the early-return FAIL path with the distinctive error_type "empty_chain_bad_index". An
+    # or-weakening (De Morgan) would skip that early return (the failure-status disjunct alone
+    # satisfies the relaxed guard) and fall through to the FULL report — which still FAILs (via
+    # inconsistent_failure_index) but carries NO error_type. So the error_type, not just the FAIL
+    # verdict, is the load-bearing assertion that distinguishes the two paths.
+    rep = cog.verify_outcome([], {"status": "failed", "failed_at_step": 1, "failure_class": "anchor_loss"})
+    assert rep["overall_verdict"] == "FAIL"
+    assert rep["error_type"] == "empty_chain_bad_index"
+    # contrast: a failure at step 0 with no records IS the one valid empty outcome
+    ok = cog.verify_outcome([], {"status": "failed", "failed_at_step": 0, "failure_class": "anchor_loss"})
+    assert ok["overall_verdict"] == "PASS"
+
+
+def test_outcome_recommended_action_mirrors_verdict():
+    # recommended_action is "accept_outcome" iff overall == "PASS" (else "reject_outcome"); flipping
+    # the == inverts the label. The FAIL case uses a NON-EMPTY chain (failed_at_step beyond the
+    # recorded count) so it reaches the full report that carries recommended_action.
+    ok = cog.verify_outcome(_chain(), {"status": "completed"})
+    assert ok["overall_verdict"] == "PASS" and ok["recommended_action"] == "accept_outcome"
+    bad = cog.verify_outcome(_chain(), {"status": "failed", "failed_at_step": 5, "failure_class": "anchor_loss"})
+    assert bad["overall_verdict"] == "FAIL" and bad["recommended_action"] == "reject_outcome"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

@@ -217,6 +217,38 @@ def test_main_pass_fail_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_decisions"
 
 
+def test_decision_step_index_validation():
+    # step_index must be a real in-range int (guard `not isinstance(idx,int) or isinstance(idx,bool)
+    # or not (0 <= idx < step_count)`). The BOOL term is the load-bearing isolator of the or-chain:
+    # True is an int subclass and (True == 1) provides full step coverage, so a bool index passes the
+    # count/coverage checks and is rejected ONLY by the explicit `isinstance(idx, bool)` disjunct.
+    # An and-weakening of the chain admits it (the `not isinstance(True,int)` term is False, so the
+    # conjunction short-circuits to no-raise). Out-of-range / non-int indices are also rejected, but
+    # via the coverage check too, so they cannot single out this guard.
+    recs = _chain()  # step_count == 2
+    assert _err(pag.compute_effective_chain, recs,
+                [{"step_index": 0, "decision": "adopt"},
+                 {"step_index": True, "decision": "adopt"}]) == "malformed_decisions"  # bool index
+    assert _err(pag.compute_effective_chain, recs,
+                [{"step_index": 5, "decision": "adopt"}]) == "malformed_decisions"      # out of range
+    assert _err(pag.compute_effective_chain, recs,
+                [{"step_index": "0", "decision": "adopt"}]) == "malformed_decisions"    # non-int
+
+
+def test_adoption_counts_and_recommended_action():
+    # skipped_count/reverted_count count `== "skip"`/`== "revert"`; a != weakening counts the
+    # complement. With [adopt, adopt] the matching count is 0 while the complement is 2, so the
+    # mutants are exposed. recommended_action mirrors overall == "PASS".
+    recs = _chain()
+    rep = pag.compute_effective_chain(recs, _dec([(0, "adopt"), (1, "adopt")]))
+    assert rep["adopted_count"] == 2
+    assert rep["skipped_count"] == 0    # != weakening would count the 2 non-skip steps
+    assert rep["reverted_count"] == 0   # != weakening would count the 2 non-revert steps
+    assert rep["overall_verdict"] == "PASS" and rep["recommended_action"] == "apply_effective_chain"
+    bad = pag.compute_effective_chain(recs, _dec([(0, "skip"), (1, "adopt")]))  # incoherent -> FAIL
+    assert bad["overall_verdict"] == "FAIL" and bad["recommended_action"] == "reject_decision_set"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
