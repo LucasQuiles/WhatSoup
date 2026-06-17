@@ -126,17 +126,24 @@ sequence (proactive per-chat resume → resume-fail → context-recovery / repla
 turns) emits empty results while the usability probe is still transiently
 `unknown`. That transient `unknown` is what `primaryModelUsabilityRequiresAlert`
 reads as unusable, so the **single-empty probe fast-path** would arm on the very
-first empty turn and flap the bot onto the backup on *every* restart (observed on
-eh-bot 2026-06-17: 4/4 activations were single-empty `probe-unusable` at startup,
-0 from the threshold). So before the bot has served a turn
-(`lastSuccessfulTurnAt === null`) and within the grace window, **only the probe
-fast-path is suppressed** — the empty is still **counted**, and the
+first empty turn and flap the instance onto the backup on *every* restart (seen in
+production: the spurious startup activations were all single-empty
+`probe-unusable`, none from the threshold). So before the instance has served a
+turn (`lastSuccessfulTurnAt === null`) and within the grace window, **only the
+probe fast-path is suppressed** — the empty is still **counted**, and the
 consecutive-empty threshold still arms. This is deliberately narrow: a genuinely
 dead primary taking *real* inbound traffic in the first 60s still fails over via
 the threshold (at most one extra turn of latency — no silent blind spot), and the
 per-chat empty-output replay that arms through the threshold is preserved. The
 counter resets on any successful turn, after which the probe fast-path is live
 again immediately.
+
+The grace's elapsed measurement uses `performance.now()` (monotonic), not
+`Date.now()`, so wall-clock steps (NTP corrections, host sleep/wake, VM
+migration) cannot prematurely end or over-extend the window on any host/platform.
+The probe fast-path is additionally gated on `!probeInFlight` (mirroring
+`getTurnCapability`) so an unresolved startup probe never reads as
+confirmed-unusable.
 
 ## Warm handoff distiller (flag-gated)
 

@@ -180,7 +180,8 @@ function driveTurn(runtime: AgentRuntime, queue: ReturnType<typeof makeFakeQueue
 }
 
 /** A usability probe result that primaryModelUsabilityRequiresAlert() rejects
- *  (status unknown + binary-model-probe-failed) — the exact mini4 shape. */
+ *  (status unknown + binary-model-probe-failed) — the transient
+ *  startup-unusable shape that triggered the spurious probe-fast-path arming. */
 const UNUSABLE_PROBE = {
   status: 'unknown',
   reason: 'binary-model-probe-failed',
@@ -349,6 +350,141 @@ describe('empty-output arming — startup grace (anti-flap)', () => {
     driveTurn(runtime, queue, 'hello', 1);
     v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE };
     driveTurn(runtime, queue, null, 2); // empty + unusable probe -> arms
+    expect(runtime.getFallbackState().fallbackActiveUntil).not.toBeNull();
+    expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
+  });
+});
+
+// ─── R1 regression: monotonic grace is immune to wall-clock jumps ─────────────
+describe('empty-output arming — startup grace uses monotonic clock (R1 regression)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-17T01:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('a forward Date.now() jump does NOT prematurely end the grace (NTP / sleep-wake forward step)', () => {
+    // Scenario: bot boots, an NTP correction / sleep-wake steps Date.now()
+    // forward by 70s, but no real time has passed (monotonic clock unchanged).
+    // Before R1 fix: grace would appear elapsed (Date.now() - bootMs ≥ 60_000)
+    // and the probe fast-path would arm on a single empty turn at boot.
+    // After R1 fix: performance.now() is unchanged → grace still active → no arm.
+    const runtime = makeRuntime(FALLBACK);
+    v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE };
+    const queue = makeFakeQueue();
+
+    // Step the wall-clock forward by 70 s (simulates a NTP step or sleep-wake
+    // event) WITHOUT advancing performance.now() (only setSystemTime moves Date).
+    vi.setSystemTime(new Date('2026-06-17T01:01:10Z')); // +70s wall-clock
+
+    // Single empty turn: probe says unusable but grace is still active
+    // (performance.now() hasn't moved). Must NOT arm via probe fast-path.
+    driveTurn(runtime, queue, null, 1);
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+    expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(1);
+  });
+
+  it('a backward Date.now() step does NOT over-extend the grace (NTP correction backward)', () => {
+    // Scenario: performance.now() advances past 60s (grace should elapse) but a
+    // NTP backward correction steps Date.now() back. Before R1 fix: the elapsed
+    // computation could go negative / stay below threshold, silently extending
+    // the grace indefinitely. After R1 fix: monotonic clock elapsed → grace
+    // correctly ends → probe fast-path fires once.
+    const runtime = makeRuntime(FALLBACK);
+    v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE };
+    const queue = makeFakeQueue();
+
+    // Advance monotonic time past the grace window.
+    vi.advanceTimersByTime(61_000); // performance.now() +61s
+
+    // Now step wall-clock backward (NTP backward correction): Date.now() is back
+    // to 30s after boot, so Date.now()-based elapsed would show ~30s (within grace).
+    vi.setSystemTime(new Date('2026-06-17T01:00:30Z')); // -30s from +61s wall
+
+    // Single empty turn: grace has elapsed on the monotonic clock. Must ARM
+    // (probe unusable + outside monotonic grace window).
+    driveTurn(runtime, queue, null, 1);
+    expect(runtime.getFallbackState().fallbackActiveUntil).not.toBeNull();
+    expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
+  });
+});
+
+// ─── R2 regression: probeInFlight guard ───────────────────────────────────────
+describe('empty-output arming — probeInFlight guard (R2 regression)', () => {
+  /** A usability result with probeInFlight:true — set when the startup probe
+   *  has been dispatched but not yet resolved. Before R2 fix, this was treated
+   *  identically to a resolved-unusable probe and could arm the fast-path. */
+  const IN_FLIGHT_PROBE = {
+    status: 'unknown' as const,
+    reason: 'probe-in-flight' as const,
+    provider: 'claude-cli',
+    model: 'claude-opus-4-8',
+    checkedAt: null,
+    probeInFlight: true,
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-17T01:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    vi.spyOn(fallbackStateDb, 'saveFallbackState').mockImplementation(() => {});
+    vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('does NOT arm on a single empty turn when the probe is still in-flight (even outside startup grace)', () => {
+    // Core R2 scenario: startup probe takes >60s (slow network, overloaded
+    // probe target). The grace window elapses. An empty turn arrives. Before
+    // R2 fix: probeInFlight:true → primaryModelUsabilityRequiresAlert() → true
+    // → armViaProbe=true → arms against a healthy primary. After R2 fix: the
+    // probeInFlight guard short-circuits to false → no arm.
+    const runtime = makeRuntime(FALLBACK);
+    v(runtime).primaryModelUsability = { ...IN_FLIGHT_PROBE };
+    const queue = makeFakeQueue();
+
+    vi.advanceTimersByTime(61_000); // past grace
+    driveTurn(runtime, queue, null, 1);
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+    expect(v(runtime).consecutivePrimaryEmptyTurns).toBe(1);
+  });
+
+  it('DOES arm after threshold consecutive empties even when probe is in-flight', () => {
+    // The probeInFlight guard only suppresses the single-empty probe fast-path.
+    // The threshold path (≥2 consecutive empties) is not gated by probeInFlight
+    // and must still arm — a genuinely dead primary with a stalled probe cannot
+    // hide indefinitely.
+    const runtime = makeRuntime(FALLBACK);
+    v(runtime).primaryModelUsability = { ...IN_FLIGHT_PROBE };
+    const queue = makeFakeQueue();
+
+    vi.advanceTimersByTime(61_000); // past grace
+    driveTurn(runtime, queue, null, 1); // count 1, no arm
+    expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
+
+    driveTurn(runtime, queue, null, 2); // threshold reached → arms
+    expect(runtime.getFallbackState().fallbackActiveUntil).not.toBeNull();
+    expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
+  });
+
+  it('DOES arm on first empty when the probe has RESOLVED unusable (probeInFlight:false)', () => {
+    // Sanity-check: R2 fix must not suppress the existing resolved-unusable
+    // fast-path. A completed probe with probeInFlight:false still arms on the
+    // first empty turn outside the startup grace.
+    const runtime = makeRuntime(FALLBACK);
+    v(runtime).primaryModelUsability = { ...UNUSABLE_PROBE }; // probeInFlight:false
+    const queue = makeFakeQueue();
+
+    vi.advanceTimersByTime(61_000); // past grace
+    driveTurn(runtime, queue, null, 1);
     expect(runtime.getFallbackState().fallbackActiveUntil).not.toBeNull();
     expect(runtime.getFallbackState().effectiveProvider).toBe('opencode-cli');
   });
