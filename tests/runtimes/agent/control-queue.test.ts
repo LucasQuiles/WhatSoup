@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ControlQueue } from '../../../src/runtimes/agent/control-queue.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import type { DurabilityEngine } from '../../../src/core/durability.ts';
 import type { ToolUpdate } from '../../../src/runtimes/agent/outbound-queue.ts';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
@@ -55,6 +56,14 @@ describe('ControlQueue', () => {
     expect(log).toContain('second line');
   });
 
+  it('buffers streaming and result text without calling messenger', () => {
+    queue.enqueueStreamingText('stream chunk');
+    queue.enqueueResultText('terminal result');
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(queue.getLog()).toEqual(['stream chunk', 'terminal result']);
+  });
+
   it('enqueueToolUpdate buffers a formatted entry and does not call messenger', () => {
     const update: ToolUpdate = { category: 'reading', detail: 'CLAUDE.md' };
     queue.enqueueToolUpdate(update);
@@ -76,6 +85,35 @@ describe('ControlQueue', () => {
   it('indicateTyping is a no-op and does not throw', () => {
     expect(() => queue.indicateTyping()).not.toThrow();
     expect(messenger.setTyping).not.toHaveBeenCalled();
+  });
+
+  it('executes poll callbacks immediately and propagates poll failures', async () => {
+    const sendPoll = vi.fn(async () => undefined);
+
+    await queue.enqueuePoll(sendPoll);
+    expect(sendPoll).toHaveBeenCalledOnce();
+
+    const failure = new Error('poll failed');
+    await expect(queue.enqueuePoll(async () => {
+      throw failure;
+    })).rejects.toThrow(failure);
+  });
+
+  it('keeps control-only no-op settings local', async () => {
+    queue.enqueueText('kept');
+
+    expect(() => queue.enqueueProgressUpdate({ type: 'thinking_long', gapMs: 1000 }, 'q')).not.toThrow();
+    expect(() => queue.setToolUpdateMode('friendly')).not.toThrow();
+    expect(() => queue.setToolUpdateRedirectJid('ops@s.whatsapp.net')).not.toThrow();
+    expect(() => queue.setToolUpdateRedirectJid(null)).not.toThrow();
+    expect(() => queue.setTextAggregateDelayMs(5)).not.toThrow();
+    expect(() => queue.setPollPending(true)).not.toThrow();
+    expect(() => queue.setPollPending(false)).not.toThrow();
+    await expect(queue.shutdown()).resolves.toBeUndefined();
+
+    expect(messenger.sendMessage).not.toHaveBeenCalled();
+    expect(messenger.setTyping).not.toHaveBeenCalled();
+    expect(queue.getLog()).toEqual(['kept']);
   });
 
   it('abortTurn clears the buffer', () => {
@@ -108,6 +146,16 @@ describe('ControlQueue', () => {
 
   it('markLastTerminal is a no-op and does not throw', () => {
     expect(() => queue.markLastTerminal()).not.toThrow();
+  });
+
+  it('durability lifecycle methods are no-ops for control sessions', () => {
+    queue.enqueueText('still buffered');
+
+    expect(() => queue.clearLastOpId()).not.toThrow();
+    expect(() => queue.setDurability({} as DurabilityEngine)).not.toThrow();
+
+    expect(queue.getLastOpId()).toBeUndefined();
+    expect(queue.getLog()).toEqual(['still buffered']);
   });
 
   it('sendControlMessage calls sendTracked with the formatted message and correct args', async () => {

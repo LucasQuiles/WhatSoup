@@ -3,6 +3,7 @@ import {
   encodeMediaForProvider,
   turnPartsToText,
   turnPartsToOpenAIContent,
+  turnPartsToAnthropicContent,
 } from '../../../../src/runtimes/agent/providers/media-bridge.ts';
 import {
   generateMcpConfigFile,
@@ -70,6 +71,15 @@ describe('encodeMediaForProvider', () => {
     expect(pendingFiles).toHaveLength(0);
   });
 
+  it('file_path mode: image with caption keeps the file reference and caption together', () => {
+    const { textParts } = encodeMediaForProvider(
+      [{ kind: 'image', mimeType: 'image/jpeg', filePath: '/tmp/photo.jpg', caption: 'front panel' }],
+      'file_path',
+    );
+
+    expect(textParts).toEqual(['[Image: /tmp/photo.jpg] front panel']);
+  });
+
   it('startup_only mode: image with filePath → mediaFlags contains --image /path', () => {
     const { textParts, mediaFlags } = encodeMediaForProvider(
       [{ kind: 'image', mimeType: 'image/png', filePath: '/tmp/img.png' }],
@@ -109,6 +119,17 @@ describe('encodeMediaForProvider', () => {
     expect(base64Parts).toHaveLength(0);
   });
 
+  it('base64 mode: image without data or file path still preserves caption text', () => {
+    const { textParts, base64Parts, pendingFiles } = encodeMediaForProvider(
+      [{ kind: 'image', mimeType: 'image/png', caption: 'missing upload payload' }],
+      'base64',
+    );
+
+    expect(textParts).toEqual(['missing upload payload']);
+    expect(base64Parts).toEqual([]);
+    expect(pendingFiles).toEqual([]);
+  });
+
   it('native mode (Gemini): image with filePath → textParts contains @/path', () => {
     const { textParts, mediaFlags, base64Parts } = encodeMediaForProvider(
       [{ kind: 'image', mimeType: 'image/jpeg', filePath: '/tmp/native.jpg' }],
@@ -118,6 +139,15 @@ describe('encodeMediaForProvider', () => {
     expect(textParts[0]).toBe('@/tmp/native.jpg');
     expect(mediaFlags).toHaveLength(0);
     expect(base64Parts).toHaveLength(0);
+  });
+
+  it('native mode: image without a file path is omitted', () => {
+    const { textParts } = encodeMediaForProvider(
+      [{ kind: 'image', mimeType: 'image/jpeg' }],
+      'native',
+    );
+
+    expect(textParts).toEqual([]);
   });
 
   it('none mode: image → textParts contains "does not support images"', () => {
@@ -136,6 +166,18 @@ describe('encodeMediaForProvider', () => {
     expect(textParts.join(' ')).toContain('Hello there');
   });
 
+  it('audio without transcript falls back to file path and omits empty audio parts', () => {
+    const { textParts } = encodeMediaForProvider(
+      [
+        { kind: 'audio', mimeType: 'audio/ogg', filePath: '/tmp/voice.ogg' },
+        { kind: 'audio', mimeType: 'audio/ogg' },
+      ],
+      'file_path',
+    );
+
+    expect(textParts).toEqual(['[Audio file: /tmp/voice.ogg]']);
+  });
+
   it('document with extractedText → textParts contains extracted content', () => {
     const { textParts } = encodeMediaForProvider(
       [{
@@ -148,6 +190,30 @@ describe('encodeMediaForProvider', () => {
       'file_path',
     );
     expect(textParts.join('\n')).toContain('This is the document body');
+  });
+
+  it('document formatting falls back to default filename and raw file path evidence', () => {
+    const { textParts } = encodeMediaForProvider(
+      [
+        {
+          kind: 'document',
+          mimeType: 'application/pdf',
+          filePath: '/tmp/unnamed.pdf',
+          extractedText: 'Unnamed body',
+        },
+        {
+          kind: 'document',
+          mimeType: 'application/pdf',
+          filePath: '/tmp/raw.pdf',
+        },
+      ],
+      'file_path',
+    );
+
+    expect(textParts).toEqual([
+      '[Document: file]\nUnnamed body',
+      '[Document: /tmp/raw.pdf]',
+    ]);
   });
 });
 
@@ -179,6 +245,89 @@ describe('turnPartsToOpenAIContent', () => {
       type: 'image_url',
       image_url: { url: 'data:image/jpeg;base64,abc123' },
     });
+  });
+
+  it('preserves image captions, audio transcripts, and extracted documents', () => {
+    const result = turnPartsToOpenAIContent([
+      { kind: 'image', mimeType: 'image/png', base64: 'imgdata', caption: 'panel detail' },
+      { kind: 'audio', mimeType: 'audio/ogg', transcript: 'spoken words' },
+      {
+        kind: 'document',
+        mimeType: 'text/plain',
+        filePath: '/tmp/brief.txt',
+        filename: 'brief.txt',
+        extractedText: 'brief body',
+      },
+      {
+        kind: 'document',
+        mimeType: 'text/plain',
+        filePath: '/tmp/unnamed.txt',
+        extractedText: 'unnamed body',
+      },
+    ]);
+
+    expect(result).toEqual([
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,imgdata' } },
+      { type: 'text', text: 'panel detail' },
+      { type: 'text', text: '[Audio]: spoken words' },
+      { type: 'text', text: '[brief.txt]:\nbrief body' },
+      { type: 'text', text: '[Document]:\nunnamed body' },
+    ]);
+  });
+
+  it('returns an empty text block when no provider content can be encoded', () => {
+    const result = turnPartsToOpenAIContent([
+      { kind: 'image', mimeType: 'image/png' },
+      { kind: 'audio', mimeType: 'audio/ogg' },
+      { kind: 'document', mimeType: 'application/pdf', filePath: '/tmp/raw.pdf' },
+    ]);
+
+    expect(result).toEqual([{ type: 'text', text: '' }]);
+  });
+});
+
+describe('turnPartsToAnthropicContent', () => {
+  it('encodes text, images, captions, audio transcripts, and extracted documents', () => {
+    const result = turnPartsToAnthropicContent([
+      { kind: 'text', text: 'hello' },
+      { kind: 'image', mimeType: 'image/jpeg', base64: 'abc123', caption: 'close up' },
+      { kind: 'audio', mimeType: 'audio/ogg', transcript: 'audio words' },
+      {
+        kind: 'document',
+        mimeType: 'text/plain',
+        filePath: '/tmp/notes.txt',
+        filename: 'notes.txt',
+        extractedText: 'notes body',
+      },
+      {
+        kind: 'document',
+        mimeType: 'text/plain',
+        filePath: '/tmp/unnamed.txt',
+        extractedText: 'unnamed body',
+      },
+    ]);
+
+    expect(result).toEqual([
+      { type: 'text', text: 'hello' },
+      {
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/jpeg', data: 'abc123' },
+      },
+      { type: 'text', text: 'close up' },
+      { type: 'text', text: '[Audio]: audio words' },
+      { type: 'text', text: '[notes.txt]:\nnotes body' },
+      { type: 'text', text: '[Document]:\nunnamed body' },
+    ]);
+  });
+
+  it('returns an empty text block when no Anthropic content can be encoded', () => {
+    const result = turnPartsToAnthropicContent([
+      { kind: 'image', mimeType: 'image/png' },
+      { kind: 'audio', mimeType: 'audio/ogg' },
+      { kind: 'document', mimeType: 'application/pdf', filePath: '/tmp/raw.pdf' },
+    ]);
+
+    expect(result).toEqual([{ type: 'text', text: '' }]);
   });
 });
 
