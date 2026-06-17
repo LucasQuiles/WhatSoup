@@ -5,7 +5,10 @@ import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
-import { FAILCLOSED_FLAG } from '../../../src/runtimes/agent/providers/child-env.ts';
+import {
+  CONFIG_ROOT_ISOLATION_FLAG,
+  FAILCLOSED_FLAG,
+} from '../../../src/runtimes/agent/providers/child-env.ts';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -133,7 +136,14 @@ async function withConnectorMutationEnv(
   overrides: Record<string, string | undefined>,
   run: () => Promise<void>,
 ): Promise<void> {
-  const keys = ['ALLOW_M365_MUTATIONS', FAILCLOSED_FLAG] as const;
+  const keys = [
+    'ALLOW_M365_MUTATIONS',
+    FAILCLOSED_FLAG,
+    CONFIG_ROOT_ISOLATION_FLAG,
+    'HOME',
+    'XDG_CONFIG_HOME',
+    'XDG_DATA_HOME',
+  ] as const;
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
 
   try {
@@ -287,6 +297,34 @@ describe('SessionManager', () => {
       await sm.spawnSession();
 
       expect(lastSpawnEnv()).not.toHaveProperty('ALLOW_M365_MUTATIONS');
+    });
+  });
+
+  it('spawnSession can isolate child HOME/XDG config roots when explicitly enabled', async () => {
+    await withConnectorMutationEnv({
+      HOME: '/host/home',
+      XDG_CONFIG_HOME: '/host/config',
+      XDG_DATA_HOME: '/host/data',
+      [CONFIG_ROOT_ISOLATION_FLAG]: '1',
+    }, async () => {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const sm = new SessionManager({
+        db,
+        messenger,
+        chatJid: CHAT_JID,
+        onEvent: vi.fn(),
+        cwd: '/workspace/chat-a',
+        configRoot: '/workspace/chat-a/.agent-home',
+      });
+
+      await sm.spawnSession();
+
+      expect(lastSpawnEnv()).toMatchObject({
+        HOME: '/workspace/chat-a/.agent-home',
+        XDG_CONFIG_HOME: '/workspace/chat-a/.agent-home/.config',
+        XDG_DATA_HOME: '/workspace/chat-a/.agent-home/.local/share',
+      });
     });
   });
 

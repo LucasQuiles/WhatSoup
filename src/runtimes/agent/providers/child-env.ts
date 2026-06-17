@@ -1,6 +1,8 @@
 // src/runtimes/agent/providers/child-env.ts
 // Shared base environment builder for provider child processes.
 
+import { join } from 'node:path';
+
 /**
  * Opt-in env flag (#411). When set to `"1"`, `buildBaseChildEnv` drops
  * `ALLOW_M365_MUTATIONS` from the child env unless the per-instance
@@ -11,6 +13,14 @@
  * is the shipping default; current fleets see zero observable change.
  */
 export const FAILCLOSED_FLAG = 'WHATSOUP_CONNECTOR_FAILCLOSED';
+
+/**
+ * Opt-in env flag for generated-workspace config-root isolation. When set to
+ * `"1"` and a caller supplies `configRoot`, child HOME/XDG config roots are
+ * rewritten under that root. Unset or any other value preserves current
+ * parent HOME/XDG forwarding behavior.
+ */
+export const CONFIG_ROOT_ISOLATION_FLAG = 'WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION';
 
 /** Per-call options for `buildBaseChildEnv`. Optional for back-compat. */
 export interface BuildBaseChildEnvOptions {
@@ -23,10 +33,28 @@ export interface BuildBaseChildEnvOptions {
   allowM365Mutations?: boolean;
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
+  configRoot?: string;
 }
 
 function isFailClosedEnabled(): boolean {
   return process.env[FAILCLOSED_FLAG] === '1';
+}
+
+function isConfigRootIsolationEnabled(): boolean {
+  return process.env[CONFIG_ROOT_ISOLATION_FLAG] === '1';
+}
+
+function childConfigRoots(opts?: BuildBaseChildEnvOptions): {
+  home: string;
+  xdgConfig: string;
+  xdgData: string;
+} | undefined {
+  if (!opts?.configRoot || !isConfigRootIsolationEnabled()) return undefined;
+  return {
+    home: opts.configRoot,
+    xdgConfig: join(opts.configRoot, '.config'),
+    xdgData: join(opts.configRoot, '.local', 'share'),
+  };
 }
 
 /**
@@ -47,12 +75,13 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       ? process.env.ALLOW_M365_MUTATIONS
       : undefined
     : process.env.ALLOW_M365_MUTATIONS;
+  const configRoots = childConfigRoots(opts);
 
   return Object.fromEntries(
     Object.entries({
       // System essentials
       PATH: process.env.PATH,
-      HOME: process.env.HOME,
+      HOME: configRoots?.home ?? process.env.HOME,
       USER: process.env.USER,
       SHELL: process.env.SHELL,
       LANG: process.env.LANG,
@@ -61,8 +90,8 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       NODE_PATH: process.env.NODE_PATH,
       // XDG dirs (Linux)
       XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
-      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
-      XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+      XDG_CONFIG_HOME: configRoots?.xdgConfig ?? process.env.XDG_CONFIG_HOME,
+      XDG_DATA_HOME: configRoots?.xdgData ?? process.env.XDG_DATA_HOME,
       TMPDIR: process.env.TMPDIR,
       // Per-instance overrides can set ALLOW_M365_MUTATIONS=1 to bypass
       // external M365 read-only hooks; most instances do not set it and

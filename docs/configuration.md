@@ -748,6 +748,25 @@ export WHATSOUP_CONNECTOR_FAILCLOSED=1
 }
 ```
 
+### Agent config-root isolation
+
+`WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION` is an opt-in prototype for sandbox-per-chat
+agent workers. It controls only the child process environment built by
+`src/runtimes/agent/providers/child-env.ts`.
+
+- **Unset (default):** spawned CLI workers keep the parent `HOME`,
+  `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` behavior. This preserves current
+  host-global Claude/Codex/OpenCode config reachability.
+- **Set to `"1"` and sandbox-per-chat supplies a workspace `configRoot`:**
+  spawned CLI workers receive `HOME=<workspace>/.agent-home`,
+  `XDG_CONFIG_HOME=<workspace>/.agent-home/.config`, and
+  `XDG_DATA_HOME=<workspace>/.agent-home/.local/share`.
+- Any other value is treated as unset.
+
+The runtime supplies the generated `configRoot` only for sandbox-per-chat
+sessions. This flag should stay default-off until Claude/Codex/OpenCode behavior
+has been validated with synthetic roots for the target CLI versions.
+
 ### `twilioConfig`
 
 Selects the optional Twilio SMS transport for this instance. Stage 2 supports

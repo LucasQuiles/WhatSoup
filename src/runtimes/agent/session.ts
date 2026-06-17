@@ -94,6 +94,7 @@ export interface SessionManagerOptions {
   onCrash?: (info: SessionCrashInfo) => void;
   notifyUser?: (msg: string) => void;
   cwd?: string;
+  configRoot?: string;
   configSystemPrompt?: string;
   instructionsPath?: string;
   model?: string;
@@ -453,6 +454,7 @@ export class SessionManager {
   private readonly onEvent: (event: AgentEvent) => void;
   private readonly instanceName: string;
   private configuredCwd: string | undefined;
+  private readonly configRoot: string | undefined;
   private readonly configSystemPrompt: string | undefined;
   private readonly instructionsPath: string | undefined;
   private readonly model: string | undefined;
@@ -537,6 +539,7 @@ export class SessionManager {
     this.onCrash = opts.onCrash;
     this.notifyUser = opts.notifyUser;
     this.configuredCwd = opts.cwd;
+    this.configRoot = opts.configRoot;
     this.configSystemPrompt = opts.configSystemPrompt;
     this.instructionsPath = opts.instructionsPath;
     this.model = opts.model;
@@ -1071,6 +1074,7 @@ export class SessionManager {
           allowM365Mutations: this.allowM365Mutations,
           whatsoupInstance: this.whatsoupInstance,
           whatsoupMcpSocket: this.whatsoupMcpSocket,
+          configRoot: this.configRoot,
         },
         this.model,
         this.providerConfig,
@@ -1647,6 +1651,7 @@ export class SessionManager {
             allowM365Mutations: this.allowM365Mutations,
             whatsoupInstance: this.whatsoupInstance,
             whatsoupMcpSocket: this.whatsoupMcpSocket,
+            configRoot: this.configRoot,
           },
           this.model,
           this.providerConfig,
