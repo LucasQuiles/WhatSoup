@@ -229,3 +229,128 @@ Extend the existing Vitest suites; add cases per pattern:
 - **JSON-RPC timeout consistency.** Inconsistent client timeouts (15s vs 20s)
   in the dispatch path; audit for unhandled timeout exceptions. (Unverified — confirm
   before acting.)
+
+---
+
+## 9. Addendum v2 — Pattern E (enrichment), Pattern F (flap-storm), refinements
+
+**Status:** Approved in principle (owner, 2026-06-17). Driven by a live wave of ~12
+stale-renotify digests in ~14 min, all 5–7 days quiet, all `requested_action: none`,
+several multiplying per-fingerprint within one collapsed storm, plus a
+`<instance>|whatsapp_auth_bond_local_failure` incident that flapped 263× then
+self-healed and renotified at `info` 7 days later. The four base patterns suppress
+this noise; E and F raise the *information value* of what survives.
+
+### Pattern E — Alert enrichment (amplify signal on every surviving alert)
+
+**Where:** the formatter/emit path (`format_event()` in the dispatcher) and emit-time
+classification.
+
+**Logic:** every alert that *does* send carries:
+- **One authoritative `requested_action` (SSOT).** Today digests carry two
+  contradictory fields — an inner evidence `requested_action` ("Q verify…") and a
+  top-level `requested_action` ("none — no remediation"). Collapse to a single
+  derived field; delete the contradictory one. The action is *derived* from the
+  final classification (intent + tier + inhibition state), not author-supplied.
+- **Intent tag** inline: `planned` vs `crash` (from Pattern B's systemd intent).
+- **Severity rationale**: one phrase on why this tier (e.g. "transient: cleared on
+  next probe" / "outage: host unreachable 3 probes").
+- **Recent-change context**: most recent deploy/restart/config touch for the
+  instance within a lookback window, when available (answers "did we cause this?").
+
+**New env:** `BOT_ERRORS_ENRICH_ALERTS` (default `1`),
+`BOT_ERRORS_REQUESTED_ACTION_SSOT` (default `1`),
+`BOT_ERRORS_CHANGE_CONTEXT_LOOKBACK_SECONDS` (default `900`).
+
+### Pattern F — Flap-storm detection (consolidate **and** escalate)
+
+A flapping source is not just noise to collapse — sustained self-heal-then-fail is a
+**fault signature** and must raise its own alert. Pure consolidation that goes quiet
+would hide the 263× bond instability; pure per-event sending is the spam we are
+removing. F does both.
+
+**Where:** a flap detector keyed on `incident_key`, consulted in the dispatcher
+before per-event send and in the stale sweep.
+
+**Logic:**
+- Track trip-rate per `incident_key` over a sliding window `W`.
+- When trips cross `FLAP_TRIP_THRESHOLD` in `W`, **suppress the individual member
+  events** and emit ONE `flap_storm` alert for that key.
+- The `flap_storm` severity is **tiered by intensity, not `info`**: `warning` at
+  threshold; **promote to `critical`** if the rate stays high across
+  `FLAP_PROMOTE_SECONDS` or the cumulative count crosses `FLAP_CRITICAL_COUNT`
+  (the 263 case → critical). Ties into Pattern D's promote-on-persist.
+- The `flap_storm` alert carries full Pattern E enrichment: count · rate · window ·
+  first/last-seen · underlying source · intent · a real `requested_action`
+  ("source unstable — investigate root cause", never "none").
+- **Dedup by `incident_key`, not fingerprint** — collapses the observed
+  per-fingerprint multiplication of stale-renotify within a single collapsed storm.
+- On stabilize (quiet ≥ `FLAP_STABLE_SECONDS`) emit ONE terminal
+  *"resolved after N flaps over Tm"* summary, then transition to `resolved_stale`.
+- A source that never crosses the threshold and never paged → silent (state only),
+  per the symmetric-recovery principle.
+
+**Recovery visibility (resolved decision):** recoveries are **summarized, buffered,
+and consolidated as a flap problem** — never 200 individual alerts. This supersedes
+the three recovery-visibility options previously floated; F is the mechanism.
+
+**New env:** `BOT_ERRORS_FLAP_DETECTION` (default `1`),
+`BOT_ERRORS_FLAP_TRIP_THRESHOLD` (default `5`),
+`BOT_ERRORS_FLAP_WINDOW_SECONDS` (default `600`),
+`BOT_ERRORS_FLAP_PROMOTE_SECONDS` (default `1800`),
+`BOT_ERRORS_FLAP_CRITICAL_COUNT` (default `50`),
+`BOT_ERRORS_FLAP_STABLE_SECONDS` (default `3600`).
+
+### Folded refinements (from the live wave + prior review)
+
+1. **`requested_action` SSOT** — covered by Pattern E (the dual-field contradiction).
+2. **`incident_key`-level stale dedup** — covered by Pattern F (storm-member
+   multiplication: 3+ digests sharing one key, differing only by fingerprint suffix).
+3. **Terminal/self-closing recovery events** — `*_reverted`, `*_restored`,
+   `*_recovered`, `provider_fallback_*` should auto-close on emit, not open an
+   incident that renotifies on the dup threshold forever (observed:
+   `provider_fallback_reverted` held `open` and re-notified at the suppression
+   threshold).
+4. **Pattern A liveness safety valve** — before suppressing a stale incident as
+   recovered, a cheap liveness probe confirms the source is actually back; suppress
+   only on a positive probe, else fall through to send (guards false-negatives).
+5. **Failure-counter reset** — a "N consecutive failures" counter must reset when a
+   re-baseline/clearing run already cleared the cause (observed: a supervisor kept
+   counting past a clean re-baseline until the timer naturally elapsed).
+6. **Recovery glyph correctness** — recovery summaries must not render the 🔴
+   down-glyph; formatter bug to fix alongside Pattern E.
+7. **AskUserQuestion suppression gap** — WhatsApp-bridged decision polls never
+   register a `toolId`, so the suppression check at `runtime.ts:~4849` falls through
+   to a false `critical`; folded with the poll-reliability backlog item.
+
+### Sequencing
+
+1. **Wave 1:** Pattern A + Pattern F (flap-storm) + Pattern E `requested_action`
+   SSOT — this trio kills the exact noise wave observed 2026-06-17.
+2. **Wave 2:** Pattern B (intent detection + maintenance windows).
+3. **Wave 3:** Pattern C (inhibition) + Pattern D (transient tiering) + remaining
+   Pattern E enrichment fields.
+4. **Parallel:** WhatsApp poll-reliability fix (§8) + AskUserQuestion gap (#7).
+
+### Data flow (revised)
+
+```
+emit ─▶ collector ─▶ dispatcher ─────────────────────────────────▶ WhatsApp
+                       │   ├─ storm-collapse (unchanged)
+                       │   ├─ [F] flap detector (consolidate + escalate, by key)
+                       │   ├─ [D] severity tiering (transient→warn, auto-clear)
+                       │   ├─ [C] inhibition gate (root suppresses symptom)
+                       │   ├─ [B] maintenance-window + intent gate
+                       │   ├─ [A] stale-renotify suppression (+ liveness valve)
+                       │   └─ [E] enrichment (SSOT action, intent, rationale, change)
+heartbeat-watchdog ─▶ [B] systemd intent (planned vs crash) ──────▶ dispatcher
+```
+
+### Testing (additions)
+
+- `bot-errors-dispatcher.test.ts` — E: dual `requested_action` collapsed to one
+  derived SSOT field; enrichment fields populated; F: N trips in W → one `flap_storm`
+  (members suppressed), warning→critical promotion at count/duration thresholds,
+  per-`incident_key` dedup of storm members, terminal resolve after stable window,
+  `*_reverted`/`*_restored` self-close on emit.
+- Fail-open: flap detector / enrichment raising → falls back to current send.

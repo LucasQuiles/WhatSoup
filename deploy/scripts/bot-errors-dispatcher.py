@@ -836,9 +836,12 @@ def append_still_open_context(
     last_notified = int_field(open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened))
     status = str(open_record.get("status") or "open")
     awaiting_physical = status == "awaiting_physical"
-    action = physical_action_text() if awaiting_physical else (
-        "Q investigate persistent incident; duplicate suppression threshold exceeded."
-    )
+    # Pattern E SSOT (design §10 C4): requested_action is rendered solely by
+    # format_event, derived from the event's real state. We no longer bake an
+    # inner `requested_action=` into the evidence string here — that produced the
+    # dual-field contradiction (inner "Q verify..." vs top-level "none"). The
+    # awaiting_physical action is recovered by format_event via the
+    # `incident_status=awaiting_physical` marker still present in additions.
     additions = [
         "incident_still_open=true",
         f"incident_key={key}",
@@ -848,7 +851,6 @@ def append_still_open_context(
         f"suppressed_duplicates={suppressed}",
         f"last_notified={open_record.get('lastNotifiedIso') or open_record.get('lastSentIso') or last_notified}",
         f"escalated={str(escalated).lower()}",
-        f"requested_action={action}",
     ]
     if digest:
         additions.insert(0, "still_open_digest=true")
@@ -1119,14 +1121,21 @@ def format_event(event: dict[str, Any]) -> str:
         lines.append(event_line(f"log_{idx}", hint, 900))
     operator_action = critical_operator_action(event)
     clear_requirement = critical_clear_requirement(event)
-    if severity == "info":
-        requested_action = "  > requested_action: none — informational event; no Q remediation required."
-    elif operator_action:
-        requested_action = f"  > requested_action: {redact(operator_action).replace('@', ' at ')}"
-    elif event_has_awaiting_physical_context(event) or is_verified_device_bond_lost_signal(event):
+    # Pattern E — requested_action SSOT (design §9/§10 C4): format_event is the
+    # SOLE source of the requested_action. Precedence is derived from the event's
+    # real state. A real action (physical / operator) must win over the
+    # informational "none" fallback EVEN on info severity — otherwise an
+    # info-severity awaiting_physical digest renders "none" and loses its action
+    # (false negative). "none" is the honest action only for an info event with
+    # no real standing action (e.g. a self-healed stale digest).
+    if event_has_awaiting_physical_context(event) or is_verified_device_bond_lost_signal(event):
         requested_action = f"  > requested_action: {physical_action_text()}"
     elif is_physical_intervention_signal(event):
         requested_action = f"  > requested_action: {physical_candidate_action_text()}"
+    elif operator_action:
+        requested_action = f"  > requested_action: {redact(operator_action).replace('@', ' at ')}"
+    elif severity == "info":
+        requested_action = "  > requested_action: none — informational event; no Q remediation required."
     elif event_has_stale_context(event):
         requested_action = f"  > requested_action: {stale_action_text()}"
     else:
@@ -1645,7 +1654,9 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
         f"quiet_seconds={quiet_seconds}",
         f"suppressed_duplicates={int_field(record, 'suppressedCount')}",
         f"renotify_cadence_seconds={renotify_seconds}",
-        f"requested_action={action}",
+        # Pattern E SSOT (design §10 C4): no inner requested_action in evidence;
+        # format_event renders it. `action` below still feeds
+        # criticalAsset.operatorAction so the action survives in structured form.
     ]
     fields = incident_event_fields_from_key(key)
     event = {
