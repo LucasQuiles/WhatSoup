@@ -407,6 +407,61 @@ def test_main_pass_and_fail_and_errors():
         assert rc == 1 and rep["error_type"] == "malformed_record"
 
 
+def test_classify_delta_prefix_preserving_change_not_full_rewrite():
+    # full_rewrite (the FORBIDDEN delta — red-team A1/A4) is returned only when there is NEITHER a
+    # common prefix NOR a common suffix (guard `p == 0 and s == 0`). A prefix-preserving change must
+    # classify by length, not collapse to full_rewrite. An or-weakening would mislabel a prefix-
+    # sharing expansion as full_rewrite; flipping either `==` mislabels a true full_rewrite (p==0,
+    # s==0) as a length change when the lengths differ.
+    assert mpc.classify_delta("abcX", "abcYY") == "length_expansion"   # p>0, s==0, longer
+    assert mpc.classify_delta("hello", "wxyz") == "full_rewrite"        # p==0, s==0, shorter non-subseq
+
+
+def test_classify_delta_multi_placeholder_mask_substitution():
+    # _mask_ok's MIDDLE-segment path (the `prev.find(seg)` branch, guard `idx == -1`) is only
+    # exercised by a mask with 2+ placeholders: a single placeholder produces just two segments and
+    # hits only the final-segment endswith branch. A two-span mask must classify as
+    # mask_substitution; an `idx != -1` weakening would reject every valid multi-placeholder mask
+    # (treating a FOUND middle segment as failure) — a hole in the security-critical mask classifier.
+    prev = "user bob@x.com and carol@y.com here"
+    new = "user [REDACTED_1] and [REDACTED_2] here"
+    assert mpc.classify_delta(prev, new) == "mask_substitution"
+
+
+def test_compress_at_exact_min_ratio_is_accepted():
+    # The compress floor is INCLUSIVE: `ratio < MIN_COMPRESS_RATIO` rejects only strictly BELOW the
+    # minimum. A deletion-shaped compress removing exactly MIN_COMPRESS_RATIO (0.10) of the length
+    # must pass: a 10-char prev and a 9-char subsequence give ratio (10-9)/10 == 0.10 exactly. A <=
+    # weakening would reject a compression that exactly meets the minimum useful ratio.
+    ok, reason = mpc.check_purpose_delta("compress", "abcdefghij", "abcdefghi")
+    assert ok is True, reason
+
+
+def test_compress_equal_length_reason_is_must_shorten():
+    # A compress that does not shorten is rejected with the SPECIFIC reason `compress_must_shorten`
+    # (guard `len(new) >= len(prev)`). A > weakening would let an equal-length input slip past the
+    # length check and be rejected downstream with a less precise reason.
+    ok, reason = mpc.check_purpose_delta("compress", "abcd", "abce")
+    assert ok is False and reason == "compress_must_shorten"
+
+
+def test_inject_equal_length_reason_is_must_grow():
+    # An inject that does not grow is rejected with the SPECIFIC reason `inject_must_grow`
+    # (guard `len(new) <= len(prev)`). A < weakening would let an equal-length input slip past and
+    # be rejected downstream with a less precise reason.
+    ok, reason = mpc.check_purpose_delta("inject", "abcd", "abce")
+    assert ok is False and reason == "inject_must_grow"
+
+
+def test_perturb_inserts_marker_mid_text_not_replaces():
+    # _perturb must INSERT the marker at the interior midpoint of non-empty text (guard `if not
+    # text`), so a transform that echoes/ignores its input is exposed by an unchanged output.
+    # Removing the `not` would return the marker ALONE for non-empty text, destroying the original
+    # content the determinism gate relies on comparing against.
+    assert mpc._perturb("abcd", "Z") == "abZcd"   # midpoint insert, original preserved
+    assert mpc._perturb("", "Z") == "Z"           # empty -> marker (boundary case unchanged)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:
