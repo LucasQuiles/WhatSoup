@@ -580,4 +580,199 @@ describe('ToolRegistry', () => {
     };
     expect(schema.properties['metadata']).toEqual({ type: 'object' });
   });
+
+  it('converts ZodBoolean to JSON Schema boolean', () => {
+    registry.register(
+      makeTool({
+        schema: z.object({ enabled: z.boolean() }),
+      }),
+    );
+    const tools = registry.listTools(makeSession());
+    const schema = tools[0].inputSchema as {
+      properties: Record<string, { type: string }>;
+    };
+    expect(schema.properties['enabled']).toEqual({ type: 'boolean' });
+  });
+
+  it('omits required array for an empty ZodObject schema', () => {
+    registry.register(
+      makeTool({
+        schema: z.object({}),
+      }),
+    );
+    const tools = registry.listTools(makeSession());
+    const schema = tools[0].inputSchema as {
+      type: string;
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(schema.type).toBe('object');
+    expect(schema.required).toBeUndefined();
+    expect(schema.properties).toEqual({});
+  });
+});
+
+describe('registry.ts uncovered-branch coverage', () => {
+  let registry: ToolRegistry;
+
+  beforeEach(() => {
+    registry = new ToolRegistry();
+  });
+
+  it('getChatScopedToolNames lists only chat-scoped tools', () => {
+    registry.register(makeTool({ name: 'chat_one', scope: 'chat' }));
+    registry.register(makeTool({ name: 'chat_two', scope: 'chat' }));
+    registry.register(makeTool({ name: 'global_one', scope: 'global' }));
+
+    const names = registry.getChatScopedToolNames();
+    expect(names).toEqual(['chat_one', 'chat_two']);
+  });
+
+  it('injected tool with no properties/required gets chatJid appended (covers ?? {} and ?? [])', () => {
+    // An empty schema has no `properties`/`required` keys in its JSON form, so the
+    // injected-tool builder falls back to `{}` and `[]`.
+    registry.register(
+      makeTool({
+        name: 'injected_empty',
+        targetMode: 'injected',
+        schema: z.object({}),
+      }),
+    );
+
+    const tools = registry.listTools(makeSession({ tier: 'global' }));
+    const schema = tools[0].inputSchema as {
+      properties: Record<string, { type: string }>;
+      required: string[];
+    };
+    expect(schema.properties['chatJid']).toEqual({ type: 'string' });
+    expect(schema.required).toEqual(['chatJid']);
+  });
+
+  it('records durability lifecycle (record → executing → complete) on a successful call', async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const fakeDurability = {
+      recordToolCall: (conversationKey: string, toolName: string, input: string, replayPolicy: string) => {
+        const id = 4242;
+        calls.push({ method: 'recordToolCall', args: [conversationKey, toolName, input, replayPolicy] });
+        return id;
+      },
+      markToolExecuting: (id: number) => {
+        calls.push({ method: 'markToolExecuting', args: [id] });
+      },
+      markToolComplete: (id: number, result: string) => {
+        calls.push({ method: 'markToolComplete', args: [id, result] });
+      },
+    };
+    registry.setDurability(fakeDurability as unknown as import('../../src/core/durability.ts').DurabilityEngine);
+    registry.register(makeTool({ name: 'durable_tool', scope: 'global' }));
+
+    const result = await registry.call(
+      'durable_tool',
+      { message: 'hi' },
+      makeSession({ tier: 'global', conversationKey: '15550000001@s.whatsapp.net' }),
+    );
+
+    expect(calls.map((c) => c.method)).toEqual([
+      'recordToolCall',
+      'markToolExecuting',
+      'markToolComplete',
+    ]);
+    expect(calls[1].args[0]).toBe(4242);
+    expect(calls[2].args[0]).toBe(4242);
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain('hi');
+  });
+
+  it('marks tool complete with the error message when the handler throws an Error', async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const fakeDurability = {
+      recordToolCall: () => {
+        calls.push({ method: 'recordToolCall', args: [] });
+        return 777;
+      },
+      markToolExecuting: (id: number) => calls.push({ method: 'markToolExecuting', args: [id] }),
+      markToolComplete: (id: number, result: string) => calls.push({ method: 'markToolComplete', args: [id, result] }),
+    };
+    registry.setDurability(fakeDurability as unknown as import('../../src/core/durability.ts').DurabilityEngine);
+    registry.register(
+      makeTool({
+        name: 'durable_fail',
+        scope: 'global',
+        schema: z.object({}),
+        handler: async () => {
+          throw new Error('boom');
+        },
+      }),
+    );
+
+    const result = await registry.call(
+      'durable_fail',
+      {},
+      makeSession({ tier: 'global', conversationKey: '15550000001@s.whatsapp.net' }),
+    );
+
+    expect(calls[2].args[1]).toBe('error: boom');
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe('Tool "durable_fail" failed: boom');
+  });
+
+  it('stringifies non-Error thrown values (err instanceof Error false branch)', async () => {
+    registry.register(
+      makeTool({
+        name: 'non_error_throw',
+        scope: 'global',
+        schema: z.object({}),
+        handler: async () => {
+          // Intentionally throw a non-Error to exercise the String(err) branch.
+          // eslint-disable-next-line no-throw-literal -- deliberate non-Error throw for branch coverage (expires 2027-06-17)
+          throw 'plain string failure';
+        },
+      }),
+    );
+
+    const result = await registry.call('non_error_throw', {}, makeSession());
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe('Tool "non_error_throw" failed: plain string failure');
+  });
+
+  it('sanitizes connection-level transport errors before exposing them', async () => {
+    registry.register(
+      makeTool({
+        name: 'transport_fail',
+        scope: 'global',
+        schema: z.object({}),
+        handler: async () => {
+          const err = new Error('write ECONNRESET at TCPOnSession');
+          throw err;
+        },
+      }),
+    );
+
+    const result = await registry.call('transport_fail', {}, makeSession());
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe('Tool "transport_fail" failed: connection error — try again');
+  });
+
+  it('rejects a malformed caller chatJid in a global session bound to a conversationKey', async () => {
+    registry.register(
+      makeTool({
+        name: 'injected_global',
+        targetMode: 'injected',
+        scope: 'global',
+        schema: z.object({ message: z.string() }),
+        handler: async (params) => ({ echoed: params['message'] }),
+      }),
+    );
+
+    const result = await registry.call(
+      'injected_global',
+      { chatJid: 'not-a-jid', message: 'hi' },
+      makeSession({ tier: 'global', conversationKey: '15550000001' }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe('Invalid chatJid "not-a-jid": must be a valid JID');
+  });
 });
