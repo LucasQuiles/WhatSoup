@@ -564,19 +564,20 @@ curl -s http://127.0.0.1:9091/health | python3 -c \
 
 **Symptoms:** User sees "stuck" or "retrying" messages, or an agent session restarts unexpectedly during a long tool invocation.
 
-The operation tracker monitors each tool invocation and thinking gap. It reports stalls and probes liveness, but stream-json stalled-recovery is a no-op. The hard watchdog at `src/runtimes/agent/session.ts:43` handles termination after the configured active-turn budget.
+The operation tracker monitors each tool invocation and thinking gap. Stream-json providers cannot be soft-interrupted (stdin is NDJSON, not a TTY), so a stalled tool is terminated by killing the provider process. The watchdog constants live at `src/runtimes/agent/session.ts:43`.
 
 **Recovery cascade:**
 
 1. **Tool stall detected** — `expectedMs * stallMultiplier` exceeded (e.g. 75s for Bash, 6 min for Agent subagents)
    - Tracker records the stall and emits a user-visible warning (format depends on `toolUpdateMode`)
-   - For stream-json providers, soft stalled-recovery is a structured no-op; the hard watchdog remains the termination backstop
+   - For stream-json providers this arms a dedicated **stalled-operation kill** (`STALLED_OP_KILL_GRACE_MS`, default 3 min). Unlike the hard watchdog it is **not reset by inbound user messages**, so re-prompting a hung session cannot postpone the kill. It is cancelled if genuine provider progress arrives first. On fire: SIGKILL the provider and post "_A tool call stalled and was terminated. Send your message again to retry._" This bounds a hung tool to roughly `stall threshold + 3 min` (e.g. ~4–5 min for Bash) instead of the 30-min hard-watchdog ceiling.
 
 2. **Thinking stall detected** — no events from the provider for `thinkingStallMs` (default 5 min)
    - Tracker sends a newline (`\n`) to stdin as a liveness probe
    - If the provider is alive, it will produce an event in response
 
 3. **Hard watchdog backstop** — no activity for 30 minutes (not configurable via `operationTracker`)
+   - Reset on any agent activity (tool_use, tool_result, assistant_text) **and on every inbound user message**, so it only catches sessions that go fully silent. The stalled-operation kill (step 1) is what bounds a single hung tool while the user keeps messaging.
    - Sends SIGKILL to the provider process
    - User receives "_Session terminated after 30 minutes of inactivity — restarting._"
    - Session is marked as crashed; a new session spawns on the next inbound message

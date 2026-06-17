@@ -75,7 +75,7 @@ vi.mock('node:fs', () => ({
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
-import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
+import { formatAge, TURN_WATCHDOG_MS, WATCHDOG_SOFT_MS, WATCHDOG_WARN_MS, WATCHDOG_HARD_MS, STALLED_OP_KILL_GRACE_MS, PROVIDER_DISPLAY_NAMES } from '../../../src/runtimes/agent/session.ts';
 import { OpenAIApiProvider } from '../../../src/runtimes/agent/providers/openai-api.ts';
 import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 
@@ -1041,6 +1041,80 @@ describe('SessionManager', () => {
 
     // Nothing should have fired
     expect(notifyUser).not.toHaveBeenCalled();
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('a stalled operation is SIGKILLed after the grace period, long before the 30-min hard watchdog', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('send revised report');
+
+    // A tool crosses its stall threshold → OperationTracker calls recoverStalledOperation
+    sm.recoverStalledOperation('toolu_bash_hang', 'Bash');
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).not.toBeNull();
+
+    // Nothing yet just before the grace elapses
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS - 1);
+    expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+    // Grace elapses well inside the 30-min hard watchdog → SIGKILL the hung provider
+    await vi.advanceTimersByTimeAsync(2);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(notifyUser).toHaveBeenCalledWith(expect.stringContaining('stalled'));
+    expect(STALLED_OP_KILL_GRACE_MS).toBeLessThan(WATCHDOG_HARD_MS);
+
+    vi.useRealTimers();
+  });
+
+  it('an inbound user message does NOT cancel a pending stalled-operation kill (the ~90-min limbo bug)', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('send revised report');
+
+    sm.recoverStalledOperation('toolu_bash_hang', 'Bash');
+
+    // Impatient user re-prompts while the tool is hung. This resets the hard watchdog
+    // (clearTurnWatchdog + armWatchdog) but must NOT clear the stalled-op kill.
+    await sm.sendTurn('how soon until the report is ready?');
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+
+    vi.useRealTimers();
+  });
+
+  it('genuine provider progress (tickWatchdog) cancels a pending stalled-operation kill', async () => {
+    vi.useFakeTimers();
+
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const notifyUser = vi.fn();
+
+    const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), instanceName: 'personal', notifyUser });
+    await sm.spawnSession();
+    await sm.sendTurn('send revised report');
+
+    sm.recoverStalledOperation('toolu_bash_hang', 'Bash');
+    // The hung tool finally produces output / the provider emits an event
+    sm.tickWatchdog();
+    expect((sm as unknown as { stalledOpKill: unknown }).stalledOpKill).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
 
     vi.useRealTimers();
