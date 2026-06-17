@@ -85,4 +85,8 @@
   --log-source-w: 96px;       /* source lane width */
   /* === Drawer component token (drawer.md spec-normative) === */
   --drawer-w: min(360px, 86%); /* drawer width */
+  /* === Landing / splash component tokens (brand.md §view-brand reproduction) === */
+  --landing-max-w: 1080px;    /* splash container max inline size */
+  --landing-hero-measure: 16ch;  /* hero headline measure (typography.md §5) */
+  --landing-prose-measure: 52ch; /* hero supporting-copy measure (typography.md §5) */
 }
