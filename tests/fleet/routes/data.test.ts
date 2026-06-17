@@ -1428,3 +1428,55 @@ describe('handleCheckDirectory', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// data.ts uncovered-branch coverage
+// ---------------------------------------------------------------------------
+// Targets the branch on line 405 of src/fleet/routes/data.ts:
+//   `pinoLevelMap[obj.level] ?? 'info'`
+// where the ?? 'info' fallback fires for a numeric pino level that is absent
+// from pinoLevelMap (which only maps 10/20/30/40/50/60).
+//
+// Note on branches NOT targeted here:
+//  - Lines 343 and 359 (`logResult.code ?? 'UNKNOWN'` / `tailResult.code ?? 'UNKNOWN'`):
+//    the `?? 'UNKNOWN'` fallbacks only fire when the underlying fs error lacks a
+//    `.code` property. log-utils.ts#logReadFailure omits `code` precisely when
+//    `nodeErr.code` is not a string, but every real fs error surfaced by
+//    readdirSync/statSync/openSync carries an errno `code`. Driving this branch
+//    would require injecting a non-ErrnoException into fs — out of scope for the
+//    real-fs harness this file uses (log-utils is not mocked), and unreachable
+//    through actual behavior.
+describe('data.ts uncovered-branch coverage', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-data-branch-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('falls back to level "info" for a numeric pino level absent from pinoLevelMap', () => {
+    const inst = fakeInstance({ logDir: tmpDir });
+    // level: 25 is numeric (so `typeof obj.level === 'number'` is true) but is
+    // NOT a key in pinoLevelMap, exercising the `?? 'info'` fallback on line 405.
+    fs.writeFileSync(
+      path.join(tmpDir, 'current.log'),
+      JSON.stringify({ level: 25, msg: 'unmapped-numeric-level', name: 'system' }) + '\n',
+    );
+
+    const deps = makeDeps({
+      discovery: { getInstance: vi.fn(() => inst) } as any,
+    });
+
+    const res = mockRes();
+    handleGetLogs(mockReq(), res, deps, { name: 'test-line' });
+
+    expect(res._status).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body).toHaveLength(1);
+    // Concrete assertion: the unmapped numeric level resolves to the 'info' fallback.
+    expect(body[0]).toMatchObject({ level: 'info', msg: 'unmapped-numeric-level' });
+  });
+});
