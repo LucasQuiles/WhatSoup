@@ -12,11 +12,13 @@
 :root,
 [data-theme="dark"] {
   color-scheme: dark;
-  /* §3.1 Surface ladder */
-  --surface-base:    #0E1013;
-  --surface-raised:  #15181D;
-  --surface-overlay: #1B1F26;
-  --surface-inset:   #0A0C0E;
+  /* §3.1 Surface ladder — warm-neutral ramp (decision-log #4: warmth from
+     neutrals, not chroma). Hue ~70° / chroma ≤ 0.012, matched to the warm
+     reference in the identity showcase. Accent stays locked electric blue. */
+  --surface-base:    #1B1610;
+  --surface-raised:  #231D15;
+  --surface-overlay: #2E261B;
+  --surface-inset:   #14110C;
 
   /* §3.2 Ink ladder */
   --text-1: #E8EAEE;
@@ -112,16 +114,20 @@
 
 [data-theme="light"] {
   color-scheme: light;
-  /* §3.1 Surface ladder */
-  --surface-base:    #FAFAFA;
-  --surface-raised:  #FFFFFF;
-  --surface-overlay: #FFFFFF;
-  --surface-inset:   #F1F2F4;
+  /* §3.1 Surface ladder — warm bone/paper ramp (decision-log #4: warmth from
+     neutrals, not chroma), matched to the warm-light reference in the identity
+     showcase. base/raised/overlay sit on the lightest paper so the locked
+     electric-blue accent text clears AA (>=4.5:1); inset recesses one step. */
+  --surface-base:    #FBF6EC;
+  --surface-raised:  #FBF6EC;
+  --surface-overlay: #FBF6EC;
+  --surface-inset:   #ECE3D2;
 
-  /* §3.2 Ink ladder */
-  --text-1: #1A1D21;
-  --text-2: #555C66;
-  --text-3: #7C8490;  /* must-fix: v2 was #8A919C — see color.md §5 */
+  /* §3.2 Ink ladder — warmed to the showcase paper inks so contrast clears AA
+     on the warmer surfaces (dependent neutral inks per decision-log #4). */
+  --text-1: #221C12;
+  --text-2: #524833;
+  --text-3: #645849;  /* incidental only — lint-banned as sole information carrier */
 
   /* §3.3 Edge ladder */
   --border-hairline: rgba(16,18,22,0.08);

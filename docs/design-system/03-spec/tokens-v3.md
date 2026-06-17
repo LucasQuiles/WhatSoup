@@ -135,9 +135,15 @@ contract + seed-3 OkLCh):
    just-noticeable difference (ΔE OK < 0.02) of the corresponding v2 hex listed in §3. Where
    engineering and v2 hex disagree beyond that, the v2 hex wins for v3.0 and the delta is logged for
    a v3.1 ramp correction.
-3. One **neutral ramp** (hue ~255, chroma ≤ 0.012 — the cool near-black family) generates the
-   surface ladders and ink ladders of both themes from one lightness scale read in opposite
-   directions.
+3. One **neutral ramp** generates the surface ladders and ink ladders of both themes from one
+   lightness scale read in opposite directions. Per decision-log #4 ("warmth from neutrals, not
+   chroma"), the surface ramp is **warm**: hue ~70° (yellow-amber), chroma ≤ 0.012 — a subtly warm
+   near-black for dark and a warm bone/paper for light, matched to the warm reference in the identity
+   showcase. The electric-blue action accent (§3.4) stays locked and is *not* part of this ramp, so
+   warmth comes only from the neutrals. Dark surface ladder
+   (`#14110C`→`#1B1610`→`#231D15`→`#2E261B`) and light surface ladder (`#FBF6EC` paper for
+   base/raised/overlay, `#ECE3D2` for inset) are the implemented values in §3.1; the light ink ladder
+   is correspondingly warmed (§3.2) so text clears AA on the warmer paper.
 4. Six **chromatic channel ramps** — status ok/warn/crit + mode passive/chat/agent — each generate
    exactly two solids (one per theme) plus derived wash/border tints via `--wash`/`--chan-border`.
    Light-theme solids sit darker and more saturated (chroma +15–25%) so every channel holds ≥ 4.5:1
@@ -157,18 +163,18 @@ per theme. Values marked **(must-fix)** replace the v2 value for AA — see `col
 
 | Token | Dark | Light | Role |
 |---|---|---|---|
-| `--surface-base` | `#0E1013` | `#FAFAFA` | app canvas |
-| `--surface-raised` | `#15181D` | `#FFFFFF` (+ `--shadow-raised`) | cards, panels, toolbars |
-| `--surface-overlay` | `#1B1F26` | `#FFFFFF` (+ `--shadow-overlay`) | modals, drawer, popovers, toasts |
-| `--surface-inset` | `#0A0C0E` | `#F1F2F4` | wells, fields, log beds |
+| `--surface-base` | `#1B1610` | `#FBF6EC` | app canvas |
+| `--surface-raised` | `#231D15` | `#FBF6EC` (+ `--shadow-raised`) | cards, panels, toolbars |
+| `--surface-overlay` | `#2E261B` | `#FBF6EC` (+ `--shadow-overlay`) | modals, drawer, popovers, toasts |
+| `--surface-inset` | `#14110C` | `#ECE3D2` | wells, fields, log beds |
 
 ### 3.2 Ink ladder
 
 | Token | Dark | Light | Role |
 |---|---|---|---|
-| `--text-1` | `#E8EAEE` | `#1A1D21` | primary ink |
-| `--text-2` | `#9AA2AD` | `#555C66` | secondary ink |
-| `--text-3` | `#6B7480` | `#7C8490` **(must-fix; v2 was `#8A919C`)** | incidental only — lint-banned as sole information carrier |
+| `--text-1` | `#E8EAEE` | `#221C12` | primary ink |
+| `--text-2` | `#9AA2AD` | `#524833` | secondary ink |
+| `--text-3` | `#6B7480` | `#645849` **(warm-ink; clears AA on the warm-light paper ramp)** | incidental only — lint-banned as sole information carrier |
 
 ### 3.3 Edge ladder
 

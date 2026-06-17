@@ -67,4 +67,6 @@ with the asset packet.
 
 Document-shell iconography/chrome includes the favicon link and browser `theme-color`. The
 `theme-color` value is not a Lucide icon or a separate icon color token; it follows `brand.md` §5 and
-the semantic `--surface-base` surface so browser chrome tracks the active theme.
+the semantic `--surface-base` surface so browser chrome tracks the active theme. With the warm
+neutral surface ramp (decision-log #4, `tokens-v3.md` §2.8/§3.1), the pre-paint `theme-color` in
+`index.html` tracks the warm `--surface-base`: `#1B1610` (dark) and `#FBF6EC` (light).

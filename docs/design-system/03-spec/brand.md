@@ -63,7 +63,10 @@ identity, marketing — the wordmark may move toward a **round, dense, tightly-s
 and badge resolve to one legible glyph at 16px (primary: the round "S" monogram). All §1.3
 forbidden treatments still bind: no bowls, mascots, gradients, glow, or second action accent; the
 single electric-blue accent stays locked, and warmth comes from warmer neutral surfaces, not chroma.
-Reference exploration: standalone identity showcase (not wired to the product).
+This warmth is now implemented in the product surface ramp (decision-log #4): the neutral surface
+ladders run warm (hue ~70°, chroma ≤ 0.012) in both themes per `tokens-v3.md` §2.8/§3.1, and the
+pre-paint browser `theme-color` tracks the warm `--surface-base`. Reference exploration: standalone
+identity showcase (not wired to the product).
 
 ### 1.5 Multi-channel positioning (2026-06-13 follow-on decision #5)
 
