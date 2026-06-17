@@ -46,5 +46,10 @@ describe('eslint fitness wrapper — exit semantics', () => {
       (i) => i.code === 'fitness/god-class' && i.filePath?.endsWith('runtime.ts'),
     );
     expect(godClass).toBeDefined();
-  }, 60_000);
+    // This spawns a real ESLint pass over the entire source tree. Under the
+    // coverage-instrumented CI step (slower than the plain suite) with the
+    // parallel vitest pool contending for CPU, the 60s budget was marginal and
+    // flaked intermittently (observed on main too). 180s gives durable headroom
+    // without masking a genuine hang.
+  }, 180_000);
 });
