@@ -2152,6 +2152,81 @@ button.soup-pill[aria-disabled="true"] {
   }
 }
 
+/* ═══ Checkbox — boolean selection primitive (showcase §17). ═══
+   Native <input type="checkbox"> visually styled via the token system.
+   Box 16×16 (--sp-4); hairline border; accent fill when checked; indeterminate
+   fills the box with an em-dash hint. Distinct from CheckboxField (form-kit,
+   label-wrapped) — this is the bare checkbox used in table cells and bulk
+   action bars where the consumer owns the row layout. */
+.soup-checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.soup-checkbox__label {
+  font-size: var(--text-data);
+  color: var(--text-1);
+}
+
+/* Native input is visually hidden but kept focusable + in tab order; the visible
+   box is its sibling span. (Not display:none — that would drop it from a11y/tab.) */
+.soup-checkbox-input {
+  position: absolute;
+  width: var(--bw);
+  height: var(--bw);
+  margin: calc(-1 * var(--bw));
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* The visible box — centres the lucide glyph (Check / Minus) via flex; the glyph
+   inherits --accent-fg through currentColor when the box fills on check. */
+.soup-checkbox {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--sp-4);
+  height: var(--sp-4);
+  border: var(--bw) solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+  color: var(--accent-fg);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-enter),
+    border-color var(--dur-fast) var(--ease-enter);
+}
+
+.soup-checkbox-input:hover:not(:disabled) + .soup-checkbox {
+  border-color: var(--accent);
+}
+
+.soup-checkbox-input:focus-visible + .soup-checkbox {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: var(--bw-accent);
+}
+
+.soup-checkbox-input:disabled + .soup-checkbox {
+  cursor: not-allowed;
+  opacity: var(--opacity-muted);
+}
+
+.soup-checkbox--on,
+.soup-checkbox--indeterminate {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soup-checkbox {
+    transition: none;
+  }
+}
+
 /* ═══ Tooltip — hover/focus bubble (showcase §24). Retires DetailCard. ═══
    role="tooltip" associated via aria-describedby on the trigger; top/bottom flip
    from useViewportPlacement; Esc dismiss; reduced-motion removes the lift. Paid
