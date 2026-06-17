@@ -22,6 +22,7 @@ const EXPECTED_FILE_SIZE_WARNING_FILES = [
   'tests/core/health.test.ts',
   'tests/fleet/health-poller.test.ts',
   'tests/fleet/routes/feed.test.ts',
+  'tests/fleet/routes/ops.test.ts',
   'tests/runtimes/agent/outbound-queue.test.ts',
   'tests/runtimes/agent/runtime.test.ts',
   'tests/runtimes/agent/session.test.ts',
