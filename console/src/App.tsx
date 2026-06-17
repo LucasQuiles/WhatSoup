@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState, useCallback } from 'react'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { MotionConfig } from 'framer-motion'
 import ErrorBoundary from './components/ErrorBoundary'
 import { KeyboardShortcutsHelp } from './components/KeyboardShortcutsHelp'
@@ -15,6 +15,7 @@ const SoupKitchen = lazy(() => import('./pages/SoupKitchen'))
 const LineDetail = lazy(() => import('./pages/LineDetail'))
 const Inbox = lazy(() => import('./pages/Inbox'))
 const Ops = lazy(() => import('./pages/Ops'))
+const Landing = lazy(() => import('./pages/Landing'))
 
 // Modal code splitting — loaded only when opened
 const UpdateModal = lazy(() => import('./components/UpdateModal'))
@@ -47,6 +48,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
 
   const update = useUpdateCheck()
   const version = update.data?.sha ?? getStaticVersion()
+  const location = useLocation()
 
   // Keyboard shortcuts help modal
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -59,6 +61,19 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
 
   // Global keyboard shortcuts (Cmd+K search, 1/2/3 page nav, ? help)
   useKeyboardShortcuts({ onHelp: toggleShortcuts, onSearch: focusSearch })
+
+  // Dedicated splash/landing route — rendered full-screen, outside the Nav shell, so
+  // it carries its own <main> landmark (no nested-main). Additive and non-breaking:
+  // the console chrome (Nav + Fleet at "/") and every other route are untouched.
+  if (location.pathname === '/welcome') {
+    return (
+      <MotionConfig reducedMotion="user">
+        <Suspense fallback={<PageLoader />}>
+          <ErrorBoundary><Landing /></ErrorBoundary>
+        </Suspense>
+      </MotionConfig>
+    )
+  }
 
   return (
     <MotionConfig reducedMotion="user">
@@ -76,6 +91,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
           <Suspense fallback={<PageLoader />}>
             <Routes>
               <Route path="/" element={<ErrorBoundary><SoupKitchen /></ErrorBoundary>} />
+              <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
               <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
               <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
               <Route path="/ops" element={<ErrorBoundary><Ops /></ErrorBoundary>} />
