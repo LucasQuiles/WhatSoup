@@ -15,6 +15,7 @@ import type { Messenger } from '../../../src/core/types.ts';
 import type { DurabilityEngine } from '../../../src/core/durability.ts';
 import { makeChannelId } from '../../../src/core/transport-refs.ts';
 import { RateLimitedError } from '../../../src/transport/contract/errors.ts';
+import { recordGroupOutbound, __resetForTests } from '../../../src/core/echo-guard.ts';
 
 // vi.mock is hoisted, so mockLog must be created with vi.hoisted to be accessible inside the factory
 const mockLog = vi.hoisted(() => ({
@@ -2118,6 +2119,188 @@ describe('OutboundQueue', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain('thinking');
+  });
+
+  // ─── outbound-queue.ts uncovered-branch coverage ──────────────────────────
+  // Targets branches that the suite above did not exercise:
+  //   * sendWithPacing echo-guard suppression (line 727 true branch)
+  //   * warn-log text truncation when the failing text exceeds 80 chars (line 778)
+  //   * error-log text truncation when the failing text exceeds 80 chars (line 788)
+  //   * markMaybeSent 'send_failed' fallback when the thrown value has no .message (line 792)
+  //   * shutdown() clearing a toolTimer that was (re)armed during flush's await (line 562)
+
+  describe('outbound-queue.ts uncovered-branch coverage', () => {
+    const GROUP_JID = '1111111000000000@g.us';
+
+    it('sendWithPacing silently drops a group send suppressed by the echo-guard cooldown', async () => {
+      // Seed an active cross-session cooldown so canSendToGroup() returns false.
+      __resetForTests();
+      recordGroupOutbound(GROUP_JID, 'a-different-sender-token');
+
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, GROUP_JID);
+
+      queue.enqueueText('this group send should be suppressed');
+      await vi.runAllTimersAsync();
+
+      // The echo guard dropped the send before it reached messenger.sendMessage.
+      expect(messenger.sendMessage).not.toHaveBeenCalled();
+      expect(calls).toEqual([]);
+
+      __resetForTests();
+    });
+
+    it('retry warn log truncates textPreview to 80 chars plus ellipsis for long messages', async () => {
+      mockLog.warn.mockClear();
+      mockLog.error.mockClear();
+      let callCount = 0;
+      const longText = 'x'.repeat(120);
+      const retryMessenger: Messenger = {
+        sendMessage: vi.fn(async () => {
+          callCount += 1;
+          if (callCount < 2) throw new Error('transient');
+          return { waMessageId: null };
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      };
+
+      const queue = new OutboundQueue(retryMessenger, CHAT_JID);
+      queue.enqueueText(longText);
+      await vi.runAllTimersAsync();
+
+      // One retry fired before the successful second attempt.
+      expect(mockLog.warn).toHaveBeenCalledOnce();
+      const [warnArg] = mockLog.warn.mock.calls[0];
+      // Truncation branch: preview is the first 80 chars followed by the ellipsis.
+      expect(warnArg.textPreview).toBe('x'.repeat(80) + '…');
+      expect(warnArg.textPreview).toHaveLength(81);
+    });
+
+    it('terminal error log truncates textPreview to 80 chars plus ellipsis when all retries fail on a long message', async () => {
+      mockLog.warn.mockClear();
+      mockLog.error.mockClear();
+      let callNum = 0;
+      const longText = 'y'.repeat(150);
+      const alwaysFailMessenger: Messenger = {
+        sendMessage: vi.fn(async () => {
+          callNum += 1;
+          if (callNum <= 3) throw new Error('hard fail');
+          // 4th call is the best-effort notice — let it succeed.
+          return { waMessageId: null };
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      };
+
+      const queue = new OutboundQueue(alwaysFailMessenger, CHAT_JID);
+      queue.enqueueText(longText);
+      await vi.runAllTimersAsync();
+
+      expect(mockLog.error).toHaveBeenCalledOnce();
+      const [errorArg] = mockLog.error.mock.calls[0];
+      // Truncation branch on the terminal-failure path.
+      expect(errorArg.textPreview).toBe('y'.repeat(80) + '…');
+      expect(errorArg.textPreview).toHaveLength(81);
+    });
+
+    it('markMaybeSent receives "send_failed" when the thrown value has no .message property', async () => {
+      mockLog.warn.mockClear();
+      mockLog.error.mockClear();
+      const durability = makeDurabilityStub();
+      let callNum = 0;
+      // Throw a bare object (not an Error) so `(lastErr as Error)?.message` is undefined.
+      const nonErrorMessenger: Messenger = {
+        sendMessage: vi.fn(async () => {
+          callNum += 1;
+          if (callNum <= 3) throw { code: 'weird_failure' };
+          return { waMessageId: null };
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+      };
+
+      const queue = new OutboundQueue(nonErrorMessenger, CHAT_JID);
+      queue.setDurability(durability);
+      queue.enqueueText('non-error throw');
+      await vi.runAllTimersAsync();
+
+      // The ?? fallback fired — markMaybeSent got the literal 'send_failed'.
+      expect(durability.markMaybeSent).toHaveBeenCalledOnce();
+      const [, reasonArg] = (durability.markMaybeSent as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(reasonArg).toBe('send_failed');
+    });
+
+    it('splitMessage skips the trailing empty chunk when text ends in whitespace past the boundary', async () => {
+      // Force splitMessage's `if (remaining.length > 0)` false branch: the
+      // chunk splits at maxLen and the leftover slice trims to an empty string.
+      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      // 4000 chars of body + a paragraph break + trailing spaces. splitMessage
+      // cuts at index 4000 (no '\n\n' or space within the first 4000), leaving
+      // a remainder that trimStart() reduces to '' — so no second chunk ships.
+      const body = 'z'.repeat(4000) + '\n\n   ';
+      queue.enqueueText(body);
+      await vi.runAllTimersAsync();
+
+      // Exactly one message was emitted — the trailing-whitespace remainder was
+      // dropped by the `remaining.length > 0` guard, not sent as an empty chunk.
+      expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+      expect(calls[0]).toBe('z'.repeat(4000));
+    });
+
+    it('shutdown clears a toolTimer that was re-armed while flush was awaiting the send chain', async () => {      const { messenger, calls } = makeMessenger();
+      const queue = new OutboundQueue(messenger, CHAT_JID);
+
+      // Block the first (and only) send so the chain stays pending while we
+      // re-arm a tool timer mid-flush.
+      const sendGate = deferred<void>();
+      const blockingMessenger: Messenger = {
+        sendMessage: vi.fn(async (_jid: string, text: string) => {
+          calls.push(text);
+          await sendGate.promise;
+          return { waMessageId: null };
+        }),
+        sendMedia: vi.fn(async () => ({ waMessageId: null })),
+        setTyping: vi.fn(async () => {}),
+      };
+      const blockingQueue = new OutboundQueue(blockingMessenger, CHAT_JID);
+
+      blockingQueue.enqueueText('in-flight send that holds the chain open');
+      // Let the send start (chain becomes pending).
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Begin shutdown — flush() runs flushToolBuffer() synchronously (no tool
+      // buffer yet) then awaits the still-pending chain. While it is awaiting,
+      // arm a fresh tool timer. The defensive clear at shutdown line 562 is the
+      // only thing that cleans it up.
+      const shutdownPromise = blockingQueue.shutdown();
+      // Re-arm the tool timer AFTER flushToolBuffer ran but BEFORE the chain
+      // resolves — i.e. while flush() is in its `await this.chain`.
+      blockingQueue.enqueueToolUpdate({ category: 'running', detail: 'late update' });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Release the in-flight send so flush() can complete and shutdown can
+      // reach the toolTimer-clear branch.
+      sendGate.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await shutdownPromise;
+
+      // The in-flight text send was delivered; the late tool update was NOT
+      // re-flushed by shutdown (shutdown's defensive clear only clears the
+      // toolTimer, it does not re-flush). Exactly one message reached the
+      // messenger from the send chain.
+      expect(calls).toEqual(['in-flight send that holds the chain open']);
+      expect(blockingMessenger.sendMessage).toHaveBeenCalledTimes(1);
+
+      // The late enqueueToolUpdate also armed the 30s max-age timer, which
+      // shutdown's defensive clear does NOT touch. Drain it so no timer leaks
+      // (this also confirms shutdown's toolTimer clear left no duplicate work).
+      await vi.advanceTimersByTimeAsync(TOOL_BATCH_MAX_AGE_MS);
+      // The max-age flush now delivers the late tool-status update.
+      expect(calls).toEqual([
+        'in-flight send that holds the chain open',
+        '🔧 Running:\n  • late update',
+      ]);
+    });
   });
 });
 
