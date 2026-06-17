@@ -40,14 +40,9 @@ function expectCurrentLink(name: string | RegExp) {
   expect(currentLinks[0]).toBe(navLink(name));
 }
 
-// The active-item indicator is now a LEFT-EDGE vertical accent bar (rail
-// restructure) — a width-driven absolute span (.soup-rail__bar), replacing the
-// legacy bottom underline (which was height-driven). Query the vertical bar.
-function activeBar(link: HTMLElement) {
-  const bar = link.querySelector('span.soup-rail__bar.absolute.w-\\[var\\(--bw-accent\\)\\]');
-  expect(bar).not.toBeNull();
-  return bar as HTMLElement;
-}
+// The active-item indicator is now a FULL accent fill on the row itself
+// (showcase-accurate): the active link carries bg-[var(--accent)] +
+// text-[var(--accent-fg)], replacing the prior left-edge accent bar / underline.
 
 beforeEach(() => {
   wsConnected = false;
@@ -96,23 +91,28 @@ describe('Nav route state', () => {
     expect(navLink('Inbox').getAttribute('aria-current')).toBeNull();
   });
 
-  it('uses the action accent, not status green, for active-route left-edge bars', () => {
+  it('uses the action accent, not status green, for the active-route full fill', () => {
     renderNav({}, '/inbox');
 
-    const bar = activeBar(navLink('Inbox'));
-    expect(bar.className).toContain('bg-[var(--accent)]');
-    expect(bar.className).not.toContain('bg-s-ok');
+    const active = navLink('Inbox');
+    expect(active.className).toContain('bg-[var(--accent)]');
+    expect(active.className).toContain('text-[var(--accent-fg)]');
+    expect(active.className).not.toContain('bg-s-ok');
   });
 
-  it('marks the active item with a LEFT-EDGE vertical accent bar (not a bottom underline)', () => {
+  it('marks the active item with a full accent fill (not a bar or bottom underline)', () => {
     renderNav({}, '/ops');
 
-    const bar = activeBar(navLink('Ops'));
-    // Width-driven vertical bar (rail) — never the legacy height-driven underline.
-    expect(bar.className).toContain('w-[var(--bw-accent)]');
-    expect(bar.className).not.toContain('h-[var(--bw-accent)]');
-    // Inactive items carry no bar.
+    const active = navLink('Ops');
+    // Full-row accent fill with dark accent-fg text/icon — showcase-accurate.
+    expect(active.className).toContain('bg-[var(--accent)]');
+    expect(active.className).toContain('text-[var(--accent-fg)]');
+    // No legacy left-edge bar anywhere in the rail.
+    expect(active.querySelector('span.soup-rail__bar')).toBeNull();
+    // Inactive items carry neither the fill nor a bar.
+    expect(navLink('Fleet').className).not.toContain('bg-[var(--accent)]');
     expect(navLink('Fleet').querySelector('span.soup-rail__bar')).toBeNull();
+    expect(navLink('Inbox').className).not.toContain('bg-[var(--accent)]');
     expect(navLink('Inbox').querySelector('span.soup-rail__bar')).toBeNull();
   });
 });
