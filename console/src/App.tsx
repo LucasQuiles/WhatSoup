@@ -14,6 +14,7 @@ import { useKeyboardShortcuts } from './hooks/use-keyboard-shortcuts'
 const SoupKitchen = lazy(() => import('./pages/SoupKitchen'))
 const LineDetail = lazy(() => import('./pages/LineDetail'))
 const Inbox = lazy(() => import('./pages/Inbox'))
+const Metrics = lazy(() => import('./pages/Metrics'))
 const Ops = lazy(() => import('./pages/Ops'))
 const Landing = lazy(() => import('./pages/Landing'))
 
@@ -94,6 +95,7 @@ function UnlockedApp({ onLogout, showLogout }: { onLogout: () => void; showLogou
               <Route path="/welcome" element={<ErrorBoundary><Landing /></ErrorBoundary>} />
               <Route path="/lines/:name" element={<ErrorBoundary><LineDetail /></ErrorBoundary>} />
               <Route path="/inbox" element={<ErrorBoundary><Inbox /></ErrorBoundary>} />
+              <Route path="/metrics" element={<ErrorBoundary><Metrics /></ErrorBoundary>} />
               <Route path="/ops" element={<ErrorBoundary><Ops /></ErrorBoundary>} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
